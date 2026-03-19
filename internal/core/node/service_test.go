@@ -403,6 +403,14 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 		)
 		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "push-dm-1"
 	})
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := exchangeFrames(t, nodeA.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+			protocol.Frame{Type: "fetch_delivery_receipts", Recipient: nodeA.Address()},
+		)
+		return reply[1].Type == "delivery_receipts" && len(reply[1].Receipts) == 1 && reply[1].Receipts[0].MessageID == "push-dm-1"
+	})
 }
 
 func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {

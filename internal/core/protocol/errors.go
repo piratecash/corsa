@@ -13,6 +13,8 @@ const (
 	ErrCodeInvalidFetchMessageIDs     = "invalid-fetch-message-ids"
 	ErrCodeInvalidFetchMessage        = "invalid-fetch-message"
 	ErrCodeInvalidFetchInbox          = "invalid-fetch-inbox"
+	ErrCodeInvalidSendDeliveryReceipt = "invalid-send-delivery-receipt"
+	ErrCodeInvalidFetchReceipts       = "invalid-fetch-delivery-receipts"
 	ErrCodeInvalidSubscribeInbox      = "invalid-subscribe-inbox"
 	ErrCodeInvalidPublishNotice       = "invalid-publish-notice"
 	ErrCodeUnknownSenderKey           = "unknown-sender-key"
@@ -33,6 +35,8 @@ var (
 	ErrInvalidFetchMessageIDs     = errors.New(ErrCodeInvalidFetchMessageIDs)
 	ErrInvalidFetchMessage        = errors.New(ErrCodeInvalidFetchMessage)
 	ErrInvalidFetchInbox          = errors.New(ErrCodeInvalidFetchInbox)
+	ErrInvalidSendDeliveryReceipt = errors.New(ErrCodeInvalidSendDeliveryReceipt)
+	ErrInvalidFetchReceipts       = errors.New(ErrCodeInvalidFetchReceipts)
 	ErrInvalidSubscribeInbox      = errors.New(ErrCodeInvalidSubscribeInbox)
 	ErrInvalidPublishNotice       = errors.New(ErrCodeInvalidPublishNotice)
 	ErrUnknownSenderKey           = errors.New(ErrCodeUnknownSenderKey)
@@ -64,6 +68,10 @@ func ErrorCode(err error) string {
 		return ErrCodeInvalidFetchMessage
 	case errors.Is(err, ErrInvalidFetchInbox):
 		return ErrCodeInvalidFetchInbox
+	case errors.Is(err, ErrInvalidSendDeliveryReceipt):
+		return ErrCodeInvalidSendDeliveryReceipt
+	case errors.Is(err, ErrInvalidFetchReceipts):
+		return ErrCodeInvalidFetchReceipts
 	case errors.Is(err, ErrInvalidSubscribeInbox):
 		return ErrCodeInvalidSubscribeInbox
 	case errors.Is(err, ErrInvalidPublishNotice):
@@ -103,6 +111,10 @@ func ErrorFromCode(code string) error {
 		return ErrInvalidFetchMessage
 	case ErrCodeInvalidFetchInbox:
 		return ErrInvalidFetchInbox
+	case ErrCodeInvalidSendDeliveryReceipt:
+		return ErrInvalidSendDeliveryReceipt
+	case ErrCodeInvalidFetchReceipts:
+		return ErrInvalidFetchReceipts
 	case ErrCodeInvalidSubscribeInbox:
 		return ErrInvalidSubscribeInbox
 	case ErrCodeInvalidPublishNotice:

@@ -30,8 +30,10 @@ type Service struct {
 	boxKeys  map[string]string
 	pubKeys  map[string]string
 	topics   map[string][]protocol.Envelope
+	receipts map[string][]protocol.DeliveryReceipt
 	notices  map[string]gazeta.Notice
 	seen     map[string]struct{}
+	seenReceipts map[string]struct{}
 	subs     map[string]map[string]*subscriber
 	sessions map[string]*peerSession
 	upstream map[string]struct{}
@@ -104,8 +106,10 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		boxKeys:  boxKeys,
 		pubKeys:  pubKeys,
 		topics:   make(map[string][]protocol.Envelope),
+		receipts: make(map[string][]protocol.DeliveryReceipt),
 		notices:  make(map[string]gazeta.Notice),
 		seen:     make(map[string]struct{}),
+		seenReceipts: make(map[string]struct{}),
 		subs:     make(map[string]map[string]*subscriber),
 		sessions: make(map[string]*peerSession),
 		upstream: make(map[string]struct{}),
@@ -265,6 +269,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "import_message":
 		s.writeJSONFrame(conn, s.importMessageFrame(frame))
 		return true
+	case "send_delivery_receipt":
+		s.writeJSONFrame(conn, s.storeDeliveryReceiptFrame(frame))
+		return true
 	case "fetch_messages":
 		s.writeJSONFrame(conn, s.fetchMessagesFrame(frame.Topic))
 		return true
@@ -276,6 +283,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	case "fetch_inbox":
 		s.writeJSONFrame(conn, s.fetchInboxFrame(frame.Topic, frame.Recipient))
+		return true
+	case "fetch_delivery_receipts":
+		s.writeJSONFrame(conn, s.fetchDeliveryReceiptsFrame(frame.Recipient))
 		return true
 	case "subscribe_inbox":
 		s.writeJSONFrame(conn, s.subscribeInboxFrame(conn, frame))
@@ -310,6 +320,8 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.storeMessageFrame(frame)
 	case "import_message":
 		return s.importMessageFrame(frame)
+	case "send_delivery_receipt":
+		return s.storeDeliveryReceiptFrame(frame)
 	case "fetch_messages":
 		return s.fetchMessagesFrame(frame.Topic)
 	case "fetch_message_ids":
@@ -318,6 +330,8 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.fetchMessageFrame(frame.Topic, frame.ID)
 	case "fetch_inbox":
 		return s.fetchInboxFrame(frame.Topic, frame.Recipient)
+	case "fetch_delivery_receipts":
+		return s.fetchDeliveryReceiptsFrame(frame.Recipient)
 	case "publish_notice":
 		return s.publishNoticeFrame(frame)
 	case "fetch_notices":
@@ -521,6 +535,19 @@ func (s *Service) importMessageFrame(frame protocol.Frame) protocol.Frame {
 	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
 }
 
+func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame {
+	receipt, err := receiptFromFrame(frame)
+	if err != nil {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
+	}
+
+	stored, count := s.storeDeliveryReceipt(receipt)
+	if !stored {
+		return protocol.Frame{Type: "receipt_known", Recipient: receipt.Recipient, Count: count, ID: string(receipt.MessageID)}
+	}
+	return protocol.Frame{Type: "receipt_stored", Recipient: receipt.Recipient, Count: count, ID: string(receipt.MessageID)}
+}
+
 func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bool) (bool, int, string) {
 	if validateTimestamp {
 		if err := s.validateMessageTimestamp(msg.CreatedAt); err != nil {
@@ -576,9 +603,34 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	}
 	if msg.Topic == "dm" && msg.Recipient != "*" {
 		go s.pushMessageToSubscribers(envelope)
+		if validateTimestamp && msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
+			go s.emitDeliveryReceipt(msg)
+		}
 	}
 
 	return true, count, ""
+}
+
+func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, int) {
+	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+
+	s.mu.Lock()
+	if _, ok := s.seenReceipts[key]; ok {
+		count := len(s.receipts[receipt.Recipient])
+		s.mu.Unlock()
+		return false, count
+	}
+	s.seenReceipts[key] = struct{}{}
+	s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
+	count := len(s.receipts[receipt.Recipient])
+	s.mu.Unlock()
+
+	log.Printf("node: stored delivery receipt message_id=%s sender=%s recipient=%s status=%s delivered_at=%s", receipt.MessageID, receipt.Sender, receipt.Recipient, receipt.Status, receipt.DeliveredAt.Format(time.RFC3339))
+
+	go s.gossipReceipt(receipt)
+	go s.pushReceiptToSubscribers(receipt)
+
+	return true, count
 }
 
 func (s *Service) fetchMessagesFrame(topic string) protocol.Frame {
@@ -655,6 +707,28 @@ func (s *Service) fetchInboxFrame(topic, recipient string) protocol.Frame {
 	}
 
 	return protocol.Frame{Type: "inbox", Topic: topic, Recipient: recipient, Count: len(items), Messages: items}
+}
+
+func (s *Service) fetchDeliveryReceiptsFrame(recipient string) protocol.Frame {
+	if strings.TrimSpace(recipient) == "" {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchReceipts}
+	}
+
+	s.mu.RLock()
+	items := append([]protocol.DeliveryReceipt(nil), s.receipts[recipient]...)
+	s.mu.RUnlock()
+
+	frames := make([]protocol.ReceiptFrame, 0, len(items))
+	for _, item := range items {
+		frames = append(frames, receiptFrame(item))
+	}
+
+	return protocol.Frame{
+		Type:      "delivery_receipts",
+		Recipient: recipient,
+		Count:     len(frames),
+		Receipts:  frames,
+	}
 }
 
 func (s *Service) bootstrapLoop(ctx context.Context) {
@@ -907,6 +981,27 @@ func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
 	}
 }
 
+func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
+	subs := s.subscribersForRecipient(receipt.Recipient)
+	if len(subs) == 0 {
+		return
+	}
+	log.Printf("node: push_delivery_receipt message_id=%s recipient=%s status=%s subscribers=%d", receipt.MessageID, receipt.Recipient, receipt.Status, len(subs))
+
+	frame := protocol.Frame{
+		Type:      "push_delivery_receipt",
+		Recipient: receipt.Recipient,
+		Receipt: func() *protocol.ReceiptFrame {
+			item := receiptFrame(receipt)
+			return &item
+		}(),
+	}
+
+	for _, sub := range subs {
+		go s.writePushFrame(sub, frame)
+	}
+}
+
 func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
 	ttl := time.Duration(frame.TTLSeconds) * time.Second
 	if ttl <= 0 || strings.TrimSpace(frame.Ciphertext) == "" {
@@ -1010,6 +1105,53 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 		Type:       "publish_notice",
 		TTLSeconds: int(ttl.Seconds()),
 		Ciphertext: ciphertext,
+	}
+	if s.enqueuePeerFrame(address, frame) {
+		return
+	}
+
+	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+	reader := bufio.NewReader(conn)
+
+	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
+		return
+	}
+	if _, err := reader.ReadString('\n'); err != nil {
+		return
+	}
+
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		return
+	}
+	_, _ = io.WriteString(conn, line)
+	_, _ = reader.ReadString('\n')
+}
+
+func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
+	for _, peer := range s.Peers() {
+		address := peer.Address
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		go s.sendReceiptToPeer(address, receipt)
+	}
+}
+
+func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryReceipt) {
+	frame := protocol.Frame{
+		Type:        "send_delivery_receipt",
+		ID:          string(receipt.MessageID),
+		Address:     receipt.Sender,
+		Recipient:   receipt.Recipient,
+		Status:      receipt.Status,
+		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
 	}
 	if s.enqueuePeerFrame(address, frame) {
 		return
@@ -1212,6 +1354,10 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				s.handlePeerSessionFrame(session.address, incoming)
 				continue
 			}
+			if incoming.Type == "push_delivery_receipt" {
+				s.handlePeerSessionFrame(session.address, incoming)
+				continue
+			}
 			if expectedType == "" || incoming.Type == expectedType {
 				return incoming, nil
 			}
@@ -1240,31 +1386,44 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 }
 
 func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
-	if frame.Type != "push_message" || frame.Item == nil {
-		return
-	}
+	switch frame.Type {
+	case "push_message":
+		if frame.Item == nil {
+			return
+		}
 
-	msg, err := incomingMessageFromFrame(protocol.Frame{
-		ID:         frame.Item.ID,
-		Topic:      frame.Topic,
-		Address:    frame.Item.Sender,
-		Recipient:  frame.Item.Recipient,
-		Flag:       frame.Item.Flag,
-		CreatedAt:  frame.Item.CreatedAt,
-		TTLSeconds: frame.Item.TTLSeconds,
-		Body:       frame.Item.Body,
-	})
-	if err != nil {
-		return
-	}
+		msg, err := incomingMessageFromFrame(protocol.Frame{
+			ID:         frame.Item.ID,
+			Topic:      frame.Topic,
+			Address:    frame.Item.Sender,
+			Recipient:  frame.Item.Recipient,
+			Flag:       frame.Item.Flag,
+			CreatedAt:  frame.Item.CreatedAt,
+			TTLSeconds: frame.Item.TTLSeconds,
+			Body:       frame.Item.Body,
+		})
+		if err != nil {
+			return
+		}
 
-	if stored, _, errCode := s.storeIncomingMessage(msg, true); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
-		refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-		s.syncPeer(refreshCtx, address)
-		cancel()
-		_, _, _ = s.storeIncomingMessage(msg, true)
+		if stored, _, errCode := s.storeIncomingMessage(msg, true); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			s.syncPeer(refreshCtx, address)
+			cancel()
+			_, _, _ = s.storeIncomingMessage(msg, true)
+		}
+		log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
+	case "push_delivery_receipt":
+		if frame.Receipt == nil {
+			return
+		}
+		receipt, err := receiptFromReceiptFrame(*frame.Receipt)
+		if err != nil {
+			return
+		}
+		s.storeDeliveryReceipt(receipt)
+		log.Printf("node: received pushed delivery receipt peer=%s message_id=%s recipient=%s status=%s", address, receipt.MessageID, receipt.Recipient, receipt.Status)
 	}
-	log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
 }
 
 func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
@@ -1415,6 +1574,66 @@ func enableTCPKeepAlive(conn net.Conn) {
 	}
 	_ = tcpConn.SetKeepAlive(true)
 	_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+}
+
+func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
+	receipt := protocol.DeliveryReceipt{
+		MessageID:   msg.ID,
+		Sender:      s.identity.Address,
+		Recipient:   msg.Sender,
+		Status:      protocol.ReceiptStatusDelivered,
+		DeliveredAt: time.Now().UTC(),
+	}
+	s.storeDeliveryReceipt(receipt)
+}
+
+func receiptFrame(receipt protocol.DeliveryReceipt) protocol.ReceiptFrame {
+	return protocol.ReceiptFrame{
+		MessageID:   string(receipt.MessageID),
+		Sender:      receipt.Sender,
+		Recipient:   receipt.Recipient,
+		Status:      receipt.Status,
+		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func receiptFromFrame(frame protocol.Frame) (protocol.DeliveryReceipt, error) {
+	if strings.TrimSpace(frame.ID) == "" || strings.TrimSpace(frame.Address) == "" || strings.TrimSpace(frame.Recipient) == "" || strings.TrimSpace(frame.Status) == "" || strings.TrimSpace(frame.DeliveredAt) == "" {
+		return protocol.DeliveryReceipt{}, fmt.Errorf("missing delivery receipt fields")
+	}
+	if frame.Status != protocol.ReceiptStatusDelivered && frame.Status != protocol.ReceiptStatusSeen {
+		return protocol.DeliveryReceipt{}, fmt.Errorf("invalid delivery receipt status")
+	}
+
+	deliveredAt, err := time.Parse(time.RFC3339, frame.DeliveredAt)
+	if err != nil {
+		return protocol.DeliveryReceipt{}, err
+	}
+
+	return protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID(frame.ID),
+		Sender:      frame.Address,
+		Recipient:   frame.Recipient,
+		Status:      frame.Status,
+		DeliveredAt: deliveredAt.UTC(),
+	}, nil
+}
+
+func receiptFromReceiptFrame(frame protocol.ReceiptFrame) (protocol.DeliveryReceipt, error) {
+	if frame.Status != protocol.ReceiptStatusDelivered && frame.Status != protocol.ReceiptStatusSeen {
+		return protocol.DeliveryReceipt{}, fmt.Errorf("invalid delivery receipt status")
+	}
+	deliveredAt, err := time.Parse(time.RFC3339, frame.DeliveredAt)
+	if err != nil {
+		return protocol.DeliveryReceipt{}, err
+	}
+	return protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID(frame.MessageID),
+		Sender:      frame.Sender,
+		Recipient:   frame.Recipient,
+		Status:      frame.Status,
+		DeliveredAt: deliveredAt.UTC(),
+	}, nil
 }
 
 func (s *Service) cleanupExpiredNotices() {

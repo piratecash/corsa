@@ -397,14 +397,15 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 		w.t("chat.peers", len(status.Peers)),
 	)
 
-	conversation := w.conversationWith(status, recipient)
+	conversation := w.conversationEntries(status, recipient)
 	if len(conversation) == 0 {
 		rows = append(rows, w.t("chat.empty"))
 		return w.card(gtx, title, rows)
 	}
 
-	rows = append(rows, conversation...)
-	return w.card(gtx, title, rows)
+	return w.card(gtx, title, rows, func(gtx layout.Context) layout.Dimensions {
+		return w.layoutConversation(gtx, recipient, conversation)
+	})
 }
 
 func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
@@ -527,6 +528,15 @@ func (w *Window) refreshStatus() {
 	status := w.client.ProbeNode(ctx)
 	cancel()
 
+	recipient := strings.TrimSpace(w.selectedRecipient)
+	if recipient != "" {
+		go func(recipient string, messages []service.DirectMessage) {
+			seenCtx, seenCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = w.client.MarkConversationSeen(seenCtx, recipient, messages)
+			seenCancel()
+		}(recipient, append([]service.DirectMessage(nil), status.DirectMessages...))
+	}
+
 	w.mu.Lock()
 	w.nodeStatus = status
 	w.mu.Unlock()
@@ -584,29 +594,123 @@ func (w *Window) ensureSelectedRecipient(recipients []string) {
 	w.recipientEditor.SetText(recipients[0])
 }
 
-func (w *Window) conversationWith(status service.NodeStatus, recipient string) []string {
+func (w *Window) conversationEntries(status service.NodeStatus, recipient string) []service.DirectMessage {
 	me := w.client.Address()
-	rows := make([]string, 0, len(status.DirectMessages))
+	rows := make([]service.DirectMessage, 0, len(status.DirectMessages))
 
 	for _, raw := range status.DirectMessages {
-		parts := strings.SplitN(raw, ">", 3)
-		if len(parts) != 3 {
-			continue
-		}
-
-		sender := parts[0]
-		target := parts[1]
-		body := parts[2]
+		sender := raw.Sender
+		target := raw.Recipient
 
 		switch {
 		case sender == me && target == recipient:
-			rows = append(rows, w.t("chat.you", body))
+			rows = append(rows, raw)
 		case sender == recipient && target == me:
-			rows = append(rows, shortFingerprint(recipient)+": "+body)
+			rows = append(rows, raw)
 		}
 	}
 
 	return rows
+}
+
+func (w *Window) layoutConversation(gtx layout.Context, recipient string, conversation []service.DirectMessage) layout.Dimensions {
+	children := make([]layout.FlexChild, 0, len(conversation)*2)
+	for i, message := range conversation {
+		msg := message
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.layoutChatBubble(gtx, recipient, msg)
+		}))
+		if i < len(conversation)-1 {
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
+		}
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}
+
+func (w *Window) layoutChatBubble(gtx layout.Context, recipient string, message service.DirectMessage) layout.Dimensions {
+	me := w.client.Address()
+	isMine := message.Sender == me
+
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if isMine {
+			return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return w.chatBubbleCard(gtx, message, true, w.t("chat.you_label"))
+			})
+		}
+		return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return w.chatBubbleCard(gtx, message, false, shortFingerprint(recipient))
+		})
+	})
+}
+
+func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessage, isMine bool, author string) layout.Dimensions {
+	maxWidth := gtx.Dp(unit.Dp(520))
+	if gtx.Constraints.Max.X < maxWidth {
+		maxWidth = gtx.Constraints.Max.X
+	}
+	gtx.Constraints.Max.X = maxWidth
+
+	borderColor := color.NRGBA{R: 55, G: 68, B: 86, A: 255}
+	authorColor := color.NRGBA{R: 162, G: 176, B: 196, A: 255}
+	statusColor := color.NRGBA{R: 142, G: 178, B: 230, A: 255}
+	if isMine {
+		borderColor = color.NRGBA{R: 74, G: 109, B: 176, A: 255}
+		authorColor = color.NRGBA{R: 173, G: 205, B: 255, A: 255}
+	}
+
+	border := widget.Border{Color: borderColor, CornerRadius: unit.Dp(8), Width: unit.Dp(1)}
+	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			children := []layout.FlexChild{
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{
+						Axis:      layout.Horizontal,
+						Spacing:   layout.SpaceBetween,
+						Alignment: layout.Middle,
+					}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							label := material.Caption(w.theme, author)
+							label.Color = authorColor
+							return label.Layout(gtx)
+						}),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return layout.Dimensions{}
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							label := material.Caption(w.theme, message.Timestamp.Format("15:04"))
+							label.Color = color.NRGBA{R: 132, G: 144, B: 160, A: 255}
+							return label.Layout(gtx)
+						}),
+					)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Body1(w.theme, message.Body)
+					label.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+					return label.Layout(gtx)
+				}),
+			}
+
+			if isMine && message.DeliveredAt != nil {
+				children = append(children,
+					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						statusText := "✓ " + message.DeliveredAt.Format("15:04")
+						if message.ReceiptStatus == "seen" {
+							statusText = "✓✓ " + message.DeliveredAt.Format("15:04")
+						}
+						return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							label := material.Caption(w.theme, statusText)
+							label.Color = statusColor
+							return label.Layout(gtx)
+						})
+					}),
+				)
+			}
+
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+		})
+	})
 }
 
 func knownRecipients(ids []string, contacts map[string]service.Contact, self string) []string {

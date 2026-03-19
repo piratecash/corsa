@@ -124,8 +124,14 @@ func TestDecryptDirectMessages(t *testing.T) {
 		Sender:     sender.Address,
 		Recipient:  recipient.Address,
 		Body:       ciphertext,
-	}})
-	want := []string{sender.Address + ">" + recipient.Address + ">secret phrase"}
+	}}, nil)
+	want := []DirectMessage{{
+		ID:        "id-1",
+		Sender:    sender.Address,
+		Recipient: recipient.Address,
+		Body:      "secret phrase",
+		Timestamp: mustTime(t, "2026-03-19T10:00:00Z"),
+	}}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected decrypted messages: got %v want %v", got, want)

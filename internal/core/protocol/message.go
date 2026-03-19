@@ -30,6 +30,19 @@ type Envelope struct {
 	CreatedAt  time.Time
 }
 
+type DeliveryReceipt struct {
+	MessageID   MessageID
+	Sender      string
+	Recipient   string
+	Status      string
+	DeliveredAt time.Time
+}
+
+const (
+	ReceiptStatusDelivered = "delivered"
+	ReceiptStatusSeen      = "seen"
+)
+
 func NewMessageID() (MessageID, error) {
 	var data [16]byte
 	if _, err := rand.Read(data[:]); err != nil {

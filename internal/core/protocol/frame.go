@@ -27,11 +27,14 @@ type Frame struct {
 	ID            string         `json:"id,omitempty"`
 	IDs           []string       `json:"ids,omitempty"`
 	Item          *MessageFrame  `json:"item,omitempty"`
+	Receipt       *ReceiptFrame  `json:"receipt,omitempty"`
 	Messages      []MessageFrame `json:"messages,omitempty"`
+	Receipts      []ReceiptFrame `json:"receipts,omitempty"`
 	Notices       []NoticeFrame  `json:"notices,omitempty"`
 	Subscriber    string         `json:"subscriber,omitempty"`
 	Flag          string         `json:"flag,omitempty"`
 	CreatedAt     string         `json:"created_at,omitempty"`
+	DeliveredAt   string         `json:"delivered_at,omitempty"`
 	TTLSeconds    int            `json:"ttl_seconds,omitempty"`
 	Body          string         `json:"body,omitempty"`
 	Ciphertext    string         `json:"ciphertext,omitempty"`
@@ -57,6 +60,14 @@ type MessageFrame struct {
 	CreatedAt  string `json:"created_at"`
 	TTLSeconds int    `json:"ttl_seconds"`
 	Body       string `json:"body"`
+}
+
+type ReceiptFrame struct {
+	MessageID   string `json:"message_id"`
+	Sender      string `json:"sender"`
+	Recipient   string `json:"recipient"`
+	Status      string `json:"status"`
+	DeliveredAt string `json:"delivered_at"`
 }
 
 type NoticeFrame struct {

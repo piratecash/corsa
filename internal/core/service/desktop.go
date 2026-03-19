@@ -41,6 +41,24 @@ type MessageRecord struct {
 	Body       string
 }
 
+type DeliveryReceipt struct {
+	MessageID   string
+	Sender      string
+	Recipient   string
+	Status      string
+	DeliveredAt time.Time
+}
+
+type DirectMessage struct {
+	ID          string
+	Sender      string
+	Recipient   string
+	Body        string
+	Timestamp   time.Time
+	ReceiptStatus string
+	DeliveredAt *time.Time
+}
+
 type NodeStatus struct {
 	Address          string
 	Connected        bool
@@ -55,8 +73,9 @@ type NodeStatus struct {
 	Stored           string
 	Messages         []string
 	MessageIDs       []string
-	DirectMessages   []string
+	DirectMessages   []DirectMessage
 	DirectMessageIDs []string
+	DeliveryReceipts []DeliveryReceipt
 	Inbox            []string
 	DirectInbox      []string
 	Gazeta           []string
@@ -194,6 +213,12 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		status.CheckedAt = time.Now()
 		return status
 	}
+	receiptsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_delivery_receipts", Recipient: c.id.Address})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
 	noticesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_notices"})
 	if err != nil {
 		status.Error = err.Error()
@@ -210,6 +235,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	directMessageIDs := directMessageIDsReply.IDs
 	inbox := messageRecordsFromFrames(inboxReply.Messages)
 	directInbox := messageRecordsFromFrames(directInboxReply.Messages)
+	deliveryReceipts := receiptRecordsFromFrames(receiptsReply.Receipts)
 	notices := decryptNoticeFrames(c.id, noticesReply.Notices)
 
 	if missing := missingDirectContacts(c.id.Address, contacts, directMessages); len(missing) > 0 {
@@ -219,7 +245,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		}
 	}
 
-	decryptedDirectMessages := decryptDirectMessages(c.id, contacts, directMessages)
+	decryptedDirectMessages := decryptDirectMessages(c.id, contacts, directMessages, deliveryReceipts)
 
 	status.Connected = true
 	status.KnownIDs = ids
@@ -229,6 +255,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.MessageIDs = messageIDs
 	status.DirectMessages = decryptedDirectMessages
 	status.DirectMessageIDs = directMessageIDs
+	status.DeliveryReceipts = deliveryReceipts
 	status.Inbox = stringifyMessages(inbox)
 	status.DirectInbox = stringifyMessages(directInbox)
 	status.Gazeta = notices
@@ -485,6 +512,47 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 	return fmt.Errorf("unexpected send reply: %s", reply.Type)
 }
 
+func (c *DesktopClient) MarkConversationSeen(ctx context.Context, counterparty string, messages []DirectMessage) error {
+	counterparty = strings.TrimSpace(counterparty)
+	if counterparty == "" {
+		return nil
+	}
+
+	var firstErr error
+	seenAt := time.Now().UTC().Format(time.RFC3339)
+
+	for _, message := range messages {
+		if message.Sender != counterparty || message.Recipient != c.id.Address {
+			continue
+		}
+		if message.ReceiptStatus == protocol.ReceiptStatusSeen {
+			continue
+		}
+
+		reply, err := c.localRequestFrame(protocol.Frame{
+			Type:        "send_delivery_receipt",
+			ID:          message.ID,
+			Address:     c.id.Address,
+			Recipient:   counterparty,
+			Status:      protocol.ReceiptStatusSeen,
+			DeliveredAt: seenAt,
+		})
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if reply.Type != "receipt_stored" && reply.Type != "receipt_known" {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("unexpected receipt reply: %s", reply.Type)
+			}
+		}
+	}
+
+	return firstErr
+}
+
 func (c *DesktopClient) localAddress() string {
 	if strings.HasPrefix(c.nodeCfg.ListenAddress, ":") {
 		return "127.0.0.1" + c.nodeCfg.ListenAddress
@@ -627,6 +695,24 @@ func messageRecordFromFrame(message protocol.MessageFrame) (MessageRecord, error
 	}, nil
 }
 
+func receiptRecordsFromFrames(receipts []protocol.ReceiptFrame) []DeliveryReceipt {
+	out := make([]DeliveryReceipt, 0, len(receipts))
+	for _, receipt := range receipts {
+		deliveredAt, err := time.Parse(time.RFC3339, receipt.DeliveredAt)
+		if err != nil {
+			continue
+		}
+		out = append(out, DeliveryReceipt{
+			MessageID:   receipt.MessageID,
+			Sender:      receipt.Sender,
+			Recipient:   receipt.Recipient,
+			Status:      receipt.Status,
+			DeliveredAt: deliveredAt.UTC(),
+		})
+	}
+	return out
+}
+
 func decryptNoticeFrames(id *identity.Identity, notices []protocol.NoticeFrame) []string {
 	out := make([]string, 0, len(notices))
 	for _, item := range notices {
@@ -639,8 +725,16 @@ func decryptNoticeFrames(id *identity.Identity, notices []protocol.NoticeFrame) 
 	return out
 }
 
-func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord) []string {
-	out := make([]string, 0, len(messages))
+func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt) []DirectMessage {
+	receiptsByMessageID := make(map[string]DeliveryReceipt, len(receipts))
+	for _, receipt := range receipts {
+		existing, ok := receiptsByMessageID[receipt.MessageID]
+		if !ok || receipt.Status == protocol.ReceiptStatusSeen || existing.Status != protocol.ReceiptStatusSeen {
+			receiptsByMessageID[receipt.MessageID] = receipt
+		}
+	}
+
+	out := make([]DirectMessage, 0, len(messages))
 	for _, item := range messages {
 		sender := item.Sender
 		recipient := item.Recipient
@@ -656,7 +750,23 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			continue
 		}
 
-		out = append(out, sender+">"+recipient+">"+message.Body)
+		var deliveredAt *time.Time
+		receiptStatus := ""
+		if receipt, ok := receiptsByMessageID[item.ID]; ok {
+			deliveredCopy := receipt.DeliveredAt
+			deliveredAt = &deliveredCopy
+			receiptStatus = receipt.Status
+		}
+
+		out = append(out, DirectMessage{
+			ID:            item.ID,
+			Sender:        sender,
+			Recipient:     recipient,
+			Body:          message.Body,
+			Timestamp:     item.Timestamp,
+			ReceiptStatus: receiptStatus,
+			DeliveredAt:   deliveredAt,
+		})
 	}
 
 	return out
