@@ -128,6 +128,88 @@ func TestDuplicateSendMessageIsDeduplicated(t *testing.T) {
 	})
 }
 
+func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	timestampA := time.Now().UTC().Format(time.RFC3339)
+	singleConnection := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.4-alpha"},
+		protocol.Frame{Type: "get_peers"},
+		protocol.Frame{Type: "fetch_contacts"},
+		sendMessageFrame("global", "series-msg-1", svc.Address(), "*", "immutable", timestampA, 0, "hello-series"),
+		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
+	)
+
+	if got := singleConnection[0]; got.Type != "welcome" || got.Address != svc.Address() {
+		t.Fatalf("unexpected welcome over single connection: %#v", got)
+	}
+	if got := singleConnection[1]; got.Type != "peers" || got.Count != 0 {
+		t.Fatalf("unexpected peers over single connection: %#v", got)
+	}
+	if got := singleConnection[2]; got.Type != "contacts" || got.Count == 0 {
+		t.Fatalf("unexpected contacts over single connection: %#v", got)
+	}
+	if got := singleConnection[3]; got.Type != "message_stored" || got.ID != "series-msg-1" {
+		t.Fatalf("unexpected store reply over single connection: %#v", got)
+	}
+	assertMessageFrame(t, singleConnection[4], "inbox", "global", 1, protocol.MessageFrame{
+		ID: "series-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: timestampA, TTLSeconds: 0, Body: "hello-series",
+	})
+
+	timestampB := time.Now().UTC().Format(time.RFC3339)
+	step1 := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.4-alpha"},
+	)
+	step2 := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.4-alpha"},
+		protocol.Frame{Type: "get_peers"},
+	)
+	step3 := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.4-alpha"},
+		protocol.Frame{Type: "fetch_contacts"},
+	)
+	step4 := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.4-alpha"},
+		sendMessageFrame("global", "series-msg-2", svc.Address(), "*", "immutable", timestampB, 0, "hello-separate"),
+	)
+	step5 := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.4-alpha"},
+		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
+	)
+
+	if got := step1[0]; got.Type != "welcome" || got.Address != svc.Address() {
+		t.Fatalf("unexpected welcome over separate connection: %#v", got)
+	}
+	if got := step2[1]; got.Type != "peers" || got.Count != 0 {
+		t.Fatalf("unexpected peers over separate connection: %#v", got)
+	}
+	if got := step3[1]; got.Type != "contacts" || got.Count == 0 {
+		t.Fatalf("unexpected contacts over separate connection: %#v", got)
+	}
+	if got := step4[1]; got.Type != "message_stored" || got.ID != "series-msg-2" {
+		t.Fatalf("unexpected store reply over separate connection: %#v", got)
+	}
+
+	finalInbox := step5[1]
+	if finalInbox.Type != "inbox" || finalInbox.Count != 2 {
+		t.Fatalf("unexpected final inbox after separate connections: %#v", finalInbox)
+	}
+	if len(finalInbox.Messages) != 2 {
+		t.Fatalf("expected 2 messages in final inbox, got %#v", finalInbox)
+	}
+	if finalInbox.Messages[0].ID != "series-msg-1" || finalInbox.Messages[1].ID != "series-msg-2" {
+		t.Fatalf("unexpected message order in final inbox: %#v", finalInbox.Messages)
+	}
+}
+
 func TestMeshMessagePropagation(t *testing.T) {
 	t.Parallel()
 

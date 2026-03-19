@@ -33,6 +33,7 @@ type Service struct {
 	notices  map[string]gazeta.Notice
 	seen     map[string]struct{}
 	subs     map[string]map[string]*subscriber
+	sessions map[string]*peerSession
 	upstream map[string]struct{}
 	listener net.Listener
 	lastSync time.Time
@@ -43,6 +44,14 @@ type subscriber struct {
 	recipient string
 	conn      net.Conn
 	mu        sync.Mutex
+}
+
+type peerSession struct {
+	address string
+	conn    net.Conn
+	sendCh  chan protocol.Frame
+	inboxCh chan protocol.Frame
+	errCh   chan error
 }
 
 type incomingMessage struct {
@@ -98,6 +107,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		notices:  make(map[string]gazeta.Notice),
 		seen:     make(map[string]struct{}),
 		subs:     make(map[string]map[string]*subscriber),
+		sessions: make(map[string]*peerSession),
 		upstream: make(map[string]struct{}),
 	}
 }
@@ -428,7 +438,7 @@ func (s *Service) refreshKnowledgeFromPeers() {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 
-	s.syncPeers(ctx)
+	s.ensurePeerSessions(ctx)
 
 	s.mu.Lock()
 	s.lastSync = time.Now().UTC()
@@ -589,8 +599,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	s.syncPeers(ctx)
-	s.ensureUpstreamSubscriptions(ctx)
+	s.ensurePeerSessions(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -598,13 +607,12 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 		case <-ticker.C:
 			s.cleanupExpiredMessages()
 			s.cleanupExpiredNotices()
-			s.syncPeers(ctx)
-			s.ensureUpstreamSubscriptions(ctx)
+			s.ensurePeerSessions(ctx)
 		}
 	}
 }
 
-func (s *Service) ensureUpstreamSubscriptions(ctx context.Context) {
+func (s *Service) ensurePeerSessions(ctx context.Context) {
 	for _, peer := range s.Peers() {
 		address := strings.TrimSpace(peer.Address)
 		if address == "" || s.isSelfAddress(address) {
@@ -622,21 +630,12 @@ func (s *Service) ensureUpstreamSubscriptions(ctx context.Context) {
 		go func(peerAddress string) {
 			defer func() {
 				s.mu.Lock()
+				delete(s.sessions, peerAddress)
 				delete(s.upstream, peerAddress)
 				s.mu.Unlock()
 			}()
-			s.runPeerSubscription(ctx, peerAddress)
+			s.runPeerSession(ctx, peerAddress)
 		}(address)
-	}
-}
-
-func (s *Service) syncPeers(ctx context.Context) {
-	for _, peer := range s.Peers() {
-		address := peer.Address
-		if address == "" || s.isSelfAddress(address) {
-			continue
-		}
-		s.syncPeer(ctx, address)
 	}
 }
 
@@ -699,7 +698,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 	}
 }
 
-func (s *Service) runPeerSubscription(ctx context.Context, address string) {
+func (s *Service) runPeerSession(ctx context.Context, address string) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -707,7 +706,10 @@ func (s *Service) runPeerSubscription(ctx context.Context, address string) {
 		default:
 		}
 
-		if err := s.subscribeToPeerInbox(ctx, address); err != nil {
+		if err := s.openPeerSession(ctx, address); err != nil {
+			s.mu.Lock()
+			delete(s.sessions, address)
+			s.mu.Unlock()
 			select {
 			case <-ctx.Done():
 				return
@@ -719,7 +721,7 @@ func (s *Service) runPeerSubscription(ctx context.Context, address string) {
 	}
 }
 
-func (s *Service) subscribeToPeerInbox(ctx context.Context, address string) error {
+func (s *Service) openPeerSession(ctx context.Context, address string) error {
 	dialer := net.Dialer{Timeout: 2 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
@@ -735,109 +737,72 @@ func (s *Service) subscribeToPeerInbox(ctx context.Context, address string) erro
 
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	reader := bufio.NewReader(conn)
+	session := &peerSession{
+		address: address,
+		conn:    conn,
+		sendCh:  make(chan protocol.Frame, 64),
+		inboxCh: make(chan protocol.Frame, 64),
+		errCh:   make(chan error, 1),
+	}
+	go s.readPeerSession(reader, session)
 
-	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		return err
-	}
-	welcomeLine, err := reader.ReadString('\n')
-	if err != nil {
-		return err
-	}
-	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
+	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
 	if err != nil {
 		return err
 	}
 	s.learnIdentityFromWelcome(welcome)
 
-	subLine, err := protocol.MarshalFrameLine(protocol.Frame{
+	if _, err := s.peerSessionRequest(session, protocol.Frame{
 		Type:       "subscribe_inbox",
 		Topic:      "dm",
 		Recipient:  s.identity.Address,
 		Subscriber: s.cfg.AdvertiseAddress,
-	})
-	if err != nil {
+	}, "subscribed", false); err != nil {
 		return err
-	}
-	if _, err := io.WriteString(conn, subLine); err != nil {
-		return err
-	}
-	ackLine, err := reader.ReadString('\n')
-	if err != nil {
-		return err
-	}
-	ack, err := protocol.ParseFrameLine(strings.TrimSpace(ackLine))
-	if err != nil {
-		return err
-	}
-	if ack.Type == "error" {
-		return protocol.ErrorFromCode(ack.Code)
-	}
-	if ack.Type != "subscribed" {
-		return fmt.Errorf("unexpected subscribe reply: %s", ack.Type)
 	}
 	log.Printf("node: upstream subscription established peer=%s recipient=%s", address, s.identity.Address)
 
+	if err := s.syncPeerSession(session); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.sessions[address] = session
+	s.mu.Unlock()
+
+	return s.servePeerSession(ctx, session)
+}
+
+func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
+	syncTicker := time.NewTicker(4 * time.Second)
 	pingTicker := time.NewTicker(20 * time.Second)
+	defer syncTicker.Stop()
 	defer pingTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-pingTicker.C:
-			pingLine, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
-			if err != nil {
-				return err
-			}
-			if _, err := io.WriteString(conn, pingLine); err != nil {
-				log.Printf("node: upstream ping failed peer=%s recipient=%s err=%v", address, s.identity.Address, err)
-				return err
-			}
-		default:
-		}
-
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
-			}
-			log.Printf("node: upstream subscription closed peer=%s recipient=%s err=%v", address, s.identity.Address, err)
+		case err := <-session.errCh:
+			log.Printf("node: upstream subscription closed peer=%s recipient=%s err=%v", session.address, s.identity.Address, err)
 			return err
+		case frame := <-session.inboxCh:
+			s.handlePeerSessionFrame(session.address, frame)
+		case <-syncTicker.C:
+			if err := s.syncPeerSession(session); err != nil {
+				return err
+			}
+		case <-pingTicker.C:
+			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
+				log.Printf("node: upstream ping failed peer=%s recipient=%s err=%v", session.address, s.identity.Address, err)
+				return err
+			}
+		case outbound := <-session.sendCh:
+			if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
+				log.Printf("node: peer session send failed peer=%s type=%s err=%v", session.address, outbound.Type, err)
+				return err
+			}
 		}
-		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
-		if err != nil {
-			continue
-		}
-		switch frame.Type {
-		case "pong", "subscribed":
-			continue
-		}
-		if frame.Type != "push_message" || frame.Item == nil {
-			continue
-		}
-
-		msg, err := incomingMessageFromFrame(protocol.Frame{
-			ID:         frame.Item.ID,
-			Topic:      frame.Topic,
-			Address:    frame.Item.Sender,
-			Recipient:  frame.Item.Recipient,
-			Flag:       frame.Item.Flag,
-			CreatedAt:  frame.Item.CreatedAt,
-			TTLSeconds: frame.Item.TTLSeconds,
-			Body:       frame.Item.Body,
-		})
-		if err != nil {
-			continue
-		}
-
-		if stored, _, errCode := s.storeIncomingMessage(msg); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-			s.syncPeer(refreshCtx, address)
-			cancel()
-			_, _, _ = s.storeIncomingMessage(msg)
-		}
-		log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
 	}
 }
 
@@ -923,6 +888,21 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 }
 
 func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
+	frame := protocol.Frame{
+		Type:       "send_message",
+		Topic:      msg.Topic,
+		ID:         string(msg.ID),
+		Address:    msg.Sender,
+		Recipient:  msg.Recipient,
+		Flag:       string(msg.Flag),
+		CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
+		TTLSeconds: msg.TTLSeconds,
+		Body:       string(msg.Payload),
+	}
+	if s.enqueuePeerFrame(address, frame) {
+		return
+	}
+
 	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
 	if err != nil {
 		return
@@ -939,17 +919,7 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 		return
 	}
 
-	line, err := protocol.MarshalFrameLine(protocol.Frame{
-		Type:       "send_message",
-		Topic:      msg.Topic,
-		ID:         string(msg.ID),
-		Address:    msg.Sender,
-		Recipient:  msg.Recipient,
-		Flag:       string(msg.Flag),
-		CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
-		TTLSeconds: msg.TTLSeconds,
-		Body:       string(msg.Payload),
-	})
+	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		return
 	}
@@ -968,6 +938,15 @@ func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
 }
 
 func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext string) {
+	frame := protocol.Frame{
+		Type:       "publish_notice",
+		TTLSeconds: int(ttl.Seconds()),
+		Ciphertext: ciphertext,
+	}
+	if s.enqueuePeerFrame(address, frame) {
+		return
+	}
+
 	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
 	if err != nil {
 		return
@@ -984,11 +963,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 		return
 	}
 
-	line, err := protocol.MarshalFrameLine(protocol.Frame{
-		Type:       "publish_notice",
-		TTLSeconds: int(ttl.Seconds()),
-		Ciphertext: ciphertext,
-	})
+	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		return
 	}
@@ -1110,6 +1085,144 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 	s.addKnownPubKey(address, pubKey)
 	if !existed {
 		log.Printf("node: trusted new contact address=%s source=%s", address, source)
+	}
+}
+
+func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			select {
+			case session.errCh <- err:
+			default:
+			}
+			return
+		}
+
+		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
+		if err != nil {
+			continue
+		}
+
+		select {
+		case session.inboxCh <- frame:
+		default:
+			select {
+			case session.errCh <- fmt.Errorf("peer session inbox overflow for %s", session.address):
+			default:
+			}
+			return
+		}
+	}
+}
+
+func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
+	if hello {
+		line := s.nodeHelloJSONLine()
+		if _, err := io.WriteString(session.conn, line); err != nil {
+			return protocol.Frame{}, err
+		}
+	} else {
+		line, err := protocol.MarshalFrameLine(frame)
+		if err != nil {
+			return protocol.Frame{}, err
+		}
+		if _, err := io.WriteString(session.conn, line); err != nil {
+			return protocol.Frame{}, err
+		}
+	}
+
+	for {
+		select {
+		case err := <-session.errCh:
+			return protocol.Frame{}, err
+		case incoming := <-session.inboxCh:
+			if incoming.Type == "error" {
+				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
+			}
+			if incoming.Type == "push_message" {
+				s.handlePeerSessionFrame(session.address, incoming)
+				continue
+			}
+			if expectedType == "" || incoming.Type == expectedType {
+				return incoming, nil
+			}
+			continue
+		}
+	}
+}
+
+func (s *Service) syncPeerSession(session *peerSession) error {
+	peersFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers", false)
+	if err != nil {
+		return err
+	}
+	for _, peer := range peersFrame.Peers {
+		s.addPeerAddress(peer)
+	}
+
+	contactsFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "fetch_contacts"}, "contacts", false)
+	if err != nil {
+		return err
+	}
+	for _, contact := range contactsFrame.Contacts {
+		s.trustContact(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig, "contacts")
+	}
+	return nil
+}
+
+func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
+	if frame.Type != "push_message" || frame.Item == nil {
+		return
+	}
+
+	msg, err := incomingMessageFromFrame(protocol.Frame{
+		ID:         frame.Item.ID,
+		Topic:      frame.Topic,
+		Address:    frame.Item.Sender,
+		Recipient:  frame.Item.Recipient,
+		Flag:       frame.Item.Flag,
+		CreatedAt:  frame.Item.CreatedAt,
+		TTLSeconds: frame.Item.TTLSeconds,
+		Body:       frame.Item.Body,
+	})
+	if err != nil {
+		return
+	}
+
+	if stored, _, errCode := s.storeIncomingMessage(msg); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		s.syncPeer(refreshCtx, address)
+		cancel()
+		_, _, _ = s.storeIncomingMessage(msg)
+	}
+	log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
+}
+
+func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
+	s.mu.RLock()
+	session := s.sessions[address]
+	s.mu.RUnlock()
+	if session == nil {
+		return false
+	}
+
+	select {
+	case session.sendCh <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+func expectedReplyType(requestType string) string {
+	switch requestType {
+	case "send_message":
+		return ""
+	case "publish_notice":
+		return ""
+	default:
+		return ""
 	}
 }
 
