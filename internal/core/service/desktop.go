@@ -205,6 +205,13 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	directInbox := messageRecordsFromFrames(directInboxReply.Messages)
 	notices := decryptNoticeFrames(c.id, noticesReply.Notices)
 
+	if missing := missingDirectContacts(c.id.Address, contacts, directMessages); len(missing) > 0 {
+		refreshedContactsReply, refreshErr := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_contacts"})
+		if refreshErr == nil {
+			contacts = contactsFromFrame(refreshedContactsReply)
+		}
+	}
+
 	decryptedDirectMessages := decryptDirectMessages(c.id, contacts, directMessages)
 
 	status.Connected = true
@@ -251,6 +258,97 @@ func (c *DesktopClient) FetchMessage(ctx context.Context, topic, messageID strin
 		return MessageRecord{}, fmt.Errorf("message item is missing")
 	}
 	return messageRecordFromFrame(*frame.Item)
+}
+
+func (c *DesktopClient) RebuildTrust(ctx context.Context) (int, error) {
+	localConn, localReader, _, err := c.openLocalSession(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = localConn.Close() }()
+
+	peersFrame, err := c.requestFrame(localConn, localReader, protocol.Frame{Type: "get_peers"})
+	if err != nil {
+		return 0, err
+	}
+
+	addresses := make(map[string]struct{})
+	for _, peer := range c.BootstrapPeers() {
+		address := strings.TrimSpace(peer.Address)
+		if address != "" {
+			addresses[address] = struct{}{}
+		}
+	}
+	for _, address := range peersFrame.Peers {
+		address = strings.TrimSpace(address)
+		if address != "" {
+			addresses[address] = struct{}{}
+		}
+	}
+
+	collected := make(map[string]protocol.ContactFrame)
+	var firstErr error
+
+	for address := range addresses {
+		if address == c.localAddress() {
+			continue
+		}
+
+		remoteConn, remoteReader, welcome, err := c.openSessionAt(ctx, address, "desktop")
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		if strings.TrimSpace(welcome.Address) != "" {
+			collected[welcome.Address] = protocol.ContactFrame{
+				Address: welcome.Address,
+				PubKey:  welcome.PubKey,
+				BoxKey:  welcome.BoxKey,
+				BoxSig:  welcome.BoxSig,
+			}
+		}
+
+		frame, err := c.requestFrame(remoteConn, remoteReader, protocol.Frame{Type: "fetch_contacts"})
+		_ = remoteConn.Close()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		for _, contact := range frame.Contacts {
+			if strings.TrimSpace(contact.Address) == "" || contact.Address == c.id.Address {
+				continue
+			}
+			collected[contact.Address] = contact
+		}
+	}
+
+	if len(collected) == 0 {
+		if firstErr != nil {
+			return 0, firstErr
+		}
+		return 0, nil
+	}
+
+	contacts := make([]protocol.ContactFrame, 0, len(collected))
+	for _, contact := range collected {
+		contacts = append(contacts, contact)
+	}
+
+	reply, err := c.requestFrame(localConn, localReader, protocol.Frame{
+		Type:     "import_contacts",
+		Contacts: contacts,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return reply.Count, nil
 }
 
 func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresses []string, counterparty string) (int, error) {
@@ -574,4 +672,26 @@ func stringifyMessages(messages []MessageRecord) []string {
 func isConversationMessage(message protocol.MessageFrame, self, counterparty string) bool {
 	return (message.Sender == self && message.Recipient == counterparty) ||
 		(message.Sender == counterparty && message.Recipient == self)
+}
+
+func missingDirectContacts(self string, contacts map[string]Contact, messages []MessageRecord) []string {
+	missing := make(map[string]struct{})
+	for _, item := range messages {
+		for _, address := range []string{item.Sender, item.Recipient} {
+			address = strings.TrimSpace(address)
+			if address == "" || address == "*" || address == self {
+				continue
+			}
+			if _, ok := contacts[address]; ok {
+				continue
+			}
+			missing[address] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(missing))
+	for address := range missing {
+		out = append(out, address)
+	}
+	return out
 }

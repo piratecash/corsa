@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type trustFile struct {
 
 type trustStore struct {
 	path      string
+	mu        sync.RWMutex
 	contacts  map[string]trustedContact
 	conflicts map[string]string
 }
@@ -79,10 +81,13 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 func (s *trustStore) remember(contact trustedContact) error {
 	now := time.Now().UTC()
 
+	s.mu.Lock()
 	if existing, ok := s.contacts[contact.Address]; ok {
 		if existing.PubKey != contact.PubKey || existing.BoxKey != contact.BoxKey || existing.BoxSignature != contact.BoxSignature {
 			s.conflicts[contact.Address] = fmt.Sprintf("pinned contact mismatch from %s at %s", contact.Source, now.Format(time.RFC3339))
-			if err := s.save(); err != nil {
+			contacts, conflicts := s.snapshotLocked()
+			s.mu.Unlock()
+			if err := s.saveSnapshot(contacts, conflicts); err != nil {
 				return err
 			}
 			return errTrustConflict
@@ -91,16 +96,23 @@ func (s *trustStore) remember(contact trustedContact) error {
 		existing.LastSeenAt = now
 		existing.Source = contact.Source
 		s.contacts[contact.Address] = existing
-		return s.save()
+		contacts, conflicts := s.snapshotLocked()
+		s.mu.Unlock()
+		return s.saveSnapshot(contacts, conflicts)
 	}
 
 	contact.FirstSeenAt = now
 	contact.LastSeenAt = now
 	s.contacts[contact.Address] = contact
-	return s.save()
+	contacts, conflicts := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.saveSnapshot(contacts, conflicts)
 }
 
 func (s *trustStore) trustedContacts() map[string]trustedContact {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	out := make(map[string]trustedContact, len(s.contacts))
 	for address, contact := range s.contacts {
 		out[address] = contact
@@ -109,6 +121,27 @@ func (s *trustStore) trustedContacts() map[string]trustedContact {
 }
 
 func (s *trustStore) save() error {
+	s.mu.RLock()
+	contacts, conflicts := s.snapshotLocked()
+	s.mu.RUnlock()
+	return s.saveSnapshot(contacts, conflicts)
+}
+
+func (s *trustStore) snapshotLocked() (map[string]trustedContact, map[string]string) {
+	contacts := make(map[string]trustedContact, len(s.contacts))
+	for address, contact := range s.contacts {
+		contacts[address] = contact
+	}
+
+	conflicts := make(map[string]string, len(s.conflicts))
+	for address, conflict := range s.conflicts {
+		conflicts[address] = conflict
+	}
+
+	return contacts, conflicts
+}
+
+func (s *trustStore) saveSnapshot(contacts map[string]trustedContact, conflicts map[string]string) error {
 	if s.path == "" {
 		return nil
 	}
@@ -118,8 +151,8 @@ func (s *trustStore) save() error {
 	}
 
 	payload, err := json.MarshalIndent(trustFile{
-		Contacts:  s.contacts,
-		Conflicts: s.conflicts,
+		Contacts:  contacts,
+		Conflicts: conflicts,
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal trust store: %w", err)

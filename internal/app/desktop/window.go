@@ -29,17 +29,18 @@ type Window struct {
 	theme   *material.Theme
 	ops     op.Ops
 
-	recipientEditor   widget.Editor
-	messageEditor     widget.Editor
-	sendButton        widget.Clickable
-	syncButton        widget.Clickable
-	languageToggle    widget.Clickable
-	languageOptions   map[string]*widget.Clickable
-	recipientButtons  map[string]*widget.Clickable
-	selectedRecipient string
-	language          string
-	showLanguageMenu  bool
-	sendStatus        string
+	recipientEditor    widget.Editor
+	messageEditor      widget.Editor
+	sendButton         widget.Clickable
+	syncButton         widget.Clickable
+	rebuildTrustButton widget.Clickable
+	languageToggle     widget.Clickable
+	languageOptions    map[string]*widget.Clickable
+	recipientButtons   map[string]*widget.Clickable
+	selectedRecipient  string
+	language           string
+	showLanguageMenu   bool
+	sendStatus         string
 
 	mu         sync.RWMutex
 	nodeStatus service.NodeStatus
@@ -220,6 +221,29 @@ func (w *Window) handleActions(gtx layout.Context) {
 			}
 		}(recipient, peers)
 	}
+
+	for w.rebuildTrustButton.Clicked(gtx) {
+		w.sendStatus = w.t("status.trust_rebuilding")
+
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			count, err := w.client.RebuildTrust(ctx)
+			cancel()
+
+			w.mu.Lock()
+			if err != nil {
+				w.sendStatus = w.t("status.trust_failed", err.Error())
+			} else {
+				w.sendStatus = w.t("status.trust_rebuilt", count)
+			}
+			w.mu.Unlock()
+
+			w.refreshStatus()
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+		}()
+	}
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
@@ -348,7 +372,13 @@ func (w *Window) layoutNodeSummary(gtx layout.Context, status service.NodeStatus
 		rows = append(rows, w.t("node.checked", status.CheckedAt.Format(time.RFC3339)))
 	}
 
-	return w.card(gtx, w.t("node.title"), rows)
+	return w.card(gtx, w.t("node.title"), rows, func(gtx layout.Context) layout.Dimensions {
+		return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(240)))
+			btn := material.Button(w.theme, &w.rebuildTrustButton, w.t("node.trust_rebuild"))
+			return btn.Layout(gtx)
+		})
+	})
 }
 
 func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
@@ -530,8 +560,11 @@ func (w *Window) recipientButton(id string) *widget.Clickable {
 
 func (w *Window) ensureSelectedRecipient(recipients []string) {
 	if len(recipients) == 0 {
-		w.selectedRecipient = ""
-		w.recipientEditor.SetText("")
+		if strings.TrimSpace(w.selectedRecipient) != "" {
+			w.recipientEditor.SetText(w.selectedRecipient)
+		} else {
+			w.recipientEditor.SetText("")
+		}
 		return
 	}
 
@@ -540,6 +573,11 @@ func (w *Window) ensureSelectedRecipient(recipients []string) {
 			w.recipientEditor.SetText(recipient)
 			return
 		}
+	}
+
+	if strings.TrimSpace(w.selectedRecipient) != "" {
+		w.recipientEditor.SetText(w.selectedRecipient)
+		return
 	}
 
 	w.selectedRecipient = recipients[0]

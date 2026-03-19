@@ -47,7 +47,7 @@ Primary JSON desktop request:
   "type": "hello",
   "version": 1,
   "client": "desktop",
-  "client_version": "0.2-alpha"
+  "client_version": "0.3-alpha"
 }
 ```
 
@@ -67,7 +67,7 @@ Primary JSON node-to-node request:
   "client": "node",
   "listen": "203.0.113.10:64646",
   "node_type": "full",
-  "client_version": "0.2-alpha",
+  "client_version": "0.3-alpha",
   "services": [
     "identity",
     "contacts",
@@ -105,7 +105,7 @@ Response:
   "node": "corsa",
   "network": "gazeta-devnet",
   "node_type": "full",
-  "client_version": "0.2-alpha",
+  "client_version": "0.3-alpha",
   "services": [
     "identity",
     "contacts",
@@ -140,8 +140,8 @@ Role rules:
 - `client` nodes do not relay traffic onward
 - desktop and standalone console node default to `full`
 - future mobile/light clients should use `client`
-- current client version: `0.2 alpha`
-- wire form used in handshake: `0.2-alpha`
+- current client version: `0.3 alpha`
+- wire form used in handshake: `0.3-alpha`
 
 ### Peer sync
 
@@ -623,7 +623,7 @@ Fields:
   "type": "hello",
   "version": 1,
   "client": "desktop",
-  "client_version": "0.2-alpha"
+  "client_version": "0.3-alpha"
 }
 ```
 
@@ -643,7 +643,7 @@ Fields:
   "client": "node",
   "listen": "203.0.113.10:64646",
   "node_type": "full",
-  "client_version": "0.2-alpha",
+  "client_version": "0.3-alpha",
   "services": [
     "identity",
     "contacts",
@@ -681,7 +681,7 @@ Fields:
   "node": "corsa",
   "network": "gazeta-devnet",
   "node_type": "full",
-  "client_version": "0.2-alpha",
+  "client_version": "0.3-alpha",
   "services": [
     "identity",
     "contacts",
@@ -716,8 +716,8 @@ Fields:
 - `client`-узлы не ретранслируют трафик дальше
 - `corsa-desktop` и `corsa-node` по умолчанию запускаются как `full`
 - будущий mobile/light client должен использовать `client`
-- текущая версия клиента: `0.2 alpha`
-- wire-форма в handshake: `0.2-alpha`
+- текущая версия клиента: `0.3 alpha`
+- wire-форма в handshake: `0.3-alpha`
 
 ### Peer sync
 

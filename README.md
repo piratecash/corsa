@@ -6,7 +6,7 @@
 
 Current repository status:
 
-- current client version: `0.2 alpha`
+- current client version: `0.3 alpha`
 - Go-based desktop and node foundation
 - desktop chat-style UI with identity list and direct messaging
 - mesh-style peer sync between local nodes
@@ -108,24 +108,27 @@ go run ./cmd/corsa-node
 Docker example:
 
 ```bash
-docker build -t corsa-node .
-docker run --rm -p 64646:64646 \
-  -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
-  -e CORSA_BOOTSTRAP_PEERS=198.51.100.20:64646,198.51.100.21:64646 \
-  -v corsa-data:/home/corsa/.corsa \
-  corsa-node
+docker compose up -d --build
 ```
 
 The container runs as non-root user `corsa` (`uid=10001`).
 
-Recommended persistence is a named Docker volume:
+The included [docker-compose.yaml](docker-compose.yaml) already uses:
+
+- `restart: unless-stopped`
+- named volume `corsa-data`
+- non-root runtime user
+
+Manual `docker run` example:
 
 ```bash
 docker volume create corsa-data
-docker run --rm -p 64646:64646 \
+docker run -d -p 64646:64646 \
+  --name corsa-node \
+  --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v corsa-data:/home/corsa/.corsa \
   corsa-node
 ```
@@ -135,9 +138,12 @@ For host bind mount usage, prepare the directory for `uid=10001` first:
 ```bash
 mkdir -p .corsa
 sudo chown -R 10001:10001 .corsa
-docker run --rm -p 64646:64646 \
+docker run -d -p 64646:64646 \
+  --name corsa-node \
+  --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node
 ```
@@ -150,7 +156,7 @@ docker run --rm -p 64646:64646 \
 
 Текущее состояние репозитория:
 
-- текущая версия клиента: `0.2 alpha`
+- текущая версия клиента: `0.3 alpha`
 - Go-основа для desktop-приложения и ноды
 - desktop UI в формате чата: список identity слева и direct messaging справа
 - mesh-синхронизация между локальными узлами
@@ -251,24 +257,27 @@ go run ./cmd/corsa-node
 Пример через Docker:
 
 ```bash
-docker build -t corsa-node .
-docker run --rm -p 64646:64646 \
-  -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
-  -e CORSA_BOOTSTRAP_PEERS=198.51.100.20:64646,198.51.100.21:64646 \
-  -v corsa-data:/home/corsa/.corsa \
-  corsa-node
+docker compose up -d --build
 ```
 
 Контейнер запускается не от `root`, а от пользователя `corsa` (`uid=10001`).
 
-Рекомендуемый вариант хранения данных — named volume Docker:
+[docker-compose.yaml](docker-compose.yaml) уже использует:
+
+- `restart: unless-stopped`
+- named volume `corsa-data`
+- запуск не от `root`
+
+Ручной пример через `docker run`:
 
 ```bash
 docker volume create corsa-data
-docker run --rm -p 64646:64646 \
+docker run -d -p 64646:64646 \
+  --name corsa-node \
+  --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v corsa-data:/home/corsa/.corsa \
   corsa-node
 ```
@@ -278,9 +287,12 @@ docker run --rm -p 64646:64646 \
 ```bash
 mkdir -p .corsa
 sudo chown -R 10001:10001 .corsa
-docker run --rm -p 64646:64646 \
+docker run -d -p 64646:64646 \
+  --name corsa-node \
+  --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node
 ```

@@ -28,7 +28,7 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	defer stop()
 
 	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "get_peers"},
 		sendMessageFrame("global", "msg-1", svc.Address(), "*", "immutable", ts, 0, "hello"),
 		protocol.Frame{Type: "fetch_messages", Topic: "global"},
@@ -80,7 +80,7 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		sendMessageFrame("global", "client-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "client-message"),
 	)
 	if got := frames[1]; got.Type != "message_stored" {
@@ -90,7 +90,7 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	final := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_messages", Topic: "global"},
 	)
 	if got := final[1]; got.Type != "messages" || got.Count != 0 {
@@ -111,7 +111,7 @@ func TestDuplicateSendMessageIsDeduplicated(t *testing.T) {
 	defer stop()
 
 	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"),
 		sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"),
 		protocol.Frame{Type: "fetch_messages", Topic: "global"},
@@ -154,7 +154,7 @@ func TestMeshMessagePropagation(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		sendMessageFrame("global", "mesh-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "hello-from-a"),
 	)
 	if frames[1].Type != "message_stored" {
@@ -163,14 +163,14 @@ func TestMeshMessagePropagation(t *testing.T) {
 
 	waitForCondition(t, 5*time.Second, func() bool {
 		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 			protocol.Frame{Type: "fetch_messages", Topic: "global"},
 		)
 		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].Body == "hello-from-a"
 	})
 
 	final := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_messages", Topic: "global"},
 		protocol.Frame{Type: "get_peers"},
 	)
@@ -218,7 +218,7 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 
 	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		sendMessageFrame("dm", "dm-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, ciphertext),
 	)
 	if frames[1].Type != "message_stored" {
@@ -227,14 +227,14 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 
 	waitForCondition(t, 5*time.Second, func() bool {
 		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 			protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
 		)
 		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "dm-msg-1"
 	})
 
 	inboxB := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
 	)
 	assertMessageFrame(t, inboxB[1], "inbox", "dm", 1, protocol.MessageFrame{
@@ -242,7 +242,7 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	})
 
 	inboxA := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeA.Address()},
 	)
 	if got := inboxA[1]; got.Type != "inbox" || got.Count != 0 {
@@ -250,7 +250,7 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	}
 
 	dmIDs := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_message_ids", Topic: "dm"},
 	)
 	if got := dmIDs[1]; got.Type != "message_ids" || len(got.IDs) != 1 || got.IDs[0] != "dm-msg-1" {
@@ -258,7 +258,7 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	}
 
 	single := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_message", Topic: "dm", ID: "dm-msg-1"},
 	)
 	if got := single[1]; got.Type != "message" || got.Item == nil || got.Item.ID != "dm-msg-1" {
@@ -303,7 +303,7 @@ func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 	tampered := ciphertext[:len(ciphertext)-1] + "A"
 	ts := time.Now().UTC().Format(time.RFC3339)
 	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		sendMessageFrame("dm", "tampered-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, tampered),
 	)
 	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeInvalidDirectMessageSig {
@@ -325,7 +325,7 @@ func TestNodeRejectsMessageOutsideAllowedClockDrift(t *testing.T) {
 
 	oldTimestamp := time.Now().UTC().Add(-11 * time.Minute).Format(time.RFC3339)
 	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		sendMessageFrame("global", "old-msg-1", svc.Address(), "*", "immutable", oldTimestamp, 0, "too-old"),
 	)
 
@@ -347,7 +347,7 @@ func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		sendMessageFrame("global", "ttl-msg-1", svc.Address(), "*", "auto-delete-ttl", ts, 1, "burn-after-read"),
 		protocol.Frame{Type: "fetch_messages", Topic: "global"},
 	)
@@ -362,7 +362,7 @@ func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	final := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_messages", Topic: "global"},
 		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
 	)
@@ -410,7 +410,7 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 	}
 
 	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "publish_notice", TTLSeconds: 30, Ciphertext: ciphertext},
 	)
 	if got := frames[1]; got.Type != "notice_stored" {
@@ -419,14 +419,14 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 
 	waitForCondition(t, 5*time.Second, func() bool {
 		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 			protocol.Frame{Type: "fetch_notices"},
 		)
 		return reply[1].Type == "notices" && len(reply[1].Notices) > 0
 	})
 
 	replyB := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
 		protocol.Frame{Type: "fetch_notices"},
 	)
 	if len(replyB[1].Notices) == 0 {

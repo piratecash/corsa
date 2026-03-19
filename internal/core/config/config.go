@@ -42,7 +42,7 @@ type Config struct {
 }
 
 func Default() Config {
-	appVersion := "0.2 alpha"
+	appVersion := "0.3 alpha"
 	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":64646")
 	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress))
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
@@ -167,7 +167,7 @@ func appLanguageFromEnv() string {
 func wireClientVersion(version string) string {
 	value := strings.TrimSpace(version)
 	if value == "" {
-		return "0.2-alpha"
+		return "0.3-alpha"
 	}
 	return strings.ReplaceAll(value, " ", "-")
 }

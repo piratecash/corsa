@@ -32,6 +32,7 @@ type Service struct {
 	notices  map[string]gazeta.Notice
 	seen     map[string]struct{}
 	listener net.Listener
+	lastSync time.Time
 }
 
 type incomingMessage struct {
@@ -145,7 +146,7 @@ func (s *Service) Services() []string {
 
 func (s *Service) ClientVersion() string {
 	if strings.TrimSpace(s.cfg.ClientVersion) == "" {
-		return "0.2-alpha"
+		return "0.3-alpha"
 	}
 	return s.cfg.ClientVersion
 }
@@ -219,6 +220,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	case "fetch_contacts":
 		s.writeJSONFrame(conn, s.contactsFrame())
+		return true
+	case "import_contacts":
+		s.writeJSONFrame(conn, s.importContactsFrame(frame.Contacts))
 		return true
 	case "send_message":
 		s.writeJSONFrame(conn, s.storeMessageFrame(frame))
@@ -302,6 +306,8 @@ func (s *Service) identitiesFrame() protocol.Frame {
 }
 
 func (s *Service) contactsFrame() protocol.Frame {
+	s.refreshKnowledgeFromPeers()
+
 	s.mu.RLock()
 	contacts := make([]protocol.ContactFrame, 0, len(s.boxKeys))
 	for address, boxKey := range s.boxKeys {
@@ -324,6 +330,52 @@ func (s *Service) contactsFrame() protocol.Frame {
 		Count:    len(contacts),
 		Contacts: contacts,
 	}
+}
+
+func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol.Frame {
+	imported := 0
+	for _, contact := range contacts {
+		address := strings.TrimSpace(contact.Address)
+		if address == "" || address == s.identity.Address {
+			continue
+		}
+
+		before := s.trust.trustedContacts()
+		_, existed := before[address]
+
+		s.trustContact(address, contact.PubKey, contact.BoxKey, contact.BoxSig, "import_contacts")
+
+		after := s.trust.trustedContacts()
+		if _, ok := after[address]; ok && !existed {
+			imported++
+		}
+	}
+
+	return protocol.Frame{
+		Type:  "contacts_imported",
+		Count: imported,
+	}
+}
+
+func (s *Service) refreshKnowledgeFromPeers() {
+	s.mu.RLock()
+	lastSync := s.lastSync
+	s.mu.RUnlock()
+
+	// Avoid dialing upstream peers on every UI poll while still making
+	// contact discovery responsive for NAT/light clients.
+	if !lastSync.IsZero() && time.Since(lastSync) < 3*time.Second {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+
+	s.syncPeers(ctx)
+
+	s.mu.Lock()
+	s.lastSync = time.Now().UTC()
+	s.mu.Unlock()
 }
 
 func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
