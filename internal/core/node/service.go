@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -185,6 +186,8 @@ func (s *Service) handleConn(conn net.Conn) {
 		_ = conn.Close()
 	}()
 
+	log.Printf("node: incoming connection from %s", conn.RemoteAddr())
+
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	reader := bufio.NewReader(conn)
@@ -224,6 +227,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	case "hello":
 		s.learnPeerFromFrame(frame)
+		if frame.Client == "node" || frame.Client == "desktop" {
+			log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
+		}
 		s.writeJSONFrame(conn, s.welcomeFrame())
 		return true
 	case "get_peers":
@@ -397,6 +403,7 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 		recipient: recipient,
 		conn:      conn,
 	}
+	log.Printf("node: subscribe_inbox recipient=%s subscriber=%s active=%d", recipient, subID, len(s.subs[recipient]))
 
 	return protocol.Frame{
 		Type:       "subscribed",
@@ -490,6 +497,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage) (bool, int, string) 
 	s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
 	count := len(s.topics[msg.Topic])
 	s.mu.Unlock()
+
+	log.Printf("node: stored message topic=%s id=%s from=%s to=%s flag=%s", msg.Topic, msg.ID, msg.Sender, msg.Recipient, msg.Flag)
 
 	if s.CanForward() {
 		go s.gossipMessage(envelope)
@@ -823,6 +832,7 @@ func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
 	if len(subs) == 0 {
 		return
 	}
+	log.Printf("node: push_message id=%s topic=%s recipient=%s subscribers=%d", msg.ID, msg.Topic, msg.Recipient, len(subs))
 
 	frame := protocol.Frame{
 		Type:      "push_message",
@@ -1054,6 +1064,9 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		return
 	}
 
+	before := s.trust.trustedContacts()
+	_, existed := before[address]
+
 	if err := s.trust.remember(trustedContact{
 		Address:      address,
 		PubKey:       pubKey,
@@ -1061,12 +1074,18 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		BoxSignature: boxSig,
 		Source:       source,
 	}); err != nil {
+		if err == errTrustConflict {
+			log.Printf("node: trust conflict for address=%s source=%s", address, source)
+		}
 		return
 	}
 
 	s.addKnownIdentity(address)
 	s.addKnownBoxKey(address, boxKey)
 	s.addKnownPubKey(address, pubKey)
+	if !existed {
+		log.Printf("node: trusted new contact address=%s source=%s", address, source)
+	}
 }
 
 func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
