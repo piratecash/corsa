@@ -41,8 +41,12 @@ type Config struct {
 	Node Node
 }
 
+const (
+	CorsaVersion     = "0.5 alpha"
+	CorsaWireVersion = "0.5-alpha"
+)
+
 func Default() Config {
-	appVersion := "0.4 alpha"
 	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":64646")
 	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress))
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
@@ -57,7 +61,7 @@ func Default() Config {
 			Network:  "gazeta-devnet",
 			Profile:  "default",
 			Language: appLanguageFromEnv(),
-			Version:  appVersion,
+			Version:  CorsaVersion,
 		},
 		Node: Node{
 			ListenAddress:    listenAddress,
@@ -66,7 +70,7 @@ func Default() Config {
 			IdentityPath:     identityPath,
 			TrustStorePath:   trustStorePath,
 			Type:             nodeType,
-			ClientVersion:    wireClientVersion(appVersion),
+			ClientVersion:    wireClientVersion(CorsaVersion),
 			MaxClockDrift:    maxClockDrift,
 		},
 	}
@@ -167,7 +171,7 @@ func appLanguageFromEnv() string {
 func wireClientVersion(version string) string {
 	value := strings.TrimSpace(version)
 	if value == "" {
-		return "0.4-alpha"
+		return CorsaWireVersion
 	}
 	return strings.ReplaceAll(value, " ", "-")
 }

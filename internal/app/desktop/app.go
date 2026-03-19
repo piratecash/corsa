@@ -33,7 +33,7 @@ func Run() error {
 	runtime := NewNodeRuntime(nodeService)
 	runtime.Start(ctx)
 
-	client := service.NewDesktopClient(cfg.App, cfg.Node, id)
+	client := service.NewDesktopClient(cfg.App, cfg.Node, id, nodeService)
 	window := NewWindow(client, runtime, prefs)
 	return window.Run()
 }

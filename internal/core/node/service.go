@@ -168,7 +168,7 @@ func (s *Service) Services() []string {
 
 func (s *Service) ClientVersion() string {
 	if strings.TrimSpace(s.cfg.ClientVersion) == "" {
-		return "0.4-alpha"
+		return config.CorsaWireVersion
 	}
 	return s.cfg.ClientVersion
 }
@@ -280,6 +280,39 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	default:
 		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
+	}
+}
+
+func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
+	switch frame.Type {
+	case "hello":
+		return s.welcomeFrame()
+	case "ping":
+		return protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"}
+	case "get_peers":
+		return s.peersFrame()
+	case "fetch_identities":
+		return s.identitiesFrame()
+	case "fetch_contacts":
+		return s.contactsFrame()
+	case "import_contacts":
+		return s.importContactsFrame(frame.Contacts)
+	case "send_message":
+		return s.storeMessageFrame(frame)
+	case "fetch_messages":
+		return s.fetchMessagesFrame(frame.Topic)
+	case "fetch_message_ids":
+		return s.fetchMessageIDsFrame(frame.Topic)
+	case "fetch_message":
+		return s.fetchMessageFrame(frame.Topic, frame.ID)
+	case "fetch_inbox":
+		return s.fetchInboxFrame(frame.Topic, frame.Recipient)
+	case "publish_notice":
+		return s.publishNoticeFrame(frame)
+	case "fetch_notices":
+		return s.fetchNoticesFrame()
+	default:
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand}
 	}
 }
 
@@ -640,6 +673,11 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 }
 
 func (s *Service) syncPeer(ctx context.Context, address string) {
+	if session := s.peerSession(address); session != nil {
+		_ = s.syncPeerSession(session)
+		return
+	}
+
 	dialer := net.Dialer{Timeout: 1500 * time.Millisecond}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
@@ -760,6 +798,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) error {
 	}, "subscribed", false); err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Time{})
 	log.Printf("node: upstream subscription established peer=%s recipient=%s", address, s.identity.Address)
 
 	if err := s.syncPeerSession(session); err != nil {
@@ -1200,9 +1239,7 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 }
 
 func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
-	s.mu.RLock()
-	session := s.sessions[address]
-	s.mu.RUnlock()
+	session := s.peerSession(address)
 	if session == nil {
 		return false
 	}
@@ -1224,6 +1261,12 @@ func expectedReplyType(requestType string) string {
 	default:
 		return ""
 	}
+}
+
+func (s *Service) peerSession(address string) *peerSession {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessions[address]
 }
 
 func (s *Service) subscribersForRecipient(recipient string) []*subscriber {

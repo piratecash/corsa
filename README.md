@@ -6,7 +6,7 @@
 
 Current repository status:
 
-- current client version: `0.4 alpha`
+- current Corsa version: see `internal/core/config.CorsaVersion`
 - Go-based desktop and node foundation
 - desktop chat-style UI with identity list and direct messaging
 - mesh-style peer sync between local nodes
@@ -156,7 +156,7 @@ docker run -d -p 64646:64646 \
 
 Текущее состояние репозитория:
 
-- текущая версия клиента: `0.4 alpha`
+- текущая версия Corsa: см. `internal/core/config.CorsaVersion`
 - Go-основа для desktop-приложения и ноды
 - desktop UI в формате чата: список identity слева и direct messaging справа
 - mesh-синхронизация между локальными узлами

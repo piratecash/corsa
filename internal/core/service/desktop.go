@@ -13,14 +13,16 @@ import (
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/identity"
+	"corsa/internal/core/node"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/transport"
 )
 
 type DesktopClient struct {
-	id      *identity.Identity
-	appCfg  config.App
-	nodeCfg config.Node
+	id        *identity.Identity
+	appCfg    config.App
+	nodeCfg   config.Node
+	localNode *node.Service
 }
 
 type Contact struct {
@@ -62,11 +64,12 @@ type NodeStatus struct {
 	CheckedAt        time.Time
 }
 
-func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity) *DesktopClient {
+func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service) *DesktopClient {
 	return &DesktopClient{
-		id:      id,
-		appCfg:  appCfg,
-		nodeCfg: nodeCfg,
+		id:        id,
+		appCfg:    appCfg,
+		nodeCfg:   nodeCfg,
+		localNode: localNode,
 	}
 }
 
@@ -120,74 +123,78 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		return status
 	}
 
-	conn, reader, welcome, err := c.openLocalSession(ctx)
+	welcome, err := c.localRequestFrame(protocol.Frame{
+		Type:          "hello",
+		Version:       1,
+		Client:        "desktop",
+		ClientVersion: strings.ReplaceAll(c.appCfg.Version, " ", "-"),
+	})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	defer func() { _ = conn.Close() }()
 	status.Welcome = welcome.Type
 	status.NodeID = welcome.Address
 	status.NodeType = welcome.NodeType
 	status.ClientVersion = welcome.ClientVersion
 	status.Services = welcome.Services
 
-	peersReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "get_peers"})
+	peersReply, err := c.localRequestFrame(protocol.Frame{Type: "get_peers"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	idsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_identities"})
+	idsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_identities"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	contactsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_contacts"})
+	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	messagesReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	messagesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	directMessagesReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+	directMessagesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	messageIDsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message_ids", Topic: "global"})
+	messageIDsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_message_ids", Topic: "global"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	directMessageIDsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
+	directMessageIDsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	inboxReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: c.id.Address})
+	inboxReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: c.id.Address})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	directInboxReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: c.id.Address})
+	directInboxReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: c.id.Address})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	noticesReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_notices"})
+	noticesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_notices"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
@@ -206,7 +213,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	notices := decryptNoticeFrames(c.id, noticesReply.Notices)
 
 	if missing := missingDirectContacts(c.id.Address, contacts, directMessages); len(missing) > 0 {
-		refreshedContactsReply, refreshErr := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_contacts"})
+		refreshedContactsReply, refreshErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
 		if refreshErr == nil {
 			contacts = contactsFromFrame(refreshedContactsReply)
 		}
@@ -230,13 +237,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 }
 
 func (c *DesktopClient) FetchMessageIDs(ctx context.Context, topic string) ([]string, error) {
-	conn, reader, _, err := c.openLocalSession(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = conn.Close() }()
-
-	frame, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message_ids", Topic: strings.TrimSpace(topic)})
+	frame, err := c.localRequestFrame(protocol.Frame{Type: "fetch_message_ids", Topic: strings.TrimSpace(topic)})
 	if err != nil {
 		return nil, err
 	}
@@ -244,13 +245,7 @@ func (c *DesktopClient) FetchMessageIDs(ctx context.Context, topic string) ([]st
 }
 
 func (c *DesktopClient) FetchMessage(ctx context.Context, topic, messageID string) (MessageRecord, error) {
-	conn, reader, _, err := c.openLocalSession(ctx)
-	if err != nil {
-		return MessageRecord{}, err
-	}
-	defer func() { _ = conn.Close() }()
-
-	frame, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message", Topic: strings.TrimSpace(topic), ID: strings.TrimSpace(messageID)})
+	frame, err := c.localRequestFrame(protocol.Frame{Type: "fetch_message", Topic: strings.TrimSpace(topic), ID: strings.TrimSpace(messageID)})
 	if err != nil {
 		return MessageRecord{}, err
 	}
@@ -261,13 +256,7 @@ func (c *DesktopClient) FetchMessage(ctx context.Context, topic, messageID strin
 }
 
 func (c *DesktopClient) RebuildTrust(ctx context.Context) (int, error) {
-	localConn, localReader, _, err := c.openLocalSession(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = localConn.Close() }()
-
-	peersFrame, err := c.requestFrame(localConn, localReader, protocol.Frame{Type: "get_peers"})
+	peersFrame, err := c.localRequestFrame(protocol.Frame{Type: "get_peers"})
 	if err != nil {
 		return 0, err
 	}
@@ -340,7 +329,7 @@ func (c *DesktopClient) RebuildTrust(ctx context.Context) (int, error) {
 		contacts = append(contacts, contact)
 	}
 
-	reply, err := c.requestFrame(localConn, localReader, protocol.Frame{
+	reply, err := c.localRequestFrame(protocol.Frame{
 		Type:     "import_contacts",
 		Contacts: contacts,
 	})
@@ -356,12 +345,6 @@ func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAdd
 	if counterparty == "" {
 		return 0, fmt.Errorf("counterparty is required")
 	}
-
-	localConn, localReader, _, err := c.openLocalSession(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = localConn.Close() }()
 
 	imported := 0
 	seenIDs := make(map[string]struct{})
@@ -420,7 +403,7 @@ func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAdd
 				continue
 			}
 
-			reply, err := c.requestFrame(localConn, localReader, protocol.Frame{
+			reply, err := c.localRequestFrame(protocol.Frame{
 				Type:       "send_message",
 				Topic:      "dm",
 				ID:         item.ID,
@@ -458,13 +441,7 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 		return fmt.Errorf("recipient and message are required")
 	}
 
-	conn, reader, _, err := c.openLocalSession(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
-	contactsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_contacts"})
+	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
 	if err != nil {
 		return err
 	}
@@ -486,7 +463,7 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 	}
 
 	createdAt := time.Now().UTC().Format(time.RFC3339)
-	reply, err := c.requestFrame(conn, reader, protocol.Frame{
+	reply, err := c.localRequestFrame(protocol.Frame{
 		Type:       "send_message",
 		Topic:      "dm",
 		ID:         string(messageID),
@@ -516,6 +493,9 @@ func (c *DesktopClient) localAddress() string {
 }
 
 func (c *DesktopClient) openLocalSession(ctx context.Context) (net.Conn, *bufio.Reader, protocol.Frame, error) {
+	if c.localNode != nil {
+		return nil, nil, protocol.Frame{}, fmt.Errorf("local TCP session is disabled for embedded node mode")
+	}
 	return c.openSessionAt(ctx, c.localAddress(), "desktop")
 }
 
@@ -561,6 +541,27 @@ func (c *DesktopClient) requestFrame(conn net.Conn, reader *bufio.Reader, reques
 		return protocol.Frame{}, err
 	}
 	return readJSONFrame(reader)
+}
+
+func (c *DesktopClient) localRequestFrame(request protocol.Frame) (protocol.Frame, error) {
+	if c.localNode != nil {
+		frame := c.localNode.HandleLocalFrame(request)
+		if frame.Type == "error" {
+			if frame.Code != "" {
+				return protocol.Frame{}, protocol.ErrorFromCode(frame.Code)
+			}
+			return protocol.Frame{}, protocol.ErrProtocol
+		}
+		return frame, nil
+	}
+
+	conn, reader, _, err := c.openLocalSession(context.Background())
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	return c.requestFrame(conn, reader, request)
 }
 
 func peerID(index int) string {
