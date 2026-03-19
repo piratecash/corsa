@@ -43,6 +43,8 @@ type Window struct {
 	languageOptions    map[string]*widget.Clickable
 	recipientButtons   map[string]*widget.Clickable
 	selectedRecipient  string
+	lastConversationRecipient string
+	lastConversationCount     int
 	language           string
 	showLanguageMenu   bool
 	sendStatus         string
@@ -82,7 +84,7 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 		recipientButtons: make(map[string]*widget.Clickable),
 		sendStatus:       translate(language, "status.compose_default"),
 		contactsList:     widget.List{List: layout.List{Axis: layout.Vertical}},
-		chatList:         widget.List{List: layout.List{Axis: layout.Vertical}},
+		chatList:         widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 	}
 }
 
@@ -579,6 +581,18 @@ func (w *Window) refreshStatus() {
 	cancel()
 
 	recipient := strings.TrimSpace(w.selectedRecipient)
+	if recipient != "" {
+		conversationCount := len(w.conversationEntries(status, recipient))
+		if recipient != w.lastConversationRecipient || conversationCount > w.lastConversationCount {
+			w.chatList.Position.BeforeEnd = false
+		}
+		w.lastConversationRecipient = recipient
+		w.lastConversationCount = conversationCount
+	} else {
+		w.lastConversationRecipient = ""
+		w.lastConversationCount = 0
+	}
+
 	if recipient != "" {
 		go func(recipient string, messages []service.DirectMessage) {
 			seenCtx, seenCancel := context.WithTimeout(context.Background(), 2*time.Second)
