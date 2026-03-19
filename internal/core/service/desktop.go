@@ -404,7 +404,7 @@ func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAdd
 			}
 
 			reply, err := c.localRequestFrame(protocol.Frame{
-				Type:       "send_message",
+				Type:       "import_message",
 				Topic:      "dm",
 				ID:         item.ID,
 				Address:    item.Sender,

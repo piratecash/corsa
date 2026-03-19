@@ -8,6 +8,7 @@ const (
 	ErrCodeEncodeFailed               = "encode-failed"
 	ErrCodeUnknownCommand             = "unknown-command"
 	ErrCodeInvalidSendMessage         = "invalid-send-message"
+	ErrCodeInvalidImportMessage       = "invalid-import-message"
 	ErrCodeInvalidFetchMessages       = "invalid-fetch-messages"
 	ErrCodeInvalidFetchMessageIDs     = "invalid-fetch-message-ids"
 	ErrCodeInvalidFetchMessage        = "invalid-fetch-message"
@@ -27,6 +28,7 @@ var (
 	ErrEncodeFailed               = errors.New(ErrCodeEncodeFailed)
 	ErrUnknownCommand             = errors.New(ErrCodeUnknownCommand)
 	ErrInvalidSendMessage         = errors.New(ErrCodeInvalidSendMessage)
+	ErrInvalidImportMessage       = errors.New(ErrCodeInvalidImportMessage)
 	ErrInvalidFetchMessages       = errors.New(ErrCodeInvalidFetchMessages)
 	ErrInvalidFetchMessageIDs     = errors.New(ErrCodeInvalidFetchMessageIDs)
 	ErrInvalidFetchMessage        = errors.New(ErrCodeInvalidFetchMessage)
@@ -52,6 +54,8 @@ func ErrorCode(err error) string {
 		return ErrCodeUnknownCommand
 	case errors.Is(err, ErrInvalidSendMessage):
 		return ErrCodeInvalidSendMessage
+	case errors.Is(err, ErrInvalidImportMessage):
+		return ErrCodeInvalidImportMessage
 	case errors.Is(err, ErrInvalidFetchMessages):
 		return ErrCodeInvalidFetchMessages
 	case errors.Is(err, ErrInvalidFetchMessageIDs):
@@ -89,6 +93,8 @@ func ErrorFromCode(code string) error {
 		return ErrUnknownCommand
 	case ErrCodeInvalidSendMessage:
 		return ErrInvalidSendMessage
+	case ErrCodeInvalidImportMessage:
+		return ErrInvalidImportMessage
 	case ErrCodeInvalidFetchMessages:
 		return ErrInvalidFetchMessages
 	case ErrCodeInvalidFetchMessageIDs:

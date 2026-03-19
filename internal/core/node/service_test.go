@@ -373,6 +373,9 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 	waitForCondition(t, 5*time.Second, func() bool {
 		return len(nodeB.Peers()) >= 1
 	})
+	waitForCondition(t, 5*time.Second, func() bool {
+		return nodeA.SubscriberCount(nodeB.Address()) >= 1
+	})
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
@@ -468,6 +471,43 @@ func TestNodeRejectsMessageOutsideAllowedClockDrift(t *testing.T) {
 	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeMessageTimestampOutOfRange {
 		t.Fatalf("unexpected stale timestamp response: %#v", got)
 	}
+}
+
+func TestImportMessageAllowsHistoricalTimestamp(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		MaxClockDrift:    10 * time.Minute,
+	})
+	defer stop()
+
+	oldTimestamp := time.Now().UTC().Add(-11 * time.Minute).Format(time.RFC3339)
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{
+			Type:       "import_message",
+			Topic:      "global",
+			ID:         "historic-msg-1",
+			Address:    svc.Address(),
+			Recipient:  "*",
+			Flag:       "immutable",
+			CreatedAt:  oldTimestamp,
+			TTLSeconds: 0,
+			Body:       "historic",
+		},
+		protocol.Frame{Type: "fetch_messages", Topic: "global"},
+	)
+
+	if got := frames[1]; got.Type != "message_stored" || got.ID != "historic-msg-1" {
+		t.Fatalf("unexpected import response: %#v", got)
+	}
+	assertMessageFrame(t, frames[2], "messages", "global", 1, protocol.MessageFrame{
+		ID: "historic-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: oldTimestamp, TTLSeconds: 0, Body: "historic",
+	})
 }
 
 func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {

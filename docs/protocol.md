@@ -240,6 +240,22 @@ Primary JSON request:
 }
 ```
 
+Historical import request:
+
+```json
+{
+  "type": "import_message",
+  "topic": "dm",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "address": "a1b2c3",
+  "recipient": "d4e5f6",
+  "flag": "sender-delete",
+  "created_at": "2026-03-19T12:00:05Z",
+  "ttl_seconds": 0,
+  "body": "<ciphertext-token>"
+}
+```
+
 Fields:
 
 - `type` — required; frame kind, here `send_message`
@@ -251,6 +267,12 @@ Fields:
 - `created_at` — required; sender timestamp in RFC3339 UTC form
 - `ttl_seconds` — optional; TTL used by `auto-delete-ttl`, otherwise `0`
 - `body` — required; plaintext for public topics or ciphertext for `dm`
+
+Import rules:
+
+- `send_message` is for live traffic and enforces the configured clock drift window
+- `import_message` is for historical sync and does not reject old/new timestamps
+- `import_message` still validates direct-message signatures, deduplication, and retention flags
 
 Responses:
 
@@ -883,6 +905,22 @@ Fields:
 }
 ```
 
+Запрос исторического импорта:
+
+```json
+{
+  "type": "import_message",
+  "topic": "dm",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "address": "a1b2c3",
+  "recipient": "d4e5f6",
+  "flag": "sender-delete",
+  "created_at": "2026-03-19T12:00:05Z",
+  "ttl_seconds": 0,
+  "body": "<ciphertext-token>"
+}
+```
+
 Поля:
 
 - `type` — обязательное; тип кадра, здесь `send_message`
@@ -894,6 +932,12 @@ Fields:
 - `created_at` — обязательное; timestamp отправителя в RFC3339 UTC
 - `ttl_seconds` — опциональное; TTL для `auto-delete-ttl`, иначе `0`
 - `body` — обязательное; plaintext для публичных тем или ciphertext для `dm`
+
+Правила импорта:
+
+- `send_message` используется для live-трафика и проверяет допустимый clock drift
+- `import_message` используется для синка истории и не отбрасывает старые/будущие timestamps
+- `import_message` все равно проверяет подписи direct messages, дедупликацию и retention flags
 
 Ответы:
 

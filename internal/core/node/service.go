@@ -181,6 +181,12 @@ func (s *Service) Address() string {
 	return s.identity.Address
 }
 
+func (s *Service) SubscriberCount(recipient string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.subs[recipient])
+}
+
 func (s *Service) Peers() []transport.Peer {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -256,6 +262,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "send_message":
 		s.writeJSONFrame(conn, s.storeMessageFrame(frame))
 		return true
+	case "import_message":
+		s.writeJSONFrame(conn, s.importMessageFrame(frame))
+		return true
 	case "fetch_messages":
 		s.writeJSONFrame(conn, s.fetchMessagesFrame(frame.Topic))
 		return true
@@ -299,6 +308,8 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.importContactsFrame(frame.Contacts)
 	case "send_message":
 		return s.storeMessageFrame(frame)
+	case "import_message":
+		return s.importMessageFrame(frame)
 	case "fetch_messages":
 		return s.fetchMessagesFrame(frame.Topic)
 	case "fetch_message_ids":
@@ -484,7 +495,7 @@ func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendMessage}
 	}
 
-	stored, count, errCode := s.storeIncomingMessage(msg)
+	stored, count, errCode := s.storeIncomingMessage(msg, true)
 	if errCode != "" {
 		return protocol.Frame{Type: "error", Code: errCode}
 	}
@@ -494,9 +505,27 @@ func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
 	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
 }
 
-func (s *Service) storeIncomingMessage(msg incomingMessage) (bool, int, string) {
-	if err := s.validateMessageTimestamp(msg.CreatedAt); err != nil {
-		return false, 0, protocol.ErrCodeMessageTimestampOutOfRange
+func (s *Service) importMessageFrame(frame protocol.Frame) protocol.Frame {
+	msg, err := incomingMessageFromFrame(frame)
+	if err != nil {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidImportMessage}
+	}
+
+	stored, count, errCode := s.storeIncomingMessage(msg, false)
+	if errCode != "" {
+		return protocol.Frame{Type: "error", Code: errCode}
+	}
+	if !stored {
+		return protocol.Frame{Type: "message_known", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
+	}
+	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
+}
+
+func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bool) (bool, int, string) {
+	if validateTimestamp {
+		if err := s.validateMessageTimestamp(msg.CreatedAt); err != nil {
+			return false, 0, protocol.ErrCodeMessageTimestampOutOfRange
+		}
 	}
 
 	if msg.Topic == "dm" {
@@ -1229,11 +1258,11 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		return
 	}
 
-	if stored, _, errCode := s.storeIncomingMessage(msg); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+	if stored, _, errCode := s.storeIncomingMessage(msg, true); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		s.syncPeer(refreshCtx, address)
 		cancel()
-		_, _, _ = s.storeIncomingMessage(msg)
+		_, _, _ = s.storeIncomingMessage(msg, true)
 	}
 	log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
 }
