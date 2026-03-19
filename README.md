@@ -113,7 +113,32 @@ docker run --rm -p 64646:64646 \
   -e CORSA_LISTEN_ADDRESS=:64646 \
   -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
   -e CORSA_BOOTSTRAP_PEERS=198.51.100.20:64646,198.51.100.21:64646 \
-  -v $(pwd)/.corsa:/app/.corsa \
+  -v corsa-data:/home/corsa/.corsa \
+  corsa-node
+```
+
+The container runs as non-root user `corsa` (`uid=10001`).
+
+Recommended persistence is a named Docker volume:
+
+```bash
+docker volume create corsa-data
+docker run --rm -p 64646:64646 \
+  -e CORSA_LISTEN_ADDRESS=:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -v corsa-data:/home/corsa/.corsa \
+  corsa-node
+```
+
+For host bind mount usage, prepare the directory for `uid=10001` first:
+
+```bash
+mkdir -p .corsa
+sudo chown -R 10001:10001 .corsa
+docker run --rm -p 64646:64646 \
+  -e CORSA_LISTEN_ADDRESS=:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node
 ```
 
@@ -231,6 +256,31 @@ docker run --rm -p 64646:64646 \
   -e CORSA_LISTEN_ADDRESS=:64646 \
   -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
   -e CORSA_BOOTSTRAP_PEERS=198.51.100.20:64646,198.51.100.21:64646 \
-  -v $(pwd)/.corsa:/app/.corsa \
+  -v corsa-data:/home/corsa/.corsa \
+  corsa-node
+```
+
+Контейнер запускается не от `root`, а от пользователя `corsa` (`uid=10001`).
+
+Рекомендуемый вариант хранения данных — named volume Docker:
+
+```bash
+docker volume create corsa-data
+docker run --rm -p 64646:64646 \
+  -e CORSA_LISTEN_ADDRESS=:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -v corsa-data:/home/corsa/.corsa \
+  corsa-node
+```
+
+Для использования bind mount с хоста сначала подготовь каталог под `uid=10001`:
+
+```bash
+mkdir -p .corsa
+sudo chown -R 10001:10001 .corsa
+docker run --rm -p 64646:64646 \
+  -e CORSA_LISTEN_ADDRESS=:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
+  -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node
 ```

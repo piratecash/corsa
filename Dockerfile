@@ -11,17 +11,18 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/corsa-node ./cmd/cors
 
 FROM debian:bookworm-slim
 
-RUN useradd --create-home --shell /usr/sbin/nologin corsa
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin corsa
 
-WORKDIR /app
+WORKDIR /home/corsa
 
 COPY --from=builder /out/corsa-node /usr/local/bin/corsa-node
 
-RUN mkdir -p /app/.corsa && chown -R corsa:corsa /app
+RUN mkdir -p /home/corsa/.corsa && chown -R corsa:corsa /home/corsa
 
 USER corsa
 
 ENV CORSA_LISTEN_ADDRESS=:64646
+VOLUME ["/home/corsa/.corsa"]
 EXPOSE 64646/tcp
 
 ENTRYPOINT ["/usr/local/bin/corsa-node"]
