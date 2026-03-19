@@ -31,23 +31,25 @@ type Window struct {
 	theme   *material.Theme
 	ops     op.Ops
 
-	recipientEditor    widget.Editor
-	messageEditor      widget.Editor
-	contactsList       widget.List
-	chatList           widget.List
-	sendButton         widget.Clickable
-	syncButton         widget.Clickable
-	copyIdentityButton widget.Clickable
-	rebuildTrustButton widget.Clickable
-	languageToggle     widget.Clickable
-	languageOptions    map[string]*widget.Clickable
-	recipientButtons   map[string]*widget.Clickable
-	selectedRecipient  string
+	recipientEditor           widget.Editor
+	messageEditor             widget.Editor
+	contactsList              widget.List
+	chatList                  widget.List
+	consoleButton             widget.Clickable
+	sendButton                widget.Clickable
+	syncButton                widget.Clickable
+	copyIdentityButton        widget.Clickable
+	rebuildTrustButton        widget.Clickable
+	languageToggle            widget.Clickable
+	languageOptions           map[string]*widget.Clickable
+	recipientButtons          map[string]*widget.Clickable
+	selectedRecipient         string
 	lastConversationRecipient string
 	lastConversationCount     int
-	language           string
-	showLanguageMenu   bool
-	sendStatus         string
+	language                  string
+	showLanguageMenu          bool
+	sendStatus                string
+	consoleOpen               bool
 
 	mu         sync.RWMutex
 	nodeStatus service.NodeStatus
@@ -172,6 +174,10 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 func (w *Window) handleActions(gtx layout.Context) {
 	for w.languageToggle.Clicked(gtx) {
 		w.showLanguageMenu = !w.showLanguageMenu
+	}
+
+	for w.consoleButton.Clicked(gtx) {
+		w.openConsoleWindow()
 	}
 
 	for w.sendButton.Clicked(gtx) {
@@ -303,7 +309,7 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{
 		Axis:      layout.Horizontal,
 		Spacing:   layout.SpaceBetween,
-		Alignment: layout.Start,
+		Alignment: layout.Middle,
 	}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{
@@ -316,7 +322,15 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.E.Layout(gtx, w.layoutLanguageSelector)
+			return layout.Flex{
+				Axis:      layout.Horizontal,
+				Alignment: layout.Middle,
+				Spacing:   layout.SpaceBetween,
+			}.Layout(gtx,
+				layout.Rigid(w.layoutConsoleButton),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
+				layout.Rigid(w.layoutLanguageSelectorInline),
+			)
 		}),
 	)
 }
@@ -327,35 +341,22 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	w.ensureSelectedRecipient(recipients)
 
 	return layout.Flex{
-		Axis: layout.Vertical,
+		Axis:    layout.Horizontal,
+		Spacing: layout.SpaceBetween,
 	}.Layout(gtx,
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+		layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
+			return w.layoutContactsCard(gtx, recipients)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
+		layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{
-				Axis:    layout.Horizontal,
-				Spacing: layout.SpaceBetween,
+				Axis: layout.Vertical,
 			}.Layout(gtx,
-				layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
-					return w.layoutContactsCard(gtx, recipients)
-				}),
-				layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
-				layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return w.layoutChatCard(gtx, status)
 				}),
-			)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{
-				Axis:    layout.Horizontal,
-				Spacing: layout.SpaceBetween,
-			}.Layout(gtx,
-				layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
-					return w.layoutNodeSummary(gtx, status)
-				}),
-				layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
-				layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
-					return w.layoutComposerCard(gtx)
-				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
+				layout.Rigid(w.layoutComposerCard),
 			)
 		}),
 	)
@@ -380,10 +381,6 @@ func (w *Window) layoutContactsCard(gtx layout.Context, recipients []string) lay
 			return label.Layout(gtx)
 		}
 
-		maxY := gtx.Dp(unit.Dp(420))
-		if gtx.Constraints.Max.Y > maxY {
-			gtx.Constraints.Max.Y = maxY
-		}
 		list := material.List(w.theme, &w.contactsList)
 		return list.Layout(gtx, len(recipients), func(gtx layout.Context, index int) layout.Dimensions {
 			fingerprint := recipients[index]
@@ -404,31 +401,6 @@ func (w *Window) layoutContactsCard(gtx layout.Context, recipients []string) lay
 				style.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 				return style.Layout(gtx)
 			})
-		})
-	})
-}
-
-func (w *Window) layoutNodeSummary(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	rows := []string{
-		w.t("node.client_version", w.client.Version()),
-		w.t("node.peer_version", fallback(status.ClientVersion, strings.ReplaceAll(w.client.Version(), " ", "-"))),
-		w.t("node.listen", w.runtime.ListenAddress()),
-		w.t("node.type", fallback(status.NodeType, "full")),
-		w.t("node.services", fallback(joinOrNone(status.Services), "identity,contacts,messages,gazeta,relay")),
-		w.t("node.connected", status.Connected),
-		w.t("node.peers", len(status.Peers)),
-		w.localNodeErrorRow(),
-	}
-
-	if !status.CheckedAt.IsZero() {
-		rows = append(rows, w.t("node.checked", status.CheckedAt.Format(time.RFC3339)))
-	}
-
-	return w.card(gtx, w.t("node.title"), rows, func(gtx layout.Context) layout.Dimensions {
-		return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(240)))
-			btn := material.Button(w.theme, &w.rebuildTrustButton, w.t("node.trust_rebuild"))
-			return btn.Layout(gtx)
 		})
 	})
 }
@@ -514,7 +486,7 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 	borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
 	backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
-	cardHeight := gtx.Dp(unit.Dp(230))
+	cardHeight := gtx.Dp(unit.Dp(96))
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.Y = cardHeight
@@ -541,7 +513,7 @@ func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 						editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
 						editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
 
-						height := gtx.Dp(unit.Dp(160))
+						height := gtx.Dp(unit.Dp(36))
 						gtx.Constraints.Min.Y = height
 						gtx.Constraints.Max.Y = height
 						return editor.Layout(gtx)
@@ -823,6 +795,30 @@ func (w *Window) t(key string, args ...any) string {
 	return translate(w.language, key, args...)
 }
 
+func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
+	btn := material.Button(w.theme, &w.consoleButton, w.t("header.console"))
+	btn.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
+	btn.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+	return btn.Layout(gtx)
+}
+
+func (w *Window) openConsoleWindow() {
+	w.mu.Lock()
+	if w.consoleOpen {
+		w.mu.Unlock()
+		return
+	}
+	w.consoleOpen = true
+	w.mu.Unlock()
+
+	console := NewConsoleWindow(w, func() {
+		w.mu.Lock()
+		w.consoleOpen = false
+		w.mu.Unlock()
+	})
+	console.Open()
+}
+
 func (w *Window) languageButton(code string) *widget.Clickable {
 	if btn, ok := w.languageOptions[code]; ok {
 		return btn
@@ -833,17 +829,17 @@ func (w *Window) languageButton(code string) *widget.Clickable {
 	return btn
 }
 
-func (w *Window) layoutLanguageSelector(gtx layout.Context) layout.Dimensions {
+func (w *Window) layoutLanguageSelectorInline(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{
-		Axis:      layout.Vertical,
-		Alignment: layout.End,
+		Axis:      layout.Horizontal,
+		Alignment: layout.Middle,
 	}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			label := material.Body2(w.theme, w.t("header.language"))
 			label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-			return layout.E.Layout(gtx, label.Layout)
+			return label.Layout(gtx)
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 		layout.Rigid(w.layoutLanguageDropdown),
 	)
 }
