@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ type Service struct {
 	subs     map[string]map[string]*subscriber
 	sessions map[string]*peerSession
 	upstream map[string]struct{}
+	events   map[chan struct{}]struct{}
 	listener net.Listener
 	lastSync time.Time
 }
@@ -113,6 +115,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		subs:     make(map[string]map[string]*subscriber),
 		sessions: make(map[string]*peerSession),
 		upstream: make(map[string]struct{}),
+		events:   make(map[chan struct{}]struct{}),
 	}
 }
 
@@ -191,6 +194,25 @@ func (s *Service) SubscriberCount(recipient string) int {
 	return len(s.subs[recipient])
 }
 
+func (s *Service) SubscribeLocalChanges() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 8)
+
+	s.mu.Lock()
+	s.events[ch] = struct{}{}
+	s.mu.Unlock()
+
+	cancel := func() {
+		s.mu.Lock()
+		if _, ok := s.events[ch]; ok {
+			delete(s.events, ch)
+			close(ch)
+		}
+		s.mu.Unlock()
+	}
+
+	return ch, cancel
+}
+
 func (s *Service) Peers() []transport.Peer {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -246,6 +268,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	case "hello":
 		s.learnPeerFromFrame(conn.RemoteAddr().String(), frame)
+		s.registerHelloRoute(conn, frame)
 		if frame.Client == "node" || frame.Client == "desktop" {
 			log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
 		}
@@ -482,6 +505,38 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 	}
 }
 
+func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
+	if strings.TrimSpace(frame.Client) != "node" {
+		return
+	}
+
+	recipient := strings.TrimSpace(frame.Address)
+	if recipient == "" {
+		return
+	}
+
+	subID := "node-route:" + conn.RemoteAddr().String()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.subs[recipient]; !ok {
+		s.subs[recipient] = make(map[string]*subscriber)
+	}
+
+	existing, exists := s.subs[recipient][subID]
+	if exists && existing.conn == conn {
+		return
+	}
+
+	s.subs[recipient][subID] = &subscriber{
+		id:        subID,
+		recipient: recipient,
+		conn:      conn,
+	}
+	log.Printf("node: route_via_hello recipient=%s subscriber=%s active=%d", recipient, subID, len(s.subs[recipient]))
+}
+
 func (s *Service) refreshKnowledgeFromPeers() {
 	s.mu.RLock()
 	lastSync := s.lastSync
@@ -596,6 +651,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	count := len(s.topics[msg.Topic])
 	s.mu.Unlock()
 
+	s.emitLocalChange()
+
 	log.Printf("node: stored message topic=%s id=%s from=%s to=%s flag=%s", msg.Topic, msg.ID, msg.Sender, msg.Recipient, msg.Flag)
 
 	if s.CanForward() {
@@ -624,6 +681,8 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
 	count := len(s.receipts[receipt.Recipient])
 	s.mu.Unlock()
+
+	s.emitLocalChange()
 
 	log.Printf("node: stored delivery receipt message_id=%s sender=%s recipient=%s status=%s delivered_at=%s", receipt.MessageID, receipt.Sender, receipt.Recipient, receipt.Status, receipt.DeliveredAt.Format(time.RFC3339))
 
@@ -949,8 +1008,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 }
 
 func (s *Service) gossipMessage(msg protocol.Envelope) {
-	for _, peer := range s.Peers() {
-		address := peer.Address
+	for _, address := range s.routingTargets() {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
@@ -958,9 +1016,40 @@ func (s *Service) gossipMessage(msg protocol.Envelope) {
 	}
 }
 
+func (s *Service) routingTargets() []string {
+	s.mu.RLock()
+	if len(s.sessions) > 0 {
+		targets := make([]string, 0, len(s.sessions))
+		for address := range s.sessions {
+			if address == "" || s.isSelfAddress(address) {
+				continue
+			}
+			targets = append(targets, address)
+		}
+		s.mu.RUnlock()
+		sort.Strings(targets)
+		return targets
+	}
+	s.mu.RUnlock()
+
+	targets := make([]string, 0, len(s.Peers()))
+	for _, peer := range s.Peers() {
+		address := peer.Address
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		targets = append(targets, address)
+	}
+	sort.Strings(targets)
+	return targets
+}
+
 func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
 	subs := s.subscribersForRecipient(msg.Recipient)
 	if len(subs) == 0 {
+		if msg.Recipient == s.identity.Address {
+			return
+		}
 		log.Printf("node: no active subscribers for recipient=%s topic=%s id=%s", msg.Recipient, msg.Topic, msg.ID)
 		return
 	}
@@ -1063,8 +1152,10 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 		Body:       string(msg.Payload),
 	}
 	if s.enqueuePeerFrame(address, frame) {
+		log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=session", msg.ID, msg.Recipient, address)
 		return
 	}
+	log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=dial", msg.ID, msg.Recipient, address)
 
 	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
 	if err != nil {
@@ -1135,8 +1226,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 }
 
 func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
-	for _, peer := range s.Peers() {
-		address := peer.Address
+	for _, address := range s.routingTargets() {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
@@ -1154,8 +1244,10 @@ func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryRec
 		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
 	}
 	if s.enqueuePeerFrame(address, frame) {
+		log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=session status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
 		return
 	}
+	log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=dial status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
 
 	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
 	if err != nil {
@@ -1263,6 +1355,22 @@ func (s *Service) addKnownPubKey(address, pubKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pubKeys[address] = pubKey
+}
+
+func (s *Service) emitLocalChange() {
+	s.mu.RLock()
+	subs := make([]chan struct{}, 0, len(s.events))
+	for ch := range s.events {
+		subs = append(subs, ch)
+	}
+	s.mu.RUnlock()
+
+	for _, ch := range subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
@@ -1546,10 +1654,10 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 		}
 		return advertisedAddr, true
 	case observedOK:
-		observedIP := net.ParseIP(observedHost)
-		if observedIP != nil && !isUnroutableIP(observedIP) {
-			return observedAddr, true
-		}
+		// The observed remote port is an ephemeral source port, not a
+		// stable listening endpoint. Without a valid advertised port we
+		// should not learn a dialable peer address from RemoteAddr alone.
+		return "", false
 	}
 
 	return "", false

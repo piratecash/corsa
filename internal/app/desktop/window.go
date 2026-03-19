@@ -106,6 +106,15 @@ func (w *Window) Run() error {
 }
 
 func (w *Window) startPolling(window *app.Window) {
+	events, cancel := w.client.SubscribeLocalChanges()
+
+	go func() {
+		defer cancel()
+		for range events {
+			w.refreshStatus()
+		}
+	}()
+
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()

@@ -131,6 +131,15 @@ func (c *DesktopClient) BootstrapPeers() []transport.Peer {
 	return peers
 }
 
+func (c *DesktopClient) SubscribeLocalChanges() (<-chan struct{}, func()) {
+	if c.localNode == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch, func() {}
+	}
+	return c.localNode.SubscribeLocalChanges()
+}
+
 func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status := NodeStatus{
 		Address: c.localAddress(),
