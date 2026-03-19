@@ -187,8 +187,7 @@ func (s *Service) handleConn(conn net.Conn) {
 	}()
 
 	log.Printf("node: incoming connection from %s", conn.RemoteAddr())
-
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	enableTCPKeepAlive(conn)
 
 	reader := bufio.NewReader(conn)
 	for {
@@ -727,6 +726,7 @@ func (s *Service) subscribeToPeerInbox(ctx context.Context, address string) erro
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	enableTCPKeepAlive(conn)
 
 	go func() {
 		<-ctx.Done()
@@ -775,15 +775,42 @@ func (s *Service) subscribeToPeerInbox(ctx context.Context, address string) erro
 	if ack.Type != "subscribed" {
 		return fmt.Errorf("unexpected subscribe reply: %s", ack.Type)
 	}
+	log.Printf("node: upstream subscription established peer=%s recipient=%s", address, s.identity.Address)
 
-	_ = conn.SetDeadline(time.Time{})
+	pingTicker := time.NewTicker(20 * time.Second)
+	defer pingTicker.Stop()
+
 	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-pingTicker.C:
+			pingLine, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
+			if err != nil {
+				return err
+			}
+			if _, err := io.WriteString(conn, pingLine); err != nil {
+				log.Printf("node: upstream ping failed peer=%s recipient=%s err=%v", address, s.identity.Address, err)
+				return err
+			}
+		default:
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			log.Printf("node: upstream subscription closed peer=%s recipient=%s err=%v", address, s.identity.Address, err)
 			return err
 		}
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
 		if err != nil {
+			continue
+		}
+		switch frame.Type {
+		case "pong", "subscribed":
 			continue
 		}
 		if frame.Type != "push_message" || frame.Item == nil {
@@ -810,6 +837,7 @@ func (s *Service) subscribeToPeerInbox(ctx context.Context, address string) erro
 			cancel()
 			_, _, _ = s.storeIncomingMessage(msg)
 		}
+		log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
 	}
 }
 
@@ -1149,6 +1177,15 @@ func (s *Service) externalListenAddress() string {
 
 func (s *Service) isSelfAddress(address string) bool {
 	return address == s.cfg.AdvertiseAddress || address == s.externalListenAddress() || address == s.cfg.ListenAddress
+}
+
+func enableTCPKeepAlive(conn net.Conn) {
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tcpConn.SetKeepAlive(true)
+	_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
 }
 
 func (s *Service) cleanupExpiredNotices() {
