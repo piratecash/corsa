@@ -47,7 +47,7 @@ Primary JSON desktop request:
   "type": "hello",
   "version": 1,
   "client": "desktop",
-  "client_version": "0.3-alpha"
+  "client_version": "0.4-alpha"
 }
 ```
 
@@ -67,7 +67,7 @@ Primary JSON node-to-node request:
   "client": "node",
   "listen": "203.0.113.10:64646",
   "node_type": "full",
-  "client_version": "0.3-alpha",
+  "client_version": "0.4-alpha",
   "services": [
     "identity",
     "contacts",
@@ -105,7 +105,7 @@ Response:
   "node": "corsa",
   "network": "gazeta-devnet",
   "node_type": "full",
-  "client_version": "0.3-alpha",
+  "client_version": "0.4-alpha",
   "services": [
     "identity",
     "contacts",
@@ -140,8 +140,8 @@ Role rules:
 - `client` nodes do not relay traffic onward
 - desktop and standalone console node default to `full`
 - future mobile/light clients should use `client`
-- current client version: `0.3 alpha`
-- wire form used in handshake: `0.3-alpha`
+- current client version: `0.4 alpha`
+- wire form used in handshake: `0.4-alpha`
 
 ### Peer sync
 
@@ -431,6 +431,68 @@ Notes:
 - `fetch_message_ids` can be used as a lightweight direct-message index
 - `fetch_message` can be used to load one DM by UUID
 
+Realtime routing subscription:
+
+Request:
+
+```json
+{
+  "type": "subscribe_inbox",
+  "topic": "dm",
+  "recipient": "d4e5f6",
+  "subscriber": "198.51.100.20:64646"
+}
+```
+
+Response:
+
+```json
+{
+  "type": "subscribed",
+  "topic": "dm",
+  "recipient": "d4e5f6",
+  "subscriber": "198.51.100.20:64646",
+  "status": "ok",
+  "count": 1
+}
+```
+
+Push frame:
+
+```json
+{
+  "type": "push_message",
+  "topic": "dm",
+  "recipient": "d4e5f6",
+  "item": {
+    "id": "uuid1",
+    "flag": "sender-delete",
+    "created_at": "2026-03-19T12:00:05Z",
+    "ttl_seconds": 0,
+    "sender": "a1b2c3",
+    "recipient": "d4e5f6",
+    "body": "<ciphertext-token>"
+  }
+}
+```
+
+Fields:
+
+- `type` — required; `subscribe_inbox`, `subscribed`, or `push_message`
+- `topic` — required; currently only `dm` is supported for push routing
+- `recipient` — required; inbox owner that should receive pushed messages
+- `subscriber` — optional in request, required in `subscribed`; subscriber label/address tracked by the full node
+- `status` — optional; subscription state string, currently `ok`
+- `count` — optional; active subscriber count for that recipient on the full node
+- `item` — required in `push_message`; full message object being delivered over the live subscription
+
+Routing rules:
+
+- full nodes may keep a long-lived subscription for `client` nodes
+- when a full node stores a new `dm`, it pushes the message to active subscribers for the recipient
+- `client` nodes still keep polling/sync as a fallback, but can receive `dm` immediately over the subscribed session
+- public topics such as `global` are still relayed by mesh gossip, not by inbox subscription
+
 Message flags:
 
 - `immutable` — nobody may delete the message
@@ -537,6 +599,10 @@ Possible JSON error codes:
 }
 {
   "type": "error",
+  "code": "invalid-subscribe-inbox"
+}
+{
+  "type": "error",
   "code": "invalid-publish-notice"
 }
 {
@@ -573,6 +639,7 @@ Fields:
 6. fetch topic traffic
 7. fetch and decrypt readable direct messages
 8. fetch Gazeta notices
+9. for `client` nodes, keep an upstream `subscribe_inbox` session for realtime DM routing
 
 ---
 
@@ -623,7 +690,7 @@ Fields:
   "type": "hello",
   "version": 1,
   "client": "desktop",
-  "client_version": "0.3-alpha"
+  "client_version": "0.4-alpha"
 }
 ```
 
@@ -643,7 +710,7 @@ Fields:
   "client": "node",
   "listen": "203.0.113.10:64646",
   "node_type": "full",
-  "client_version": "0.3-alpha",
+  "client_version": "0.4-alpha",
   "services": [
     "identity",
     "contacts",
@@ -681,7 +748,7 @@ Fields:
   "node": "corsa",
   "network": "gazeta-devnet",
   "node_type": "full",
-  "client_version": "0.3-alpha",
+  "client_version": "0.4-alpha",
   "services": [
     "identity",
     "contacts",
@@ -716,8 +783,8 @@ Fields:
 - `client`-узлы не ретранслируют трафик дальше
 - `corsa-desktop` и `corsa-node` по умолчанию запускаются как `full`
 - будущий mobile/light client должен использовать `client`
-- текущая версия клиента: `0.3 alpha`
-- wire-форма в handshake: `0.3-alpha`
+- текущая версия клиента: `0.4 alpha`
+- wire-форма в handshake: `0.4-alpha`
 
 ### Peer sync
 
@@ -1009,6 +1076,68 @@ Fields:
 - `fetch_message_ids` можно использовать как легкий индекс direct messages
 - `fetch_message` позволяет загрузить одно direct message по UUID
 
+Подписка на realtime routing:
+
+Запрос:
+
+```json
+{
+  "type": "subscribe_inbox",
+  "topic": "dm",
+  "recipient": "d4e5f6",
+  "subscriber": "198.51.100.20:64646"
+}
+```
+
+Ответ:
+
+```json
+{
+  "type": "subscribed",
+  "topic": "dm",
+  "recipient": "d4e5f6",
+  "subscriber": "198.51.100.20:64646",
+  "status": "ok",
+  "count": 1
+}
+```
+
+Push-кадр:
+
+```json
+{
+  "type": "push_message",
+  "topic": "dm",
+  "recipient": "d4e5f6",
+  "item": {
+    "id": "uuid1",
+    "flag": "sender-delete",
+    "created_at": "2026-03-19T12:00:05Z",
+    "ttl_seconds": 0,
+    "sender": "a1b2c3",
+    "recipient": "d4e5f6",
+    "body": "<ciphertext-token>"
+  }
+}
+```
+
+Поля:
+
+- `type` — обязательное; `subscribe_inbox`, `subscribed` или `push_message`
+- `topic` — обязательное; сейчас для push routing поддерживается только `dm`
+- `recipient` — обязательное; владелец inbox, которому нужно доставлять pushed messages
+- `subscriber` — опциональное в запросе и обязательное в `subscribed`; метка/адрес подписчика, который full node держит на живой сессии
+- `status` — опциональное; строка состояния подписки, сейчас `ok`
+- `count` — опциональное; число активных подписчиков для этого recipient на full node
+- `item` — обязательное в `push_message`; полный объект сообщения, доставляемый по живой подписке
+
+Правила маршрутизации:
+
+- full node может держать длинную подписку для `client`-узлов
+- когда full node сохраняет новое `dm`, она отправляет push всем активным подписчикам recipient
+- `client`-узлы все еще сохраняют polling/sync как fallback, но могут получать `dm` сразу по подписанной сессии
+- публичные темы вроде `global` по-прежнему идут через mesh gossip, а не через inbox subscription
+
 Флаги сообщений:
 
 - `immutable` — сообщение нельзя удалить никому
@@ -1113,6 +1242,10 @@ Fields:
 }
 {
   "type": "error",
+  "code": "invalid-subscribe-inbox"
+}
+{
+  "type": "error",
   "code": "invalid-publish-notice"
 }
 {
@@ -1149,3 +1282,4 @@ Fields:
 6. получение topic traffic
 7. получение и локальная расшифровка direct messages
 8. получение notices из Gazeta
+9. для `client`-узлов удержание upstream `subscribe_inbox` сессии для realtime-маршрутизации `dm`

@@ -85,7 +85,7 @@ func (w *Window) Run() error {
 		w.window = window
 		window.Option(
 			app.Title(w.t("app.title")),
-			app.Size(unit.Dp(1100), unit.Dp(720)),
+			app.Size(unit.Dp(1100), unit.Dp(1100)),
 		)
 
 		w.startPolling(window)

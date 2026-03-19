@@ -29,6 +29,7 @@ type Frame struct {
 	Item          *MessageFrame  `json:"item,omitempty"`
 	Messages      []MessageFrame `json:"messages,omitempty"`
 	Notices       []NoticeFrame  `json:"notices,omitempty"`
+	Subscriber    string         `json:"subscriber,omitempty"`
 	Flag          string         `json:"flag,omitempty"`
 	CreatedAt     string         `json:"created_at,omitempty"`
 	TTLSeconds    int            `json:"ttl_seconds,omitempty"`

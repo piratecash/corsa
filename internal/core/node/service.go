@@ -31,8 +31,17 @@ type Service struct {
 	topics   map[string][]protocol.Envelope
 	notices  map[string]gazeta.Notice
 	seen     map[string]struct{}
+	subs     map[string]map[string]*subscriber
+	upstream map[string]struct{}
 	listener net.Listener
 	lastSync time.Time
+}
+
+type subscriber struct {
+	id        string
+	recipient string
+	conn      net.Conn
+	mu        sync.Mutex
 }
 
 type incomingMessage struct {
@@ -87,6 +96,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		topics:   make(map[string][]protocol.Envelope),
 		notices:  make(map[string]gazeta.Notice),
 		seen:     make(map[string]struct{}),
+		subs:     make(map[string]map[string]*subscriber),
+		upstream: make(map[string]struct{}),
 	}
 }
 
@@ -146,7 +157,7 @@ func (s *Service) Services() []string {
 
 func (s *Service) ClientVersion() string {
 	if strings.TrimSpace(s.cfg.ClientVersion) == "" {
-		return "0.3-alpha"
+		return "0.4-alpha"
 	}
 	return s.cfg.ClientVersion
 }
@@ -169,7 +180,10 @@ func (s *Service) Peers() []transport.Peer {
 }
 
 func (s *Service) handleConn(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		s.removeSubscriberConn(conn)
+		_ = conn.Close()
+	}()
 
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
@@ -238,6 +252,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	case "fetch_inbox":
 		s.writeJSONFrame(conn, s.fetchInboxFrame(frame.Topic, frame.Recipient))
+		return true
+	case "subscribe_inbox":
+		s.writeJSONFrame(conn, s.subscribeInboxFrame(conn, frame))
 		return true
 	case "publish_notice":
 		s.writeJSONFrame(conn, s.publishNoticeFrame(frame))
@@ -357,6 +374,40 @@ func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol
 	}
 }
 
+func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) protocol.Frame {
+	topic := strings.TrimSpace(frame.Topic)
+	recipient := strings.TrimSpace(frame.Recipient)
+	if topic != "dm" || recipient == "" {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSubscribeInbox}
+	}
+
+	subID := strings.TrimSpace(frame.Subscriber)
+	if subID == "" {
+		subID = conn.RemoteAddr().String()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.subs[recipient]; !ok {
+		s.subs[recipient] = make(map[string]*subscriber)
+	}
+	s.subs[recipient][subID] = &subscriber{
+		id:        subID,
+		recipient: recipient,
+		conn:      conn,
+	}
+
+	return protocol.Frame{
+		Type:       "subscribed",
+		Topic:      topic,
+		Recipient:  recipient,
+		Subscriber: subID,
+		Status:     "ok",
+		Count:      len(s.subs[recipient]),
+	}
+}
+
 func (s *Service) refreshKnowledgeFromPeers() {
 	s.mu.RLock()
 	lastSync := s.lastSync
@@ -443,6 +494,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage) (bool, int, string) 
 	if s.CanForward() {
 		go s.gossipMessage(envelope)
 	}
+	if msg.Topic == "dm" && msg.Recipient != "*" {
+		go s.pushMessageToSubscribers(envelope)
+	}
 
 	return true, count, ""
 }
@@ -528,6 +582,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	s.syncPeers(ctx)
+	s.ensureUpstreamSubscriptions(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -536,7 +591,38 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.cleanupExpiredMessages()
 			s.cleanupExpiredNotices()
 			s.syncPeers(ctx)
+			s.ensureUpstreamSubscriptions(ctx)
 		}
+	}
+}
+
+func (s *Service) ensureUpstreamSubscriptions(ctx context.Context) {
+	if s.NodeType() != config.NodeTypeClient {
+		return
+	}
+
+	for _, peer := range s.Peers() {
+		address := strings.TrimSpace(peer.Address)
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+
+		s.mu.Lock()
+		if _, ok := s.upstream[address]; ok {
+			s.mu.Unlock()
+			continue
+		}
+		s.upstream[address] = struct{}{}
+		s.mu.Unlock()
+
+		go func(peerAddress string) {
+			defer func() {
+				s.mu.Lock()
+				delete(s.upstream, peerAddress)
+				s.mu.Unlock()
+			}()
+			s.runPeerSubscription(ctx, peerAddress)
+		}(address)
 	}
 }
 
@@ -609,6 +695,119 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 	}
 }
 
+func (s *Service) runPeerSubscription(ctx context.Context, address string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if err := s.subscribeToPeerInbox(ctx, address); err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		return
+	}
+}
+
+func (s *Service) subscribeToPeerInbox(ctx context.Context, address string) error {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
+		return err
+	}
+	welcomeLine, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
+	if err != nil {
+		return err
+	}
+	s.learnIdentityFromWelcome(welcome)
+
+	subLine, err := protocol.MarshalFrameLine(protocol.Frame{
+		Type:       "subscribe_inbox",
+		Topic:      "dm",
+		Recipient:  s.identity.Address,
+		Subscriber: s.cfg.AdvertiseAddress,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(conn, subLine); err != nil {
+		return err
+	}
+	ackLine, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	ack, err := protocol.ParseFrameLine(strings.TrimSpace(ackLine))
+	if err != nil {
+		return err
+	}
+	if ack.Type == "error" {
+		return protocol.ErrorFromCode(ack.Code)
+	}
+	if ack.Type != "subscribed" {
+		return fmt.Errorf("unexpected subscribe reply: %s", ack.Type)
+	}
+
+	_ = conn.SetDeadline(time.Time{})
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
+		if err != nil {
+			continue
+		}
+		if frame.Type != "push_message" || frame.Item == nil {
+			continue
+		}
+
+		msg, err := incomingMessageFromFrame(protocol.Frame{
+			ID:         frame.Item.ID,
+			Topic:      frame.Topic,
+			Address:    frame.Item.Sender,
+			Recipient:  frame.Item.Recipient,
+			Flag:       frame.Item.Flag,
+			CreatedAt:  frame.Item.CreatedAt,
+			TTLSeconds: frame.Item.TTLSeconds,
+			Body:       frame.Item.Body,
+		})
+		if err != nil {
+			continue
+		}
+
+		if stored, _, errCode := s.storeIncomingMessage(msg); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			s.syncPeer(refreshCtx, address)
+			cancel()
+			_, _, _ = s.storeIncomingMessage(msg)
+		}
+	}
+}
+
 func (s *Service) gossipMessage(msg protocol.Envelope) {
 	for _, peer := range s.Peers() {
 		address := peer.Address
@@ -616,6 +815,27 @@ func (s *Service) gossipMessage(msg protocol.Envelope) {
 			continue
 		}
 		go s.sendMessageToPeer(address, msg)
+	}
+}
+
+func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
+	subs := s.subscribersForRecipient(msg.Recipient)
+	if len(subs) == 0 {
+		return
+	}
+
+	frame := protocol.Frame{
+		Type:      "push_message",
+		Topic:     msg.Topic,
+		Recipient: msg.Recipient,
+		Item: func() *protocol.MessageFrame {
+			item := messageFrame(msg)
+			return &item
+		}(),
+	}
+
+	for _, sub := range subs {
+		go s.writePushFrame(sub, frame)
 	}
 }
 
@@ -847,6 +1067,61 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 	s.addKnownIdentity(address)
 	s.addKnownBoxKey(address, boxKey)
 	s.addKnownPubKey(address, pubKey)
+}
+
+func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	group := s.subs[recipient]
+	subs := make([]*subscriber, 0, len(group))
+	for _, sub := range group {
+		subs = append(subs, sub)
+	}
+	return subs
+}
+
+func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		return
+	}
+	if _, err := io.WriteString(sub.conn, line); err != nil {
+		s.removeSubscriberByID(sub.recipient, sub.id)
+	}
+}
+
+func (s *Service) removeSubscriberConn(conn net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for recipient, group := range s.subs {
+		for id, sub := range group {
+			if sub.conn == conn {
+				delete(group, id)
+			}
+		}
+		if len(group) == 0 {
+			delete(s.subs, recipient)
+		}
+	}
+}
+
+func (s *Service) removeSubscriberByID(recipient, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	group := s.subs[recipient]
+	if group == nil {
+		return
+	}
+	delete(group, id)
+	if len(group) == 0 {
+		delete(s.subs, recipient)
+	}
 }
 
 func (s *Service) externalListenAddress() string {

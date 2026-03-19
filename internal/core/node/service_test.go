@@ -266,6 +266,60 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	}
 }
 
+func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopA()
+
+	nodeB, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		Type:             config.NodeTypeClient,
+	})
+	defer stopB()
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		return len(nodeB.Peers()) >= 1
+	})
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		nodeA.identity,
+		nodeB.Address(),
+		identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
+		"push-route-secret",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
+		sendMessageFrame("dm", "push-dm-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, ciphertext),
+	)
+	if frames[1].Type != "message_stored" {
+		t.Fatalf("unexpected nodeA direct store response: %#v", frames[1])
+	}
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := exchangeFrames(t, nodeB.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.3-alpha"},
+			protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
+		)
+		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "push-dm-1"
+	})
+}
+
 func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 	t.Parallel()
 

@@ -12,6 +12,7 @@ const (
 	ErrCodeInvalidFetchMessageIDs     = "invalid-fetch-message-ids"
 	ErrCodeInvalidFetchMessage        = "invalid-fetch-message"
 	ErrCodeInvalidFetchInbox          = "invalid-fetch-inbox"
+	ErrCodeInvalidSubscribeInbox      = "invalid-subscribe-inbox"
 	ErrCodeInvalidPublishNotice       = "invalid-publish-notice"
 	ErrCodeUnknownSenderKey           = "unknown-sender-key"
 	ErrCodeUnknownMessageID           = "unknown-message-id"
@@ -30,6 +31,7 @@ var (
 	ErrInvalidFetchMessageIDs     = errors.New(ErrCodeInvalidFetchMessageIDs)
 	ErrInvalidFetchMessage        = errors.New(ErrCodeInvalidFetchMessage)
 	ErrInvalidFetchInbox          = errors.New(ErrCodeInvalidFetchInbox)
+	ErrInvalidSubscribeInbox      = errors.New(ErrCodeInvalidSubscribeInbox)
 	ErrInvalidPublishNotice       = errors.New(ErrCodeInvalidPublishNotice)
 	ErrUnknownSenderKey           = errors.New(ErrCodeUnknownSenderKey)
 	ErrUnknownMessageID           = errors.New(ErrCodeUnknownMessageID)
@@ -58,6 +60,8 @@ func ErrorCode(err error) string {
 		return ErrCodeInvalidFetchMessage
 	case errors.Is(err, ErrInvalidFetchInbox):
 		return ErrCodeInvalidFetchInbox
+	case errors.Is(err, ErrInvalidSubscribeInbox):
+		return ErrCodeInvalidSubscribeInbox
 	case errors.Is(err, ErrInvalidPublishNotice):
 		return ErrCodeInvalidPublishNotice
 	case errors.Is(err, ErrUnknownSenderKey):
@@ -93,6 +97,8 @@ func ErrorFromCode(code string) error {
 		return ErrInvalidFetchMessage
 	case ErrCodeInvalidFetchInbox:
 		return ErrInvalidFetchInbox
+	case ErrCodeInvalidSubscribeInbox:
+		return ErrInvalidSubscribeInbox
 	case ErrCodeInvalidPublishNotice:
 		return ErrInvalidPublishNotice
 	case ErrCodeUnknownSenderKey:
