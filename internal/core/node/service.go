@@ -606,10 +606,6 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 }
 
 func (s *Service) ensureUpstreamSubscriptions(ctx context.Context) {
-	if s.NodeType() != config.NodeTypeClient {
-		return
-	}
-
 	for _, peer := range s.Peers() {
 		address := strings.TrimSpace(peer.Address)
 		if address == "" || s.isSelfAddress(address) {
@@ -830,6 +826,7 @@ func (s *Service) gossipMessage(msg protocol.Envelope) {
 func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
 	subs := s.subscribersForRecipient(msg.Recipient)
 	if len(subs) == 0 {
+		log.Printf("node: no active subscribers for recipient=%s topic=%s id=%s", msg.Recipient, msg.Topic, msg.ID)
 		return
 	}
 	log.Printf("node: push_message id=%s topic=%s recipient=%s subscribers=%d", msg.ID, msg.Topic, msg.Recipient, len(subs))
