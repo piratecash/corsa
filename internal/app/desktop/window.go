@@ -34,6 +34,7 @@ type Window struct {
 	recipientEditor    widget.Editor
 	messageEditor      widget.Editor
 	contactsList       widget.List
+	chatList           widget.List
 	sendButton         widget.Clickable
 	syncButton         widget.Clickable
 	copyIdentityButton widget.Clickable
@@ -81,6 +82,7 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 		recipientButtons: make(map[string]*widget.Clickable),
 		sendStatus:       translate(language, "status.compose_default"),
 		contactsList:     widget.List{List: layout.List{Axis: layout.Vertical}},
+		chatList:         widget.List{List: layout.List{Axis: layout.Vertical}},
 	}
 }
 
@@ -662,17 +664,13 @@ func (w *Window) conversationEntries(status service.NodeStatus, recipient string
 }
 
 func (w *Window) layoutConversation(gtx layout.Context, recipient string, conversation []service.DirectMessage) layout.Dimensions {
-	children := make([]layout.FlexChild, 0, len(conversation)*2)
-	for i, message := range conversation {
-		msg := message
-		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return w.layoutChatBubble(gtx, recipient, msg)
-		}))
-		if i < len(conversation)-1 {
-			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
-		}
-	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	list := material.List(w.theme, &w.chatList)
+	return list.Layout(gtx, len(conversation), func(gtx layout.Context, index int) layout.Dimensions {
+		message := conversation[index]
+		return layout.Inset{Bottom: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return w.layoutChatBubble(gtx, recipient, message)
+		})
+	})
 }
 
 func (w *Window) layoutChatBubble(gtx layout.Context, recipient string, message service.DirectMessage) layout.Dimensions {
