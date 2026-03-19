@@ -235,7 +235,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"})
 		return true
 	case "hello":
-		s.learnPeerFromFrame(frame)
+		s.learnPeerFromFrame(conn.RemoteAddr().String(), frame)
 		if frame.Client == "node" || frame.Client == "desktop" {
 			log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
 		}
@@ -1030,9 +1030,9 @@ func (s *Service) nodeHelloJSONLine() string {
 	return line
 }
 
-func (s *Service) learnPeerFromFrame(frame protocol.Frame) {
-	if frame.Listen != "" {
-		s.addPeerAddress(frame.Listen)
+func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
+	if normalized, ok := s.normalizePeerAddress(observedAddr, frame.Listen); ok {
+		s.addPeerAddress(normalized)
 	}
 	if frame.Address != "" {
 		s.addKnownIdentity(frame.Address)
@@ -1333,6 +1333,50 @@ func (s *Service) externalListenAddress() string {
 
 func (s *Service) isSelfAddress(address string) bool {
 	return address == s.cfg.AdvertiseAddress || address == s.externalListenAddress() || address == s.cfg.ListenAddress
+}
+
+func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (string, bool) {
+	observedHost, _, observedOK := splitHostPort(observedAddr)
+	advertisedHost, advertisedPort, advertisedOK := splitHostPort(advertisedAddr)
+
+	switch {
+	case advertisedOK && observedOK:
+		observedIP := net.ParseIP(observedHost)
+		advertisedIP := net.ParseIP(advertisedHost)
+
+		if advertisedIP != nil && !isUnroutableIP(advertisedIP) {
+			return net.JoinHostPort(advertisedHost, advertisedPort), true
+		}
+		if observedIP != nil && !isUnroutableIP(observedIP) {
+			return net.JoinHostPort(observedHost, advertisedPort), true
+		}
+		return "", false
+	case advertisedOK:
+		advertisedIP := net.ParseIP(advertisedHost)
+		if advertisedIP != nil && isUnroutableIP(advertisedIP) {
+			return "", false
+		}
+		return advertisedAddr, true
+	case observedOK:
+		observedIP := net.ParseIP(observedHost)
+		if observedIP != nil && !isUnroutableIP(observedIP) {
+			return observedAddr, true
+		}
+	}
+
+	return "", false
+}
+
+func splitHostPort(address string) (string, string, bool) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil || host == "" || port == "" {
+		return "", "", false
+	}
+	return host, port, true
+}
+
+func isUnroutableIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 func enableTCPKeepAlive(conn net.Conn) {
