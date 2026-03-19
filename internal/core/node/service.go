@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -31,6 +32,17 @@ type Service struct {
 	notices  map[string]gazeta.Notice
 	seen     map[string]struct{}
 	listener net.Listener
+}
+
+type incomingMessage struct {
+	ID         protocol.MessageID
+	Topic      string
+	Sender     string
+	Recipient  string
+	Flag       protocol.MessageFlag
+	CreatedAt  time.Time
+	TTLSeconds int
+	Body       string
 }
 
 func NewService(cfg config.Node, id *identity.Identity) *Service {
@@ -133,7 +145,7 @@ func (s *Service) Services() []string {
 
 func (s *Service) ClientVersion() string {
 	if strings.TrimSpace(s.cfg.ClientVersion) == "" {
-		return "0.1-alpha"
+		return "0.2-alpha"
 	}
 	return s.cfg.ClientVersion
 }
@@ -165,7 +177,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
-				_, _ = io.WriteString(conn, "ERR read\n")
+				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
 			}
 			return
 		}
@@ -177,68 +189,104 @@ func (s *Service) handleConn(conn net.Conn) {
 }
 
 func (s *Service) handleCommand(conn net.Conn, line string) bool {
-	switch {
-	case line == "PING":
-		_, _ = io.WriteString(conn, "PONG corsa gazeta-devnet\n")
+	if !protocol.IsJSONLine(line) {
+		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+		return false
+	}
+	return s.handleJSONCommand(conn, line)
+}
+
+func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
+	frame, err := protocol.ParseFrameLine(line)
+	if err != nil {
+		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
+		return false
+	}
+
+	switch frame.Type {
+	case "ping":
+		s.writeJSONFrame(conn, protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"})
 		return true
-	case strings.HasPrefix(line, "HELLO "):
-		s.learnPeerFromHello(line)
-		_, _ = io.WriteString(conn, s.welcomeLine())
+	case "hello":
+		s.learnPeerFromFrame(frame)
+		s.writeJSONFrame(conn, s.welcomeFrame())
 		return true
-	case line == "GET_PEERS":
-		_, _ = io.WriteString(conn, s.peersLine())
+	case "get_peers":
+		s.writeJSONFrame(conn, s.peersFrame())
 		return true
-	case line == "FETCH_IDENTITIES":
-		_, _ = io.WriteString(conn, s.identitiesLine())
+	case "fetch_identities":
+		s.writeJSONFrame(conn, s.identitiesFrame())
 		return true
-	case line == "FETCH_CONTACTS":
-		_, _ = io.WriteString(conn, s.contactsLine())
+	case "fetch_contacts":
+		s.writeJSONFrame(conn, s.contactsFrame())
 		return true
-	case strings.HasPrefix(line, "SEND_MESSAGE "):
-		_, _ = io.WriteString(conn, s.storeMessage(line))
+	case "send_message":
+		s.writeJSONFrame(conn, s.storeMessageFrame(frame))
 		return true
-	case strings.HasPrefix(line, "FETCH_MESSAGES "):
-		_, _ = io.WriteString(conn, s.fetchMessages(line))
+	case "fetch_messages":
+		s.writeJSONFrame(conn, s.fetchMessagesFrame(frame.Topic))
 		return true
-	case strings.HasPrefix(line, "FETCH_INBOX "):
-		_, _ = io.WriteString(conn, s.fetchInbox(line))
+	case "fetch_message_ids":
+		s.writeJSONFrame(conn, s.fetchMessageIDsFrame(frame.Topic))
 		return true
-	case strings.HasPrefix(line, "PUBLISH_NOTICE "):
-		_, _ = io.WriteString(conn, s.publishNotice(line))
+	case "fetch_message":
+		s.writeJSONFrame(conn, s.fetchMessageFrame(frame.Topic, frame.ID))
 		return true
-	case line == "FETCH_NOTICES":
-		_, _ = io.WriteString(conn, s.fetchNotices())
+	case "fetch_inbox":
+		s.writeJSONFrame(conn, s.fetchInboxFrame(frame.Topic, frame.Recipient))
+		return true
+	case "publish_notice":
+		s.writeJSONFrame(conn, s.publishNoticeFrame(frame))
+		return true
+	case "fetch_notices":
+		s.writeJSONFrame(conn, s.fetchNoticesFrame())
 		return true
 	default:
-		_, _ = io.WriteString(conn, "ERR unknown-command\n")
+		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 }
 
-func (s *Service) welcomeLine() string {
-	return fmt.Sprintf(
-		"WELCOME version=1 node=corsa network=gazeta-devnet node_type=%s client_version=%s services=%s address=%s pubkey=%s boxkey=%s boxsig=%s\n",
-		s.NodeType(),
-		s.ClientVersion(),
-		strings.Join(s.Services(), ","),
-		s.identity.Address,
-		identity.PublicKeyBase64(s.identity.PublicKey),
-		identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
-		identity.SignBoxKeyBinding(s.identity),
-	)
-}
-
-func (s *Service) peersLine() string {
-	peers := s.Peers()
-	parts := make([]string, 0, len(peers))
-	for _, peer := range peers {
-		parts = append(parts, peer.Address)
+func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
+		_, _ = io.WriteString(conn, string(fallback)+"\n")
+		return
 	}
-
-	return fmt.Sprintf("PEERS count=%d list=%s\n", len(parts), strings.Join(parts, ","))
+	_, _ = io.WriteString(conn, line)
 }
 
-func (s *Service) identitiesLine() string {
+func (s *Service) welcomeFrame() protocol.Frame {
+	return protocol.Frame{
+		Type:          "welcome",
+		Version:       1,
+		Node:          "corsa",
+		Network:       "gazeta-devnet",
+		NodeType:      string(s.NodeType()),
+		ClientVersion: s.ClientVersion(),
+		Services:      s.Services(),
+		Address:       s.identity.Address,
+		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(s.identity),
+	}
+}
+
+func (s *Service) peersFrame() protocol.Frame {
+	peers := s.Peers()
+	addresses := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		addresses = append(addresses, peer.Address)
+	}
+	return protocol.Frame{
+		Type:  "peers",
+		Count: len(addresses),
+		Peers: addresses,
+	}
+}
+
+func (s *Service) identitiesFrame() protocol.Frame {
 	s.mu.RLock()
 	parts := make([]string, 0, len(s.known))
 	for address := range s.known {
@@ -246,126 +294,181 @@ func (s *Service) identitiesLine() string {
 	}
 	s.mu.RUnlock()
 
-	return fmt.Sprintf("IDENTITIES count=%d list=%s\n", len(parts), strings.Join(parts, ","))
+	return protocol.Frame{
+		Type:       "identities",
+		Count:      len(parts),
+		Identities: parts,
+	}
 }
 
-func (s *Service) contactsLine() string {
+func (s *Service) contactsFrame() protocol.Frame {
 	s.mu.RLock()
-	parts := make([]string, 0, len(s.boxKeys))
+	contacts := make([]protocol.ContactFrame, 0, len(s.boxKeys))
 	for address, boxKey := range s.boxKeys {
 		pubKey := s.pubKeys[address]
 		boxSig := ""
 		if contact, ok := s.trust.trustedContacts()[address]; ok {
 			boxSig = contact.BoxSignature
 		}
-		parts = append(parts, address+"@"+boxKey+"@"+pubKey+"@"+boxSig)
+		contacts = append(contacts, protocol.ContactFrame{
+			Address: address,
+			PubKey:  pubKey,
+			BoxKey:  boxKey,
+			BoxSig:  boxSig,
+		})
 	}
 	s.mu.RUnlock()
 
-	return fmt.Sprintf("CONTACTS count=%d list=%s\n", len(parts), strings.Join(parts, ","))
+	return protocol.Frame{
+		Type:     "contacts",
+		Count:    len(contacts),
+		Contacts: contacts,
+	}
 }
 
-func (s *Service) storeMessage(line string) string {
-	parts := strings.SplitN(line, " ", 5)
-	if len(parts) < 5 {
-		return "ERR invalid-send-message\n"
+func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
+	msg, err := incomingMessageFromFrame(frame)
+	if err != nil {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendMessage}
 	}
 
-	topic := strings.TrimSpace(parts[1])
-	from := strings.TrimSpace(parts[2])
-	to := strings.TrimSpace(parts[3])
-	body := strings.TrimSpace(parts[4])
-	if topic == "" || from == "" || to == "" || body == "" {
-		return "ERR invalid-send-message\n"
+	stored, count, errCode := s.storeIncomingMessage(msg)
+	if errCode != "" {
+		return protocol.Frame{Type: "error", Code: errCode}
+	}
+	if !stored {
+		return protocol.Frame{Type: "message_known", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
+	}
+	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
+}
+
+func (s *Service) storeIncomingMessage(msg incomingMessage) (bool, int, string) {
+	if err := s.validateMessageTimestamp(msg.CreatedAt); err != nil {
+		return false, 0, protocol.ErrCodeMessageTimestampOutOfRange
 	}
 
-	if topic == "dm" {
+	if msg.Topic == "dm" {
 		s.mu.RLock()
-		senderPubKey := s.pubKeys[from]
+		senderPubKey := s.pubKeys[msg.Sender]
 		s.mu.RUnlock()
 		if senderPubKey == "" {
-			return "ERR unknown-sender-key\n"
+			return false, 0, protocol.ErrCodeUnknownSenderKey
 		}
-		if err := directmsg.VerifyEnvelope(from, senderPubKey, to, body); err != nil {
-			return "ERR invalid-direct-message-signature\n"
+		if err := directmsg.VerifyEnvelope(msg.Sender, senderPubKey, msg.Recipient, msg.Body); err != nil {
+			return false, 0, protocol.ErrCodeInvalidDirectMessageSig
 		}
 	}
 
-	key := topic + "|" + from + "|" + to + "|" + body
+	s.cleanupExpiredMessages()
 
 	s.mu.Lock()
-	s.known[from] = struct{}{}
-	if to != "*" {
-		s.known[to] = struct{}{}
+	s.known[msg.Sender] = struct{}{}
+	if msg.Recipient != "*" {
+		s.known[msg.Recipient] = struct{}{}
 	}
-	if _, ok := s.seen[key]; ok {
-		count := len(s.topics[topic])
+	if _, ok := s.seen[string(msg.ID)]; ok {
+		count := len(s.topics[msg.Topic])
 		s.mu.Unlock()
-		return fmt.Sprintf("MESSAGE_KNOWN topic=%s count=%d\n", topic, count)
+		return false, count, ""
 	}
-	s.seen[key] = struct{}{}
+	s.seen[string(msg.ID)] = struct{}{}
 
-	msg := protocol.Envelope{
-		ID:        protocol.MessageID(fmt.Sprintf("%d", time.Now().UnixNano())),
-		Topic:     topic,
-		Sender:    from,
-		Recipient: to,
-		Payload:   []byte(body),
-		CreatedAt: time.Now().UTC(),
+	envelope := protocol.Envelope{
+		ID:         msg.ID,
+		Topic:      msg.Topic,
+		Sender:     msg.Sender,
+		Recipient:  msg.Recipient,
+		Flag:       msg.Flag,
+		TTLSeconds: msg.TTLSeconds,
+		Payload:    []byte(msg.Body),
+		CreatedAt:  msg.CreatedAt,
 	}
 
-	s.topics[topic] = append(s.topics[topic], msg)
-	count := len(s.topics[topic])
+	s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
+	count := len(s.topics[msg.Topic])
 	s.mu.Unlock()
 
 	if s.CanForward() {
-		go s.gossipMessage(topic, from, to, body)
+		go s.gossipMessage(envelope)
 	}
 
-	return fmt.Sprintf("MESSAGE_STORED topic=%s count=%d id=%s\n", topic, count, msg.ID)
+	return true, count, ""
 }
 
-func (s *Service) fetchMessages(line string) string {
-	parts := strings.Fields(line)
-	if len(parts) != 2 {
-		return "ERR invalid-fetch-messages\n"
+func (s *Service) fetchMessagesFrame(topic string) protocol.Frame {
+	if strings.TrimSpace(topic) == "" {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessages}
 	}
-
-	topic := parts[1]
+	s.cleanupExpiredMessages()
 
 	s.mu.RLock()
 	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
 	s.mu.RUnlock()
 
-	items := make([]string, 0, len(messages))
+	items := make([]protocol.MessageFrame, 0, len(messages))
 	for _, msg := range messages {
-		items = append(items, msg.Sender+">"+msg.Recipient+">"+string(msg.Payload))
+		items = append(items, messageFrame(msg))
 	}
 
-	return fmt.Sprintf("MESSAGES topic=%s count=%d list=%s\n", topic, len(messages), strings.Join(items, "|"))
+	return protocol.Frame{Type: "messages", Topic: topic, Count: len(items), Messages: items}
 }
 
-func (s *Service) fetchInbox(line string) string {
-	parts := strings.Fields(line)
-	if len(parts) != 3 {
-		return "ERR invalid-fetch-inbox\n"
+func (s *Service) fetchMessageIDsFrame(topic string) protocol.Frame {
+	if strings.TrimSpace(topic) == "" {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessageIDs}
 	}
-
-	topic := parts[1]
-	recipient := parts[2]
+	s.cleanupExpiredMessages()
 
 	s.mu.RLock()
 	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
 	s.mu.RUnlock()
 
-	items := make([]string, 0, len(messages))
+	ids := make([]string, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Recipient == recipient || msg.Recipient == "*" {
-			items = append(items, msg.Sender+">"+msg.Recipient+">"+string(msg.Payload))
+		ids = append(ids, string(msg.ID))
+	}
+
+	return protocol.Frame{Type: "message_ids", Topic: topic, Count: len(ids), IDs: ids}
+}
+
+func (s *Service) fetchMessageFrame(topic, messageID string) protocol.Frame {
+	if strings.TrimSpace(topic) == "" || strings.TrimSpace(messageID) == "" {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessage}
+	}
+	s.cleanupExpiredMessages()
+
+	s.mu.RLock()
+	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
+	s.mu.RUnlock()
+
+	for _, msg := range messages {
+		if string(msg.ID) == messageID {
+			item := messageFrame(msg)
+			return protocol.Frame{Type: "message", Topic: topic, ID: messageID, Item: &item}
 		}
 	}
 
-	return fmt.Sprintf("INBOX topic=%s recipient=%s count=%d list=%s\n", topic, recipient, len(items), strings.Join(items, "|"))
+	return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownMessageID}
+}
+
+func (s *Service) fetchInboxFrame(topic, recipient string) protocol.Frame {
+	if strings.TrimSpace(topic) == "" || strings.TrimSpace(recipient) == "" {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchInbox}
+	}
+	s.cleanupExpiredMessages()
+
+	s.mu.RLock()
+	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
+	s.mu.RUnlock()
+
+	items := make([]protocol.MessageFrame, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Recipient == recipient || msg.Recipient == "*" {
+			items = append(items, messageFrame(msg))
+		}
+	}
+
+	return protocol.Frame{Type: "inbox", Topic: topic, Recipient: recipient, Count: len(items), Messages: items}
 }
 
 func (s *Service) bootstrapLoop(ctx context.Context) {
@@ -378,6 +481,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.cleanupExpiredMessages()
 			s.cleanupExpiredNotices()
 			s.syncPeers(ctx)
 		}
@@ -405,104 +509,113 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
 	reader := bufio.NewReader(conn)
 
-	if _, err := io.WriteString(conn, s.nodeHelloLine()); err != nil {
+	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}
-	welcome, err := reader.ReadString('\n')
+	welcomeLine, err := reader.ReadString('\n')
 	if err != nil {
 		return
 	}
-	s.learnIdentityFromWelcome(strings.TrimSpace(welcome))
-
-	if _, err := io.WriteString(conn, "GET_PEERS\n"); err != nil {
-		return
-	}
-	reply, err := reader.ReadString('\n')
+	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
 	if err != nil {
 		return
 	}
+	s.learnIdentityFromWelcome(welcome)
 
-	for _, peer := range parsePeerLine(strings.TrimSpace(reply)) {
-		s.addPeerAddress(peer)
-	}
-
-	if _, err := io.WriteString(conn, "FETCH_CONTACTS\n"); err != nil {
+	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
+		if _, err := io.WriteString(conn, line); err != nil {
+			return
+		}
+		reply, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		frame, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
+		if err == nil {
+			for _, peer := range frame.Peers {
+				s.addPeerAddress(peer)
+			}
+		}
+	} else {
 		return
 	}
-	contactsReply, err := reader.ReadString('\n')
-	if err != nil {
-		return
-	}
-	for address, contact := range parseContactsLine(strings.TrimSpace(contactsReply)) {
-		s.trustContact(address, contact.PubKey, contact.BoxKey, contact.BoxSignature, "contacts")
+
+	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "fetch_contacts"}); err == nil {
+		if _, err := io.WriteString(conn, line); err != nil {
+			return
+		}
+		contactsReply, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		frame, err := protocol.ParseFrameLine(strings.TrimSpace(contactsReply))
+		if err == nil {
+			for _, contact := range frame.Contacts {
+				s.trustContact(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig, "contacts")
+			}
+		}
 	}
 }
 
-func (s *Service) gossipMessage(topic, from, to, body string) {
+func (s *Service) gossipMessage(msg protocol.Envelope) {
 	for _, peer := range s.Peers() {
 		address := peer.Address
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		go s.sendMessageToPeer(address, topic, from, to, body)
+		go s.sendMessageToPeer(address, msg)
 	}
 }
 
-func (s *Service) publishNotice(line string) string {
-	parts := strings.SplitN(line, " ", 3)
-	if len(parts) < 3 {
-		return "ERR invalid-publish-notice\n"
-	}
-
-	ttl, err := time.ParseDuration(strings.TrimSpace(parts[1]) + "s")
-	if err != nil || ttl <= 0 {
-		return "ERR invalid-publish-notice\n"
-	}
-
-	ciphertext := strings.TrimSpace(parts[2])
-	if ciphertext == "" {
-		return "ERR invalid-publish-notice\n"
+func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
+	ttl := time.Duration(frame.TTLSeconds) * time.Second
+	if ttl <= 0 || strings.TrimSpace(frame.Ciphertext) == "" {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidPublishNotice}
 	}
 
 	s.cleanupExpiredNotices()
 
-	id := gazeta.ID(ciphertext)
+	id := gazeta.ID(frame.Ciphertext)
 	expiresAt := time.Now().UTC().Add(ttl)
 
 	s.mu.Lock()
 	if existing, ok := s.notices[id]; ok && existing.ExpiresAt.After(time.Now().UTC()) {
 		s.mu.Unlock()
-		return fmt.Sprintf("NOTICE_KNOWN id=%s expires=%d\n", id, existing.ExpiresAt.Unix())
+		return protocol.Frame{Type: "notice_known", ID: string(id), ExpiresAt: existing.ExpiresAt.Unix()}
 	}
 
 	s.notices[id] = gazeta.Notice{
 		ID:         id,
-		Ciphertext: ciphertext,
+		Ciphertext: frame.Ciphertext,
 		ExpiresAt:  expiresAt,
 	}
 	s.mu.Unlock()
 
 	if s.CanForward() {
-		go s.gossipNotice(ttl, ciphertext)
+		go s.gossipNotice(ttl, frame.Ciphertext)
 	}
 
-	return fmt.Sprintf("NOTICE_STORED id=%s expires=%d\n", id, expiresAt.Unix())
+	return protocol.Frame{Type: "notice_stored", ID: string(id), ExpiresAt: expiresAt.Unix()}
 }
 
-func (s *Service) fetchNotices() string {
+func (s *Service) fetchNoticesFrame() protocol.Frame {
 	s.cleanupExpiredNotices()
 
 	s.mu.RLock()
-	items := make([]string, 0, len(s.notices))
+	items := make([]protocol.NoticeFrame, 0, len(s.notices))
 	for _, notice := range s.notices {
-		items = append(items, fmt.Sprintf("%s@%d@%s", notice.ID, notice.ExpiresAt.Unix(), notice.Ciphertext))
+		items = append(items, protocol.NoticeFrame{
+			ID:         string(notice.ID),
+			ExpiresAt:  notice.ExpiresAt.Unix(),
+			Ciphertext: notice.Ciphertext,
+		})
 	}
 	s.mu.RUnlock()
 
-	return fmt.Sprintf("NOTICES count=%d list=%s\n", len(items), strings.Join(items, ","))
+	return protocol.Frame{Type: "notices", Count: len(items), Notices: items}
 }
 
-func (s *Service) sendMessageToPeer(address, topic, from, to, body string) {
+func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
 	if err != nil {
 		return
@@ -512,14 +625,28 @@ func (s *Service) sendMessageToPeer(address, topic, from, to, body string) {
 	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
 	reader := bufio.NewReader(conn)
 
-	if _, err := io.WriteString(conn, s.nodeHelloLine()); err != nil {
+	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}
 	if _, err := reader.ReadString('\n'); err != nil {
 		return
 	}
 
-	_, _ = io.WriteString(conn, fmt.Sprintf("SEND_MESSAGE %s %s %s %s\n", topic, from, to, body))
+	line, err := protocol.MarshalFrameLine(protocol.Frame{
+		Type:       "send_message",
+		Topic:      msg.Topic,
+		ID:         string(msg.ID),
+		Address:    msg.Sender,
+		Recipient:  msg.Recipient,
+		Flag:       string(msg.Flag),
+		CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
+		TTLSeconds: msg.TTLSeconds,
+		Body:       string(msg.Payload),
+	})
+	if err != nil {
+		return
+	}
+	_, _ = io.WriteString(conn, line)
 	_, _ = reader.ReadString('\n')
 }
 
@@ -543,81 +670,57 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
 	reader := bufio.NewReader(conn)
 
-	if _, err := io.WriteString(conn, s.nodeHelloLine()); err != nil {
+	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}
 	if _, err := reader.ReadString('\n'); err != nil {
 		return
 	}
 
-	_, _ = io.WriteString(conn, fmt.Sprintf("PUBLISH_NOTICE %d %s\n", int(ttl.Seconds()), ciphertext))
+	line, err := protocol.MarshalFrameLine(protocol.Frame{
+		Type:       "publish_notice",
+		TTLSeconds: int(ttl.Seconds()),
+		Ciphertext: ciphertext,
+	})
+	if err != nil {
+		return
+	}
+	_, _ = io.WriteString(conn, line)
 	_, _ = reader.ReadString('\n')
 }
 
-func (s *Service) nodeHelloLine() string {
-	return fmt.Sprintf(
-		"HELLO version=1 client=node listen=%s node_type=%s client_version=%s services=%s address=%s pubkey=%s boxkey=%s boxsig=%s\n",
-		s.cfg.AdvertiseAddress,
-		s.NodeType(),
-		s.ClientVersion(),
-		strings.Join(s.Services(), ","),
-		s.identity.Address,
-		identity.PublicKeyBase64(s.identity.PublicKey),
-		identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
-		identity.SignBoxKeyBinding(s.identity),
-	)
+func (s *Service) nodeHelloJSONLine() string {
+	line, err := protocol.MarshalFrameLine(protocol.Frame{
+		Type:          "hello",
+		Version:       1,
+		Client:        "node",
+		Listen:        s.cfg.AdvertiseAddress,
+		NodeType:      string(s.NodeType()),
+		ClientVersion: s.ClientVersion(),
+		Services:      s.Services(),
+		Address:       s.identity.Address,
+		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(s.identity),
+	})
+	if err != nil {
+		return ""
+	}
+	return line
 }
 
-func (s *Service) learnPeerFromHello(line string) {
-	var address string
-	var boxKey string
-	var pubKey string
-	var boxSig string
-
-	for _, field := range strings.Fields(line) {
-		if strings.HasPrefix(field, "listen=") {
-			s.addPeerAddress(strings.TrimPrefix(field, "listen="))
-		}
-		if strings.HasPrefix(field, "address=") {
-			address = strings.TrimPrefix(field, "address=")
-			s.addKnownIdentity(address)
-		}
-		if strings.HasPrefix(field, "boxkey=") {
-			boxKey = strings.TrimPrefix(field, "boxkey=")
-		}
-		if strings.HasPrefix(field, "pubkey=") {
-			pubKey = strings.TrimPrefix(field, "pubkey=")
-		}
-		if strings.HasPrefix(field, "boxsig=") {
-			boxSig = strings.TrimPrefix(field, "boxsig=")
-		}
+func (s *Service) learnPeerFromFrame(frame protocol.Frame) {
+	if frame.Listen != "" {
+		s.addPeerAddress(frame.Listen)
 	}
-
-	s.trustContact(address, pubKey, boxKey, boxSig, "hello")
+	if frame.Address != "" {
+		s.addKnownIdentity(frame.Address)
+	}
+	s.trustContact(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig, "hello")
 }
 
-func (s *Service) learnIdentityFromWelcome(line string) {
-	var address string
-	var boxKey string
-	var pubKey string
-	var boxSig string
-
-	for _, field := range strings.Fields(line) {
-		if strings.HasPrefix(field, "address=") {
-			address = strings.TrimPrefix(field, "address=")
-		}
-		if strings.HasPrefix(field, "boxkey=") {
-			boxKey = strings.TrimPrefix(field, "boxkey=")
-		}
-		if strings.HasPrefix(field, "pubkey=") {
-			pubKey = strings.TrimPrefix(field, "pubkey=")
-		}
-		if strings.HasPrefix(field, "boxsig=") {
-			boxSig = strings.TrimPrefix(field, "boxsig=")
-		}
-	}
-
-	s.trustContact(address, pubKey, boxKey, boxSig, "welcome")
+func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
+	s.trustContact(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig, "welcome")
 }
 
 func (s *Service) addPeerAddress(address string) {
@@ -718,50 +821,86 @@ func (s *Service) cleanupExpiredNotices() {
 	}
 }
 
-func parsePeerLine(line string) []string {
-	fields := strings.Fields(line)
-	for _, field := range fields {
-		if strings.HasPrefix(field, "list=") {
-			value := strings.TrimPrefix(field, "list=")
-			if value == "" {
-				return nil
+func (s *Service) cleanupExpiredMessages() {
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for topic, messages := range s.topics {
+		filtered := messages[:0]
+		for _, message := range messages {
+			if message.Flag == protocol.MessageFlagAutoDeleteTTL && message.TTLSeconds > 0 {
+				expiresAt := message.CreatedAt.Add(time.Duration(message.TTLSeconds) * time.Second)
+				if !expiresAt.After(now) {
+					continue
+				}
 			}
-			return strings.Split(value, ",")
+			filtered = append(filtered, message)
 		}
+
+		if len(filtered) == 0 {
+			delete(s.topics, topic)
+			continue
+		}
+
+		s.topics[topic] = filtered
 	}
+}
+
+func (s *Service) validateMessageTimestamp(timestamp time.Time) error {
+	now := time.Now().UTC()
+	drift := s.cfg.MaxClockDrift
+	if drift <= 0 {
+		drift = protocol.DefaultMessageTimeDrift
+	}
+
+	if timestamp.Before(now.Add(-drift)) || timestamp.After(now.Add(drift)) {
+		return fmt.Errorf("message timestamp %s outside allowed drift %s", timestamp.Format(time.RFC3339), drift)
+	}
+
 	return nil
 }
 
-type contactRecord struct {
-	BoxKey       string
-	PubKey       string
-	BoxSignature string
+func incomingMessageFromFrame(frame protocol.Frame) (incomingMessage, error) {
+	timestamp, err := time.Parse(time.RFC3339, strings.TrimSpace(frame.CreatedAt))
+	if err != nil {
+		return incomingMessage{}, fmt.Errorf("parse message timestamp: %w", err)
+	}
+
+	msg := incomingMessage{
+		ID:         protocol.MessageID(strings.TrimSpace(frame.ID)),
+		Topic:      strings.TrimSpace(frame.Topic),
+		Sender:     strings.TrimSpace(frame.Address),
+		Recipient:  strings.TrimSpace(frame.Recipient),
+		Flag:       protocol.MessageFlag(strings.TrimSpace(frame.Flag)),
+		CreatedAt:  timestamp.UTC(),
+		TTLSeconds: frame.TTLSeconds,
+		Body:       strings.TrimSpace(frame.Body),
+	}
+
+	if msg.Topic == "" || msg.Sender == "" || msg.Recipient == "" || msg.Body == "" || msg.ID == "" || !msg.Flag.Valid() {
+		return incomingMessage{}, fmt.Errorf("missing required message field")
+	}
+
+	if msg.Flag == protocol.MessageFlagAutoDeleteTTL && msg.TTLSeconds <= 0 {
+		return incomingMessage{}, fmt.Errorf("ttl message requires positive ttl_seconds")
+	}
+	if msg.Flag != protocol.MessageFlagAutoDeleteTTL {
+		msg.TTLSeconds = 0
+	}
+
+	return msg, nil
 }
 
-func parseContactsLine(line string) map[string]contactRecord {
-	index := strings.Index(line, "list=")
-	if index == -1 {
-		return nil
+func messageFrame(msg protocol.Envelope) protocol.MessageFrame {
+	return protocol.MessageFrame{
+		ID:         string(msg.ID),
+		Sender:     msg.Sender,
+		Recipient:  msg.Recipient,
+		Flag:       string(msg.Flag),
+		CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
+		TTLSeconds: msg.TTLSeconds,
+		Body:       string(msg.Payload),
 	}
-
-	value := strings.TrimPrefix(line[index:], "list=")
-	if value == "" {
-		return nil
-	}
-
-	items := strings.Split(value, ",")
-	out := make(map[string]contactRecord, len(items))
-	for _, item := range items {
-		parts := strings.SplitN(item, "@", 4)
-		if len(parts) != 4 {
-			continue
-		}
-		out[parts[0]] = contactRecord{
-			BoxKey:       parts[1],
-			PubKey:       parts[2],
-			BoxSignature: parts[3],
-		}
-	}
-
-	return out
 }

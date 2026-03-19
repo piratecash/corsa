@@ -6,7 +6,7 @@
 
 Current repository status:
 
-- current client version: `0.1 alpha`
+- current client version: `0.2 alpha`
 - Go-based desktop and node foundation
 - desktop chat-style UI with identity list and direct messaging
 - mesh-style peer sync between local nodes
@@ -14,7 +14,10 @@ Current repository status:
 - identity based on public-key fingerprint addresses
 - signed and encrypted direct addressed messages over the mesh
 - signed box-key discovery with local TOFU trust pinning
+- every message carries a UUID, deletion flag, timestamp, and optional TTL
+- messages outside the allowed clock drift are rejected and not forwarded
 - `Gazeta` anonymous encrypted notices with TTL
+- primary wire protocol is JSON frames over TCP
 
 Main docs:
 
@@ -67,6 +70,21 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_NODE_TYPE` — `full` or `client`
+- `CORSA_MAX_CLOCK_DRIFT_SECONDS` — allowed past/future clock drift for relayed messages, default `600`
+
+Message metadata and relay rules:
+
+- each `SEND_MESSAGE` frame carries `message-id`, `flag`, `timestamp`, and `ttl-seconds`
+- `FETCH_MESSAGE_IDS <topic>` returns only UUIDs for lightweight sync
+- `FETCH_MESSAGE <topic> <uuid>` loads one message by UUID
+- the preferred protocol form is one JSON object per line
+- supported flags:
+  - `immutable`
+  - `sender-delete`
+  - `any-delete`
+  - `auto-delete-ttl`
+- `auto-delete-ttl` messages are removed automatically after `ttl-seconds`
+- nodes reject and do not forward messages that are too far in the past or future
 
 Node roles:
 
@@ -107,7 +125,7 @@ docker run --rm -p 64646:64646 \
 
 Текущее состояние репозитория:
 
-- текущая версия клиента: `0.1 alpha`
+- текущая версия клиента: `0.2 alpha`
 - Go-основа для desktop-приложения и ноды
 - desktop UI в формате чата: список identity слева и direct messaging справа
 - mesh-синхронизация между локальными узлами
@@ -115,6 +133,8 @@ docker run --rm -p 64646:64646 \
 - identity через адрес как fingerprint публичного ключа
 - подписанные и зашифрованные адресные direct-сообщения поверх mesh
 - подписанное распространение box key и локальный TOFU trust pinning
+- каждое сообщение несет UUID, флаг удаления, timestamp и опциональный TTL
+- сообщения вне допустимого дрейфа времени отклоняются и не форвардятся
 - анонимные зашифрованные объявления `Gazeta` с временем жизни
 
 Основные документы:
@@ -164,6 +184,21 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
 - `CORSA_BOOTSTRAP_PEERS` — список seed-нод через запятую
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
 - `CORSA_NODE_TYPE` — `full` или `client`
+- `CORSA_MAX_CLOCK_DRIFT_SECONDS` — допустимый дрейф времени для ретранслируемых сообщений, по умолчанию `600`
+
+Метаданные сообщений и правила relay:
+
+- каждый `SEND_MESSAGE` кадр несет `message-id`, `flag`, `timestamp` и `ttl-seconds`
+- `FETCH_MESSAGE_IDS <topic>` возвращает только UUID для легкой синхронизации
+- `FETCH_MESSAGE <topic> <uuid>` загружает одно сообщение по UUID
+- поддерживаемые флаги:
+  - `immutable`
+  - `sender-delete`
+  - `any-delete`
+  - `auto-delete-ttl`
+- сообщения с `auto-delete-ttl` автоматически удаляются после `ttl-seconds`
+- ноды отклоняют и не форвардят сообщения, которые слишком далеко в прошлом или будущем
+- основной wire-format теперь: один JSON-объект на строку
 
 Роли узла:
 

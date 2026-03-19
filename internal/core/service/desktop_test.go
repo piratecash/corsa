@@ -3,118 +3,23 @@ package service
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/identity"
+	"corsa/internal/core/protocol"
 )
 
-func TestParsePeers(t *testing.T) {
+func TestContactsFromFrame(t *testing.T) {
 	t.Parallel()
 
-	got, err := parsePeers("PEERS count=2 list=127.0.0.1:64646,127.0.0.1:64647")
-	if err != nil {
-		t.Fatalf("parsePeers returned error: %v", err)
-	}
-
-	want := []string{"127.0.0.1:64646", "127.0.0.1:64647"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected peers: got %v want %v", got, want)
-	}
-}
-
-func TestParsePeersMissingList(t *testing.T) {
-	t.Parallel()
-
-	if _, err := parsePeers("PEERS count=1"); err == nil {
-		t.Fatal("expected parsePeers to fail for missing list")
-	}
-}
-
-func TestParseMessages(t *testing.T) {
-	t.Parallel()
-
-	got, err := parseMessages("MESSAGES topic=global count=2 list=hello|world")
-	if err != nil {
-		t.Fatalf("parseMessages returned error: %v", err)
-	}
-
-	want := []string{"hello", "world"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected messages: got %v want %v", got, want)
-	}
-}
-
-func TestParseMessagesPreservesSpaces(t *testing.T) {
-	t.Parallel()
-
-	got, err := parseMessages("MESSAGES topic=dm count=1 list=alice>bob>My message was delivered ?")
-	if err != nil {
-		t.Fatalf("parseMessages returned error: %v", err)
-	}
-
-	want := []string{"alice>bob>My message was delivered ?"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected messages with spaces: got %v want %v", got, want)
-	}
-}
-
-func TestParseMessagesUnexpectedPrefix(t *testing.T) {
-	t.Parallel()
-
-	if _, err := parseMessages("PEERS count=1 list=x"); err == nil {
-		t.Fatal("expected parseMessages to fail for unexpected prefix")
-	}
-}
-
-func TestParseInbox(t *testing.T) {
-	t.Parallel()
-
-	got, err := parseInbox("INBOX topic=global recipient=abc count=1 list=sender>abc>hello")
-	if err != nil {
-		t.Fatalf("parseInbox returned error: %v", err)
-	}
-
-	want := []string{"sender>abc>hello"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected inbox: got %v want %v", got, want)
-	}
-}
-
-func TestParseInboxPreservesSpaces(t *testing.T) {
-	t.Parallel()
-
-	got, err := parseInbox("INBOX topic=dm recipient=abc count=1 list=sender>abc>Мое сообщение доставилось ?")
-	if err != nil {
-		t.Fatalf("parseInbox returned error: %v", err)
-	}
-
-	want := []string{"sender>abc>Мое сообщение доставилось ?"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected inbox with spaces: got %v want %v", got, want)
-	}
-}
-
-func TestParseIdentities(t *testing.T) {
-	t.Parallel()
-
-	got, err := parseIdentities("IDENTITIES count=2 list=abc,def")
-	if err != nil {
-		t.Fatalf("parseIdentities returned error: %v", err)
-	}
-
-	want := []string{"abc", "def"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected identities: got %v want %v", got, want)
-	}
-}
-
-func TestParseContacts(t *testing.T) {
-	t.Parallel()
-
-	got, err := parseContacts("CONTACTS count=2 list=abc@box1@pub1@sig1,def@box2@pub2@sig2")
-	if err != nil {
-		t.Fatalf("parseContacts returned error: %v", err)
-	}
+	got := contactsFromFrame(protocol.Frame{
+		Type: "contacts",
+		Contacts: []protocol.ContactFrame{
+			{Address: "abc", BoxKey: "box1", PubKey: "pub1", BoxSig: "sig1"},
+			{Address: "def", BoxKey: "box2", PubKey: "pub2", BoxSig: "sig2"},
+		},
+	})
 
 	want := map[string]Contact{
 		"abc": {BoxKey: "box1", PubKey: "pub1", BoxSignature: "sig1"},
@@ -122,6 +27,69 @@ func TestParseContacts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected contacts: got %v want %v", got, want)
+	}
+}
+
+func TestMessageRecordFromFrame(t *testing.T) {
+	t.Parallel()
+
+	got, err := messageRecordFromFrame(protocol.MessageFrame{
+		ID:         "id-1",
+		Sender:     "alice",
+		Recipient:  "bob",
+		Flag:       "sender-delete",
+		CreatedAt:  "2026-03-19T10:00:00Z",
+		TTLSeconds: 0,
+		Body:       "hello",
+	})
+	if err != nil {
+		t.Fatalf("messageRecordFromFrame returned error: %v", err)
+	}
+
+	want := MessageRecord{
+		ID:         "id-1",
+		Flag:       "sender-delete",
+		Timestamp:  mustTime(t, "2026-03-19T10:00:00Z"),
+		TTLSeconds: 0,
+		Sender:     "alice",
+		Recipient:  "bob",
+		Body:       "hello",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected message: got %#v want %#v", got, want)
+	}
+}
+
+func TestMessageRecordsFromFrames(t *testing.T) {
+	t.Parallel()
+
+	got := messageRecordsFromFrames([]protocol.MessageFrame{
+		{ID: "id-1", Sender: "alice", Recipient: "*", Flag: "immutable", CreatedAt: "2026-03-19T10:00:00Z", TTLSeconds: 0, Body: "hello"},
+		{ID: "id-2", Sender: "bob", Recipient: "*", Flag: "sender-delete", CreatedAt: "2026-03-19T10:01:00Z", TTLSeconds: 0, Body: "world"},
+	})
+
+	want := []MessageRecord{
+		{ID: "id-1", Flag: "immutable", Timestamp: mustTime(t, "2026-03-19T10:00:00Z"), TTLSeconds: 0, Sender: "alice", Recipient: "*", Body: "hello"},
+		{ID: "id-2", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:01:00Z"), TTLSeconds: 0, Sender: "bob", Recipient: "*", Body: "world"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected messages: got %v want %v", got, want)
+	}
+}
+
+func TestMessageRecordsFromFramesSkipsInvalid(t *testing.T) {
+	t.Parallel()
+
+	got := messageRecordsFromFrames([]protocol.MessageFrame{
+		{ID: "bad", Sender: "alice", Recipient: "bob", Flag: "sender-delete", CreatedAt: "broken", TTLSeconds: 0, Body: "hello"},
+		{ID: "good", Sender: "alice", Recipient: "bob", Flag: "sender-delete", CreatedAt: "2026-03-19T10:00:00Z", TTLSeconds: 0, Body: "world"},
+	})
+
+	want := []MessageRecord{
+		{ID: "good", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:00:00Z"), TTLSeconds: 0, Sender: "alice", Recipient: "bob", Body: "world"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected filtered messages: got %v want %v", got, want)
 	}
 }
 
@@ -148,10 +116,29 @@ func TestDecryptDirectMessages(t *testing.T) {
 			BoxKey: identity.BoxPublicKeyBase64(sender.BoxPublicKey),
 			PubKey: identity.PublicKeyBase64(sender.PublicKey),
 		},
-	}, []string{sender.Address + ">" + recipient.Address + ">" + ciphertext})
+	}, []MessageRecord{{
+		ID:         "id-1",
+		Flag:       "sender-delete",
+		Timestamp:  mustTime(t, "2026-03-19T10:00:00Z"),
+		TTLSeconds: 0,
+		Sender:     sender.Address,
+		Recipient:  recipient.Address,
+		Body:       ciphertext,
+	}})
 	want := []string{sender.Address + ">" + recipient.Address + ">secret phrase"}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected decrypted messages: got %v want %v", got, want)
 	}
+}
+
+func mustTime(t *testing.T, value string) time.Time {
+	t.Helper()
+
+	timestamp, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("parse time %q: %v", value, err)
+	}
+
+	return timestamp.UTC()
 }

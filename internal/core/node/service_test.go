@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,12 +12,14 @@ import (
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/identity"
+	"corsa/internal/core/protocol"
 )
 
-func TestSingleNodeProtocolFlow(t *testing.T) {
+func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
+	ts := time.Now().UTC().Format(time.RFC3339)
 	svc, stop := startTestNode(t, config.Node{
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
@@ -26,29 +27,29 @@ func TestSingleNodeProtocolFlow(t *testing.T) {
 	})
 	defer stop()
 
-	lines := exchangeLines(t, svc.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"GET_PEERS",
-		"SEND_MESSAGE global "+svc.Address()+" * hello",
-		"FETCH_MESSAGES global",
-		"FETCH_INBOX global "+svc.Address(),
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "get_peers"},
+		sendMessageFrame("global", "msg-1", svc.Address(), "*", "immutable", ts, 0, "hello"),
+		protocol.Frame{Type: "fetch_messages", Topic: "global"},
+		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
 	)
 
-	if got := lines[0]; !strings.HasPrefix(got, "WELCOME version=1 node=corsa network=gazeta-devnet node_type=full client_version=0.1-alpha services=identity,contacts,messages,gazeta,relay address=") {
-		t.Fatalf("unexpected welcome: %q", got)
+	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
+		t.Fatalf("unexpected welcome: %#v", got)
 	}
-	if got := lines[1]; got != "PEERS count=0 list=" {
-		t.Fatalf("unexpected peers: %q", got)
+	if got := frames[1]; got.Type != "peers" || got.Count != 0 {
+		t.Fatalf("unexpected peers: %#v", got)
 	}
-	if !strings.HasPrefix(lines[2], "MESSAGE_STORED topic=global count=1 id=") {
-		t.Fatalf("unexpected stored response: %q", lines[2])
+	if got := frames[2]; got.Type != "message_stored" || got.ID != "msg-1" {
+		t.Fatalf("unexpected stored frame: %#v", got)
 	}
-	if got := lines[3]; got != "MESSAGES topic=global count=1 list="+svc.Address()+">*>hello" {
-		t.Fatalf("unexpected messages: %q", got)
-	}
-	if got := lines[4]; got != "INBOX topic=global recipient="+svc.Address()+" count=1 list="+svc.Address()+">*>hello" {
-		t.Fatalf("unexpected inbox: %q", got)
-	}
+	assertMessageFrame(t, frames[3], "messages", "global", 1, protocol.MessageFrame{
+		ID: "msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello",
+	})
+	assertMessageFrame(t, frames[4], "inbox", "global", 1, protocol.MessageFrame{
+		ID: "msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello",
+	})
 }
 
 func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
@@ -77,24 +78,23 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 		return len(nodeA.Peers()) >= 1 && len(nodeB.Peers()) >= 1
 	})
 
-	lines := exchangeLines(t, nodeA.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"SEND_MESSAGE global "+nodeA.Address()+" * client-message",
+	ts := time.Now().UTC().Format(time.RFC3339)
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		sendMessageFrame("global", "client-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "client-message"),
 	)
-
-	if !strings.HasPrefix(lines[1], "MESSAGE_STORED topic=global count=1 id=") {
-		t.Fatalf("unexpected client store response: %q", lines[1])
+	if got := frames[1]; got.Type != "message_stored" {
+		t.Fatalf("unexpected client store response: %#v", got)
 	}
 
 	time.Sleep(1500 * time.Millisecond)
 
-	final := exchangeLines(t, nodeB.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"FETCH_MESSAGES global",
+	final := exchangeFrames(t, nodeB.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_messages", Topic: "global"},
 	)
-
-	if got := final[1]; got != "MESSAGES topic=global count=0 list=" {
-		t.Fatalf("expected full node not to receive relayed client message, got %q", got)
+	if got := final[1]; got.Type != "messages" || got.Count != 0 {
+		t.Fatalf("expected empty message log on full node, got %#v", got)
 	}
 }
 
@@ -102,6 +102,7 @@ func TestDuplicateSendMessageIsDeduplicated(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
+	ts := time.Now().UTC().Format(time.RFC3339)
 	svc, stop := startTestNode(t, config.Node{
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
@@ -109,22 +110,22 @@ func TestDuplicateSendMessageIsDeduplicated(t *testing.T) {
 	})
 	defer stop()
 
-	lines := exchangeLines(t, svc.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"SEND_MESSAGE global "+svc.Address()+" * same",
-		"SEND_MESSAGE global "+svc.Address()+" * same",
-		"FETCH_MESSAGES global",
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"),
+		sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"),
+		protocol.Frame{Type: "fetch_messages", Topic: "global"},
 	)
 
-	if !strings.HasPrefix(lines[1], "MESSAGE_STORED topic=global count=1 id=") {
-		t.Fatalf("unexpected first store response: %q", lines[1])
+	if frames[1].Type != "message_stored" {
+		t.Fatalf("unexpected first store response: %#v", frames[1])
 	}
-	if got := lines[2]; got != "MESSAGE_KNOWN topic=global count=1" {
-		t.Fatalf("unexpected duplicate response: %q", got)
+	if got := frames[2]; got.Type != "message_known" || got.ID != "dup-msg-1" {
+		t.Fatalf("unexpected duplicate response: %#v", got)
 	}
-	if got := lines[3]; got != "MESSAGES topic=global count=1 list="+svc.Address()+">*>same" {
-		t.Fatalf("unexpected fetch response: %q", got)
-	}
+	assertMessageFrame(t, frames[3], "messages", "global", 1, protocol.MessageFrame{
+		ID: "dup-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "same",
+	})
 }
 
 func TestMeshMessagePropagation(t *testing.T) {
@@ -151,34 +152,33 @@ func TestMeshMessagePropagation(t *testing.T) {
 		return len(nodeA.Peers()) >= 1 && len(nodeB.Peers()) >= 1
 	})
 
-	lines := exchangeLines(t, nodeA.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"SEND_MESSAGE global "+nodeA.Address()+" * hello-from-a",
+	ts := time.Now().UTC().Format(time.RFC3339)
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		sendMessageFrame("global", "mesh-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "hello-from-a"),
 	)
-
-	if !strings.HasPrefix(lines[1], "MESSAGE_STORED topic=global count=1 id=") {
-		t.Fatalf("unexpected nodeA store response: %q", lines[1])
+	if frames[1].Type != "message_stored" {
+		t.Fatalf("unexpected nodeA store response: %#v", frames[1])
 	}
 
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeLines(t, nodeB.externalListenAddress(),
-			"HELLO version=1 client=test",
-			"FETCH_MESSAGES global",
+		reply := exchangeFrames(t, nodeB.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+			protocol.Frame{Type: "fetch_messages", Topic: "global"},
 		)
-		return len(reply) == 2 && reply[1] == "MESSAGES topic=global count=1 list="+nodeA.Address()+">*>hello-from-a"
+		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].Body == "hello-from-a"
 	})
 
-	final := exchangeLines(t, nodeB.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"FETCH_MESSAGES global",
-		"GET_PEERS",
+	final := exchangeFrames(t, nodeB.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_messages", Topic: "global"},
+		protocol.Frame{Type: "get_peers"},
 	)
-
-	if got := final[1]; got != "MESSAGES topic=global count=1 list="+nodeA.Address()+">*>hello-from-a" {
-		t.Fatalf("unexpected propagated message list: %q", got)
-	}
-	if !strings.Contains(final[2], normalizeAddress(addressA)) {
-		t.Fatalf("expected nodeB peer list to include nodeA, got %q", final[2])
+	assertMessageFrame(t, final[1], "messages", "global", 1, protocol.MessageFrame{
+		ID: "mesh-msg-1", Sender: nodeA.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello-from-a",
+	})
+	if got := final[2]; got.Type != "peers" || len(got.Peers) == 0 {
+		t.Fatalf("expected nodeB to know at least one peer, got %#v", got)
 	}
 }
 
@@ -215,37 +215,54 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
 	}
+	ts := time.Now().UTC().Format(time.RFC3339)
 
-	lines := exchangeLines(t, nodeA.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"SEND_MESSAGE dm "+nodeA.Address()+" "+nodeB.Address()+" "+ciphertext,
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		sendMessageFrame("dm", "dm-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, ciphertext),
 	)
-	if !strings.HasPrefix(lines[1], "MESSAGE_STORED topic=dm count=1 id=") {
-		t.Fatalf("unexpected nodeA direct store response: %q", lines[1])
+	if frames[1].Type != "message_stored" {
+		t.Fatalf("unexpected nodeA direct store response: %#v", frames[1])
 	}
 
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeLines(t, nodeB.externalListenAddress(),
-			"HELLO version=1 client=test",
-			"FETCH_INBOX dm "+nodeB.Address(),
+		reply := exchangeFrames(t, nodeB.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+			protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
 		)
-		return len(reply) == 2 && reply[1] == "INBOX topic=dm recipient="+nodeB.Address()+" count=1 list="+nodeA.Address()+">"+nodeB.Address()+">"+ciphertext
+		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "dm-msg-1"
 	})
 
-	inboxB := exchangeLines(t, nodeB.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"FETCH_INBOX dm "+nodeB.Address(),
+	inboxB := exchangeFrames(t, nodeB.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
 	)
-	if got := inboxB[1]; got != "INBOX topic=dm recipient="+nodeB.Address()+" count=1 list="+nodeA.Address()+">"+nodeB.Address()+">"+ciphertext {
-		t.Fatalf("unexpected nodeB inbox: %q", got)
+	assertMessageFrame(t, inboxB[1], "inbox", "dm", 1, protocol.MessageFrame{
+		ID: "dm-msg-1", Sender: nodeA.Address(), Recipient: nodeB.Address(), Flag: "sender-delete", CreatedAt: ts, TTLSeconds: 0, Body: ciphertext,
+	})
+
+	inboxA := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeA.Address()},
+	)
+	if got := inboxA[1]; got.Type != "inbox" || got.Count != 0 {
+		t.Fatalf("unexpected nodeA inbox: %#v", got)
 	}
 
-	inboxA := exchangeLines(t, nodeA.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"FETCH_INBOX dm "+nodeA.Address(),
+	dmIDs := exchangeFrames(t, nodeB.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_message_ids", Topic: "dm"},
 	)
-	if got := inboxA[1]; got != "INBOX topic=dm recipient="+nodeA.Address()+" count=0 list=" {
-		t.Fatalf("unexpected nodeA inbox: %q", got)
+	if got := dmIDs[1]; got.Type != "message_ids" || len(got.IDs) != 1 || got.IDs[0] != "dm-msg-1" {
+		t.Fatalf("unexpected dm id list: %#v", got)
+	}
+
+	single := exchangeFrames(t, nodeB.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_message", Topic: "dm", ID: "dm-msg-1"},
+	)
+	if got := single[1]; got.Type != "message" || got.Item == nil || got.Item.ID != "dm-msg-1" {
+		t.Fatalf("unexpected single dm fetch: %#v", got)
 	}
 }
 
@@ -284,12 +301,77 @@ func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 	}
 
 	tampered := ciphertext[:len(ciphertext)-1] + "A"
-	lines := exchangeLines(t, nodeA.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"SEND_MESSAGE dm "+nodeA.Address()+" "+nodeB.Address()+" "+tampered,
+	ts := time.Now().UTC().Format(time.RFC3339)
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		sendMessageFrame("dm", "tampered-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, tampered),
 	)
-	if got := lines[1]; got != "ERR invalid-direct-message-signature" {
-		t.Fatalf("unexpected invalid signature response: %q", got)
+	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeInvalidDirectMessageSig {
+		t.Fatalf("unexpected invalid signature response: %#v", got)
+	}
+}
+
+func TestNodeRejectsMessageOutsideAllowedClockDrift(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		MaxClockDrift:    10 * time.Minute,
+	})
+	defer stop()
+
+	oldTimestamp := time.Now().UTC().Add(-11 * time.Minute).Format(time.RFC3339)
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		sendMessageFrame("global", "old-msg-1", svc.Address(), "*", "immutable", oldTimestamp, 0, "too-old"),
+	)
+
+	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeMessageTimestampOutOfRange {
+		t.Fatalf("unexpected stale timestamp response: %#v", got)
+	}
+}
+
+func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		sendMessageFrame("global", "ttl-msg-1", svc.Address(), "*", "auto-delete-ttl", ts, 1, "burn-after-read"),
+		protocol.Frame{Type: "fetch_messages", Topic: "global"},
+	)
+
+	if frames[1].Type != "message_stored" {
+		t.Fatalf("unexpected ttl store response: %#v", frames[1])
+	}
+	assertMessageFrame(t, frames[2], "messages", "global", 1, protocol.MessageFrame{
+		ID: "ttl-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "auto-delete-ttl", CreatedAt: ts, TTLSeconds: 1, Body: "burn-after-read",
+	})
+
+	time.Sleep(1500 * time.Millisecond)
+
+	final := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_messages", Topic: "global"},
+		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
+	)
+
+	if got := final[1]; got.Type != "messages" || got.Count != 0 {
+		t.Fatalf("expected ttl message to expire from log, got %#v", got)
+	}
+	if got := final[2]; got.Type != "inbox" || got.Count != 0 {
+		t.Fatalf("expected ttl message to expire from inbox, got %#v", got)
 	}
 }
 
@@ -327,35 +409,31 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 		t.Fatalf("EncryptForRecipient failed: %v", err)
 	}
 
-	lines := exchangeLines(t, nodeA.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"PUBLISH_NOTICE 30 "+ciphertext,
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "publish_notice", TTLSeconds: 30, Ciphertext: ciphertext},
 	)
-	if !strings.HasPrefix(lines[1], "NOTICE_STORED id=") {
-		t.Fatalf("unexpected notice store response: %q", lines[1])
+	if got := frames[1]; got.Type != "notice_stored" {
+		t.Fatalf("unexpected notice store response: %#v", got)
 	}
 
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeLines(t, nodeB.externalListenAddress(),
-			"HELLO version=1 client=test",
-			"FETCH_NOTICES",
+		reply := exchangeFrames(t, nodeB.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+			protocol.Frame{Type: "fetch_notices"},
 		)
-		return len(reply) == 2 && strings.Contains(reply[1], ciphertext)
+		return reply[1].Type == "notices" && len(reply[1].Notices) > 0
 	})
 
-	replyB := exchangeLines(t, nodeB.externalListenAddress(),
-		"HELLO version=1 client=test",
-		"FETCH_NOTICES",
+	replyB := exchangeFrames(t, nodeB.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: "0.2-alpha"},
+		protocol.Frame{Type: "fetch_notices"},
 	)
-	noticesB, err := parseNoticeCiphertexts(strings.TrimSpace(replyB[1]))
-	if err != nil {
-		t.Fatalf("parseNoticeCiphertexts failed: %v", err)
-	}
-	if len(noticesB) == 0 {
+	if len(replyB[1].Notices) == 0 {
 		t.Fatal("expected nodeB to have at least one notice")
 	}
 
-	plain, err := gazeta.DecryptForIdentity(nodeB.identity, noticesB[0])
+	plain, err := gazeta.DecryptForIdentity(nodeB.identity, replyB[1].Notices[0].Ciphertext)
 	if err != nil {
 		t.Fatalf("expected nodeB to decrypt notice: %v", err)
 	}
@@ -363,7 +441,7 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 		t.Fatalf("unexpected gazeta body: %q", plain.Body)
 	}
 
-	if _, err := gazeta.DecryptForIdentity(nodeA.identity, noticesB[0]); err == nil {
+	if _, err := gazeta.DecryptForIdentity(nodeA.identity, replyB[1].Notices[0].Ciphertext); err == nil {
 		t.Fatal("expected sender nodeA not to decrypt recipient notice")
 	}
 }
@@ -407,7 +485,7 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	return svc, stop
 }
 
-func exchangeLines(t *testing.T, address string, commands ...string) []string {
+func exchangeFrames(t *testing.T, address string, frames ...protocol.Frame) []protocol.Frame {
 	t.Helper()
 
 	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
@@ -419,21 +497,13 @@ func exchangeLines(t *testing.T, address string, commands ...string) []string {
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	reader := bufio.NewReader(conn)
-	lines := make([]string, 0, len(commands))
-	for _, cmd := range commands {
-		if _, err := fmt.Fprintf(conn, "%s\n", cmd); err != nil {
-			t.Fatalf("write %q: %v", cmd, err)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read response for %q: %v", cmd, err)
-		}
-
-		lines = append(lines, strings.TrimSpace(line))
+	replyFrames := make([]protocol.Frame, 0, len(frames))
+	for _, frame := range frames {
+		writeJSONFrame(t, conn, frame)
+		replyFrames = append(replyFrames, readJSONTestFrame(t, reader))
 	}
 
-	return lines
+	return replyFrames
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
@@ -463,38 +533,61 @@ func freeAddress(t *testing.T) string {
 }
 
 func normalizeAddress(address string) string {
-	if strings.HasPrefix(address, ":") {
+	if len(address) > 0 && address[0] == ':' {
 		return "127.0.0.1" + address
 	}
 	return address
 }
 
-func parseNoticeCiphertexts(line string) ([]string, error) {
-	const prefix = "NOTICES "
-	if !strings.HasPrefix(line, prefix) {
-		return nil, fmt.Errorf("unexpected notices line: %s", line)
+func sendMessageFrame(topic, id, from, to, flag, timestamp string, ttlSeconds int, body string) protocol.Frame {
+	return protocol.Frame{
+		Type:       "send_message",
+		Topic:      topic,
+		ID:         id,
+		Address:    from,
+		Recipient:  to,
+		Flag:       flag,
+		CreatedAt:  timestamp,
+		TTLSeconds: ttlSeconds,
+		Body:       body,
+	}
+}
+
+func assertMessageFrame(t *testing.T, frame protocol.Frame, expectedType, topic string, expectedCount int, expected protocol.MessageFrame) {
+	t.Helper()
+
+	if frame.Type != expectedType || frame.Topic != topic || frame.Count != expectedCount || len(frame.Messages) != expectedCount {
+		t.Fatalf("unexpected message frame envelope: %#v", frame)
 	}
 
-	fields := strings.Fields(line)
-	for _, field := range fields {
-		if strings.HasPrefix(field, "list=") {
-			value := strings.TrimPrefix(field, "list=")
-			if value == "" {
-				return nil, nil
-			}
-
-			items := strings.Split(value, ",")
-			out := make([]string, 0, len(items))
-			for _, item := range items {
-				parts := strings.SplitN(item, "@", 3)
-				if len(parts) != 3 {
-					continue
-				}
-				out = append(out, parts[2])
-			}
-			return out, nil
-		}
+	got := frame.Messages[0]
+	if got != expected {
+		t.Fatalf("unexpected message item: got %#v want %#v", got, expected)
 	}
+}
 
-	return nil, fmt.Errorf("missing notice list in line: %s", line)
+func writeJSONFrame(t *testing.T, conn net.Conn, frame protocol.Frame) {
+	t.Helper()
+
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		t.Fatalf("marshal frame: %v", err)
+	}
+	if _, err := fmt.Fprint(conn, line); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+}
+
+func readJSONTestFrame(t *testing.T, reader *bufio.Reader) protocol.Frame {
+	t.Helper()
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	frame, err := protocol.ParseFrameLine(line[:len(line)-1])
+	if err != nil {
+		t.Fatalf("parse frame: %v", err)
+	}
+	return frame
 }

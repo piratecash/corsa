@@ -3,7 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
+
+	"corsa/internal/core/protocol"
 )
 
 type App struct {
@@ -29,6 +33,7 @@ type Node struct {
 	TrustStorePath   string
 	Type             NodeType
 	ClientVersion    string
+	MaxClockDrift    time.Duration
 }
 
 type Config struct {
@@ -37,13 +42,14 @@ type Config struct {
 }
 
 func Default() Config {
-	appVersion := "0.1 alpha"
+	appVersion := "0.2 alpha"
 	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":64646")
 	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress))
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
 	identityPath := envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress))
 	trustStorePath := envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress))
 	nodeType := nodeTypeFromEnv()
+	maxClockDrift := maxClockDriftFromEnv()
 
 	return Config{
 		App: App{
@@ -61,6 +67,7 @@ func Default() Config {
 			TrustStorePath:   trustStorePath,
 			Type:             nodeType,
 			ClientVersion:    wireClientVersion(appVersion),
+			MaxClockDrift:    maxClockDrift,
 		},
 	}
 }
@@ -160,7 +167,21 @@ func appLanguageFromEnv() string {
 func wireClientVersion(version string) string {
 	value := strings.TrimSpace(version)
 	if value == "" {
-		return "0.1-alpha"
+		return "0.2-alpha"
 	}
 	return strings.ReplaceAll(value, " ", "-")
+}
+
+func maxClockDriftFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_CLOCK_DRIFT_SECONDS"))
+	if raw == "" {
+		return protocol.DefaultMessageTimeDrift
+	}
+
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return protocol.DefaultMessageTimeDrift
+	}
+
+	return time.Duration(seconds) * time.Second
 }

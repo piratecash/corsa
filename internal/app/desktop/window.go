@@ -32,6 +32,7 @@ type Window struct {
 	recipientEditor   widget.Editor
 	messageEditor     widget.Editor
 	sendButton        widget.Clickable
+	syncButton        widget.Clickable
 	languageToggle    widget.Clickable
 	languageOptions   map[string]*widget.Clickable
 	recipientButtons  map[string]*widget.Clickable
@@ -185,6 +186,40 @@ func (w *Window) handleActions(gtx layout.Context) {
 			}
 		}()
 	}
+
+	for w.syncButton.Clicked(gtx) {
+		recipient := strings.TrimSpace(w.selectedRecipient)
+		if recipient == "" {
+			w.sendStatus = w.t("compose.select_first")
+			continue
+		}
+
+		peers := append([]string(nil), w.currentStatus().Peers...)
+		if len(peers) == 0 {
+			w.sendStatus = w.t("chat.sync_disabled")
+			continue
+		}
+
+		w.sendStatus = w.t("status.syncing")
+		go func(recipient string, peers []string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			imported, err := w.client.SyncDirectMessagesFromPeers(ctx, peers, recipient)
+			cancel()
+
+			w.mu.Lock()
+			if err != nil {
+				w.sendStatus = w.t("status.sync_failed", err.Error())
+			} else {
+				w.sendStatus = w.t("status.sync_done", imported)
+			}
+			w.mu.Unlock()
+
+			w.refreshStatus()
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+		}(recipient, peers)
+	}
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
@@ -221,25 +256,36 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	w.ensureSelectedRecipient(recipients)
 
 	return layout.Flex{
-		Axis:    layout.Horizontal,
-		Spacing: layout.SpaceBetween,
+		Axis: layout.Vertical,
 	}.Layout(gtx,
-		layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{
-				Axis: layout.Vertical,
+				Axis:    layout.Horizontal,
+				Spacing: layout.SpaceBetween,
 			}.Layout(gtx,
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
 					return w.layoutContactsCard(gtx, recipients)
 				}),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return w.layoutNodeSummary(gtx, status)
+				layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
+				layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
+					return w.layoutChatCard(gtx, status)
 				}),
 			)
 		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
-		layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
-			return w.layoutChatColumn(gtx, status)
+		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{
+				Axis:    layout.Horizontal,
+				Spacing: layout.SpaceBetween,
+			}.Layout(gtx,
+				layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
+					return w.layoutNodeSummary(gtx, status)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
+				layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
+					return w.layoutComposerCard(gtx)
+				}),
+			)
 		}),
 	)
 }
@@ -305,18 +351,6 @@ func (w *Window) layoutNodeSummary(gtx layout.Context, status service.NodeStatus
 	return w.card(gtx, w.t("node.title"), rows)
 }
 
-func (w *Window) layoutChatColumn(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	return layout.Flex{
-		Axis: layout.Vertical,
-	}.Layout(gtx,
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return w.layoutChatCard(gtx, status)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
-		layout.Rigid(w.layoutComposerCard),
-	)
-}
-
 func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
 	recipient := w.selectedRecipient
 	title := w.t("chat.title")
@@ -328,7 +362,10 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 	}
 
 	title = w.t("chat.with", shortFingerprint(recipient))
-	rows = append(rows, w.t("chat.fingerprint", recipient))
+	rows = append(rows,
+		w.t("chat.fingerprint", recipient),
+		w.t("chat.peers", len(status.Peers)),
+	)
 
 	conversation := w.conversationWith(status, recipient)
 	if len(conversation) == 0 {
@@ -337,12 +374,12 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 	}
 
 	rows = append(rows, conversation...)
-
 	return w.card(gtx, title, rows)
 }
 
 func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 	recipient := w.selectedRecipient
+	status := w.currentStatus()
 	rows := []string{
 		w.sendStatusLine(),
 	}
@@ -362,15 +399,30 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				label := w.t("compose.send")
-				if recipient == "" {
-					label = w.t("compose.select_first")
-				}
-				return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(260)))
-					btn := material.Button(w.theme, &w.sendButton, label)
-					return btn.Layout(gtx)
-				})
+				return layout.Flex{
+					Axis:      layout.Horizontal,
+					Spacing:   layout.SpaceBetween,
+					Alignment: layout.Middle,
+				}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						canSync := recipient != "" && len(status.Peers) > 0
+						return w.layoutChatActions(gtx, canSync)
+					}),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return layout.Dimensions{}
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						label := w.t("compose.send")
+						if recipient == "" {
+							label = w.t("compose.select_first")
+						}
+						return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(260)))
+							btn := material.Button(w.theme, &w.sendButton, label)
+							return btn.Layout(gtx)
+						})
+					}),
+				)
 			}),
 		)
 	})
@@ -414,6 +466,22 @@ func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 				)
 			})
 		})
+	})
+}
+
+func (w *Window) layoutChatActions(gtx layout.Context, canSync bool) layout.Dimensions {
+	label := w.t("chat.sync")
+	if !canSync {
+		label = w.t("chat.sync_disabled")
+	}
+
+	return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(280)))
+		btn := material.Button(w.theme, &w.syncButton, label)
+		if !canSync {
+			btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
+		}
+		return btn.Layout(gtx)
 	})
 }
 

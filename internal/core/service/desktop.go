@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/identity"
+	"corsa/internal/core/protocol"
 	"corsa/internal/core/transport"
 )
 
@@ -27,25 +29,37 @@ type Contact struct {
 	BoxSignature string
 }
 
+type MessageRecord struct {
+	ID         string
+	Flag       string
+	Timestamp  time.Time
+	TTLSeconds int
+	Sender     string
+	Recipient  string
+	Body       string
+}
+
 type NodeStatus struct {
-	Address        string
-	Connected      bool
-	Welcome        string
-	NodeID         string
-	NodeType       string
-	ClientVersion  string
-	Services       []string
-	KnownIDs       []string
-	Contacts       map[string]Contact
-	Peers          []string
-	Stored         string
-	Messages       []string
-	DirectMessages []string
-	Inbox          []string
-	DirectInbox    []string
-	Gazeta         []string
-	Error          string
-	CheckedAt      time.Time
+	Address          string
+	Connected        bool
+	Welcome          string
+	NodeID           string
+	NodeType         string
+	ClientVersion    string
+	Services         []string
+	KnownIDs         []string
+	Contacts         map[string]Contact
+	Peers            []string
+	Stored           string
+	Messages         []string
+	MessageIDs       []string
+	DirectMessages   []string
+	DirectMessageIDs []string
+	Inbox            []string
+	DirectInbox      []string
+	Gazeta           []string
+	Error            string
+	CheckedAt        time.Time
 }
 
 func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity) *DesktopClient {
@@ -106,199 +120,90 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		return status
 	}
 
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", status.Address)
+	conn, reader, welcome, err := c.openLocalSession(ctx)
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
 	defer func() { _ = conn.Close() }()
+	status.Welcome = welcome.Type
+	status.NodeID = welcome.Address
+	status.NodeType = welcome.NodeType
+	status.ClientVersion = welcome.ClientVersion
+	status.Services = welcome.Services
 
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-	reader := bufio.NewReader(conn)
-
-	if _, err := fmt.Fprintf(conn, "HELLO version=1 client=desktop client_version=%s\n", strings.ReplaceAll(c.appCfg.Version, " ", "-")); err != nil {
+	peersReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "get_peers"})
+	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-
-	welcome, err := reader.ReadString('\n')
+	idsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_identities"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	contactsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_contacts"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	messagesReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	directMessagesReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	messageIDsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message_ids", Topic: "global"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	directMessageIDsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	inboxReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: c.id.Address})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	directInboxReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: c.id.Address})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	noticesReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_notices"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
 
-	status.Welcome = strings.TrimSpace(welcome)
-	status.NodeID = parseWelcomeField(status.Welcome, "address")
-	status.NodeType = parseWelcomeField(status.Welcome, "node_type")
-	status.ClientVersion = parseWelcomeField(status.Welcome, "client_version")
-	status.Services = parseCSVField(status.Welcome, "services")
-
-	if _, err := conn.Write([]byte("GET_PEERS\n")); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	peersReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	peers, err := parsePeers(strings.TrimSpace(peersReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	if _, err := conn.Write([]byte("FETCH_IDENTITIES\n")); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	idsReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	ids, err := parseIdentities(strings.TrimSpace(idsReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	if _, err := conn.Write([]byte("FETCH_CONTACTS\n")); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	contactsReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	contacts, err := parseContacts(strings.TrimSpace(contactsReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	if _, err := conn.Write([]byte("FETCH_MESSAGES global\n")); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	messagesReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	if _, err := conn.Write([]byte("FETCH_MESSAGES dm\n")); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	directMessagesReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	directMessages, err := parseMessages(strings.TrimSpace(directMessagesReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	messages, err := parseMessages(strings.TrimSpace(messagesReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	inboxWire := fmt.Sprintf("FETCH_INBOX global %s\n", c.id.Address)
-	if _, err := conn.Write([]byte(inboxWire)); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	inboxReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	inbox, err := parseInbox(strings.TrimSpace(inboxReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	directInboxWire := fmt.Sprintf("FETCH_INBOX dm %s\n", c.id.Address)
-	if _, err := conn.Write([]byte(directInboxWire)); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	directInboxReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	directInbox, err := parseInbox(strings.TrimSpace(directInboxReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	if _, err := conn.Write([]byte("FETCH_NOTICES\n")); err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	noticesReply, err := reader.ReadString('\n')
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-
-	notices, err := decryptNotices(c.id, strings.TrimSpace(noticesReply))
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
+	peers := peersReply.Peers
+	ids := idsReply.Identities
+	contacts := contactsFromFrame(contactsReply)
+	messages := messageRecordsFromFrames(messagesReply.Messages)
+	directMessages := messageRecordsFromFrames(directMessagesReply.Messages)
+	messageIDs := messageIDsReply.IDs
+	directMessageIDs := directMessageIDsReply.IDs
+	inbox := messageRecordsFromFrames(inboxReply.Messages)
+	directInbox := messageRecordsFromFrames(directInboxReply.Messages)
+	notices := decryptNoticeFrames(c.id, noticesReply.Notices)
 
 	decryptedDirectMessages := decryptDirectMessages(c.id, contacts, directMessages)
 
@@ -306,13 +211,146 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.KnownIDs = ids
 	status.Contacts = contacts
 	status.Peers = peers
-	status.Messages = messages
+	status.Messages = stringifyMessages(messages)
+	status.MessageIDs = messageIDs
 	status.DirectMessages = decryptedDirectMessages
-	status.Inbox = inbox
-	status.DirectInbox = directInbox
+	status.DirectMessageIDs = directMessageIDs
+	status.Inbox = stringifyMessages(inbox)
+	status.DirectInbox = stringifyMessages(directInbox)
 	status.Gazeta = notices
 	status.CheckedAt = time.Now()
 	return status
+}
+
+func (c *DesktopClient) FetchMessageIDs(ctx context.Context, topic string) ([]string, error) {
+	conn, reader, _, err := c.openLocalSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	frame, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message_ids", Topic: strings.TrimSpace(topic)})
+	if err != nil {
+		return nil, err
+	}
+	return frame.IDs, nil
+}
+
+func (c *DesktopClient) FetchMessage(ctx context.Context, topic, messageID string) (MessageRecord, error) {
+	conn, reader, _, err := c.openLocalSession(ctx)
+	if err != nil {
+		return MessageRecord{}, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	frame, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_message", Topic: strings.TrimSpace(topic), ID: strings.TrimSpace(messageID)})
+	if err != nil {
+		return MessageRecord{}, err
+	}
+	if frame.Item == nil {
+		return MessageRecord{}, fmt.Errorf("message item is missing")
+	}
+	return messageRecordFromFrame(*frame.Item)
+}
+
+func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresses []string, counterparty string) (int, error) {
+	counterparty = strings.TrimSpace(counterparty)
+	if counterparty == "" {
+		return 0, fmt.Errorf("counterparty is required")
+	}
+
+	localConn, localReader, _, err := c.openLocalSession(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = localConn.Close() }()
+
+	imported := 0
+	seenIDs := make(map[string]struct{})
+	var firstErr error
+	me := c.id.Address
+
+	for _, peerAddress := range peerAddresses {
+		peerAddress = strings.TrimSpace(peerAddress)
+		if peerAddress == "" || peerAddress == c.localAddress() {
+			continue
+		}
+
+		remoteConn, remoteReader, _, err := c.openSessionAt(ctx, peerAddress, "desktop")
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		idsFrame, err := c.requestFrame(remoteConn, remoteReader, protocol.Frame{
+			Type:  "fetch_message_ids",
+			Topic: "dm",
+		})
+		if err != nil {
+			_ = remoteConn.Close()
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		for _, id := range idsFrame.IDs {
+			if _, ok := seenIDs[id]; ok {
+				continue
+			}
+			seenIDs[id] = struct{}{}
+
+			messageFrame, err := c.requestFrame(remoteConn, remoteReader, protocol.Frame{
+				Type:  "fetch_message",
+				Topic: "dm",
+				ID:    id,
+			})
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if messageFrame.Item == nil {
+				continue
+			}
+
+			item := messageFrame.Item
+			if !isConversationMessage(*item, me, counterparty) {
+				continue
+			}
+
+			reply, err := c.requestFrame(localConn, localReader, protocol.Frame{
+				Type:       "send_message",
+				Topic:      "dm",
+				ID:         item.ID,
+				Address:    item.Sender,
+				Recipient:  item.Recipient,
+				Flag:       item.Flag,
+				CreatedAt:  item.CreatedAt,
+				TTLSeconds: item.TTLSeconds,
+				Body:       item.Body,
+			})
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if reply.Type == "message_stored" {
+				imported++
+			}
+		}
+
+		_ = remoteConn.Close()
+	}
+
+	if imported == 0 && firstErr != nil {
+		return 0, firstErr
+	}
+	return imported, nil
 }
 
 func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) error {
@@ -322,36 +360,17 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 		return fmt.Errorf("recipient and message are required")
 	}
 
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", c.localAddress())
+	conn, reader, _, err := c.openLocalSession(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	if _, err := fmt.Fprintf(conn, "HELLO version=1 client=desktop client_version=%s\n", strings.ReplaceAll(c.appCfg.Version, " ", "-")); err != nil {
-		return err
-	}
-	if _, err := reader.ReadString('\n'); err != nil {
-		return err
-	}
-
-	if _, err := conn.Write([]byte("FETCH_CONTACTS\n")); err != nil {
-		return err
-	}
-
-	contactsReply, err := reader.ReadString('\n')
+	contactsReply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "fetch_contacts"})
 	if err != nil {
 		return err
 	}
-
-	contacts, err := parseContacts(strings.TrimSpace(contactsReply))
-	if err != nil {
-		return err
-	}
+	contacts := contactsFromFrame(contactsReply)
 
 	recipient, ok := contacts[to]
 	if !ok || recipient.BoxKey == "" {
@@ -363,22 +382,32 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 		return err
 	}
 
-	wire := fmt.Sprintf("SEND_MESSAGE dm %s %s %s\n", c.id.Address, to, ciphertext)
-	if _, err := conn.Write([]byte(wire)); err != nil {
-		return err
-	}
-
-	reply, err := reader.ReadString('\n')
+	messageID, err := protocol.NewMessageID()
 	if err != nil {
 		return err
 	}
 
-	reply = strings.TrimSpace(reply)
-	if strings.HasPrefix(reply, "MESSAGE_STORED ") || strings.HasPrefix(reply, "MESSAGE_KNOWN ") {
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	reply, err := c.requestFrame(conn, reader, protocol.Frame{
+		Type:       "send_message",
+		Topic:      "dm",
+		ID:         string(messageID),
+		Address:    c.id.Address,
+		Recipient:  to,
+		Flag:       string(protocol.MessageFlagSenderDelete),
+		CreatedAt:  createdAt,
+		TTLSeconds: 0,
+		Body:       ciphertext,
+	})
+	if err != nil {
+		return err
+	}
+
+	if reply.Type == "message_stored" || reply.Type == "message_known" {
 		return nil
 	}
 
-	return fmt.Errorf("unexpected send reply: %s", reply)
+	return fmt.Errorf("unexpected send reply: %s", reply.Type)
 }
 
 func (c *DesktopClient) localAddress() string {
@@ -388,176 +417,135 @@ func (c *DesktopClient) localAddress() string {
 	return c.nodeCfg.ListenAddress
 }
 
+func (c *DesktopClient) openLocalSession(ctx context.Context) (net.Conn, *bufio.Reader, protocol.Frame, error) {
+	return c.openSessionAt(ctx, c.localAddress(), "desktop")
+}
+
+func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind string) (net.Conn, *bufio.Reader, protocol.Frame, error) {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, nil, protocol.Frame{}, err
+	}
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	line, err := protocol.MarshalFrameLine(protocol.Frame{
+		Type:          "hello",
+		Version:       1,
+		Client:        clientKind,
+		ClientVersion: strings.ReplaceAll(c.appCfg.Version, " ", "-"),
+	})
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, protocol.Frame{}, err
+	}
+	if _, err := io.WriteString(conn, line); err != nil {
+		_ = conn.Close()
+		return nil, nil, protocol.Frame{}, err
+	}
+	welcome, err := readJSONFrame(reader)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, protocol.Frame{}, err
+	}
+
+	return conn, reader, welcome, nil
+}
+
+func (c *DesktopClient) requestFrame(conn net.Conn, reader *bufio.Reader, request protocol.Frame) (protocol.Frame, error) {
+	line, err := protocol.MarshalFrameLine(request)
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	if _, err := io.WriteString(conn, line); err != nil {
+		return protocol.Frame{}, err
+	}
+	return readJSONFrame(reader)
+}
+
 func peerID(index int) string {
 	return fmt.Sprintf("bootstrap-%d", index)
 }
 
-func parsePeers(line string) ([]string, error) {
-	const prefix = "PEERS "
-	if !strings.HasPrefix(line, prefix) {
-		return nil, fmt.Errorf("unexpected peers response: %s", line)
+func readJSONFrame(reader *bufio.Reader) (protocol.Frame, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return protocol.Frame{}, err
 	}
 
-	fields := strings.Fields(line)
-	for _, field := range fields {
-		if strings.HasPrefix(field, "list=") {
-			value := strings.TrimPrefix(field, "list=")
-			if value == "" {
-				return nil, nil
-			}
-			return strings.Split(value, ","), nil
+	frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	if frame.Type == "error" {
+		if frame.Code != "" {
+			return protocol.Frame{}, protocol.ErrorFromCode(frame.Code)
 		}
+		return protocol.Frame{}, protocol.ErrProtocol
 	}
-
-	return nil, fmt.Errorf("missing peer list in response: %s", line)
+	return frame, nil
 }
 
-func parseIdentities(line string) ([]string, error) {
-	const prefix = "IDENTITIES "
-	if !strings.HasPrefix(line, prefix) {
-		return nil, fmt.Errorf("unexpected identities response: %s", line)
-	}
-
-	fields := strings.Fields(line)
-	for _, field := range fields {
-		if strings.HasPrefix(field, "list=") {
-			value := strings.TrimPrefix(field, "list=")
-			if value == "" {
-				return nil, nil
-			}
-			return strings.Split(value, ","), nil
+func contactsFromFrame(frame protocol.Frame) map[string]Contact {
+	out := make(map[string]Contact, len(frame.Contacts))
+	for _, contact := range frame.Contacts {
+		out[contact.Address] = Contact{
+			BoxKey:       contact.BoxKey,
+			PubKey:       contact.PubKey,
+			BoxSignature: contact.BoxSig,
 		}
 	}
-
-	return nil, fmt.Errorf("missing identity list in response: %s", line)
+	return out
 }
 
-func parseContacts(line string) (map[string]Contact, error) {
-	const prefix = "CONTACTS "
-	if !strings.HasPrefix(line, prefix) {
-		return nil, fmt.Errorf("unexpected contacts response: %s", line)
-	}
-
-	index := strings.Index(line, "list=")
-	if index == -1 {
-		return nil, fmt.Errorf("missing contact list in response: %s", line)
-	}
-
-	value := strings.TrimPrefix(line[index:], "list=")
-	if value == "" {
-		return map[string]Contact{}, nil
-	}
-
-	items := strings.Split(value, ",")
-	out := make(map[string]Contact, len(items))
-	for _, item := range items {
-		parts := strings.SplitN(item, "@", 4)
-		if len(parts) != 4 {
+func messageRecordsFromFrames(messages []protocol.MessageFrame) []MessageRecord {
+	out := make([]MessageRecord, 0, len(messages))
+	for _, message := range messages {
+		record, err := messageRecordFromFrame(message)
+		if err != nil {
 			continue
 		}
-		out[parts[0]] = Contact{
-			BoxKey:       parts[1],
-			PubKey:       parts[2],
-			BoxSignature: parts[3],
+		out = append(out, record)
+	}
+	return out
+}
+
+func messageRecordFromFrame(message protocol.MessageFrame) (MessageRecord, error) {
+	timestamp, err := time.Parse(time.RFC3339, message.CreatedAt)
+	if err != nil {
+		return MessageRecord{}, err
+	}
+	return MessageRecord{
+		ID:         message.ID,
+		Flag:       message.Flag,
+		Timestamp:  timestamp.UTC(),
+		TTLSeconds: message.TTLSeconds,
+		Sender:     message.Sender,
+		Recipient:  message.Recipient,
+		Body:       message.Body,
+	}, nil
+}
+
+func decryptNoticeFrames(id *identity.Identity, notices []protocol.NoticeFrame) []string {
+	out := make([]string, 0, len(notices))
+	for _, item := range notices {
+		notice, err := gazeta.DecryptForIdentity(id, item.Ciphertext)
+		if err != nil {
+			continue
 		}
+		out = append(out, notice.From+">"+notice.Body)
 	}
-
-	return out, nil
+	return out
 }
 
-func parseMessages(line string) ([]string, error) {
-	const prefix = "MESSAGES "
-	return parseListField(line, prefix)
-}
-
-func parseInbox(line string) ([]string, error) {
-	const prefix = "INBOX "
-	return parseListField(line, prefix)
-}
-
-func parseWelcomeField(line, key string) string {
-	prefix := key + "="
-	for _, field := range strings.Fields(line) {
-		if strings.HasPrefix(field, prefix) {
-			return strings.TrimPrefix(field, prefix)
-		}
-	}
-	return ""
-}
-
-func parseCSVField(line, key string) []string {
-	value := parseWelcomeField(line, key)
-	if value == "" {
-		return nil
-	}
-	return strings.Split(value, ",")
-}
-
-func parseListField(line, prefix string) ([]string, error) {
-	if !strings.HasPrefix(line, prefix) {
-		return nil, fmt.Errorf("unexpected response: %s", line)
-	}
-
-	index := strings.Index(line, "list=")
-	if index == -1 {
-		return nil, fmt.Errorf("missing list field in response: %s", line)
-	}
-
-	value := strings.TrimPrefix(line[index:], "list=")
-	if value == "" {
-		return nil, nil
-	}
-
-	return strings.Split(value, "|"), nil
-}
-
-func decryptNotices(id *identity.Identity, line string) ([]string, error) {
-	const prefix = "NOTICES "
-	if !strings.HasPrefix(line, prefix) {
-		return nil, fmt.Errorf("unexpected notices response: %s", line)
-	}
-
-	fields := strings.Fields(line)
-	for _, field := range fields {
-		if strings.HasPrefix(field, "list=") {
-			value := strings.TrimPrefix(field, "list=")
-			if value == "" {
-				return nil, nil
-			}
-
-			items := strings.Split(value, ",")
-			out := make([]string, 0, len(items))
-			for _, item := range items {
-				parts := strings.SplitN(item, "@", 3)
-				if len(parts) != 3 {
-					continue
-				}
-
-				notice, err := gazeta.DecryptForIdentity(id, parts[2])
-				if err != nil {
-					continue
-				}
-
-				out = append(out, notice.From+">"+notice.Body)
-			}
-			return out, nil
-		}
-	}
-
-	return nil, fmt.Errorf("missing notice list in response: %s", line)
-}
-
-func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []string) []string {
+func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord) []string {
 	out := make([]string, 0, len(messages))
 	for _, item := range messages {
-		parts := strings.SplitN(item, ">", 3)
-		if len(parts) != 3 {
-			continue
-		}
-
-		sender := parts[0]
-		recipient := parts[1]
-		ciphertext := parts[2]
+		sender := item.Sender
+		recipient := item.Recipient
+		ciphertext := item.Body
 
 		contact, ok := contacts[sender]
 		if !ok || contact.PubKey == "" {
@@ -573,4 +561,17 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 	}
 
 	return out
+}
+
+func stringifyMessages(messages []MessageRecord) []string {
+	out := make([]string, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, message.Sender+">"+message.Recipient+">"+message.Body)
+	}
+	return out
+}
+
+func isConversationMessage(message protocol.MessageFrame, self, counterparty string) bool {
+	return (message.Sender == self && message.Recipient == counterparty) ||
+		(message.Sender == counterparty && message.Recipient == self)
 }
