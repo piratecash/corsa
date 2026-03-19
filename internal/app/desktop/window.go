@@ -4,6 +4,7 @@ import (
 	"context"
 	"image"
 	"image/color"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"corsa/internal/core/service"
 
 	"gioui.org/app"
+	"gioui.org/io/clipboard"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -31,8 +33,10 @@ type Window struct {
 
 	recipientEditor    widget.Editor
 	messageEditor      widget.Editor
+	contactsList       widget.List
 	sendButton         widget.Clickable
 	syncButton         widget.Clickable
+	copyIdentityButton widget.Clickable
 	rebuildTrustButton widget.Clickable
 	languageToggle     widget.Clickable
 	languageOptions    map[string]*widget.Clickable
@@ -76,6 +80,7 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 		languageOptions:  make(map[string]*widget.Clickable),
 		recipientButtons: make(map[string]*widget.Clickable),
 		sendStatus:       translate(language, "status.compose_default"),
+		contactsList:     widget.List{List: layout.List{Axis: layout.Vertical}},
 	}
 }
 
@@ -157,35 +162,29 @@ func (w *Window) handleActions(gtx layout.Context) {
 	}
 
 	for w.sendButton.Clicked(gtx) {
-		to := strings.TrimSpace(w.selectedRecipient)
-		if to == "" {
-			to = strings.TrimSpace(w.recipientEditor.Text())
+		w.triggerSend()
+	}
+
+	w.messageEditor.Submit = true
+	for {
+		event, ok := w.messageEditor.Update(gtx)
+		if !ok {
+			break
 		}
-		body := w.messageEditor.Text()
-		w.sendStatus = w.t("status.sending")
+		if _, ok := event.(widget.SubmitEvent); ok {
+			w.triggerSend()
+		}
+	}
 
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err := w.client.SendDirectMessage(ctx, to, body)
-			cancel()
-
-			w.mu.Lock()
-			if err != nil {
-				w.sendStatus = w.t("status.send_failed", err.Error())
-			} else {
-				w.sendStatus = w.t("status.message_sent")
-				w.messageEditor.SetText("")
-			}
-			w.mu.Unlock()
-
-			if err == nil {
-				w.refreshStatus()
-			}
-
-			if w.window != nil {
-				w.window.Invalidate()
-			}
-		}()
+	for w.copyIdentityButton.Clicked(gtx) {
+		gtx.Execute(clipboard.WriteCmd{
+			Type: "text/plain",
+			Data: io.NopCloser(strings.NewReader(w.client.Address())),
+		})
+		w.sendStatus = w.t("status.identity_copied")
+		if w.window != nil {
+			w.window.Invalidate()
+		}
 	}
 
 	for w.syncButton.Clicked(gtx) {
@@ -244,6 +243,41 @@ func (w *Window) handleActions(gtx layout.Context) {
 			}
 		}()
 	}
+}
+
+func (w *Window) triggerSend() {
+	to := strings.TrimSpace(w.selectedRecipient)
+	if to == "" {
+		to = strings.TrimSpace(w.recipientEditor.Text())
+	}
+	body := strings.TrimSpace(w.messageEditor.Text())
+	if body == "" {
+		return
+	}
+	w.sendStatus = w.t("status.sending")
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := w.client.SendDirectMessage(ctx, to, body)
+		cancel()
+
+		w.mu.Lock()
+		if err != nil {
+			w.sendStatus = w.t("status.send_failed", err.Error())
+		} else {
+			w.sendStatus = w.t("status.message_sent")
+			w.messageEditor.SetText("")
+		}
+		w.mu.Unlock()
+
+		if err == nil {
+			w.refreshStatus()
+		}
+
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}()
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
@@ -321,17 +355,27 @@ func (w *Window) layoutContactsCard(gtx layout.Context, recipients []string) lay
 	}
 
 	return w.card(gtx, w.t("clients.title"), rows, func(gtx layout.Context) layout.Dimensions {
+		return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(220)))
+			btn := material.Button(w.theme, &w.copyIdentityButton, w.t("clients.copy_identity"))
+			return btn.Layout(gtx)
+		})
+	}, func(gtx layout.Context) layout.Dimensions {
 		if len(recipients) == 0 {
 			label := material.Body1(w.theme, w.t("clients.empty"))
 			label.Color = color.NRGBA{R: 165, G: 177, B: 194, A: 255}
 			return label.Layout(gtx)
 		}
 
-		children := make([]layout.FlexChild, 0, len(recipients)*2)
-		for i, recipient := range recipients {
-			fingerprint := recipient
+		maxY := gtx.Dp(unit.Dp(420))
+		if gtx.Constraints.Max.Y > maxY {
+			gtx.Constraints.Max.Y = maxY
+		}
+		list := material.List(w.theme, &w.contactsList)
+		return list.Layout(gtx, len(recipients), func(gtx layout.Context, index int) layout.Dimensions {
+			fingerprint := recipients[index]
 			btn := w.recipientButton(fingerprint)
-			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				for btn.Clicked(gtx) {
 					w.selectedRecipient = fingerprint
 					w.recipientEditor.SetText(fingerprint)
@@ -346,13 +390,8 @@ func (w *Window) layoutContactsCard(gtx layout.Context, recipients []string) lay
 				}
 				style.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 				return style.Layout(gtx)
-			}))
-			if i < len(recipients)-1 {
-				children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
-			}
-		}
-
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+			})
+		})
 	})
 }
 
