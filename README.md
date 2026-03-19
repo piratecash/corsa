@@ -98,8 +98,8 @@ Example:
 
 ```bash
 CORSA_LISTEN_ADDRESS=:64646 \
-CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
-CORSA_BOOTSTRAP_PEERS=198.51.100.20:64646,198.51.100.21:64646 \
+CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
+CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
 GOCACHE=$(pwd)/.gocache \
 GOMODCACHE=$(pwd)/.gomodcache \
 go run ./cmd/corsa-node
@@ -127,7 +127,7 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v corsa-data:/home/corsa/.corsa \
   corsa-node
@@ -142,7 +142,7 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node
@@ -247,8 +247,8 @@ Bootstrap seed по умолчанию:
 
 ```bash
 CORSA_LISTEN_ADDRESS=:64646 \
-CORSA_ADVERTISE_ADDRESS=203.0.113.10:64646 \
-CORSA_BOOTSTRAP_PEERS=198.51.100.20:64646,198.51.100.21:64646 \
+CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
+CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
 GOCACHE=$(pwd)/.gocache \
 GOMODCACHE=$(pwd)/.gomodcache \
 go run ./cmd/corsa-node
@@ -276,7 +276,7 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v corsa-data:/home/corsa/.corsa \
   corsa-node
@@ -291,7 +291,7 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=65.108.204.190:64646 \
+  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node

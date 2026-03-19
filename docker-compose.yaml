@@ -9,7 +9,7 @@ services:
       - "64646:64646"
     environment:
       CORSA_LISTEN_ADDRESS: ":64646"
-      CORSA_ADVERTISE_ADDRESS: "65.108.204.190:64646"
+      CORSA_ADVERTISE_ADDRESS: "<your-public-ip>:64646"
       CORSA_BOOTSTRAP_PEERS: "65.108.204.190:64646"
     volumes:
       - corsa-data:/home/corsa/.corsa

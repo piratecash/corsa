@@ -65,7 +65,7 @@ Primary JSON node-to-node request:
   "type": "hello",
   "version": 1,
   "client": "node",
-  "listen": "203.0.113.10:64646",
+  "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
   "services": [
@@ -160,8 +160,8 @@ Response:
   "type": "peers",
   "count": 2,
   "peers": [
-    "127.0.0.1:64646",
-    "127.0.0.1:64647"
+    "65.108.204.190:64646",
+    "<peer-address>"
   ]
 }
 ```
@@ -462,7 +462,7 @@ Request:
   "type": "subscribe_inbox",
   "topic": "dm",
   "recipient": "d4e5f6",
-  "subscriber": "198.51.100.20:64646"
+  "subscriber": "<subscriber-address>"
 }
 ```
 
@@ -473,7 +473,7 @@ Response:
   "type": "subscribed",
   "topic": "dm",
   "recipient": "d4e5f6",
-  "subscriber": "198.51.100.20:64646",
+  "subscriber": "<subscriber-address>",
   "status": "ok",
   "count": 1
 }
@@ -730,7 +730,7 @@ Fields:
   "type": "hello",
   "version": 1,
   "client": "node",
-  "listen": "203.0.113.10:64646",
+  "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
   "services": [
@@ -825,8 +825,8 @@ Fields:
   "type": "peers",
   "count": 2,
   "peers": [
-    "127.0.0.1:64646",
-    "127.0.0.1:64647"
+    "65.108.204.190:64646",
+    "<peer-address>"
   ]
 }
 ```
@@ -1129,7 +1129,7 @@ Fields:
   "type": "subscribe_inbox",
   "topic": "dm",
   "recipient": "d4e5f6",
-  "subscriber": "198.51.100.20:64646"
+  "subscriber": "<subscriber-address>"
 }
 ```
 
@@ -1140,7 +1140,7 @@ Fields:
   "type": "subscribed",
   "topic": "dm",
   "recipient": "d4e5f6",
-  "subscriber": "198.51.100.20:64646",
+  "subscriber": "<subscriber-address>",
   "status": "ok",
   "count": 1
 }
