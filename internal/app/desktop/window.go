@@ -276,7 +276,7 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 
 func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	status := w.currentStatus()
-	recipients := knownRecipients(status.Contacts, w.client.Address())
+	recipients := knownRecipients(status.KnownIDs, status.Contacts, w.client.Address())
 	w.ensureSelectedRecipient(recipients)
 
 	return layout.Flex{
@@ -609,12 +609,25 @@ func (w *Window) conversationWith(status service.NodeStatus, recipient string) [
 	return rows
 }
 
-func knownRecipients(contacts map[string]service.Contact, self string) []string {
-	recipients := make([]string, 0, len(contacts))
-	for id := range contacts {
+func knownRecipients(ids []string, contacts map[string]service.Contact, self string) []string {
+	known := make(map[string]struct{}, len(ids)+len(contacts))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
 		if id == "" || id == self {
 			continue
 		}
+		known[id] = struct{}{}
+	}
+	for id := range contacts {
+		id = strings.TrimSpace(id)
+		if id == "" || id == self {
+			continue
+		}
+		known[id] = struct{}{}
+	}
+
+	recipients := make([]string, 0, len(known))
+	for id := range known {
 		recipients = append(recipients, id)
 	}
 	sort.Strings(recipients)
