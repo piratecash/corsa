@@ -933,6 +933,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 }
 
 func (s *Service) shouldRouteStoredMessage(msg incomingMessage) bool {
+	if msg.Topic == "dm" && msg.Recipient == s.identity.Address {
+		return false
+	}
 	if s.CanForward() {
 		return true
 	}
@@ -1041,6 +1044,14 @@ func (s *Service) fetchInboxFrame(topic, recipient string) protocol.Frame {
 
 	items := make([]protocol.MessageFrame, 0, len(messages))
 	for _, msg := range messages {
+		if topic == "dm" && msg.Recipient == recipient {
+			s.mu.RLock()
+			delivered := s.hasReceiptForMessageLocked(msg.Sender, msg.ID)
+			s.mu.RUnlock()
+			if delivered {
+				continue
+			}
+		}
 		if msg.Recipient == recipient || msg.Recipient == "*" {
 			items = append(items, messageFrame(msg))
 		}

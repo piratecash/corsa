@@ -597,16 +597,16 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	waitForCondition(t, 5*time.Second, func() bool {
 		reply := exchangeFrames(t, nodeB.externalListenAddress(),
 			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
+			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
 		)
-		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "dm-msg-1"
+		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "dm-msg-1"
 	})
 
 	inboxB := exchangeFrames(t, nodeB.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
+		protocol.Frame{Type: "fetch_messages", Topic: "dm"},
 	)
-	assertMessageFrame(t, inboxB[1], "inbox", "dm", 1, protocol.MessageFrame{
+	assertMessageFrame(t, inboxB[1], "messages", "dm", 1, protocol.MessageFrame{
 		ID: "dm-msg-1", Sender: nodeA.Address(), Recipient: nodeB.Address(), Flag: "sender-delete", CreatedAt: ts, TTLSeconds: 0, Body: ciphertext,
 	})
 
@@ -688,9 +688,9 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 	waitForCondition(t, 5*time.Second, func() bool {
 		reply := exchangeFrames(t, nodeB.externalListenAddress(),
 			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
+			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
 		)
-		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "push-dm-1"
+		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "push-dm-1"
 	})
 
 	waitForCondition(t, 5*time.Second, func() bool {
@@ -1166,9 +1166,9 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	waitForCondition(t, 12*time.Second, func() bool {
 		reply := exchangeFrames(t, nodeB.externalListenAddress(),
 			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
+			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
 		)
-		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "retry-dm-1"
+		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "retry-dm-1"
 	})
 }
 
@@ -1219,8 +1219,8 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 	defer stopClient()
 
 	waitForCondition(t, 8*time.Second, func() bool {
-		reply := clientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: clientNode.Address()})
-		return reply.Type == "inbox" && len(reply.Messages) == 1 && reply.Messages[0].ID == "backlog-dm-1"
+		reply := clientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+		return reply.Type == "messages" && len(reply.Messages) == 1 && reply.Messages[0].ID == "backlog-dm-1"
 	})
 }
 
@@ -1301,9 +1301,109 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	defer stopRecipient()
 
 	waitForCondition(t, 8*time.Second, func() bool {
-		inbox := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: recipientNode.Address()})
-		return inbox.Type == "inbox" && len(inbox.Messages) == 1 && inbox.Messages[0].ID == "client-offline-dm-1"
+		messages := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+		return messages.Type == "messages" && len(messages.Messages) == 1 && messages.Messages[0].ID == "client-offline-dm-1"
 	})
+}
+
+func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	svc.mu.Lock()
+	svc.topics["dm"] = append(svc.topics["dm"], protocol.Envelope{
+		ID:         protocol.MessageID("delivered-dm-1"),
+		Topic:      "dm",
+		Sender:     "sender-1",
+		Recipient:  id.Address,
+		Flag:       protocol.MessageFlagSenderDelete,
+		CreatedAt:  createdAt,
+		TTLSeconds: 0,
+		Payload:    []byte("ciphertext"),
+	})
+	svc.receipts["sender-1"] = append(svc.receipts["sender-1"], protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID("delivered-dm-1"),
+		Sender:      id.Address,
+		Recipient:   "sender-1",
+		Status:      protocol.ReceiptStatusDelivered,
+		DeliveredAt: createdAt.Add(time.Second),
+	})
+	svc.mu.Unlock()
+
+	reply := svc.fetchInboxFrame("dm", id.Address)
+	if reply.Type != "inbox" || reply.Count != 0 || len(reply.Messages) != 0 {
+		t.Fatalf("expected delivered dm to be hidden from inbox backlog, got %#v", reply)
+	}
+}
+
+func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
+	t.Parallel()
+
+	recipientID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		Type:             config.NodeTypeFull,
+	}, recipientID)
+
+	senderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate sender identity failed: %v", err)
+	}
+	svc.addKnownPubKey(senderID.Address, identity.PublicKeyBase64(senderID.PublicKey))
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		senderID,
+		recipientID.Address,
+		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		"for-myself-no-reroute",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+
+	stored, _, errCode := svc.storeIncomingMessage(incomingMessage{
+		ID:         protocol.MessageID("self-dm-1"),
+		Topic:      "dm",
+		Sender:     senderID.Address,
+		Recipient:  recipientID.Address,
+		Flag:       protocol.MessageFlagSenderDelete,
+		CreatedAt:  time.Now().UTC(),
+		TTLSeconds: 0,
+		Body:       ciphertext,
+	}, true)
+	if !stored || errCode != "" {
+		t.Fatalf("unexpected store result stored=%v errCode=%q", stored, errCode)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	if _, ok := svc.relayRetry[relayMessageKey(protocol.MessageID("self-dm-1"))]; ok {
+		t.Fatalf("recipient-local dm should not be tracked for relay retry: %#v", svc.relayRetry)
+	}
+	if _, ok := svc.outbound["self-dm-1"]; ok {
+		t.Fatalf("recipient-local dm should not create outbound state: %#v", svc.outbound["self-dm-1"])
+	}
 }
 
 func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
