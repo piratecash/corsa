@@ -42,6 +42,7 @@ type Service struct {
 	pending      map[string][]pendingFrame
 	pendingKeys  map[string]struct{}
 	upstream     map[string]struct{}
+	inboundConns map[net.Conn]struct{}
 	events       map[chan struct{}]struct{}
 	listener     net.Listener
 	lastSync     time.Time
@@ -154,6 +155,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		pending:      make(map[string][]pendingFrame),
 		pendingKeys:  make(map[string]struct{}),
 		upstream:     make(map[string]struct{}),
+		inboundConns: make(map[net.Conn]struct{}),
 		events:       make(map[chan struct{}]struct{}),
 	}
 }
@@ -262,7 +264,13 @@ func (s *Service) Peers() []transport.Peer {
 }
 
 func (s *Service) handleConn(conn net.Conn) {
+	if !s.registerInboundConn(conn) {
+		log.Printf("node: reject connection from %s reason=max-connections", conn.RemoteAddr())
+		_ = conn.Close()
+		return
+	}
 	defer func() {
+		s.unregisterInboundConn(conn)
 		s.removeSubscriberConn(conn)
 		_ = conn.Close()
 	}()
@@ -949,12 +957,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 }
 
 func (s *Service) ensurePeerSessions(ctx context.Context) {
-	for _, peer := range s.Peers() {
-		address := strings.TrimSpace(peer.Address)
-		if address == "" || s.isSelfAddress(address) {
-			continue
-		}
-
+	for _, address := range s.peerDialCandidates() {
 		s.mu.Lock()
 		if _, ok := s.upstream[address]; ok {
 			s.mu.Unlock()
@@ -962,7 +965,6 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 		}
 		s.upstream[address] = struct{}{}
 		s.mu.Unlock()
-
 		go func(peerAddress string) {
 			defer func() {
 				s.mu.Lock()
@@ -973,6 +975,33 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 			s.runPeerSession(ctx, peerAddress)
 		}(address)
 	}
+}
+
+func (s *Service) peerDialCandidates() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	limit := s.cfg.EffectiveMaxOutgoingPeers()
+	active := len(s.upstream)
+	if limit > 0 && active >= limit {
+		return nil
+	}
+
+	candidates := make([]string, 0, len(s.peers))
+	for _, peer := range s.peers {
+		address := strings.TrimSpace(peer.Address)
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		if _, ok := s.upstream[address]; ok {
+			continue
+		}
+		candidates = append(candidates, address)
+		if limit > 0 && active+len(candidates) >= limit {
+			break
+		}
+	}
+	return candidates
 }
 
 func (s *Service) syncPeer(ctx context.Context, address string) {
@@ -1251,6 +1280,24 @@ func scorePeerTargetLocked(health *peerHealth) int64 {
 	}
 
 	return stateWeight*1_000_000_000_000 + recency - int64(health.ConsecutiveFailures*1000) - int64(len(health.LastError))
+}
+
+func (s *Service) registerInboundConn(conn net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	limit := s.cfg.EffectiveMaxIncomingPeers()
+	if limit > 0 && len(s.inboundConns) >= limit {
+		return false
+	}
+	s.inboundConns[conn] = struct{}{}
+	return true
+}
+
+func (s *Service) unregisterInboundConn(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.inboundConns, conn)
+	s.mu.Unlock()
 }
 
 func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {

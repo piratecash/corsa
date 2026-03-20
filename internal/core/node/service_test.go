@@ -75,6 +75,66 @@ func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
 	}
 }
 
+func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		BootstrapPeers: []string{
+			"10.0.0.1:64646",
+			"10.0.0.2:64646",
+			"10.0.0.3:64646",
+			"10.0.0.4:64646",
+			"10.0.0.5:64646",
+			"10.0.0.6:64646",
+			"10.0.0.7:64646",
+			"10.0.0.8:64646",
+			"10.0.0.9:64646",
+		},
+		Type: config.NodeTypeClient,
+	}, id)
+
+	got := svc.peerDialCandidates()
+	if len(got) != 8 {
+		t.Fatalf("expected 8 peer dial candidates, got %d: %#v", len(got), got)
+	}
+	if got[0] != "10.0.0.1:64646" || got[7] != "10.0.0.8:64646" {
+		t.Fatalf("unexpected candidate order: %#v", got)
+	}
+}
+
+func TestPeerDialCandidatesUsesDefaultFullOutgoingLimit(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	bootstrap := make([]string, 0, config.DefaultOutgoingPeers+4)
+	for i := 1; i <= config.DefaultOutgoingPeers+4; i++ {
+		bootstrap = append(bootstrap, fmt.Sprintf("10.0.1.%d:64646", i))
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		BootstrapPeers:   bootstrap,
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	got := svc.peerDialCandidates()
+	if len(got) != config.DefaultOutgoingPeers {
+		t.Fatalf("expected %d peer dial candidates, got %d: %#v", config.DefaultOutgoingPeers, len(got), got)
+	}
+}
+
 func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 	t.Parallel()
 

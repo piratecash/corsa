@@ -28,6 +28,8 @@ Relevant environment variables:
 - `CORSA_IDENTITY_PATH`
 - `CORSA_TRUST_STORE_PATH`
 - `CORSA_NODE_TYPE`
+- `CORSA_MAX_OUTGOING_PEERS`
+- `CORSA_MAX_INCOMING_PEERS`
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS`
 
 Rules:
@@ -36,6 +38,8 @@ Rules:
 - default seed if nothing is set: `65.108.204.190:64646`
 - `CORSA_NODE_TYPE=full` enables relay/forwarding
 - `CORSA_NODE_TYPE=client` disables forwarding but keeps sync, inbox, and local storage
+- default outbound peer-session cap: `8`
+- `CORSA_MAX_INCOMING_PEERS=0` means no app-level inbound cap
 - default message clock drift: `600` seconds
 
 ### Handshake
@@ -863,6 +867,8 @@ Fields:
 - `CORSA_IDENTITY_PATH`
 - `CORSA_TRUST_STORE_PATH`
 - `CORSA_NODE_TYPE`
+- `CORSA_MAX_OUTGOING_PEERS`
+- `CORSA_MAX_INCOMING_PEERS`
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS`
 
 Правила:
@@ -871,6 +877,8 @@ Fields:
 - если ничего не задано, используется seed по умолчанию: `65.108.204.190:64646`
 - `CORSA_NODE_TYPE=full` включает relay/forwarding
 - `CORSA_NODE_TYPE=client` отключает forwarding, но оставляет sync, inbox и локальное хранение
+- outbound peer-session cap по умолчанию: `8`
+- `CORSA_MAX_INCOMING_PEERS=0` означает отсутствие app-level лимита на входящие peer-соединения
 - допустимый drift времени сообщений по умолчанию: `600` секунд
 
 ### Handshake

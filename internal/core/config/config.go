@@ -34,6 +34,8 @@ type Node struct {
 	Type             NodeType
 	ClientVersion    string
 	MaxClockDrift    time.Duration
+	MaxOutgoingPeers int
+	MaxIncomingPeers int
 }
 
 type Config struct {
@@ -46,6 +48,7 @@ const (
 	CorsaWireVersion       = "0.9-alpha"
 	ProtocolVersion        = 1
 	MinimumProtocolVersion = 1
+	DefaultOutgoingPeers   = 8
 )
 
 func Default() Config {
@@ -56,6 +59,8 @@ func Default() Config {
 	trustStorePath := envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress))
 	nodeType := nodeTypeFromEnv()
 	maxClockDrift := maxClockDriftFromEnv()
+	maxOutgoingPeers := maxOutgoingPeersFromEnv()
+	maxIncomingPeers := maxIncomingPeersFromEnv()
 
 	return Config{
 		App: App{
@@ -74,6 +79,8 @@ func Default() Config {
 			Type:             nodeType,
 			ClientVersion:    wireClientVersion(CorsaVersion),
 			MaxClockDrift:    maxClockDrift,
+			MaxOutgoingPeers: maxOutgoingPeers,
+			MaxIncomingPeers: maxIncomingPeers,
 		},
 	}
 }
@@ -93,6 +100,20 @@ func (n Node) ServiceList() []string {
 		services = append(services, "relay")
 	}
 	return services
+}
+
+func (n Node) EffectiveMaxOutgoingPeers() int {
+	if n.MaxOutgoingPeers > 0 {
+		return n.MaxOutgoingPeers
+	}
+	return DefaultOutgoingPeers
+}
+
+func (n Node) EffectiveMaxIncomingPeers() int {
+	if n.MaxIncomingPeers > 0 {
+		return n.MaxIncomingPeers
+	}
+	return 0
 }
 
 func envOrDefault(key, fallback string) string {
@@ -190,4 +211,28 @@ func maxClockDriftFromEnv() time.Duration {
 	}
 
 	return time.Duration(seconds) * time.Second
+}
+
+func maxOutgoingPeersFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_OUTGOING_PEERS"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+func maxIncomingPeersFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_INCOMING_PEERS"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
 }

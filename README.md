@@ -70,6 +70,8 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_NODE_TYPE` — `full` or `client`
+- `CORSA_MAX_OUTGOING_PEERS` — max outbound peer sessions, default `8`
+- `CORSA_MAX_INCOMING_PEERS` — optional inbound peer cap; `0` means no app-level cap
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS` — allowed past/future clock drift for relayed messages, default `600`
 
 Message metadata and relay rules:
