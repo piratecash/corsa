@@ -868,7 +868,7 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 
 func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bool) (bool, int, string) {
 	if validateTimestamp {
-		if err := s.validateMessageTimestamp(msg.CreatedAt); err != nil {
+		if err := s.validateMessageTiming(msg); err != nil {
 			return false, 0, protocol.ErrCodeMessageTimestampOutOfRange
 		}
 	}
@@ -1464,6 +1464,9 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 }
 
 func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
+	if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
+		return
+	}
 	subs := s.subscribersForRecipient(msg.Recipient)
 	if len(subs) == 0 {
 		if msg.Recipient == s.identity.Address {
@@ -1517,6 +1520,9 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 
 	inbox := s.fetchInboxFrame("dm", sub.recipient)
 	for _, item := range inbox.Messages {
+		if createdAt, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil && s.messageDeliveryExpired(createdAt.UTC(), item.TTLSeconds) {
+			continue
+		}
 		msgFrame := item
 		s.writePushFrame(sub, protocol.Frame{
 			Type:      "push_message",
@@ -2301,7 +2307,11 @@ func (s *Service) flushPendingPeerFrames(address string) {
 	remaining := make([]pendingFrame, 0)
 	now := time.Now().UTC()
 	for _, item := range frames {
-		if now.Sub(item.QueuedAt) > pendingFrameTTL {
+		if s.pendingFrameExpired(item.Frame, item.QueuedAt, now) {
+			s.markOutboundTerminal(item.Frame, "expired", "message delivery expired")
+			continue
+		}
+		if item.Frame.Type != "send_message" && now.Sub(item.QueuedAt) > pendingFrameTTL {
 			s.markOutboundTerminal(item.Frame, "expired", "pending queue expired")
 			continue
 		}
@@ -2359,6 +2369,10 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	for _, msg := range items {
 		key := relayMessageKey(msg.ID)
 		if msg.Recipient == "" || msg.Recipient == "*" || msg.Recipient == s.identity.Address {
+			delete(s.relayRetry, key)
+			continue
+		}
+		if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
 			delete(s.relayRetry, key)
 			continue
 		}
@@ -2955,18 +2969,52 @@ func (s *Service) cleanupExpiredMessages() {
 	}
 }
 
-func (s *Service) validateMessageTimestamp(timestamp time.Time) error {
+func (s *Service) validateMessageTiming(msg incomingMessage) error {
 	now := time.Now().UTC()
 	drift := s.cfg.MaxClockDrift
 	if drift <= 0 {
 		drift = protocol.DefaultMessageTimeDrift
 	}
 
-	if timestamp.Before(now.Add(-drift)) || timestamp.After(now.Add(drift)) {
-		return fmt.Errorf("message timestamp %s outside allowed drift %s", timestamp.Format(time.RFC3339), drift)
+	if msg.CreatedAt.After(now.Add(drift)) {
+		return fmt.Errorf("message timestamp %s outside allowed future drift %s", msg.CreatedAt.Format(time.RFC3339), drift)
+	}
+
+	if msg.Topic == "dm" && msg.Recipient != "" && msg.Recipient != "*" {
+		if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
+			return fmt.Errorf("message timestamp %s expired for delivery", msg.CreatedAt.Format(time.RFC3339))
+		}
+		return nil
+	}
+
+	if msg.CreatedAt.Before(now.Add(-drift)) {
+		return fmt.Errorf("message timestamp %s outside allowed drift %s", msg.CreatedAt.Format(time.RFC3339), drift)
 	}
 
 	return nil
+}
+
+func (s *Service) messageDeliveryExpired(createdAt time.Time, ttlSeconds int) bool {
+	if ttlSeconds <= 0 {
+		return false
+	}
+	expiresAt := createdAt.Add(time.Duration(ttlSeconds) * time.Second)
+	return !expiresAt.After(time.Now().UTC())
+}
+
+func (s *Service) pendingFrameExpired(frame protocol.Frame, queuedAt time.Time, now time.Time) bool {
+	if frame.Type != "send_message" || frame.Topic != "dm" {
+		return false
+	}
+	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(frame.CreatedAt))
+	if err != nil {
+		return false
+	}
+	if frame.TTLSeconds <= 0 {
+		return false
+	}
+	expiresAt := createdAt.UTC().Add(time.Duration(frame.TTLSeconds) * time.Second)
+	return !expiresAt.After(now)
 }
 
 func incomingMessageFromFrame(frame protocol.Frame) (incomingMessage, error) {
@@ -2993,8 +3041,8 @@ func incomingMessageFromFrame(frame protocol.Frame) (incomingMessage, error) {
 	if msg.Flag == protocol.MessageFlagAutoDeleteTTL && msg.TTLSeconds <= 0 {
 		return incomingMessage{}, fmt.Errorf("ttl message requires positive ttl_seconds")
 	}
-	if msg.Flag != protocol.MessageFlagAutoDeleteTTL {
-		msg.TTLSeconds = 0
+	if msg.TTLSeconds < 0 {
+		return incomingMessage{}, fmt.Errorf("ttl_seconds must not be negative")
 	}
 
 	return msg, nil

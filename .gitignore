@@ -2,4 +2,5 @@
 .gocache/
 .gomodcache/
 .idea/
+.corsa/
 corsa-desktop.exe

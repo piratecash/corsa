@@ -424,6 +424,7 @@ Fields:
 - `flag` — required; delete/retention rule for the message
 - `created_at` — required; sender timestamp in RFC3339 UTC form
 - `ttl_seconds` — optional; TTL used by `auto-delete-ttl`, otherwise `0`
+- for `dm`, `ttl_seconds` may also be used as an optional delivery lifetime counted from `created_at`
 - `body` — required; plaintext for public topics or ciphertext for `dm`
 
 Import rules:
@@ -650,6 +651,7 @@ Notes:
 - for `dm`, `<body>` is ciphertext
 - messages outside the allowed clock drift are rejected and not forwarded
 - `auto-delete-ttl` messages are removed after `ttl-seconds`
+- direct messages are not rejected only because they are old; they expire only when `ttl_seconds > 0` and `created_at + ttl_seconds` is already in the past
 - `fetch_message_ids` can be used as a lightweight direct-message index
 - `fetch_message` can be used to load one DM by UUID
 - `fetch_delivery_receipts` returns delivery acknowledgements for messages originally sent by `recipient`
@@ -1315,6 +1317,7 @@ Fields:
 - `flag` — обязательное; правило удаления/хранения сообщения
 - `created_at` — обязательное; timestamp отправителя в RFC3339 UTC
 - `ttl_seconds` — опциональное; TTL для `auto-delete-ttl`, иначе `0`
+- для `dm` поле `ttl_seconds` также может задавать опциональный срок доставки, считающийся от `created_at`
 - `body` — обязательное; plaintext для публичных тем или ciphertext для `dm`
 
 Правила импорта:
@@ -1543,6 +1546,7 @@ Fields:
 - desktop повторно проверяет подпись перед расшифровкой и показом
 - сообщения вне допустимого time drift отклоняются и не форвардятся
 - сообщения с `auto-delete-ttl` удаляются после `ttl-seconds`
+- direct messages не отклоняются только из-за возраста; они считаются истекшими только если `ttl_seconds > 0` и момент `created_at + ttl_seconds` уже в прошлом
 - `fetch_message_ids` можно использовать как легкий индекс direct messages
 - `fetch_message` позволяет загрузить одно direct message по UUID
 - `fetch_delivery_receipts` возвращает подтверждения доставки для сообщений, которые изначально отправил `recipient`

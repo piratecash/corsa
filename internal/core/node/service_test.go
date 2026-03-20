@@ -873,6 +873,82 @@ func TestImportMessageAllowsHistoricalTimestamp(t *testing.T) {
 	})
 }
 
+func TestDirectMessageAllowsHistoricalTimestampWithoutTTL(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	recipientID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient identity failed: %v", err)
+	}
+
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		MaxClockDrift:    10 * time.Minute,
+	})
+	defer stop()
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		svc.identity,
+		recipientID.Address,
+		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		"late-but-valid",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+
+	oldTimestamp := time.Now().UTC().Add(-11 * time.Minute).Format(time.RFC3339)
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		sendMessageFrame("dm", "late-dm-1", svc.Address(), recipientID.Address, "sender-delete", oldTimestamp, 0, ciphertext),
+	)
+
+	if got := frames[1]; got.Type != "message_stored" || got.ID != "late-dm-1" {
+		t.Fatalf("unexpected historical dm response: %#v", got)
+	}
+}
+
+func TestDirectMessageRejectsExpiredTTL(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	recipientID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient identity failed: %v", err)
+	}
+
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		MaxClockDrift:    10 * time.Minute,
+	})
+	defer stop()
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		svc.identity,
+		recipientID.Address,
+		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		"already-expired",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+
+	oldTimestamp := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339)
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		sendMessageFrame("dm", "expired-dm-1", svc.Address(), recipientID.Address, "sender-delete", oldTimestamp, 30, ciphertext),
+	)
+
+	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeMessageTimestampOutOfRange {
+		t.Fatalf("unexpected expired ttl dm response: %#v", got)
+	}
+}
+
 func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {
 	t.Parallel()
 
@@ -1313,9 +1389,12 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 
+	tempDir := t.TempDir()
+
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 	}, id)
 
 	queuedAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
@@ -1387,6 +1466,56 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 	}
 	if got["expired-1"].Status != "expired" || got["expired-1"].Error == "" {
 		t.Fatalf("expected expired status, got %#v", got["expired-1"])
+	}
+}
+
+func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+	}, id)
+
+	address := "127.0.0.1:65001"
+	svc.mu.Lock()
+	svc.sessions[address] = &peerSession{address: address, sendCh: make(chan protocol.Frame)}
+	svc.health[address] = &peerHealth{Address: address, Connected: true, State: peerStateHealthy}
+	svc.pending[address] = []pendingFrame{{
+		Frame: protocol.Frame{
+			Type:       "send_message",
+			Topic:      "dm",
+			ID:         "ttl-expire-1",
+			Address:    id.Address,
+			Recipient:  "recipient-1",
+			Flag:       "sender-delete",
+			CreatedAt:  time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339),
+			TTLSeconds: 30,
+			Body:       "ciphertext",
+		},
+		QueuedAt: time.Now().UTC().Add(-90 * time.Second),
+	}}
+	svc.pendingKeys[pendingFrameKey(address, svc.pending[address][0].Frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	svc.flushPendingPeerFrames(address)
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	if len(svc.pending[address]) != 0 {
+		t.Fatalf("expected expired dm to be removed from pending queue, got %#v", svc.pending[address])
+	}
+	state, ok := svc.outbound["ttl-expire-1"]
+	if !ok || state.Status != "expired" {
+		t.Fatalf("expected outbound expired state, got %#v", svc.outbound["ttl-expire-1"])
 	}
 }
 

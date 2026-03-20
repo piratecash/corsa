@@ -89,6 +89,7 @@ Message metadata and relay rules:
   - `auto-delete-ttl`
 - `auto-delete-ttl` messages are removed automatically after `ttl-seconds`
 - nodes reject and do not forward messages that are too far in the past or future
+- for direct messages, `ttl-seconds` is optional and acts as delivery lifetime counted from `created_at`
 - pending direct-message delivery and delivery-receipt retry state are persisted on disk and survive node restarts
 - desktop delivery lifecycle for outgoing direct messages is: `queued -> retrying -> failed/expired -> delivered/seen`
 
@@ -244,6 +245,7 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
   - `auto-delete-ttl`
 - сообщения с `auto-delete-ttl` автоматически удаляются после `ttl-seconds`
 - ноды отклоняют и не форвардят сообщения, которые слишком далеко в прошлом или будущем
+- для direct message поле `ttl-seconds` опционально и задает срок доставки, считающийся от `created_at`
 - состояние очереди доставки direct message и retry delivery receipt сохраняется на диск и переживает рестарт ноды
 - desktop показывает жизненный цикл исходящего direct message как: `queued -> retrying -> failed/expired -> delivered/seen`
 - основной wire-format теперь: один JSON-объект на строку
