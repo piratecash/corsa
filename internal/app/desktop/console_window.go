@@ -213,6 +213,16 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if strings.TrimSpace(item.ClientVersion) == "" {
+						return layout.Dimensions{}
+					}
+					return layout.Inset{Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						label := material.Caption(c.theme, item.ClientVersion)
+						label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
+						return label.Layout(gtx)
+					})
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					label := material.Caption(c.theme, peerHealthMeta(item))
 					label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 					return label.Layout(gtx)

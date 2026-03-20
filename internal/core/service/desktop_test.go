@@ -262,6 +262,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 		PeerHealth: []protocol.PeerHealthFrame{
 			{
 				Address:             "65.108.204.190:64646",
+				ClientVersion:       "0.11-alpha",
 				State:               "healthy",
 				Connected:           true,
 				PendingCount:        2,
@@ -283,6 +284,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 
 	want := PeerHealth{
 		Address:             "65.108.204.190:64646",
+		ClientVersion:       "0.11-alpha",
 		State:               "healthy",
 		Connected:           true,
 		PendingCount:        2,

@@ -41,6 +41,7 @@ type Service struct {
 	health       map[string]*peerHealth
 	peerTypes    map[string]config.NodeType
 	peerIDs      map[string]string
+	peerVersions map[string]string
 	pending      map[string][]pendingFrame
 	pendingKeys  map[string]struct{}
 	relayRetry   map[string]relayAttempt
@@ -212,6 +213,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		health:       make(map[string]*peerHealth),
 		peerTypes:    make(map[string]config.NodeType),
 		peerIDs:      make(map[string]string),
+		peerVersions: make(map[string]string),
 		pending:      queueState.Pending,
 		pendingKeys:  pendingKeys,
 		relayRetry:   queueState.RelayRetry,
@@ -1709,6 +1711,7 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 	if listenerEnabledFromFrame(frame) {
 		if normalized, ok := s.normalizePeerAddress(observedAddr, frame.Listen); ok {
 			s.addPeerAddress(normalized, frame.NodeType, frame.Address)
+			s.addPeerVersion(normalized, frame.ClientVersion)
 		}
 	}
 	if frame.Address != "" {
@@ -1741,6 +1744,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
 		if normalized, ok := s.normalizePeerAddress(frame.Listen, frame.Listen); ok {
 			s.addPeerAddress(normalized, frame.NodeType, frame.Address)
+			s.addPeerVersion(normalized, frame.ClientVersion)
 		}
 	}
 	if frame.Address != "" {
@@ -1777,6 +1781,18 @@ func (s *Service) addPeerAddress(address string, nodeType string, peerID string)
 	if peerID != "" {
 		s.peerIDs[address] = peerID
 	}
+}
+
+func (s *Service) addPeerVersion(address, clientVersion string) {
+	address = strings.TrimSpace(address)
+	clientVersion = strings.TrimSpace(clientVersion)
+	if address == "" || clientVersion == "" {
+		return
+	}
+
+	s.mu.Lock()
+	s.peerVersions[address] = clientVersion
+	s.mu.Unlock()
 }
 
 func normalizePeerNodeType(raw string) config.NodeType {
@@ -2133,6 +2149,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	for _, health := range s.health {
 		items = append(items, protocol.PeerHealthFrame{
 			Address:             health.Address,
+			ClientVersion:       s.peerVersions[health.Address],
 			State:               s.computePeerStateLocked(health),
 			Connected:           health.Connected,
 			PendingCount:        len(s.pending[health.Address]),
