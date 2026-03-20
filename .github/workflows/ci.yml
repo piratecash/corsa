@@ -188,7 +188,11 @@ jobs:
     needs:
       - build-linux
       - build-platforms
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: |
+      always() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.build-linux.result == 'success' &&
+      needs.build-platforms.result == 'success'
     permissions:
       contents: write
     steps:
