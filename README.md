@@ -218,10 +218,13 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
 Для публичных или VPS-нод практические сетевые настройки такие:
 
 - `CORSA_LISTEN_ADDRESS` — локальный bind-адрес
+- `CORSA_LISTENER` — явное переопределение входящего listener: `1` включает прослушивание, `0` выключает
 - `CORSA_ADVERTISE_ADDRESS` — внешний адрес, который нода объявляет пирам
 - `CORSA_BOOTSTRAP_PEERS` — список seed-нод через запятую
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
 - `CORSA_NODE_TYPE` — `full` или `client`
+- `CORSA_MAX_OUTGOING_PEERS` — максимум исходящих peer-session, по умолчанию `8`
+- `CORSA_MAX_INCOMING_PEERS` — опциональный лимит на входящие peer-соединения; `0` означает без app-level лимита
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS` — допустимый дрейф времени для ретранслируемых сообщений, по умолчанию `600`
 
 Метаданные сообщений и правила relay:
@@ -242,6 +245,10 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
 
 - `full` — форвардит mesh-трафик, ретранслирует direct messages и `Gazeta` notices
 - `client` — синкает peers и contacts, хранит локальный трафик, но не делает mesh-forwarding
+- `client` по умолчанию работает с `CORSA_LISTENER=0`, то есть держит исходящие сессии и синхронизацию identity без объявления dialable peer endpoint
+- `full` по умолчанию работает с `CORSA_LISTENER=1`
+- `listener` управляет только входящими соединениями и не меняет relay-роль узла
+- даже если `client` запущен с `CORSA_LISTENER=1`, его нельзя использовать как relay для чужого трафика
 - значение по умолчанию для `corsa-node`: `full`
 - значение по умолчанию для `corsa-desktop`: `full`
 - рекомендуемое будущее значение для mobile/light client: `client`

@@ -39,6 +39,11 @@ Rules:
 - default seed if nothing is set: `65.108.204.190:64646`
 - `CORSA_NODE_TYPE=full` enables relay/forwarding
 - `CORSA_NODE_TYPE=client` disables forwarding but keeps sync, inbox, and local storage
+- `CORSA_LISTENER=1` forces the inbound listener on
+- `CORSA_LISTENER=0` forces the inbound listener off
+- by default `full` listens for inbound peers, while `client` runs without a listener
+- `listener` only controls inbound reachability and does not change the relay role of the node
+- even if a `client` node is reachable and accepts inbound connections, it must not be used as a relay for foreign traffic
 - default outbound peer-session cap: `8`
 - `CORSA_MAX_INCOMING_PEERS=0` means no app-level inbound cap
 - default message clock drift: `600` seconds
@@ -70,6 +75,7 @@ Primary JSON node-to-node request:
   "type": "hello",
   "version": 1,
   "client": "node",
+  "listener": "1",
   "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
@@ -92,7 +98,9 @@ Fields:
 - `type` — required; frame kind, here `hello`
 - `version` — required; sender protocol version
 - `client` — required; caller kind, here `node`
+- `listener` — optional; `"1"` if the node accepts inbound peer connections, `"0"` otherwise
 - `listen` — optional; address this node advertises to peers
+- when `listener="0"`, the node identity may still be known to the network, but it must not be used as a dialable peer endpoint
 - `node_type` — optional; node role, currently `full` or `client`
 - `client_version` — optional; node software version
 - `services` — optional; declared capabilities supported by the node
@@ -110,6 +118,8 @@ Response:
   "minimum_protocol_version": 1,
   "node": "corsa",
   "network": "gazeta-devnet",
+  "listener": "1",
+  "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
   "services": [
@@ -133,6 +143,8 @@ Fields:
 - `minimum_protocol_version` — required; minimum protocol version accepted by the responder
 - `node` — required; server implementation name
 - `network` — required; logical network name
+- `listener` — optional; whether the responder currently exposes an inbound listener
+- `listen` — optional; dialable peer endpoint only when `listener="1"`
 - `node_type` — optional; responder role
 - `client_version` — optional; responder software version
 - `services` — optional; responder capabilities
@@ -145,6 +157,8 @@ Role rules:
 
 - `full` nodes forward mesh traffic
 - `client` nodes do not relay traffic onward
+- a `client` node may still have `listener=1`, but that does not make it a relay node
+- foreign traffic must not be deliberately routed through a `client`; the only exception is a direct message addressed to that client identity
 - desktop and standalone console node default to `full`
 - future mobile/light clients should use `client`
 - current Corsa version: see `internal/core/config.CorsaVersion`
@@ -862,6 +876,7 @@ Fields:
 Основные переменные окружения:
 
 - `CORSA_LISTEN_ADDRESS`
+- `CORSA_LISTENER`
 - `CORSA_ADVERTISE_ADDRESS`
 - `CORSA_BOOTSTRAP_PEER`
 - `CORSA_BOOTSTRAP_PEERS`

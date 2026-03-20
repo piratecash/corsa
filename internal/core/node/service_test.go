@@ -151,8 +151,8 @@ func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
 	}, id)
 
 	got := svc.peerDialCandidates()
-	if len(got) != 8 {
-		t.Fatalf("expected 8 peer dial candidates, got %d: %#v", len(got), got)
+	if len(got) != config.DefaultOutgoingPeers {
+		t.Fatalf("expected %d peer dial candidates, got %d: %#v", config.DefaultOutgoingPeers, len(got), got)
 	}
 	if got[0] != "10.0.0.1:64646" || got[7] != "10.0.0.8:64646" {
 		t.Fatalf("unexpected candidate order: %#v", got)
