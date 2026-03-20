@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run lint
+        run: make lint
+
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runs_on: ubuntu-latest
+            build_cmds: |
+              make build-node-linux-amd64
+              make build-desktop-linux-amd64
+          - name: macos
+            runs_on: macos-latest
+            build_cmds: |
+              make build-node-macos-arm64
+              make build-node-macos-amd64
+              make build-node-windows-amd64
+              make build-desktop-macos-arm64
+              make build-desktop-macos-amd64
+              make build-desktop-windows-amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux desktop build deps
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1-mesa-dev \
+            libgles2-mesa-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxrandr-dev \
+            libxrender-dev \
+            libxxf86vm-dev
+
+      - name: Build binaries
+        shell: bash
+        run: ${{ matrix.build_cmds }}
