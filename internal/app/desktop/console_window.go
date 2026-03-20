@@ -121,7 +121,8 @@ func (c *ConsoleWindow) consoleRows(status service.NodeStatus) []string {
 	rows := []string{
 		c.parent.t("node.client_version", c.parent.client.Version()),
 		c.parent.t("node.peer_version", fallback(status.ClientVersion, strings.ReplaceAll(c.parent.client.Version(), " ", "-"))),
-		c.parent.t("node.listen", c.parent.runtime.ListenAddress()),
+		c.parent.t("node.listener", status.ListenerEnabled),
+		c.parent.t("node.listen", fallback(status.ListenerAddress, c.parent.runtime.ListenAddress())),
 		c.parent.t("node.type", fallback(status.NodeType, "full")),
 		c.parent.t("node.services", fallback(joinOrNone(status.Services), "identity,contacts,messages,gazeta,relay")),
 		c.parent.t("node.connected", status.Connected),

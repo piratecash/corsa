@@ -13,6 +13,7 @@ type Frame struct {
 	Node                   string            `json:"node,omitempty"`
 	Network                string            `json:"network,omitempty"`
 	Listen                 string            `json:"listen,omitempty"`
+	Listener               string            `json:"listener,omitempty"`
 	NodeType               string            `json:"node_type,omitempty"`
 	ClientVersion          string            `json:"client_version,omitempty"`
 	Services               []string          `json:"services,omitempty"`

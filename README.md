@@ -66,6 +66,7 @@ Default bootstrap seed:
 For public or VPS nodes, the practical network settings are:
 
 - `CORSA_LISTEN_ADDRESS` — local bind address
+- `CORSA_LISTENER` — explicit inbound listener override: `1` enables listen, `0` disables it
 - `CORSA_ADVERTISE_ADDRESS` — external address announced to peers
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
@@ -92,6 +93,10 @@ Node roles:
 
 - `full` — forwards mesh traffic, relays direct messages and `Gazeta` notices
 - `client` — syncs peers and contacts, stores local traffic, but does not forward mesh traffic
+- `client` defaults to `CORSA_LISTENER=0`, so it keeps outbound sessions and identity sync without advertising a dialable peer endpoint
+- `full` defaults to `CORSA_LISTENER=1`
+- `listener` only controls whether a node accepts inbound connections; it does not change relay behavior
+- even if `client` is started with `CORSA_LISTENER=1`, it must not be used as a relay for foreign traffic
 - default for `corsa-node`: `full`
 - default for `corsa-desktop`: `full`
 - recommended future default for mobile/light client: `client`

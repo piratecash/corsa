@@ -22,6 +22,7 @@ Related crypto documentation:
 Relevant environment variables:
 
 - `CORSA_LISTEN_ADDRESS`
+- `CORSA_LISTENER`
 - `CORSA_ADVERTISE_ADDRESS`
 - `CORSA_BOOTSTRAP_PEER`
 - `CORSA_BOOTSTRAP_PEERS`
@@ -877,6 +878,11 @@ Fields:
 - если ничего не задано, используется seed по умолчанию: `65.108.204.190:64646`
 - `CORSA_NODE_TYPE=full` включает relay/forwarding
 - `CORSA_NODE_TYPE=client` отключает forwarding, но оставляет sync, inbox и локальное хранение
+- `CORSA_LISTENER=1` принудительно включает входящий listener
+- `CORSA_LISTENER=0` принудительно выключает входящий listener
+- по умолчанию `full` слушает входящие, а `client` работает без listener
+- `listener` управляет только входящими соединениями, но не меняет relay-роль узла
+- даже если `client` reachable и принимает входящие, его нельзя использовать как relay для чужого трафика
 - outbound peer-session cap по умолчанию: `8`
 - `CORSA_MAX_INCOMING_PEERS=0` означает отсутствие app-level лимита на входящие peer-соединения
 - допустимый drift времени сообщений по умолчанию: `600` секунд
@@ -908,6 +914,7 @@ Fields:
   "type": "hello",
   "version": 1,
   "client": "node",
+  "listener": "1",
   "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
@@ -930,7 +937,9 @@ Fields:
 - `type` — обязательное; тип кадра, здесь `hello`
 - `version` — обязательное; текущая версия протокола у отправителя
 - `client` — обязательное; тип вызывающей стороны, здесь `node`
+- `listener` — опциональное; `"1"` если узел принимает входящие peer-соединения, `"0"` если нет
 - `listen` — опциональное; адрес, который узел рекламирует пирам
+- при `listener="0"` identity узла может быть известен сети, но он не должен использоваться как dialable peer endpoint
 - `node_type` — опциональное; роль узла, сейчас `full` или `client`
 - `client_version` — опциональное; версия ПО узла
 - `services` — опциональное; список capabilities, которые поддерживает узел
@@ -948,6 +957,8 @@ Fields:
   "minimum_protocol_version": 1,
   "node": "corsa",
   "network": "gazeta-devnet",
+  "listener": "1",
+  "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
   "services": [
@@ -971,6 +982,8 @@ Fields:
 - `minimum_protocol_version` — обязательное; минимальная версия протокола, которую принимает отвечающий узел
 - `node` — обязательное; имя серверной реализации
 - `network` — обязательное; логическое имя сети
+- `listener` — опциональное; флаг наличия входящего listener у отвечающего узла
+- `listen` — опциональное; dialable peer endpoint только если `listener="1"`
 - `node_type` — опциональное; роль отвечающего узла
 - `client_version` — опциональное; версия ПО отвечающего узла
 - `services` — опциональное; capabilities отвечающего узла
@@ -983,6 +996,8 @@ Fields:
 
 - `full`-узлы форвардят mesh-трафик
 - `client`-узлы не ретранслируют трафик дальше
+- `client`-узел может иметь `listener=1`, но это не делает его relay-узлом
+- чужой трафик не должен специально маршрутизироваться через `client`; исключение — direct message, адресованный самому этому client identity
 - `corsa-desktop` и `corsa-node` по умолчанию запускаются как `full`
 - будущий mobile/light client должен использовать `client`
 - текущая версия Corsa: см. `internal/core/config.CorsaVersion`

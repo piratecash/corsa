@@ -81,6 +81,8 @@ type NodeStatus struct {
 	Welcome          string
 	NodeID           string
 	NodeType         string
+	ListenerEnabled  bool
+	ListenerAddress  string
 	ClientVersion    string
 	Services         []string
 	KnownIDs         []string
@@ -182,6 +184,8 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Welcome = welcome.Type
 	status.NodeID = welcome.Address
 	status.NodeType = welcome.NodeType
+	status.ListenerEnabled = strings.TrimSpace(welcome.Listener) == "1"
+	status.ListenerAddress = strings.TrimSpace(welcome.Listen)
 	status.ClientVersion = welcome.ClientVersion
 	status.Services = welcome.Services
 

@@ -38,6 +38,9 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome: %#v", got)
 	}
+	if got := frames[0]; got.Listener != "1" || got.Listen != normalizeAddress(address) {
+		t.Fatalf("unexpected welcome listener fields: %#v", got)
+	}
 	if got := frames[1]; got.Type != "peers" || got.Count != 0 {
 		t.Fatalf("unexpected peers: %#v", got)
 	}
@@ -50,6 +53,53 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	assertMessageFrame(t, frames[4], "inbox", "global", 1, protocol.MessageFrame{
 		ID: "msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello",
 	})
+}
+
+func TestClientWithoutListenerAnnouncesIdentityButNotDialAddress(t *testing.T) {
+	t.Parallel()
+
+	addressFull := freeAddress(t)
+	addressClient := freeAddress(t)
+
+	fullNode, stopFull := startTestNode(t, config.Node{
+		ListenAddress:    addressFull,
+		AdvertiseAddress: normalizeAddress(addressFull),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopFull()
+
+	clientNode, stopClient := startTestNode(t, config.Node{
+		ListenAddress:    addressClient,
+		AdvertiseAddress: "",
+		BootstrapPeers:   []string{normalizeAddress(addressFull)},
+		Type:             config.NodeTypeClient,
+	})
+	defer stopClient()
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := exchangeFrames(t, fullNode.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+			protocol.Frame{Type: "fetch_identities"},
+		)
+		for _, address := range reply[1].Identities {
+			if address == clientNode.Address() {
+				return true
+			}
+		}
+		return false
+	})
+
+	reply := exchangeFrames(t, fullNode.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "get_peers"},
+	)
+
+	for _, peer := range reply[1].Peers {
+		if peer == normalizeAddress(addressClient) {
+			t.Fatalf("listener-disabled client should not be advertised as dialable peer: %#v", reply[1].Peers)
+		}
+	}
 }
 
 func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
@@ -146,6 +196,8 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(addressA),
 		BootstrapPeers:   []string{normalizeAddress(addressB)},
 		Type:             config.NodeTypeClient,
+		ListenerEnabled:  true,
+		ListenerSet:      true,
 	})
 	defer stopA()
 
@@ -372,9 +424,11 @@ func TestRoutingTargetsPreferBestHealthySessions(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		cfg:      config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
-		sessions: map[string]*peerSession{},
-		health:   map[string]*peerHealth{},
+		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		sessions:  map[string]*peerSession{},
+		health:    map[string]*peerHealth{},
+		peerTypes: map[string]config.NodeType{},
+		peerIDs:   map[string]string{},
 	}
 
 	now := time.Now().UTC()
@@ -397,6 +451,48 @@ func TestRoutingTargetsPreferBestHealthySessions(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("unexpected routing targets: got %v want %v", got, want)
 		}
+	}
+}
+
+func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		sessions:  map[string]*peerSession{},
+		health:    map[string]*peerHealth{},
+		peerTypes: map[string]config.NodeType{},
+		peerIDs:   map[string]string{},
+	}
+
+	now := time.Now().UTC()
+	svc.sessions["full:1"] = &peerSession{address: "full:1"}
+	svc.sessions["client:1"] = &peerSession{address: "client:1"}
+	svc.health["full:1"] = &peerHealth{Address: "full:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	svc.health["client:1"] = &peerHealth{Address: "client:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	svc.peerTypes["full:1"] = config.NodeTypeFull
+	svc.peerTypes["client:1"] = config.NodeTypeClient
+	svc.peerIDs["client:1"] = "client-id"
+
+	globalTargets := svc.routingTargetsForMessage(protocol.Envelope{
+		Topic:     "global",
+		Sender:    "sender",
+		Recipient: "*",
+	})
+	if len(globalTargets) != 1 || globalTargets[0] != "full:1" {
+		t.Fatalf("global traffic should avoid client relay: %#v", globalTargets)
+	}
+
+	dmTargets := svc.routingTargetsForMessage(protocol.Envelope{
+		Topic:     "dm",
+		Sender:    "sender",
+		Recipient: "client-id",
+	})
+	if len(dmTargets) != 2 {
+		t.Fatalf("direct message should allow relay and direct recipient session: %#v", dmTargets)
+	}
+	if dmTargets[0] != "client:1" && dmTargets[1] != "client:1" {
+		t.Fatalf("recipient client session missing from targets: %#v", dmTargets)
 	}
 }
 
@@ -557,6 +653,8 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(addressB),
 		BootstrapPeers:   []string{normalizeAddress(addressA)},
 		Type:             config.NodeTypeClient,
+		ListenerEnabled:  true,
+		ListenerSet:      true,
 	})
 	defer stopB()
 
@@ -901,14 +999,16 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 		errCh <- svc.Run(ctx)
 	}()
 
-	waitForCondition(t, 3*time.Second, func() bool {
-		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return true
-		}
-		return false
-	})
+	if cfg.EffectiveListenerEnabled() {
+		waitForCondition(t, 3*time.Second, func() bool {
+			conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 200*time.Millisecond)
+			if err == nil {
+				_ = conn.Close()
+				return true
+			}
+			return false
+		})
+	}
 
 	stop := func() {
 		cancel()

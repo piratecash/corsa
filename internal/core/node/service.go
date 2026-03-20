@@ -39,6 +39,8 @@ type Service struct {
 	subs         map[string]map[string]*subscriber
 	sessions     map[string]*peerSession
 	health       map[string]*peerHealth
+	peerTypes    map[string]config.NodeType
+	peerIDs      map[string]string
 	pending      map[string][]pendingFrame
 	pendingKeys  map[string]struct{}
 	upstream     map[string]struct{}
@@ -152,6 +154,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		subs:         make(map[string]map[string]*subscriber),
 		sessions:     make(map[string]*peerSession),
 		health:       make(map[string]*peerHealth),
+		peerTypes:    make(map[string]config.NodeType),
+		peerIDs:      make(map[string]string),
 		pending:      make(map[string][]pendingFrame),
 		pendingKeys:  make(map[string]struct{}),
 		upstream:     make(map[string]struct{}),
@@ -161,6 +165,12 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	if !s.cfg.EffectiveListenerEnabled() {
+		go s.bootstrapLoop(ctx)
+		<-ctx.Done()
+		return nil
+	}
+
 	listener, err := net.Listen("tcp", s.cfg.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.cfg.ListenAddress, err)
@@ -456,12 +466,18 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 }
 
 func (s *Service) welcomeFrame() protocol.Frame {
+	listen := ""
+	if s.cfg.EffectiveListenerEnabled() {
+		listen = s.cfg.AdvertiseAddress
+	}
 	return protocol.Frame{
 		Type:                   "welcome",
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Node:                   "corsa",
 		Network:                "gazeta-devnet",
+		Listen:                 listen,
+		Listener:               listenerFlag(s.cfg.EffectiveListenerEnabled()),
 		NodeType:               string(s.NodeType()),
 		ClientVersion:          s.ClientVersion(),
 		Services:               s.Services(),
@@ -1044,7 +1060,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
 		if err == nil {
 			for _, peer := range frame.Peers {
-				s.addPeerAddress(peer)
+				s.addPeerAddress(peer, "", "")
 			}
 		}
 	} else {
@@ -1195,7 +1211,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 }
 
 func (s *Service) gossipMessage(msg protocol.Envelope) {
-	for _, address := range s.routingTargets() {
+	for _, address := range s.routingTargetsForMessage(msg) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
@@ -1204,6 +1220,27 @@ func (s *Service) gossipMessage(msg protocol.Envelope) {
 }
 
 func (s *Service) routingTargets() []string {
+	return s.routingTargetsFiltered(func(_ string, peerType config.NodeType, _ string) bool {
+		return peerType != config.NodeTypeClient
+	})
+}
+
+func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []string {
+	if msg.Topic != "dm" || msg.Recipient == "*" {
+		return s.routingTargets()
+	}
+	return s.routingTargetsFiltered(func(_ string, peerType config.NodeType, peerID string) bool {
+		return peerType != config.NodeTypeClient || peerID == msg.Recipient
+	})
+}
+
+func (s *Service) routingTargetsForRecipient(recipient string) []string {
+	return s.routingTargetsFiltered(func(_ string, peerType config.NodeType, peerID string) bool {
+		return peerType != config.NodeTypeClient || peerID == recipient
+	})
+}
+
+func (s *Service) routingTargetsFiltered(allow func(address string, peerType config.NodeType, peerID string) bool) []string {
 	s.mu.RLock()
 	if len(s.sessions) > 0 {
 		type scoredTarget struct {
@@ -1213,6 +1250,11 @@ func (s *Service) routingTargets() []string {
 		scored := make([]scoredTarget, 0, len(s.sessions))
 		for address := range s.sessions {
 			if address == "" || s.isSelfAddress(address) {
+				continue
+			}
+			peerType := s.peerTypeForAddressLocked(address)
+			peerID := s.peerIDs[address]
+			if !allow(address, peerType, peerID) {
 				continue
 			}
 			health := s.health[address]
@@ -1249,6 +1291,9 @@ func (s *Service) routingTargets() []string {
 	for _, peer := range s.Peers() {
 		address := peer.Address
 		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		if !allow(address, s.peerTypeForAddress(address), s.peerIdentityForAddress(address)) {
 			continue
 		}
 		targets = append(targets, address)
@@ -1419,8 +1464,7 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 }
 
 func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
-	for _, peer := range s.Peers() {
-		address := peer.Address
+	for _, address := range s.routingTargets() {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
@@ -1463,7 +1507,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 }
 
 func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
-	for _, address := range s.routingTargets() {
+	for _, address := range s.routingTargetsForRecipient(receipt.Recipient) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
@@ -1492,11 +1536,16 @@ func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryRec
 }
 
 func (s *Service) nodeHelloJSONLine() string {
+	listen := ""
+	if s.cfg.EffectiveListenerEnabled() {
+		listen = s.cfg.AdvertiseAddress
+	}
 	line, err := protocol.MarshalFrameLine(protocol.Frame{
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "node",
-		Listen:        s.cfg.AdvertiseAddress,
+		Listen:        listen,
+		Listener:      listenerFlag(s.cfg.EffectiveListenerEnabled()),
 		NodeType:      string(s.NodeType()),
 		ClientVersion: s.ClientVersion(),
 		Services:      s.Services(),
@@ -1512,8 +1561,10 @@ func (s *Service) nodeHelloJSONLine() string {
 }
 
 func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
-	if normalized, ok := s.normalizePeerAddress(observedAddr, frame.Listen); ok {
-		s.addPeerAddress(normalized)
+	if listenerEnabledFromFrame(frame) {
+		if normalized, ok := s.normalizePeerAddress(observedAddr, frame.Listen); ok {
+			s.addPeerAddress(normalized, frame.NodeType, frame.Address)
+		}
 	}
 	if frame.Address != "" {
 		s.addKnownIdentity(frame.Address)
@@ -1523,14 +1574,39 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 	s.addKnownBoxSig(frame.Address, frame.BoxSig)
 }
 
+func listenerEnabledFromFrame(frame protocol.Frame) bool {
+	switch strings.TrimSpace(frame.Listener) {
+	case "1":
+		return true
+	case "0":
+		return false
+	default:
+		return strings.TrimSpace(frame.Listen) != ""
+	}
+}
+
+func listenerFlag(enabled bool) string {
+	if enabled {
+		return "1"
+	}
+	return "0"
+}
+
 func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
-	s.addKnownIdentity(frame.Address)
+	if listenerEnabledFromFrame(frame) {
+		if normalized, ok := s.normalizePeerAddress(frame.Listen, frame.Listen); ok {
+			s.addPeerAddress(normalized, frame.NodeType, frame.Address)
+		}
+	}
+	if frame.Address != "" {
+		s.addKnownIdentity(frame.Address)
+	}
 	s.addKnownBoxKey(frame.Address, frame.BoxKey)
 	s.addKnownPubKey(frame.Address, frame.PubKey)
 	s.addKnownBoxSig(frame.Address, frame.BoxSig)
 }
 
-func (s *Service) addPeerAddress(address string) {
+func (s *Service) addPeerAddress(address string, nodeType string, peerID string) {
 	if address == "" || s.isSelfAddress(address) {
 		return
 	}
@@ -1540,6 +1616,10 @@ func (s *Service) addPeerAddress(address string) {
 
 	for _, peer := range s.peers {
 		if peer.Address == address {
+			s.peerTypes[address] = normalizePeerNodeType(nodeType)
+			if peerID != "" {
+				s.peerIDs[address] = peerID
+			}
 			return
 		}
 	}
@@ -1548,6 +1628,38 @@ func (s *Service) addPeerAddress(address string) {
 		ID:      fmt.Sprintf("peer-%d", len(s.peers)),
 		Address: address,
 	})
+	s.peerTypes[address] = normalizePeerNodeType(nodeType)
+	if peerID != "" {
+		s.peerIDs[address] = peerID
+	}
+}
+
+func normalizePeerNodeType(raw string) config.NodeType {
+	switch strings.TrimSpace(raw) {
+	case string(config.NodeTypeClient):
+		return config.NodeTypeClient
+	default:
+		return config.NodeTypeFull
+	}
+}
+
+func (s *Service) peerTypeForAddress(address string) config.NodeType {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.peerTypeForAddressLocked(address)
+}
+
+func (s *Service) peerTypeForAddressLocked(address string) config.NodeType {
+	if peerType, ok := s.peerTypes[address]; ok {
+		return peerType
+	}
+	return config.NodeTypeFull
+}
+
+func (s *Service) peerIdentityForAddress(address string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.peerIDs[address]
 }
 
 func (s *Service) addKnownIdentity(address string) {
@@ -1720,7 +1832,7 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 		return err
 	}
 	for _, peer := range peersFrame.Peers {
-		s.addPeerAddress(peer)
+		s.addPeerAddress(peer, "", "")
 	}
 
 	contactsFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "fetch_contacts"}, "contacts", false)
@@ -2120,6 +2232,9 @@ func (s *Service) removeSubscriberByID(recipient, id string) {
 }
 
 func (s *Service) externalListenAddress() string {
+	if !s.cfg.EffectiveListenerEnabled() {
+		return ""
+	}
 	if strings.HasPrefix(s.cfg.ListenAddress, ":") {
 		return "127.0.0.1" + s.cfg.ListenAddress
 	}

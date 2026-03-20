@@ -32,6 +32,8 @@ type Node struct {
 	IdentityPath     string
 	TrustStorePath   string
 	Type             NodeType
+	ListenerEnabled  bool
+	ListenerSet      bool
 	ClientVersion    string
 	MaxClockDrift    time.Duration
 	MaxOutgoingPeers int
@@ -53,11 +55,12 @@ const (
 
 func Default() Config {
 	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":64646")
-	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress))
+	nodeType := nodeTypeFromEnv()
+	listenerEnabled, listenerSet := listenerFromEnv()
+	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress, listenerSet, listenerEnabled, nodeType))
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
 	identityPath := envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress))
 	trustStorePath := envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress))
-	nodeType := nodeTypeFromEnv()
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
@@ -77,6 +80,8 @@ func Default() Config {
 			IdentityPath:     identityPath,
 			TrustStorePath:   trustStorePath,
 			Type:             nodeType,
+			ListenerEnabled:  listenerEnabled,
+			ListenerSet:      listenerSet,
 			ClientVersion:    wireClientVersion(CorsaVersion),
 			MaxClockDrift:    maxClockDrift,
 			MaxOutgoingPeers: maxOutgoingPeers,
@@ -100,6 +105,13 @@ func (n Node) ServiceList() []string {
 		services = append(services, "relay")
 	}
 	return services
+}
+
+func (n Node) EffectiveListenerEnabled() bool {
+	if n.ListenerSet {
+		return n.ListenerEnabled
+	}
+	return n.NormalizedType() != NodeTypeClient
 }
 
 func (n Node) EffectiveMaxOutgoingPeers() int {
@@ -143,7 +155,14 @@ func portSuffix(listenAddress string) string {
 	return port
 }
 
-func defaultAdvertiseAddress(listenAddress string) string {
+func defaultAdvertiseAddress(listenAddress string, listenerSet bool, listenerEnabled bool, nodeType NodeType) string {
+	effectiveListener := listenerEnabled
+	if !listenerSet {
+		effectiveListener = nodeType != NodeTypeClient
+	}
+	if !effectiveListener {
+		return ""
+	}
 	if strings.HasPrefix(listenAddress, ":") {
 		return "127.0.0.1" + listenAddress
 	}
@@ -179,6 +198,19 @@ func nodeTypeFromEnv() NodeType {
 		return NodeTypeClient
 	default:
 		return NodeTypeFull
+	}
+}
+
+func listenerFromEnv() (bool, bool) {
+	raw := strings.TrimSpace(os.Getenv("CORSA_LISTENER"))
+	if raw == "" {
+		return false, false
+	}
+	switch raw {
+	case "1", "true", "TRUE", "yes", "YES":
+		return true, true
+	default:
+		return false, true
 	}
 }
 
