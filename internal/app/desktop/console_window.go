@@ -97,16 +97,6 @@ func (c *ConsoleWindow) layout(gtx layout.Context) layout.Dimensions {
 					}
 					return c.layoutPeerHealthList(gtx, status.PeerHealth)
 				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layout.Spacer{Height: unit.Dp(12)}.Layout(gtx)
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(240)))
-						btn := material.Button(c.theme, &c.parent.rebuildTrustButton, c.parent.t("node.trust_rebuild"))
-						return btn.Layout(gtx)
-					})
-				}),
 			)
 		})
 	})

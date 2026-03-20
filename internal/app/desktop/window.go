@@ -42,7 +42,6 @@ type Window struct {
 	sendButton                widget.Clickable
 	syncButton                widget.Clickable
 	copyIdentityButton        widget.Clickable
-	rebuildTrustButton        widget.Clickable
 	languageToggle            widget.Clickable
 	languageOptions           map[string]*widget.Clickable
 	recipientButtons          map[string]*widget.Clickable
@@ -242,28 +241,6 @@ func (w *Window) handleActions(gtx layout.Context) {
 		}(recipient, peers)
 	}
 
-	for w.rebuildTrustButton.Clicked(gtx) {
-		w.sendStatus = w.t("status.trust_rebuilding")
-
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			count, err := w.client.RebuildTrust(ctx)
-			cancel()
-
-			w.mu.Lock()
-			if err != nil {
-				w.sendStatus = w.t("status.trust_failed", err.Error())
-			} else {
-				w.sendStatus = w.t("status.trust_rebuilt", count)
-			}
-			w.mu.Unlock()
-
-			w.refreshStatus()
-			if w.window != nil {
-				w.window.Invalidate()
-			}
-		}()
-	}
 }
 
 func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
