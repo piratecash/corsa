@@ -742,17 +742,19 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
-	s.subs[recipient][subID] = &subscriber{
+	sub := &subscriber{
 		id:        subID,
 		recipient: recipient,
 		conn:      conn,
 	}
-	log.Printf("node: subscribe_inbox recipient=%s subscriber=%s active=%d", recipient, subID, len(s.subs[recipient]))
+	s.subs[recipient][subID] = sub
+	count := len(s.subs[recipient])
+	s.mu.Unlock()
+	log.Printf("node: subscribe_inbox recipient=%s subscriber=%s active=%d", recipient, subID, count)
+	go s.pushBacklogToSubscriber(sub)
 
 	return protocol.Frame{
 		Type:       "subscribed",
@@ -760,7 +762,7 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 		Recipient:  recipient,
 		Subscriber: subID,
 		Status:     "ok",
-		Count:      len(s.subs[recipient]),
+		Count:      count,
 	}
 }
 
@@ -1490,6 +1492,33 @@ func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
 
 	for _, sub := range subs {
 		go s.writePushFrame(sub, frame)
+	}
+}
+
+func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
+	if sub == nil || strings.TrimSpace(sub.recipient) == "" {
+		return
+	}
+
+	inbox := s.fetchInboxFrame("dm", sub.recipient)
+	for _, item := range inbox.Messages {
+		msgFrame := item
+		s.writePushFrame(sub, protocol.Frame{
+			Type:      "push_message",
+			Topic:     "dm",
+			Recipient: sub.recipient,
+			Item:      &msgFrame,
+		})
+	}
+
+	receipts := s.fetchDeliveryReceiptsFrame(sub.recipient)
+	for _, item := range receipts.Receipts {
+		receiptFrame := item
+		s.writePushFrame(sub, protocol.Frame{
+			Type:      "push_delivery_receipt",
+			Recipient: sub.recipient,
+			Receipt:   &receiptFrame,
+		})
 	}
 }
 

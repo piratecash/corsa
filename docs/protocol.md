@@ -255,6 +255,7 @@ Fields:
 Routing notes:
 
 - direct messages and delivery receipts prefer active healthy sessions
+- when a peer subscribes to `dm` inbox updates, the serving node should immediately push already stored backlog for that recipient on the same session
 - if no suitable session exists, the frame is queued locally instead of fan-out dialing every known peer
 - queued frames are retried after reconnect and dropped only after the local queue policy expires them
 - queued local delivery state survives node restart via the persisted queue-state file
@@ -1143,6 +1144,7 @@ Fields:
 Правила маршрутизации:
 
 - direct messages и delivery receipts в первую очередь идут через активные healthy session
+- когда peer подписывается на обновления `dm` inbox, обслуживающая нода должна сразу отпушить уже накопленный backlog для этого recipient в той же session
 - если подходящей session нет, frame ставится в локальную очередь вместо fan-out dial по всем известным peer
 - queued frames повторно отправляются после reconnect и удаляются только когда локальная queue policy считает их просроченными
 - локальное состояние этой очереди сохраняется в queue-state файле и переживает рестарт ноды

@@ -1096,6 +1096,58 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	})
 }
 
+func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
+	t.Parallel()
+
+	addressFull := freeAddress(t)
+	addressClient := freeAddress(t)
+
+	idClient, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient identity failed: %v", err)
+	}
+
+	fullNode, stopFull := startTestNode(t, config.Node{
+		ListenAddress:    addressFull,
+		AdvertiseAddress: normalizeAddress(addressFull),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopFull()
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		fullNode.identity,
+		idClient.Address,
+		identity.BoxPublicKeyBase64(idClient.BoxPublicKey),
+		"backlog-secret",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	frames := exchangeFrames(t, fullNode.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		sendMessageFrame("dm", "backlog-dm-1", fullNode.Address(), idClient.Address, "sender-delete", ts, 0, ciphertext),
+	)
+	if frames[1].Type != "message_stored" {
+		t.Fatalf("unexpected full-node direct store response: %#v", frames[1])
+	}
+
+	clientNode, stopClient := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    addressClient,
+		AdvertiseAddress: "",
+		BootstrapPeers:   []string{normalizeAddress(addressFull)},
+		Type:             config.NodeTypeClient,
+	}, idClient)
+	defer stopClient()
+
+	waitForCondition(t, 8*time.Second, func() bool {
+		reply := clientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: clientNode.Address()})
+		return reply.Type == "inbox" && len(reply.Messages) == 1 && reply.Messages[0].ID == "backlog-dm-1"
+	})
+}
+
 func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	t.Parallel()
 
