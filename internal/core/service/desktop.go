@@ -170,7 +170,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 
 	welcome, err := c.localRequestFrame(protocol.Frame{
 		Type:          "hello",
-		Version:       1,
+		Version:       config.ProtocolVersion,
 		Client:        "desktop",
 		ClientVersion: strings.ReplaceAll(c.appCfg.Version, " ", "-"),
 	})
@@ -753,7 +753,7 @@ func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind s
 
 	line, err := protocol.MarshalFrameLine(protocol.Frame{
 		Type:          "hello",
-		Version:       1,
+		Version:       config.ProtocolVersion,
 		Client:        clientKind,
 		ClientVersion: strings.ReplaceAll(c.appCfg.Version, " ", "-"),
 	})
@@ -769,6 +769,13 @@ func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind s
 	if err != nil {
 		_ = conn.Close()
 		return nil, nil, protocol.Frame{}, err
+	}
+	if welcome.Type == "error" {
+		_ = conn.Close()
+		if welcome.Code != "" {
+			return nil, nil, protocol.Frame{}, protocol.ErrorFromCode(welcome.Code)
+		}
+		return nil, nil, protocol.Frame{}, protocol.ErrProtocol
 	}
 
 	return conn, reader, welcome, nil

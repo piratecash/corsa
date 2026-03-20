@@ -28,7 +28,7 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	defer stop()
 
 	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 		protocol.Frame{Type: "get_peers"},
 		sendMessageFrame("global", "msg-1", svc.Address(), "*", "immutable", ts, 0, "hello"),
 		protocol.Frame{Type: "fetch_messages", Topic: "global"},
@@ -50,6 +50,29 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	assertMessageFrame(t, frames[4], "inbox", "global", 1, protocol.MessageFrame{
 		ID: "msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello",
 	})
+}
+
+func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 0, Client: "test", ClientVersion: config.CorsaWireVersion},
+	)
+
+	if len(frames) != 1 {
+		t.Fatalf("unexpected frame count: %#v", frames)
+	}
+	if got := frames[0]; got.Type != "error" || got.Code != protocol.ErrCodeIncompatibleProtocol {
+		t.Fatalf("unexpected incompatible protocol reply: %#v", got)
+	}
 }
 
 func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {

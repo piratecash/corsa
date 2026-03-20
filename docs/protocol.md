@@ -54,7 +54,7 @@ Primary JSON desktop request:
 Fields:
 
 - `type` — required; frame kind, here always `hello`
-- `version` — required; protocol frame version
+- `version` — required; sender protocol version
 - `client` — required; caller kind such as `desktop` or `node`
 - `client_version` — optional; app/client build version in wire form
 
@@ -85,7 +85,7 @@ Primary JSON node-to-node request:
 Fields:
 
 - `type` — required; frame kind, here `hello`
-- `version` — required; protocol frame version
+- `version` — required; sender protocol version
 - `client` — required; caller kind, here `node`
 - `listen` — optional; address this node advertises to peers
 - `node_type` — optional; node role, currently `full` or `client`
@@ -102,6 +102,7 @@ Response:
 {
   "type": "welcome",
   "version": 1,
+  "minimum_protocol_version": 1,
   "node": "corsa",
   "network": "gazeta-devnet",
   "node_type": "full",
@@ -123,7 +124,8 @@ Response:
 Fields:
 
 - `type` — required; frame kind, here `welcome`
-- `version` — required; protocol frame version
+- `version` — required; current protocol version supported by the responder
+- `minimum_protocol_version` — required; minimum protocol version accepted by the responder
 - `node` — required; server implementation name
 - `network` — required; logical network name
 - `node_type` — optional; responder role
@@ -142,6 +144,12 @@ Role rules:
 - future mobile/light clients should use `client`
 - current Corsa version: see `internal/core/config.CorsaVersion`
 - wire form used in handshake: see `internal/core/config.CorsaWireVersion`
+
+Handshake compatibility rule:
+
+- caller sends only its current `version` in `hello`
+- responder rejects the handshake if caller `version` is lower than responder `minimum_protocol_version`
+- reject reply uses `type=error`, `code=incompatible-protocol-version`, and includes responder `version` plus `minimum_protocol_version`
 
 ### Peer sync
 
@@ -881,7 +889,7 @@ Fields:
 Поля:
 
 - `type` — обязательное; тип кадра, здесь всегда `hello`
-- `version` — обязательное; версия формата кадра
+- `version` — обязательное; текущая версия протокола у отправителя
 - `client` — обязательное; тип вызывающей стороны, например `desktop` или `node`
 - `client_version` — опциональное; версия приложения в wire-форме
 
@@ -912,7 +920,7 @@ Fields:
 Поля:
 
 - `type` — обязательное; тип кадра, здесь `hello`
-- `version` — обязательное; версия формата кадра
+- `version` — обязательное; текущая версия протокола у отправителя
 - `client` — обязательное; тип вызывающей стороны, здесь `node`
 - `listen` — опциональное; адрес, который узел рекламирует пирам
 - `node_type` — опциональное; роль узла, сейчас `full` или `client`
@@ -929,6 +937,7 @@ Fields:
 {
   "type": "welcome",
   "version": 1,
+  "minimum_protocol_version": 1,
   "node": "corsa",
   "network": "gazeta-devnet",
   "node_type": "full",
@@ -950,7 +959,8 @@ Fields:
 Поля:
 
 - `type` — обязательное; тип кадра, здесь `welcome`
-- `version` — обязательное; версия формата кадра
+- `version` — обязательное; текущая версия протокола, которую поддерживает отвечающий узел
+- `minimum_protocol_version` — обязательное; минимальная версия протокола, которую принимает отвечающий узел
 - `node` — обязательное; имя серверной реализации
 - `network` — обязательное; логическое имя сети
 - `node_type` — опциональное; роль отвечающего узла
@@ -969,6 +979,12 @@ Fields:
 - будущий mobile/light client должен использовать `client`
 - текущая версия Corsa: см. `internal/core/config.CorsaVersion`
 - wire-форма в handshake: см. `internal/core/config.CorsaWireVersion`
+
+Правило совместимости handshake:
+
+- вызывающая сторона отправляет в `hello` только свою текущую `version`
+- отвечающий узел делает reject, если `version` вызывающей стороны ниже его `minimum_protocol_version`
+- reject-ответ использует `type=error`, `code=incompatible-protocol-version` и содержит `version` плюс `minimum_protocol_version` отвечающего узла
 
 ### Peer sync
 

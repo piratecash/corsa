@@ -21,6 +21,7 @@ const (
 	ErrCodeUnknownMessageID           = "unknown-message-id"
 	ErrCodeInvalidDirectMessageSig    = "invalid-direct-message-signature"
 	ErrCodeMessageTimestampOutOfRange = "message-timestamp-out-of-range"
+	ErrCodeIncompatibleProtocol       = "incompatible-protocol-version"
 	ErrCodeRead                       = "read"
 )
 
@@ -43,6 +44,7 @@ var (
 	ErrUnknownMessageID           = errors.New(ErrCodeUnknownMessageID)
 	ErrInvalidDirectMessageSig    = errors.New(ErrCodeInvalidDirectMessageSig)
 	ErrMessageTimestampOutOfRange = errors.New(ErrCodeMessageTimestampOutOfRange)
+	ErrIncompatibleProtocol       = errors.New(ErrCodeIncompatibleProtocol)
 	ErrRead                       = errors.New(ErrCodeRead)
 )
 
@@ -84,6 +86,8 @@ func ErrorCode(err error) string {
 		return ErrCodeInvalidDirectMessageSig
 	case errors.Is(err, ErrMessageTimestampOutOfRange):
 		return ErrCodeMessageTimestampOutOfRange
+	case errors.Is(err, ErrIncompatibleProtocol):
+		return ErrCodeIncompatibleProtocol
 	case errors.Is(err, ErrRead):
 		return ErrCodeRead
 	default:
@@ -127,6 +131,8 @@ func ErrorFromCode(code string) error {
 		return ErrInvalidDirectMessageSig
 	case ErrCodeMessageTimestampOutOfRange:
 		return ErrMessageTimestampOutOfRange
+	case ErrCodeIncompatibleProtocol:
+		return ErrIncompatibleProtocol
 	case ErrCodeRead:
 		return ErrRead
 	default:

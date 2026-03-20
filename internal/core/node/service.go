@@ -306,6 +306,16 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"})
 		return true
 	case "hello":
+		if err := validateProtocolHandshake(frame); err != nil {
+			s.writeJSONFrame(conn, protocol.Frame{
+				Type:                   "error",
+				Code:                   protocol.ErrCodeIncompatibleProtocol,
+				Error:                  err.Error(),
+				Version:                config.ProtocolVersion,
+				MinimumProtocolVersion: config.MinimumProtocolVersion,
+			})
+			return true
+		}
 		s.learnPeerFromFrame(conn.RemoteAddr().String(), frame)
 		s.registerHelloRoute(conn, frame)
 		if frame.Client == "node" || frame.Client == "desktop" {
@@ -376,6 +386,15 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 	switch frame.Type {
 	case "hello":
+		if err := validateProtocolHandshake(frame); err != nil {
+			return protocol.Frame{
+				Type:                   "error",
+				Code:                   protocol.ErrCodeIncompatibleProtocol,
+				Error:                  err.Error(),
+				Version:                config.ProtocolVersion,
+				MinimumProtocolVersion: config.MinimumProtocolVersion,
+			}
+		}
 		return s.welcomeFrame()
 	case "ping":
 		return protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"}
@@ -430,18 +449,26 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 
 func (s *Service) welcomeFrame() protocol.Frame {
 	return protocol.Frame{
-		Type:          "welcome",
-		Version:       1,
-		Node:          "corsa",
-		Network:       "gazeta-devnet",
-		NodeType:      string(s.NodeType()),
-		ClientVersion: s.ClientVersion(),
-		Services:      s.Services(),
-		Address:       s.identity.Address,
-		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(s.identity),
+		Type:                   "welcome",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Node:                   "corsa",
+		Network:                "gazeta-devnet",
+		NodeType:               string(s.NodeType()),
+		ClientVersion:          s.ClientVersion(),
+		Services:               s.Services(),
+		Address:                s.identity.Address,
+		PubKey:                 identity.PublicKeyBase64(s.identity.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(s.identity),
 	}
+}
+
+func validateProtocolHandshake(frame protocol.Frame) error {
+	if frame.Version < config.MinimumProtocolVersion {
+		return fmt.Errorf("protocol version %d is too old; supported %d..%d", frame.Version, config.MinimumProtocolVersion, config.ProtocolVersion)
+	}
+	return nil
 }
 
 func (s *Service) peersFrame() protocol.Frame {
@@ -1420,7 +1447,7 @@ func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryRec
 func (s *Service) nodeHelloJSONLine() string {
 	line, err := protocol.MarshalFrameLine(protocol.Frame{
 		Type:          "hello",
-		Version:       1,
+		Version:       config.ProtocolVersion,
 		Client:        "node",
 		Listen:        s.cfg.AdvertiseAddress,
 		NodeType:      string(s.NodeType()),
