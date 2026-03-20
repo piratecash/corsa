@@ -129,11 +129,19 @@ jobs:
           make build-node-linux-amd64
           make build-desktop-linux-amd64
 
+      - name: Package Linux artifacts
+        shell: bash
+        run: |
+          mkdir -p release
+          tar -cjf release/corsa-linux-amd64.tar.bz2 -C dist \
+            corsa-node-linux-amd64 \
+            corsa-desktop-linux-amd64
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: corsa-linux
-          path: dist/*
+          path: release/corsa-linux-amd64.tar.bz2
           if-no-files-found: error
 
   build-platforms:
@@ -175,11 +183,33 @@ jobs:
         shell: bash
         run: ${{ matrix.build_cmds }}
 
+      - name: Package macOS artifacts
+        if: startsWith(matrix.name, 'macos-')
+        shell: bash
+        run: |
+          mkdir -p release
+          if [ "${{ matrix.name }}" = "macos-arm64" ]; then
+            tar -cjf release/corsa-darwin-arm64.tar.bz2 -C dist \
+              corsa-node-darwin-arm64 \
+              corsa-desktop-darwin-arm64
+          else
+            tar -cjf release/corsa-darwin-amd64.tar.bz2 -C dist \
+              corsa-node-darwin-amd64 \
+              corsa-desktop-darwin-amd64
+          fi
+
+      - name: Package Windows artifacts
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          mkdir -p release
+          powershell -Command "Compress-Archive -Path dist/corsa-node-windows-amd64.exe,dist/corsa-desktop-windows-amd64.exe -DestinationPath release/corsa-windows-amd64.zip"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: corsa-${{ matrix.name }}
-          path: dist/*
+          path: release/*
           if-no-files-found: error
 
   release:
