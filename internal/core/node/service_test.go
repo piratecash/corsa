@@ -1138,6 +1138,7 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 		TTLSeconds: 0,
 		Payload:    []byte("ciphertext"),
 	}
+	svc.topics["dm"] = append(svc.topics["dm"], envelope)
 	svc.trackRelayMessage(envelope)
 	attempts := svc.noteRelayAttempt(relayMessageKey(envelope.ID), time.Now().UTC())
 	if attempts != 1 {
@@ -1164,6 +1165,9 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	}
 	if outbound, ok := reloaded.outbound["persist-msg-1"]; !ok || outbound.Status != "queued" {
 		t.Fatalf("expected persisted outbound queued state, got %#v", reloaded.outbound)
+	}
+	if len(reloaded.topics["dm"]) != 1 || reloaded.topics["dm"][0].ID != protocol.MessageID("persist-msg-1") {
+		t.Fatalf("expected persisted relay message payload, got %#v", reloaded.topics["dm"])
 	}
 }
 
@@ -1249,6 +1253,52 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 	}
 	if got["expired-1"].Status != "expired" || got["expired-1"].Error == "" {
 		t.Fatalf("expected expired status, got %#v", got["expired-1"])
+	}
+}
+
+func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate test identity: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+	}, id)
+
+	receipt := protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID("receipt-msg-1"),
+		Sender:      "alice",
+		Recipient:   "bob",
+		Status:      protocol.ReceiptStatusSeen,
+		DeliveredAt: time.Now().UTC(),
+	}
+	svc.trackRelayReceipt(receipt)
+
+	svc.mu.RLock()
+	if _, ok := svc.relayRetry[relayReceiptKey(receipt)]; !ok {
+		svc.mu.RUnlock()
+		t.Fatalf("expected receipt relay retry state before clear")
+	}
+	svc.mu.RUnlock()
+
+	svc.clearRelayRetryForOutbound(protocol.Frame{
+		Type:      "send_delivery_receipt",
+		ID:        string(receipt.MessageID),
+		Recipient: receipt.Recipient,
+		Status:    receipt.Status,
+	})
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	if _, ok := svc.relayRetry[relayReceiptKey(receipt)]; ok {
+		t.Fatalf("expected receipt relay retry state to be cleared")
 	}
 }
 

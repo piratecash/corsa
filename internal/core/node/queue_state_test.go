@@ -53,6 +53,27 @@ func TestSaveAndLoadQueueStateRoundTrip(t *testing.T) {
 				Attempts:    3,
 			},
 		},
+		RelayMessages: []protocol.Envelope{
+			{
+				ID:         protocol.MessageID("msg-1"),
+				Topic:      "dm",
+				Sender:     "sender-1",
+				Recipient:  "recipient-1",
+				Flag:       protocol.MessageFlag("sender-delete"),
+				TTLSeconds: 0,
+				Payload:    []byte("ciphertext"),
+				CreatedAt:  now,
+			},
+		},
+		RelayReceipts: []protocol.DeliveryReceipt{
+			{
+				MessageID:   protocol.MessageID("msg-2"),
+				Sender:      "sender-2",
+				Recipient:   "recipient-2",
+				Status:      protocol.ReceiptStatusDelivered,
+				DeliveredAt: now,
+			},
+		},
 		OutboundState: map[string]outboundDelivery{
 			"msg-1": {
 				MessageID:     "msg-1",
@@ -98,6 +119,12 @@ func TestSaveAndLoadQueueStateRoundTrip(t *testing.T) {
 	}
 	if outbound.Status != "retrying" || outbound.Retries != 3 {
 		t.Fatalf("unexpected outbound state: %#v", outbound)
+	}
+	if len(got.RelayMessages) != 1 || got.RelayMessages[0].ID != protocol.MessageID("msg-1") {
+		t.Fatalf("unexpected relay messages: %#v", got.RelayMessages)
+	}
+	if len(got.RelayReceipts) != 1 || got.RelayReceipts[0].MessageID != protocol.MessageID("msg-2") {
+		t.Fatalf("unexpected relay receipts: %#v", got.RelayReceipts)
 	}
 }
 

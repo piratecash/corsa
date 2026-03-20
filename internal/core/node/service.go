@@ -176,6 +176,23 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		}
 	}
 
+	topics := make(map[string][]protocol.Envelope)
+	seen := make(map[string]struct{})
+	for _, msg := range queueState.RelayMessages {
+		topics[msg.Topic] = append(topics[msg.Topic], msg)
+		if msg.ID != "" {
+			seen[string(msg.ID)] = struct{}{}
+		}
+	}
+	receipts := make(map[string][]protocol.DeliveryReceipt)
+	seenReceipts := make(map[string]struct{})
+	for _, receipt := range queueState.RelayReceipts {
+		receipts[receipt.Recipient] = append(receipts[receipt.Recipient], receipt)
+		key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+		seenReceipts[key] = struct{}{}
+	}
+	sanitizeRelayState(queueState.RelayRetry, queueState.RelayMessages, queueState.RelayReceipts)
+
 	return &Service{
 		identity:     id,
 		cfg:          cfg,
@@ -185,11 +202,11 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		boxKeys:      boxKeys,
 		pubKeys:      pubKeys,
 		boxSigs:      boxSigs,
-		topics:       make(map[string][]protocol.Envelope),
-		receipts:     make(map[string][]protocol.DeliveryReceipt),
+		topics:       topics,
+		receipts:     receipts,
 		notices:      make(map[string]gazeta.Notice),
-		seen:         make(map[string]struct{}),
-		seenReceipts: make(map[string]struct{}),
+		seen:         seen,
+		seenReceipts: seenReceipts,
 		subs:         make(map[string]map[string]*subscriber),
 		sessions:     make(map[string]*peerSession),
 		health:       make(map[string]*peerHealth),
@@ -1289,6 +1306,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				s.markPeerDisconnected(session.address, err)
 				return err
 			}
+			s.clearRelayRetryForOutbound(outbound)
 		}
 	}
 }
@@ -2461,6 +2479,20 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 	for key, item := range s.relayRetry {
 		relayRetry[key] = item
 	}
+	relayMessages := make([]protocol.Envelope, 0, len(s.topics["dm"]))
+	for _, msg := range s.topics["dm"] {
+		if _, ok := relayRetry[relayMessageKey(msg.ID)]; ok {
+			relayMessages = append(relayMessages, msg)
+		}
+	}
+	relayReceipts := make([]protocol.DeliveryReceipt, 0)
+	for _, list := range s.receipts {
+		for _, receipt := range list {
+			if _, ok := relayRetry[relayReceiptKey(receipt)]; ok {
+				relayReceipts = append(relayReceipts, receipt)
+			}
+		}
+	}
 	outbound := make(map[string]outboundDelivery, len(s.outbound))
 	for key, item := range s.outbound {
 		outbound[key] = item
@@ -2469,6 +2501,8 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 	return queueStateFile{
 		Pending:       pending,
 		RelayRetry:    relayRetry,
+		RelayMessages: relayMessages,
+		RelayReceipts: relayReceipts,
 		OutboundState: outbound,
 	}
 }
@@ -2477,6 +2511,21 @@ func (s *Service) persistQueueState(snapshot queueStateFile) {
 	path := s.cfg.EffectiveQueueStatePath()
 	if err := saveQueueState(path, snapshot); err != nil {
 		log.Printf("node: queue state save failed path=%s err=%v", path, err)
+	}
+}
+
+func sanitizeRelayState(items map[string]relayAttempt, messages []protocol.Envelope, receipts []protocol.DeliveryReceipt) {
+	valid := make(map[string]struct{}, len(messages)+len(receipts))
+	for _, msg := range messages {
+		valid[relayMessageKey(msg.ID)] = struct{}{}
+	}
+	for _, receipt := range receipts {
+		valid[relayReceiptKey(receipt)] = struct{}{}
+	}
+	for key := range items {
+		if _, ok := valid[key]; !ok {
+			delete(items, key)
+		}
 	}
 }
 
@@ -2551,6 +2600,28 @@ func (s *Service) clearOutboundQueued(messageID string) {
 		return
 	}
 	delete(s.outbound, messageID)
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
+	if frame.Type != "send_delivery_receipt" || frame.ID == "" || frame.Recipient == "" || frame.Status == "" {
+		return
+	}
+
+	key := relayReceiptKey(protocol.DeliveryReceipt{
+		MessageID: protocol.MessageID(frame.ID),
+		Recipient: frame.Recipient,
+		Status:    frame.Status,
+	})
+
+	s.mu.Lock()
+	if _, ok := s.relayRetry[key]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.relayRetry, key)
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)

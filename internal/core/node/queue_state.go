@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"corsa/internal/core/protocol"
 )
 
 type queueStateFile struct {
 	Pending       map[string][]pendingFrame   `json:"pending,omitempty"`
 	RelayRetry    map[string]relayAttempt     `json:"relay_retry,omitempty"`
+	RelayMessages []protocol.Envelope         `json:"relay_messages,omitempty"`
+	RelayReceipts []protocol.DeliveryReceipt  `json:"relay_receipts,omitempty"`
 	OutboundState map[string]outboundDelivery `json:"outbound_state,omitempty"`
 }
 
