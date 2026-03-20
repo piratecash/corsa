@@ -30,6 +30,7 @@ type Service struct {
 	known    map[string]struct{}
 	boxKeys  map[string]string
 	pubKeys  map[string]string
+	boxSigs  map[string]string
 	topics   map[string][]protocol.Envelope
 	receipts map[string][]protocol.DeliveryReceipt
 	notices  map[string]gazeta.Notice
@@ -93,10 +94,12 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	known := map[string]struct{}{}
 	boxKeys := map[string]string{}
 	pubKeys := map[string]string{}
+	boxSigs := map[string]string{}
 	for address, contact := range trust.trustedContacts() {
 		known[address] = struct{}{}
 		boxKeys[address] = contact.BoxKey
 		pubKeys[address] = contact.PubKey
+		boxSigs[address] = contact.BoxSignature
 	}
 
 	return &Service{
@@ -107,6 +110,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		known:    known,
 		boxKeys:  boxKeys,
 		pubKeys:  pubKeys,
+		boxSigs:  boxSigs,
 		topics:   make(map[string][]protocol.Envelope),
 		receipts: make(map[string][]protocol.DeliveryReceipt),
 		notices:  make(map[string]gazeta.Notice),
@@ -283,6 +287,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "fetch_contacts":
 		s.writeJSONFrame(conn, s.contactsFrame())
 		return true
+	case "fetch_trusted_contacts":
+		s.writeJSONFrame(conn, s.trustedContactsFrame())
+		return true
 	case "import_contacts":
 		s.writeJSONFrame(conn, s.importContactsFrame(frame.Contacts))
 		return true
@@ -337,6 +344,8 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.identitiesFrame()
 	case "fetch_contacts":
 		return s.contactsFrame()
+	case "fetch_trusted_contacts":
+		return s.trustedContactsFrame()
 	case "import_contacts":
 		return s.importContactsFrame(frame.Contacts)
 	case "send_message":
@@ -425,15 +434,41 @@ func (s *Service) contactsFrame() protocol.Frame {
 	contacts := make([]protocol.ContactFrame, 0, len(s.boxKeys))
 	for address, boxKey := range s.boxKeys {
 		pubKey := s.pubKeys[address]
-		boxSig := ""
-		if contact, ok := s.trust.trustedContacts()[address]; ok {
-			boxSig = contact.BoxSignature
+		contacts = append(contacts, protocol.ContactFrame{
+			Address: address,
+			PubKey:  pubKey,
+			BoxKey:  boxKey,
+			BoxSig:  s.boxSigs[address],
+		})
+	}
+	s.mu.RUnlock()
+
+	return protocol.Frame{
+		Type:     "contacts",
+		Count:    len(contacts),
+		Contacts: contacts,
+	}
+}
+
+func (s *Service) trustedContactsFrame() protocol.Frame {
+	trusted := s.trust.trustedContacts()
+
+	s.mu.RLock()
+	contacts := make([]protocol.ContactFrame, 0, len(trusted))
+	for address, contact := range trusted {
+		pubKey := s.pubKeys[address]
+		if pubKey == "" {
+			pubKey = contact.PubKey
+		}
+		boxKey := s.boxKeys[address]
+		if boxKey == "" {
+			boxKey = contact.BoxKey
 		}
 		contacts = append(contacts, protocol.ContactFrame{
 			Address: address,
 			PubKey:  pubKey,
 			BoxKey:  boxKey,
-			BoxSig:  boxSig,
+			BoxSig:  contact.BoxSignature,
 		})
 	}
 	s.mu.RUnlock()
@@ -892,7 +927,10 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(contactsReply))
 		if err == nil {
 			for _, contact := range frame.Contacts {
-				s.trustContact(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig, "contacts")
+				s.addKnownIdentity(contact.Address)
+				s.addKnownBoxKey(contact.Address, contact.BoxKey)
+				s.addKnownPubKey(contact.Address, contact.PubKey)
+				s.addKnownBoxSig(contact.Address, contact.BoxSig)
 			}
 		}
 	}
@@ -1300,11 +1338,16 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 	if frame.Address != "" {
 		s.addKnownIdentity(frame.Address)
 	}
-	s.trustContact(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig, "hello")
+	s.addKnownBoxKey(frame.Address, frame.BoxKey)
+	s.addKnownPubKey(frame.Address, frame.PubKey)
+	s.addKnownBoxSig(frame.Address, frame.BoxSig)
 }
 
 func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
-	s.trustContact(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig, "welcome")
+	s.addKnownIdentity(frame.Address)
+	s.addKnownBoxKey(frame.Address, frame.BoxKey)
+	s.addKnownPubKey(frame.Address, frame.PubKey)
+	s.addKnownBoxSig(frame.Address, frame.BoxSig)
 }
 
 func (s *Service) addPeerAddress(address string) {
@@ -1355,6 +1398,16 @@ func (s *Service) addKnownPubKey(address, pubKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pubKeys[address] = pubKey
+}
+
+func (s *Service) addKnownBoxSig(address, boxSig string) {
+	if address == "" || boxSig == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.boxSigs[address] = boxSig
 }
 
 func (s *Service) emitLocalChange() {
@@ -1488,7 +1541,10 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 		return err
 	}
 	for _, contact := range contactsFrame.Contacts {
-		s.trustContact(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig, "contacts")
+		s.addKnownIdentity(contact.Address)
+		s.addKnownBoxKey(contact.Address, contact.BoxKey)
+		s.addKnownPubKey(contact.Address, contact.PubKey)
+		s.addKnownBoxSig(contact.Address, contact.BoxSig)
 	}
 	return nil
 }

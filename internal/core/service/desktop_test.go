@@ -138,6 +138,35 @@ func TestDecryptDirectMessages(t *testing.T) {
 	}
 }
 
+func TestIncomingContactsToTrustIncludesUnknownIncomingSender(t *testing.T) {
+	t.Parallel()
+
+	got := incomingContactsToTrust(
+		"me",
+		map[string]Contact{
+			"trusted": {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
+		},
+		map[string]Contact{
+			"alice": {BoxKey: "alice-box", PubKey: "alice-pub", BoxSignature: "alice-sig"},
+			"trusted": {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
+			"bob": {BoxKey: "bob-box", PubKey: "bob-pub"},
+		},
+		[]DirectMessage{
+			{Sender: "alice", Recipient: "me", Body: "hello"},
+			{Sender: "trusted", Recipient: "me", Body: "known"},
+			{Sender: "bob", Recipient: "me", Body: "missing signature"},
+			{Sender: "me", Recipient: "alice", Body: "outgoing"},
+		},
+	)
+
+	want := []protocol.ContactFrame{
+		{Address: "alice", PubKey: "alice-pub", BoxKey: "alice-box", BoxSig: "alice-sig"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected contacts to trust: got %#v want %#v", got, want)
+	}
+}
+
 func mustTime(t *testing.T, value string) time.Time {
 	t.Helper()
 

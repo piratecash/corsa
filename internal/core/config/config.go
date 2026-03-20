@@ -42,8 +42,8 @@ type Config struct {
 }
 
 const (
-	CorsaVersion     = "0.8 alpha"
-	CorsaWireVersion = "0.8-alpha"
+	CorsaVersion     = "0.9 alpha"
+	CorsaWireVersion = "0.9-alpha"
 )
 
 func Default() Config {

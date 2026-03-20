@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -180,7 +181,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		status.CheckedAt = time.Now()
 		return status
 	}
-	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
@@ -238,6 +239,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	peers := peersReply.Peers
 	ids := idsReply.Identities
 	contacts := contactsFromFrame(contactsReply)
+	decryptContacts := contacts
 	messages := messageRecordsFromFrames(messagesReply.Messages)
 	directMessages := messageRecordsFromFrames(directMessagesReply.Messages)
 	messageIDs := messageIDsReply.IDs
@@ -250,11 +252,17 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	if missing := missingDirectContacts(c.id.Address, contacts, directMessages); len(missing) > 0 {
 		refreshedContactsReply, refreshErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
 		if refreshErr == nil {
-			contacts = contactsFromFrame(refreshedContactsReply)
+			decryptContacts = contactsFromFrame(refreshedContactsReply)
 		}
 	}
 
-	decryptedDirectMessages := decryptDirectMessages(c.id, contacts, directMessages, deliveryReceipts)
+	decryptedDirectMessages := decryptDirectMessages(c.id, decryptContacts, directMessages, deliveryReceipts)
+	if imported := c.importIncomingContacts(contacts, decryptContacts, decryptedDirectMessages); imported > 0 {
+		trustedContactsReply, trustedErr := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+		if trustedErr == nil {
+			contacts = contactsFromFrame(trustedContactsReply)
+		}
+	}
 
 	status.Connected = true
 	status.KnownIDs = ids
@@ -270,6 +278,56 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Gazeta = notices
 	status.CheckedAt = time.Now()
 	return status
+}
+
+func (c *DesktopClient) importIncomingContacts(trustedContacts, decryptContacts map[string]Contact, messages []DirectMessage) int {
+	contacts := incomingContactsToTrust(c.id.Address, trustedContacts, decryptContacts, messages)
+	if len(contacts) == 0 {
+		return 0
+	}
+
+	reply, err := c.localRequestFrame(protocol.Frame{
+		Type:     "import_contacts",
+		Contacts: contacts,
+	})
+	if err != nil {
+		return 0
+	}
+	return reply.Count
+}
+
+func incomingContactsToTrust(self string, trustedContacts, decryptContacts map[string]Contact, messages []DirectMessage) []protocol.ContactFrame {
+	toImport := make(map[string]protocol.ContactFrame)
+
+	for _, message := range messages {
+		if message.Recipient != self || message.Sender == self {
+			continue
+		}
+		if _, ok := trustedContacts[message.Sender]; ok {
+			continue
+		}
+		contact, ok := decryptContacts[message.Sender]
+		if !ok || contact.BoxKey == "" || contact.PubKey == "" || contact.BoxSignature == "" {
+			continue
+		}
+		toImport[message.Sender] = protocol.ContactFrame{
+			Address: message.Sender,
+			PubKey:  contact.PubKey,
+			BoxKey:  contact.BoxKey,
+			BoxSig:  contact.BoxSignature,
+		}
+	}
+
+	contacts := make([]protocol.ContactFrame, 0, len(toImport))
+	addresses := make([]string, 0, len(toImport))
+	for address := range toImport {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	for _, address := range addresses {
+		contacts = append(contacts, toImport[address])
+	}
+	return contacts
 }
 
 func (c *DesktopClient) FetchMessageIDs(ctx context.Context, topic string) ([]string, error) {
@@ -477,15 +535,9 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 		return fmt.Errorf("recipient and message are required")
 	}
 
-	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+	recipient, err := c.ensureRecipientContact(ctx, to)
 	if err != nil {
 		return err
-	}
-	contacts := contactsFromFrame(contactsReply)
-
-	recipient, ok := contacts[to]
-	if !ok || recipient.BoxKey == "" {
-		return fmt.Errorf("recipient box key is unknown")
 	}
 
 	ciphertext, err := directmsg.EncryptForParticipants(c.id, to, recipient.BoxKey, body)
@@ -519,6 +571,57 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 	}
 
 	return fmt.Errorf("unexpected send reply: %s", reply.Type)
+}
+
+func (c *DesktopClient) ensureRecipientContact(ctx context.Context, recipient string) (Contact, error) {
+	trustedReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	if err != nil {
+		return Contact{}, err
+	}
+	trustedContacts := contactsFromFrame(trustedReply)
+	if contact, ok := trustedContacts[recipient]; ok && contact.BoxKey != "" {
+		return contact, nil
+	}
+
+	networkReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+	if err != nil {
+		return Contact{}, err
+	}
+	networkContacts := contactsFromFrame(networkReply)
+	contact, ok := networkContacts[recipient]
+	if !ok || contact.BoxKey == "" {
+		return Contact{}, fmt.Errorf("recipient box key is unknown")
+	}
+	if contact.PubKey == "" || contact.BoxSignature == "" {
+		return Contact{}, fmt.Errorf("recipient trust data is incomplete")
+	}
+
+	importReply, err := c.localRequestFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: recipient,
+			PubKey:  contact.PubKey,
+			BoxKey:  contact.BoxKey,
+			BoxSig:  contact.BoxSignature,
+		}},
+	})
+	if err != nil {
+		return Contact{}, err
+	}
+	if importReply.Type != "contacts_imported" {
+		return Contact{}, fmt.Errorf("unexpected contacts import reply: %s", importReply.Type)
+	}
+
+	trustedReply, err = c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	if err != nil {
+		return Contact{}, err
+	}
+	trustedContacts = contactsFromFrame(trustedReply)
+	contact, ok = trustedContacts[recipient]
+	if !ok || contact.BoxKey == "" {
+		return Contact{}, fmt.Errorf("recipient box key is unknown")
+	}
+	return contact, nil
 }
 
 func (c *DesktopClient) MarkConversationSeen(ctx context.Context, counterparty string, messages []DirectMessage) error {

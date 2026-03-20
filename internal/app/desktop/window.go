@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"gioui.org/app"
 	"gioui.org/io/clipboard"
+	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -32,6 +34,7 @@ type Window struct {
 	ops     op.Ops
 
 	recipientEditor           widget.Editor
+	identitySearchEditor      widget.Editor
 	messageEditor             widget.Editor
 	contactsList              widget.List
 	chatList                  widget.List
@@ -46,6 +49,9 @@ type Window struct {
 	selectedRecipient         string
 	lastConversationRecipient string
 	lastConversationCount     int
+	seenIncoming              map[string]struct{}
+	discoveredRecipients      map[string]struct{}
+	unreadRecipients          map[string]int
 	language                  string
 	showLanguageMenu          bool
 	sendStatus                string
@@ -77,16 +83,19 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 	}
 
 	return &Window{
-		client:           client,
-		runtime:          runtime,
-		prefs:            prefs,
-		theme:            theme,
-		language:         language,
-		languageOptions:  make(map[string]*widget.Clickable),
-		recipientButtons: make(map[string]*widget.Clickable),
-		sendStatus:       translate(language, "status.compose_default"),
-		contactsList:     widget.List{List: layout.List{Axis: layout.Vertical}},
-		chatList:         widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
+		client:               client,
+		runtime:              runtime,
+		prefs:                prefs,
+		theme:                theme,
+		language:             language,
+		languageOptions:      make(map[string]*widget.Clickable),
+		recipientButtons:     make(map[string]*widget.Clickable),
+		seenIncoming:         make(map[string]struct{}),
+		discoveredRecipients: make(map[string]struct{}),
+		unreadRecipients:     make(map[string]int),
+		sendStatus:           translate(language, "status.compose_default"),
+		contactsList:         widget.List{List: layout.List{Axis: layout.Vertical}},
+		chatList:             widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 	}
 }
 
@@ -184,16 +193,7 @@ func (w *Window) handleActions(gtx layout.Context) {
 		w.triggerSend()
 	}
 
-	w.messageEditor.Submit = true
-	for {
-		event, ok := w.messageEditor.Update(gtx)
-		if !ok {
-			break
-		}
-		if _, ok := event.(widget.SubmitEvent); ok {
-			w.triggerSend()
-		}
-	}
+	w.handleMessageSubmitShortcut(gtx)
 
 	for w.copyIdentityButton.Clicked(gtx) {
 		gtx.Execute(clipboard.WriteCmd{
@@ -261,6 +261,26 @@ func (w *Window) handleActions(gtx layout.Context) {
 				w.window.Invalidate()
 			}
 		}()
+	}
+}
+
+func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Focus: &w.messageEditor, Name: key.NameEnter, Optional: key.ModShift},
+			key.Filter{Focus: &w.messageEditor, Name: key.NameReturn, Optional: key.ModShift},
+		)
+		if !ok {
+			break
+		}
+		ke, ok := ev.(key.Event)
+		if !ok || ke.State != key.Press {
+			continue
+		}
+		if ke.Modifiers.Contain(key.ModShift) {
+			continue
+		}
+		w.triggerSend()
 	}
 }
 
@@ -337,7 +357,7 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 
 func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	status := w.currentStatus()
-	recipients := knownRecipients(status.KnownIDs, status.Contacts, w.client.Address())
+	recipients := w.currentRecipients(status)
 	w.ensureSelectedRecipient(recipients)
 
 	return layout.Flex{
@@ -345,7 +365,7 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 		Spacing: layout.SpaceBetween,
 	}.Layout(gtx,
 		layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
-			return w.layoutContactsCard(gtx, recipients)
+			return w.layoutContactsCard(gtx, status, recipients)
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
 		layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
@@ -362,7 +382,7 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	)
 }
 
-func (w *Window) layoutContactsCard(gtx layout.Context, recipients []string) layout.Dimensions {
+func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatus, recipients []string) layout.Dimensions {
 	rows := []string{
 		w.t("clients.you", w.client.Address()),
 		w.t("clients.known", len(recipients)),
@@ -375,31 +395,142 @@ func (w *Window) layoutContactsCard(gtx layout.Context, recipients []string) lay
 			return btn.Layout(gtx)
 		})
 	}, func(gtx layout.Context) layout.Dimensions {
+		searchResults := searchKnownIdentities(status.KnownIDs, recipients, w.client.Address(), w.identitySearchEditor.Text())
+
+		children := []layout.FlexChild{
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return w.identitySearchCard(gtx, status, searchResults)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+		}
+
 		if len(recipients) == 0 {
-			label := material.Body1(w.theme, w.t("clients.empty"))
-			label.Color = color.NRGBA{R: 165, G: 177, B: 194, A: 255}
-			return label.Layout(gtx)
+			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := material.Body1(w.theme, w.t("clients.empty"))
+				label.Color = color.NRGBA{R: 165, G: 177, B: 194, A: 255}
+				return label.Layout(gtx)
+			}))
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 		}
 
 		list := material.List(w.theme, &w.contactsList)
-		return list.Layout(gtx, len(recipients), func(gtx layout.Context, index int) layout.Dimensions {
-			fingerprint := recipients[index]
-			btn := w.recipientButton(fingerprint)
-			return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				for btn.Clicked(gtx) {
-					w.selectedRecipient = fingerprint
-					w.recipientEditor.SetText(fingerprint)
-					w.sendStatus = w.t("status.chat_selected")
-				}
+		children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return list.Layout(gtx, len(recipients), func(gtx layout.Context, index int) layout.Dimensions {
+				return w.layoutRecipientButton(gtx, status, recipients[index], true)
+			})
+		}))
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	})
+}
 
-				style := material.Button(w.theme, btn, fingerprint)
-				if fingerprint == w.selectedRecipient {
-					style.Background = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
-				} else {
-					style.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-				}
-				style.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-				return style.Layout(gtx)
+func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatus, results []string) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
+				backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
+				cardHeight := gtx.Dp(unit.Dp(78))
+				return layout.Stack{}.Layout(gtx,
+					layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+						gtx.Constraints.Min.Y = cardHeight
+						gtx.Constraints.Max.Y = cardHeight
+						fill(gtx, borderColor)
+						return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							fill(gtx, backgroundColor)
+							return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										label := material.Body2(w.theme, w.t("clients.search_label"))
+										label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
+										return label.Layout(gtx)
+									}),
+									layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										w.identitySearchEditor.SingleLine = true
+										editor := material.Editor(w.theme, &w.identitySearchEditor, w.t("clients.search_placeholder"))
+										editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
+										editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
+										return editor.Layout(gtx)
+									}),
+								)
+							})
+						})
+					}),
+				)
+			})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if len(results) == 0 {
+				return layout.Dimensions{}
+			}
+			if len(results) > 4 {
+				results = results[:4]
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, recipientsToChildren(results, func(gtx layout.Context, identity string) layout.Dimensions {
+				return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return w.layoutRecipientButton(gtx, status, identity, false)
+				})
+			})...)
+		}),
+	)
+}
+
+func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeStatus, fingerprint string, showUnread bool) layout.Dimensions {
+	btn := w.recipientButton(fingerprint)
+	return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		for btn.Clicked(gtx) {
+			w.selectedRecipient = fingerprint
+			w.recipientEditor.SetText(fingerprint)
+			w.clearUnreadRecipient(fingerprint)
+			w.sendStatus = w.t("status.chat_selected")
+		}
+
+		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
+		if fingerprint == w.selectedRecipient {
+			bg = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
+		}
+
+		return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
+			fill(gtx, bg)
+			return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{
+							Axis:      layout.Horizontal,
+							Spacing:   layout.SpaceBetween,
+							Alignment: layout.Middle,
+						}.Layout(gtx,
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								title := material.Body1(w.theme, fingerprint)
+								title.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+								title.Font.Weight = 600
+								return title.Layout(gtx)
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if !showUnread {
+									return layout.Dimensions{}
+								}
+								count := w.unreadCount(fingerprint)
+								if count == 0 {
+									return layout.Dimensions{}
+								}
+								return w.layoutUnreadBadge(gtx, count)
+							}),
+						)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						preview := w.recipientPreview(status, fingerprint)
+						if strings.TrimSpace(preview) == "" {
+							preview = fingerprint
+						}
+						label := material.Body2(w.theme, ellipsize(preview, 44))
+						label.Color = color.NRGBA{R: 187, G: 197, B: 212, A: 255}
+						label.MaxLines = 1
+						return label.Layout(gtx)
+					}),
+				)
 			})
 		})
 	})
@@ -553,7 +684,9 @@ func (w *Window) refreshStatus() {
 	cancel()
 
 	recipient := strings.TrimSpace(w.selectedRecipient)
+	w.updateUnreadState(status)
 	if recipient != "" {
+		w.clearUnreadRecipient(recipient)
 		conversationCount := len(w.conversationEntries(status, recipient))
 		if recipient != w.lastConversationRecipient || conversationCount > w.lastConversationCount {
 			w.chatList.Position.BeforeEnd = false
@@ -647,6 +780,113 @@ func (w *Window) conversationEntries(status service.NodeStatus, recipient string
 	}
 
 	return rows
+}
+
+func (w *Window) updateUnreadState(status service.NodeStatus) {
+	me := w.client.Address()
+	selected := strings.TrimSpace(w.selectedRecipient)
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for _, message := range status.DirectMessages {
+		if message.Sender == me || message.Recipient != me {
+			continue
+		}
+		w.discoveredRecipients[message.Sender] = struct{}{}
+		if _, ok := w.seenIncoming[message.ID]; ok {
+			continue
+		}
+		w.seenIncoming[message.ID] = struct{}{}
+		if message.Sender != selected {
+			w.unreadRecipients[message.Sender]++
+		}
+	}
+}
+
+func (w *Window) clearUnreadRecipient(recipient string) {
+	w.mu.Lock()
+	delete(w.unreadRecipients, recipient)
+	w.mu.Unlock()
+}
+
+func (w *Window) unreadCount(recipient string) int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.unreadRecipients[recipient]
+}
+
+func (w *Window) currentRecipients(status service.NodeStatus) []string {
+	w.mu.RLock()
+	discovered := make(map[string]struct{}, len(w.discoveredRecipients))
+	for id := range w.discoveredRecipients {
+		discovered[id] = struct{}{}
+	}
+	w.mu.RUnlock()
+
+	return knownRecipients(status.Contacts, discovered, w.client.Address())
+}
+
+func (w *Window) recipientPreview(status service.NodeStatus, recipient string) string {
+	me := w.client.Address()
+	for i := len(status.DirectMessages) - 1; i >= 0; i-- {
+		msg := status.DirectMessages[i]
+		if msg.Sender == me && msg.Recipient == recipient {
+			return "You: " + msg.Body
+		}
+		if msg.Sender == recipient && msg.Recipient == me {
+			return msg.Body
+		}
+	}
+	return ""
+}
+
+func (w *Window) layoutUnreadBadge(gtx layout.Context, count int) layout.Dimensions {
+	height := gtx.Dp(unit.Dp(24))
+	width := gtx.Dp(unit.Dp(28))
+	labelText := intToString(count)
+	if count > 9 {
+		labelText = "9+"
+		width = gtx.Dp(unit.Dp(34))
+	}
+	gtx.Constraints.Min = image.Pt(width, height)
+	gtx.Constraints.Max = image.Pt(width, height)
+	return layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			rr := clip.UniformRRect(image.Rectangle{Max: image.Pt(width, height)}, height/2)
+			stack := clip.Stroke{
+				Path:  rr.Path(gtx.Ops),
+				Width: float32(gtx.Dp(unit.Dp(1))),
+			}.Op().Push(gtx.Ops)
+			defer stack.Pop()
+			paint.ColorOp{Color: color.NRGBA{R: 221, G: 228, B: 240, A: 255}}.Add(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+			return layout.Dimensions{Size: image.Pt(width, height)}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			label := material.Caption(w.theme, labelText)
+			label.Color = color.NRGBA{R: 232, G: 237, B: 247, A: 255}
+			return layout.Inset{Left: unit.Dp(10), Top: unit.Dp(3)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Center.Layout(gtx, label.Layout)
+			})
+		}),
+	)
+}
+
+func ellipsize(s string, limit int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if limit <= 0 || len([]rune(s)) <= limit {
+		return s
+	}
+	runes := []rune(s)
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func intToString(v int) string {
+	return strconv.Itoa(v)
 }
 
 func (w *Window) layoutConversation(gtx layout.Context, recipient string, conversation []service.DirectMessage) layout.Dimensions {
@@ -745,16 +985,16 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 	})
 }
 
-func knownRecipients(ids []string, contacts map[string]service.Contact, self string) []string {
-	known := make(map[string]struct{}, len(ids)+len(contacts))
-	for _, id := range ids {
+func knownRecipients(contacts map[string]service.Contact, discovered map[string]struct{}, self string) []string {
+	known := make(map[string]struct{}, len(contacts)+len(discovered))
+	for id := range contacts {
 		id = strings.TrimSpace(id)
 		if id == "" || id == self {
 			continue
 		}
 		known[id] = struct{}{}
 	}
-	for id := range contacts {
+	for id := range discovered {
 		id = strings.TrimSpace(id)
 		if id == "" || id == self {
 			continue
@@ -768,6 +1008,52 @@ func knownRecipients(ids []string, contacts map[string]service.Contact, self str
 	}
 	sort.Strings(recipients)
 	return recipients
+}
+
+func searchKnownIdentities(knownIDs, recipients []string, self, query string) []string {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == "" {
+		return nil
+	}
+
+	alreadyListed := make(map[string]struct{}, len(recipients))
+	for _, recipient := range recipients {
+		alreadyListed[recipient] = struct{}{}
+	}
+
+	results := make([]string, 0, len(knownIDs))
+	seen := make(map[string]struct{}, len(knownIDs))
+	for _, id := range knownIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || id == self {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, ok := alreadyListed[id]; ok {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(id), query) {
+			continue
+		}
+		results = append(results, id)
+	}
+
+	sort.Strings(results)
+	return results
+}
+
+func recipientsToChildren(values []string, render func(layout.Context, string) layout.Dimensions) []layout.FlexChild {
+	children := make([]layout.FlexChild, 0, len(values))
+	for _, value := range values {
+		value := value
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return render(gtx, value)
+		}))
+	}
+	return children
 }
 
 func shortFingerprint(value string) string {

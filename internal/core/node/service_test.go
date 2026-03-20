@@ -413,6 +413,72 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 	})
 }
 
+func TestFetchTrustedContactsDoesNotIncludeNetworkDiscoveredContacts(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+	})
+	defer stopA()
+
+	nodeB, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+	})
+	defer stopB()
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := exchangeFrames(t, nodeA.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+			protocol.Frame{Type: "fetch_contacts"},
+		)
+		if reply[1].Type != "contacts" || reply[1].Count == 0 {
+			return false
+		}
+		for _, contact := range reply[1].Contacts {
+			if contact.Address == nodeB.Address() && contact.BoxSig != "" {
+				return true
+			}
+		}
+		return false
+	})
+
+	networkReply := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "fetch_contacts"},
+	)
+	foundNetworkContact := false
+	for _, contact := range networkReply[1].Contacts {
+		if contact.Address == nodeB.Address() {
+			foundNetworkContact = true
+			if contact.BoxSig == "" {
+				t.Fatalf("expected network contact %s to include box signature, got %#v", nodeB.Address(), contact)
+			}
+		}
+	}
+	if !foundNetworkContact {
+		t.Fatalf("expected fetch_contacts to include network-discovered contact %s, got %#v", nodeB.Address(), networkReply[1].Contacts)
+	}
+
+	reply := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "fetch_trusted_contacts"},
+	)
+	got := reply[1]
+	if got.Type != "contacts" || got.Count != 1 || len(got.Contacts) != 1 {
+		t.Fatalf("expected only self trusted contact, got %#v", got)
+	}
+	if got.Contacts[0].Address != nodeA.Address() {
+		t.Fatalf("expected only self trusted contact %s, got %#v", nodeA.Address(), got.Contacts)
+	}
+}
+
 func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 	t.Parallel()
 
