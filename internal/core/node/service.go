@@ -916,7 +916,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 
 	log.Printf("node: stored message topic=%s id=%s from=%s to=%s flag=%s", msg.Topic, msg.ID, msg.Sender, msg.Recipient, msg.Flag)
 
-	if s.CanForward() {
+	if s.shouldRouteStoredMessage(msg) {
 		s.trackRelayMessage(envelope)
 		go s.gossipMessage(envelope)
 	}
@@ -928,6 +928,19 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	}
 
 	return true, count, ""
+}
+
+func (s *Service) shouldRouteStoredMessage(msg incomingMessage) bool {
+	if s.CanForward() {
+		return true
+	}
+	if msg.Topic != "dm" {
+		return false
+	}
+	if msg.Sender != s.identity.Address {
+		return false
+	}
+	return msg.Recipient != "" && msg.Recipient != "*"
 }
 
 func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, int) {

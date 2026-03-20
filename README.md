@@ -100,6 +100,7 @@ Node roles:
 - `full` defaults to `CORSA_LISTENER=1`
 - `listener` only controls whether a node accepts inbound connections; it does not change relay behavior
 - even if `client` is started with `CORSA_LISTENER=1`, it must not be used as a relay for foreign traffic
+- a `client` still sends its own direct messages and delivery receipts upstream; the restriction only applies to third-party traffic
 - default for `corsa-node`: `full`
 - default for `corsa-desktop`: `full`
 - recommended future default for mobile/light client: `client`
@@ -255,6 +256,7 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
 - `full` по умолчанию работает с `CORSA_LISTENER=1`
 - `listener` управляет только входящими соединениями и не меняет relay-роль узла
 - даже если `client` запущен с `CORSA_LISTENER=1`, его нельзя использовать как relay для чужого трафика
+- при этом `client` все равно отправляет свои собственные direct messages и delivery receipts вверх по upstream; ограничение касается только чужого трафика
 - значение по умолчанию для `corsa-node`: `full`
 - значение по умолчанию для `corsa-desktop`: `full`
 - рекомендуемое будущее значение для mobile/light client: `client`

@@ -45,6 +45,7 @@ Rules:
 - by default `full` listens for inbound peers, while `client` runs without a listener
 - `listener` only controls inbound reachability and does not change the relay role of the node
 - even if a `client` node is reachable and accepts inbound connections, it must not be used as a relay for foreign traffic
+- a `client` node still sends its own direct messages and delivery receipts upstream; the relay restriction applies only to third-party traffic
 - default outbound peer-session cap: `8`
 - `CORSA_MAX_INCOMING_PEERS=0` means no app-level inbound cap
 - pending outgoing direct-message frames and relay-retry state are persisted to disk and survive node restarts
@@ -161,6 +162,7 @@ Role rules:
 - `client` nodes do not relay traffic onward
 - a `client` node may still have `listener=1`, but that does not make it a relay node
 - foreign traffic must not be deliberately routed through a `client`; the only exception is a direct message addressed to that client identity
+- a `client` must still route its own direct messages and delivery receipts toward upstream/full peers
 - desktop and standalone console node default to `full`
 - future mobile/light clients should use `client`
 - current Corsa version: see `internal/core/config.CorsaVersion`
@@ -934,6 +936,7 @@ Fields:
 - по умолчанию `full` слушает входящие, а `client` работает без listener
 - `listener` управляет только входящими соединениями, но не меняет relay-роль узла
 - даже если `client` reachable и принимает входящие, его нельзя использовать как relay для чужого трафика
+- при этом `client`-узел все равно отправляет свои собственные direct messages и delivery receipts вверх по upstream; ограничение относится только к чужому трафику
 - outbound peer-session cap по умолчанию: `8`
 - `CORSA_MAX_INCOMING_PEERS=0` означает отсутствие app-level лимита на входящие peer-соединения
 - очередь исходящих direct-message кадров и состояние relay retry сохраняются на диск и переживают рестарт ноды
@@ -1050,6 +1053,7 @@ Fields:
 - `client`-узлы не ретранслируют трафик дальше
 - `client`-узел может иметь `listener=1`, но это не делает его relay-узлом
 - чужой трафик не должен специально маршрутизироваться через `client`; исключение — direct message, адресованный самому этому client identity
+- при этом `client` обязан маршрутизировать свои собственные direct messages и delivery receipts в сторону upstream/full peers
 - `corsa-desktop` и `corsa-node` по умолчанию запускаются как `full`
 - будущий mobile/light client должен использовать `client`
 - текущая версия Corsa: см. `internal/core/config.CorsaVersion`

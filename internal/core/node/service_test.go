@@ -1148,6 +1148,88 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 	})
 }
 
+func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppears(t *testing.T) {
+	t.Parallel()
+
+	addressFull := freeAddress(t)
+	addressSender := freeAddress(t)
+	addressRecipient := freeAddress(t)
+
+	idRecipient, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient identity failed: %v", err)
+	}
+
+	fullNode, stopFull := startTestNode(t, config.Node{
+		ListenAddress:    addressFull,
+		AdvertiseAddress: normalizeAddress(addressFull),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopFull()
+
+	senderNode, stopSender := startTestNode(t, config.Node{
+		ListenAddress:    addressSender,
+		AdvertiseAddress: "",
+		BootstrapPeers:   []string{normalizeAddress(addressFull)},
+		Type:             config.NodeTypeClient,
+	})
+	defer stopSender()
+
+	waitForCondition(t, 6*time.Second, func() bool {
+		reply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_identities"})
+		for _, address := range reply.Identities {
+			if address == senderNode.Address() {
+				return true
+			}
+		}
+		return false
+	})
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		senderNode.identity,
+		idRecipient.Address,
+		identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
+		"sender-client-backlog-secret",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	reply := senderNode.HandleLocalFrame(sendMessageFrame(
+		"dm",
+		"client-offline-dm-1",
+		senderNode.Address(),
+		idRecipient.Address,
+		"sender-delete",
+		ts,
+		0,
+		ciphertext,
+	))
+	if reply.Type != "message_stored" {
+		t.Fatalf("unexpected sender direct store response: %#v", reply)
+	}
+
+	waitForCondition(t, 8*time.Second, func() bool {
+		fullReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: idRecipient.Address})
+		return fullReply.Type == "inbox" && len(fullReply.Messages) == 1 && fullReply.Messages[0].ID == "client-offline-dm-1"
+	})
+
+	recipientNode, stopRecipient := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    addressRecipient,
+		AdvertiseAddress: "",
+		BootstrapPeers:   []string{normalizeAddress(addressFull)},
+		Type:             config.NodeTypeClient,
+	}, idRecipient)
+	defer stopRecipient()
+
+	waitForCondition(t, 8*time.Second, func() bool {
+		inbox := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: recipientNode.Address()})
+		return inbox.Type == "inbox" && len(inbox.Messages) == 1 && inbox.Messages[0].ID == "client-offline-dm-1"
+	})
+}
+
 func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	t.Parallel()
 
