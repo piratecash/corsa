@@ -610,7 +610,7 @@ func validateProtocolHandshake(frame protocol.Frame) error {
 }
 
 func requiresSessionAuth(frame protocol.Frame) bool {
-	return frame.Version >= 2 && (strings.TrimSpace(frame.Client) == "node" || strings.TrimSpace(frame.Client) == "desktop")
+	return strings.TrimSpace(frame.Client) == "node" || strings.TrimSpace(frame.Client) == "desktop"
 }
 
 func (s *Service) isCommandAllowedForConn(conn net.Conn, command string) bool {
@@ -1484,7 +1484,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 	if err != nil {
 		return
 	}
-	if welcome.Version >= 2 && strings.TrimSpace(welcome.Challenge) != "" {
+	if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
 			Address:   s.identity.Address,
@@ -1674,9 +1674,8 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 }
 
 func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol.Frame) error {
-	if welcome.Version < 2 || strings.TrimSpace(welcome.Challenge) == "" {
-		session.authOK = true
-		return nil
+	if strings.TrimSpace(welcome.Challenge) == "" {
+		return protocol.ErrAuthRequired
 	}
 	reply, err := s.peerSessionRequest(session, protocol.Frame{
 		Type:      "auth_session",
@@ -2020,7 +2019,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 	if err != nil {
 		return
 	}
-	if welcome.Version >= 2 && strings.TrimSpace(welcome.Challenge) != "" {
+	if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
 			Address:   s.identity.Address,
@@ -2455,7 +2454,7 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 
 func (s *Service) sendAckDeleteToPeer(address, ackType string, id protocol.MessageID, status string) {
 	session := s.peerSession(address)
-	if session == nil || !session.authOK || session.version < 2 {
+	if session == nil || !session.authOK {
 		return
 	}
 	frame := protocol.Frame{

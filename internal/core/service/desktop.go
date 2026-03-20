@@ -715,7 +715,7 @@ func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind s
 		}
 		return nil, nil, protocol.Frame{}, protocol.ErrProtocol
 	}
-	if welcome.Version >= 2 && strings.TrimSpace(welcome.Challenge) != "" {
+	if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
 			Address:   c.id.Address,

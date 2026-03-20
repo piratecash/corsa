@@ -58,7 +58,7 @@ Primary JSON desktop request:
 ```json
 {
   "type": "hello",
-  "version": 1,
+  "version": 2,
   "client": "desktop",
   "client_version": "<corsa-version-wire>"
 }
@@ -76,7 +76,7 @@ Primary JSON node-to-node request:
 ```json
 {
   "type": "hello",
-  "version": 1,
+  "version": 2,
   "client": "node",
   "listener": "1",
   "listen": "<your-public-ip>:64646",
@@ -117,8 +117,8 @@ Response:
 ```json
 {
   "type": "welcome",
-  "version": 1,
-  "minimum_protocol_version": 1,
+  "version": 2,
+  "minimum_protocol_version": 2,
   "node": "corsa",
   "network": "gazeta-devnet",
   "listener": "1",
@@ -173,11 +173,11 @@ Handshake compatibility rule:
 - caller sends only its current `version` in `hello`
 - responder rejects the handshake if caller `version` is lower than responder `minimum_protocol_version`
 - reject reply uses `type=error`, `code=incompatible-protocol-version`, and includes responder `version` plus `minimum_protocol_version`
-- protocol version `1` is still accepted only for backward compatibility during migration; support for `v1` must be removed in a future protocol cleanup after all active peers move to `v2`
+- all network peers are now expected to use protocol `v2`; responders reject any caller below `minimum_protocol_version`
 
 Authenticated session upgrade for protocol `v2`:
 
-- for `node` and `desktop` peers using protocol `v2`, the responder may include a random `challenge` in `welcome`
+- for `node` and `desktop` peers using protocol `v2`, the responder includes a random `challenge` in `welcome`
 - the caller must answer with a signed `auth_session`
 - the signature is made by the caller identity key over the payload `corsa-session-auth-v1|<challenge>|<address>`
 - if the signature is valid, responder returns `auth_ok`
@@ -1037,7 +1037,7 @@ Fields:
 ```json
 {
   "type": "hello",
-  "version": 1,
+  "version": 2,
   "client": "desktop",
   "client_version": "<corsa-version-wire>"
 }
@@ -1055,7 +1055,7 @@ Fields:
 ```json
 {
   "type": "hello",
-  "version": 1,
+  "version": 2,
   "client": "node",
   "listener": "1",
   "listen": "<your-public-ip>:64646",
@@ -1096,8 +1096,8 @@ Fields:
 ```json
 {
   "type": "welcome",
-  "version": 1,
-  "minimum_protocol_version": 1,
+  "version": 2,
+  "minimum_protocol_version": 2,
   "node": "corsa",
   "network": "gazeta-devnet",
   "listener": "1",
@@ -1152,11 +1152,11 @@ Fields:
 - вызывающая сторона отправляет в `hello` только свою текущую `version`
 - отвечающий узел делает reject, если `version` вызывающей стороны ниже его `minimum_protocol_version`
 - reject-ответ использует `type=error`, `code=incompatible-protocol-version` и содержит `version` плюс `minimum_protocol_version` отвечающего узла
-- версия протокола `1` пока еще принимается только для обратной совместимости на время миграции; поддержку `v1` нужно удалить в будущей очистке протокола после перевода всех активных пиров на `v2`
+- теперь все сетевые пиры должны использовать протокол `v2`; отвечающий узел отклоняет любую вызывающую сторону ниже `minimum_protocol_version`
 
 Аутентифицированное повышение сессии для протокола `v2`:
 
-- для `node` и `desktop` пиров на протоколе `v2` отвечающая сторона может добавить случайный `challenge` в `welcome`
+- для `node` и `desktop` пиров на протоколе `v2` отвечающая сторона добавляет случайный `challenge` в `welcome`
 - вызывающая сторона должна ответить подписанным `auth_session`
 - подпись делается identity key вызывающей стороны по payload `corsa-session-auth-v1|<challenge>|<address>`
 - если подпись валидна, отвечающая сторона возвращает `auth_ok`
