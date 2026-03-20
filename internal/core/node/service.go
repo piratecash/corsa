@@ -43,6 +43,7 @@ type Service struct {
 	peerIDs      map[string]string
 	pending      map[string][]pendingFrame
 	pendingKeys  map[string]struct{}
+	relayRetry   map[string]relayAttempt
 	upstream     map[string]struct{}
 	inboundConns map[net.Conn]struct{}
 	events       map[chan struct{}]struct{}
@@ -85,6 +86,12 @@ type pendingFrame struct {
 	Retries  int
 }
 
+type relayAttempt struct {
+	FirstSeen   time.Time
+	LastAttempt time.Time
+	Attempts    int
+}
+
 const (
 	peerStateHealthy      = "healthy"
 	peerStateDegraded     = "degraded"
@@ -92,6 +99,7 @@ const (
 	peerStateReconnecting = "reconnecting"
 	peerRequestTimeout    = 12 * time.Second
 	pendingFrameTTL       = 5 * time.Minute
+	relayRetryTTL         = 3 * time.Minute
 )
 
 type incomingMessage struct {
@@ -158,6 +166,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		peerIDs:      make(map[string]string),
 		pending:      make(map[string][]pendingFrame),
 		pendingKeys:  make(map[string]struct{}),
+		relayRetry:   make(map[string]relayAttempt),
 		upstream:     make(map[string]struct{}),
 		inboundConns: make(map[net.Conn]struct{}),
 		events:       make(map[chan struct{}]struct{}),
@@ -821,6 +830,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	log.Printf("node: stored message topic=%s id=%s from=%s to=%s flag=%s", msg.Topic, msg.ID, msg.Sender, msg.Recipient, msg.Flag)
 
 	if s.CanForward() {
+		s.trackRelayMessage(envelope)
 		go s.gossipMessage(envelope)
 	}
 	if msg.Topic == "dm" && msg.Recipient != "*" {
@@ -851,6 +861,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 
 	log.Printf("node: stored delivery receipt message_id=%s sender=%s recipient=%s status=%s delivered_at=%s", receipt.MessageID, receipt.Sender, receipt.Recipient, receipt.Status, receipt.DeliveredAt.Format(time.RFC3339))
 
+	s.trackRelayReceipt(receipt)
 	go s.gossipReceipt(receipt)
 	go s.pushReceiptToSubscribers(receipt)
 
@@ -968,6 +979,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.cleanupExpiredMessages()
 			s.cleanupExpiredNotices()
 			s.ensurePeerSessions(ctx)
+			s.retryRelayDeliveries()
 		}
 	}
 }
@@ -2127,6 +2139,155 @@ func (s *Service) flushPendingPeerFrames(address string) {
 		s.pendingKeys[pendingFrameKey(address, item.Frame)] = struct{}{}
 	}
 	s.mu.Unlock()
+}
+
+func (s *Service) retryRelayDeliveries() {
+	if !s.CanForward() {
+		return
+	}
+
+	now := time.Now().UTC()
+	for _, msg := range s.retryableRelayMessages(now) {
+		log.Printf("node: relay_retry_message id=%s recipient=%s attempts=%d", msg.ID, msg.Recipient, s.noteRelayAttempt(relayMessageKey(msg.ID), now))
+		go s.gossipMessage(msg)
+	}
+	for _, receipt := range s.retryableRelayReceipts(now) {
+		log.Printf("node: relay_retry_receipt message_id=%s recipient=%s status=%s attempts=%d", receipt.MessageID, receipt.Recipient, receipt.Status, s.noteRelayAttempt(relayReceiptKey(receipt), now))
+		go s.gossipReceipt(receipt)
+	}
+}
+
+func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	items := append([]protocol.Envelope(nil), s.topics["dm"]...)
+	out := make([]protocol.Envelope, 0)
+	for _, msg := range items {
+		key := relayMessageKey(msg.ID)
+		if msg.Recipient == "" || msg.Recipient == "*" || msg.Recipient == s.identity.Address {
+			delete(s.relayRetry, key)
+			continue
+		}
+		if s.hasReceiptForMessageLocked(msg.Sender, msg.ID) {
+			delete(s.relayRetry, key)
+			continue
+		}
+		if !shouldRetryRelayLocked(s.relayRetry, key, now) {
+			continue
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
+func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryReceipt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]protocol.DeliveryReceipt, 0)
+	for _, list := range s.receipts {
+		for _, receipt := range list {
+			key := relayReceiptKey(receipt)
+			if !shouldRetryRelayLocked(s.relayRetry, key, now) {
+				continue
+			}
+			out = append(out, receipt)
+		}
+	}
+	return out
+}
+
+func shouldRetryRelayLocked(items map[string]relayAttempt, key string, now time.Time) bool {
+	state, ok := items[key]
+	if !ok {
+		return true
+	}
+	firstSeen := state.FirstSeen
+	if firstSeen.IsZero() {
+		firstSeen = now
+	}
+	if now.Sub(firstSeen) > relayRetryTTL {
+		delete(items, key)
+		return false
+	}
+	if state.LastAttempt.IsZero() {
+		return true
+	}
+	return now.Sub(state.LastAttempt) >= relayRetryBackoff(state.Attempts)
+}
+
+func relayRetryBackoff(attempts int) time.Duration {
+	if attempts <= 0 {
+		return 5 * time.Second
+	}
+	backoff := 5 * time.Second
+	for i := 1; i < attempts; i++ {
+		backoff *= 2
+		if backoff >= 30*time.Second {
+			return 30 * time.Second
+		}
+	}
+	return backoff
+}
+
+func (s *Service) noteRelayAttempt(key string, now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state := s.relayRetry[key]
+	if state.FirstSeen.IsZero() {
+		state.FirstSeen = now
+	}
+	state.LastAttempt = now
+	state.Attempts++
+	s.relayRetry[key] = state
+	return state.Attempts
+}
+
+func (s *Service) trackRelayMessage(msg protocol.Envelope) {
+	if msg.Topic != "dm" || msg.Recipient == "" || msg.Recipient == "*" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := relayMessageKey(msg.ID)
+	state := s.relayRetry[key]
+	if state.FirstSeen.IsZero() {
+		state.FirstSeen = time.Now().UTC()
+		s.relayRetry[key] = state
+	}
+}
+
+func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := relayReceiptKey(receipt)
+	state := s.relayRetry[key]
+	if state.FirstSeen.IsZero() {
+		state.FirstSeen = time.Now().UTC()
+		s.relayRetry[key] = state
+	}
+	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
+}
+
+func relayMessageKey(id protocol.MessageID) string {
+	return "msg|" + string(id)
+}
+
+func relayReceiptKey(receipt protocol.DeliveryReceipt) string {
+	return "receipt|" + receipt.Recipient + "|" + string(receipt.MessageID) + "|" + receipt.Status
+}
+
+func (s *Service) hasReceiptForMessageLocked(originalSender string, messageID protocol.MessageID) bool {
+	for _, receipt := range s.receipts[originalSender] {
+		if receipt.MessageID == messageID {
+			return true
+		}
+	}
+	return false
 }
 
 func expectedReplyType(requestType string) string {

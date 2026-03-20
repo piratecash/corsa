@@ -255,6 +255,8 @@ Routing notes:
 - direct messages and delivery receipts prefer active healthy sessions
 - if no suitable session exists, the frame is queued locally instead of fan-out dialing every known peer
 - queued frames are retried after reconnect and dropped only after the local queue policy expires them
+- full nodes may keep retrying stored direct messages for a bounded time even after the first routing miss
+- the same bounded retry policy applies to delivery receipts, including both `delivered` and `seen`
 
 ### Pending messages
 
@@ -621,6 +623,7 @@ Notes:
 - receipt `status` is currently either `delivered` or `seen`
 - outbound `dm` and delivery receipts prefer established peer sessions
 - if no usable peer session exists, outbound `dm` and receipts are queued and flushed after reconnect instead of immediate fan-out dialing
+- full nodes may also keep retrying already stored `dm` and stored delivery receipts for a bounded time so they are not treated as lost after the first failed route
 
 Realtime routing subscription:
 
@@ -1109,6 +1112,8 @@ Fields:
 - direct messages и delivery receipts в первую очередь идут через активные healthy session
 - если подходящей session нет, frame ставится в локальную очередь вместо fan-out dial по всем известным peer
 - queued frames повторно отправляются после reconnect и удаляются только когда локальная queue policy считает их просроченными
+- full node может еще некоторое время повторно пытаться доставить уже сохраненный `dm`, даже если первая попытка маршрутизации не удалась
+- то же bounded retry-поведение применяется и к delivery receipt со статусами `delivered` и `seen`
 
 ### Ожидающие сообщения
 
@@ -1477,6 +1482,7 @@ Fields:
 - поле receipt `status` сейчас принимает значения `delivered` или `seen`
 - outbound `dm` и delivery receipts сначала пытаются идти по установленным peer sessions
 - если пригодной session нет, outbound `dm` и receipts ставятся в очередь и отправляются после reconnect, а не веерным dial по всем адресам
+- full node может также некоторое время повторно пробовать доставку уже сохраненных `dm` и уже сохраненных delivery receipts, чтобы не считать их потерянными после первой неудачной маршрутизации
 
 Подписка на realtime routing:
 

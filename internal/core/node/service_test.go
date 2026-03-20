@@ -993,13 +993,26 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 		t.Fatalf("generate test identity: %v", err)
 	}
 	svc := NewService(cfg, id)
+	return startTestService(t, ctx, cancel, svc)
+}
+
+func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Identity) (*Service, func()) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	svc := NewService(cfg, id)
+	return startTestService(t, ctx, cancel, svc)
+}
+
+func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFunc, svc *Service) (*Service, func()) {
+	t.Helper()
 
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- svc.Run(ctx)
 	}()
 
-	if cfg.EffectiveListenerEnabled() {
+	if svc.cfg.EffectiveListenerEnabled() {
 		waitForCondition(t, 3*time.Second, func() bool {
 			conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 200*time.Millisecond)
 			if err == nil {
@@ -1023,6 +1036,63 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	}
 
 	return svc, stop
+}
+
+func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	idB, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient identity failed: %v", err)
+	}
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopA()
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		nodeA.identity,
+		idB.Address,
+		identity.BoxPublicKeyBase64(idB.BoxPublicKey),
+		"retry-route-secret",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		sendMessageFrame("dm", "retry-dm-1", nodeA.Address(), idB.Address, "sender-delete", ts, 0, ciphertext),
+	)
+	if frames[1].Type != "message_stored" {
+		t.Fatalf("unexpected nodeA direct store response: %#v", frames[1])
+	}
+
+	time.Sleep(2500 * time.Millisecond)
+
+	nodeB, stopB := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		Type:             config.NodeTypeFull,
+	}, idB)
+	defer stopB()
+
+	waitForCondition(t, 12*time.Second, func() bool {
+		reply := exchangeFrames(t, nodeB.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+			protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeB.Address()},
+		)
+		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "retry-dm-1"
+	})
 }
 
 func exchangeFrames(t *testing.T, address string, frames ...protocol.Frame) []protocol.Frame {
