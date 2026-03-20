@@ -210,6 +210,113 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 	}
 }
 
+func TestFetchPeerHealthShowsEstablishedSession(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+	})
+	defer stopA()
+
+	_, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+	})
+	defer stopB()
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+		return reply.Type == "peer_health" && reply.Count > 0
+	})
+
+	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if reply.Type != "peer_health" || reply.Count == 0 {
+		t.Fatalf("expected peer_health response with items, got %#v", reply)
+	}
+	if reply.PeerHealth[0].Address != normalizeAddress(addressB) {
+		t.Fatalf("expected peer health for %s, got %#v", normalizeAddress(addressB), reply.PeerHealth)
+	}
+	if reply.PeerHealth[0].State == "" {
+		t.Fatalf("expected peer health state, got %#v", reply.PeerHealth[0])
+	}
+}
+
+func TestQueuedMeshMessageFlushesAfterPeerReconnect(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+	})
+	defer stopA()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	frames := exchangeFrames(t, nodeA.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+		sendMessageFrame("global", "queued-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "hello-after-reconnect"),
+	)
+	if got := frames[1]; got.Type != "message_stored" {
+		t.Fatalf("unexpected nodeA store response: %#v", got)
+	}
+
+	nodeB, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+	})
+	defer stopB()
+
+	waitForCondition(t, 8*time.Second, func() bool {
+		reply := exchangeFrames(t, nodeB.externalListenAddress(),
+			protocol.Frame{Type: "hello", Version: 1, Client: "test", ClientVersion: config.CorsaWireVersion},
+			protocol.Frame{Type: "fetch_messages", Topic: "global"},
+		)
+		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "queued-msg-1"
+	})
+}
+
+func TestRoutingTargetsPreferBestHealthySessions(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		cfg:      config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		sessions: map[string]*peerSession{},
+		health:   map[string]*peerHealth{},
+	}
+
+	now := time.Now().UTC()
+	addresses := []string{"a:1", "b:1", "c:1", "d:1", "e:1"}
+	for _, address := range addresses {
+		svc.sessions[address] = &peerSession{address: address}
+	}
+	svc.health["a:1"] = &peerHealth{Address: "a:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-2 * time.Second)}
+	svc.health["b:1"] = &peerHealth{Address: "b:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-1 * time.Second)}
+	svc.health["c:1"] = &peerHealth{Address: "c:1", Connected: true, State: peerStateDegraded, LastUsefulReceiveAt: now.Add(-3 * time.Second)}
+	svc.health["d:1"] = &peerHealth{Address: "d:1", Connected: true, State: peerStateStalled, LastUsefulReceiveAt: now.Add(-120 * time.Second)}
+	svc.health["e:1"] = &peerHealth{Address: "e:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-4 * time.Second)}
+
+	got := svc.routingTargets()
+	want := []string{"b:1", "a:1", "e:1"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected target count: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected routing targets: got %v want %v", got, want)
+		}
+	}
+}
+
 func TestMeshMessagePropagation(t *testing.T) {
 	t.Parallel()
 

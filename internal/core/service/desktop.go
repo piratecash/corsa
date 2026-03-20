@@ -50,14 +50,29 @@ type DeliveryReceipt struct {
 	DeliveredAt time.Time
 }
 
+type PeerHealth struct {
+	Address             string
+	State               string
+	Connected           bool
+	PendingCount        int
+	LastConnectedAt     *time.Time
+	LastDisconnectedAt  *time.Time
+	LastPingAt          *time.Time
+	LastPongAt          *time.Time
+	LastUsefulSendAt    *time.Time
+	LastUsefulReceiveAt *time.Time
+	ConsecutiveFailures int
+	LastError           string
+}
+
 type DirectMessage struct {
-	ID          string
-	Sender      string
-	Recipient   string
-	Body        string
-	Timestamp   time.Time
+	ID            string
+	Sender        string
+	Recipient     string
+	Body          string
+	Timestamp     time.Time
 	ReceiptStatus string
-	DeliveredAt *time.Time
+	DeliveredAt   *time.Time
 }
 
 type NodeStatus struct {
@@ -71,6 +86,7 @@ type NodeStatus struct {
 	KnownIDs         []string
 	Contacts         map[string]Contact
 	Peers            []string
+	PeerHealth       []PeerHealth
 	Stored           string
 	Messages         []string
 	MessageIDs       []string
@@ -187,6 +203,18 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		status.CheckedAt = time.Now()
 		return status
 	}
+	peerHealthReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
+	pendingReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
+	if err != nil {
+		status.Error = err.Error()
+		status.CheckedAt = time.Now()
+		return status
+	}
 	messagesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
 	if err != nil {
 		status.Error = err.Error()
@@ -256,7 +284,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		}
 	}
 
-	decryptedDirectMessages := decryptDirectMessages(c.id, decryptContacts, directMessages, deliveryReceipts)
+	decryptedDirectMessages := decryptDirectMessages(c.id, decryptContacts, directMessages, deliveryReceipts, pendingReply.PendingIDs)
 	if imported := c.importIncomingContacts(contacts, decryptContacts, decryptedDirectMessages); imported > 0 {
 		trustedContactsReply, trustedErr := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
 		if trustedErr == nil {
@@ -268,6 +296,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.KnownIDs = ids
 	status.Contacts = contacts
 	status.Peers = peers
+	status.PeerHealth = peerHealthFromFrame(peerHealthReply)
 	status.Messages = stringifyMessages(messages)
 	status.MessageIDs = messageIDs
 	status.DirectMessages = decryptedDirectMessages
@@ -278,6 +307,39 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Gazeta = notices
 	status.CheckedAt = time.Now()
 	return status
+}
+
+func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
+	items := make([]PeerHealth, 0, len(frame.PeerHealth))
+	for _, item := range frame.PeerHealth {
+		items = append(items, PeerHealth{
+			Address:             item.Address,
+			State:               item.State,
+			Connected:           item.Connected,
+			PendingCount:        item.PendingCount,
+			LastConnectedAt:     parseOptionalTime(item.LastConnectedAt),
+			LastDisconnectedAt:  parseOptionalTime(item.LastDisconnectedAt),
+			LastPingAt:          parseOptionalTime(item.LastPingAt),
+			LastPongAt:          parseOptionalTime(item.LastPongAt),
+			LastUsefulSendAt:    parseOptionalTime(item.LastUsefulSendAt),
+			LastUsefulReceiveAt: parseOptionalTime(item.LastUsefulReceiveAt),
+			ConsecutiveFailures: item.ConsecutiveFailures,
+			LastError:           item.LastError,
+		})
+	}
+	return items
+}
+
+func parseOptionalTime(value string) *time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	ts, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil
+	}
+	return &ts
 }
 
 func (c *DesktopClient) importIncomingContacts(trustedContacts, decryptContacts map[string]Contact, messages []DirectMessage) int {
@@ -837,13 +899,17 @@ func decryptNoticeFrames(id *identity.Identity, notices []protocol.NoticeFrame) 
 	return out
 }
 
-func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt) []DirectMessage {
+func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingIDs []string) []DirectMessage {
 	receiptsByMessageID := make(map[string]DeliveryReceipt, len(receipts))
 	for _, receipt := range receipts {
 		existing, ok := receiptsByMessageID[receipt.MessageID]
 		if !ok || receipt.Status == protocol.ReceiptStatusSeen || existing.Status != protocol.ReceiptStatusSeen {
 			receiptsByMessageID[receipt.MessageID] = receipt
 		}
+	}
+	pending := make(map[string]struct{}, len(pendingIDs))
+	for _, id := range pendingIDs {
+		pending[id] = struct{}{}
 	}
 
 	out := make([]DirectMessage, 0, len(messages))
@@ -868,6 +934,12 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			deliveredCopy := receipt.DeliveredAt
 			deliveredAt = &deliveredCopy
 			receiptStatus = receipt.Status
+		} else if item.Sender == id.Address {
+			if _, ok := pending[item.ID]; ok {
+				receiptStatus = "queued"
+			} else {
+				receiptStatus = "sent"
+			}
 		}
 
 		out = append(out, DirectMessage{

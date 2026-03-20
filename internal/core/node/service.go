@@ -22,26 +22,29 @@ import (
 )
 
 type Service struct {
-	identity *identity.Identity
-	cfg      config.Node
-	trust    *trustStore
-	mu       sync.RWMutex
-	peers    []transport.Peer
-	known    map[string]struct{}
-	boxKeys  map[string]string
-	pubKeys  map[string]string
-	boxSigs  map[string]string
-	topics   map[string][]protocol.Envelope
-	receipts map[string][]protocol.DeliveryReceipt
-	notices  map[string]gazeta.Notice
-	seen     map[string]struct{}
+	identity     *identity.Identity
+	cfg          config.Node
+	trust        *trustStore
+	mu           sync.RWMutex
+	peers        []transport.Peer
+	known        map[string]struct{}
+	boxKeys      map[string]string
+	pubKeys      map[string]string
+	boxSigs      map[string]string
+	topics       map[string][]protocol.Envelope
+	receipts     map[string][]protocol.DeliveryReceipt
+	notices      map[string]gazeta.Notice
+	seen         map[string]struct{}
 	seenReceipts map[string]struct{}
-	subs     map[string]map[string]*subscriber
-	sessions map[string]*peerSession
-	upstream map[string]struct{}
-	events   map[chan struct{}]struct{}
-	listener net.Listener
-	lastSync time.Time
+	subs         map[string]map[string]*subscriber
+	sessions     map[string]*peerSession
+	health       map[string]*peerHealth
+	pending      map[string][]pendingFrame
+	pendingKeys  map[string]struct{}
+	upstream     map[string]struct{}
+	events       map[chan struct{}]struct{}
+	listener     net.Listener
+	lastSync     time.Time
 }
 
 type subscriber struct {
@@ -58,6 +61,35 @@ type peerSession struct {
 	inboxCh chan protocol.Frame
 	errCh   chan error
 }
+
+type peerHealth struct {
+	Address             string
+	Connected           bool
+	State               string
+	LastConnectedAt     time.Time
+	LastDisconnectedAt  time.Time
+	LastPingAt          time.Time
+	LastPongAt          time.Time
+	LastUsefulSendAt    time.Time
+	LastUsefulReceiveAt time.Time
+	ConsecutiveFailures int
+	LastError           string
+}
+
+type pendingFrame struct {
+	Frame    protocol.Frame
+	QueuedAt time.Time
+	Retries  int
+}
+
+const (
+	peerStateHealthy      = "healthy"
+	peerStateDegraded     = "degraded"
+	peerStateStalled      = "stalled"
+	peerStateReconnecting = "reconnecting"
+	peerRequestTimeout    = 12 * time.Second
+	pendingFrameTTL       = 5 * time.Minute
+)
 
 type incomingMessage struct {
 	ID         protocol.MessageID
@@ -103,23 +135,26 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	}
 
 	return &Service{
-		identity: id,
-		cfg:      cfg,
-		trust:    trust,
-		peers:    peers,
-		known:    known,
-		boxKeys:  boxKeys,
-		pubKeys:  pubKeys,
-		boxSigs:  boxSigs,
-		topics:   make(map[string][]protocol.Envelope),
-		receipts: make(map[string][]protocol.DeliveryReceipt),
-		notices:  make(map[string]gazeta.Notice),
-		seen:     make(map[string]struct{}),
+		identity:     id,
+		cfg:          cfg,
+		trust:        trust,
+		peers:        peers,
+		known:        known,
+		boxKeys:      boxKeys,
+		pubKeys:      pubKeys,
+		boxSigs:      boxSigs,
+		topics:       make(map[string][]protocol.Envelope),
+		receipts:     make(map[string][]protocol.DeliveryReceipt),
+		notices:      make(map[string]gazeta.Notice),
+		seen:         make(map[string]struct{}),
 		seenReceipts: make(map[string]struct{}),
-		subs:     make(map[string]map[string]*subscriber),
-		sessions: make(map[string]*peerSession),
-		upstream: make(map[string]struct{}),
-		events:   make(map[chan struct{}]struct{}),
+		subs:         make(map[string]map[string]*subscriber),
+		sessions:     make(map[string]*peerSession),
+		health:       make(map[string]*peerHealth),
+		pending:      make(map[string][]pendingFrame),
+		pendingKeys:  make(map[string]struct{}),
+		upstream:     make(map[string]struct{}),
+		events:       make(map[chan struct{}]struct{}),
 	}
 }
 
@@ -290,6 +325,12 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "fetch_trusted_contacts":
 		s.writeJSONFrame(conn, s.trustedContactsFrame())
 		return true
+	case "fetch_peer_health":
+		s.writeJSONFrame(conn, s.peerHealthFrame())
+		return true
+	case "fetch_pending_messages":
+		s.writeJSONFrame(conn, s.pendingMessagesFrame(frame.Topic))
+		return true
 	case "import_contacts":
 		s.writeJSONFrame(conn, s.importContactsFrame(frame.Contacts))
 		return true
@@ -346,6 +387,10 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.contactsFrame()
 	case "fetch_trusted_contacts":
 		return s.trustedContactsFrame()
+	case "fetch_peer_health":
+		return s.peerHealthFrame()
+	case "fetch_pending_messages":
+		return s.pendingMessagesFrame(frame.Topic)
 	case "import_contacts":
 		return s.importContactsFrame(frame.Contacts)
 	case "send_message":
@@ -478,6 +523,40 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 		Count:    len(contacts),
 		Contacts: contacts,
 	}
+}
+
+func (s *Service) peerHealthFrame() protocol.Frame {
+	return protocol.Frame{
+		Type:       "peer_health",
+		Count:      len(s.peerHealthFrames()),
+		PeerHealth: s.peerHealthFrames(),
+	}
+}
+
+func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
+	if strings.TrimSpace(topic) == "" {
+		topic = "dm"
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ids := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, frames := range s.pending {
+		for _, item := range frames {
+			frame := item.Frame
+			if frame.Topic != topic || frame.Type != "send_message" || frame.ID == "" {
+				continue
+			}
+			if _, ok := seen[frame.ID]; ok {
+				continue
+			}
+			seen[frame.ID] = struct{}{}
+			ids = append(ids, frame.ID)
+		}
+	}
+	sort.Strings(ids)
+	return protocol.Frame{Type: "pending_messages", Topic: topic, Count: len(ids), PendingIDs: ids}
 }
 
 func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol.Frame {
@@ -1000,6 +1079,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) error {
 	}
 	_ = conn.SetDeadline(time.Time{})
 	log.Printf("node: upstream subscription established peer=%s recipient=%s", address, s.identity.Address)
+	s.markPeerConnected(address)
 
 	if err := s.syncPeerSession(session); err != nil {
 		return err
@@ -1008,15 +1088,16 @@ func (s *Service) openPeerSession(ctx context.Context, address string) error {
 	s.mu.Lock()
 	s.sessions[address] = session
 	s.mu.Unlock()
+	s.flushPendingPeerFrames(address)
 
 	return s.servePeerSession(ctx, session)
 }
 
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
 	syncTicker := time.NewTicker(4 * time.Second)
-	pingTicker := time.NewTicker(20 * time.Second)
+	pingTimer := time.NewTimer(nextHeartbeatDuration())
 	defer syncTicker.Stop()
-	defer pingTicker.Stop()
+	defer pingTimer.Stop()
 
 	for {
 		select {
@@ -1024,21 +1105,33 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			return nil
 		case err := <-session.errCh:
 			log.Printf("node: upstream subscription closed peer=%s recipient=%s err=%v", session.address, s.identity.Address, err)
+			s.markPeerDisconnected(session.address, err)
 			return err
 		case frame := <-session.inboxCh:
 			s.handlePeerSessionFrame(session.address, frame)
 		case <-syncTicker.C:
-			if err := s.syncPeerSession(session); err != nil {
+			if s.peerState(session.address) == peerStateStalled {
+				err := fmt.Errorf("peer session stalled")
+				log.Printf("node: upstream session stalled peer=%s recipient=%s", session.address, s.identity.Address)
+				s.markPeerDisconnected(session.address, err)
 				return err
 			}
-		case <-pingTicker.C:
+			if err := s.syncPeerSession(session); err != nil {
+				s.markPeerDisconnected(session.address, err)
+				return err
+			}
+			s.flushPendingPeerFrames(session.address)
+		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
 				log.Printf("node: upstream ping failed peer=%s recipient=%s err=%v", session.address, s.identity.Address, err)
+				s.markPeerDisconnected(session.address, err)
 				return err
 			}
+			pingTimer.Reset(nextHeartbeatDuration())
 		case outbound := <-session.sendCh:
 			if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
 				log.Printf("node: peer session send failed peer=%s type=%s err=%v", session.address, outbound.Type, err)
+				s.markPeerDisconnected(session.address, err)
 				return err
 			}
 		}
@@ -1057,16 +1150,42 @@ func (s *Service) gossipMessage(msg protocol.Envelope) {
 func (s *Service) routingTargets() []string {
 	s.mu.RLock()
 	if len(s.sessions) > 0 {
-		targets := make([]string, 0, len(s.sessions))
+		type scoredTarget struct {
+			address string
+			score   int64
+		}
+		scored := make([]scoredTarget, 0, len(s.sessions))
 		for address := range s.sessions {
 			if address == "" || s.isSelfAddress(address) {
 				continue
 			}
-			targets = append(targets, address)
+			health := s.health[address]
+			if health == nil || !health.Connected {
+				continue
+			}
+			if s.computePeerStateLocked(health) == peerStateStalled {
+				continue
+			}
+			scored = append(scored, scoredTarget{
+				address: address,
+				score:   scorePeerTargetLocked(health),
+			})
 		}
-		s.mu.RUnlock()
-		sort.Strings(targets)
-		return targets
+		if len(scored) > 0 {
+			s.mu.RUnlock()
+			sort.Slice(scored, func(i, j int) bool {
+				if scored[i].score == scored[j].score {
+					return scored[i].address < scored[j].address
+				}
+				return scored[i].score > scored[j].score
+			})
+			limit := min(3, len(scored))
+			targets := make([]string, 0, limit)
+			for _, item := range scored[:limit] {
+				targets = append(targets, item.address)
+			}
+			return targets
+		}
 	}
 	s.mu.RUnlock()
 
@@ -1080,6 +1199,31 @@ func (s *Service) routingTargets() []string {
 	}
 	sort.Strings(targets)
 	return targets
+}
+
+func scorePeerTargetLocked(health *peerHealth) int64 {
+	stateWeight := int64(0)
+	switch health.State {
+	case peerStateHealthy:
+		stateWeight = 4
+	case peerStateDegraded:
+		stateWeight = 2
+	case peerStateReconnecting:
+		stateWeight = 1
+	default:
+		stateWeight = 0
+	}
+
+	lastUseful := health.LastUsefulReceiveAt
+	if lastUseful.IsZero() {
+		lastUseful = health.LastPongAt
+	}
+	recency := int64(0)
+	if !lastUseful.IsZero() {
+		recency = lastUseful.Unix()
+	}
+
+	return stateWeight*1_000_000_000_000 + recency - int64(health.ConsecutiveFailures*1000) - int64(len(health.LastError))
 }
 
 func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
@@ -1193,30 +1337,11 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 		log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=session", msg.ID, msg.Recipient, address)
 		return
 	}
-	log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=dial", msg.ID, msg.Recipient, address)
-
-	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
-	if err != nil {
+	if s.queuePeerFrame(address, frame) {
+		log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=queued", msg.ID, msg.Recipient, address)
 		return
 	}
-	defer func() { _ = conn.Close() }()
-
-	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
-	reader := bufio.NewReader(conn)
-
-	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		return
-	}
-	if _, err := reader.ReadString('\n'); err != nil {
-		return
-	}
-
-	line, err := protocol.MarshalFrameLine(frame)
-	if err != nil {
-		return
-	}
-	_, _ = io.WriteString(conn, line)
-	_, _ = reader.ReadString('\n')
+	log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=dropped", msg.ID, msg.Recipient, address)
 }
 
 func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
@@ -1285,30 +1410,11 @@ func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryRec
 		log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=session status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
 		return
 	}
-	log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=dial status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
-
-	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
-	if err != nil {
+	if s.queuePeerFrame(address, frame) {
+		log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=queued status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
 		return
 	}
-	defer func() { _ = conn.Close() }()
-
-	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
-	reader := bufio.NewReader(conn)
-
-	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		return
-	}
-	if _, err := reader.ReadString('\n'); err != nil {
-		return
-	}
-
-	line, err := protocol.MarshalFrameLine(frame)
-	if err != nil {
-		return
-	}
-	_, _ = io.WriteString(conn, line)
-	_, _ = reader.ReadString('\n')
+	log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=dropped status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
 }
 
 func (s *Service) nodeHelloJSONLine() string {
@@ -1488,8 +1594,10 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 }
 
 func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
+	_ = session.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 	if hello {
 		line := s.nodeHelloJSONLine()
+		s.markPeerWrite(session.address, protocol.Frame{Type: "hello"})
 		if _, err := io.WriteString(session.conn, line); err != nil {
 			return protocol.Frame{}, err
 		}
@@ -1498,16 +1606,20 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 		if err != nil {
 			return protocol.Frame{}, err
 		}
+		s.markPeerWrite(session.address, frame)
 		if _, err := io.WriteString(session.conn, line); err != nil {
 			return protocol.Frame{}, err
 		}
 	}
+	_ = session.conn.SetWriteDeadline(time.Time{})
+	_ = session.conn.SetReadDeadline(time.Now().Add(peerRequestTimeout))
 
 	for {
 		select {
 		case err := <-session.errCh:
 			return protocol.Frame{}, err
 		case incoming := <-session.inboxCh:
+			s.markPeerRead(session.address, incoming)
 			if incoming.Type == "error" {
 				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
 			}
@@ -1520,6 +1632,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				continue
 			}
 			if expectedType == "" || incoming.Type == expectedType {
+				_ = session.conn.SetReadDeadline(time.Time{})
 				return incoming, nil
 			}
 			continue
@@ -1550,6 +1663,7 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 }
 
 func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
+	s.markPeerUsefulReceive(address)
 	switch frame.Type {
 	case "push_message":
 		if frame.Item == nil {
@@ -1590,8 +1704,164 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 	}
 }
 
+func (s *Service) markPeerConnected(address string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	health := s.ensurePeerHealthLocked(address)
+	now := time.Now().UTC()
+	health.Connected = true
+	s.updatePeerStateLocked(health, peerStateHealthy)
+	health.LastConnectedAt = now
+	health.LastError = ""
+	health.ConsecutiveFailures = 0
+}
+
+func (s *Service) markPeerDisconnected(address string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	health := s.ensurePeerHealthLocked(address)
+	now := time.Now().UTC()
+	health.Connected = false
+	s.updatePeerStateLocked(health, peerStateReconnecting)
+	health.LastDisconnectedAt = now
+	health.ConsecutiveFailures++
+	if err != nil {
+		health.LastError = err.Error()
+	}
+}
+
+func (s *Service) markPeerWrite(address string, frame protocol.Frame) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	health := s.ensurePeerHealthLocked(address)
+	now := time.Now().UTC()
+	if frame.Type == "ping" {
+		health.LastPingAt = now
+	} else if frame.Type != "" {
+		health.LastUsefulSendAt = now
+	}
+	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+}
+
+func (s *Service) markPeerRead(address string, frame protocol.Frame) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	health := s.ensurePeerHealthLocked(address)
+	now := time.Now().UTC()
+	if frame.Type == "pong" {
+		health.LastPongAt = now
+		s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+		return
+	}
+	if frame.Type != "" {
+		health.LastUsefulReceiveAt = now
+	}
+	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+}
+
+func (s *Service) markPeerUsefulReceive(address string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	health := s.ensurePeerHealthLocked(address)
+	health.LastUsefulReceiveAt = time.Now().UTC()
+	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+}
+
+func (s *Service) ensurePeerHealthLocked(address string) *peerHealth {
+	health := s.health[address]
+	if health == nil {
+		health = &peerHealth{
+			Address: address,
+			State:   peerStateReconnecting,
+		}
+		s.health[address] = health
+	}
+	return health
+}
+
+func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
+	if health.State == next {
+		return
+	}
+	if health.State != "" {
+		log.Printf("node: peer_state_change peer=%s from=%s to=%s pending=%d failures=%d", health.Address, health.State, next, len(s.pending[health.Address]), health.ConsecutiveFailures)
+	}
+	health.State = next
+}
+
+func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	items := make([]protocol.PeerHealthFrame, 0, len(s.health))
+	for _, health := range s.health {
+		items = append(items, protocol.PeerHealthFrame{
+			Address:             health.Address,
+			State:               s.computePeerStateLocked(health),
+			Connected:           health.Connected,
+			PendingCount:        len(s.pending[health.Address]),
+			LastConnectedAt:     formatTime(health.LastConnectedAt),
+			LastDisconnectedAt:  formatTime(health.LastDisconnectedAt),
+			LastPingAt:          formatTime(health.LastPingAt),
+			LastPongAt:          formatTime(health.LastPongAt),
+			LastUsefulSendAt:    formatTime(health.LastUsefulSendAt),
+			LastUsefulReceiveAt: formatTime(health.LastUsefulReceiveAt),
+			ConsecutiveFailures: health.ConsecutiveFailures,
+			LastError:           health.LastError,
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Address < items[j].Address
+	})
+	return items
+}
+
+func (s *Service) computePeerStateLocked(health *peerHealth) string {
+	if !health.Connected {
+		return peerStateReconnecting
+	}
+
+	now := time.Now().UTC()
+	lastUseful := health.LastUsefulReceiveAt
+	if lastUseful.IsZero() {
+		lastUseful = health.LastPongAt
+	}
+	if lastUseful.IsZero() {
+		return peerStateDegraded
+	}
+
+	age := now.Sub(lastUseful)
+	switch {
+	case age >= 60*time.Second:
+		return peerStateStalled
+	case age >= 25*time.Second:
+		return peerStateDegraded
+	default:
+		return peerStateHealthy
+	}
+}
+
+func formatTime(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.UTC().Format(time.RFC3339)
+}
+
 func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
-	session := s.peerSession(address)
+	session, ok := s.activePeerSession(address)
+	if !ok {
+		return false
+	}
+	if s.peerState(address) == peerStateStalled {
+		return false
+	}
 	if session == nil {
 		return false
 	}
@@ -1602,6 +1872,75 @@ func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
 	default:
 		return false
 	}
+}
+
+func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
+	key := pendingFrameKey(address, frame)
+	if key == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.pendingKeys[key]; exists {
+		return true
+	}
+	s.pending[address] = append(s.pending[address], pendingFrame{
+		Frame:    frame,
+		QueuedAt: time.Now().UTC(),
+	})
+	s.pendingKeys[key] = struct{}{}
+	return true
+}
+
+func pendingFrameKey(address string, frame protocol.Frame) string {
+	switch frame.Type {
+	case "send_message":
+		return address + "|send_message|" + frame.ID + "|" + frame.Recipient
+	case "send_delivery_receipt":
+		return address + "|send_delivery_receipt|" + frame.ID + "|" + frame.Recipient + "|" + frame.Status
+	default:
+		return ""
+	}
+}
+
+func (s *Service) flushPendingPeerFrames(address string) {
+	session, ok := s.activePeerSession(address)
+	if !ok || session == nil {
+		return
+	}
+
+	s.mu.Lock()
+	frames := append([]pendingFrame(nil), s.pending[address]...)
+	delete(s.pending, address)
+	for _, frame := range frames {
+		delete(s.pendingKeys, pendingFrameKey(address, frame.Frame))
+	}
+	s.mu.Unlock()
+
+	remaining := make([]pendingFrame, 0)
+	for _, item := range frames {
+		if time.Since(item.QueuedAt) > pendingFrameTTL {
+			continue
+		}
+		select {
+		case session.sendCh <- item.Frame:
+		default:
+			item.Retries++
+			remaining = append(remaining, item)
+		}
+	}
+	if len(remaining) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	s.pending[address] = append(s.pending[address], remaining...)
+	for _, item := range remaining {
+		s.pendingKeys[pendingFrameKey(address, item.Frame)] = struct{}{}
+	}
+	s.mu.Unlock()
 }
 
 func expectedReplyType(requestType string) string {
@@ -1619,6 +1958,36 @@ func (s *Service) peerSession(address string) *peerSession {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sessions[address]
+}
+
+func (s *Service) activePeerSession(address string) (*peerSession, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	session := s.sessions[address]
+	if session == nil {
+		return nil, false
+	}
+	health := s.health[address]
+	if health == nil || !health.Connected {
+		return nil, false
+	}
+	return session, true
+}
+
+func (s *Service) peerState(address string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	health := s.health[address]
+	if health == nil {
+		return peerStateReconnecting
+	}
+	return s.computePeerStateLocked(health)
+}
+
+func nextHeartbeatDuration() time.Duration {
+	base := 15 * time.Second
+	jitter := time.Duration(time.Now().UTC().UnixNano()%7) * time.Second
+	return base + jitter
 }
 
 func (s *Service) subscribersForRecipient(recipient string) []*subscriber {

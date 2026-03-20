@@ -598,6 +598,11 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 						return layout.Dimensions{}
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return w.layoutNetworkStatus(gtx, status)
+						})
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						label := w.t("compose.send")
 						if recipient == "" {
 							label = w.t("compose.select_first")
@@ -612,6 +617,126 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 			}),
 		)
 	})
+}
+
+func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
+	state, peers, pending := networkStatusSummary(status)
+	labelText := w.t("compose.network_status", strings.ToUpper(state), peers, pending)
+	if labelText == "compose.network_status" {
+		labelText = "NET " + strings.ToUpper(state) + " | " + strconv.Itoa(peers) + " peers | " + strconv.Itoa(pending) + " pending"
+	}
+	breakdownText := w.networkBreakdownText(status)
+	bg, fg := networkStateColors(state)
+
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		inset := layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(12), Right: unit.Dp(12)}
+		macro := op.Record(gtx.Ops)
+		dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Caption(w.theme, labelText)
+					label.Color = fg
+					return label.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if strings.TrimSpace(breakdownText) == "" {
+						return layout.Dimensions{}
+					}
+					return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						label := material.Caption(w.theme, breakdownText)
+						label.Color = color.NRGBA{R: 214, G: 221, B: 232, A: 220}
+						return label.Layout(gtx)
+					})
+				}),
+			)
+		})
+		call := macro.Stop()
+		defer clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(unit.Dp(12))).Push(gtx.Ops).Pop()
+		paint.ColorOp{Color: bg}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		call.Add(gtx.Ops)
+		return dims
+	})
+}
+
+func networkStatusSummary(status service.NodeStatus) (string, int, int) {
+	healthy := 0
+	degraded := 0
+	stalled := 0
+	reconnecting := 0
+	pending := 0
+
+	for _, item := range status.PeerHealth {
+		switch item.State {
+		case "healthy":
+			healthy++
+		case "degraded":
+			degraded++
+		case "stalled":
+			stalled++
+		case "reconnecting":
+			reconnecting++
+		}
+		pending += item.PendingCount
+	}
+
+	switch {
+	case healthy > 0:
+		return "healthy", len(status.PeerHealth), pending
+	case degraded > 0:
+		return "degraded", len(status.PeerHealth), pending
+	case stalled > 0:
+		return "stalled", len(status.PeerHealth), pending
+	case reconnecting > 0:
+		return "reconnecting", len(status.PeerHealth), pending
+	default:
+		return "offline", 0, pending
+	}
+}
+
+func (w *Window) networkBreakdownText(status service.NodeStatus) string {
+	healthy := 0
+	degraded := 0
+	stalled := 0
+	reconnecting := 0
+
+	for _, item := range status.PeerHealth {
+		switch item.State {
+		case "healthy":
+			healthy++
+		case "degraded":
+			degraded++
+		case "stalled":
+			stalled++
+		case "reconnecting":
+			reconnecting++
+		}
+	}
+
+	if healthy == 0 && degraded == 0 && stalled == 0 && reconnecting == 0 {
+		return ""
+	}
+
+	text := w.t("compose.network_breakdown", healthy, degraded, stalled, reconnecting)
+	if text == "compose.network_breakdown" {
+		return "H " + strconv.Itoa(healthy) + " | D " + strconv.Itoa(degraded) + " | S " + strconv.Itoa(stalled) + " | R " + strconv.Itoa(reconnecting)
+	}
+	return text
+}
+
+func networkStateColors(state string) (color.NRGBA, color.NRGBA) {
+	switch state {
+	case "healthy":
+		return color.NRGBA{R: 36, G: 92, B: 63, A: 255}, color.NRGBA{R: 231, G: 255, B: 239, A: 255}
+	case "degraded":
+		return color.NRGBA{R: 110, G: 82, B: 25, A: 255}, color.NRGBA{R: 255, G: 244, B: 210, A: 255}
+	case "stalled":
+		return color.NRGBA{R: 118, G: 50, B: 37, A: 255}, color.NRGBA{R: 255, G: 225, B: 220, A: 255}
+	case "reconnecting":
+		return color.NRGBA{R: 57, G: 67, B: 84, A: 255}, color.NRGBA{R: 231, G: 237, B: 246, A: 255}
+	default:
+		return color.NRGBA{R: 51, G: 56, B: 66, A: 255}, color.NRGBA{R: 214, G: 221, B: 232, A: 255}
+	}
 }
 
 func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
@@ -963,13 +1088,20 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				}),
 			}
 
-			if isMine && message.DeliveredAt != nil {
+			if isMine && (message.DeliveredAt != nil || message.ReceiptStatus == "queued" || message.ReceiptStatus == "sent") {
 				children = append(children,
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						statusText := "✓ " + message.DeliveredAt.Format("15:04")
-						if message.ReceiptStatus == "seen" {
+						statusText := ""
+						switch {
+						case message.DeliveredAt != nil && message.ReceiptStatus == "seen":
 							statusText = "✓✓ " + message.DeliveredAt.Format("15:04")
+						case message.DeliveredAt != nil:
+							statusText = "✓ " + message.DeliveredAt.Format("15:04")
+						case message.ReceiptStatus == "queued":
+							statusText = "queued"
+						case message.ReceiptStatus == "sent":
+							statusText = "sent"
 						}
 						return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							label := material.Caption(w.theme, statusText)

@@ -124,7 +124,7 @@ func TestDecryptDirectMessages(t *testing.T) {
 		Sender:     sender.Address,
 		Recipient:  recipient.Address,
 		Body:       ciphertext,
-	}}, nil)
+	}}, nil, nil)
 	want := []DirectMessage{{
 		ID:        "id-1",
 		Sender:    sender.Address,
@@ -138,6 +138,48 @@ func TestDecryptDirectMessages(t *testing.T) {
 	}
 }
 
+func TestDecryptDirectMessagesMarksQueuedAndSent(t *testing.T) {
+	t.Parallel()
+
+	sender, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate sender failed: %v", err)
+	}
+	recipient, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient failed: %v", err)
+	}
+
+	ciphertext, err := directmsg.EncryptForParticipants(sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), "queued later")
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+
+	got := decryptDirectMessages(sender, map[string]Contact{
+		sender.Address: {
+			BoxKey: identity.BoxPublicKeyBase64(sender.BoxPublicKey),
+			PubKey: identity.PublicKeyBase64(sender.PublicKey),
+		},
+		recipient.Address: {
+			BoxKey: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+			PubKey: identity.PublicKeyBase64(recipient.PublicKey),
+		},
+	}, []MessageRecord{
+		{ID: "queued-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:00:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
+		{ID: "sent-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:01:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
+	}, nil, []string{"queued-1"})
+
+	if len(got) != 2 {
+		t.Fatalf("unexpected direct messages: %#v", got)
+	}
+	if got[0].ReceiptStatus != "queued" {
+		t.Fatalf("expected queued status, got %#v", got[0])
+	}
+	if got[1].ReceiptStatus != "sent" {
+		t.Fatalf("expected sent status, got %#v", got[1])
+	}
+}
+
 func TestIncomingContactsToTrustIncludesUnknownIncomingSender(t *testing.T) {
 	t.Parallel()
 
@@ -147,9 +189,9 @@ func TestIncomingContactsToTrustIncludesUnknownIncomingSender(t *testing.T) {
 			"trusted": {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
 		},
 		map[string]Contact{
-			"alice": {BoxKey: "alice-box", PubKey: "alice-pub", BoxSignature: "alice-sig"},
+			"alice":   {BoxKey: "alice-box", PubKey: "alice-pub", BoxSignature: "alice-sig"},
 			"trusted": {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
-			"bob": {BoxKey: "bob-box", PubKey: "bob-pub"},
+			"bob":     {BoxKey: "bob-box", PubKey: "bob-pub"},
 		},
 		[]DirectMessage{
 			{Sender: "alice", Recipient: "me", Body: "hello"},
@@ -167,6 +209,70 @@ func TestIncomingContactsToTrustIncludesUnknownIncomingSender(t *testing.T) {
 	}
 }
 
+func TestPeerHealthFromFrame(t *testing.T) {
+	t.Parallel()
+
+	got := peerHealthFromFrame(protocol.Frame{
+		Type: "peer_health",
+		PeerHealth: []protocol.PeerHealthFrame{
+			{
+				Address:             "65.108.204.190:64646",
+				State:               "healthy",
+				Connected:           true,
+				PendingCount:        2,
+				LastConnectedAt:     "2026-03-20T09:10:11Z",
+				LastDisconnectedAt:  "2026-03-20T09:09:11Z",
+				LastPingAt:          "2026-03-20T09:11:00Z",
+				LastPongAt:          "2026-03-20T09:11:00Z",
+				LastUsefulSendAt:    "2026-03-20T09:10:58Z",
+				LastUsefulReceiveAt: "2026-03-20T09:10:59Z",
+				ConsecutiveFailures: 1,
+				LastError:           "timeout",
+			},
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("expected one peer health item, got %#v", got)
+	}
+
+	want := PeerHealth{
+		Address:             "65.108.204.190:64646",
+		State:               "healthy",
+		Connected:           true,
+		PendingCount:        2,
+		LastConnectedAt:     timePtr(t, "2026-03-20T09:10:11Z"),
+		LastDisconnectedAt:  timePtr(t, "2026-03-20T09:09:11Z"),
+		LastPingAt:          timePtr(t, "2026-03-20T09:11:00Z"),
+		LastPongAt:          timePtr(t, "2026-03-20T09:11:00Z"),
+		LastUsefulSendAt:    timePtr(t, "2026-03-20T09:10:58Z"),
+		LastUsefulReceiveAt: timePtr(t, "2026-03-20T09:10:59Z"),
+		ConsecutiveFailures: 1,
+		LastError:           "timeout",
+	}
+
+	if !reflect.DeepEqual(got[0], want) {
+		t.Fatalf("unexpected peer health: got %#v want %#v", got[0], want)
+	}
+}
+
+func TestParseOptionalTime(t *testing.T) {
+	t.Parallel()
+
+	if got := parseOptionalTime(""); got != nil {
+		t.Fatalf("expected nil for empty time, got %#v", got)
+	}
+	if got := parseOptionalTime("broken"); got != nil {
+		t.Fatalf("expected nil for invalid time, got %#v", got)
+	}
+
+	got := parseOptionalTime("2026-03-20T09:10:11Z")
+	want := timePtr(t, "2026-03-20T09:10:11Z")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected parsed time: got %#v want %#v", got, want)
+	}
+}
+
 func mustTime(t *testing.T, value string) time.Time {
 	t.Helper()
 
@@ -176,4 +282,10 @@ func mustTime(t *testing.T, value string) time.Time {
 	}
 
 	return timestamp.UTC()
+}
+
+func timePtr(t *testing.T, value string) *time.Time {
+	t.Helper()
+	ts := mustTime(t, value)
+	return &ts
 }
