@@ -207,7 +207,7 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 							return label.Layout(gtx)
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return c.layoutStateBadge(gtx, item.State)
+					return c.layoutStateBadge(gtx, item.State)
 						}),
 					)
 				}),
@@ -223,7 +223,7 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 					})
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Caption(c.theme, peerHealthMeta(item))
+					label := material.Caption(c.theme, c.peerHealthMeta(item))
 					label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 					return label.Layout(gtx)
 				}),
@@ -248,7 +248,7 @@ func (c *ConsoleWindow) layoutStateBadge(gtx layout.Context, state string) layou
 		inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
 		macro := op.Record(gtx.Ops)
 		dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Caption(c.theme, strings.ToUpper(state))
+			label := material.Caption(c.theme, strings.ToUpper(c.parent.t("node.peer_state."+state)))
 			label.Color = fg
 			return label.Layout(gtx)
 		})
@@ -261,7 +261,7 @@ func (c *ConsoleWindow) layoutStateBadge(gtx layout.Context, state string) layou
 	})
 }
 
-func peerHealthMeta(item service.PeerHealth) string {
+func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 	lastRecv := "-"
 	if item.LastUsefulReceiveAt != nil {
 		lastRecv = item.LastUsefulReceiveAt.Format("15:04:05")
@@ -270,11 +270,15 @@ func peerHealthMeta(item service.PeerHealth) string {
 	if item.LastPongAt != nil {
 		lastPong = item.LastPongAt.Format("15:04:05")
 	}
-	connected := "down"
+	connected := c.parent.t("node.link.down")
 	if item.Connected {
-		connected = "up"
+		connected = c.parent.t("node.link.up")
 	}
-	return fmt.Sprintf("%s | pending %d | recv %s | pong %s | fails %d", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures)
+	text := c.parent.t("node.peer_health.meta", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures)
+	if text == "node.peer_health.meta" {
+		return fmt.Sprintf("%s | pending %d | recv %s | pong %s | fails %d", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures)
+	}
+	return text
 }
 
 func peerStateColors(state string) (color.NRGBA, color.NRGBA) {
