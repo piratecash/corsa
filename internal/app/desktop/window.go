@@ -52,6 +52,7 @@ type Window struct {
 	seenIncoming              map[string]struct{}
 	discoveredRecipients      map[string]struct{}
 	unreadRecipients          map[string]int
+	recipientOrder            []string
 	language                  string
 	showLanguageMenu          bool
 	sendStatus                string
@@ -93,6 +94,7 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 		seenIncoming:         make(map[string]struct{}),
 		discoveredRecipients: make(map[string]struct{}),
 		unreadRecipients:     make(map[string]int),
+		recipientOrder:       make([]string, 0),
 		sendStatus:           translate(language, "status.compose_default"),
 		contactsList:         widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:             widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
@@ -921,6 +923,7 @@ func (w *Window) updateUnreadState(status service.NodeStatus) {
 		w.seenIncoming[message.ID] = struct{}{}
 		if message.Sender != selected {
 			w.unreadRecipients[message.Sender]++
+			w.promoteRecipientLocked(message.Sender)
 		}
 	}
 }
@@ -943,9 +946,56 @@ func (w *Window) currentRecipients(status service.NodeStatus) []string {
 	for id := range w.discoveredRecipients {
 		discovered[id] = struct{}{}
 	}
+	order := append([]string(nil), w.recipientOrder...)
 	w.mu.RUnlock()
 
-	return knownRecipients(status.Contacts, discovered, w.client.Address())
+	recipients := knownRecipients(status.Contacts, discovered, w.client.Address())
+	return mergeRecipientOrder(recipients, order)
+}
+
+func (w *Window) promoteRecipientLocked(recipient string) {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "" {
+		return
+	}
+	filtered := w.recipientOrder[:0]
+	for _, item := range w.recipientOrder {
+		if item == recipient {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	w.recipientOrder = append([]string{recipient}, filtered...)
+}
+
+func mergeRecipientOrder(recipients, order []string) []string {
+	if len(recipients) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{}, len(recipients))
+	for _, recipient := range recipients {
+		known[recipient] = struct{}{}
+	}
+	out := make([]string, 0, len(recipients))
+	used := make(map[string]struct{}, len(recipients))
+	for _, recipient := range order {
+		if _, ok := known[recipient]; !ok {
+			continue
+		}
+		if _, ok := used[recipient]; ok {
+			continue
+		}
+		used[recipient] = struct{}{}
+		out = append(out, recipient)
+	}
+	for _, recipient := range recipients {
+		if _, ok := used[recipient]; ok {
+			continue
+		}
+		used[recipient] = struct{}{}
+		out = append(out, recipient)
+	}
+	return out
 }
 
 func (w *Window) recipientPreview(status service.NodeStatus, recipient string) string {
