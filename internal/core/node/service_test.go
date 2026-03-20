@@ -1350,6 +1350,73 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 	}
 }
 
+func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	frame := protocol.Frame{
+		Type:      "send_message",
+		Topic:     "dm",
+		ID:        "outbound-dm-1",
+		Address:   id.Address,
+		Recipient: "peer-recipient",
+		Flag:      string(protocol.MessageFlagSenderDelete),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Body:      "ciphertext",
+	}
+
+	svc.mu.Lock()
+	svc.pending["91.234.35.132:64646"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
+	svc.pending["91.234.35.132:64647"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
+	svc.pendingKeys[pendingFrameKey("91.234.35.132:64646", frame)] = struct{}{}
+	svc.pendingKeys[pendingFrameKey("91.234.35.132:64647", frame)] = struct{}{}
+	svc.outbound[frame.ID] = outboundDelivery{
+		MessageID: frame.ID,
+		Recipient: frame.Recipient,
+		Status:    "queued",
+		QueuedAt:  time.Now().UTC(),
+	}
+	svc.mu.Unlock()
+
+	receipt := protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID(frame.ID),
+		Sender:      "peer-recipient",
+		Recipient:   id.Address,
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC(),
+	}
+
+	stored, _ := svc.storeDeliveryReceipt(receipt)
+	if !stored {
+		t.Fatalf("expected receipt to be stored")
+	}
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	if len(svc.pending) != 0 {
+		t.Fatalf("expected pending send_message entries to be cleared, got %#v", svc.pending)
+	}
+	if len(svc.pendingKeys) != 0 {
+		t.Fatalf("expected pending keys to be cleared, got %#v", svc.pendingKeys)
+	}
+	if _, ok := svc.relayRetry[relayReceiptKey(receipt)]; ok {
+		t.Fatalf("expected self receipt not to be tracked for relay retry")
+	}
+}
+
 func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 	t.Parallel()
 

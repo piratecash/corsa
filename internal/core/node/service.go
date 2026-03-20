@@ -747,6 +747,10 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
+	s.removeSubscriberConnLocked(recipient, conn)
+	if _, ok := s.subs[recipient]; !ok {
+		s.subs[recipient] = make(map[string]*subscriber)
+	}
 	sub := &subscriber{
 		id:        subID,
 		recipient: recipient,
@@ -786,6 +790,10 @@ func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
+	s.removeSubscriberConnLocked(recipient, conn)
+	if _, ok := s.subs[recipient]; !ok {
+		s.subs[recipient] = make(map[string]*subscriber)
+	}
 
 	existing, exists := s.subs[recipient][subID]
 	if exists && existing.conn == conn {
@@ -798,6 +806,21 @@ func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
 		conn:      conn,
 	}
 	log.Printf("node: route_via_hello recipient=%s subscriber=%s active=%d", recipient, subID, len(s.subs[recipient]))
+}
+
+func (s *Service) removeSubscriberConnLocked(recipient string, conn net.Conn) {
+	if recipient == "" || conn == nil {
+		return
+	}
+	subs := s.subs[recipient]
+	for id, sub := range subs {
+		if sub != nil && sub.conn == conn {
+			delete(subs, id)
+		}
+	}
+	if len(subs) == 0 {
+		delete(s.subs, recipient)
+	}
 }
 
 func (s *Service) refreshKnowledgeFromPeers() {
@@ -960,6 +983,8 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	s.seenReceipts[key] = struct{}{}
 	s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
 	delete(s.outbound, string(receipt.MessageID))
+	s.clearPendingMessageLocked(receipt.MessageID)
+	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
 	count := len(s.receipts[receipt.Recipient])
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
@@ -969,11 +994,36 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 
 	log.Printf("node: stored delivery receipt message_id=%s sender=%s recipient=%s status=%s delivered_at=%s", receipt.MessageID, receipt.Sender, receipt.Recipient, receipt.Status, receipt.DeliveredAt.Format(time.RFC3339))
 
+	if receipt.Recipient == s.identity.Address {
+		return true, count
+	}
+
 	s.trackRelayReceipt(receipt)
 	go s.gossipReceipt(receipt)
 	go s.pushReceiptToSubscribers(receipt)
 
 	return true, count
+}
+
+func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) {
+	if strings.TrimSpace(string(messageID)) == "" {
+		return
+	}
+	for address, items := range s.pending {
+		remaining := items[:0]
+		for _, item := range items {
+			if item.Frame.Type == "send_message" && item.Frame.ID == string(messageID) {
+				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
+				continue
+			}
+			remaining = append(remaining, item)
+		}
+		if len(remaining) == 0 {
+			delete(s.pending, address)
+			continue
+		}
+		s.pending[address] = append([]pendingFrame(nil), remaining...)
+	}
 }
 
 func (s *Service) fetchMessagesFrame(topic string) protocol.Frame {
