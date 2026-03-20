@@ -64,6 +64,26 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install Linux desktop build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1-mesa-dev \
+            libgles2-mesa-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxrandr-dev \
+            libxrender-dev \
+            libxxf86vm-dev
+
       - name: Run govulncheck
         run: make vuln
 
