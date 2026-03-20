@@ -126,6 +126,118 @@ func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
 	}
 }
 
+func TestV2NodeHandshakeRequiresSignedAuth(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+	})
+	defer stop()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	reader := bufio.NewReader(conn)
+
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:          "hello",
+		Version:       config.ProtocolVersion,
+		Client:        "node",
+		ClientVersion: config.CorsaWireVersion,
+		Address:       id.Address,
+		PubKey:        identity.PublicKeyBase64(id.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(id),
+	})
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" || welcome.Challenge == "" {
+		t.Fatalf("expected welcome with challenge, got %#v", welcome)
+	}
+
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   id.Address,
+		Signature: identity.SignPayload(id, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+id.Address)),
+	})
+	authOK := readJSONTestFrame(t, reader)
+	if authOK.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got %#v", authOK)
+	}
+
+	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
+	peers := readJSONTestFrame(t, reader)
+	if peers.Type != "peers" {
+		t.Fatalf("expected peers after auth, got %#v", peers)
+	}
+}
+
+func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+	})
+	defer stop()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial attempt %d: %v", i, err)
+		}
+		reader := bufio.NewReader(conn)
+		writeJSONFrame(t, conn, protocol.Frame{
+			Type:          "hello",
+			Version:       config.ProtocolVersion,
+			Client:        "node",
+			ClientVersion: config.CorsaWireVersion,
+			Address:       id.Address,
+			PubKey:        identity.PublicKeyBase64(id.PublicKey),
+			BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
+			BoxSig:        identity.SignBoxKeyBinding(id),
+		})
+		welcome := readJSONTestFrame(t, reader)
+		if welcome.Type != "welcome" || welcome.Challenge == "" {
+			t.Fatalf("expected welcome challenge on attempt %d, got %#v", i, welcome)
+		}
+		writeJSONFrame(t, conn, protocol.Frame{
+			Type:      "auth_session",
+			Address:   id.Address,
+			Signature: "bad-signature",
+		})
+		reply := readJSONTestFrame(t, reader)
+		if reply.Code != protocol.ErrCodeInvalidAuthSignature {
+			t.Fatalf("expected invalid auth signature on attempt %d, got %#v", i, reply)
+		}
+		_ = conn.Close()
+	}
+
+	svc.mu.RLock()
+	entry := svc.bans["127.0.0.1"]
+	svc.mu.RUnlock()
+	if entry.Score != 1000 {
+		t.Fatalf("expected ban score 1000, got %#v", entry)
+	}
+	if entry.Blacklisted.IsZero() {
+		t.Fatalf("expected blacklist expiration to be set, got %#v", entry)
+	}
+}
+
 func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
 	t.Parallel()
 
@@ -1332,6 +1444,52 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 	})
 }
 
+func TestV2AckDeleteClearsReceiptBacklog(t *testing.T) {
+	t.Parallel()
+
+	addressFull := freeAddress(t)
+	addressClient := freeAddress(t)
+
+	idClient, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate client identity: %v", err)
+	}
+
+	fullNode, stopFull := startTestNode(t, config.Node{
+		ListenAddress:    addressFull,
+		AdvertiseAddress: normalizeAddress(addressFull),
+		Type:             config.NodeTypeFull,
+	})
+	defer stopFull()
+
+	stored, _ := fullNode.storeDeliveryReceipt(protocol.DeliveryReceipt{
+		MessageID:   "receipt-backlog-1",
+		Sender:      fullNode.Address(),
+		Recipient:   idClient.Address,
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC(),
+	})
+	if !stored {
+		t.Fatal("expected backlog receipt to be stored")
+	}
+
+	clientNode, stopClient := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    addressClient,
+		AdvertiseAddress: "",
+		BootstrapPeers:   []string{normalizeAddress(addressFull)},
+		Type:             config.NodeTypeClient,
+	}, idClient)
+	defer stopClient()
+
+	waitForCondition(t, 8*time.Second, func() bool {
+		reply := fullNode.HandleLocalFrame(protocol.Frame{
+			Type:      "fetch_delivery_receipts",
+			Recipient: clientNode.Address(),
+		})
+		return reply.Type == "delivery_receipts" && len(reply.Receipts) == 0
+	})
+}
+
 func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppears(t *testing.T) {
 	t.Parallel()
 
@@ -1491,6 +1649,16 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 	svc.pending["91.234.35.132:64647"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
 	svc.pendingKeys[pendingFrameKey("91.234.35.132:64646", frame)] = struct{}{}
 	svc.pendingKeys[pendingFrameKey("91.234.35.132:64647", frame)] = struct{}{}
+	receiptFrame := protocol.Frame{
+		Type:        "send_delivery_receipt",
+		ID:          frame.ID,
+		Address:     "peer-recipient",
+		Recipient:   id.Address,
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	svc.pending["65.108.204.190:64646"] = []pendingFrame{{Frame: receiptFrame, QueuedAt: time.Now().UTC()}}
+	svc.pendingKeys[pendingFrameKey("65.108.204.190:64646", receiptFrame)] = struct{}{}
 	svc.outbound[frame.ID] = outboundDelivery{
 		MessageID: frame.ID,
 		Recipient: frame.Recipient,

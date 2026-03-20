@@ -173,6 +173,7 @@ Handshake compatibility rule:
 - caller sends only its current `version` in `hello`
 - responder rejects the handshake if caller `version` is lower than responder `minimum_protocol_version`
 - reject reply uses `type=error`, `code=incompatible-protocol-version`, and includes responder `version` plus `minimum_protocol_version`
+- protocol version `1` is still accepted only for backward compatibility during migration; support for `v1` must be removed in a future protocol cleanup after all active peers move to `v2`
 
 ### Peer sync
 
@@ -1066,6 +1067,7 @@ Fields:
 - вызывающая сторона отправляет в `hello` только свою текущую `version`
 - отвечающий узел делает reject, если `version` вызывающей стороны ниже его `minimum_protocol_version`
 - reject-ответ использует `type=error`, `code=incompatible-protocol-version` и содержит `version` плюс `minimum_protocol_version` отвечающего узла
+- версия протокола `1` пока еще принимается только для обратной совместимости на время миграции; поддержку `v1` нужно удалить в будущей очистке протокола после перевода всех активных пиров на `v2`
 
 ### Peer sync
 

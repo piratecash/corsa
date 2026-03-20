@@ -775,6 +775,10 @@ func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind s
 		Version:       config.ProtocolVersion,
 		Client:        clientKind,
 		ClientVersion: strings.ReplaceAll(c.appCfg.Version, " ", "-"),
+		Address:       c.id.Address,
+		PubKey:        identity.PublicKeyBase64(c.id.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(c.id.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(c.id),
 	})
 	if err != nil {
 		_ = conn.Close()
@@ -795,6 +799,33 @@ func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind s
 			return nil, nil, protocol.Frame{}, protocol.ErrorFromCode(welcome.Code)
 		}
 		return nil, nil, protocol.Frame{}, protocol.ErrProtocol
+	}
+	if welcome.Version >= 2 && strings.TrimSpace(welcome.Challenge) != "" {
+		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:      "auth_session",
+			Address:   c.id.Address,
+			Signature: identity.SignPayload(c.id, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+c.id.Address)),
+		})
+		if err != nil {
+			_ = conn.Close()
+			return nil, nil, protocol.Frame{}, err
+		}
+		if _, err := io.WriteString(conn, authLine); err != nil {
+			_ = conn.Close()
+			return nil, nil, protocol.Frame{}, err
+		}
+		authReply, err := readJSONFrame(reader)
+		if err != nil {
+			_ = conn.Close()
+			return nil, nil, protocol.Frame{}, err
+		}
+		if authReply.Type == "error" {
+			_ = conn.Close()
+			if authReply.Code != "" {
+				return nil, nil, protocol.Frame{}, protocol.ErrorFromCode(authReply.Code)
+			}
+			return nil, nil, protocol.Frame{}, protocol.ErrProtocol
+		}
 	}
 
 	return conn, reader, welcome, nil

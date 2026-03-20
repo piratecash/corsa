@@ -90,6 +90,10 @@ func SignBoxKeyBinding(id *Identity) string {
 	return base64.RawURLEncoding.EncodeToString(signature)
 }
 
+func SignPayload(id *Identity, payload []byte) string {
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(id.PrivateKey, payload))
+}
+
 func VerifyBoxKeyBinding(address, publicKeyBase64, boxKeyBase64, signatureBase64 string) error {
 	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
 	if err != nil {
@@ -113,6 +117,30 @@ func VerifyBoxKeyBinding(address, publicKeyBase64, boxKeyBase64, signatureBase64
 		return fmt.Errorf("invalid box key signature")
 	}
 
+	return nil
+}
+
+func VerifyPayload(address, publicKeyBase64 string, payload []byte, signatureBase64 string) error {
+	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	if err != nil {
+		return fmt.Errorf("decode public key: %w", err)
+	}
+	if len(publicKeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid public key size: %d", len(publicKeyBytes))
+	}
+
+	publicKey := ed25519.PublicKey(publicKeyBytes)
+	if Fingerprint(publicKey) != address {
+		return fmt.Errorf("public key fingerprint mismatch")
+	}
+
+	signature, err := base64.RawURLEncoding.DecodeString(signatureBase64)
+	if err != nil {
+		return fmt.Errorf("decode signature: %w", err)
+	}
+	if !ed25519.Verify(publicKey, payload, signature) {
+		return fmt.Errorf("invalid signature")
+	}
 	return nil
 }
 

@@ -3,6 +3,8 @@ package node
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,6 +50,8 @@ type Service struct {
 	outbound     map[string]outboundDelivery
 	upstream     map[string]struct{}
 	inboundConns map[net.Conn]struct{}
+	connAuth     map[net.Conn]*connAuthState
+	bans         map[string]banEntry
 	events       map[chan struct{}]struct{}
 	listener     net.Listener
 	lastSync     time.Time
@@ -66,6 +70,8 @@ type peerSession struct {
 	sendCh  chan protocol.Frame
 	inboxCh chan protocol.Frame
 	errCh   chan error
+	version int
+	authOK  bool
 }
 
 type peerHealth struct {
@@ -104,6 +110,17 @@ type outboundDelivery struct {
 	Error         string
 }
 
+type connAuthState struct {
+	Hello     protocol.Frame
+	Challenge string
+	Verified  bool
+}
+
+type banEntry struct {
+	Score       int
+	Blacklisted time.Time
+}
+
 const (
 	peerStateHealthy       = "healthy"
 	peerStateDegraded      = "degraded"
@@ -113,6 +130,9 @@ const (
 	pendingFrameTTL        = 5 * time.Minute
 	relayRetryTTL          = 3 * time.Minute
 	maxPendingFrameRetries = 5
+	banThreshold           = 1000
+	banIncrementInvalidSig = 100
+	banDuration            = 24 * time.Hour
 )
 
 type incomingMessage struct {
@@ -220,6 +240,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		outbound:     queueState.OutboundState,
 		upstream:     make(map[string]struct{}),
 		inboundConns: make(map[net.Conn]struct{}),
+		connAuth:     make(map[net.Conn]*connAuthState),
+		bans:         make(map[string]banEntry),
 		events:       make(map[chan struct{}]struct{}),
 	}
 }
@@ -334,6 +356,10 @@ func (s *Service) Peers() []transport.Peer {
 }
 
 func (s *Service) handleConn(conn net.Conn) {
+	if s.isBlacklistedConn(conn) {
+		_ = conn.Close()
+		return
+	}
 	if !s.registerInboundConn(conn) {
 		log.Printf("node: reject connection from %s reason=max-connections", conn.RemoteAddr())
 		_ = conn.Close()
@@ -342,6 +368,7 @@ func (s *Service) handleConn(conn net.Conn) {
 	defer func() {
 		s.unregisterInboundConn(conn)
 		s.removeSubscriberConn(conn)
+		s.clearConnAuth(conn)
 		_ = conn.Close()
 	}()
 
@@ -379,6 +406,11 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return false
 	}
 
+	if !s.isCommandAllowedForConn(conn, frame.Type) {
+		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
+		return false
+	}
+
 	switch frame.Type {
 	case "ping":
 		s.writeJSONFrame(conn, protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"})
@@ -394,13 +426,34 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			})
 			return true
 		}
+		if requiresSessionAuth(frame) {
+			challenge, err := s.prepareConnAuth(conn, frame)
+			if err != nil {
+				s.addBanScore(conn, banIncrementInvalidSig)
+				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
+				return false
+			}
+			if frame.Client == "node" || frame.Client == "desktop" {
+				log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
+			}
+			s.writeJSONFrame(conn, s.welcomeFrame(challenge))
+			return true
+		}
 		s.learnPeerFromFrame(conn.RemoteAddr().String(), frame)
 		s.registerHelloRoute(conn, frame)
 		if frame.Client == "node" || frame.Client == "desktop" {
 			log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
 		}
-		s.writeJSONFrame(conn, s.welcomeFrame())
+		s.writeJSONFrame(conn, s.welcomeFrame(""))
 		return true
+	case "auth_session":
+		reply, ok := s.handleAuthSessionFrame(conn, frame)
+		s.writeJSONFrame(conn, reply)
+		return ok
+	case "ack_delete":
+		reply, ok := s.handleAckDeleteFrame(conn, frame)
+		s.writeJSONFrame(conn, reply)
+		return ok
 	case "get_peers":
 		s.writeJSONFrame(conn, s.peersFrame())
 		return true
@@ -473,7 +526,7 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 				MinimumProtocolVersion: config.MinimumProtocolVersion,
 			}
 		}
-		return s.welcomeFrame()
+		return s.welcomeFrame("")
 	case "ping":
 		return protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"}
 	case "get_peers":
@@ -525,7 +578,7 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 	_, _ = io.WriteString(conn, line)
 }
 
-func (s *Service) welcomeFrame() protocol.Frame {
+func (s *Service) welcomeFrame(challenge string) protocol.Frame {
 	listen := ""
 	if s.cfg.EffectiveListenerEnabled() {
 		listen = s.cfg.AdvertiseAddress
@@ -545,6 +598,7 @@ func (s *Service) welcomeFrame() protocol.Frame {
 		PubKey:                 identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
 		BoxSig:                 identity.SignBoxKeyBinding(s.identity),
+		Challenge:              challenge,
 	}
 }
 
@@ -553,6 +607,152 @@ func validateProtocolHandshake(frame protocol.Frame) error {
 		return fmt.Errorf("protocol version %d is too old; supported %d..%d", frame.Version, config.MinimumProtocolVersion, config.ProtocolVersion)
 	}
 	return nil
+}
+
+func requiresSessionAuth(frame protocol.Frame) bool {
+	return frame.Version >= 2 && (strings.TrimSpace(frame.Client) == "node" || strings.TrimSpace(frame.Client) == "desktop")
+}
+
+func (s *Service) isCommandAllowedForConn(conn net.Conn, command string) bool {
+	if command == "hello" || command == "ping" || command == "auth_session" {
+		return true
+	}
+	s.mu.RLock()
+	state := s.connAuth[conn]
+	s.mu.RUnlock()
+	return state == nil || state.Verified
+}
+
+func (s *Service) prepareConnAuth(conn net.Conn, hello protocol.Frame) (string, error) {
+	if strings.TrimSpace(hello.Address) == "" || strings.TrimSpace(hello.PubKey) == "" || strings.TrimSpace(hello.BoxKey) == "" || strings.TrimSpace(hello.BoxSig) == "" {
+		return "", fmt.Errorf("missing identity fields for authenticated session")
+	}
+	if err := identity.VerifyBoxKeyBinding(hello.Address, hello.PubKey, hello.BoxKey, hello.BoxSig); err != nil {
+		return "", err
+	}
+	challenge, err := randomChallenge()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.connAuth[conn] = &connAuthState{
+		Hello:     hello,
+		Challenge: challenge,
+	}
+	s.mu.Unlock()
+	return challenge, nil
+}
+
+func randomChallenge() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func sessionAuthPayload(challenge, address string) []byte {
+	return []byte("corsa-session-auth-v1|" + challenge + "|" + address)
+}
+
+func ackDeletePayload(address, ackType, id, status string) []byte {
+	return []byte("corsa-ack-delete-v1|" + address + "|" + ackType + "|" + id + "|" + status)
+}
+
+func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
+	s.mu.Lock()
+	state := s.connAuth[conn]
+	s.mu.Unlock()
+	if state == nil {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
+	}
+	if state.Verified {
+		return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
+	}
+	if strings.TrimSpace(frame.Address) != strings.TrimSpace(state.Hello.Address) {
+		s.addBanScore(conn, banIncrementInvalidSig)
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: "authenticated address mismatch"}, false
+	}
+	if err := identity.VerifyPayload(state.Hello.Address, state.Hello.PubKey, sessionAuthPayload(state.Challenge, state.Hello.Address), frame.Signature); err != nil {
+		s.addBanScore(conn, banIncrementInvalidSig)
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()}, false
+	}
+
+	s.mu.Lock()
+	state.Verified = true
+	state.Challenge = ""
+	s.connAuth[conn] = state
+	s.mu.Unlock()
+
+	s.learnPeerFromFrame(conn.RemoteAddr().String(), state.Hello)
+	s.registerHelloRoute(conn, state.Hello)
+	return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
+}
+
+func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	state := s.connAuth[conn]
+	if state == nil || !state.Verified {
+		return protocol.Frame{}, false
+	}
+	return state.Hello, true
+}
+
+func (s *Service) clearConnAuth(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.connAuth, conn)
+	s.mu.Unlock()
+}
+
+func remoteIP(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err == nil {
+		return host
+	}
+	return addr.String()
+}
+
+func (s *Service) isBlacklistedConn(conn net.Conn) bool {
+	ip := remoteIP(conn.RemoteAddr())
+	if ip == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.bans[ip]
+	if !ok {
+		return false
+	}
+	if !entry.Blacklisted.IsZero() && time.Now().UTC().Before(entry.Blacklisted) {
+		log.Printf("node: reject connection from %s reason=blacklisted until=%s", ip, entry.Blacklisted.Format(time.RFC3339))
+		return true
+	}
+	if !entry.Blacklisted.IsZero() && time.Now().UTC().After(entry.Blacklisted) {
+		delete(s.bans, ip)
+	}
+	return false
+}
+
+func (s *Service) addBanScore(conn net.Conn, delta int) {
+	ip := remoteIP(conn.RemoteAddr())
+	if ip == "" || delta <= 0 {
+		return
+	}
+	s.mu.Lock()
+	entry := s.bans[ip]
+	entry.Score += delta
+	if entry.Score >= banThreshold {
+		entry.Blacklisted = time.Now().UTC().Add(banDuration)
+	}
+	s.bans[ip] = entry
+	s.mu.Unlock()
+	if !entry.Blacklisted.IsZero() {
+		log.Printf("node: blacklist ip=%s score=%d until=%s", ip, entry.Score, entry.Blacklisted.Format(time.RFC3339))
+	}
 }
 
 func (s *Service) peersFrame() protocol.Frame {
@@ -889,6 +1089,33 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 	return protocol.Frame{Type: "receipt_stored", Recipient: receipt.Recipient, Count: count, ID: string(receipt.MessageID)}
 }
 
+func (s *Service) handleAckDeleteFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
+	hello, ok := s.authenticatedAddressForConn(conn)
+	if !ok {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
+	}
+	if strings.TrimSpace(frame.Address) == "" || strings.TrimSpace(frame.Address) != strings.TrimSpace(hello.Address) || strings.TrimSpace(frame.ID) == "" {
+		s.addBanScore(conn, banIncrementInvalidSig)
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "invalid ack identity or id"}, false
+	}
+	if err := identity.VerifyPayload(hello.Address, hello.PubKey, ackDeletePayload(frame.Address, frame.AckType, frame.ID, frame.Status), frame.Signature); err != nil {
+		s.addBanScore(conn, banIncrementInvalidSig)
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()}, false
+	}
+
+	count := 0
+	switch strings.TrimSpace(frame.AckType) {
+	case "dm":
+		count = s.deleteBacklogMessageForRecipient(frame.Address, protocol.MessageID(frame.ID))
+	case "receipt":
+		count = s.deleteBacklogReceiptForRecipient(frame.Address, protocol.MessageID(frame.ID), frame.Status)
+	default:
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "unknown ack type"}, false
+	}
+	log.Printf("node: ack_delete_applied address=%s type=%s id=%s status=%s removed=%d", frame.Address, frame.AckType, frame.ID, frame.Status, count)
+	return protocol.Frame{Type: "ack_deleted", AckType: frame.AckType, ID: frame.ID, Count: count, Status: "ok"}, true
+}
+
 func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bool) (bool, int, string) {
 	if validateTimestamp {
 		if err := s.validateMessageTiming(msg); err != nil {
@@ -984,7 +1211,9 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
 	delete(s.outbound, string(receipt.MessageID))
 	s.clearPendingMessageLocked(receipt.MessageID)
+	s.clearPendingReceiptLocked(receipt.MessageID, receipt.Recipient, receipt.Status)
 	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
+	delete(s.relayRetry, relayReceiptKey(receipt))
 	count := len(s.receipts[receipt.Recipient])
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
@@ -1013,6 +1242,30 @@ func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) {
 		remaining := items[:0]
 		for _, item := range items {
 			if item.Frame.Type == "send_message" && item.Frame.ID == string(messageID) {
+				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
+				continue
+			}
+			remaining = append(remaining, item)
+		}
+		if len(remaining) == 0 {
+			delete(s.pending, address)
+			continue
+		}
+		s.pending[address] = append([]pendingFrame(nil), remaining...)
+	}
+}
+
+func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipient, status string) {
+	if strings.TrimSpace(string(messageID)) == "" || strings.TrimSpace(recipient) == "" || strings.TrimSpace(status) == "" {
+		return
+	}
+	for address, items := range s.pending {
+		remaining := items[:0]
+		for _, item := range items {
+			if item.Frame.Type == "send_delivery_receipt" &&
+				item.Frame.ID == string(messageID) &&
+				item.Frame.Recipient == recipient &&
+				item.Frame.Status == status {
 				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
 				continue
 			}
@@ -1231,6 +1484,27 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 	if err != nil {
 		return
 	}
+	if welcome.Version >= 2 && strings.TrimSpace(welcome.Challenge) != "" {
+		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:      "auth_session",
+			Address:   s.identity.Address,
+			Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
+		})
+		if err != nil {
+			return
+		}
+		if _, err := io.WriteString(conn, authLine); err != nil {
+			return
+		}
+		authReply, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		frame, err := protocol.ParseFrameLine(strings.TrimSpace(authReply))
+		if err != nil || frame.Type != "auth_ok" {
+			return
+		}
+	}
 	s.learnIdentityFromWelcome(welcome)
 
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
@@ -1323,7 +1597,15 @@ func (s *Service) openPeerSession(ctx context.Context, address string) error {
 	if err != nil {
 		return err
 	}
+	session.version = welcome.Version
 	s.learnIdentityFromWelcome(welcome)
+	if err := s.authenticatePeerSession(session, welcome); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.sessions[address] = session
+	s.mu.Unlock()
+	s.markPeerConnected(address)
 
 	if _, err := s.peerSessionRequest(session, protocol.Frame{
 		Type:       "subscribe_inbox",
@@ -1335,15 +1617,11 @@ func (s *Service) openPeerSession(ctx context.Context, address string) error {
 	}
 	_ = conn.SetDeadline(time.Time{})
 	log.Printf("node: upstream subscription established peer=%s recipient=%s", address, s.identity.Address)
-	s.markPeerConnected(address)
 
 	if err := s.syncPeerSession(session); err != nil {
 		return err
 	}
 
-	s.mu.Lock()
-	s.sessions[address] = session
-	s.mu.Unlock()
 	s.flushPendingPeerFrames(address)
 
 	return s.servePeerSession(ctx, session)
@@ -1393,6 +1671,26 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			s.clearRelayRetryForOutbound(outbound)
 		}
 	}
+}
+
+func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol.Frame) error {
+	if welcome.Version < 2 || strings.TrimSpace(welcome.Challenge) == "" {
+		session.authOK = true
+		return nil
+	}
+	reply, err := s.peerSessionRequest(session, protocol.Frame{
+		Type:      "auth_session",
+		Address:   s.identity.Address,
+		Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
+	}, "auth_ok", false)
+	if err != nil {
+		return err
+	}
+	if reply.Type != "auth_ok" {
+		return protocol.ErrAuthRequired
+	}
+	session.authOK = true
+	return nil
 }
 
 func (s *Service) gossipMessage(msg protocol.Envelope) {
@@ -1714,7 +2012,36 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}
-	if _, err := reader.ReadString('\n'); err != nil {
+	welcomeLine, err := reader.ReadString('\n')
+	if err != nil {
+		return
+	}
+	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
+	if err != nil {
+		return
+	}
+	if welcome.Version >= 2 && strings.TrimSpace(welcome.Challenge) != "" {
+		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:      "auth_session",
+			Address:   s.identity.Address,
+			Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
+		})
+		if err != nil {
+			return
+		}
+		if _, err := io.WriteString(conn, authLine); err != nil {
+			return
+		}
+		reply, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		authReply, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
+		if err != nil || authReply.Type != "auth_ok" {
+			return
+		}
+	}
+	if welcome.Type == "error" {
 		return
 	}
 
@@ -2110,6 +2437,7 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			cancel()
 			_, _, _ = s.storeIncomingMessage(msg, true)
 		}
+		s.sendAckDeleteToPeer(address, "dm", msg.ID, "")
 		log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
 	case "push_delivery_receipt":
 		if frame.Receipt == nil {
@@ -2120,7 +2448,30 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			return
 		}
 		s.storeDeliveryReceipt(receipt)
+		s.sendAckDeleteToPeer(address, "receipt", receipt.MessageID, receipt.Status)
 		log.Printf("node: received pushed delivery receipt peer=%s message_id=%s recipient=%s status=%s", address, receipt.MessageID, receipt.Recipient, receipt.Status)
+	}
+}
+
+func (s *Service) sendAckDeleteToPeer(address, ackType string, id protocol.MessageID, status string) {
+	session := s.peerSession(address)
+	if session == nil || !session.authOK || session.version < 2 {
+		return
+	}
+	frame := protocol.Frame{
+		Type:      "ack_delete",
+		Address:   s.identity.Address,
+		AckType:   ackType,
+		ID:        string(id),
+		Status:    status,
+		Signature: identity.SignPayload(s.identity, ackDeletePayload(s.identity.Address, ackType, string(id), status)),
+	}
+	if s.enqueuePeerFrame(address, frame) {
+		log.Printf("node: ack_delete_send peer=%s type=%s id=%s status=%s mode=session", address, ackType, id, status)
+		return
+	}
+	if s.queuePeerFrame(address, frame) {
+		log.Printf("node: ack_delete_send peer=%s type=%s id=%s status=%s mode=queued", address, ackType, id, status)
 	}
 }
 
@@ -2596,6 +2947,65 @@ func (s *Service) hasReceiptForMessageLocked(originalSender string, messageID pr
 		}
 	}
 	return false
+}
+
+func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID protocol.MessageID) int {
+	s.mu.Lock()
+	before := len(s.topics["dm"])
+	filtered := s.topics["dm"][:0]
+	for _, msg := range s.topics["dm"] {
+		if msg.ID == messageID && msg.Recipient == recipient {
+			delete(s.relayRetry, relayMessageKey(msg.ID))
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	if len(filtered) == 0 {
+		delete(s.topics, "dm")
+	} else {
+		s.topics["dm"] = filtered
+	}
+	removed := before - len(filtered)
+	if removed <= 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+	return removed
+}
+
+func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID protocol.MessageID, status string) int {
+	s.mu.Lock()
+	list := s.receipts[recipient]
+	if len(list) == 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	filtered := list[:0]
+	removed := 0
+	for _, receipt := range list {
+		if receipt.MessageID == messageID && receipt.Recipient == recipient && receipt.Status == status {
+			delete(s.relayRetry, relayReceiptKey(receipt))
+			removed++
+			continue
+		}
+		filtered = append(filtered, receipt)
+	}
+	if len(filtered) == 0 {
+		delete(s.receipts, recipient)
+	} else {
+		s.receipts[recipient] = filtered
+	}
+	if removed <= 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+	return removed
 }
 
 func (s *Service) queueStateSnapshot() queueStateFile {

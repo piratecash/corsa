@@ -23,6 +23,10 @@ const (
 	ErrCodeMessageTimestampOutOfRange = "message-timestamp-out-of-range"
 	ErrCodeIncompatibleProtocol       = "incompatible-protocol-version"
 	ErrCodeRead                       = "read"
+	ErrCodeAuthRequired               = "auth-required"
+	ErrCodeInvalidAuthSignature       = "invalid-auth-signature"
+	ErrCodeBlacklisted                = "blacklisted"
+	ErrCodeInvalidAckDelete           = "invalid-ack-delete"
 )
 
 var (
@@ -46,6 +50,10 @@ var (
 	ErrMessageTimestampOutOfRange = errors.New(ErrCodeMessageTimestampOutOfRange)
 	ErrIncompatibleProtocol       = errors.New(ErrCodeIncompatibleProtocol)
 	ErrRead                       = errors.New(ErrCodeRead)
+	ErrAuthRequired               = errors.New(ErrCodeAuthRequired)
+	ErrInvalidAuthSignature       = errors.New(ErrCodeInvalidAuthSignature)
+	ErrBlacklisted                = errors.New(ErrCodeBlacklisted)
+	ErrInvalidAckDelete           = errors.New(ErrCodeInvalidAckDelete)
 )
 
 func ErrorCode(err error) string {
@@ -90,6 +98,14 @@ func ErrorCode(err error) string {
 		return ErrCodeIncompatibleProtocol
 	case errors.Is(err, ErrRead):
 		return ErrCodeRead
+	case errors.Is(err, ErrAuthRequired):
+		return ErrCodeAuthRequired
+	case errors.Is(err, ErrInvalidAuthSignature):
+		return ErrCodeInvalidAuthSignature
+	case errors.Is(err, ErrBlacklisted):
+		return ErrCodeBlacklisted
+	case errors.Is(err, ErrInvalidAckDelete):
+		return ErrCodeInvalidAckDelete
 	default:
 		return ErrCodeProtocol
 	}
@@ -135,6 +151,14 @@ func ErrorFromCode(code string) error {
 		return ErrIncompatibleProtocol
 	case ErrCodeRead:
 		return ErrRead
+	case ErrCodeAuthRequired:
+		return ErrAuthRequired
+	case ErrCodeInvalidAuthSignature:
+		return ErrInvalidAuthSignature
+	case ErrCodeBlacklisted:
+		return ErrBlacklisted
+	case ErrCodeInvalidAckDelete:
+		return ErrInvalidAckDelete
 	default:
 		return ErrProtocol
 	}

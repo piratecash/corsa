@@ -46,6 +46,9 @@ type Frame struct {
 	ExpiresAt              int64                 `json:"expires_at,omitempty"`
 	Count                  int                   `json:"count,omitempty"`
 	Status                 string                `json:"status,omitempty"`
+	AckType                string                `json:"ack_type,omitempty"`
+	Challenge              string                `json:"challenge,omitempty"`
+	Signature              string                `json:"signature,omitempty"`
 	Code                   string                `json:"code,omitempty"`
 	Error                  string                `json:"error,omitempty"`
 }
