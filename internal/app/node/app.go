@@ -25,6 +25,11 @@ func New() *App {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	log.Printf("starting node on %s", a.service.ListenAddress())
+	log.Printf(
+		"starting node version=%s wire=%s listen=%s",
+		config.CorsaVersion,
+		config.CorsaWireVersion,
+		a.service.ListenAddress(),
+	)
 	return a.service.Run(ctx)
 }
