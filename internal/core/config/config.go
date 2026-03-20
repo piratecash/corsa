@@ -31,6 +31,7 @@ type Node struct {
 	BootstrapPeers   []string
 	IdentityPath     string
 	TrustStorePath   string
+	QueueStatePath   string
 	Type             NodeType
 	ListenerEnabled  bool
 	ListenerSet      bool
@@ -61,6 +62,7 @@ func Default() Config {
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
 	identityPath := envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress))
 	trustStorePath := envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress))
+	queueStatePath := envOrDefault("CORSA_QUEUE_STATE_PATH", defaultQueueStatePath(listenAddress))
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
@@ -79,6 +81,7 @@ func Default() Config {
 			BootstrapPeers:   bootstrapPeers,
 			IdentityPath:     identityPath,
 			TrustStorePath:   trustStorePath,
+			QueueStatePath:   queueStatePath,
 			Type:             nodeType,
 			ListenerEnabled:  listenerEnabled,
 			ListenerSet:      listenerSet,
@@ -128,6 +131,13 @@ func (n Node) EffectiveMaxIncomingPeers() int {
 	return 0
 }
 
+func (n Node) EffectiveQueueStatePath() string {
+	if strings.TrimSpace(n.QueueStatePath) != "" {
+		return n.QueueStatePath
+	}
+	return defaultQueueStatePath(n.ListenAddress)
+}
+
 func envOrDefault(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -145,6 +155,12 @@ func defaultTrustStorePath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
 	return filepath.Join(".corsa", "trust-"+port+".json")
+}
+
+func defaultQueueStatePath(listenAddress string) string {
+	port := portSuffix(listenAddress)
+
+	return filepath.Join(".corsa", "queue-"+port+".json")
 }
 
 func portSuffix(listenAddress string) string {

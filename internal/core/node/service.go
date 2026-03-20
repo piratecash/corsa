@@ -145,6 +145,24 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		boxSigs[address] = contact.BoxSignature
 	}
 
+	queueStatePath := cfg.EffectiveQueueStatePath()
+	queueState, err := loadQueueState(queueStatePath)
+	if err != nil {
+		log.Printf("node: queue state load failed path=%s err=%v", queueStatePath, err)
+		queueState = queueStateFile{
+			Pending:    map[string][]pendingFrame{},
+			RelayRetry: map[string]relayAttempt{},
+		}
+	}
+	pendingKeys := make(map[string]struct{})
+	for address, items := range queueState.Pending {
+		for _, item := range items {
+			if key := pendingFrameKey(address, item.Frame); key != "" {
+				pendingKeys[key] = struct{}{}
+			}
+		}
+	}
+
 	return &Service{
 		identity:     id,
 		cfg:          cfg,
@@ -164,9 +182,9 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		health:       make(map[string]*peerHealth),
 		peerTypes:    make(map[string]config.NodeType),
 		peerIDs:      make(map[string]string),
-		pending:      make(map[string][]pendingFrame),
-		pendingKeys:  make(map[string]struct{}),
-		relayRetry:   make(map[string]relayAttempt),
+		pending:      queueState.Pending,
+		pendingKeys:  pendingKeys,
+		relayRetry:   queueState.RelayRetry,
 		upstream:     make(map[string]struct{}),
 		inboundConns: make(map[net.Conn]struct{}),
 		events:       make(map[chan struct{}]struct{}),
@@ -2079,9 +2097,8 @@ func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if _, exists := s.pendingKeys[key]; exists {
+		s.mu.Unlock()
 		return true
 	}
 	s.pending[address] = append(s.pending[address], pendingFrame{
@@ -2089,6 +2106,9 @@ func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
 		QueuedAt: time.Now().UTC(),
 	})
 	s.pendingKeys[key] = struct{}{}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
 	return true
 }
 
@@ -2130,6 +2150,8 @@ func (s *Service) flushPendingPeerFrames(address string) {
 		}
 	}
 	if len(remaining) == 0 {
+		snapshot := s.queueStateSnapshot()
+		s.persistQueueState(snapshot)
 		return
 	}
 
@@ -2138,7 +2160,9 @@ func (s *Service) flushPendingPeerFrames(address string) {
 	for _, item := range remaining {
 		s.pendingKeys[pendingFrameKey(address, item.Frame)] = struct{}{}
 	}
+	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
+	s.persistQueueState(snapshot)
 }
 
 func (s *Service) retryRelayDeliveries() {
@@ -2159,10 +2183,10 @@ func (s *Service) retryRelayDeliveries() {
 
 func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	items := append([]protocol.Envelope(nil), s.topics["dm"]...)
 	out := make([]protocol.Envelope, 0)
+	beforeLen := len(s.relayRetry)
 	for _, msg := range items {
 		key := relayMessageKey(msg.ID)
 		if msg.Recipient == "" || msg.Recipient == "*" || msg.Recipient == s.identity.Address {
@@ -2178,23 +2202,43 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 		}
 		out = append(out, msg)
 	}
+	afterLen := len(s.relayRetry)
+	if beforeLen != afterLen {
+		snapshot := s.queueStateSnapshotLocked()
+		s.mu.Unlock()
+		s.persistQueueState(snapshot)
+		return out
+	}
+	s.mu.Unlock()
 	return out
 }
 
 func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryReceipt {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	out := make([]protocol.DeliveryReceipt, 0)
+	beforeLen := len(s.relayRetry)
 	for _, list := range s.receipts {
 		for _, receipt := range list {
 			key := relayReceiptKey(receipt)
+			if receipt.Recipient == "" || receipt.Recipient == s.identity.Address {
+				delete(s.relayRetry, key)
+				continue
+			}
 			if !shouldRetryRelayLocked(s.relayRetry, key, now) {
 				continue
 			}
 			out = append(out, receipt)
 		}
 	}
+	afterLen := len(s.relayRetry)
+	if beforeLen != afterLen {
+		snapshot := s.queueStateSnapshotLocked()
+		s.mu.Unlock()
+		s.persistQueueState(snapshot)
+		return out
+	}
+	s.mu.Unlock()
 	return out
 }
 
@@ -2233,8 +2277,6 @@ func relayRetryBackoff(attempts int) time.Duration {
 
 func (s *Service) noteRelayAttempt(key string, now time.Time) int {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	state := s.relayRetry[key]
 	if state.FirstSeen.IsZero() {
 		state.FirstSeen = now
@@ -2242,6 +2284,9 @@ func (s *Service) noteRelayAttempt(key string, now time.Time) int {
 	state.LastAttempt = now
 	state.Attempts++
 	s.relayRetry[key] = state
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
 	return state.Attempts
 }
 
@@ -2250,27 +2295,40 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	key := relayMessageKey(msg.ID)
 	state := s.relayRetry[key]
 	if state.FirstSeen.IsZero() {
 		state.FirstSeen = time.Now().UTC()
 		s.relayRetry[key] = state
+		snapshot := s.queueStateSnapshotLocked()
+		s.mu.Unlock()
+		s.persistQueueState(snapshot)
+		return
 	}
+	s.mu.Unlock()
 }
 
 func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	key := relayReceiptKey(receipt)
 	state := s.relayRetry[key]
+	dirty := false
 	if state.FirstSeen.IsZero() {
 		state.FirstSeen = time.Now().UTC()
 		s.relayRetry[key] = state
+		dirty = true
 	}
-	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
+	if _, ok := s.relayRetry[relayMessageKey(receipt.MessageID)]; ok {
+		delete(s.relayRetry, relayMessageKey(receipt.MessageID))
+		dirty = true
+	}
+	if !dirty {
+		s.mu.Unlock()
+		return
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
 }
 
 func relayMessageKey(id protocol.MessageID) string {
@@ -2288,6 +2346,41 @@ func (s *Service) hasReceiptForMessageLocked(originalSender string, messageID pr
 		}
 	}
 	return false
+}
+
+func (s *Service) queueStateSnapshot() queueStateFile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.queueStateSnapshotLocked()
+}
+
+func (s *Service) queueStateSnapshotLocked() queueStateFile {
+	pending := make(map[string][]pendingFrame, len(s.pending))
+	for address, items := range s.pending {
+		if len(items) == 0 {
+			continue
+		}
+		frames := make([]pendingFrame, len(items))
+		copy(frames, items)
+		pending[address] = frames
+	}
+
+	relayRetry := make(map[string]relayAttempt, len(s.relayRetry))
+	for key, item := range s.relayRetry {
+		relayRetry[key] = item
+	}
+
+	return queueStateFile{
+		Pending:    pending,
+		RelayRetry: relayRetry,
+	}
+}
+
+func (s *Service) persistQueueState(snapshot queueStateFile) {
+	path := s.cfg.EffectiveQueueStatePath()
+	if err := saveQueueState(path, snapshot); err != nil {
+		log.Printf("node: queue state save failed path=%s err=%v", path, err)
+	}
 }
 
 func expectedReplyType(requestType string) string {

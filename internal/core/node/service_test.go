@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -1093,6 +1094,74 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 		)
 		return reply[1].Type == "inbox" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "retry-dm-1"
 	})
+}
+
+func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate test identity: %v", err)
+	}
+
+	cfg := config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		Type:             config.NodeTypeFull,
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+	}
+
+	svc := NewService(cfg, id)
+	frame := protocol.Frame{
+		Type:      "send_message",
+		Topic:     "dm",
+		ID:        "persist-msg-1",
+		Address:   id.Address,
+		Recipient: "recipient-1",
+		Flag:      "sender-delete",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Body:      "queued-body",
+	}
+	if ok := svc.queuePeerFrame("127.0.0.1:65001", frame); !ok {
+		t.Fatal("expected queued frame to be accepted")
+	}
+
+	envelope := protocol.Envelope{
+		ID:         protocol.MessageID("persist-msg-1"),
+		Topic:      "dm",
+		Sender:     id.Address,
+		Recipient:  "recipient-1",
+		Flag:       protocol.MessageFlag("sender-delete"),
+		CreatedAt:  time.Now().UTC(),
+		TTLSeconds: 0,
+		Payload:    []byte("ciphertext"),
+	}
+	svc.trackRelayMessage(envelope)
+	attempts := svc.noteRelayAttempt(relayMessageKey(envelope.ID), time.Now().UTC())
+	if attempts != 1 {
+		t.Fatalf("expected first relay attempt, got %d", attempts)
+	}
+
+	reloaded := NewService(cfg, id)
+	reloaded.mu.RLock()
+	defer reloaded.mu.RUnlock()
+
+	items := reloaded.pending["127.0.0.1:65001"]
+	if len(items) != 1 {
+		t.Fatalf("expected 1 pending item after restart, got %d", len(items))
+	}
+	if items[0].Frame.ID != "persist-msg-1" {
+		t.Fatalf("unexpected persisted pending frame: %#v", items[0].Frame)
+	}
+	state, ok := reloaded.relayRetry[relayMessageKey(envelope.ID)]
+	if !ok {
+		t.Fatal("expected relay retry state after restart")
+	}
+	if state.Attempts != 1 {
+		t.Fatalf("expected persisted attempts=1, got %#v", state)
+	}
 }
 
 func exchangeFrames(t *testing.T, address string, frames ...protocol.Frame) []protocol.Frame {

@@ -28,6 +28,7 @@ Relevant environment variables:
 - `CORSA_BOOTSTRAP_PEERS`
 - `CORSA_IDENTITY_PATH`
 - `CORSA_TRUST_STORE_PATH`
+- `CORSA_QUEUE_STATE_PATH`
 - `CORSA_NODE_TYPE`
 - `CORSA_MAX_OUTGOING_PEERS`
 - `CORSA_MAX_INCOMING_PEERS`
@@ -46,6 +47,7 @@ Rules:
 - even if a `client` node is reachable and accepts inbound connections, it must not be used as a relay for foreign traffic
 - default outbound peer-session cap: `8`
 - `CORSA_MAX_INCOMING_PEERS=0` means no app-level inbound cap
+- pending outgoing direct-message frames and relay-retry state are persisted to disk and survive node restarts
 - default message clock drift: `600` seconds
 
 ### Handshake
@@ -255,6 +257,7 @@ Routing notes:
 - direct messages and delivery receipts prefer active healthy sessions
 - if no suitable session exists, the frame is queued locally instead of fan-out dialing every known peer
 - queued frames are retried after reconnect and dropped only after the local queue policy expires them
+- queued local delivery state survives node restart via the persisted queue-state file
 - full nodes may keep retrying stored direct messages for a bounded time even after the first routing miss
 - the same bounded retry policy applies to delivery receipts, including both `delivered` and `seen`
 
@@ -885,6 +888,7 @@ Fields:
 - `CORSA_BOOTSTRAP_PEERS`
 - `CORSA_IDENTITY_PATH`
 - `CORSA_TRUST_STORE_PATH`
+- `CORSA_QUEUE_STATE_PATH`
 - `CORSA_NODE_TYPE`
 - `CORSA_MAX_OUTGOING_PEERS`
 - `CORSA_MAX_INCOMING_PEERS`
@@ -903,6 +907,7 @@ Fields:
 - даже если `client` reachable и принимает входящие, его нельзя использовать как relay для чужого трафика
 - outbound peer-session cap по умолчанию: `8`
 - `CORSA_MAX_INCOMING_PEERS=0` означает отсутствие app-level лимита на входящие peer-соединения
+- очередь исходящих direct-message кадров и состояние relay retry сохраняются на диск и переживают рестарт ноды
 - допустимый drift времени сообщений по умолчанию: `600` секунд
 
 ### Handshake
@@ -1112,6 +1117,7 @@ Fields:
 - direct messages и delivery receipts в первую очередь идут через активные healthy session
 - если подходящей session нет, frame ставится в локальную очередь вместо fan-out dial по всем известным peer
 - queued frames повторно отправляются после reconnect и удаляются только когда локальная queue policy считает их просроченными
+- локальное состояние этой очереди сохраняется в queue-state файле и переживает рестарт ноды
 - full node может еще некоторое время повторно пытаться доставить уже сохраненный `dm`, даже если первая попытка маршрутизации не удалась
 - то же bounded retry-поведение применяется и к delivery receipt со статусами `delivered` и `seen`
 

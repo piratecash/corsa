@@ -70,6 +70,7 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_ADVERTISE_ADDRESS` — external address announced to peers
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
+- `CORSA_QUEUE_STATE_PATH` — persisted pending-delivery and relay-retry state
 - `CORSA_NODE_TYPE` — `full` or `client`
 - `CORSA_MAX_OUTGOING_PEERS` — max outbound peer sessions, default `8`
 - `CORSA_MAX_INCOMING_PEERS` — optional inbound peer cap; `0` means no app-level cap
@@ -88,6 +89,7 @@ Message metadata and relay rules:
   - `auto-delete-ttl`
 - `auto-delete-ttl` messages are removed automatically after `ttl-seconds`
 - nodes reject and do not forward messages that are too far in the past or future
+- pending direct-message delivery and delivery-receipt retry state are persisted on disk and survive node restarts
 
 Node roles:
 
@@ -222,6 +224,7 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
 - `CORSA_ADVERTISE_ADDRESS` — внешний адрес, который нода объявляет пирам
 - `CORSA_BOOTSTRAP_PEERS` — список seed-нод через запятую
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
+- `CORSA_QUEUE_STATE_PATH` — persisted-состояние очереди доставки и relay retry
 - `CORSA_NODE_TYPE` — `full` или `client`
 - `CORSA_MAX_OUTGOING_PEERS` — максимум исходящих peer-session, по умолчанию `8`
 - `CORSA_MAX_INCOMING_PEERS` — опциональный лимит на входящие peer-соединения; `0` означает без app-level лимита
@@ -239,6 +242,7 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
   - `auto-delete-ttl`
 - сообщения с `auto-delete-ttl` автоматически удаляются после `ttl-seconds`
 - ноды отклоняют и не форвардят сообщения, которые слишком далеко в прошлом или будущем
+- состояние очереди доставки direct message и retry delivery receipt сохраняется на диск и переживает рестарт ноды
 - основной wire-format теперь: один JSON-объект на строку
 
 Роли узла:
