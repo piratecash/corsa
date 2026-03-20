@@ -1162,6 +1162,94 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	if state.Attempts != 1 {
 		t.Fatalf("expected persisted attempts=1, got %#v", state)
 	}
+	if outbound, ok := reloaded.outbound["persist-msg-1"]; !ok || outbound.Status != "queued" {
+		t.Fatalf("expected persisted outbound queued state, got %#v", reloaded.outbound)
+	}
+}
+
+func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+	}, id)
+
+	queuedAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	lastAttemptAt := queuedAt.Add(30 * time.Second)
+	svc.pending["peer-a"] = []pendingFrame{
+		{
+			Frame: protocol.Frame{
+				Type:      "send_message",
+				Topic:     "dm",
+				ID:        "queued-1",
+				Recipient: "alice",
+			},
+			QueuedAt: queuedAt,
+		},
+		{
+			Frame: protocol.Frame{
+				Type:      "send_message",
+				Topic:     "dm",
+				ID:        "retrying-1",
+				Recipient: "bob",
+			},
+			QueuedAt: queuedAt,
+			Retries:  2,
+		},
+	}
+	svc.outbound["retrying-1"] = outboundDelivery{
+		MessageID:     "retrying-1",
+		Recipient:     "bob",
+		Status:        "retrying",
+		QueuedAt:      queuedAt,
+		LastAttemptAt: lastAttemptAt,
+		Retries:       2,
+		Error:         "retry queued delivery",
+	}
+	svc.outbound["failed-1"] = outboundDelivery{
+		MessageID:     "failed-1",
+		Recipient:     "carol",
+		Status:        "failed",
+		QueuedAt:      queuedAt,
+		LastAttemptAt: lastAttemptAt,
+		Retries:       5,
+		Error:         "max retries exceeded",
+	}
+	svc.outbound["expired-1"] = outboundDelivery{
+		MessageID:     "expired-1",
+		Recipient:     "dan",
+		Status:        "expired",
+		QueuedAt:      queuedAt,
+		LastAttemptAt: lastAttemptAt,
+		Error:         "pending queue expired",
+	}
+
+	frame := svc.pendingMessagesFrame("dm")
+	if frame.Type != "pending_messages" || frame.Count != 4 {
+		t.Fatalf("unexpected pending frame: %#v", frame)
+	}
+	got := make(map[string]protocol.PendingMessageFrame, len(frame.PendingMessages))
+	for _, item := range frame.PendingMessages {
+		got[item.ID] = item
+	}
+	if got["queued-1"].Status != "queued" {
+		t.Fatalf("expected queued status, got %#v", got["queued-1"])
+	}
+	if got["retrying-1"].Status != "retrying" || got["retrying-1"].Retries != 2 {
+		t.Fatalf("expected retrying status, got %#v", got["retrying-1"])
+	}
+	if got["failed-1"].Status != "failed" || got["failed-1"].Error == "" {
+		t.Fatalf("expected failed status, got %#v", got["failed-1"])
+	}
+	if got["expired-1"].Status != "expired" || got["expired-1"].Error == "" {
+		t.Fatalf("expected expired status, got %#v", got["expired-1"])
+	}
 }
 
 func exchangeFrames(t *testing.T, address string, frames ...protocol.Frame) []protocol.Frame {

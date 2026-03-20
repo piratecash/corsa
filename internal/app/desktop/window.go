@@ -1088,7 +1088,7 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				}),
 			}
 
-			if isMine && (message.DeliveredAt != nil || message.ReceiptStatus == "queued" || message.ReceiptStatus == "sent") {
+			if isMine && (message.DeliveredAt != nil || message.ReceiptStatus == "queued" || message.ReceiptStatus == "retrying" || message.ReceiptStatus == "failed" || message.ReceiptStatus == "expired" || message.ReceiptStatus == "sent") {
 				children = append(children,
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1099,9 +1099,15 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 						case message.DeliveredAt != nil:
 							statusText = "✓ " + message.DeliveredAt.Format("15:04")
 						case message.ReceiptStatus == "queued":
-							statusText = "queued"
+							statusText = w.t("chat.status.queued")
+						case message.ReceiptStatus == "retrying":
+							statusText = w.t("chat.status.retrying")
+						case message.ReceiptStatus == "failed":
+							statusText = w.t("chat.status.failed")
+						case message.ReceiptStatus == "expired":
+							statusText = w.t("chat.status.expired")
 						case message.ReceiptStatus == "sent":
-							statusText = "sent"
+							statusText = w.t("chat.status.sent")
 						}
 						return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							label := material.Caption(w.theme, statusText)

@@ -279,6 +279,26 @@ Response:
   "type": "pending_messages",
   "topic": "dm",
   "count": 2,
+  "pending_messages": [
+    {
+      "id": "a1111111-2222-3333-4444-555555555555",
+      "recipient": "<recipient-address>",
+      "status": "retrying",
+      "queued_at": "2026-03-20T10:00:00Z",
+      "last_attempt_at": "2026-03-20T10:00:30Z",
+      "retries": 2,
+      "error": "retry queued delivery"
+    },
+    {
+      "id": "b1111111-2222-3333-4444-555555555555",
+      "recipient": "<recipient-address>",
+      "status": "failed",
+      "queued_at": "2026-03-20T10:01:00Z",
+      "last_attempt_at": "2026-03-20T10:03:00Z",
+      "retries": 5,
+      "error": "max retries exceeded"
+    }
+  ],
   "pending_ids": [
     "a1111111-2222-3333-4444-555555555555",
     "b1111111-2222-3333-4444-555555555555"
@@ -291,12 +311,20 @@ Fields:
 - `type` — required; frame kind, here `pending_messages`
 - `topic` — required; message topic currently inspected, usually `dm`
 - `count` — required; number of pending message ids
+- `pending_messages` — required; item-level delivery state for locally tracked outbound direct messages
+- `pending_messages[].id` — required; direct message UUID
+- `pending_messages[].recipient` — optional; intended recipient identity
+- `pending_messages[].status` — required; one of `queued`, `retrying`, `failed`, or `expired`
+- `pending_messages[].queued_at` — optional; when the node first queued local delivery
+- `pending_messages[].last_attempt_at` — optional; last flush/retry attempt time
+- `pending_messages[].retries` — optional; retry count already spent
+- `pending_messages[].error` — optional; latest queue/drop reason
 - `pending_ids` — required; ids of locally queued outgoing messages still waiting for a usable route
 
 Desktop/UI interpretation:
 
-- outgoing `dm` with id in `pending_ids` should be shown as `queued`
-- outgoing `dm` without receipt and not present in `pending_ids` can be shown as `sent`
+- outgoing `dm` with a matching `pending_messages[].status` should be shown as `queued`, `retrying`, `failed`, or `expired`
+- outgoing `dm` without receipt and not present in `pending_messages` can be shown as `sent`
 - once a delivery receipt arrives, UI should replace `queued` or `sent` with `delivered` or `seen`
 
 ### Contacts
@@ -1139,6 +1167,26 @@ Fields:
   "type": "pending_messages",
   "topic": "dm",
   "count": 2,
+  "pending_messages": [
+    {
+      "id": "a1111111-2222-3333-4444-555555555555",
+      "recipient": "<recipient-address>",
+      "status": "retrying",
+      "queued_at": "2026-03-20T10:00:00Z",
+      "last_attempt_at": "2026-03-20T10:00:30Z",
+      "retries": 2,
+      "error": "retry queued delivery"
+    },
+    {
+      "id": "b1111111-2222-3333-4444-555555555555",
+      "recipient": "<recipient-address>",
+      "status": "failed",
+      "queued_at": "2026-03-20T10:01:00Z",
+      "last_attempt_at": "2026-03-20T10:03:00Z",
+      "retries": 5,
+      "error": "max retries exceeded"
+    }
+  ],
   "pending_ids": [
     "a1111111-2222-3333-4444-555555555555",
     "b1111111-2222-3333-4444-555555555555"
@@ -1151,12 +1199,20 @@ Fields:
 - `type` — обязательное; тип кадра, здесь `pending_messages`
 - `topic` — обязательное; topic, для которого сейчас запрошена очередь, обычно `dm`
 - `count` — обязательное; число ожидающих message id
+- `pending_messages` — обязательное; item-level состояние доставки для локально отслеживаемых исходящих direct message
+- `pending_messages[].id` — обязательное; UUID direct message
+- `pending_messages[].recipient` — опциональное; identity получателя
+- `pending_messages[].status` — обязательное; одно из `queued`, `retrying`, `failed`, `expired`
+- `pending_messages[].queued_at` — опциональное; когда нода впервые поставила локальную доставку в очередь
+- `pending_messages[].last_attempt_at` — опциональное; время последней flush/retry попытки
+- `pending_messages[].retries` — опциональное; сколько retry уже потрачено
+- `pending_messages[].error` — опциональное; последняя причина queue/drop
 - `pending_ids` — обязательное; ids исходящих сообщений, которые локально стоят в очереди и ждут пригодный route
 
 Интерпретация в UI:
 
-- исходящий `dm`, чей id есть в `pending_ids`, должен показываться как `queued`
-- исходящий `dm` без receipt и без присутствия в `pending_ids` можно показывать как `sent`
+- исходящий `dm` с записью в `pending_messages` должен показываться как `queued`, `retrying`, `failed` или `expired`
+- исходящий `dm` без receipt и без присутствия в `pending_messages` можно показывать как `sent`
 - когда приходит delivery receipt, UI должен заменить `queued` или `sent` на `delivered` или `seen`
 
 ### Contacts

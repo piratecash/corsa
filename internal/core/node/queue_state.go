@@ -8,14 +8,16 @@ import (
 )
 
 type queueStateFile struct {
-	Pending    map[string][]pendingFrame `json:"pending,omitempty"`
-	RelayRetry map[string]relayAttempt   `json:"relay_retry,omitempty"`
+	Pending       map[string][]pendingFrame   `json:"pending,omitempty"`
+	RelayRetry    map[string]relayAttempt     `json:"relay_retry,omitempty"`
+	OutboundState map[string]outboundDelivery `json:"outbound_state,omitempty"`
 }
 
 func loadQueueState(path string) (queueStateFile, error) {
 	state := queueStateFile{
-		Pending:    map[string][]pendingFrame{},
-		RelayRetry: map[string]relayAttempt{},
+		Pending:       map[string][]pendingFrame{},
+		RelayRetry:    map[string]relayAttempt{},
+		OutboundState: map[string]outboundDelivery{},
 	}
 	if path == "" {
 		return state, nil
@@ -37,6 +39,9 @@ func loadQueueState(path string) (queueStateFile, error) {
 	}
 	if state.RelayRetry == nil {
 		state.RelayRetry = map[string]relayAttempt{}
+	}
+	if state.OutboundState == nil {
+		state.OutboundState = map[string]outboundDelivery{}
 	}
 	return state, nil
 }

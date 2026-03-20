@@ -53,6 +53,17 @@ func TestSaveAndLoadQueueStateRoundTrip(t *testing.T) {
 				Attempts:    3,
 			},
 		},
+		OutboundState: map[string]outboundDelivery{
+			"msg-1": {
+				MessageID:     "msg-1",
+				Recipient:     "recipient-1",
+				Status:        "retrying",
+				QueuedAt:      now,
+				LastAttemptAt: now.Add(5 * time.Second),
+				Retries:       3,
+				Error:         "retry queued delivery",
+			},
+		},
 	}
 
 	if err := saveQueueState(path, want); err != nil {
@@ -80,6 +91,13 @@ func TestSaveAndLoadQueueStateRoundTrip(t *testing.T) {
 	}
 	if state.Attempts != 3 || !state.FirstSeen.Equal(now) {
 		t.Fatalf("unexpected relay retry state: %#v", state)
+	}
+	outbound, ok := got.OutboundState["msg-1"]
+	if !ok {
+		t.Fatalf("missing outbound state: %#v", got.OutboundState)
+	}
+	if outbound.Status != "retrying" || outbound.Retries != 3 {
+		t.Fatalf("unexpected outbound state: %#v", outbound)
 	}
 }
 

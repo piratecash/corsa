@@ -138,7 +138,7 @@ func TestDecryptDirectMessages(t *testing.T) {
 	}
 }
 
-func TestDecryptDirectMessagesMarksQueuedAndSent(t *testing.T) {
+func TestDecryptDirectMessagesMarksLifecycleStatuses(t *testing.T) {
 	t.Parallel()
 
 	sender, err := identity.Generate()
@@ -166,17 +166,62 @@ func TestDecryptDirectMessagesMarksQueuedAndSent(t *testing.T) {
 		},
 	}, []MessageRecord{
 		{ID: "queued-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:00:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
-		{ID: "sent-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:01:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
-	}, nil, []string{"queued-1"})
+		{ID: "retrying-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:01:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
+		{ID: "failed-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:02:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
+		{ID: "expired-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:03:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
+		{ID: "sent-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:04:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
+	}, nil, []PendingMessage{
+		{ID: "queued-1", Status: "queued"},
+		{ID: "retrying-1", Status: "retrying", Retries: 2},
+		{ID: "failed-1", Status: "failed", Retries: 5, Error: "max retries exceeded"},
+		{ID: "expired-1", Status: "expired", Error: "pending queue expired"},
+	})
 
-	if len(got) != 2 {
+	if len(got) != 5 {
 		t.Fatalf("unexpected direct messages: %#v", got)
 	}
 	if got[0].ReceiptStatus != "queued" {
 		t.Fatalf("expected queued status, got %#v", got[0])
 	}
-	if got[1].ReceiptStatus != "sent" {
-		t.Fatalf("expected sent status, got %#v", got[1])
+	if got[1].ReceiptStatus != "retrying" {
+		t.Fatalf("expected retrying status, got %#v", got[1])
+	}
+	if got[2].ReceiptStatus != "failed" {
+		t.Fatalf("expected failed status, got %#v", got[2])
+	}
+	if got[3].ReceiptStatus != "expired" {
+		t.Fatalf("expected expired status, got %#v", got[3])
+	}
+	if got[4].ReceiptStatus != "sent" {
+		t.Fatalf("expected sent status, got %#v", got[4])
+	}
+}
+
+func TestPendingMessagesFromFrame(t *testing.T) {
+	t.Parallel()
+
+	got := pendingMessagesFromFrame(protocol.Frame{
+		PendingMessages: []protocol.PendingMessageFrame{
+			{
+				ID:            "msg-1",
+				Recipient:     "alice",
+				Status:        "retrying",
+				QueuedAt:      "2026-03-20T10:00:00Z",
+				LastAttemptAt: "2026-03-20T10:01:00Z",
+				Retries:       2,
+				Error:         "retry queued delivery",
+			},
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("unexpected pending messages: %#v", got)
+	}
+	if got[0].Status != "retrying" || got[0].Retries != 2 || got[0].Error != "retry queued delivery" {
+		t.Fatalf("unexpected pending item: %#v", got[0])
+	}
+	if got[0].QueuedAt == nil || got[0].LastAttemptAt == nil {
+		t.Fatalf("expected parsed timestamps: %#v", got[0])
 	}
 }
 

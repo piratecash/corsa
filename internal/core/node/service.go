@@ -44,6 +44,7 @@ type Service struct {
 	pending      map[string][]pendingFrame
 	pendingKeys  map[string]struct{}
 	relayRetry   map[string]relayAttempt
+	outbound     map[string]outboundDelivery
 	upstream     map[string]struct{}
 	inboundConns map[net.Conn]struct{}
 	events       map[chan struct{}]struct{}
@@ -92,14 +93,25 @@ type relayAttempt struct {
 	Attempts    int
 }
 
+type outboundDelivery struct {
+	MessageID     string
+	Recipient     string
+	Status        string
+	QueuedAt      time.Time
+	LastAttemptAt time.Time
+	Retries       int
+	Error         string
+}
+
 const (
-	peerStateHealthy      = "healthy"
-	peerStateDegraded     = "degraded"
-	peerStateStalled      = "stalled"
-	peerStateReconnecting = "reconnecting"
-	peerRequestTimeout    = 12 * time.Second
-	pendingFrameTTL       = 5 * time.Minute
-	relayRetryTTL         = 3 * time.Minute
+	peerStateHealthy       = "healthy"
+	peerStateDegraded      = "degraded"
+	peerStateStalled       = "stalled"
+	peerStateReconnecting  = "reconnecting"
+	peerRequestTimeout     = 12 * time.Second
+	pendingFrameTTL        = 5 * time.Minute
+	relayRetryTTL          = 3 * time.Minute
+	maxPendingFrameRetries = 5
 )
 
 type incomingMessage struct {
@@ -150,8 +162,9 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	if err != nil {
 		log.Printf("node: queue state load failed path=%s err=%v", queueStatePath, err)
 		queueState = queueStateFile{
-			Pending:    map[string][]pendingFrame{},
-			RelayRetry: map[string]relayAttempt{},
+			Pending:       map[string][]pendingFrame{},
+			RelayRetry:    map[string]relayAttempt{},
+			OutboundState: map[string]outboundDelivery{},
 		}
 	}
 	pendingKeys := make(map[string]struct{})
@@ -185,6 +198,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		pending:      queueState.Pending,
 		pendingKeys:  pendingKeys,
 		relayRetry:   queueState.RelayRetry,
+		outbound:     queueState.OutboundState,
 		upstream:     make(map[string]struct{}),
 		inboundConns: make(map[net.Conn]struct{}),
 		events:       make(map[chan struct{}]struct{}),
@@ -620,6 +634,7 @@ func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
 
 	ids := make([]string, 0)
 	seen := make(map[string]struct{})
+	items := make([]protocol.PendingMessageFrame, 0)
 	for _, frames := range s.pending {
 		for _, item := range frames {
 			frame := item.Frame
@@ -631,10 +646,45 @@ func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
 			}
 			seen[frame.ID] = struct{}{}
 			ids = append(ids, frame.ID)
+			status := pendingStatusFromFrame(item)
+			items = append(items, protocol.PendingMessageFrame{
+				ID:            frame.ID,
+				Recipient:     frame.Recipient,
+				Status:        status,
+				QueuedAt:      formatTime(item.QueuedAt),
+				LastAttemptAt: formatTime(outboundLastAttemptLocked(s.outbound, frame.ID)),
+				Retries:       outboundRetriesLocked(s.outbound, frame.ID, item.Retries),
+				Error:         outboundErrorLocked(s.outbound, frame.ID),
+			})
 		}
 	}
+	for id, item := range s.outbound {
+		if item.Status == "" || item.Status == "sent" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+		items = append(items, protocol.PendingMessageFrame{
+			ID:            id,
+			Recipient:     item.Recipient,
+			Status:        item.Status,
+			QueuedAt:      formatTime(item.QueuedAt),
+			LastAttemptAt: formatTime(item.LastAttemptAt),
+			Retries:       item.Retries,
+			Error:         item.Error,
+		})
+	}
 	sort.Strings(ids)
-	return protocol.Frame{Type: "pending_messages", Topic: topic, Count: len(ids), PendingIDs: ids}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].ID == items[j].ID {
+			return items[i].Status < items[j].Status
+		}
+		return items[i].ID < items[j].ID
+	})
+	return protocol.Frame{Type: "pending_messages", Topic: topic, Count: len(ids), PendingIDs: ids, PendingMessages: items}
 }
 
 func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol.Frame {
@@ -872,8 +922,11 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	}
 	s.seenReceipts[key] = struct{}{}
 	s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
+	delete(s.outbound, string(receipt.MessageID))
 	count := len(s.receipts[receipt.Recipient])
+	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
+	s.persistQueueState(snapshot)
 
 	s.emitLocalChange()
 
@@ -1483,6 +1536,7 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 		Body:       string(msg.Payload),
 	}
 	if s.enqueuePeerFrame(address, frame) {
+		s.clearOutboundQueued(frame.ID)
 		log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=session", msg.ID, msg.Recipient, address)
 		return
 	}
@@ -1490,6 +1544,7 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 		log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=queued", msg.ID, msg.Recipient, address)
 		return
 	}
+	s.markOutboundTerminal(frame, "failed", "unable to queue outbound frame")
 	log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=dropped", msg.ID, msg.Recipient, address)
 }
 
@@ -2070,6 +2125,34 @@ func formatTime(ts time.Time) string {
 	return ts.UTC().Format(time.RFC3339)
 }
 
+func pendingStatusFromFrame(item pendingFrame) string {
+	if item.Retries > 0 {
+		return "retrying"
+	}
+	return "queued"
+}
+
+func outboundLastAttemptLocked(items map[string]outboundDelivery, id string) time.Time {
+	if item, ok := items[id]; ok {
+		return item.LastAttemptAt
+	}
+	return time.Time{}
+}
+
+func outboundRetriesLocked(items map[string]outboundDelivery, id string, fallback int) int {
+	if item, ok := items[id]; ok && item.Retries > fallback {
+		return item.Retries
+	}
+	return fallback
+}
+
+func outboundErrorLocked(items map[string]outboundDelivery, id string) string {
+	if item, ok := items[id]; ok {
+		return item.Error
+	}
+	return ""
+}
+
 func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
 	session, ok := s.activePeerSession(address)
 	if !ok {
@@ -2106,6 +2189,7 @@ func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
 		QueuedAt: time.Now().UTC(),
 	})
 	s.pendingKeys[key] = struct{}{}
+	s.noteOutboundQueuedLocked(frame, "")
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
@@ -2138,14 +2222,22 @@ func (s *Service) flushPendingPeerFrames(address string) {
 	s.mu.Unlock()
 
 	remaining := make([]pendingFrame, 0)
+	now := time.Now().UTC()
 	for _, item := range frames {
-		if time.Since(item.QueuedAt) > pendingFrameTTL {
+		if now.Sub(item.QueuedAt) > pendingFrameTTL {
+			s.markOutboundTerminal(item.Frame, "expired", "pending queue expired")
 			continue
 		}
 		select {
 		case session.sendCh <- item.Frame:
+			s.clearOutboundQueued(item.Frame.ID)
 		default:
 			item.Retries++
+			if item.Retries >= maxPendingFrameRetries {
+				s.markOutboundTerminal(item.Frame, "failed", "max retries exceeded")
+				continue
+			}
+			s.markOutboundRetrying(item.Frame, item.QueuedAt, item.Retries, "retry queued delivery")
 			remaining = append(remaining, item)
 		}
 	}
@@ -2369,10 +2461,15 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 	for key, item := range s.relayRetry {
 		relayRetry[key] = item
 	}
+	outbound := make(map[string]outboundDelivery, len(s.outbound))
+	for key, item := range s.outbound {
+		outbound[key] = item
+	}
 
 	return queueStateFile{
-		Pending:    pending,
-		RelayRetry: relayRetry,
+		Pending:       pending,
+		RelayRetry:    relayRetry,
+		OutboundState: outbound,
 	}
 }
 
@@ -2381,6 +2478,82 @@ func (s *Service) persistQueueState(snapshot queueStateFile) {
 	if err := saveQueueState(path, snapshot); err != nil {
 		log.Printf("node: queue state save failed path=%s err=%v", path, err)
 	}
+}
+
+func (s *Service) noteOutboundQueuedLocked(frame protocol.Frame, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
+	state := s.outbound[frame.ID]
+	if state.MessageID == "" {
+		state.MessageID = frame.ID
+		state.Recipient = frame.Recipient
+		state.QueuedAt = time.Now().UTC()
+	}
+	state.Status = "queued"
+	state.Error = errText
+	s.outbound[frame.ID] = state
+}
+
+func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time, retries int, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	state := s.outbound[frame.ID]
+	if state.MessageID == "" {
+		state.MessageID = frame.ID
+		state.Recipient = frame.Recipient
+	}
+	if state.QueuedAt.IsZero() {
+		state.QueuedAt = queuedAt
+	}
+	state.Status = "retrying"
+	state.Retries = retries
+	state.LastAttemptAt = time.Now().UTC()
+	state.Error = errText
+	s.outbound[frame.ID] = state
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	state := s.outbound[frame.ID]
+	if state.MessageID == "" {
+		state.MessageID = frame.ID
+		state.Recipient = frame.Recipient
+		state.QueuedAt = time.Now().UTC()
+	}
+	state.Status = status
+	state.LastAttemptAt = time.Now().UTC()
+	if status == "failed" {
+		state.Retries++
+	}
+	state.Error = errText
+	s.outbound[frame.ID] = state
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func (s *Service) clearOutboundQueued(messageID string) {
+	if strings.TrimSpace(messageID) == "" {
+		return
+	}
+	s.mu.Lock()
+	if _, ok := s.outbound[messageID]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.outbound, messageID)
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
 }
 
 func expectedReplyType(requestType string) string {

@@ -75,6 +75,16 @@ type DirectMessage struct {
 	DeliveredAt   *time.Time
 }
 
+type PendingMessage struct {
+	ID            string
+	Recipient     string
+	Status        string
+	QueuedAt      *time.Time
+	LastAttemptAt *time.Time
+	Retries       int
+	Error         string
+}
+
 type NodeStatus struct {
 	Address          string
 	Connected        bool
@@ -94,6 +104,7 @@ type NodeStatus struct {
 	MessageIDs       []string
 	DirectMessages   []DirectMessage
 	DirectMessageIDs []string
+	PendingMessages  []PendingMessage
 	DeliveryReceipts []DeliveryReceipt
 	Inbox            []string
 	DirectInbox      []string
@@ -288,7 +299,8 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		}
 	}
 
-	decryptedDirectMessages := decryptDirectMessages(c.id, decryptContacts, directMessages, deliveryReceipts, pendingReply.PendingIDs)
+	pendingMessages := pendingMessagesFromFrame(pendingReply)
+	decryptedDirectMessages := decryptDirectMessages(c.id, decryptContacts, directMessages, deliveryReceipts, pendingMessages)
 	if imported := c.importIncomingContacts(contacts, decryptContacts, decryptedDirectMessages); imported > 0 {
 		trustedContactsReply, trustedErr := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
 		if trustedErr == nil {
@@ -305,6 +317,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.MessageIDs = messageIDs
 	status.DirectMessages = decryptedDirectMessages
 	status.DirectMessageIDs = directMessageIDs
+	status.PendingMessages = pendingMessages
 	status.DeliveryReceipts = deliveryReceipts
 	status.Inbox = stringifyMessages(inbox)
 	status.DirectInbox = stringifyMessages(directInbox)
@@ -910,7 +923,7 @@ func decryptNoticeFrames(id *identity.Identity, notices []protocol.NoticeFrame) 
 	return out
 }
 
-func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingIDs []string) []DirectMessage {
+func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingItems []PendingMessage) []DirectMessage {
 	receiptsByMessageID := make(map[string]DeliveryReceipt, len(receipts))
 	for _, receipt := range receipts {
 		existing, ok := receiptsByMessageID[receipt.MessageID]
@@ -918,9 +931,9 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			receiptsByMessageID[receipt.MessageID] = receipt
 		}
 	}
-	pending := make(map[string]struct{}, len(pendingIDs))
-	for _, id := range pendingIDs {
-		pending[id] = struct{}{}
+	pending := make(map[string]PendingMessage, len(pendingItems))
+	for _, item := range pendingItems {
+		pending[item.ID] = item
 	}
 
 	out := make([]DirectMessage, 0, len(messages))
@@ -946,8 +959,8 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			deliveredAt = &deliveredCopy
 			receiptStatus = receipt.Status
 		} else if item.Sender == id.Address {
-			if _, ok := pending[item.ID]; ok {
-				receiptStatus = "queued"
+			if pendingItem, ok := pending[item.ID]; ok {
+				receiptStatus = pendingItem.Status
 			} else {
 				receiptStatus = "sent"
 			}
@@ -964,6 +977,24 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 		})
 	}
 
+	return out
+}
+
+func pendingMessagesFromFrame(frame protocol.Frame) []PendingMessage {
+	out := make([]PendingMessage, 0, len(frame.PendingMessages))
+	for _, item := range frame.PendingMessages {
+		queuedAt := parseOptionalTime(item.QueuedAt)
+		lastAttemptAt := parseOptionalTime(item.LastAttemptAt)
+		out = append(out, PendingMessage{
+			ID:            item.ID,
+			Recipient:     item.Recipient,
+			Status:        item.Status,
+			QueuedAt:      queuedAt,
+			LastAttemptAt: lastAttemptAt,
+			Retries:       item.Retries,
+			Error:         item.Error,
+		})
+	}
 	return out
 }
 
