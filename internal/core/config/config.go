@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,10 +53,11 @@ const (
 	ProtocolVersion        = 1
 	MinimumProtocolVersion = 1
 	DefaultOutgoingPeers   = 8
+	DefaultPeerPort        = "64646"
 )
 
 func Default() Config {
-	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":64646")
+	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":"+DefaultPeerPort)
 	nodeType := nodeTypeFromEnv()
 	listenerEnabled, listenerSet := listenerFromEnv()
 	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress, listenerSet, listenerEnabled, nodeType))
@@ -205,7 +207,7 @@ func bootstrapPeersFromEnv(listenAddress string) []string {
 	}
 
 	_ = listenAddress
-	return []string{"65.108.204.190:64646"}
+	return []string{net.JoinHostPort("65.108.204.190", DefaultPeerPort)}
 }
 
 func nodeTypeFromEnv() NodeType {

@@ -1182,17 +1182,23 @@ func (s *Service) peerDialCandidates() []string {
 	}
 
 	candidates := make([]string, 0, len(s.peers))
+	seen := make(map[string]struct{})
 	for _, peer := range s.peers {
-		address := strings.TrimSpace(peer.Address)
-		if address == "" || s.isSelfAddress(address) {
-			continue
-		}
-		if _, ok := s.upstream[address]; ok {
-			continue
-		}
-		candidates = append(candidates, address)
-		if limit > 0 && active+len(candidates) >= limit {
-			break
+		for _, address := range s.dialAttemptAddressesLocked(strings.TrimSpace(peer.Address)) {
+			if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
+				continue
+			}
+			if _, ok := s.upstream[address]; ok {
+				continue
+			}
+			if _, ok := seen[address]; ok {
+				continue
+			}
+			seen[address] = struct{}{}
+			candidates = append(candidates, address)
+			if limit > 0 && active+len(candidates) >= limit {
+				return candidates
+			}
 		}
 	}
 	return candidates
@@ -1823,7 +1829,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 }
 
 func (s *Service) addPeerAddress(address string, nodeType string, peerID string) {
-	if address == "" || s.isSelfAddress(address) {
+	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return
 	}
 
@@ -2874,31 +2880,48 @@ func (s *Service) externalListenAddress() string {
 }
 
 func (s *Service) isSelfAddress(address string) bool {
-	return address == s.cfg.AdvertiseAddress || address == s.externalListenAddress() || address == s.cfg.ListenAddress
+	if address == s.cfg.AdvertiseAddress || address == s.externalListenAddress() || address == s.cfg.ListenAddress {
+		return true
+	}
+	host, _, ok := splitHostPort(address)
+	if !ok {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return s.isSelfDialIP(ip)
 }
 
 func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (string, bool) {
 	observedHost, _, observedOK := splitHostPort(observedAddr)
 	advertisedHost, advertisedPort, advertisedOK := splitHostPort(advertisedAddr)
+	if advertisedPort == "" {
+		advertisedPort = config.DefaultPeerPort
+	}
 
 	switch {
 	case advertisedOK && observedOK:
 		observedIP := net.ParseIP(observedHost)
 		advertisedIP := net.ParseIP(advertisedHost)
 
-		if advertisedIP != nil && !isUnroutableIP(advertisedIP) {
+		if advertisedIP != nil && !isForbiddenAdvertisedIP(advertisedIP) && advertisedHost == observedHost {
 			return net.JoinHostPort(advertisedHost, advertisedPort), true
 		}
-		if observedIP != nil && !isUnroutableIP(observedIP) {
+		if observedIP != nil && !s.isForbiddenDialIP(observedIP) {
+			if advertisedIP != nil && isForbiddenAdvertisedIP(advertisedIP) {
+				return net.JoinHostPort(observedHost, config.DefaultPeerPort), true
+			}
 			return net.JoinHostPort(observedHost, advertisedPort), true
 		}
 		return "", false
 	case advertisedOK:
 		advertisedIP := net.ParseIP(advertisedHost)
-		if advertisedIP != nil && isUnroutableIP(advertisedIP) {
+		if advertisedIP != nil && (isForbiddenAdvertisedIP(advertisedIP) || s.isForbiddenDialIP(advertisedIP)) {
 			return "", false
 		}
-		return advertisedAddr, true
+		return net.JoinHostPort(advertisedHost, advertisedPort), true
 	case observedOK:
 		// The observed remote port is an ephemeral source port, not a
 		// stable listening endpoint. Without a valid advertised port we
@@ -2917,8 +2940,100 @@ func splitHostPort(address string) (string, string, bool) {
 	return host, port, true
 }
 
-func isUnroutableIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+func isForbiddenAdvertisedIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	if inCIDR(ip, "192.168.0.0/16") {
+		return true
+	}
+	if inCIDR(ip, "172.16.0.0/21") {
+		return true
+	}
+	return false
+}
+
+func inCIDR(ip net.IP, cidr string) bool {
+	_, block, err := net.ParseCIDR(cidr)
+	if err != nil || block == nil {
+		return false
+	}
+	return block.Contains(ip)
+}
+
+func (s *Service) isForbiddenDialIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return !s.allowLoopbackPeers()
+	}
+	if isForbiddenAdvertisedIP(ip) || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	return false
+}
+
+func (s *Service) allowLoopbackPeers() bool {
+	for _, address := range []string{s.cfg.AdvertiseAddress, s.externalListenAddress(), s.cfg.ListenAddress} {
+		host, _, ok := splitHostPort(address)
+		if !ok {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip != nil && ip.IsLoopback() {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) isSelfDialIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, address := range []string{s.cfg.AdvertiseAddress, s.externalListenAddress(), s.cfg.ListenAddress} {
+		host, _, ok := splitHostPort(address)
+		if !ok {
+			continue
+		}
+		selfIP := net.ParseIP(host)
+		if selfIP == nil {
+			continue
+		}
+		if selfIP.Equal(ip) {
+			if ip.IsLoopback() && s.allowLoopbackPeers() {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) shouldSkipDialAddress(address string) bool {
+	host, _, ok := splitHostPort(address)
+	if !ok {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return s.isForbiddenDialIP(ip)
+}
+
+func (s *Service) dialAttemptAddressesLocked(address string) []string {
+	host, port, ok := splitHostPort(address)
+	if !ok {
+		return nil
+	}
+	addresses := []string{net.JoinHostPort(host, port)}
+	ip := net.ParseIP(host)
+	if port != config.DefaultPeerPort && ip != nil && !s.isForbiddenDialIP(ip) && !ip.IsLoopback() {
+		addresses = append(addresses, net.JoinHostPort(host, config.DefaultPeerPort))
+	}
+	return addresses
 }
 
 func enableTCPKeepAlive(conn net.Conn) {

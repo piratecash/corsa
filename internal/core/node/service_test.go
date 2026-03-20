@@ -186,6 +186,114 @@ func TestPeerDialCandidatesUsesDefaultFullOutgoingLimit(t *testing.T) {
 	}
 }
 
+func TestNormalizePeerAddressPrefersObservedHostAndDefaultPortForPrivateAdvertise(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	got, ok := svc.normalizePeerAddress("91.234.35.132:50702", "127.0.0.1:64647")
+	if !ok {
+		t.Fatalf("expected normalized address")
+	}
+	if got != "91.234.35.132:64646" {
+		t.Fatalf("unexpected normalized address: %s", got)
+	}
+}
+
+func TestNormalizePeerAddressPrefersObservedHostWhenAdvertisedHostDiffers(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	got, ok := svc.normalizePeerAddress("91.234.35.132:50702", "217.9.153.77:64647")
+	if !ok {
+		t.Fatalf("expected normalized address")
+	}
+	if got != "91.234.35.132:64647" {
+		t.Fatalf("unexpected normalized address: %s", got)
+	}
+}
+
+func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		BootstrapPeers: []string{
+			"10.0.0.1:64647",
+			"127.0.0.1:64647",
+			"192.168.1.20:64646",
+			"172.16.3.10:64646",
+		},
+		Type: config.NodeTypeClient,
+	}, id)
+
+	got := svc.peerDialCandidates()
+	want := []string{"10.0.0.1:64647", "10.0.0.1:64646"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected candidate count: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected candidates: got %v want %v", got, want)
+		}
+	}
+}
+
+func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		BootstrapPeers: []string{
+			"65.108.204.190:64647",
+			"91.234.35.132:64647",
+		},
+		Type: config.NodeTypeClient,
+	}, id)
+
+	got := svc.peerDialCandidates()
+	want := []string{"91.234.35.132:64647", "91.234.35.132:64646"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected candidate count: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected candidates: got %v want %v", got, want)
+		}
+	}
+}
+
 func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 	t.Parallel()
 
