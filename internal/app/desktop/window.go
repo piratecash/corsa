@@ -539,7 +539,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
 	recipient := w.selectedRecipient
 	title := w.t("chat.title")
-	rows := []string{}
+	var rows []string
 
 	if recipient == "" {
 		rows = append(rows, w.t("chat.choose"))
@@ -547,10 +547,6 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 	}
 
 	title = w.t("chat.with", shortFingerprint(recipient))
-	rows = append(rows,
-		w.t("chat.fingerprint", recipient),
-		w.t("chat.peers", len(status.Peers)),
-	)
 
 	conversation := w.conversationEntries(status, recipient)
 	if len(conversation) == 0 {
