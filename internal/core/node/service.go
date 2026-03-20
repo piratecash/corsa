@@ -2846,7 +2846,7 @@ func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryRecei
 func shouldRetryRelayLocked(items map[string]relayAttempt, key string, now time.Time) bool {
 	state, ok := items[key]
 	if !ok {
-		return true
+		return false
 	}
 	firstSeen := state.FirstSeen
 	if firstSeen.IsZero() {

@@ -2008,6 +2008,48 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 	}
 }
 
+func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate test identity: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	receipt := protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID("receipt-msg-2"),
+		Sender:      "alice",
+		Recipient:   "bob",
+		Status:      protocol.ReceiptStatusDelivered,
+		DeliveredAt: time.Now().UTC(),
+	}
+
+	svc.mu.Lock()
+	svc.receipts[receipt.Recipient] = append(svc.receipts[receipt.Recipient], receipt)
+	svc.mu.Unlock()
+	svc.trackRelayReceipt(receipt)
+	svc.clearRelayRetryForOutbound(protocol.Frame{
+		Type:      "send_delivery_receipt",
+		ID:        string(receipt.MessageID),
+		Recipient: receipt.Recipient,
+		Status:    receipt.Status,
+	})
+
+	retryable := svc.retryableRelayReceipts(time.Now().UTC())
+	if len(retryable) != 0 {
+		t.Fatalf("expected cleared receipt not to be retried, got %#v", retryable)
+	}
+}
+
 func exchangeFrames(t *testing.T, address string, frames ...protocol.Frame) []protocol.Frame {
 	t.Helper()
 

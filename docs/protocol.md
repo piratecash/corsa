@@ -175,6 +175,36 @@ Handshake compatibility rule:
 - reject reply uses `type=error`, `code=incompatible-protocol-version`, and includes responder `version` plus `minimum_protocol_version`
 - protocol version `1` is still accepted only for backward compatibility during migration; support for `v1` must be removed in a future protocol cleanup after all active peers move to `v2`
 
+Authenticated session upgrade for protocol `v2`:
+
+- for `node` and `desktop` peers using protocol `v2`, the responder may include a random `challenge` in `welcome`
+- the caller must answer with a signed `auth_session`
+- the signature is made by the caller identity key over the payload `corsa-session-auth-v1|<challenge>|<address>`
+- if the signature is valid, responder returns `auth_ok`
+- if the signature is invalid, the connection is rejected
+- invalid session signatures add `100` ban points to the remote IP
+- once an IP reaches `1000` points, it is blacklisted for `24h`
+
+Authenticated session request:
+
+```json
+{
+  "type": "auth_session",
+  "address": "<fingerprint>",
+  "signature": "<base64url-ed25519-signature>"
+}
+```
+
+Authenticated session success response:
+
+```json
+{
+  "type": "auth_ok",
+  "address": "<fingerprint>",
+  "status": "ok"
+}
+```
+
 ### Peer sync
 
 Request:
@@ -741,8 +771,63 @@ Routing rules:
 - when a full node stores a new `dm`, it pushes the message to active subscribers for the recipient
 - when the recipient node accepts a live `dm`, it creates a delivery receipt and routes it back toward the original sender
 - when the recipient UI opens the chat, it may promote that receipt from `delivered` to `seen`
+- on protocol `v2` authenticated sessions, the receiver must send a signed `ack_delete` after accepting `push_message` or `push_delivery_receipt`
+- after a valid `ack_delete`, the serving full node removes the corresponding backlog item and stops re-sending it on future reconnects
 - `client` nodes still keep polling/sync as a fallback, but can receive `dm` immediately over the subscribed session
 - public topics such as `global` are still relayed by mesh gossip, not by inbox subscription
+
+Backlog delete acknowledgement:
+
+```json
+{
+  "type": "ack_delete",
+  "address": "<fingerprint>",
+  "ack_type": "dm",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "status": "",
+  "signature": "<base64url-ed25519-signature>"
+}
+```
+
+For receipt backlog deletion:
+
+```json
+{
+  "type": "ack_delete",
+  "address": "<fingerprint>",
+  "ack_type": "receipt",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "status": "delivered",
+  "signature": "<base64url-ed25519-signature>"
+}
+```
+
+Ack rules:
+
+- `ack_type` is either `dm` or `receipt`
+- for `receipt`, `status` is part of the signed payload and must match the pushed receipt state
+- signature payload is `corsa-ack-delete-v1|<address>|<ack_type>|<id>|<status>`
+- only an authenticated `v2` session may send `ack_delete`
+- if the signature is invalid, responder rejects the frame and adds ban score to the remote IP
+
+Delivery flow:
+
+```mermaid
+sequenceDiagram
+    participant S as "Sender client"
+    participant F as "Full node"
+    participant R as "Recipient client"
+
+    S->>F: send_message(dm)
+    F-->>R: push_message(dm)
+    R->>F: ack_delete(dm)
+    R->>F: send_delivery_receipt(delivered)
+    F-->>S: push_delivery_receipt(delivered)
+    S->>F: ack_delete(receipt delivered)
+    R->>F: send_delivery_receipt(seen)
+    F-->>S: push_delivery_receipt(seen)
+    S->>F: ack_delete(receipt seen)
+```
 
 Message flags:
 
@@ -1068,6 +1153,36 @@ Fields:
 - отвечающий узел делает reject, если `version` вызывающей стороны ниже его `minimum_protocol_version`
 - reject-ответ использует `type=error`, `code=incompatible-protocol-version` и содержит `version` плюс `minimum_protocol_version` отвечающего узла
 - версия протокола `1` пока еще принимается только для обратной совместимости на время миграции; поддержку `v1` нужно удалить в будущей очистке протокола после перевода всех активных пиров на `v2`
+
+Аутентифицированное повышение сессии для протокола `v2`:
+
+- для `node` и `desktop` пиров на протоколе `v2` отвечающая сторона может добавить случайный `challenge` в `welcome`
+- вызывающая сторона должна ответить подписанным `auth_session`
+- подпись делается identity key вызывающей стороны по payload `corsa-session-auth-v1|<challenge>|<address>`
+- если подпись валидна, отвечающая сторона возвращает `auth_ok`
+- если подпись невалидна, соединение отвергается
+- невалидная подпись сессии добавляет `100` ban points для удаленного IP
+- после набора `1000` баллов IP попадает в blacklist на `24h`
+
+Запрос аутентификации сессии:
+
+```json
+{
+  "type": "auth_session",
+  "address": "<fingerprint>",
+  "signature": "<base64url-ed25519-signature>"
+}
+```
+
+Успешный ответ аутентификации:
+
+```json
+{
+  "type": "auth_ok",
+  "address": "<fingerprint>",
+  "status": "ok"
+}
+```
 
 ### Peer sync
 
@@ -1637,8 +1752,63 @@ Push-кадр delivery receipt:
 - когда full node сохраняет новое `dm`, она отправляет push всем активным подписчикам recipient
 - когда нода получателя принимает live `dm`, она формирует delivery receipt и маршрутизирует его обратно исходному отправителю
 - когда UI получателя открывает чат, этот receipt может быть повышен из `delivered` в `seen`
+- на аутентифицированных `v2`-сессиях получатель обязан отправить подписанный `ack_delete` после приема `push_message` или `push_delivery_receipt`
+- после валидного `ack_delete` обслуживающая full node удаляет соответствующий backlog item и перестает переотправлять его на будущих reconnect
 - `client`-узлы все еще сохраняют polling/sync как fallback, но могут получать `dm` сразу по подписанной сессии
 - публичные темы вроде `global` по-прежнему идут через mesh gossip, а не через inbox subscription
+
+Подтверждение удаления backlog:
+
+```json
+{
+  "type": "ack_delete",
+  "address": "<fingerprint>",
+  "ack_type": "dm",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "status": "",
+  "signature": "<base64url-ed25519-signature>"
+}
+```
+
+Для удаления backlog delivery receipt:
+
+```json
+{
+  "type": "ack_delete",
+  "address": "<fingerprint>",
+  "ack_type": "receipt",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "status": "delivered",
+  "signature": "<base64url-ed25519-signature>"
+}
+```
+
+Правила `ack_delete`:
+
+- `ack_type` бывает `dm` или `receipt`
+- для `receipt` поле `status` входит в подписываемый payload и должно совпадать с pushed receipt
+- payload подписи: `corsa-ack-delete-v1|<address>|<ack_type>|<id>|<status>`
+- отправлять `ack_delete` может только аутентифицированная `v2`-сессия
+- если подпись невалидна, отвечающая сторона отклоняет кадр и добавляет ban score удаленному IP
+
+Схема доставки:
+
+```mermaid
+sequenceDiagram
+    participant S as "Клиент-отправитель"
+    participant F as "Full node"
+    participant R as "Клиент-получатель"
+
+    S->>F: send_message(dm)
+    F-->>R: push_message(dm)
+    R->>F: ack_delete(dm)
+    R->>F: send_delivery_receipt(delivered)
+    F-->>S: push_delivery_receipt(delivered)
+    S->>F: ack_delete(receipt delivered)
+    R->>F: send_delivery_receipt(seen)
+    F-->>S: push_delivery_receipt(seen)
+    S->>F: ack_delete(receipt seen)
+```
 
 Флаги сообщений:
 
