@@ -88,6 +88,7 @@ type NoticeFrame struct {
 
 type PeerHealthFrame struct {
 	Address             string `json:"address"`
+	Network             string `json:"network,omitempty"`
 	ClientVersion       string `json:"client_version,omitempty"`
 	State               string `json:"state"`
 	Connected           bool   `json:"connected"`

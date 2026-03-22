@@ -3172,6 +3172,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	for _, health := range s.health {
 		items = append(items, protocol.PeerHealthFrame{
 			Address:             health.Address,
+			Network:             classifyAddress(health.Address).String(),
 			ClientVersion:       s.peerVersions[health.Address],
 			State:               s.computePeerStateLocked(health),
 			Connected:           health.Connected,

@@ -69,8 +69,12 @@ func (g NetGroup) String() string {
 	}
 }
 
-// classifyAddress returns the NetGroup for a host:port address string.
+// ClassifyAddress returns the NetGroup for a host:port address string.
 // It never fails — unknown formats map to NetGroupUnknown.
+func ClassifyAddress(address string) NetGroup {
+	return classifyAddress(address)
+}
+
 func classifyAddress(address string) NetGroup {
 	host, _, ok := splitHostPort(address)
 	if !ok {

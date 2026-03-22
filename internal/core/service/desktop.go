@@ -90,6 +90,7 @@ type PendingMessage struct {
 
 type ConsolePeerStatus struct {
 	Address      string `json:"address"`
+	Network      string `json:"network,omitempty"`
 	State        string `json:"state"`
 	Connected    bool   `json:"connected"`
 	PendingCount int    `json:"pending_count,omitempty"`
@@ -593,12 +594,13 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		item, ok := byAddress[address]
 		if !ok {
 			knownOnly = append(knownOnly, address)
-			allPeers = append(allPeers, ConsolePeerStatus{Address: address, State: "known"})
+			allPeers = append(allPeers, ConsolePeerStatus{Address: address, Network: node.ClassifyAddress(address).String(), State: "known"})
 			continue
 		}
 
 		status := ConsolePeerStatus{
 			Address:      address,
+			Network:      node.ClassifyAddress(address).String(),
 			State:        "known",
 			Connected:    item.Connected,
 			PendingCount: item.PendingCount,
