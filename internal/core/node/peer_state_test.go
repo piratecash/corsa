@@ -49,7 +49,7 @@ func TestSaveAndLoadPeerStateRoundTrip(t *testing.T) {
 		Version: peerStateVersion,
 		Peers: []peerEntry{
 			{
-				Address:             "65.108.204.190:64646",
+				Address:             "198.51.100.1:64646",
 				NodeType:            "full",
 				LastConnectedAt:     &now,
 				LastDisconnectedAt:  &past5,
@@ -82,7 +82,7 @@ func TestSaveAndLoadPeerStateRoundTrip(t *testing.T) {
 	if len(got.Peers) != 2 {
 		t.Fatalf("expected 2 peers, got %d", len(got.Peers))
 	}
-	if got.Peers[0].Address != "65.108.204.190:64646" {
+	if got.Peers[0].Address != "198.51.100.1:64646" {
 		t.Fatalf("unexpected first peer address: %s", got.Peers[0].Address)
 	}
 	if got.Peers[0].Score != 10 {
@@ -250,6 +250,29 @@ func TestPeerSource(t *testing.T) {
 	for _, tt := range tests {
 		if got := peerSource(tt.id); got != tt.want {
 			t.Errorf("peerSource(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestPeerCooldownDuration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, 0},
+		{-1, 0},
+		{1, peerCooldownBase},                   // 30s
+		{2, peerCooldownBase * 2},               // 60s
+		{3, peerCooldownBase * 4},               // 2m
+		{4, peerCooldownBase * 8},               // 4m
+		{100, peerCooldownMax},                   // capped at 30m
+	}
+	for _, tt := range tests {
+		got := peerCooldownDuration(tt.failures)
+		if got != tt.want {
+			t.Errorf("peerCooldownDuration(%d) = %v, want %v", tt.failures, got, tt.want)
 		}
 	}
 }

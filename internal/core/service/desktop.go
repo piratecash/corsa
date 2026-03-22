@@ -65,6 +65,7 @@ type PeerHealth struct {
 	LastUsefulReceiveAt *time.Time
 	ConsecutiveFailures int
 	LastError           string
+	Score               int
 }
 
 type DirectMessage struct {
@@ -364,6 +365,7 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			LastUsefulReceiveAt: parseOptionalTime(item.LastUsefulReceiveAt),
 			ConsecutiveFailures: item.ConsecutiveFailures,
 			LastError:           item.LastError,
+			Score:               item.Score,
 		})
 	}
 	return items

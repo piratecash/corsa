@@ -595,10 +595,10 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	state, peers, pending := networkStatusSummary(status)
-	labelText := w.t("compose.network_status", strings.ToUpper(state), peers, pending)
+	state, connected, total, pending := networkStatusSummary(status)
+	labelText := w.t("compose.network_status", strings.ToUpper(state), connected, total, pending)
 	if labelText == "compose.network_status" {
-		labelText = "NET " + strings.ToUpper(state) + " | " + strconv.Itoa(peers) + " peers | " + strconv.Itoa(pending) + " pending"
+		labelText = "NET " + strings.ToUpper(state) + " | " + strconv.Itoa(connected) + "/" + strconv.Itoa(total) + " peers | " + strconv.Itoa(pending) + " pending"
 	}
 	breakdownText := w.networkBreakdownText(status)
 	bg, fg := networkStateColors(state)
@@ -634,7 +634,7 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 	})
 }
 
-func networkStatusSummary(status service.NodeStatus) (string, int, int) {
+func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
 	healthy := 0
 	degraded := 0
 	stalled := 0
@@ -655,17 +655,26 @@ func networkStatusSummary(status service.NodeStatus) (string, int, int) {
 		pending += item.PendingCount
 	}
 
+	connected := healthy + degraded + stalled
+	total := connected + reconnecting
+
 	switch {
+	case total == 0:
+		return "offline", 0, 0, pending
+	case connected == 0:
+		return "reconnecting", 0, total, pending
+	case healthy > 0 && connected*2 >= total:
+		// More than half connected and at least one healthy — network is fine.
+		return "healthy", connected, total, pending
 	case healthy > 0:
-		return "healthy", len(status.PeerHealth), pending
+		// Some healthy peers but less than half connected — warn.
+		return "warning", connected, total, pending
 	case degraded > 0:
-		return "degraded", len(status.PeerHealth), pending
+		return "degraded", connected, total, pending
 	case stalled > 0:
-		return "stalled", len(status.PeerHealth), pending
-	case reconnecting > 0:
-		return "reconnecting", len(status.PeerHealth), pending
+		return "stalled", connected, total, pending
 	default:
-		return "offline", 0, pending
+		return "offline", 0, total, pending
 	}
 }
 
@@ -703,6 +712,8 @@ func networkStateColors(state string) (color.NRGBA, color.NRGBA) {
 	switch state {
 	case "healthy":
 		return color.NRGBA{R: 36, G: 92, B: 63, A: 255}, color.NRGBA{R: 231, G: 255, B: 239, A: 255}
+	case "warning":
+		return color.NRGBA{R: 140, G: 110, B: 20, A: 255}, color.NRGBA{R: 255, G: 240, B: 180, A: 255}
 	case "degraded":
 		return color.NRGBA{R: 110, G: 82, B: 25, A: 255}, color.NRGBA{R: 255, G: 244, B: 210, A: 255}
 	case "stalled":

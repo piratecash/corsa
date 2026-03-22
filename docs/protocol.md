@@ -55,21 +55,59 @@ Rules:
 
 ### Peer address persistence
 
-Peer addresses discovered via `get_peers` exchange and bootstrap are persisted locally in `peers-{port}.json` (default path: `.corsa/peers-{port}.json`, override: `CORSA_PEERS_PATH`). The file follows a scoring model inspired by Bitcoin's `peers.dat`:
+Peer addresses discovered via `get_peers` exchange and bootstrap are persisted locally in `peers-{port}.json` (default path: `.corsa/peers-{port}.json`, override: `CORSA_PEERS_PATH`). The file follows a reputation-based scoring model:
 
-- each entry stores the peer address, node type, last connection/disconnection timestamps, consecutive failure count, source tag (`bootstrap`, `peer_exchange`, `persisted`), and a numeric score
+- each entry stores the peer address, node type, last connection/disconnection timestamps, consecutive failure count, source tag (`bootstrap`, `peer_exchange`, `persisted`), first-seen time (`added_at`), and a numeric score
 - score increases on successful TCP handshake (+10) and decreases on failure (-5) or clean disconnect (-2), clamped to [-50, +100]
-- the file is flushed every 5 minutes during the bootstrap loop and once on graceful shutdown
-- on restart, persisted peers are merged with bootstrap peers: bootstrap entries appear first, then persisted entries sorted by score descending; duplicates are skipped
+- stable metadata (`node_type`, `source`, `added_at`) loaded from the file is preserved across restart+flush cycles; only newly discovered peers derive these fields from runtime state
+- the file is flushed every 5 minutes during the bootstrap loop and once on graceful shutdown; `Run` waits for the flush to complete before returning
+- on restart, persisted peers are merged with bootstrap peers: bootstrap entries appear first, then persisted entries sorted by score descending; duplicates are skipped but their metadata is still used for health seeding
 - the persisted list is capped at 500 entries; lowest-scoring entries are trimmed on save
+
+### Peer dial prioritisation
+
+Outgoing connection candidates are selected using score-based ordering instead of insertion order:
+
+- `peerDialCandidates` sorts all eligible peers by score descending so that the healthiest peers are dialled first and degraded peers sink to the bottom
+- a single connection failure does NOT trigger cooldown — the peer gets an immediate retry on the next bootstrap tick; starting from the second consecutive failure, exponential cooldown applies: `min(30s × 2^(failures−2), 30min)`; while the cooldown window is active (measured from `LastDisconnectedAt`), the peer is skipped
+- a successful connection (`markPeerConnected`) resets `ConsecutiveFailures` to zero, immediately clearing any cooldown
+- when a peer session ends (error or clean disconnect), the upstream slot is released immediately; the next `ensurePeerSessions` cycle (≤2 s) picks the best available candidate by score
+- cooldown and score are evaluated against the primary peer address (the one stored in `s.peers`); fallback dial variants (e.g. same host with default port) inherit the primary's reputation so that cooldown cannot be bypassed by dialling an alternative port
+- the pending outbound queue is also keyed by primary peer address, so frames queued while connected via a fallback variant are correctly flushed when any variant reconnects
+- dial candidates with equal scores are sorted by insertion order (stable sort), preserving bootstrap-first priority
+
+### Queue state migration
+
+The queue-state file carries a `"version"` field (current: `1`).  When loading a file with `version < 1` (or no version field — legacy files written before canonicalisation), a one-time migration runs.  For each non-primary key in `"pending"`:
+
+1. if the host maps to exactly one known primary — frames are moved to that primary key
+2. if the host has no known primaries (unknown host) or maps to more than one primary (ambiguous) — the entry cannot be resolved automatically; it is moved to the `"orphaned"` section and a warning is logged
+
+After migration the version is set to `1` and subsequent restarts skip the migration entirely.  This means entries written by the current code (already keyed by primary address) are never touched.
+
+Orphaned frames are persisted across restarts in `"orphaned"`.  They are not loaded into the runtime pending queue, but remain on disk for manual recovery (e.g. editing the JSON to move them to the correct primary key).
+
+### Stale peer eviction
+
+In-memory peer lists are periodically pruned to remove stale entries.  Every 10 minutes the node scans all known peers and removes those that meet **both** criteria:
+
+- score ≤ −20 (`peerEvictScoreThreshold`)
+- no successful connection within the last 24 hours (`peerEvictStaleWindow`); if the peer was never connected, `added_at` is used as the reference timestamp
+
+Eviction cleans up all associated state (health, peer type, version, persisted metadata).  Bootstrap peers and currently-connected peers are **never** evicted regardless of score.
+
+### Mesh learning (peer re-sync via syncTicker)
+
+`servePeerSession` runs a `syncTicker` that fires every 4 seconds.  Each tick calls `syncPeerSession`, which sends `get_peers` to the connected peer and merges newly discovered addresses into the local pool via `addPeerAddress`.  This ensures the mesh constantly learns about new nodes through its existing connections without requiring a separate re-sync goroutine.
 
 ### Onion address support
 
 Peer addresses may be `.onion` hostnames (Tor hidden services). When `CORSA_PROXY` is set to a SOCKS5 proxy address (e.g. `127.0.0.1:9050`), the node routes all `.onion` peer connections through the proxy:
 
-- `.onion` addresses are accepted as-is in the advertised address field during `normalizePeerAddress`; standard IP-based validation and forbidden-IP checks are bypassed for `.onion` hosts
+- only valid `.onion` addresses are accepted: Tor v3 (56 base32 characters) and v2 (16 base32 characters, deprecated); malformed `.onion` hostnames are rejected during `normalizePeerAddress`
+- `.onion` addresses are accepted as-is in the advertised address field; standard IP-based validation and forbidden-IP checks are bypassed for `.onion` hosts
 - the SOCKS5 handshake uses `ATYP=0x03` (domain name) so the proxy resolves the `.onion` address, not the local node
-- if no `CORSA_PROXY` is configured, `.onion` peer addresses are stored but dial attempts to them will fail gracefully
+- if no `CORSA_PROXY` is configured, `.onion` peer addresses are stored but excluded from dial candidates to avoid constant failed connection attempts
 - non-`.onion` addresses continue to use direct TCP connections regardless of proxy configuration
 
 ### Handshake
@@ -1065,21 +1103,59 @@ Fields:
 
 ### Персистенция адресов пиров
 
-Адреса пиров, обнаруженные через обмен `get_peers` и bootstrap, сохраняются локально в `peers-{port}.json` (путь по умолчанию: `.corsa/peers-{port}.json`, переопределение: `CORSA_PEERS_PATH`). Файл использует модель scoring по аналогии с Bitcoin `peers.dat`:
+Адреса пиров, обнаруженные через обмен `get_peers` и bootstrap, сохраняются локально в `peers-{port}.json` (путь по умолчанию: `.corsa/peers-{port}.json`, переопределение: `CORSA_PEERS_PATH`). Файл использует репутационную модель scoring:
 
-- каждая запись хранит адрес пира, тип ноды, временные метки последнего подключения/отключения, число последовательных ошибок, тег источника (`bootstrap`, `peer_exchange`, `persisted`) и числовой score
+- каждая запись хранит адрес пира, тип ноды, временные метки последнего подключения/отключения, число последовательных ошибок, тег источника (`bootstrap`, `peer_exchange`, `persisted`), время первого обнаружения (`added_at`) и числовой score
 - score увеличивается при успешном TCP-рукопожатии (+10) и уменьшается при ошибке (-5) или чистом отключении (-2), зажат в диапазоне [-50, +100]
-- файл сбрасывается на диск каждые 5 минут в bootstrap loop и один раз при graceful shutdown
-- при перезапуске персистированные пиры мержатся с bootstrap: записи bootstrap идут первыми, затем персистированные в порядке убывания score; дубликаты пропускаются
+- стабильные метаданные (`node_type`, `source`, `added_at`) загруженные из файла сохраняются через циклы restart+flush; только для вновь обнаруженных пиров эти поля вычисляются из runtime-состояния
+- файл сбрасывается на диск каждые 5 минут в bootstrap loop и один раз при graceful shutdown; `Run` дожидается завершения flush перед возвратом
+- при перезапуске персистированные пиры мержатся с bootstrap: записи bootstrap идут первыми, затем персистированные в порядке убывания score; дубликаты пропускаются, но их метаданные используются для инициализации health
 - список ограничен 500 записями; записи с наименьшим score обрезаются при сохранении
+
+### Приоритизация пиров при подключении
+
+Кандидаты для исходящих соединений выбираются с score-based сортировкой вместо порядка вставки:
+
+- `peerDialCandidates` сортирует всех доступных пиров по score по убыванию, чтобы самые здоровые пиры подключались первыми, а проблемные опускались вниз
+- одна ошибка подключения НЕ включает cooldown — пир получает немедленную повторную попытку на следующем тике bootstrap; начиная со второй подряд ошибки действует экспоненциальный cooldown: `min(30с × 2^(failures−2), 30мин)`; пока окно cooldown активно (от момента `LastDisconnectedAt`), пир пропускается
+- успешное подключение (`markPeerConnected`) сбрасывает `ConsecutiveFailures` в ноль, немедленно снимая cooldown
+- при завершении пир-сессии (ошибка или чистое отключение) upstream-слот освобождается немедленно; следующий цикл `ensurePeerSessions` (≤2 с) выбирает лучшего кандидата по score
+- cooldown и score вычисляются по основному адресу пира (тому, что хранится в `s.peers`); fallback-варианты (тот же хост с портом по умолчанию) наследуют репутацию основного, чтобы cooldown нельзя было обойти попыткой подключения на альтернативный порт
+- очередь исходящих pending-фреймов также привязана к основному адресу пира, поэтому фреймы, поставленные в очередь через fallback-вариант, корректно отправляются при переподключении через любой вариант
+- кандидаты для подключения с одинаковым score сортируются по порядку добавления (стабильная сортировка), сохраняя приоритет bootstrap-пиров
+
+### Миграция queue state
+
+Файл queue-state содержит поле `"version"` (текущая: `1`). При загрузке файла с `version < 1` (или без поля version — legacy-файлы, записанные до каноникализации) выполняется одноразовая миграция. Для каждого не-primary ключа в `"pending"`:
+
+1. если host однозначно маппится на один known primary — фреймы переносятся на этот primary-ключ
+2. если у host нет known primary (неизвестный хост) или host маппится на несколько primary (неоднозначный) — запись не может быть автоматически разрешена; она перемещается в секцию `"orphaned"` и логируется warning
+
+После миграции version устанавливается в `1`, и последующие рестарты пропускают миграцию полностью. Это означает, что записи, сделанные текущей версией кода (уже ключеванные по primary-адресу), никогда не затрагиваются.
+
+Orphaned фреймы сохраняются между рестартами в `"orphaned"`. Они не загружаются в runtime pending-очередь, но остаются на диске для ручного восстановления (например, редактированием JSON и переносом на правильный primary-ключ).
+
+### Вытеснение устаревших пиров
+
+Список пиров в памяти периодически очищается для удаления устаревших записей. Каждые 10 минут нода проверяет всех известных пиров и удаляет тех, кто удовлетворяет **обоим** критериям:
+
+- score ≤ −20 (`peerEvictScoreThreshold`)
+- не было успешного подключения за последние 24 часа (`peerEvictStaleWindow`); если пир никогда не подключался, используется `added_at` как точка отсчёта
+
+При вытеснении очищается всё связанное состояние (health, тип пира, версия, персистированные метаданные). Bootstrap-пиры и подключённые в данный момент пиры **никогда** не удаляются вне зависимости от score.
+
+### Обучение mesh-сети (re-sync через syncTicker)
+
+`servePeerSession` запускает `syncTicker`, который срабатывает каждые 4 секунды. При каждом тике вызывается `syncPeerSession`, который отправляет `get_peers` подключённому пиру и добавляет новые адреса в локальный пул через `addPeerAddress`. Это обеспечивает постоянное обнаружение новых нод через существующие соединения без необходимости отдельной goroutine для re-sync.
 
 ### Поддержка onion-адресов
 
 Адреса пиров могут быть `.onion` хостнеймами (Tor hidden services). При установке `CORSA_PROXY` в адрес SOCKS5 прокси (например `127.0.0.1:9050`) нода маршрутизирует все `.onion` соединения через прокси:
 
-- `.onion` адреса принимаются как есть в advertised address при `normalizePeerAddress`; стандартная IP-валидация и проверки forbidden-IP не применяются к `.onion` хостам
+- принимаются только валидные `.onion` адреса: Tor v3 (56 символов base32) и v2 (16 символов base32, deprecated); некорректные `.onion` хостнеймы отклоняются при `normalizePeerAddress`
+- `.onion` адреса принимаются как есть в advertised address; стандартная IP-валидация и проверки forbidden-IP не применяются к `.onion` хостам
 - SOCKS5 рукопожатие использует `ATYP=0x03` (доменное имя), чтобы прокси разрешал `.onion` адрес, а не локальная нода
-- если `CORSA_PROXY` не настроен, `.onion` адреса пиров сохраняются, но попытки подключения к ним завершатся ошибкой gracefully
+- если `CORSA_PROXY` не настроен, `.onion` адреса пиров сохраняются, но исключаются из кандидатов на подключение, чтобы избежать постоянных неудачных попыток
 - non-`.onion` адреса продолжают использовать прямые TCP-соединения вне зависимости от настройки прокси
 
 ### Handshake

@@ -98,6 +98,7 @@ type PeerHealthFrame struct {
 	LastUsefulReceiveAt string `json:"last_useful_receive_at,omitempty"`
 	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
 	LastError           string `json:"last_error,omitempty"`
+	Score               int    `json:"score"`
 }
 
 type PendingMessageFrame struct {

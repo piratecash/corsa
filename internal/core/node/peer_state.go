@@ -10,8 +10,8 @@ import (
 )
 
 // peerEntry represents a persisted peer address with metadata and scoring.
-// Modelled after Bitcoin's peers.dat: each entry carries enough context to
-// prioritise dial candidates on restart without a full peer-exchange round.
+// Each entry carries enough context to prioritise dial candidates on restart
+// without a full peer-exchange round.
 type peerEntry struct {
 	Address             string     `json:"address"`
 	NodeType            string     `json:"node_type,omitempty"`
@@ -38,8 +38,34 @@ const (
 	peerScoreMax         = 100
 	peerScoreMin         = -50
 	maxPersistedPeers    = 500
-	peerStateSaveMinutes = 5 // minimum interval between periodic saves
+	peerStateSaveMinutes = 5  // minimum interval between periodic saves
+	peerCooldownBase     = 30 * time.Second // base cooldown after first failure
+	peerCooldownMax      = 30 * time.Minute // cap on exponential backoff
+
+	// Eviction thresholds.
+	// A peer is evictable when its score drops below the threshold AND it has
+	// not been successfully connected for longer than the stale window.
+	peerEvictScoreThreshold = -20           // score at or below this → candidate for eviction
+	peerEvictStaleWindow    = 24 * time.Hour // must also be unseen for this long
+	peerEvictInterval       = 10 * time.Minute // how often the eviction sweep runs
 )
+
+// peerCooldownDuration returns the exponential backoff duration for a peer
+// based on its consecutive failure count: min(base * 2^(failures-1), max).
+// Returns zero if failures <= 0 (no cooldown).
+func peerCooldownDuration(consecutiveFailures int) time.Duration {
+	if consecutiveFailures <= 0 {
+		return 0
+	}
+	d := peerCooldownBase
+	for i := 1; i < consecutiveFailures; i++ {
+		d *= 2
+		if d >= peerCooldownMax {
+			return peerCooldownMax
+		}
+	}
+	return d
+}
 
 func loadPeerState(path string) (peerStateFile, error) {
 	state := peerStateFile{

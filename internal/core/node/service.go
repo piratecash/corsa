@@ -24,41 +24,44 @@ import (
 )
 
 type Service struct {
-	identity     *identity.Identity
-	selfBoxSig   string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
-	cfg          config.Node
-	trust        *trustStore
-	mu           sync.RWMutex
-	peers        []transport.Peer
-	known        map[string]struct{}
-	boxKeys      map[string]string
-	pubKeys      map[string]string
-	boxSigs      map[string]string
-	topics       map[string][]protocol.Envelope
-	receipts     map[string][]protocol.DeliveryReceipt
-	notices      map[string]gazeta.Notice
-	seen         map[string]struct{}
-	seenReceipts map[string]struct{}
-	subs         map[string]map[string]*subscriber
-	sessions     map[string]*peerSession
-	health       map[string]*peerHealth
-	peerTypes    map[string]config.NodeType
-	peerIDs      map[string]string
-	peerVersions map[string]string
-	pending      map[string][]pendingFrame
-	pendingKeys  map[string]struct{}
-	relayRetry   map[string]relayAttempt
-	outbound     map[string]outboundDelivery
-	upstream     map[string]struct{}
-	inboundConns map[net.Conn]struct{}
-	connAuth     map[net.Conn]*connAuthState
-	bans         map[string]banEntry
+	identity       *identity.Identity
+	selfBoxSig     string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
+	cfg            config.Node
+	trust          *trustStore
+	mu             sync.RWMutex
+	peers          []transport.Peer
+	known          map[string]struct{}
+	boxKeys        map[string]string
+	pubKeys        map[string]string
+	boxSigs        map[string]string
+	topics         map[string][]protocol.Envelope
+	receipts       map[string][]protocol.DeliveryReceipt
+	notices        map[string]gazeta.Notice
+	seen           map[string]struct{}
+	seenReceipts   map[string]struct{}
+	subs           map[string]map[string]*subscriber
+	sessions       map[string]*peerSession
+	health         map[string]*peerHealth
+	peerTypes      map[string]config.NodeType
+	peerIDs        map[string]string
+	peerVersions   map[string]string
+	pending        map[string][]pendingFrame
+	pendingKeys    map[string]struct{}
+	orphaned       map[string][]pendingFrame // legacy fallback-keyed frames that could not be migrated
+	relayRetry     map[string]relayAttempt
+	outbound       map[string]outboundDelivery
+	upstream       map[string]struct{}
+	inboundConns   map[net.Conn]struct{}
+	connAuth       map[net.Conn]*connAuthState
+	bans           map[string]banEntry
 	events         map[chan struct{}]struct{}
 	listener       net.Listener
 	lastSync       time.Time
 	peersStatePath string
-	lastPeerSave   time.Time
-	persistedMeta  map[string]*peerEntry // stable metadata from peers.json, keyed by address
+	lastPeerSave    time.Time
+	lastPeerEvict   time.Time
+	dialOrigin      map[string]string     // dial address → primary peer address (for fallback port tracking)
+	persistedMeta   map[string]*peerEntry // stable metadata from peers.json, keyed by address
 }
 
 type subscriber struct {
@@ -221,6 +224,58 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 			OutboundState: map[string]outboundDelivery{},
 		}
 	}
+	// One-time migration: pending queue entries written by pre-v1 code may be
+	// keyed by fallback dial addresses instead of the canonical primary.  The
+	// runtime only drains primary-keyed entries, so legacy keys must be
+	// resolved now.  After the first save the version is bumped and this
+	// block is skipped on subsequent restarts.
+	if queueState.Version < queueStateVersion {
+		hostPrimaries := make(map[string][]string, len(seenAddrs))
+		for addr := range seenAddrs {
+			if h, _, ok := splitHostPort(addr); ok {
+				hostPrimaries[h] = append(hostPrimaries[h], addr)
+			}
+		}
+		for address := range queueState.Pending {
+			if _, isPrimary := seenAddrs[address]; isPrimary {
+				continue
+			}
+			h, _, ok := splitHostPort(address)
+			if !ok {
+				// Malformed address — orphan to avoid silent loss.
+				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
+				delete(queueState.Pending, address)
+				log.Printf("node: orphaned %d pending frames for malformed address %s", len(queueState.Orphaned[address]), address)
+				continue
+			}
+			candidates := hostPrimaries[h]
+			switch len(candidates) {
+			case 0:
+				// Unknown host — no known primary to migrate to.  The
+				// runtime will never flush this key.  Orphan it so the
+				// data is preserved on disk for manual recovery.
+				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
+				delete(queueState.Pending, address)
+				log.Printf("node: orphaned %d pending frames for unknown host %s", len(queueState.Orphaned[address]), address)
+			case 1:
+				primary := candidates[0]
+				if primary == address {
+					continue
+				}
+				// Single candidate — move frames to the canonical primary.
+				queueState.Pending[primary] = append(queueState.Pending[primary], queueState.Pending[address]...)
+				delete(queueState.Pending, address)
+			default:
+				// Multiple primaries on the same host — ambiguous.
+				// Orphan so data survives for manual recovery.
+				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
+				delete(queueState.Pending, address)
+				log.Printf("node: orphaned %d pending frames for ambiguous address %s (candidates=%d)", len(queueState.Orphaned[address]), address, len(candidates))
+			}
+		}
+		queueState.Version = queueStateVersion
+	}
+
 	pendingKeys := make(map[string]struct{})
 	for address, items := range queueState.Pending {
 		for _, item := range items {
@@ -276,30 +331,32 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		peers:          peers,
 		peersStatePath: peersStatePath,
 		persistedMeta:  persistedByAddr,
-		known:        known,
-		boxKeys:      boxKeys,
-		pubKeys:      pubKeys,
-		boxSigs:      boxSigs,
-		topics:       topics,
-		receipts:     receipts,
-		notices:      make(map[string]gazeta.Notice),
-		seen:         seen,
-		seenReceipts: seenReceipts,
-		subs:         make(map[string]map[string]*subscriber),
-		sessions:     make(map[string]*peerSession),
-		health:       restoredHealth,
-		peerTypes:    make(map[string]config.NodeType),
-		peerIDs:      make(map[string]string),
-		peerVersions: make(map[string]string),
-		pending:      queueState.Pending,
-		pendingKeys:  pendingKeys,
-		relayRetry:   queueState.RelayRetry,
-		outbound:     queueState.OutboundState,
-		upstream:     make(map[string]struct{}),
-		inboundConns: make(map[net.Conn]struct{}),
-		connAuth:     make(map[net.Conn]*connAuthState),
-		bans:         make(map[string]banEntry),
-		events:       make(map[chan struct{}]struct{}),
+		known:          known,
+		boxKeys:        boxKeys,
+		pubKeys:        pubKeys,
+		boxSigs:        boxSigs,
+		topics:         topics,
+		receipts:       receipts,
+		notices:        make(map[string]gazeta.Notice),
+		seen:           seen,
+		seenReceipts:   seenReceipts,
+		subs:           make(map[string]map[string]*subscriber),
+		sessions:       make(map[string]*peerSession),
+		health:         restoredHealth,
+		peerTypes:      make(map[string]config.NodeType),
+		peerIDs:        make(map[string]string),
+		peerVersions:   make(map[string]string),
+		pending:        queueState.Pending,
+		pendingKeys:    pendingKeys,
+		orphaned:       queueState.Orphaned,
+		relayRetry:     queueState.RelayRetry,
+		outbound:       queueState.OutboundState,
+		upstream:       make(map[string]struct{}),
+		dialOrigin:     make(map[string]string),
+		inboundConns:   make(map[net.Conn]struct{}),
+		connAuth:       make(map[net.Conn]*connAuthState),
+		bans:           make(map[string]banEntry),
+		events:         make(map[chan struct{}]struct{}),
 	}
 }
 
@@ -1470,6 +1527,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 		case <-ticker.C:
 			s.cleanupExpiredMessages()
 			s.cleanupExpiredNotices()
+			s.evictStalePeers()
 			s.ensurePeerSessions(ctx)
 			s.retryRelayDeliveries()
 			s.maybeSavePeerState()
@@ -1512,6 +1570,71 @@ func (s *Service) flushPeerState() {
 	s.mu.Lock()
 	s.lastPeerSave = time.Now()
 	s.mu.Unlock()
+}
+
+// evictStalePeers removes in-memory peers whose score has dropped below
+// peerEvictScoreThreshold and that have not successfully connected within
+// peerEvictStaleWindow.  Bad addresses are purged so they stop consuming dial attempts
+// and make room for fresh peer-exchange discoveries.
+// Bootstrap peers are never evicted — they act as permanent seeds.
+func (s *Service) evictStalePeers() {
+	s.mu.RLock()
+	elapsed := time.Since(s.lastPeerEvict)
+	s.mu.RUnlock()
+	if elapsed < peerEvictInterval {
+		return
+	}
+
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastPeerEvict = now
+
+	kept := make([]transport.Peer, 0, len(s.peers))
+	for _, peer := range s.peers {
+		health := s.health[peer.Address]
+		if health == nil {
+			// No health info yet — keep; might be a freshly discovered peer.
+			kept = append(kept, peer)
+			continue
+		}
+		// Never evict bootstrap peers.
+		if peerSource(peer.ID) == "bootstrap" {
+			kept = append(kept, peer)
+			continue
+		}
+		// Never evict currently connected peers.
+		if health.Connected {
+			kept = append(kept, peer)
+			continue
+		}
+		// Evict if score is terrible AND last successful connection (or
+		// first discovery, if never connected) was more than staleWindow ago.
+		// Importantly, LastDisconnectedAt is NOT used here — it refreshes on
+		// every failed retry and would prevent eviction of perpetually-failing
+		// peers.  Only LastConnectedAt (actual success) matters for eviction.
+		if health.Score <= peerEvictScoreThreshold {
+			lastSuccess := health.LastConnectedAt
+			// If peer was never successfully connected, fall back to AddedAt
+			// (the time it was first discovered via peer exchange or config).
+			if lastSuccess.IsZero() {
+				if pm := s.persistedMeta[peer.Address]; pm != nil && pm.AddedAt != nil {
+					lastSuccess = *pm.AddedAt
+				}
+			}
+			if !lastSuccess.IsZero() && now.Sub(lastSuccess) > peerEvictStaleWindow {
+				// Evict: clean up associated state.
+				delete(s.health, peer.Address)
+				delete(s.peerTypes, peer.Address)
+				delete(s.peerIDs, peer.Address)
+				delete(s.peerVersions, peer.Address)
+				delete(s.persistedMeta, peer.Address)
+				continue
+			}
+		}
+		kept = append(kept, peer)
+	}
+	s.peers = kept
 }
 
 // buildPeerEntriesLocked snapshots all known peers with their health metadata.
@@ -1584,29 +1707,43 @@ func peerSource(id string) string {
 	}
 }
 
-
 func (s *Service) ensurePeerSessions(ctx context.Context) {
-	for _, address := range s.peerDialCandidates() {
+	for _, candidate := range s.peerDialCandidates() {
 		s.mu.Lock()
-		if _, ok := s.upstream[address]; ok {
+		if _, ok := s.upstream[candidate.address]; ok {
 			s.mu.Unlock()
 			continue
 		}
-		s.upstream[address] = struct{}{}
+		s.upstream[candidate.address] = struct{}{}
+		// Record the mapping from dial address to primary peer address
+		// so that health updates (markPeerConnected/Disconnected) always
+		// accumulate on the primary entry, even when a fallback port is used.
+		if candidate.primary != candidate.address {
+			s.dialOrigin[candidate.address] = candidate.primary
+		}
 		s.mu.Unlock()
-		go func(peerAddress string) {
+		go func(c peerDialCandidate) {
 			defer func() {
 				s.mu.Lock()
-				delete(s.sessions, peerAddress)
-				delete(s.upstream, peerAddress)
+				delete(s.sessions, c.address)
+				delete(s.upstream, c.address)
+				delete(s.dialOrigin, c.address)
 				s.mu.Unlock()
 			}()
-			s.runPeerSession(ctx, peerAddress)
-		}(address)
+			s.runPeerSession(ctx, c.address)
+		}(candidate)
 	}
 }
 
-func (s *Service) peerDialCandidates() []string {
+// peerDialCandidate is a scored candidate for outgoing connection attempts.
+type peerDialCandidate struct {
+	address string // actual address to dial (may be a fallback port variant)
+	primary string // primary peer address in s.peers (health/score are tracked here)
+	score   int
+	index   int // insertion order for stable tie-breaking (preserves bootstrap-first ordering)
+}
+
+func (s *Service) peerDialCandidates() []peerDialCandidate {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1616,11 +1753,36 @@ func (s *Service) peerDialCandidates() []string {
 		return nil
 	}
 
+	now := time.Now()
 	hasProxy := s.cfg.ProxyAddress != ""
-	candidates := make([]string, 0, len(s.peers))
+	var scored []peerDialCandidate
 	seen := make(map[string]struct{})
 	for _, peer := range s.peers {
-		for _, address := range s.dialAttemptAddressesLocked(strings.TrimSpace(peer.Address)) {
+		primaryAddr := strings.TrimSpace(peer.Address)
+
+		// Look up health/score/cooldown from the primary address — the one
+		// stored in s.peers and tracked by markPeerConnected/Disconnected.
+		// Fallback dial variants (e.g. same host with default port) share
+		// the primary's reputation so that cooldown cannot be bypassed by
+		// dialling an alternative port.
+		primaryHealth := s.health[primaryAddr]
+		peerScore := 0
+		if primaryHealth != nil {
+			peerScore = primaryHealth.Score
+			// Exponential cooldown: skip ALL dial variants for this peer
+			// while the backoff window is active.  A single failure does
+			// NOT trigger cooldown — the peer gets an immediate retry
+			// on the next bootstrapLoop tick.  This avoids stalling
+			// reconnection when a peer was simply not started yet.
+			if primaryHealth.ConsecutiveFailures > 1 && !primaryHealth.LastDisconnectedAt.IsZero() {
+				cooldown := peerCooldownDuration(primaryHealth.ConsecutiveFailures - 1)
+				if now.Sub(primaryHealth.LastDisconnectedAt) < cooldown {
+					continue
+				}
+			}
+		}
+
+		for _, address := range s.dialAttemptAddressesLocked(primaryAddr) {
 			if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 				continue
 			}
@@ -1638,13 +1800,31 @@ func (s *Service) peerDialCandidates() []string {
 				continue
 			}
 			seen[address] = struct{}{}
-			candidates = append(candidates, address)
-			if limit > 0 && active+len(candidates) >= limit {
-				return candidates
-			}
+			scored = append(scored, peerDialCandidate{address: address, primary: primaryAddr, score: peerScore, index: len(scored)})
 		}
 	}
-	return candidates
+
+	// Sort by score descending so the healthiest peers
+	// are dialled first and degraded peers sink to the bottom.
+	// Stable tie-breaker by insertion index preserves bootstrap-first ordering.
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].index < scored[j].index
+	})
+
+	needed := len(scored)
+	if limit > 0 && active+needed > limit {
+		needed = limit - active
+	}
+	if needed > len(scored) {
+		needed = len(scored)
+	}
+	if needed < len(scored) {
+		scored = scored[:needed]
+	}
+	return scored
 }
 
 func (s *Service) syncPeer(ctx context.Context, address string) {
@@ -1749,10 +1929,26 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 		default:
 		}
 
-		if err := s.openPeerSession(ctx, address); err != nil {
+		connected, err := s.openPeerSession(ctx, address)
+		if err != nil {
 			s.mu.Lock()
 			delete(s.sessions, address)
 			s.mu.Unlock()
+			// servePeerSession calls markPeerDisconnected before
+			// returning its error.  For all other error paths (dial
+			// failure, handshake, subscribe, sync) we must call it here
+			// so that Score decreases and cooldown engages.
+			if connected {
+				s.mu.RLock()
+				h := s.health[s.resolveHealthAddress(address)]
+				stillConnected := h != nil && h.Connected
+				s.mu.RUnlock()
+				if stillConnected {
+					s.markPeerDisconnected(address, err)
+				}
+			} else {
+				s.markPeerDisconnected(address, err)
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1764,10 +1960,10 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 	}
 }
 
-func (s *Service) openPeerSession(ctx context.Context, address string) error {
+func (s *Service) openPeerSession(ctx context.Context, address string) (bool, error) {
 	conn, err := s.dialPeer(ctx, address, 2*time.Second)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = conn.Close() }()
 	enableTCPKeepAlive(conn)
@@ -1790,12 +1986,12 @@ func (s *Service) openPeerSession(ctx context.Context, address string) error {
 
 	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
 	if err != nil {
-		return err
+		return false, err
 	}
 	session.version = welcome.Version
 	s.learnIdentityFromWelcome(welcome)
 	if err := s.authenticatePeerSession(session, welcome); err != nil {
-		return err
+		return false, err
 	}
 	s.mu.Lock()
 	s.sessions[address] = session
@@ -1808,19 +2004,20 @@ func (s *Service) openPeerSession(ctx context.Context, address string) error {
 		Recipient:  s.identity.Address,
 		Subscriber: s.cfg.AdvertiseAddress,
 	}, "subscribed", false); err != nil {
-		return err
+		return true, err
 	}
 	_ = conn.SetDeadline(time.Time{})
 	log.Printf("node: upstream subscription established peer=%s recipient=%s", address, s.identity.Address)
 
 	if err := s.syncPeerSession(session); err != nil {
-		return err
+		return true, err
 	}
 
 	s.flushPendingPeerFrames(address)
 
-	return s.servePeerSession(ctx, session)
+	return true, s.servePeerSession(ctx, session)
 }
+
 
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
 	syncTicker := time.NewTicker(4 * time.Second)
@@ -1929,12 +2126,13 @@ func (s *Service) routingTargetsFiltered(allow func(address string, peerType con
 			if address == "" || s.isSelfAddress(address) {
 				continue
 			}
-			peerType := s.peerTypeForAddressLocked(address)
-			peerID := s.peerIDs[address]
+			primaryAddr := s.resolveHealthAddress(address)
+			peerType := s.peerTypeForAddressLocked(primaryAddr)
+			peerID := s.peerIDs[primaryAddr]
 			if !allow(address, peerType, peerID) {
 				continue
 			}
-			health := s.health[address]
+			health := s.health[primaryAddr]
 			if health == nil || !health.Connected {
 				continue
 			}
@@ -2389,6 +2587,17 @@ func (s *Service) addPeerAddress(address string, nodeType string, peerID string)
 	if peerID != "" {
 		s.peerIDs[address] = peerID
 	}
+	// Eagerly populate persistedMeta so that AddedAt is available for
+	// eviction decisions immediately, without waiting for a flush cycle.
+	if _, ok := s.persistedMeta[address]; !ok {
+		now := time.Now().UTC()
+		s.persistedMeta[address] = &peerEntry{
+			Address:  address,
+			NodeType: string(normalizePeerNodeType(nodeType)),
+			Source:   "peer_exchange",
+			AddedAt:  &now,
+		}
+	}
 }
 
 func (s *Service) addPeerVersion(address, clientVersion string) {
@@ -2697,6 +2906,7 @@ func (s *Service) markPeerConnected(address string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 	now := time.Now().UTC()
 	health.Connected = true
@@ -2711,6 +2921,7 @@ func (s *Service) markPeerDisconnected(address string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 	now := time.Now().UTC()
 	health.Connected = false
@@ -2730,6 +2941,7 @@ func (s *Service) markPeerWrite(address string, frame protocol.Frame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 	now := time.Now().UTC()
 	if frame.Type == "ping" {
@@ -2744,6 +2956,7 @@ func (s *Service) markPeerRead(address string, frame protocol.Frame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 	now := time.Now().UTC()
 	if frame.Type == "pong" {
@@ -2808,6 +3021,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			LastUsefulReceiveAt: formatTime(health.LastUsefulReceiveAt),
 			ConsecutiveFailures: health.ConsecutiveFailures,
 			LastError:           health.LastError,
+			Score:               health.Score,
 		})
 	}
 
@@ -2898,17 +3112,20 @@ func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
 }
 
 func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
-	key := pendingFrameKey(address, frame)
+	s.mu.Lock()
+	primary := s.resolveHealthAddress(address)
+
+	key := pendingFrameKey(primary, frame)
 	if key == "" {
+		s.mu.Unlock()
 		return false
 	}
 
-	s.mu.Lock()
 	if _, exists := s.pendingKeys[key]; exists {
 		s.mu.Unlock()
 		return true
 	}
-	s.pending[address] = append(s.pending[address], pendingFrame{
+	s.pending[primary] = append(s.pending[primary], pendingFrame{
 		Frame:    frame,
 		QueuedAt: time.Now().UTC(),
 	})
@@ -2938,10 +3155,11 @@ func (s *Service) flushPendingPeerFrames(address string) {
 	}
 
 	s.mu.Lock()
-	frames := append([]pendingFrame(nil), s.pending[address]...)
-	delete(s.pending, address)
+	primary := s.resolveHealthAddress(address)
+	frames := append([]pendingFrame(nil), s.pending[primary]...)
+	delete(s.pending, primary)
 	for _, frame := range frames {
-		delete(s.pendingKeys, pendingFrameKey(address, frame.Frame))
+		delete(s.pendingKeys, pendingFrameKey(primary, frame.Frame))
 	}
 	s.mu.Unlock()
 
@@ -2976,9 +3194,9 @@ func (s *Service) flushPendingPeerFrames(address string) {
 	}
 
 	s.mu.Lock()
-	s.pending[address] = append(s.pending[address], remaining...)
+	s.pending[primary] = append(s.pending[primary], remaining...)
 	for _, item := range remaining {
-		s.pendingKeys[pendingFrameKey(address, item.Frame)] = struct{}{}
+		s.pendingKeys[pendingFrameKey(primary, item.Frame)] = struct{}{}
 	}
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
@@ -3271,8 +3489,15 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 		outbound[key] = item
 	}
 
+	orphaned := make(map[string][]pendingFrame, len(s.orphaned))
+	for addr, items := range s.orphaned {
+		orphaned[addr] = append([]pendingFrame(nil), items...)
+	}
+
 	return queueStateFile{
+		Version:       queueStateVersion,
 		Pending:       pending,
+		Orphaned:      orphaned,
 		RelayRetry:    relayRetry,
 		RelayMessages: relayMessages,
 		RelayReceipts: relayReceipts,
@@ -3424,7 +3649,7 @@ func (s *Service) activePeerSession(address string) (*peerSession, bool) {
 	if session == nil {
 		return nil, false
 	}
-	health := s.health[address]
+	health := s.health[s.resolveHealthAddress(address)]
 	if health == nil || !health.Connected {
 		return nil, false
 	}
@@ -3434,7 +3659,7 @@ func (s *Service) activePeerSession(address string) (*peerSession, bool) {
 func (s *Service) peerState(address string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	health := s.health[address]
+	health := s.health[s.resolveHealthAddress(address)]
 	if health == nil {
 		return peerStateReconnecting
 	}
@@ -3708,6 +3933,19 @@ func enableTCPKeepAlive(conn net.Conn) {
 	}
 	_ = tcpConn.SetKeepAlive(true)
 	_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+}
+
+// resolveHealthAddress returns the primary peer address to use as the
+// health map key.  When a dial candidate is a fallback variant (e.g.
+// host:defaultPort instead of the original host:customPort), the origin
+// map translates back to the primary address so that score/cooldown
+// accumulate on a single entry regardless of which port was dialled.
+// Must be called with s.mu held (read lock sufficient).
+func (s *Service) resolveHealthAddress(address string) string {
+	if origin, ok := s.dialOrigin[address]; ok {
+		return origin
+	}
+	return address
 }
 
 func (s *Service) emitDeliveryReceipt(msg incomingMessage) {

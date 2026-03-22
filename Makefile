@@ -30,6 +30,13 @@ vuln:
 test:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test ./...
 
+.PHONY: test-v
+test-v:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -v -count=1 ./...
+
+.PHONY: test-all
+test-all: lint test-v
+
 .PHONY: build-node-macos-arm64
 build-node-macos-arm64: build-dirs
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -o $(DIST_DIR)/corsa-node-darwin-arm64 ./cmd/corsa-node

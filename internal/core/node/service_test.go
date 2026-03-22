@@ -19,6 +19,15 @@ import (
 	"corsa/internal/core/protocol"
 )
 
+// candidateAddresses extracts the dial addresses from peerDialCandidate results.
+func candidateAddresses(candidates []peerDialCandidate) []string {
+	out := make([]string, len(candidates))
+	for i, c := range candidates {
+		out[i] = c.address
+	}
+	return out
+}
+
 func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	t.Parallel()
 
@@ -266,7 +275,7 @@ func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
 		Type: config.NodeTypeClient,
 	}, id)
 
-	got := svc.peerDialCandidates()
+	got := candidateAddresses(svc.peerDialCandidates())
 	if len(got) != config.DefaultOutgoingPeers {
 		t.Fatalf("expected %d peer dial candidates, got %d: %#v", config.DefaultOutgoingPeers, len(got), got)
 	}
@@ -295,7 +304,7 @@ func TestPeerDialCandidatesUsesDefaultFullOutgoingLimit(t *testing.T) {
 		Type:             config.NodeTypeFull,
 	}, id)
 
-	got := svc.peerDialCandidates()
+	got := candidateAddresses(svc.peerDialCandidates())
 	if len(got) != config.DefaultOutgoingPeers {
 		t.Fatalf("expected %d peer dial candidates, got %d: %#v", config.DefaultOutgoingPeers, len(got), got)
 	}
@@ -311,15 +320,15 @@ func TestNormalizePeerAddressPrefersObservedHostAndDefaultPortForPrivateAdvertis
 
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             config.NodeTypeFull,
 	}, id)
 
-	got, ok := svc.normalizePeerAddress("91.234.35.132:50702", "127.0.0.1:64647")
+	got, ok := svc.normalizePeerAddress("198.51.100.2:50702", "127.0.0.1:64647")
 	if !ok {
 		t.Fatalf("expected normalized address")
 	}
-	if got != "91.234.35.132:64646" {
+	if got != "198.51.100.2:64646" {
 		t.Fatalf("unexpected normalized address: %s", got)
 	}
 }
@@ -334,15 +343,15 @@ func TestNormalizePeerAddressPrefersObservedHostWhenAdvertisedHostDiffers(t *tes
 
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             config.NodeTypeFull,
 	}, id)
 
-	got, ok := svc.normalizePeerAddress("91.234.35.132:50702", "217.9.153.77:64647")
+	got, ok := svc.normalizePeerAddress("198.51.100.2:50702", "198.51.100.3:64647")
 	if !ok {
 		t.Fatalf("expected normalized address")
 	}
-	if got != "91.234.35.132:64647" {
+	if got != "198.51.100.2:64647" {
 		t.Fatalf("unexpected normalized address: %s", got)
 	}
 }
@@ -357,7 +366,7 @@ func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t
 
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers: []string{
 			"10.0.0.1:64647",
 			"127.0.0.1:64647",
@@ -367,7 +376,7 @@ func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t
 		Type: config.NodeTypeClient,
 	}, id)
 
-	got := svc.peerDialCandidates()
+	got := candidateAddresses(svc.peerDialCandidates())
 	want := []string{"10.0.0.1:64647", "10.0.0.1:64646"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected candidate count: got %v want %v", got, want)
@@ -389,16 +398,16 @@ func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
 
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers: []string{
-			"65.108.204.190:64647",
-			"91.234.35.132:64647",
+			"198.51.100.1:64647",
+			"198.51.100.2:64647",
 		},
 		Type: config.NodeTypeClient,
 	}, id)
 
-	got := svc.peerDialCandidates()
-	want := []string{"91.234.35.132:64647", "91.234.35.132:64646"}
+	got := candidateAddresses(svc.peerDialCandidates())
+	want := []string{"198.51.100.2:64647", "198.51.100.2:64646"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected candidate count: got %v want %v", got, want)
 	}
@@ -1648,10 +1657,10 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 	}
 
 	svc.mu.Lock()
-	svc.pending["91.234.35.132:64646"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
-	svc.pending["91.234.35.132:64647"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
-	svc.pendingKeys[pendingFrameKey("91.234.35.132:64646", frame)] = struct{}{}
-	svc.pendingKeys[pendingFrameKey("91.234.35.132:64647", frame)] = struct{}{}
+	svc.pending["198.51.100.2:64646"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
+	svc.pending["198.51.100.2:64647"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
+	svc.pendingKeys[pendingFrameKey("198.51.100.2:64646", frame)] = struct{}{}
+	svc.pendingKeys[pendingFrameKey("198.51.100.2:64647", frame)] = struct{}{}
 	receiptFrame := protocol.Frame{
 		Type:        "send_delivery_receipt",
 		ID:          frame.ID,
@@ -1660,8 +1669,8 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		Status:      "delivered",
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	svc.pending["65.108.204.190:64646"] = []pendingFrame{{Frame: receiptFrame, QueuedAt: time.Now().UTC()}}
-	svc.pendingKeys[pendingFrameKey("65.108.204.190:64646", receiptFrame)] = struct{}{}
+	svc.pending["198.51.100.1:64646"] = []pendingFrame{{Frame: receiptFrame, QueuedAt: time.Now().UTC()}}
+	svc.pendingKeys[pendingFrameKey("198.51.100.1:64646", receiptFrame)] = struct{}{}
 	svc.outbound[frame.ID] = outboundDelivery{
 		MessageID: frame.ID,
 		Recipient: frame.Recipient,
@@ -2175,7 +2184,7 @@ func TestNormalizePeerAddressAcceptsValidV3Onion(t *testing.T) {
 	}
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             config.NodeTypeFull,
 	}, id)
 
@@ -2201,7 +2210,7 @@ func TestNormalizePeerAddressRejectsShortOnion(t *testing.T) {
 	}
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             config.NodeTypeFull,
 	}, id)
 
@@ -2428,13 +2437,13 @@ func TestPeerDialCandidatesIncludesPersistedPeers(t *testing.T) {
 
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers:   []string{},
 		PeersStatePath:   peersPath,
 		Type:             config.NodeTypeFull,
 	}, id)
 
-	candidates := svc.peerDialCandidates()
+	candidates := candidateAddresses(svc.peerDialCandidates())
 
 	candidateAddrs := make(map[string]bool)
 	for _, c := range candidates {
@@ -2518,13 +2527,13 @@ func TestOnionPeersSkippedWithoutProxy(t *testing.T) {
 	// No ProxyAddress configured.
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers:   []string{},
 		PeersStatePath:   peersPath,
 		Type:             config.NodeTypeFull,
 	}, id)
 
-	candidates := svc.peerDialCandidates()
+	candidates := candidateAddresses(svc.peerDialCandidates())
 	for _, c := range candidates {
 		host, _, ok := splitHostPort(c)
 		if ok && isOnionAddress(host) {
@@ -2569,14 +2578,14 @@ func TestOnionPeersIncludedWithProxy(t *testing.T) {
 
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
-		AdvertiseAddress: "65.108.204.190:64646",
+		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers:   []string{},
 		PeersStatePath:   peersPath,
 		ProxyAddress:     "127.0.0.1:9050",
 		Type:             config.NodeTypeFull,
 	}, id)
 
-	candidates := svc.peerDialCandidates()
+	candidates := candidateAddresses(svc.peerDialCandidates())
 	found := false
 	for _, c := range candidates {
 		if c == onionAddr {
@@ -2585,5 +2594,937 @@ func TestOnionPeersIncludedWithProxy(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected onion peer %s in candidates with proxy, got: %v", onionAddr, candidates)
+	}
+}
+
+// TestPeerDialCandidatesSortedByScore verifies that peerDialCandidates
+// returns peers sorted by Score descending (score-based prioritisation).
+func TestPeerDialCandidatesSortedByScore(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Add three peers with different scores.
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
+	svc.addPeerAddress("10.0.0.3:64646", "full", "peer-3")
+
+	// Simulate scoring: peer-2 is best, peer-3 is worst.
+	svc.markPeerConnected("10.0.0.2:64646") // +10
+	svc.markPeerConnected("10.0.0.2:64646") // +10 (total 20)
+	svc.markPeerConnected("10.0.0.1:64646") // +10 (total 10)
+	svc.markPeerDisconnected("10.0.0.1:64646", nil) // clean (-2, total 8)
+	svc.markPeerDisconnected("10.0.0.2:64646", nil) // clean (-2, total 18)
+
+	// peer-3 has score 0 (never connected).
+
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	if len(candidates) < 3 {
+		t.Fatalf("expected at least 3 candidates, got %d: %v", len(candidates), candidates)
+	}
+	if candidates[0] != "10.0.0.2:64646" {
+		t.Fatalf("expected highest-score peer first (10.0.0.2), got %s", candidates[0])
+	}
+	if candidates[1] != "10.0.0.1:64646" {
+		t.Fatalf("expected second-highest peer (10.0.0.1), got %s", candidates[1])
+	}
+	if candidates[2] != "10.0.0.3:64646" {
+		t.Fatalf("expected lowest-score peer last (10.0.0.3), got %s", candidates[2])
+	}
+}
+
+// TestPeerDialCandidatesSkipsCooldown verifies that peers with recent
+// failures and active cooldown are excluded from dial candidates.
+func TestPeerDialCandidatesSkipsCooldown(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
+
+	// Simulate multiple failures for peer-1 (recently disconnected).
+	for i := 0; i < 3; i++ {
+		svc.markPeerDisconnected("10.0.0.1:64646", fmt.Errorf("refused"))
+	}
+
+	// peer-1 has ConsecutiveFailures=3 and LastDisconnectedAt=now,
+	// so cooldown = peerCooldownDuration(3-1) = 60s.  It should be skipped.
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	for _, c := range candidates {
+		if c == "10.0.0.1:64646" {
+			t.Fatalf("peer 10.0.0.1 should be in cooldown, but found in candidates: %v", candidates)
+		}
+	}
+	// peer-2 should still be a candidate.
+	found := false
+	for _, c := range candidates {
+		if c == "10.0.0.2:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected peer 10.0.0.2 in candidates, got: %v", candidates)
+	}
+}
+
+// TestPeerDialCandidatesCooldownExpires verifies that a peer exits cooldown
+// once enough time has passed since the last disconnect.
+func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+
+	// One failure: no cooldown (first failure is exempt), but we still
+	// backdate to verify the expiry path for future failures.
+	svc.markPeerDisconnected("10.0.0.1:64646", fmt.Errorf("timeout"))
+
+	// Backdate LastDisconnectedAt to simulate cooldown expiry.
+	svc.mu.Lock()
+	if h := svc.health["10.0.0.1:64646"]; h != nil {
+		h.LastDisconnectedAt = time.Now().Add(-1 * time.Minute)
+	}
+	svc.mu.Unlock()
+
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	found := false
+	for _, c := range candidates {
+		if c == "10.0.0.1:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected peer 10.0.0.1 after cooldown expiry, got: %v", candidates)
+	}
+}
+
+// TestEvictStalePeersRemovesBadPeers verifies that peers with score ≤ threshold
+// and no recent connection activity are evicted from in-memory state.
+func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
+
+	// Make peer-1 terrible: low score, last seen >24h ago.
+	svc.mu.Lock()
+	svc.health["10.0.0.1:64646"] = &peerHealth{
+		Address:             "10.0.0.1:64646",
+		Score:               -30,
+		ConsecutiveFailures: 10,
+		LastConnectedAt:     time.Now().Add(-48 * time.Hour),
+		LastDisconnectedAt:  time.Now().Add(-47 * time.Hour),
+	}
+	// peer-2 has low score but was recently connected — should survive.
+	svc.health["10.0.0.2:64646"] = &peerHealth{
+		Address:             "10.0.0.2:64646",
+		Score:               -25,
+		ConsecutiveFailures: 5,
+		LastConnectedAt:     time.Now().Add(-1 * time.Hour),
+		LastDisconnectedAt:  time.Now().Add(-30 * time.Minute),
+	}
+	// Reset eviction timer so it runs immediately.
+	svc.lastPeerEvict = time.Time{}
+	svc.mu.Unlock()
+
+	svc.evictStalePeers()
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	for _, p := range svc.peers {
+		if p.Address == "10.0.0.1:64646" {
+			t.Fatal("expected peer 10.0.0.1 to be evicted, but it still exists")
+		}
+	}
+	found := false
+	for _, p := range svc.peers {
+		if p.Address == "10.0.0.2:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected peer 10.0.0.2 to survive eviction (recently connected)")
+	}
+	if svc.health["10.0.0.1:64646"] != nil {
+		t.Fatal("expected health for 10.0.0.1 to be cleaned up")
+	}
+}
+
+// TestEvictStalePeersKeepsBootstrap verifies that bootstrap peers
+// are never evicted regardless of score.
+func TestEvictStalePeersKeepsBootstrap(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{"10.0.0.99:64646"},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Give the bootstrap peer a terrible score.
+	svc.mu.Lock()
+	svc.health["10.0.0.99:64646"] = &peerHealth{
+		Address:             "10.0.0.99:64646",
+		Score:               peerScoreMin,
+		ConsecutiveFailures: 20,
+		LastConnectedAt:     time.Now().Add(-72 * time.Hour),
+		LastDisconnectedAt:  time.Now().Add(-71 * time.Hour),
+	}
+	svc.lastPeerEvict = time.Time{}
+	svc.mu.Unlock()
+
+	svc.evictStalePeers()
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	found := false
+	for _, p := range svc.peers {
+		if p.Address == "10.0.0.99:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("bootstrap peer should never be evicted")
+	}
+}
+
+// TestEvictStalePeersRespectsInterval verifies that eviction is rate-limited.
+func TestEvictStalePeersRespectsInterval(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+
+	svc.mu.Lock()
+	svc.health["10.0.0.1:64646"] = &peerHealth{
+		Address:             "10.0.0.1:64646",
+		Score:               -40,
+		ConsecutiveFailures: 15,
+		LastConnectedAt:     time.Now().Add(-48 * time.Hour),
+		LastDisconnectedAt:  time.Now().Add(-47 * time.Hour),
+	}
+	// Set lastPeerEvict to recent time → eviction should be skipped.
+	svc.lastPeerEvict = time.Now()
+	svc.mu.Unlock()
+
+	svc.evictStalePeers()
+
+	// Peer should still be present because the interval hasn't elapsed.
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	found := false
+	for _, p := range svc.peers {
+		if p.Address == "10.0.0.1:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("peer should not be evicted when interval hasn't elapsed")
+	}
+}
+
+// TestEvictStalePeersIgnoresLastDisconnectedAt verifies that perpetually-failing
+// peers are evicted even though their LastDisconnectedAt is recent (refreshed
+// on every retry).  Only LastConnectedAt/AddedAt matter for eviction.
+func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+
+	addedAt := time.Now().Add(-48 * time.Hour)
+	svc.mu.Lock()
+	// Peer has never successfully connected (LastConnectedAt is zero).
+	// LastDisconnectedAt is recent (simulating repeated retries), but
+	// eviction should look at AddedAt, not LastDisconnectedAt.
+	svc.health["10.0.0.1:64646"] = &peerHealth{
+		Address:             "10.0.0.1:64646",
+		Score:               -30,
+		ConsecutiveFailures: 20,
+		LastDisconnectedAt:  time.Now().Add(-5 * time.Minute), // recent retry!
+	}
+	svc.persistedMeta["10.0.0.1:64646"] = &peerEntry{
+		Address: "10.0.0.1:64646",
+		AddedAt: &addedAt,
+	}
+	svc.lastPeerEvict = time.Time{}
+	svc.mu.Unlock()
+
+	svc.evictStalePeers()
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	for _, p := range svc.peers {
+		if p.Address == "10.0.0.1:64646" {
+			t.Fatal("perpetually-failing peer should be evicted (AddedAt > 24h, never connected)")
+		}
+	}
+}
+
+// TestFallbackAddressHealthTracking verifies that when a fallback port variant
+// is dialled, health updates are recorded under the primary peer address.
+func TestFallbackAddressHealthTracking(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Add peer with non-default port — will generate fallback :64646 variant.
+	svc.addPeerAddress("10.0.0.1:64647", "full", "peer-1")
+
+	// Simulate what ensurePeerSessions does: register dialOrigin for fallback.
+	svc.mu.Lock()
+	svc.dialOrigin["10.0.0.1:64646"] = "10.0.0.1:64647"
+	svc.mu.Unlock()
+
+	// markPeerDisconnected on the fallback address should record health
+	// under the primary address.
+	svc.markPeerDisconnected("10.0.0.1:64646", fmt.Errorf("refused"))
+
+	svc.mu.RLock()
+	primaryHealth := svc.health["10.0.0.1:64647"]
+	fallbackHealth := svc.health["10.0.0.1:64646"]
+	svc.mu.RUnlock()
+
+	if primaryHealth == nil {
+		t.Fatal("expected health to be recorded under primary address 10.0.0.1:64647")
+	}
+	if primaryHealth.ConsecutiveFailures != 1 {
+		t.Fatalf("expected 1 failure on primary, got %d", primaryHealth.ConsecutiveFailures)
+	}
+	if fallbackHealth != nil {
+		t.Fatal("health should NOT be recorded under fallback address 10.0.0.1:64646")
+	}
+
+	// Now markPeerConnected on fallback should also go to primary.
+	svc.markPeerConnected("10.0.0.1:64646")
+
+	svc.mu.RLock()
+	primaryHealth = svc.health["10.0.0.1:64647"]
+	svc.mu.RUnlock()
+
+	if !primaryHealth.Connected {
+		t.Fatal("expected primary health to show connected after fallback connect")
+	}
+	if primaryHealth.ConsecutiveFailures != 0 {
+		t.Fatalf("expected failures reset to 0, got %d", primaryHealth.ConsecutiveFailures)
+	}
+}
+
+// TestFallbackCooldownAppliesToAllVariants verifies that when the primary
+// address is in cooldown, neither the primary nor the fallback port variant
+// appears in dial candidates.
+func TestFallbackCooldownAppliesToAllVariants(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64647", "full", "peer-1")
+
+	// Simulate failures on the primary address.
+	for i := 0; i < 5; i++ {
+		svc.markPeerDisconnected("10.0.0.1:64647", fmt.Errorf("refused"))
+	}
+
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	for _, c := range candidates {
+		if c == "10.0.0.1:64647" || c == "10.0.0.1:64646" {
+			t.Fatalf("neither primary nor fallback should appear during cooldown, got: %v", candidates)
+		}
+	}
+}
+
+// TestFallbackSessionRoutingUsePrimaryMetadata verifies that when a peer is
+// connected via a fallback port variant, routing filters use the peerType
+// and peerID from the primary address, not the default "full" / empty ID.
+func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Add a client peer with a non-default port.
+	svc.addPeerAddress("10.0.0.1:64647", "client", "client-identity-abc")
+
+	// Simulate a fallback session on :64646.
+	fallbackAddr := "10.0.0.1:64646"
+	svc.mu.Lock()
+	svc.dialOrigin[fallbackAddr] = "10.0.0.1:64647"
+	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr}
+	svc.mu.Unlock()
+	svc.markPeerConnected(fallbackAddr)
+
+	// routingTargets() filters out client peers. Since 10.0.0.1:64647 is
+	// a client, the fallback session should NOT appear in routing targets.
+	targets := svc.routingTargets()
+	for _, target := range targets {
+		if target == fallbackAddr {
+			t.Fatalf("client peer connected via fallback should be excluded from relay routing, got: %v", targets)
+		}
+	}
+
+	// routingTargetsForRecipient with the correct peerID should include it.
+	targets = svc.routingTargetsForRecipient("client-identity-abc")
+	found := false
+	for _, target := range targets {
+		if target == fallbackAddr {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("client peer should be reachable via its peerID for direct messages, got: %v", targets)
+	}
+}
+
+// TestEvictRuntimeDiscoveredPeerWithoutFlush verifies that a runtime-discovered
+// peer (never flushed to disk) can still be evicted because addPeerAddress
+// eagerly populates persistedMeta with AddedAt.
+func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Add a peer at runtime (simulating peer exchange discovery).
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+
+	// Backdate the AddedAt so it looks old.
+	svc.mu.Lock()
+	old := time.Now().Add(-48 * time.Hour)
+	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
+		pm.AddedAt = &old
+	} else {
+		t.Fatal("expected persistedMeta to be populated by addPeerAddress")
+	}
+	// Give the peer a bad score and no successful connections.
+	svc.health["10.0.0.1:64646"] = &peerHealth{
+		Address:             "10.0.0.1:64646",
+		Score:               -30,
+		ConsecutiveFailures: 10,
+	}
+	svc.lastPeerEvict = time.Time{}
+	svc.mu.Unlock()
+
+	// Note: flushPeerState has NOT been called.
+	svc.evictStalePeers()
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	for _, p := range svc.peers {
+		if p.Address == "10.0.0.1:64646" {
+			t.Fatal("runtime-discovered peer should be evicted without waiting for flush")
+		}
+	}
+}
+
+// TestPendingQueueFallbackFlushedOnPrimary verifies that frames queued under
+// a fallback dial address are flushed when the session connects via the primary
+// address (or any variant), because the pending queue is keyed by primary.
+func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+	}, id)
+
+	primaryAddr := "10.0.0.1:64647"
+	fallbackAddr := "10.0.0.1:64646"
+
+	// Register fallback→primary mapping as ensurePeerSessions would.
+	svc.mu.Lock()
+	svc.dialOrigin[fallbackAddr] = primaryAddr
+	svc.mu.Unlock()
+
+	// Queue a frame targeting the fallback dial address.
+	frame := protocol.Frame{
+		Type:      "send_message",
+		Topic:     "dm",
+		ID:        "fallback-queue-1",
+		Address:   id.Address,
+		Recipient: "recipient-1",
+		Body:      "ciphertext",
+	}
+	if !svc.queuePeerFrame(fallbackAddr, frame) {
+		t.Fatal("expected queuePeerFrame to accept the frame")
+	}
+
+	// Verify the frame is stored under primary, not fallback.
+	svc.mu.RLock()
+	primaryPending := len(svc.pending[primaryAddr])
+	fallbackPending := len(svc.pending[fallbackAddr])
+	svc.mu.RUnlock()
+
+	if primaryPending != 1 {
+		t.Fatalf("expected 1 pending frame under primary %s, got %d", primaryAddr, primaryPending)
+	}
+	if fallbackPending != 0 {
+		t.Fatalf("expected 0 pending frames under fallback %s, got %d", fallbackAddr, fallbackPending)
+	}
+
+	// Now create a session on the PRIMARY address and flush.
+	sendCh := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[primaryAddr] = &peerSession{address: primaryAddr, sendCh: sendCh}
+	svc.health[primaryAddr] = &peerHealth{Address: primaryAddr, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+
+	svc.flushPendingPeerFrames(primaryAddr)
+
+	svc.mu.RLock()
+	remainingPrimary := len(svc.pending[primaryAddr])
+	remainingFallback := len(svc.pending[fallbackAddr])
+	keysCount := len(svc.pendingKeys)
+	svc.mu.RUnlock()
+
+	if remainingPrimary != 0 {
+		t.Fatalf("expected pending queue for primary to be drained, got %d", remainingPrimary)
+	}
+	if remainingFallback != 0 {
+		t.Fatalf("expected no pending under fallback, got %d", remainingFallback)
+	}
+	if keysCount != 0 {
+		t.Fatalf("expected pending keys to be cleared, got %d", keysCount)
+	}
+
+	// Verify the frame was sent on the session.
+	select {
+	case sent := <-sendCh:
+		if sent.ID != "fallback-queue-1" {
+			t.Fatalf("expected frame fallback-queue-1, got %s", sent.ID)
+		}
+	default:
+		t.Fatal("expected frame to be sent to session channel")
+	}
+}
+
+// TestDialCandidatesSortStableWithEqualScores verifies that peers with equal
+// scores retain their insertion order (bootstrap-first) after sorting.
+func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Add some non-bootstrap peers (they are appended after bootstrap in iteration).
+	svc.addPeerAddress("10.0.0.4:64646", "full", "peer-4")
+	svc.addPeerAddress("10.0.0.5:64646", "full", "peer-5")
+
+	// All peers have zero score (default), so the sort should preserve
+	// insertion order: bootstrap peers first, then discovered peers.
+	candidates := svc.peerDialCandidates()
+	addresses := candidateAddresses(candidates)
+
+	// Bootstrap peers must appear before discovered peers.
+	bootstrapIdx := map[string]int{}
+	discoveredIdx := map[string]int{}
+	for i, addr := range addresses {
+		switch addr {
+		case "10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646":
+			bootstrapIdx[addr] = i
+		case "10.0.0.4:64646", "10.0.0.5:64646":
+			discoveredIdx[addr] = i
+		}
+	}
+
+	for bAddr, bIdx := range bootstrapIdx {
+		for dAddr, dIdx := range discoveredIdx {
+			if bIdx > dIdx {
+				t.Errorf("bootstrap peer %s (index %d) should appear before discovered peer %s (index %d)",
+					bAddr, bIdx, dAddr, dIdx)
+			}
+		}
+	}
+}
+
+// TestQueueStateMigrationFallbackToPrimary verifies that pending frames
+// persisted under a fallback dial address (e.g. host:64646) are migrated
+// to the primary peer address (e.g. host:64647) on startup.
+func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	queuePath := filepath.Join(tempDir, "queue.json")
+
+	// Write a queue state file with a pending frame under the fallback
+	// address 10.0.0.1:64646 (the default port variant).
+	fallbackAddr := "10.0.0.1:64646"
+	qs := queueStateFile{
+		Pending: map[string][]pendingFrame{
+			fallbackAddr: {
+				{
+					Frame: protocol.Frame{
+						Type:      "send_message",
+						Topic:     "dm",
+						ID:        "migrate-1",
+						Address:   id.Address,
+						Recipient: "recipient-1",
+						Body:      "ciphertext",
+					},
+					QueuedAt: time.Now().UTC(),
+				},
+			},
+		},
+		RelayRetry:    map[string]relayAttempt{},
+		OutboundState: map[string]outboundDelivery{},
+	}
+	data, err := json.Marshal(qs)
+	if err != nil {
+		t.Fatalf("marshal queue state: %v", err)
+	}
+	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+		t.Fatalf("write queue state: %v", err)
+	}
+
+	// Create a service where the primary peer address uses a NON-default port.
+	primaryAddr := "10.0.0.1:64647"
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		BootstrapPeers:   []string{primaryAddr},
+		QueueStatePath:   queuePath,
+	}, id)
+
+	svc.mu.RLock()
+	primaryPending := len(svc.pending[primaryAddr])
+	fallbackPending := len(svc.pending[fallbackAddr])
+	svc.mu.RUnlock()
+
+	if primaryPending != 1 {
+		t.Fatalf("expected 1 pending frame migrated to primary %s, got %d", primaryAddr, primaryPending)
+	}
+	if fallbackPending != 0 {
+		t.Fatalf("expected 0 pending frames under fallback %s after migration, got %d", fallbackAddr, fallbackPending)
+	}
+
+	// Verify pendingKeys were rebuilt with the primary address.
+	expectedKey := pendingFrameKey(primaryAddr, qs.Pending[fallbackAddr][0].Frame)
+	svc.mu.RLock()
+	_, hasKey := svc.pendingKeys[expectedKey]
+	svc.mu.RUnlock()
+	if !hasKey {
+		t.Fatalf("expected pending key %q to exist after migration", expectedKey)
+	}
+
+	// Old fallback-keyed entry should NOT exist.
+	oldKey := pendingFrameKey(fallbackAddr, qs.Pending[fallbackAddr][0].Frame)
+	svc.mu.RLock()
+	_, hasOldKey := svc.pendingKeys[oldKey]
+	orphanedCount := len(svc.orphaned)
+	svc.mu.RUnlock()
+	if hasOldKey {
+		t.Fatal("expected old fallback-keyed pending key to be absent after migration")
+	}
+
+	// Successful migration should not produce orphans.
+	if orphanedCount != 0 {
+		t.Fatalf("expected 0 orphaned entries after clean migration, got %d", orphanedCount)
+	}
+}
+
+// TestQueueStateMigrationOrphansAmbiguousHost verifies that when multiple
+// primary peers share the same host (different ports), pending frames under
+// a fallback address are moved to the orphaned map — preserving them on disk
+// for manual recovery instead of silently dropping user data.
+func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	queuePath := filepath.Join(tempDir, "queue.json")
+
+	// Pending frame under a fallback address whose host has TWO known primaries.
+	fallbackAddr := "10.0.0.1:64646"
+	qs := queueStateFile{
+		Pending: map[string][]pendingFrame{
+			fallbackAddr: {
+				{
+					Frame: protocol.Frame{
+						Type:      "send_message",
+						Topic:     "dm",
+						ID:        "ambiguous-1",
+						Address:   id.Address,
+						Recipient: "recipient-1",
+						Body:      "ciphertext",
+					},
+					QueuedAt: time.Now().UTC(),
+				},
+			},
+		},
+		RelayRetry:    map[string]relayAttempt{},
+		OutboundState: map[string]outboundDelivery{},
+	}
+	data, err := json.Marshal(qs)
+	if err != nil {
+		t.Fatalf("marshal queue state: %v", err)
+	}
+	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+		t.Fatalf("write queue state: %v", err)
+	}
+
+	// Two primaries on the same host but different ports.
+	primaryA := "10.0.0.1:64647"
+	primaryB := "10.0.0.1:64648"
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		BootstrapPeers:   []string{primaryA, primaryB},
+		QueueStatePath:   queuePath,
+	}, id)
+
+	svc.mu.RLock()
+	fallbackPending := len(svc.pending[fallbackAddr])
+	aPending := len(svc.pending[primaryA])
+	bPending := len(svc.pending[primaryB])
+	orphanedCount := len(svc.orphaned[fallbackAddr])
+	svc.mu.RUnlock()
+
+	// Frames must NOT be in the active pending map (runtime would never flush them).
+	if fallbackPending != 0 {
+		t.Fatalf("expected fallback %s removed from pending, got %d", fallbackAddr, fallbackPending)
+	}
+	if aPending != 0 {
+		t.Fatalf("expected 0 pending frames under %s, got %d", primaryA, aPending)
+	}
+	if bPending != 0 {
+		t.Fatalf("expected 0 pending frames under %s, got %d", primaryB, bPending)
+	}
+
+	// Frames must be preserved in orphaned for manual recovery.
+	if orphanedCount != 1 {
+		t.Fatalf("expected 1 orphaned frame under %s, got %d", fallbackAddr, orphanedCount)
+	}
+	if svc.orphaned[fallbackAddr][0].Frame.ID != "ambiguous-1" {
+		t.Fatalf("unexpected orphaned frame ID: %s", svc.orphaned[fallbackAddr][0].Frame.ID)
+	}
+}
+
+// TestQueueStateMigrationOrphansUnknownHost verifies that legacy pending
+// frames for an address whose host has no known primaries are orphaned
+// during v0→v1 migration (since the runtime would never flush them).
+func TestQueueStateMigrationOrphansUnknownHost(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	queuePath := filepath.Join(tempDir, "queue.json")
+
+	unknownAddr := "10.99.99.1:65001"
+	// Version 0 (legacy) — triggers migration.
+	qs := queueStateFile{
+		Pending: map[string][]pendingFrame{
+			unknownAddr: {
+				{
+					Frame: protocol.Frame{
+						Type:      "send_message",
+						Topic:     "dm",
+						ID:        "unknown-host-1",
+						Address:   id.Address,
+						Recipient: "recipient-1",
+						Body:      "ciphertext",
+					},
+					QueuedAt: time.Now().UTC(),
+				},
+			},
+		},
+		RelayRetry:    map[string]relayAttempt{},
+		OutboundState: map[string]outboundDelivery{},
+	}
+	data, err := json.Marshal(qs)
+	if err != nil {
+		t.Fatalf("marshal queue state: %v", err)
+	}
+	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+		t.Fatalf("write queue state: %v", err)
+	}
+
+	// Bootstrap peer on a DIFFERENT host — 10.99.99.1 has zero candidates.
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		BootstrapPeers:   []string{"10.0.0.1:64647"},
+		QueueStatePath:   queuePath,
+	}, id)
+
+	svc.mu.RLock()
+	pendingCount := len(svc.pending[unknownAddr])
+	orphanedCount := len(svc.orphaned[unknownAddr])
+	svc.mu.RUnlock()
+
+	// Unknown-host entries are orphaned during migration — the runtime
+	// only drains primary-keyed entries so they would be stranded.
+	if pendingCount != 0 {
+		t.Fatalf("expected 0 pending frames under %s, got %d", unknownAddr, pendingCount)
+	}
+	if orphanedCount != 1 {
+		t.Fatalf("expected 1 orphaned frame under %s, got %d", unknownAddr, orphanedCount)
+	}
+}
+
+// TestQueueStateMigrationSkippedForCurrentVersion verifies that pending
+// frames written by the current code version (v1) are NOT touched by
+// migration — they survive a normal persist/reload cycle intact.
+func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	queuePath := filepath.Join(tempDir, "queue.json")
+
+	runtimeAddr := "10.99.99.1:65001"
+	// Version 1 (current) — migration should be skipped entirely.
+	qs := queueStateFile{
+		Version: queueStateVersion,
+		Pending: map[string][]pendingFrame{
+			runtimeAddr: {
+				{
+					Frame: protocol.Frame{
+						Type:      "send_message",
+						Topic:     "dm",
+						ID:        "current-version-1",
+						Address:   id.Address,
+						Recipient: "recipient-1",
+						Body:      "ciphertext",
+					},
+					QueuedAt: time.Now().UTC(),
+				},
+			},
+		},
+		RelayRetry:    map[string]relayAttempt{},
+		OutboundState: map[string]outboundDelivery{},
+	}
+	data, err := json.Marshal(qs)
+	if err != nil {
+		t.Fatalf("marshal queue state: %v", err)
+	}
+	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+		t.Fatalf("write queue state: %v", err)
+	}
+
+	// No bootstrap peer matching this host — but migration is skipped.
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "127.0.0.1:64646",
+		BootstrapPeers:   []string{"10.0.0.1:64647"},
+		QueueStatePath:   queuePath,
+	}, id)
+
+	svc.mu.RLock()
+	pendingCount := len(svc.pending[runtimeAddr])
+	orphanedCount := len(svc.orphaned[runtimeAddr])
+	svc.mu.RUnlock()
+
+	// Current-version entries stay in pending — no migration runs.
+	if pendingCount != 1 {
+		t.Fatalf("expected 1 pending frame under %s, got %d", runtimeAddr, pendingCount)
+	}
+	if orphanedCount != 0 {
+		t.Fatalf("expected 0 orphaned frames under %s, got %d", runtimeAddr, orphanedCount)
 	}
 }

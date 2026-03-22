@@ -9,8 +9,17 @@ import (
 	"corsa/internal/core/protocol"
 )
 
+// queueStateVersion tracks the queue-state file schema.  Bump this when the
+// on-disk format changes in a way that requires a one-time migration on load.
+//
+//   0 — implicit; pre-canonicalisation era (pending keyed by dial address)
+//   1 — pending keyed by primary peer address; orphaned section added
+const queueStateVersion = 1
+
 type queueStateFile struct {
+	Version       int                         `json:"version"`
 	Pending       map[string][]pendingFrame   `json:"pending,omitempty"`
+	Orphaned      map[string][]pendingFrame   `json:"orphaned,omitempty"`
 	RelayRetry    map[string]relayAttempt     `json:"relay_retry,omitempty"`
 	RelayMessages []protocol.Envelope         `json:"relay_messages,omitempty"`
 	RelayReceipts []protocol.DeliveryReceipt  `json:"relay_receipts,omitempty"`
@@ -20,6 +29,7 @@ type queueStateFile struct {
 func loadQueueState(path string) (queueStateFile, error) {
 	state := queueStateFile{
 		Pending:       map[string][]pendingFrame{},
+		Orphaned:      map[string][]pendingFrame{},
 		RelayRetry:    map[string]relayAttempt{},
 		OutboundState: map[string]outboundDelivery{},
 	}
@@ -40,6 +50,9 @@ func loadQueueState(path string) (queueStateFile, error) {
 	}
 	if state.Pending == nil {
 		state.Pending = map[string][]pendingFrame{}
+	}
+	if state.Orphaned == nil {
+		state.Orphaned = map[string][]pendingFrame{}
 	}
 	if state.RelayRetry == nil {
 		state.RelayRetry = map[string]relayAttempt{}

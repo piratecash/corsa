@@ -264,7 +264,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 		Type: "peer_health",
 		PeerHealth: []protocol.PeerHealthFrame{
 			{
-				Address:             "65.108.204.190:64646",
+				Address:             "198.51.100.1:64646",
 				ClientVersion:       "0.11-alpha",
 				State:               "healthy",
 				Connected:           true,
@@ -277,6 +277,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 				LastUsefulReceiveAt: "2026-03-20T09:10:59Z",
 				ConsecutiveFailures: 1,
 				LastError:           "timeout",
+				Score:               15,
 			},
 		},
 	})
@@ -286,7 +287,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 	}
 
 	want := PeerHealth{
-		Address:             "65.108.204.190:64646",
+		Address:             "198.51.100.1:64646",
 		ClientVersion:       "0.11-alpha",
 		State:               "healthy",
 		Connected:           true,
@@ -299,6 +300,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 		LastUsefulReceiveAt: timePtr(t, "2026-03-20T09:10:59Z"),
 		ConsecutiveFailures: 1,
 		LastError:           "timeout",
+		Score:               15,
 	}
 
 	if !reflect.DeepEqual(got[0], want) {

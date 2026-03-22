@@ -1117,9 +1117,9 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 	if item.Connected {
 		connected = c.parent.t("node.link.up")
 	}
-	text := c.parent.t("node.peer_health.meta", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures)
+	text := c.parent.t("node.peer_health.meta", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score)
 	if text == "node.peer_health.meta" {
-		return fmt.Sprintf("%s | pending %d | recv %s | pong %s | fails %d", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures)
+		return fmt.Sprintf("%s | pending %d | recv %s | pong %s | fails %d | score %d", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score)
 	}
 	return text
 }
