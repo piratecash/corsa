@@ -668,6 +668,11 @@ func parseConsoleCommand(input, selfAddress, clientVersion string) (protocol.Fra
 			Client:        "desktop",
 			ClientVersion: strings.ReplaceAll(clientVersion, " ", "-"),
 		}, "", nil
+	case "add_peer":
+		if len(fields) < 2 {
+			return protocol.Frame{}, "", fmt.Errorf("usage: add_peer <host:port>")
+		}
+		return protocol.Frame{Type: "add_peer", Peers: []string{fields[1]}}, "", nil
 	case "get_peers", "fetch_identities", "fetch_contacts", "fetch_trusted_contacts", "fetch_peer_health", "fetch_notices":
 		return protocol.Frame{Type: command}, "", nil
 	case "fetch_pending_messages":
@@ -707,6 +712,7 @@ func consoleHelpText(selfAddress string) string {
 		"hello",
 		"",
 		"== Network ==",
+		"add_peer <host:port>",
 		"get_peers",
 		"fetch_peer_health",
 		"",

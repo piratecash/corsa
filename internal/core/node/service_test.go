@@ -3755,3 +3755,303 @@ func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
 		t.Fatalf("expected 0 observed addresses after fallback disconnect, got %d", after)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// add_peer console command
+// ---------------------------------------------------------------------------
+
+func TestAddPeerFrameNewPeerPrependedToList(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{"10.0.0.1:64646"},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{"10.0.0.2:64646"},
+	})
+	if reply.Type != "ok" {
+		t.Fatalf("expected ok, got %#v", reply)
+	}
+
+	svc.mu.RLock()
+	first := svc.peers[0].Address
+	svc.mu.RUnlock()
+	if first != "10.0.0.2:64646" {
+		t.Fatalf("expected manually added peer first, got %s", first)
+	}
+}
+
+func TestAddPeerFrameExistingPeerMovedToFront(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{"10.0.0.3:64646"},
+	})
+	if reply.Type != "ok" {
+		t.Fatalf("expected ok, got %#v", reply)
+	}
+
+	svc.mu.RLock()
+	first := svc.peers[0].Address
+	count := 0
+	for _, p := range svc.peers {
+		if p.Address == "10.0.0.3:64646" {
+			count++
+		}
+	}
+	svc.mu.RUnlock()
+	if first != "10.0.0.3:64646" {
+		t.Fatalf("expected moved peer first, got %s", first)
+	}
+	if count != 1 {
+		t.Fatalf("expected peer to appear exactly once, got %d", count)
+	}
+}
+
+func TestAddPeerFrameResetsCooldown(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.5:64646", "full", "peer-5")
+	for i := 0; i < 5; i++ {
+		svc.markPeerDisconnected("10.0.0.5:64646", fmt.Errorf("refused"))
+	}
+
+	// Peer should be in cooldown now.
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	for _, c := range candidates {
+		if c == "10.0.0.5:64646" {
+			t.Fatalf("peer should be in cooldown before add_peer")
+		}
+	}
+
+	// add_peer resets cooldown.
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{"10.0.0.5:64646"},
+	})
+	if reply.Type != "ok" {
+		t.Fatalf("expected ok, got %#v", reply)
+	}
+
+	candidates = candidateAddresses(svc.peerDialCandidates())
+	found := false
+	for _, c := range candidates {
+		if c == "10.0.0.5:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected peer after cooldown reset, got: %v", candidates)
+	}
+}
+
+func TestAddPeerFrameDefaultPort(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{"10.0.0.9"},
+	})
+	if reply.Type != "ok" {
+		t.Fatalf("expected ok, got %#v", reply)
+	}
+	if len(reply.Peers) != 1 || reply.Peers[0] != "10.0.0.9:64646" {
+		t.Fatalf("expected default port appended, got %v", reply.Peers)
+	}
+}
+
+func TestAddPeerFrameEmptyAddressError(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	reply := svc.addPeerFrame(protocol.Frame{Peers: []string{}})
+	if reply.Type != "error" {
+		t.Fatalf("expected error for empty address, got %#v", reply)
+	}
+}
+
+func TestAddPeerFrameSelfAddressError(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{normalizeAddress(address)},
+	})
+	if reply.Type != "error" {
+		t.Fatalf("expected error for self-address, got %#v", reply)
+	}
+}
+
+func TestAddPeerFrameForbiddenIPError(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: "198.51.100.1:64646",
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// 192.168.x.x is in isForbiddenAdvertisedIP → shouldSkipDialAddress
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{"192.168.1.20:64646"},
+	})
+	if reply.Type != "error" {
+		t.Fatalf("expected error for forbidden IP, got %#v", reply)
+	}
+	if !strings.Contains(reply.Error, "forbidden") {
+		t.Fatalf("expected 'forbidden' in error message, got %q", reply.Error)
+	}
+}
+
+func TestAddPeerFrameUnreachableOverlayError(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+		// No ProxyAddress → Tor/I2P unreachable.
+	})
+	defer stop()
+
+	onion := strings.Repeat("a", 56) + ".onion:64646"
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{onion},
+	})
+	if reply.Type != "error" {
+		t.Fatalf("expected error for unreachable overlay, got %#v", reply)
+	}
+	if !strings.Contains(reply.Error, "unreachable") {
+		t.Fatalf("expected 'unreachable' in error message, got %q", reply.Error)
+	}
+}
+
+func TestAddPeerFrameUpdatesSourceToManual(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{"10.0.0.1:64646"},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Peer was added via bootstrap — source is "bootstrap" or similar.
+	svc.mu.RLock()
+	before := ""
+	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
+		before = pm.Source
+	}
+	svc.mu.RUnlock()
+	if before == "manual" {
+		t.Fatalf("expected non-manual source before add_peer, got %q", before)
+	}
+
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{"10.0.0.1:64646"},
+	})
+	if reply.Type != "ok" {
+		t.Fatalf("expected ok, got %#v", reply)
+	}
+
+	svc.mu.RLock()
+	after := ""
+	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
+		after = pm.Source
+	}
+	svc.mu.RUnlock()
+	if after != "manual" {
+		t.Fatalf("expected source updated to 'manual' after add_peer, got %q", after)
+	}
+}
+
+func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
+	t.Parallel()
+
+	peersPath := filepath.Join(t.TempDir(), "peers.json")
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		PeersStatePath:   peersPath,
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	reply := svc.addPeerFrame(protocol.Frame{
+		Peers: []string{"10.0.0.1:64646"},
+	})
+	if reply.Type != "ok" {
+		t.Fatalf("expected ok, got %#v", reply)
+	}
+
+	// The file must already exist on disk after add_peer returns.
+	state, err := loadPeerState(peersPath)
+	if err != nil {
+		t.Fatalf("loadPeerState: %v", err)
+	}
+	found := false
+	for _, p := range state.Peers {
+		if p.Address == "10.0.0.1:64646" && p.Source == "manual" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected manual peer 10.0.0.1:64646 in persisted state, got: %+v", state.Peers)
+	}
+}

@@ -459,6 +459,33 @@ func TestConsolePingPayloadShape(t *testing.T) {
 	}
 }
 
+func TestParseConsoleCommandAddPeer(t *testing.T) {
+	t.Parallel()
+
+	frame, output, err := parseConsoleCommand("add_peer 10.0.0.1:64646", "me", "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != "" {
+		t.Fatalf("expected empty inline output, got %q", output)
+	}
+	if frame.Type != "add_peer" {
+		t.Fatalf("expected type add_peer, got %q", frame.Type)
+	}
+	if len(frame.Peers) != 1 || frame.Peers[0] != "10.0.0.1:64646" {
+		t.Fatalf("expected peers=[10.0.0.1:64646], got %v", frame.Peers)
+	}
+}
+
+func TestParseConsoleCommandAddPeerMissingArg(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := parseConsoleCommand("add_peer", "me", "test")
+	if err == nil {
+		t.Fatal("expected error for add_peer without argument")
+	}
+}
+
 func mustTime(t *testing.T, value string) time.Time {
 	t.Helper()
 

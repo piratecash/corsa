@@ -699,6 +699,8 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.publishNoticeFrame(frame)
 	case "fetch_notices":
 		return s.fetchNoticesFrame()
+	case "add_peer":
+		return s.addPeerFrame(frame)
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand}
 	}
@@ -2719,6 +2721,93 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 	s.addKnownBoxKey(frame.Address, frame.BoxKey)
 	s.addKnownPubKey(frame.Address, frame.PubKey)
 	s.addKnownBoxSig(frame.Address, frame.BoxSig)
+}
+
+// addPeerFrame handles the local "add_peer" console command.
+// The peer is prepended to the peer list so it becomes the first dial
+// candidate on the next bootstrap tick.
+func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
+	if len(frame.Peers) == 0 || strings.TrimSpace(frame.Peers[0]) == "" {
+		return protocol.Frame{Type: "error", Error: "address is required"}
+	}
+	address := strings.TrimSpace(frame.Peers[0])
+
+	// Ensure host:port format.
+	if _, _, ok := splitHostPort(address); !ok {
+		address = net.JoinHostPort(address, config.DefaultPeerPort)
+	}
+
+	// Apply the same validation as the network peer-exchange path so
+	// that manually added peers cannot bypass forbidden-IP, self-address,
+	// or unreachable-network checks.
+	if s.isSelfAddress(address) {
+		return protocol.Frame{Type: "error", Error: "cannot add self as peer"}
+	}
+	if s.shouldSkipDialAddress(address) {
+		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in a forbidden IP range", address)}
+	}
+	if !s.canReach(address) {
+		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(address))}
+	}
+
+	s.mu.Lock()
+
+	now := time.Now().UTC()
+
+	// If already known, move to front and update source to manual.
+	found := false
+	for i, peer := range s.peers {
+		if peer.Address == address {
+			if i > 0 {
+				copy(s.peers[1:i+1], s.peers[:i])
+				s.peers[0] = peer
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		s.peers = append(s.peers, transport.Peer{})
+		copy(s.peers[1:], s.peers[:len(s.peers)-1])
+		s.peers[0] = transport.Peer{
+			ID:      fmt.Sprintf("manual-%d", now.UnixMilli()),
+			Address: address,
+		}
+		s.peerTypes[address] = config.NodeTypeFull
+	}
+
+	// Always stamp source as manual — whether the peer is new or was
+	// previously discovered via bootstrap/peer_exchange.
+	if pm := s.persistedMeta[address]; pm != nil {
+		pm.Source = "manual"
+	} else {
+		s.persistedMeta[address] = &peerEntry{
+			Address:  address,
+			NodeType: string(config.NodeTypeFull),
+			Source:   "manual",
+			AddedAt:  &now,
+		}
+	}
+
+	// Reset cooldown so the peer is dialled immediately.
+	if h := s.health[address]; h != nil {
+		h.ConsecutiveFailures = 0
+		h.LastDisconnectedAt = time.Time{}
+	}
+
+	s.mu.Unlock()
+
+	// Flush immediately so the manual peer survives a crash.
+	s.flushPeerState()
+
+	log.Printf("node: add_peer address=%s network=%s queued=first", address, classifyAddress(address))
+
+	return protocol.Frame{
+		Type:   "ok",
+		Peers:  []string{address},
+		Status: fmt.Sprintf("peer %s added (network: %s)", address, classifyAddress(address)),
+	}
 }
 
 func (s *Service) addPeerAddress(address string, nodeType string, peerID string) {

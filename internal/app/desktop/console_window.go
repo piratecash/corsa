@@ -916,6 +916,7 @@ func availableConsoleCommands() []consoleSuggestion {
 		{Label: "help", Insert: "help"},
 		{Label: "ping", Insert: "ping"},
 		{Label: "hello", Insert: "hello"},
+		{Label: "add_peer <host:port>", Insert: "add_peer "},
 		{Label: "get_peers", Insert: "get_peers"},
 		{Label: "fetch_peer_health", Insert: "fetch_peer_health"},
 		{Label: "fetch_identities", Insert: "fetch_identities"},
