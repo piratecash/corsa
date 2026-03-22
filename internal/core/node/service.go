@@ -25,6 +25,7 @@ import (
 
 type Service struct {
 	identity     *identity.Identity
+	selfBoxSig   string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
 	cfg          config.Node
 	trust        *trustStore
 	mu           sync.RWMutex
@@ -217,6 +218,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	return &Service{
 		identity:     id,
 		cfg:          cfg,
+		selfBoxSig:   selfContact.BoxSignature,
 		trust:        trust,
 		peers:        peers,
 		known:        known,
@@ -597,7 +599,7 @@ func (s *Service) welcomeFrame(challenge string) protocol.Frame {
 		Address:                s.identity.Address,
 		PubKey:                 identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(s.identity),
+		BoxSig:                 s.selfBoxSig,
 		Challenge:              challenge,
 	}
 }
@@ -837,10 +839,11 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 }
 
 func (s *Service) peerHealthFrame() protocol.Frame {
+	items := s.peerHealthFrames()
 	return protocol.Frame{
 		Type:       "peer_health",
-		Count:      len(s.peerHealthFrames()),
-		PeerHealth: s.peerHealthFrames(),
+		Count:      len(items),
+		PeerHealth: items,
 	}
 }
 
@@ -1126,9 +1129,17 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	if msg.Topic == "dm" {
 		s.mu.RLock()
 		senderPubKey := s.pubKeys[msg.Sender]
+		senderBoxKey := s.boxKeys[msg.Sender]
+		senderBoxSig := s.boxSigs[msg.Sender]
 		s.mu.RUnlock()
 		if senderPubKey == "" {
 			return false, 0, protocol.ErrCodeUnknownSenderKey
+		}
+		// Verify boxkey binding signature at ingest as required by encryption.md.
+		if senderBoxKey != "" && senderBoxSig != "" {
+			if err := identity.VerifyBoxKeyBinding(msg.Sender, senderPubKey, senderBoxKey, senderBoxSig); err != nil {
+				return false, 0, protocol.ErrCodeInvalidDirectMessageSig
+			}
 		}
 		if err := directmsg.VerifyEnvelope(msg.Sender, senderPubKey, msg.Recipient, msg.Body); err != nil {
 			return false, 0, protocol.ErrCodeInvalidDirectMessageSig
@@ -1536,6 +1547,13 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(contactsReply))
 		if err == nil {
 			for _, contact := range frame.Contacts {
+				// Verify box key binding before accepting peer-advertised contacts.
+				if contact.Address == "" || contact.PubKey == "" || contact.BoxKey == "" || contact.BoxSig == "" {
+					continue
+				}
+				if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
+					continue
+				}
 				s.addKnownIdentity(contact.Address)
 				s.addKnownBoxKey(contact.Address, contact.BoxKey)
 				s.addKnownPubKey(contact.Address, contact.PubKey)
@@ -2098,7 +2116,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		Address:       s.identity.Address,
 		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(s.identity),
+		BoxSig:        s.selfBoxSig,
 	})
 	if err != nil {
 		return ""
@@ -2115,6 +2133,14 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 	}
 	if frame.Address != "" {
 		s.addKnownIdentity(frame.Address)
+	}
+	// When all key fields are present, verify the box key binding before storing.
+	// If verification fails the keys are discarded; if any field is absent the
+	// existing behaviour is preserved for backward compatibility.
+	if frame.Address != "" && frame.PubKey != "" && frame.BoxKey != "" && frame.BoxSig != "" {
+		if identity.VerifyBoxKeyBinding(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig) != nil {
+			return
+		}
 	}
 	s.addKnownBoxKey(frame.Address, frame.BoxKey)
 	s.addKnownPubKey(frame.Address, frame.PubKey)
@@ -2148,6 +2174,12 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 	}
 	if frame.Address != "" {
 		s.addKnownIdentity(frame.Address)
+	}
+	// When all key fields are present, verify the box key binding before storing.
+	if frame.Address != "" && frame.PubKey != "" && frame.BoxKey != "" && frame.BoxSig != "" {
+		if identity.VerifyBoxKeyBinding(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig) != nil {
+			return
+		}
 	}
 	s.addKnownBoxKey(frame.Address, frame.BoxKey)
 	s.addKnownPubKey(frame.Address, frame.PubKey)
@@ -2400,6 +2432,16 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 		return err
 	}
 	for _, contact := range contactsFrame.Contacts {
+		// Verify box key binding before accepting keys from third-party contacts
+		// advertised by peers (encryption.md: signed box-key advertisement).
+		// Network-discovered contacts are stored in-memory only and are NOT
+		// written to the trust store; that distinction is preserved by fetch_trusted_contacts.
+		if contact.Address == "" || contact.PubKey == "" || contact.BoxKey == "" || contact.BoxSig == "" {
+			continue
+		}
+		if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
+			continue
+		}
 		s.addKnownIdentity(contact.Address)
 		s.addKnownBoxKey(contact.Address, contact.BoxKey)
 		s.addKnownPubKey(contact.Address, contact.PubKey)

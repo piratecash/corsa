@@ -185,6 +185,12 @@ Authenticated session upgrade for protocol `v2`:
 - invalid session signatures add `100` ban points to the remote IP
 - once an IP reaches `1000` points, it is blacklisted for `24h`
 
+Key verification in `hello`/`welcome`:
+
+- when all key fields (`address`, `pubkey`, `boxkey`, `boxsig`) are present in a `hello` or `welcome` frame, the receiving node should verify the `boxkey` binding signature before storing the keys in memory
+- if verification fails, the keys are discarded but the connection is not terminated; the peer identity (`address`) is still recorded
+- when any key field is absent (e.g. an older node that does not advertise `boxkey`), the node should accept whatever fields are available for backward compatibility
+
 Authenticated session request:
 
 ```json
@@ -410,6 +416,8 @@ Trust rules:
 - `boxkey` must be signed by that identity key
 - the first valid key set is pinned locally
 - later conflicting keys are ignored
+- contacts received via `fetch_contacts` during peer sync should be verified: when all key fields (`pubkey`, `boxkey`, `boxsig`) are present, the node must check the `boxkey` binding signature before storing; contacts with an invalid binding are discarded
+- when a contact is missing `boxkey` or `boxsig` (e.g. from an older node), the node should still accept `address` and `pubkey` for backward compatibility; such partial contacts cannot be used for `dm` encryption but may appear in contact listings
 
 ### Direct messages
 
@@ -836,6 +844,8 @@ Message flags:
 - `any-delete` — any participant may delete it
 - `auto-delete-ttl` — the message is deleted automatically using `ttl-seconds`
 - nodes verify `dm` signatures before store/relay
+- at ingest the node must verify the `ed25519` envelope signature; when the sender's `boxkey` and `boxsig` are known, it should also verify the `boxkey` binding signature before storing or relaying
+- if the sender's `boxkey`/`boxsig` are not yet known (e.g. the sender joined via an older node), the envelope signature check alone is sufficient; the `dm` is still accepted
 - desktops verify signatures again before decrypt/render
 
 ### Gazeta
@@ -1164,6 +1174,12 @@ Fields:
 - невалидная подпись сессии добавляет `100` ban points для удаленного IP
 - после набора `1000` баллов IP попадает в blacklist на `24h`
 
+Верификация ключей в `hello`/`welcome`:
+
+- когда во фрейме `hello` или `welcome` присутствуют все ключевые поля (`address`, `pubkey`, `boxkey`, `boxsig`), принимающая нода должна проверить подпись привязки `boxkey` перед сохранением ключей в памяти
+- если проверка не прошла, ключи отбрасываются, но соединение не разрывается; identity пира (`address`) по-прежнему фиксируется
+- если какое-либо ключевое поле отсутствует (например, старая нода, не публикующая `boxkey`), нода должна принять доступные поля для обратной совместимости
+
 Запрос аутентификации сессии:
 
 ```json
@@ -1389,6 +1405,8 @@ Fields:
 - `boxkey` должен быть подписан этим identity key
 - первый валидный набор ключей pin-ится локально
 - последующие конфликтующие ключи игнорируются
+- контакты, полученные через `fetch_contacts` при peer sync, должны проверяться: если все ключевые поля (`pubkey`, `boxkey`, `boxsig`) присутствуют, нода обязана проверить подпись привязки `boxkey` перед сохранением; контакты с невалидной подписью отбрасываются
+- если у контакта отсутствует `boxkey` или `boxsig` (например, от старой ноды), нода должна по-прежнему принять `address` и `pubkey` для обратной совместимости; такие частичные контакты не могут использоваться для `dm`-шифрования, но могут отображаться в списках контактов
 
 ### Direct messages
 
@@ -1660,6 +1678,8 @@ Fields:
 
 - для `dm` поле `<body>` содержит ciphertext
 - ноды проверяют подпись `dm` до хранения и relay
+- при инжесте нода обязана проверить `ed25519`-подпись конверта; если `boxkey` и `boxsig` отправителя известны, нода также должна проверить подпись привязки `boxkey` перед сохранением или relay
+- если `boxkey`/`boxsig` отправителя ещё неизвестны (например, отправитель пришёл через старую ноду), достаточно проверки подписи конверта; `dm` всё равно принимается
 - desktop повторно проверяет подпись перед расшифровкой и показом
 - сообщения вне допустимого time drift отклоняются и не форвардятся
 - сообщения с `auto-delete-ttl` удаляются после `ttl-seconds`
