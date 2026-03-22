@@ -58,6 +58,7 @@ type ConsoleWindow struct {
 	ops              op.Ops
 	onClose          func()
 	window           *app.Window
+	closed           chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
 	peerList         widget.List
 	peerSectionList  widget.List
 	historyList      widget.List
@@ -84,6 +85,7 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 		parent:  parent,
 		theme:   parent.theme,
 		onClose: onClose,
+		closed:  make(chan struct{}),
 		peerList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
@@ -113,23 +115,45 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 func (c *ConsoleWindow) Open() {
 	go func() {
 		window := new(app.Window)
+
+		c.mu.Lock()
 		c.window = window
+		c.mu.Unlock()
+
 		window.Option(
 			app.Title(c.parent.t("console.title")),
 			app.Size(defaultConsoleWindowWidth, defaultConsoleWindowHeight),
 		)
 
+		// Periodic refresh goroutine.  Uses c.closed as a hard stop so it
+		// never calls Invalidate after DestroyEvent begins processing.
+		// The actual Invalidate goes through invalidateWindow() which holds
+		// RLock during the call, preventing DestroyEvent from nilling out
+		// the window handle until Invalidate returns.
 		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
 		go func() {
-			for range ticker.C {
-				window.Invalidate()
+			defer ticker.Stop()
+			for {
+				select {
+				case <-c.closed:
+					return
+				case <-ticker.C:
+					c.invalidateWindow()
+				}
 			}
 		}()
 
 		for {
 			switch e := window.Event().(type) {
 			case app.DestroyEvent:
+				// Signal all cross-goroutine callers (ticker, command goroutine)
+				// to stop touching the window BEFORE the native handle is freed.
+				close(c.closed)
+
+				c.mu.Lock()
+				c.window = nil
+				c.mu.Unlock()
+
 				if c.onClose != nil {
 					c.onClose()
 				}
@@ -577,10 +601,28 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 		c.consoleBusy = false
 		c.mu.Unlock()
 
-		if c.window != nil {
-			c.window.Invalidate()
-		}
+		c.invalidateWindow()
 	}(command)
+}
+
+// invalidateWindow safely invalidates the console window from any goroutine.
+// It checks the closed channel first (non-blocking) — once closed, the native
+// window handle is about to be freed, so no Invalidate is attempted.  Then it
+// reads c.window under the mutex and calls Invalidate while still holding the
+// lock so that DestroyEvent cannot nil-out the pointer and free the handle
+// between the read and the call.
+func (c *ConsoleWindow) invalidateWindow() {
+	select {
+	case <-c.closed:
+		return
+	default:
+	}
+	c.mu.RLock()
+	w := c.window
+	if w != nil {
+		w.Invalidate()
+	}
+	c.mu.RUnlock()
 }
 
 func (c *ConsoleWindow) isConsoleBusy() bool {
@@ -732,9 +774,7 @@ func (c *ConsoleWindow) commitSuggestionForArguments(gtx layout.Context, suggest
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
-	if c.window != nil {
-		c.window.Invalidate()
-	}
+	c.invalidateWindow()
 	return true
 }
 
@@ -753,9 +793,7 @@ func (c *ConsoleWindow) cancelSuggestions(gtx layout.Context) bool {
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
-	if c.window != nil {
-		c.window.Invalidate()
-	}
+	c.invalidateWindow()
 	return true
 }
 
@@ -769,9 +807,7 @@ func (c *ConsoleWindow) applySuggestion(gtx layout.Context, item string) {
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
-	if c.window != nil {
-		c.window.Invalidate()
-	}
+	c.invalidateWindow()
 }
 
 func (c *ConsoleWindow) currentSuggestionText() string {
