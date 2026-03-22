@@ -24,6 +24,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libasound2-dev \
             libegl1-mesa-dev \
             libgles2-mesa-dev \
             libvulkan-dev \
@@ -61,6 +62,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libasound2-dev \
             libegl1-mesa-dev \
             libgles2-mesa-dev \
             libvulkan-dev \
