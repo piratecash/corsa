@@ -53,6 +53,7 @@ type Service struct {
 	upstream       map[string]struct{}
 	inboundConns   map[net.Conn]struct{}
 	connAuth       map[net.Conn]*connAuthState
+	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
 	bans           map[string]banEntry
 	events         map[chan struct{}]struct{}
 	listener       net.Listener
@@ -63,6 +64,7 @@ type Service struct {
 	dialOrigin      map[string]string     // dial address → primary peer address (for fallback port tracking)
 	persistedMeta   map[string]*peerEntry // stable metadata from peers.json, keyed by address
 	observedAddrs   map[string]string     // peer identity (fingerprint) → observed IP they reported for us
+	reachableGroups map[NetGroup]struct{} // network groups this node can reach (computed at startup)
 }
 
 type subscriber struct {
@@ -123,6 +125,14 @@ type connAuthState struct {
 	Hello     protocol.Frame
 	Challenge string
 	Verified  bool
+}
+
+// connPeerHello stores info extracted from a peer's hello frame, so that
+// later frames on the same connection can look up the peer's identity and
+// self-declared reachability without re-parsing the hello.
+type connPeerHello struct {
+	address  string              // peer's advertised listen address or identity fingerprint
+	networks map[NetGroup]struct{} // self-declared reachable groups (from hello "networks" field)
 }
 
 type banEntry struct {
@@ -353,10 +363,12 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		relayRetry:     queueState.RelayRetry,
 		outbound:       queueState.OutboundState,
 		upstream:       make(map[string]struct{}),
-		dialOrigin:     make(map[string]string),
-		observedAddrs:  make(map[string]string),
+		dialOrigin:      make(map[string]string),
+		observedAddrs:   make(map[string]string),
+		reachableGroups: computeReachableGroups(cfg),
 		inboundConns:   make(map[net.Conn]struct{}),
 		connAuth:       make(map[net.Conn]*connAuthState),
+		connPeerInfo:   make(map[net.Conn]*connPeerHello),
 		bans:           make(map[string]banEntry),
 		events:         make(map[chan struct{}]struct{}),
 	}
@@ -555,6 +567,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
+			s.rememberConnPeerAddr(conn, frame)
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
 			}
@@ -563,6 +576,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		}
 		s.learnPeerFromFrame(conn.RemoteAddr().String(), frame)
 		s.registerHelloRoute(conn, frame)
+		s.rememberConnPeerAddr(conn, frame)
 		if frame.Client == "node" || frame.Client == "desktop" {
 			log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
 		}
@@ -577,7 +591,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, reply)
 		return ok
 	case "get_peers":
-		s.writeJSONFrame(conn, s.peersFrame())
+		s.writeJSONFrame(conn, s.peersFrame(s.connPeerReachableGroups(conn), false))
 		return true
 	case "fetch_identities":
 		s.writeJSONFrame(conn, s.identitiesFrame())
@@ -652,7 +666,7 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 	case "ping":
 		return protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"}
 	case "get_peers":
-		return s.peersFrame()
+		return s.peersFrame(nil, true) // local command — unfiltered
 	case "fetch_identities":
 		return s.identitiesFrame()
 	case "fetch_contacts":
@@ -825,7 +839,64 @@ func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bo
 func (s *Service) clearConnAuth(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.connAuth, conn)
+	delete(s.connPeerInfo, conn)
 	s.mu.Unlock()
+}
+
+// rememberConnPeerAddr stores info from the peer's hello frame so that
+// later frames on this connection can look up the overlay identity and
+// self-declared reachable networks without relying on conn.RemoteAddr().
+func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
+	addr := strings.TrimSpace(hello.Listen)
+	if addr == "" {
+		addr = strings.TrimSpace(hello.Address)
+	}
+	info := &connPeerHello{
+		address:  addr,
+		networks: parseNetGroups(hello.Networks),
+	}
+	s.mu.Lock()
+	s.connPeerInfo[conn] = info
+	s.mu.Unlock()
+}
+
+// connPeerReachableGroups returns the set of network groups the remote
+// peer can reach, for use in peer exchange filtering.
+//
+// Priority:
+//  1. If the peer declared "networks" in its hello, validate them against
+//     the advertised address and use the intersection.  This prevents a
+//     clearnet peer from claiming overlay reachability to harvest .onion
+//     or .i2p addresses.
+//  2. Otherwise infer from the peer's advertised address (listen or identity).
+//  3. If we have no usable information, return nil (= no filtering, include
+//     all routable addresses).  This is the safe backward-compatible default
+//     for old clients that don't send "networks".
+func (s *Service) connPeerReachableGroups(conn net.Conn) map[NetGroup]struct{} {
+	s.mu.RLock()
+	info := s.connPeerInfo[conn]
+	s.mu.RUnlock()
+
+	if info == nil {
+		return nil
+	}
+
+	// If the peer declared its networks, validate against advertised address.
+	if len(info.networks) > 0 {
+		return validateDeclaredNetworks(info.networks, info.address)
+	}
+
+	// Infer from advertised address if it classifies to a known routable group.
+	if info.address != "" {
+		g := classifyAddress(info.address)
+		if g != NetGroupUnknown && g != NetGroupLocal {
+			return peerReachableGroups(info.address)
+		}
+	}
+
+	// No meaningful address (fingerprint or empty).  Return nil so
+	// peersFrame includes all routable addresses.
+	return nil
 }
 
 func remoteIP(addr net.Addr) string {
@@ -940,10 +1011,31 @@ func (s *Service) addBanScore(conn net.Conn, delta int) {
 	}
 }
 
-func (s *Service) peersFrame() protocol.Frame {
+// peersFrame builds a "peers" response.  When localCaller is true the
+// full unfiltered peer list is returned (operator / CLI).  For remote
+// peers non-routable addresses (local, unknown) are always stripped —
+// they must never be relayed.  When remoteGroups is non-nil the result
+// is further narrowed to groups the remote peer can reach.
+func (s *Service) peersFrame(remoteGroups map[NetGroup]struct{}, localCaller bool) protocol.Frame {
 	peers := s.Peers()
 	addresses := make([]string, 0, len(peers))
+
 	for _, peer := range peers {
+		if !localCaller {
+			g := classifyAddress(peer.Address)
+			// Non-routable addresses (local/unknown) are never relayed
+			// to remote peers.
+			if !g.IsRoutable() {
+				continue
+			}
+			// When the remote peer's reachable groups are known, skip
+			// groups it cannot reach.
+			if remoteGroups != nil {
+				if _, ok := remoteGroups[g]; !ok {
+					continue
+				}
+			}
+		}
 		addresses = append(addresses, peer.Address)
 	}
 	return protocol.Frame{
@@ -1755,6 +1847,7 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 			entry.LastError = health.LastError
 			entry.Score = health.Score
 		}
+		entry.Network = classifyAddress(entry.Address).String()
 		entries = append(entries, entry)
 	}
 	return entries
@@ -1819,7 +1912,6 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 	}
 
 	now := time.Now()
-	hasProxy := s.cfg.ProxyAddress != ""
 	var scored []peerDialCandidate
 	seen := make(map[string]struct{})
 	for _, peer := range s.peers {
@@ -1851,12 +1943,10 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 			if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 				continue
 			}
-			// Skip .onion addresses when no SOCKS5 proxy is configured;
-			// dialling them would fail immediately on every cycle.
-			if !hasProxy {
-				if host, _, ok := splitHostPort(address); ok && isOnionAddress(host) {
-					continue
-				}
+			// Skip addresses in network groups we cannot reach (e.g.
+			// .onion without a proxy, I2P without a tunnel, etc.).
+			if !s.canReach(address) {
+				continue
 			}
 			if _, ok := s.upstream[address]; ok {
 				continue
@@ -2285,6 +2375,7 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.inboundConns, conn)
+	delete(s.connPeerInfo, conn)
 	s.mu.Unlock()
 }
 
@@ -2556,6 +2647,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		NodeType:      string(s.NodeType()),
 		ClientVersion: s.ClientVersion(),
 		Services:      s.Services(),
+		Networks:      reachableGroupNames(s.reachableGroups),
 		Address:       s.identity.Address,
 		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
@@ -3891,6 +3983,12 @@ func isOnionAddress(host string) bool {
 		}
 	}
 	return true
+}
+
+// isI2PAddress returns true if the host is an I2P .b32.i2p address.
+// I2P base32 addresses are 52 base32 characters + ".b32.i2p".
+func isI2PAddress(host string) bool {
+	return strings.HasSuffix(strings.ToLower(host), ".b32.i2p")
 }
 
 func splitHostPort(address string) (string, string, bool) {

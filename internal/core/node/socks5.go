@@ -10,18 +10,18 @@ import (
 	"time"
 )
 
-// dialPeer connects to the given address, routing .onion addresses through
-// the SOCKS5 proxy configured in cfg.ProxyAddress when available.
+// dialPeer connects to the given address, routing overlay addresses (.onion,
+// .b32.i2p) through the SOCKS5 proxy configured in cfg.ProxyAddress.
 func (s *Service) dialPeer(ctx context.Context, address string, timeout time.Duration) (net.Conn, error) {
 	host, _, ok := splitHostPort(address)
 	if !ok {
 		return nil, fmt.Errorf("invalid peer address: %s", address)
 	}
 
-	if isOnionAddress(host) {
+	if isOnionAddress(host) || isI2PAddress(host) {
 		proxy := s.cfg.ProxyAddress
 		if proxy == "" {
-			return nil, fmt.Errorf("no SOCKS5 proxy configured for .onion address %s", address)
+			return nil, fmt.Errorf("no SOCKS5 proxy configured for overlay address %s", address)
 		}
 		return dialSOCKS5(ctx, proxy, address, timeout)
 	}

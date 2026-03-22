@@ -15,6 +15,7 @@ import (
 type peerEntry struct {
 	Address             string     `json:"address"`
 	NodeType            string     `json:"node_type,omitempty"`
+	Network             string     `json:"network,omitempty"`  // network group: "ipv4", "ipv6", "torv3", "i2p", etc.
 	LastConnectedAt     *time.Time `json:"last_connected_at,omitempty"`
 	LastDisconnectedAt  *time.Time `json:"last_disconnected_at,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`

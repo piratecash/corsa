@@ -17,6 +17,7 @@ type Frame struct {
 	NodeType               string                `json:"node_type,omitempty"`
 	ClientVersion          string                `json:"client_version,omitempty"`
 	Services               []string              `json:"services,omitempty"`
+	Networks               []string              `json:"networks,omitempty"` // self-declared reachable network groups (hello frame)
 	Address                string                `json:"address,omitempty"`
 	Recipient              string                `json:"recipient,omitempty"`
 	PubKey                 string                `json:"pubkey,omitempty"`

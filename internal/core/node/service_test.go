@@ -261,6 +261,7 @@ func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
+		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers: []string{
 			"10.0.0.1:64646",
 			"10.0.0.2:64646",
@@ -300,6 +301,7 @@ func TestPeerDialCandidatesUsesDefaultFullOutgoingLimit(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
+		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers:   bootstrap,
 		Type:             config.NodeTypeFull,
 	}, id)
@@ -367,6 +369,7 @@ func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
+		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers: []string{
 			"10.0.0.1:64647",
 			"127.0.0.1:64647",
@@ -399,6 +402,7 @@ func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
+		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers: []string{
 			"198.51.100.1:64647",
 			"198.51.100.2:64647",
@@ -778,8 +782,12 @@ func TestMeshMessagePropagation(t *testing.T) {
 	assertMessageFrame(t, final[1], "messages", "global", 1, protocol.MessageFrame{
 		ID: "mesh-msg-1", Sender: nodeA.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello-from-a",
 	})
-	if got := final[2]; got.Type != "peers" || len(got.Peers) == 0 {
-		t.Fatalf("expected nodeB to know at least one peer, got %#v", got)
+	// The remote get_peers response must not contain local/non-routable
+	// addresses.  Both test nodes listen on 127.0.0.1, so the filtered
+	// response is expected to be empty.  The actual peer knowledge was
+	// already verified above via nodeB.Peers().
+	if got := final[2]; got.Type != "peers" {
+		t.Fatalf("expected peers frame, got %#v", got)
 	}
 }
 
@@ -1296,6 +1304,12 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	t.Helper()
 
+	// Isolate peer state so tests never load a real peers.json that
+	// happens to match the randomly-assigned port.
+	if cfg.PeersStatePath == "" {
+		cfg.PeersStatePath = filepath.Join(t.TempDir(), "peers.json")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	id, err := identity.Generate()
 	if err != nil {
@@ -1307,6 +1321,11 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 
 func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Identity) (*Service, func()) {
 	t.Helper()
+
+	// Isolate peer state so tests never load a real peers.json.
+	if cfg.PeersStatePath == "" {
+		cfg.PeersStatePath = filepath.Join(t.TempDir(), "peers.json")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	svc := NewService(cfg, id)

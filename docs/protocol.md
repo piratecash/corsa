@@ -148,6 +148,7 @@ Primary JSON node-to-node request:
     "gazeta",
     "relay"
   ],
+  "networks": ["ipv4", "ipv6", "torv3"],
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519-pubkey>",
   "boxkey": "<base64-x25519-pubkey>",
@@ -166,6 +167,7 @@ Fields:
 - `node_type` — optional; node role, currently `full` or `client`
 - `client_version` — optional; node software version
 - `services` — optional; declared capabilities supported by the node
+- `networks` — optional; self-declared list of reachable network groups (e.g. `["ipv4","ipv6","torv3"]`); the remote node validates the declaration against the advertised address — overlay claims are accepted only when the address confirms the overlay; when absent, reachability is inferred from the advertised address
 - `address` — optional; node identity fingerprint
 - `pubkey` — optional; base64 `ed25519` public key for identity/authenticity
 - `boxkey` — optional; base64 `X25519` public key for encrypted traffic
@@ -261,6 +263,16 @@ Observed address (NAT detection):
 - observations are per-connection: when a peer disconnects, its observation is removed from the voting set
 - private, loopback, link-local, and unspecified IPs are ignored as observed addresses
 - the node never auto-rewrites `AdvertiseAddress` in the current implementation — NAT detection is informational only
+
+Address groups (network reachability):
+
+- every peer address is classified into a network group: `ipv4`, `ipv6`, `torv3`, `torv2`, `i2p`, `cjdns`, `local`, or `unknown`
+- the classification follows Bitcoin Core's `CNetAddr::GetNetwork` approach — each address belongs to exactly one group
+- a node computes which groups it can reach at startup: IPv4/IPv6 are always reachable; Tor and I2P require a SOCKS5 proxy (`CORSA_PROXY` env var); CJDNS uses its own tun interface and is not proxied — it is not currently reachable
+- dial candidate selection skips addresses in unreachable groups — e.g. a clearnet node will not attempt to dial `.onion` or `.b32.i2p` addresses without a proxy
+- nodes declare their reachable groups in the `hello` frame via the `"networks"` field (e.g. `["ipv4","ipv6","torv3"]`); the receiving node validates the declaration against the peer's advertised address — overlay groups (torv3, torv2, i2p, cjdns) are only accepted if the advertised address belongs to that overlay; clearnet groups (ipv4, ipv6) are always accepted; this prevents a clearnet peer from claiming overlay reachability to harvest `.onion` / `.i2p` addresses
+- peer exchange (`get_peers` → `peers`) filters addresses by the validated intersection of declared and verifiable groups; if the peer did not send `"networks"`, reachability is inferred from its advertised address (not the TCP endpoint, which may differ for overlay peers); local/private addresses are never relayed
+- the `network` field in `peers.json` records each peer's group for diagnostic purposes
 
 Authenticated session request:
 
@@ -1208,6 +1220,7 @@ Orphaned фреймы сохраняются между рестартами в 
     "gazeta",
     "relay"
   ],
+  "networks": ["ipv4", "ipv6", "torv3"],
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519-pubkey>",
   "boxkey": "<base64-x25519-pubkey>",
@@ -1226,6 +1239,7 @@ Orphaned фреймы сохраняются между рестартами в 
 - `node_type` — опциональное; роль узла, сейчас `full` или `client`
 - `client_version` — опциональное; версия ПО узла
 - `services` — опциональное; список capabilities, которые поддерживает узел
+- `networks` — опциональное; список доступных сетевых групп (например `["ipv4","ipv6","torv3"]`); удалённый узел валидирует декларацию по advertised-адресу — overlay-заявки принимаются только если адрес подтверждает overlay; при отсутствии достижимость выводится из advertised-адреса
 - `address` — опциональное; fingerprint identity этого узла
 - `pubkey` — опциональное; base64 `ed25519` identity key
 - `boxkey` — опциональное; base64 `X25519` ключ для шифрования
@@ -1321,6 +1335,16 @@ Observed address (обнаружение NAT):
 - наблюдения привязаны к соединению: при отключении пира его наблюдение удаляется из набора голосов
 - приватные, loopback, link-local и unspecified IP игнорируются как observed-адреса
 - в текущей реализации узел не перезаписывает `AdvertiseAddress` автоматически — обнаружение NAT носит информационный характер
+
+Группы адресов (сетевая достижимость):
+
+- каждый адрес пира классифицируется в сетевую группу: `ipv4`, `ipv6`, `torv3`, `torv2`, `i2p`, `cjdns`, `local` или `unknown`
+- классификация следует подходу Bitcoin Core `CNetAddr::GetNetwork` — каждый адрес принадлежит ровно одной группе
+- при запуске нода вычисляет доступные группы: IPv4/IPv6 всегда доступны; Tor и I2P требуют SOCKS5-прокси (`CORSA_PROXY`); CJDNS использует собственный tun-интерфейс и через прокси не работает — пока не поддерживается
+- при выборе кандидатов для подключения пропускаются адреса из недоступных групп — clearnet-нода не будет пытаться подключиться к `.onion` или `.b32.i2p` адресам без прокси
+- ноды объявляют свои доступные группы в `hello`-фрейме через поле `"networks"` (например `["ipv4","ipv6","torv3"]`); принимающая нода валидирует декларацию по advertised-адресу пира — overlay-группы (torv3, torv2, i2p, cjdns) принимаются только если advertised-адрес принадлежит соответствующему overlay; clearnet-группы (ipv4, ipv6) принимаются всегда; это предотвращает получение `.onion`/`.i2p` адресов clearnet-пирами через ложную декларацию
+- обмен пирами (`get_peers` → `peers`) фильтрует адреса по пересечению объявленных и верифицируемых групп; если пир не передал `"networks"`, достижимость выводится из его advertised-адреса (а не TCP-эндпоинта); локальные/приватные адреса никогда не передаются
+- поле `network` в `peers.json` записывает группу каждого пира для диагностики
 
 Запрос аутентификации сессии:
 
