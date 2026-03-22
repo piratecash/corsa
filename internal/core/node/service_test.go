@@ -3,9 +3,12 @@ package node
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -2155,4 +2158,432 @@ func readJSONTestFrame(t *testing.T, reader *bufio.Reader) protocol.Frame {
 		t.Fatalf("parse frame: %v", err)
 	}
 	return frame
+}
+
+// ---------------------------------------------------------------------------
+// Peer persistence integration tests (service.go changes)
+// ---------------------------------------------------------------------------
+
+// TestNormalizePeerAddressAcceptsValidV3Onion verifies the .onion
+// passthrough added to normalizePeerAddress in service.go.
+func TestNormalizePeerAddressAcceptsValidV3Onion(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	// 56 base32 chars = valid Tor v3.
+	onion := "2gzyxa5ihm7nsber23gk5eqx3mp4wrymfbhqgk2ycdjp3yzcrllbiqad.onion"
+	got, ok := svc.normalizePeerAddress("1.2.3.4:12345", onion+":64646")
+	if !ok {
+		t.Fatal("expected valid v3 .onion to be accepted")
+	}
+	if got != onion+":64646" {
+		t.Fatalf("expected %s:64646, got %s", onion, got)
+	}
+}
+
+// TestNormalizePeerAddressRejectsShortOnion verifies that short/junk .onion
+// hosts fall through to normal IP-based logic and fail when not valid IPs.
+func TestNormalizePeerAddressRejectsShortOnion(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	// "junk.onion" is not a valid 16/56 base32 host.
+	_, ok := svc.normalizePeerAddress("", "junk.onion:64646")
+	if ok {
+		t.Fatal("expected invalid .onion to be rejected")
+	}
+}
+
+// TestTwoNodesPeerExchangePersistedOnShutdown starts two full nodes,
+// lets them discover each other via bootstrap, then stops one and checks
+// that its peers-{port}.json contains the other node's address.
+func TestTwoNodesPeerExchangePersistedOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+	peersPathA := filepath.Join(dir, "peers-a.json")
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		PeersStatePath:   peersPathA,
+		Type:             config.NodeTypeFull,
+	})
+	defer stopA()
+
+	_, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		Type:             config.NodeTypeFull,
+	})
+
+	// Wait until A discovers B via peer exchange.
+	waitForCondition(t, 5*time.Second, func() bool {
+		nodeA.mu.RLock()
+		defer nodeA.mu.RUnlock()
+		for _, p := range nodeA.peers {
+			if p.Address == normalizeAddress(addressB) {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Stop B, then flush A's peer state.
+	stopB()
+	nodeA.flushPeerState()
+
+	// Verify peers file was written and contains B.
+	state, err := loadPeerState(peersPathA)
+	if err != nil {
+		t.Fatalf("loadPeerState: %v", err)
+	}
+	found := false
+	for _, p := range state.Peers {
+		if p.Address == normalizeAddress(addressB) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		addrs := make([]string, len(state.Peers))
+		for i, p := range state.Peers {
+			addrs[i] = p.Address
+		}
+		t.Fatalf("expected node B address %s in persisted peers, got: %v", normalizeAddress(addressB), addrs)
+	}
+}
+
+// TestBootstrapLoopFlushesOnShutdown verifies that stopping a node
+// (via context cancel) writes peers state to disk.
+func TestBootstrapLoopFlushesOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+	address := freeAddress(t)
+
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{"10.0.0.1:64646"},
+		PeersStatePath:   peersPath,
+		Type:             config.NodeTypeFull,
+	})
+	_ = svc // keep reference
+
+	// Graceful shutdown triggers flushPeerState via bootstrapLoop.
+	stop()
+
+	// The file should now exist.
+	state, err := loadPeerState(peersPath)
+	if err != nil {
+		t.Fatalf("loadPeerState after shutdown: %v", err)
+	}
+	if len(state.Peers) == 0 {
+		t.Fatal("expected at least one peer (bootstrap) in persisted state after shutdown")
+	}
+	found := false
+	for _, p := range state.Peers {
+		if p.Address == "10.0.0.1:64646" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected bootstrap peer 10.0.0.1:64646 in persisted state")
+	}
+}
+
+// TestNodeRestartPreservesPersistedPeers performs a full lifecycle test:
+// start a node, add peers, flush, stop, start a new node from the same
+// peers file, and verify the peers (including health) are restored.
+func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+
+	address1 := freeAddress(t)
+	svc1, stop1 := startTestNode(t, config.Node{
+		ListenAddress:    address1,
+		AdvertiseAddress: normalizeAddress(address1),
+		BootstrapPeers:   []string{},
+		PeersStatePath:   peersPath,
+		Type:             config.NodeTypeFull,
+	})
+
+	// Add peers and mark one as connected.
+	svc1.addPeerAddress("10.0.0.5:64646", "full", "")
+	svc1.addPeerAddress("10.0.0.6:64646", "full", "")
+	svc1.markPeerConnected("10.0.0.5:64646")
+	svc1.markPeerDisconnected("10.0.0.6:64646", fmt.Errorf("refused"))
+
+	stop1() // triggers flush via bootstrapLoop shutdown
+
+	// Verify file was written.
+	state, err := loadPeerState(peersPath)
+	if err != nil {
+		t.Fatalf("loadPeerState: %v", err)
+	}
+	if len(state.Peers) < 2 {
+		t.Fatalf("expected >= 2 persisted peers, got %d", len(state.Peers))
+	}
+
+	// Start a new node with different listen address but same peers file.
+	address2 := freeAddress(t)
+	svc2, stop2 := startTestNode(t, config.Node{
+		ListenAddress:    address2,
+		AdvertiseAddress: normalizeAddress(address2),
+		BootstrapPeers:   []string{"10.0.0.99:64646"}, // different bootstrap
+		PeersStatePath:   peersPath,
+		Type:             config.NodeTypeFull,
+	})
+	defer stop2()
+
+	svc2.mu.RLock()
+	// Should have: bootstrap (10.0.0.99) + persisted (10.0.0.5, 10.0.0.6).
+	peerAddrs := make(map[string]bool)
+	for _, p := range svc2.peers {
+		peerAddrs[p.Address] = true
+	}
+	svc2.mu.RUnlock()
+
+	if !peerAddrs["10.0.0.99:64646"] {
+		t.Fatal("expected bootstrap peer 10.0.0.99:64646")
+	}
+	if !peerAddrs["10.0.0.5:64646"] {
+		t.Fatal("expected persisted peer 10.0.0.5:64646")
+	}
+	if !peerAddrs["10.0.0.6:64646"] {
+		t.Fatal("expected persisted peer 10.0.0.6:64646")
+	}
+
+	// Verify health was seeded from persisted state.
+	svc2.mu.RLock()
+	h5 := svc2.health["10.0.0.5:64646"]
+	h6 := svc2.health["10.0.0.6:64646"]
+	svc2.mu.RUnlock()
+
+	if h5 == nil {
+		t.Fatal("expected health entry for 10.0.0.5:64646")
+	}
+	if h5.Score < peerScoreConnect {
+		t.Fatalf("expected score >= %d for connected peer, got %d", peerScoreConnect, h5.Score)
+	}
+	if h6 == nil {
+		t.Fatal("expected health entry for 10.0.0.6:64646")
+	}
+	if h6.ConsecutiveFailures != 1 {
+		t.Fatalf("expected 1 failure for 10.0.0.6, got %d", h6.ConsecutiveFailures)
+	}
+}
+
+// TestPeerDialCandidatesIncludesPersistedPeers verifies that peers loaded
+// from disk appear in peerDialCandidates and are actually dialed.
+func TestPeerDialCandidatesIncludesPersistedPeers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+
+	now := time.Now().UTC()
+	persisted := peerStateFile{
+		Version: peerStateVersion,
+		Peers: []peerEntry{
+			{Address: "10.0.0.50:64646", Score: 30, Source: "peer_exchange", LastConnectedAt: &now},
+			{Address: "10.0.0.51:64646", Score: 10, Source: "peer_exchange"},
+		},
+	}
+	data, _ := json.MarshalIndent(persisted, "", "  ")
+	_ = os.WriteFile(peersPath, data, 0o600)
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		BootstrapPeers:   []string{},
+		PeersStatePath:   peersPath,
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	candidates := svc.peerDialCandidates()
+
+	candidateAddrs := make(map[string]bool)
+	for _, c := range candidates {
+		candidateAddrs[c] = true
+	}
+	if !candidateAddrs["10.0.0.50:64646"] {
+		t.Fatalf("expected persisted peer 10.0.0.50:64646 in dial candidates, got: %v", candidates)
+	}
+	if !candidateAddrs["10.0.0.51:64646"] {
+		t.Fatalf("expected persisted peer 10.0.0.51:64646 in dial candidates, got: %v", candidates)
+	}
+}
+
+// TestMaybeSavePeerStateRespectsInterval verifies that maybeSavePeerState
+// does not write more often than peerStateSaveMinutes.
+func TestMaybeSavePeerStateRespectsInterval(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+	address := freeAddress(t)
+
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{"10.0.0.1:64646"},
+		PeersStatePath:   peersPath,
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// First explicit flush.
+	svc.flushPeerState()
+
+	svc.mu.RLock()
+	firstSave := svc.lastPeerSave
+	svc.mu.RUnlock()
+
+	if firstSave.IsZero() {
+		t.Fatal("expected lastPeerSave to be set after flush")
+	}
+
+	// maybeSavePeerState should NOT write again because not enough time elapsed.
+	svc.maybeSavePeerState()
+
+	svc.mu.RLock()
+	secondSave := svc.lastPeerSave
+	svc.mu.RUnlock()
+
+	if !secondSave.Equal(firstSave) {
+		t.Fatalf("expected lastPeerSave unchanged (%v), got %v", firstSave, secondSave)
+	}
+}
+
+// TestOnionPeersSkippedWithoutProxy verifies that .onion addresses
+// are excluded from dial candidates when no SOCKS5 proxy is configured,
+// preventing constant fast failures in the reconnect loop.
+func TestOnionPeersSkippedWithoutProxy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+
+	onionAddr := strings.Repeat("a", 56) + ".onion:64646"
+	now := time.Now().UTC()
+	persisted := peerStateFile{
+		Version: peerStateVersion,
+		Peers: []peerEntry{
+			{Address: onionAddr, Score: 80, Source: "peer_exchange", LastConnectedAt: &now},
+			{Address: "10.0.0.1:64646", Score: 50, Source: "peer_exchange"},
+		},
+	}
+	data, _ := json.MarshalIndent(persisted, "", "  ")
+	_ = os.WriteFile(peersPath, data, 0o600)
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	// No ProxyAddress configured.
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		BootstrapPeers:   []string{},
+		PeersStatePath:   peersPath,
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	candidates := svc.peerDialCandidates()
+	for _, c := range candidates {
+		host, _, ok := splitHostPort(c)
+		if ok && isOnionAddress(host) {
+			t.Fatalf("onion address %s should not be in dial candidates without proxy", c)
+		}
+	}
+	// The regular peer should still be present.
+	found := false
+	for _, c := range candidates {
+		if c == "10.0.0.1:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected regular peer 10.0.0.1:64646 in candidates, got: %v", candidates)
+	}
+}
+
+// TestOnionPeersIncludedWithProxy verifies that .onion addresses
+// ARE included in dial candidates when a SOCKS5 proxy is configured.
+func TestOnionPeersIncludedWithProxy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+
+	onionAddr := strings.Repeat("a", 56) + ".onion:64646"
+	now := time.Now().UTC()
+	persisted := peerStateFile{
+		Version: peerStateVersion,
+		Peers: []peerEntry{
+			{Address: onionAddr, Score: 80, Source: "peer_exchange", LastConnectedAt: &now},
+		},
+	}
+	data, _ := json.MarshalIndent(persisted, "", "  ")
+	_ = os.WriteFile(peersPath, data, 0o600)
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "65.108.204.190:64646",
+		BootstrapPeers:   []string{},
+		PeersStatePath:   peersPath,
+		ProxyAddress:     "127.0.0.1:9050",
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	candidates := svc.peerDialCandidates()
+	found := false
+	for _, c := range candidates {
+		if c == onionAddr {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected onion peer %s in candidates with proxy, got: %v", onionAddr, candidates)
+	}
 }

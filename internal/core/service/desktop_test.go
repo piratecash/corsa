@@ -1,10 +1,13 @@
 package service
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
@@ -317,6 +320,140 @@ func TestParseOptionalTime(t *testing.T) {
 	want := timePtr(t, "2026-03-20T09:10:11Z")
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected parsed time: got %#v want %#v", got, want)
+	}
+}
+
+func TestParseConsoleCommandHelp(t *testing.T) {
+	t.Parallel()
+
+	frame, output, err := parseConsoleCommand("help", "me", "desktop test")
+	if err != nil {
+		t.Fatalf("parseConsoleCommand returned error: %v", err)
+	}
+	if frame.Type != "" {
+		t.Fatalf("expected empty frame for help, got %#v", frame)
+	}
+	if output == "" || !strings.Contains(output, "== Control ==") || !strings.Contains(output, "== Messages ==") {
+		t.Fatalf("expected help output, got %q", output)
+	}
+}
+
+func TestParseConsoleCommandFetchInboxDefaults(t *testing.T) {
+	t.Parallel()
+
+	frame, output, err := parseConsoleCommand("fetch_inbox", "me", "desktop test")
+	if err != nil {
+		t.Fatalf("parseConsoleCommand returned error: %v", err)
+	}
+	if output != "" {
+		t.Fatalf("expected empty inline output, got %q", output)
+	}
+
+	want := protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: "me"}
+	if !reflect.DeepEqual(frame, want) {
+		t.Fatalf("unexpected frame: got %#v want %#v", frame, want)
+	}
+}
+
+func TestParseConsoleCommandHello(t *testing.T) {
+	t.Parallel()
+
+	frame, output, err := parseConsoleCommand("hello", "me", "desktop test")
+	if err != nil {
+		t.Fatalf("parseConsoleCommand returned error: %v", err)
+	}
+	if output != "" {
+		t.Fatalf("expected empty inline output, got %q", output)
+	}
+	if frame.Type != "hello" || frame.Version != config.ProtocolVersion || frame.Client != "desktop" || frame.ClientVersion != "desktop-test" {
+		t.Fatalf("unexpected hello frame: %#v", frame)
+	}
+}
+
+func TestParseConsoleCommandJSON(t *testing.T) {
+	t.Parallel()
+
+	frame, output, err := parseConsoleCommand(`{"type":"get_peers"}`, "me", "desktop test")
+	if err != nil {
+		t.Fatalf("parseConsoleCommand returned error: %v", err)
+	}
+	if output != "" {
+		t.Fatalf("expected empty inline output, got %q", output)
+	}
+	if frame.Type != "get_peers" {
+		t.Fatalf("unexpected frame: %#v", frame)
+	}
+}
+
+func TestParseConsoleCommandUnknown(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := parseConsoleCommand("wat", "me", "desktop test")
+	if err == nil {
+		t.Fatal("expected error for unknown command")
+	}
+}
+
+func TestBuildConsolePeersPayloadIncludesStatuses(t *testing.T) {
+	t.Parallel()
+
+	payload := buildConsolePeersPayload(
+		[]string{"a:1", "b:2", "c:3"},
+		[]PeerHealth{
+			{Address: "a:1", State: "healthy", Connected: true},
+			{Address: "b:2", State: "reconnecting", Connected: false, PendingCount: 2},
+		},
+	)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `"count":1`) {
+		t.Fatalf("expected connected count in output: %s", out)
+	}
+	if !strings.Contains(out, `"total":3`) {
+		t.Fatalf("expected total count in output: %s", out)
+	}
+	if !strings.Contains(out, `"connected":true`) {
+		t.Fatalf("expected connected peer in output: %s", out)
+	}
+	if !strings.Contains(out, `"state":"reconnecting"`) {
+		t.Fatalf("expected reconnecting peer in output: %s", out)
+	}
+	if !strings.Contains(out, `"pending":[`) {
+		t.Fatalf("expected pending section in output: %s", out)
+	}
+	if !strings.Contains(out, `"known_only":[`) {
+		t.Fatalf("expected known_only section in output: %s", out)
+	}
+}
+
+func TestConsolePingPayloadShape(t *testing.T) {
+	t.Parallel()
+
+	payload := struct {
+		Type    string              `json:"type"`
+		Count   int                 `json:"count"`
+		Total   int                 `json:"total"`
+		Results []ConsolePingStatus `json:"results"`
+	}{
+		Type:  "ping",
+		Count: 1,
+		Total: 2,
+		Results: []ConsolePingStatus{
+			{Address: "a:1", OK: true, Status: "ok", Connected: true, State: "healthy", Node: "corsa", Network: "gazeta-devnet"},
+			{Address: "b:2", OK: false, Status: "not_ok", Connected: false, State: "reconnecting", Error: "dial timeout"},
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `"type":"ping"`) || !strings.Contains(out, `"status":"ok"`) || !strings.Contains(out, `"status":"not_ok"`) {
+		t.Fatalf("unexpected ping payload: %s", out)
 	}
 }
 

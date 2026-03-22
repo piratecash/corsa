@@ -29,6 +29,8 @@ Relevant environment variables:
 - `CORSA_IDENTITY_PATH`
 - `CORSA_TRUST_STORE_PATH`
 - `CORSA_QUEUE_STATE_PATH`
+- `CORSA_PEERS_PATH`
+- `CORSA_PROXY`
 - `CORSA_NODE_TYPE`
 - `CORSA_MAX_OUTGOING_PEERS`
 - `CORSA_MAX_INCOMING_PEERS`
@@ -50,6 +52,25 @@ Rules:
 - `CORSA_MAX_INCOMING_PEERS=0` means no app-level inbound cap
 - pending outgoing direct-message frames and relay-retry state are persisted to disk and survive node restarts
 - default message clock drift: `600` seconds
+
+### Peer address persistence
+
+Peer addresses discovered via `get_peers` exchange and bootstrap are persisted locally in `peers-{port}.json` (default path: `.corsa/peers-{port}.json`, override: `CORSA_PEERS_PATH`). The file follows a scoring model inspired by Bitcoin's `peers.dat`:
+
+- each entry stores the peer address, node type, last connection/disconnection timestamps, consecutive failure count, source tag (`bootstrap`, `peer_exchange`, `persisted`), and a numeric score
+- score increases on successful TCP handshake (+10) and decreases on failure (-5) or clean disconnect (-2), clamped to [-50, +100]
+- the file is flushed every 5 minutes during the bootstrap loop and once on graceful shutdown
+- on restart, persisted peers are merged with bootstrap peers: bootstrap entries appear first, then persisted entries sorted by score descending; duplicates are skipped
+- the persisted list is capped at 500 entries; lowest-scoring entries are trimmed on save
+
+### Onion address support
+
+Peer addresses may be `.onion` hostnames (Tor hidden services). When `CORSA_PROXY` is set to a SOCKS5 proxy address (e.g. `127.0.0.1:9050`), the node routes all `.onion` peer connections through the proxy:
+
+- `.onion` addresses are accepted as-is in the advertised address field during `normalizePeerAddress`; standard IP-based validation and forbidden-IP checks are bypassed for `.onion` hosts
+- the SOCKS5 handshake uses `ATYP=0x03` (domain name) so the proxy resolves the `.onion` address, not the local node
+- if no `CORSA_PROXY` is configured, `.onion` peer addresses are stored but dial attempts to them will fail gracefully
+- non-`.onion` addresses continue to use direct TCP connections regardless of proxy configuration
 
 ### Handshake
 
@@ -1018,6 +1039,8 @@ Fields:
 - `CORSA_IDENTITY_PATH`
 - `CORSA_TRUST_STORE_PATH`
 - `CORSA_QUEUE_STATE_PATH`
+- `CORSA_PEERS_PATH`
+- `CORSA_PROXY`
 - `CORSA_NODE_TYPE`
 - `CORSA_MAX_OUTGOING_PEERS`
 - `CORSA_MAX_INCOMING_PEERS`
@@ -1039,6 +1062,25 @@ Fields:
 - `CORSA_MAX_INCOMING_PEERS=0` означает отсутствие app-level лимита на входящие peer-соединения
 - очередь исходящих direct-message кадров и состояние relay retry сохраняются на диск и переживают рестарт ноды
 - допустимый drift времени сообщений по умолчанию: `600` секунд
+
+### Персистенция адресов пиров
+
+Адреса пиров, обнаруженные через обмен `get_peers` и bootstrap, сохраняются локально в `peers-{port}.json` (путь по умолчанию: `.corsa/peers-{port}.json`, переопределение: `CORSA_PEERS_PATH`). Файл использует модель scoring по аналогии с Bitcoin `peers.dat`:
+
+- каждая запись хранит адрес пира, тип ноды, временные метки последнего подключения/отключения, число последовательных ошибок, тег источника (`bootstrap`, `peer_exchange`, `persisted`) и числовой score
+- score увеличивается при успешном TCP-рукопожатии (+10) и уменьшается при ошибке (-5) или чистом отключении (-2), зажат в диапазоне [-50, +100]
+- файл сбрасывается на диск каждые 5 минут в bootstrap loop и один раз при graceful shutdown
+- при перезапуске персистированные пиры мержатся с bootstrap: записи bootstrap идут первыми, затем персистированные в порядке убывания score; дубликаты пропускаются
+- список ограничен 500 записями; записи с наименьшим score обрезаются при сохранении
+
+### Поддержка onion-адресов
+
+Адреса пиров могут быть `.onion` хостнеймами (Tor hidden services). При установке `CORSA_PROXY` в адрес SOCKS5 прокси (например `127.0.0.1:9050`) нода маршрутизирует все `.onion` соединения через прокси:
+
+- `.onion` адреса принимаются как есть в advertised address при `normalizePeerAddress`; стандартная IP-валидация и проверки forbidden-IP не применяются к `.onion` хостам
+- SOCKS5 рукопожатие использует `ATYP=0x03` (доменное имя), чтобы прокси разрешал `.onion` адрес, а не локальная нода
+- если `CORSA_PROXY` не настроен, `.onion` адреса пиров сохраняются, но попытки подключения к ним завершатся ошибкой gracefully
+- non-`.onion` адреса продолжают использовать прямые TCP-соединения вне зависимости от настройки прокси
 
 ### Handshake
 

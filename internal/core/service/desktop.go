@@ -3,6 +3,7 @@ package service
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -84,6 +85,25 @@ type PendingMessage struct {
 	LastAttemptAt *time.Time
 	Retries       int
 	Error         string
+}
+
+type ConsolePeerStatus struct {
+	Address      string `json:"address"`
+	State        string `json:"state"`
+	Connected    bool   `json:"connected"`
+	PendingCount int    `json:"pending_count,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
+}
+
+type ConsolePingStatus struct {
+	Address   string `json:"address"`
+	OK        bool   `json:"ok"`
+	Status    string `json:"status"`
+	Connected bool   `json:"connected"`
+	State     string `json:"state,omitempty"`
+	Node      string `json:"node,omitempty"`
+	Network   string `json:"network,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type NodeStatus struct {
@@ -428,6 +448,287 @@ func (c *DesktopClient) FetchMessage(ctx context.Context, topic, messageID strin
 		return MessageRecord{}, fmt.Errorf("message item is missing")
 	}
 	return messageRecordFromFrame(*frame.Item)
+}
+
+func (c *DesktopClient) ExecuteConsoleCommand(input string) (string, error) {
+	frame, inlineOutput, err := parseConsoleCommand(input, c.id.Address, c.appCfg.Version)
+	if err != nil {
+		return "", err
+	}
+	if inlineOutput != "" {
+		return inlineOutput, nil
+	}
+	if frame.Type == "ping" {
+		return c.consolePingJSON()
+	}
+	if frame.Type == "get_peers" {
+		return c.consolePeersJSON()
+	}
+
+	reply, err := c.localRequestFrame(frame)
+	if err != nil {
+		return "", err
+	}
+
+	data, err := json.MarshalIndent(reply, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("format console response: %w", err)
+	}
+	return string(data), nil
+}
+
+func (c *DesktopClient) consolePeersJSON() (string, error) {
+	peersReply, err := c.localRequestFrame(protocol.Frame{Type: "get_peers"})
+	if err != nil {
+		return "", err
+	}
+	peerHealthReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if err != nil {
+		return "", err
+	}
+	payload := buildConsolePeersPayload(peersReply.Peers, peerHealthFromFrame(peerHealthReply))
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("format get_peers response: %w", err)
+	}
+	return string(data), nil
+}
+
+func (c *DesktopClient) consolePingJSON() (string, error) {
+	peerHealthReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if err != nil {
+		return "", err
+	}
+	health := peerHealthFromFrame(peerHealthReply)
+
+	connectedPeers := make([]PeerHealth, 0, len(health))
+	for _, item := range health {
+		if item.Connected {
+			connectedPeers = append(connectedPeers, item)
+		}
+	}
+
+	results := make([]ConsolePingStatus, 0, len(connectedPeers))
+	okCount := 0
+	for _, item := range connectedPeers {
+		address := strings.TrimSpace(item.Address)
+		if address == "" {
+			continue
+		}
+
+		result := ConsolePingStatus{
+			Address:   address,
+			Status:    "not_ok",
+			Connected: item.Connected,
+			State:     item.State,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		conn, reader, _, err := c.openSessionAt(ctx, address, "desktop")
+		cancel()
+		if err != nil {
+			result.Error = err.Error()
+			results = append(results, result)
+			continue
+		}
+
+		reply, err := c.requestFrame(conn, reader, protocol.Frame{Type: "ping"})
+		_ = conn.Close()
+		if err != nil {
+			result.Error = err.Error()
+			results = append(results, result)
+			continue
+		}
+
+		result.OK = reply.Type == "pong"
+		if result.OK {
+			result.Status = "ok"
+			result.Node = reply.Node
+			result.Network = reply.Network
+			okCount++
+		} else {
+			result.Error = "unexpected ping reply: " + reply.Type
+		}
+		results = append(results, result)
+	}
+
+	payload := struct {
+		Type    string              `json:"type"`
+		Count   int                 `json:"count"`
+		Total   int                 `json:"total"`
+		Results []ConsolePingStatus `json:"results"`
+	}{
+		Type:    "ping",
+		Count:   okCount,
+		Total:   len(connectedPeers),
+		Results: results,
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("format ping response: %w", err)
+	}
+	return string(data), nil
+}
+
+func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
+	byAddress := make(map[string]PeerHealth, len(health))
+	for _, item := range health {
+		byAddress[strings.TrimSpace(item.Address)] = item
+	}
+
+	allPeers := make([]ConsolePeerStatus, 0, len(peers))
+	connected := make([]ConsolePeerStatus, 0, len(peers))
+	knownWithState := make([]ConsolePeerStatus, 0, len(health))
+	knownOnly := make([]string, 0, len(peers))
+
+	for _, address := range peers {
+		address = strings.TrimSpace(address)
+		if address == "" {
+			continue
+		}
+		item, ok := byAddress[address]
+		if !ok {
+			knownOnly = append(knownOnly, address)
+			allPeers = append(allPeers, ConsolePeerStatus{Address: address, State: "known"})
+			continue
+		}
+
+		status := ConsolePeerStatus{
+			Address:      address,
+			State:        "known",
+			Connected:    item.Connected,
+			PendingCount: item.PendingCount,
+			LastError:    item.LastError,
+		}
+		if strings.TrimSpace(item.State) != "" {
+			status.State = item.State
+		}
+		allPeers = append(allPeers, status)
+		if item.Connected {
+			connected = append(connected, status)
+		} else {
+			knownWithState = append(knownWithState, status)
+		}
+	}
+
+	return struct {
+		Type      string              `json:"type"`
+		Count     int                 `json:"count"`
+		Total     int                 `json:"total"`
+		Connected []ConsolePeerStatus `json:"connected,omitempty"`
+		Pending   []ConsolePeerStatus `json:"pending,omitempty"`
+		KnownOnly []string            `json:"known_only,omitempty"`
+		Peers     []ConsolePeerStatus `json:"peers"`
+	}{
+		Type:      "peers",
+		Count:     len(connected),
+		Total:     len(allPeers),
+		Connected: connected,
+		Pending:   knownWithState,
+		KnownOnly: knownOnly,
+		Peers:     allPeers,
+	}
+}
+
+func parseConsoleCommand(input, selfAddress, clientVersion string) (protocol.Frame, string, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return protocol.Frame{}, "", fmt.Errorf("console command is empty")
+	}
+
+	if protocol.IsJSONLine(trimmed) {
+		frame, err := protocol.ParseFrameLine(trimmed)
+		if err != nil {
+			return protocol.Frame{}, "", err
+		}
+		if strings.TrimSpace(frame.Type) == "" {
+			return protocol.Frame{}, "", fmt.Errorf("console command type is required")
+		}
+		return frame, "", nil
+	}
+
+	fields := strings.Fields(trimmed)
+	command := strings.ToLower(fields[0])
+
+	switch command {
+	case "help":
+		return protocol.Frame{}, consoleHelpText(selfAddress), nil
+	case "ping":
+		return protocol.Frame{Type: "ping"}, "", nil
+	case "hello":
+		return protocol.Frame{
+			Type:          "hello",
+			Version:       config.ProtocolVersion,
+			Client:        "desktop",
+			ClientVersion: strings.ReplaceAll(clientVersion, " ", "-"),
+		}, "", nil
+	case "get_peers", "fetch_identities", "fetch_contacts", "fetch_trusted_contacts", "fetch_peer_health", "fetch_notices":
+		return protocol.Frame{Type: command}, "", nil
+	case "fetch_pending_messages":
+		return protocol.Frame{Type: command, Topic: commandArg(fields, 1, "dm")}, "", nil
+	case "fetch_messages", "fetch_message_ids":
+		return protocol.Frame{Type: command, Topic: commandArg(fields, 1, "global")}, "", nil
+	case "fetch_message":
+		if len(fields) < 3 {
+			return protocol.Frame{}, "", fmt.Errorf("usage: fetch_message <topic> <id>")
+		}
+		return protocol.Frame{Type: command, Topic: fields[1], ID: strings.Join(fields[2:], " ")}, "", nil
+	case "fetch_inbox":
+		return protocol.Frame{
+			Type:      command,
+			Topic:     commandArg(fields, 1, "dm"),
+			Recipient: commandArg(fields, 2, selfAddress),
+		}, "", nil
+	case "fetch_delivery_receipts":
+		return protocol.Frame{Type: command, Recipient: commandArg(fields, 1, selfAddress)}, "", nil
+	default:
+		return protocol.Frame{}, "", fmt.Errorf("unknown console command: %s", fields[0])
+	}
+}
+
+func commandArg(fields []string, index int, fallback string) string {
+	if len(fields) <= index {
+		return fallback
+	}
+	return strings.TrimSpace(fields[index])
+}
+
+func consoleHelpText(selfAddress string) string {
+	return strings.Join([]string{
+		"== Control ==",
+		"help",
+		"ping",
+		"hello",
+		"",
+		"== Network ==",
+		"get_peers",
+		"fetch_peer_health",
+		"",
+		"== Identity & Contacts ==",
+		"fetch_identities",
+		"fetch_contacts",
+		"fetch_trusted_contacts",
+		"",
+		"== Messages ==",
+		"fetch_pending_messages [topic]",
+		"fetch_messages [topic]",
+		"fetch_message_ids [topic]",
+		"fetch_message <topic> <id>",
+		"fetch_inbox <topic> [recipient]",
+		"fetch_delivery_receipts [recipient]",
+		"",
+		"== Notices ==",
+		"fetch_notices",
+		"",
+		"Defaults:",
+		"  topic for fetch_messages/fetch_message_ids: global",
+		"  topic for fetch_pending_messages/fetch_inbox: dm",
+		"  recipient: " + selfAddress,
+		"",
+		"You can also paste a raw JSON protocol frame.",
+	}, "\n")
 }
 
 func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresses []string, counterparty string) (int, error) {

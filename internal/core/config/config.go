@@ -33,6 +33,8 @@ type Node struct {
 	IdentityPath     string
 	TrustStorePath   string
 	QueueStatePath   string
+	PeersStatePath   string
+	ProxyAddress     string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
 	Type             NodeType
 	ListenerEnabled  bool
 	ListenerSet      bool
@@ -65,6 +67,8 @@ func Default() Config {
 	identityPath := envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress))
 	trustStorePath := envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress))
 	queueStatePath := envOrDefault("CORSA_QUEUE_STATE_PATH", defaultQueueStatePath(listenAddress))
+	peersStatePath := envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress))
+	proxyAddress := envOrDefault("CORSA_PROXY", "")
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
@@ -84,6 +88,8 @@ func Default() Config {
 			IdentityPath:     identityPath,
 			TrustStorePath:   trustStorePath,
 			QueueStatePath:   queueStatePath,
+			PeersStatePath:   peersStatePath,
+			ProxyAddress:     proxyAddress,
 			Type:             nodeType,
 			ListenerEnabled:  listenerEnabled,
 			ListenerSet:      listenerSet,
@@ -140,6 +146,13 @@ func (n Node) EffectiveQueueStatePath() string {
 	return defaultQueueStatePath(n.ListenAddress)
 }
 
+func (n Node) EffectivePeersStatePath() string {
+	if strings.TrimSpace(n.PeersStatePath) != "" {
+		return n.PeersStatePath
+	}
+	return defaultPeersStatePath(n.ListenAddress)
+}
+
 func envOrDefault(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -163,6 +176,12 @@ func defaultQueueStatePath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
 	return filepath.Join(".corsa", "queue-"+port+".json")
+}
+
+func defaultPeersStatePath(listenAddress string) string {
+	port := portSuffix(listenAddress)
+
+	return filepath.Join(".corsa", "peers-"+port+".json")
 }
 
 func portSuffix(listenAddress string) string {

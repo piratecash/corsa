@@ -26,6 +26,10 @@ lint:
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -show verbose ./...
 
+.PHONY: test
+test:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test ./...
+
 .PHONY: build-node-macos-arm64
 build-node-macos-arm64: build-dirs
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -o $(DIST_DIR)/corsa-node-darwin-arm64 ./cmd/corsa-node

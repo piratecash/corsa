@@ -53,9 +53,12 @@ type Service struct {
 	inboundConns map[net.Conn]struct{}
 	connAuth     map[net.Conn]*connAuthState
 	bans         map[string]banEntry
-	events       map[chan struct{}]struct{}
-	listener     net.Listener
-	lastSync     time.Time
+	events         map[chan struct{}]struct{}
+	listener       net.Listener
+	lastSync       time.Time
+	peersStatePath string
+	lastPeerSave   time.Time
+	persistedMeta  map[string]*peerEntry // stable metadata from peers.json, keyed by address
 }
 
 type subscriber struct {
@@ -87,6 +90,7 @@ type peerHealth struct {
 	LastUsefulReceiveAt time.Time
 	ConsecutiveFailures int
 	LastError           string
+	Score               int // peer quality score for persistence priority
 }
 
 type pendingFrame struct {
@@ -148,11 +152,39 @@ type incomingMessage struct {
 }
 
 func NewService(cfg config.Node, id *identity.Identity) *Service {
-	peers := make([]transport.Peer, 0, len(cfg.BootstrapPeers))
+	// Load persisted peer state and merge with bootstrap peers.
+	// Bootstrap peers always appear first; persisted peers are appended
+	// in score-descending order, skipping duplicates.
+	peersStatePath := cfg.EffectivePeersStatePath()
+	peerState, err := loadPeerState(peersStatePath)
+	if err != nil {
+		log.Printf("node: peer state load failed path=%s err=%v", peersStatePath, err)
+		peerState = peerStateFile{Version: peerStateVersion, Peers: []peerEntry{}}
+	}
+
+	peers := make([]transport.Peer, 0, len(cfg.BootstrapPeers)+len(peerState.Peers))
+	seenAddrs := make(map[string]struct{})
 	for i, addr := range cfg.BootstrapPeers {
 		peers = append(peers, transport.Peer{
 			ID:      fmt.Sprintf("bootstrap-%d", i),
 			Address: addr,
+		})
+		seenAddrs[addr] = struct{}{}
+	}
+	sortPeerEntries(peerState.Peers)
+	// Index persisted entries so we can seed health from their metadata.
+	persistedByAddr := make(map[string]*peerEntry, len(peerState.Peers))
+	for i, entry := range peerState.Peers {
+		if _, dup := seenAddrs[entry.Address]; dup {
+			// Even for duplicates (bootstrap overlap) keep the metadata for health seeding.
+			persistedByAddr[entry.Address] = &peerState.Peers[i]
+			continue
+		}
+		seenAddrs[entry.Address] = struct{}{}
+		persistedByAddr[entry.Address] = &peerState.Peers[i]
+		peers = append(peers, transport.Peer{
+			ID:      fmt.Sprintf("persisted-%d", i),
+			Address: entry.Address,
 		})
 	}
 
@@ -215,12 +247,35 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	}
 	sanitizeRelayState(queueState.RelayRetry, queueState.RelayMessages, queueState.RelayReceipts)
 
+	// Seed health map from persisted peer metadata so that scores,
+	// failure counts and timestamps survive a restart+flush cycle
+	// even if the peer hasn't reconnected yet.
+	restoredHealth := make(map[string]*peerHealth, len(persistedByAddr))
+	for addr, entry := range persistedByAddr {
+		h := &peerHealth{
+			Address:             addr,
+			State:               peerStateReconnecting,
+			ConsecutiveFailures: entry.ConsecutiveFailures,
+			LastError:           entry.LastError,
+			Score:               entry.Score,
+		}
+		if entry.LastConnectedAt != nil {
+			h.LastConnectedAt = *entry.LastConnectedAt
+		}
+		if entry.LastDisconnectedAt != nil {
+			h.LastDisconnectedAt = *entry.LastDisconnectedAt
+		}
+		restoredHealth[addr] = h
+	}
+
 	return &Service{
-		identity:     id,
-		cfg:          cfg,
-		selfBoxSig:   selfContact.BoxSignature,
-		trust:        trust,
-		peers:        peers,
+		identity:       id,
+		cfg:            cfg,
+		selfBoxSig:     selfContact.BoxSignature,
+		trust:          trust,
+		peers:          peers,
+		peersStatePath: peersStatePath,
+		persistedMeta:  persistedByAddr,
 		known:        known,
 		boxKeys:      boxKeys,
 		pubKeys:      pubKeys,
@@ -232,7 +287,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		seenReceipts: seenReceipts,
 		subs:         make(map[string]map[string]*subscriber),
 		sessions:     make(map[string]*peerSession),
-		health:       make(map[string]*peerHealth),
+		health:       restoredHealth,
 		peerTypes:    make(map[string]config.NodeType),
 		peerIDs:      make(map[string]string),
 		peerVersions: make(map[string]string),
@@ -249,9 +304,15 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	bootstrapDone := make(chan struct{})
+	go func() {
+		s.bootstrapLoop(ctx)
+		close(bootstrapDone)
+	}()
+
 	if !s.cfg.EffectiveListenerEnabled() {
-		go s.bootstrapLoop(ctx)
 		<-ctx.Done()
+		<-bootstrapDone
 		return nil
 	}
 
@@ -269,13 +330,13 @@ func (s *Service) Run(ctx context.Context) error {
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
-	go s.bootstrapLoop(ctx)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				<-bootstrapDone
 				return nil
 			default:
 			}
@@ -1404,15 +1465,125 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			s.flushPeerState()
 			return
 		case <-ticker.C:
 			s.cleanupExpiredMessages()
 			s.cleanupExpiredNotices()
 			s.ensurePeerSessions(ctx)
 			s.retryRelayDeliveries()
+			s.maybeSavePeerState()
 		}
 	}
 }
+
+// maybeSavePeerState persists peer addresses if enough time has elapsed
+// since the last flush.
+func (s *Service) maybeSavePeerState() {
+	s.mu.RLock()
+	elapsed := time.Since(s.lastPeerSave)
+	s.mu.RUnlock()
+
+	if elapsed < time.Duration(peerStateSaveMinutes)*time.Minute {
+		return
+	}
+	s.flushPeerState()
+}
+
+// flushPeerState builds a snapshot from in-memory state and writes it to disk.
+func (s *Service) flushPeerState() {
+	s.mu.Lock()
+	entries := s.buildPeerEntriesLocked()
+	path := s.peersStatePath
+	s.mu.Unlock()
+
+	sortPeerEntries(entries)
+	entries = trimPeerEntries(entries)
+
+	state := peerStateFile{
+		Version: peerStateVersion,
+		Peers:   entries,
+	}
+	if err := savePeerState(path, state); err != nil {
+		log.Printf("node: peer state save failed path=%s err=%v", path, err)
+		return
+	}
+
+	s.mu.Lock()
+	s.lastPeerSave = time.Now()
+	s.mu.Unlock()
+}
+
+// buildPeerEntriesLocked snapshots all known peers with their health metadata.
+// Stable metadata (NodeType, Source, AddedAt) is read from persistedMeta so
+// that values loaded from disk survive a restart+flush cycle without being
+// overwritten by transient runtime state.  Only truly new peers (not yet in
+// persistedMeta) derive these fields from runtime maps.
+// Must be called with s.mu held (write lock required — updates persistedMeta
+// for newly discovered peers).
+func (s *Service) buildPeerEntriesLocked() []peerEntry {
+	entries := make([]peerEntry, 0, len(s.peers))
+	now := time.Now().UTC()
+	for _, peer := range s.peers {
+		if peer.Address == "" {
+			continue
+		}
+		var entry peerEntry
+		if pm := s.persistedMeta[peer.Address]; pm != nil {
+			// Preserve stable metadata from the persisted snapshot.
+			entry = peerEntry{
+				Address:  peer.Address,
+				NodeType: pm.NodeType,
+				Source:   pm.Source,
+				AddedAt:  pm.AddedAt,
+			}
+			// If runtime has a fresher NodeType (e.g. from a hello/welcome),
+			// prefer it over the persisted value.
+			if rt := string(s.peerTypes[peer.Address]); rt != "" {
+				entry.NodeType = rt
+			}
+		} else {
+			// New peer discovered at runtime — derive from live state.
+			entry = peerEntry{
+				Address:  peer.Address,
+				NodeType: string(s.peerTypes[peer.Address]),
+				Source:   peerSource(peer.ID),
+				AddedAt:  &now,
+			}
+			// Store so that subsequent flushes are stable.
+			clone := entry
+			s.persistedMeta[peer.Address] = &clone
+		}
+		if health := s.health[peer.Address]; health != nil {
+			if !health.LastConnectedAt.IsZero() {
+				t := health.LastConnectedAt
+				entry.LastConnectedAt = &t
+			}
+			if !health.LastDisconnectedAt.IsZero() {
+				t := health.LastDisconnectedAt
+				entry.LastDisconnectedAt = &t
+			}
+			entry.ConsecutiveFailures = health.ConsecutiveFailures
+			entry.LastError = health.LastError
+			entry.Score = health.Score
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// peerSource infers the source tag from the peer ID prefix.
+func peerSource(id string) string {
+	switch {
+	case len(id) >= 9 && id[:9] == "bootstrap":
+		return "bootstrap"
+	case len(id) >= 9 && id[:9] == "persisted":
+		return "persisted"
+	default:
+		return "peer_exchange"
+	}
+}
+
 
 func (s *Service) ensurePeerSessions(ctx context.Context) {
 	for _, address := range s.peerDialCandidates() {
@@ -1445,12 +1616,20 @@ func (s *Service) peerDialCandidates() []string {
 		return nil
 	}
 
+	hasProxy := s.cfg.ProxyAddress != ""
 	candidates := make([]string, 0, len(s.peers))
 	seen := make(map[string]struct{})
 	for _, peer := range s.peers {
 		for _, address := range s.dialAttemptAddressesLocked(strings.TrimSpace(peer.Address)) {
 			if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 				continue
+			}
+			// Skip .onion addresses when no SOCKS5 proxy is configured;
+			// dialling them would fail immediately on every cycle.
+			if !hasProxy {
+				if host, _, ok := splitHostPort(address); ok && isOnionAddress(host) {
+					continue
+				}
 			}
 			if _, ok := s.upstream[address]; ok {
 				continue
@@ -1474,8 +1653,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		return
 	}
 
-	dialer := net.Dialer{Timeout: 1500 * time.Millisecond}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	conn, err := s.dialPeer(ctx, address, 1500*time.Millisecond)
 	if err != nil {
 		return
 	}
@@ -1587,8 +1765,7 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 }
 
 func (s *Service) openPeerSession(ctx context.Context, address string) error {
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	conn, err := s.dialPeer(ctx, address, 2*time.Second)
 	if err != nil {
 		return err
 	}
@@ -2527,6 +2704,7 @@ func (s *Service) markPeerConnected(address string) {
 	health.LastConnectedAt = now
 	health.LastError = ""
 	health.ConsecutiveFailures = 0
+	health.Score = clampScore(health.Score + peerScoreConnect)
 }
 
 func (s *Service) markPeerDisconnected(address string, err error) {
@@ -2538,9 +2716,13 @@ func (s *Service) markPeerDisconnected(address string, err error) {
 	health.Connected = false
 	s.updatePeerStateLocked(health, peerStateReconnecting)
 	health.LastDisconnectedAt = now
-	health.ConsecutiveFailures++
 	if err != nil {
+		health.ConsecutiveFailures++
 		health.LastError = err.Error()
+		health.Score = clampScore(health.Score + peerScoreFailure)
+	} else {
+		health.ConsecutiveFailures = 0
+		health.Score = clampScore(health.Score + peerScoreDisconnect)
 	}
 }
 
@@ -3352,6 +3534,18 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 		advertisedPort = config.DefaultPeerPort
 	}
 
+	// .onion addresses are accepted as-is from the advertised field;
+	// the observed TCP address is meaningless for Tor connections.
+	if advertisedOK && isOnionAddress(advertisedHost) {
+		return net.JoinHostPort(advertisedHost, advertisedPort), true
+	}
+	// Reject any .onion-suffixed hostname that failed the strict validator
+	// above (wrong length, invalid base32 chars, etc.) so it cannot leak
+	// through the generic hostname branches below.
+	if advertisedOK && strings.HasSuffix(strings.ToLower(advertisedHost), ".onion") {
+		return "", false
+	}
+
 	switch {
 	case advertisedOK && observedOK:
 		observedIP := net.ParseIP(observedHost)
@@ -3381,6 +3575,26 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 	}
 
 	return "", false
+}
+
+// isOnionAddress returns true if the host is a valid Tor .onion address.
+// Tor v3 addresses are 56 base32 characters + ".onion" (62 total).
+// Tor v2 addresses (deprecated) are 16 base32 characters + ".onion" (22 total).
+func isOnionAddress(host string) bool {
+	lower := strings.ToLower(host)
+	if !strings.HasSuffix(lower, ".onion") {
+		return false
+	}
+	name := lower[:len(lower)-6] // strip ".onion"
+	if len(name) != 56 && len(name) != 16 {
+		return false
+	}
+	for _, c := range name {
+		if (c < 'a' || c > 'z') && (c < '2' || c > '7') {
+			return false
+		}
+	}
+	return true
 }
 
 func splitHostPort(address string) (string, string, bool) {
