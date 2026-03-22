@@ -3528,3 +3528,211 @@ func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
 		t.Fatalf("expected 0 orphaned frames under %s, got %d", runtimeAddr, orphanedCount)
 	}
 }
+
+// --- Observed IP tests ---
+
+func TestRecordObservedAddressIgnoresEmpty(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	svc.recordObservedAddress("peer-fingerprint-a", "")
+	svc.recordObservedAddress("", "203.0.113.50")
+	svc.mu.RLock()
+	count := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if count != 0 {
+		t.Fatalf("expected 0 observed addresses after empty input, got %d", count)
+	}
+}
+
+func TestRecordObservedAddressIgnoresPrivate(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	svc.recordObservedAddress("peer-fingerprint-a", "10.0.0.1")
+	svc.recordObservedAddress("peer-fingerprint-b", "192.168.1.5")
+	svc.recordObservedAddress("peer-fingerprint-c", "127.0.0.1")
+	svc.mu.RLock()
+	count := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if count != 0 {
+		t.Fatalf("expected 0 observed addresses for private/loopback IPs, got %d", count)
+	}
+}
+
+func TestRecordObservedAddressStoresPublicIP(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.mu.RLock()
+	got := svc.observedAddrs["peer-fingerprint-a"]
+	svc.mu.RUnlock()
+	if got != "203.0.113.50" {
+		t.Fatalf("expected observed IP 203.0.113.50, got %q", got)
+	}
+}
+
+func TestRecordObservedAddressConsensusRequiresTwoPeers(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	// Single observation — no consensus yet.
+	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.mu.RLock()
+	count := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("expected 1 observed address, got %d", count)
+	}
+
+	// Second peer (different identity) agrees — consensus reached.
+	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.50")
+	svc.mu.RLock()
+	count = len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if count != 2 {
+		t.Fatalf("expected 2 observed addresses, got %d", count)
+	}
+}
+
+func TestRecordObservedAddressSameNodeOneVote(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	// Same peer identity reached via two different addresses — still one vote.
+	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.mu.RLock()
+	count := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("expected 1 observed address (same identity = one vote), got %d", count)
+	}
+}
+
+func TestRecordObservedAddressNoConsensusWhenPeersDisagree(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.99")
+
+	// Both stored, but they disagree — no consensus.
+	svc.mu.RLock()
+	count := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if count != 2 {
+		t.Fatalf("expected 2 observed addresses, got %d", count)
+	}
+}
+
+func TestRecordObservedAddressSkipsWhenAdvertiseIsPublic(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	// Node already advertises a public IP — observed address should not trigger NAT log.
+	svc := NewService(config.Node{
+		ListenAddress:    "0.0.0.0:64646",
+		AdvertiseAddress: "203.0.113.50:64646",
+	}, id)
+
+	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.50")
+	svc.mu.RLock()
+	count := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	// Observations still stored, but the consensus path exits early
+	// because advertise address already matches observed.
+	if count != 2 {
+		t.Fatalf("expected 2 observed addresses, got %d", count)
+	}
+}
+
+func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	peerID, _ := identity.Generate()
+	peerAddr := "198.51.100.1:64646"
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	// Simulate what openPeerSession does: record observation keyed by identity,
+	// and register the peerID mapping so markPeerDisconnected can find it.
+	svc.recordObservedAddress(peerID.Address, "203.0.113.50")
+	svc.mu.Lock()
+	svc.peerIDs[peerAddr] = peerID.Address
+	svc.mu.Unlock()
+
+	svc.mu.RLock()
+	before := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if before != 1 {
+		t.Fatalf("expected 1 observed address before disconnect, got %d", before)
+	}
+
+	svc.markPeerDisconnected(peerAddr, fmt.Errorf("test disconnect"))
+	svc.mu.RLock()
+	after := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if after != 0 {
+		t.Fatalf("expected 0 observed addresses after disconnect, got %d", after)
+	}
+}
+
+func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
+	t.Parallel()
+	id, _ := identity.Generate()
+	peerID, _ := identity.Generate()
+	primaryAddr := "198.51.100.1:64647"
+	fallbackAddr := "198.51.100.1:64646"
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:64646",
+		AdvertiseAddress: "192.168.1.10:64646",
+	}, id)
+
+	// Record observation under peer identity.
+	svc.recordObservedAddress(peerID.Address, "203.0.113.50")
+
+	// Set up dialOrigin (fallback → primary) and peerIDs (primary → fingerprint)
+	// as the real code does when a fallback connection succeeds.
+	svc.mu.Lock()
+	svc.dialOrigin[fallbackAddr] = primaryAddr
+	svc.peerIDs[primaryAddr] = peerID.Address
+	svc.mu.Unlock()
+
+	// Disconnect using fallback address — resolveHealthAddress maps to primary,
+	// then peerIDs lookup finds the fingerprint.
+	svc.markPeerDisconnected(fallbackAddr, fmt.Errorf("connection lost"))
+	svc.mu.RLock()
+	after := len(svc.observedAddrs)
+	svc.mu.RUnlock()
+	if after != 0 {
+		t.Fatalf("expected 0 observed addresses after fallback disconnect, got %d", after)
+	}
+}

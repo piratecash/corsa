@@ -47,6 +47,7 @@ type Frame struct {
 	Count                  int                   `json:"count,omitempty"`
 	Status                 string                `json:"status,omitempty"`
 	AckType                string                `json:"ack_type,omitempty"`
+	ObservedAddress        string                `json:"observed_address,omitempty"`
 	Challenge              string                `json:"challenge,omitempty"`
 	Signature              string                `json:"signature,omitempty"`
 	Code                   string                `json:"code,omitempty"`

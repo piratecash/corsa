@@ -62,6 +62,7 @@ type Service struct {
 	lastPeerEvict   time.Time
 	dialOrigin      map[string]string     // dial address → primary peer address (for fallback port tracking)
 	persistedMeta   map[string]*peerEntry // stable metadata from peers.json, keyed by address
+	observedAddrs   map[string]string     // peer identity (fingerprint) → observed IP they reported for us
 }
 
 type subscriber struct {
@@ -353,6 +354,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		outbound:       queueState.OutboundState,
 		upstream:       make(map[string]struct{}),
 		dialOrigin:     make(map[string]string),
+		observedAddrs:  make(map[string]string),
 		inboundConns:   make(map[net.Conn]struct{}),
 		connAuth:       make(map[net.Conn]*connAuthState),
 		bans:           make(map[string]banEntry),
@@ -556,7 +558,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
 			}
-			s.writeJSONFrame(conn, s.welcomeFrame(challenge))
+			s.writeJSONFrame(conn, s.welcomeFrame(challenge, remoteIP(conn.RemoteAddr())))
 			return true
 		}
 		s.learnPeerFromFrame(conn.RemoteAddr().String(), frame)
@@ -564,7 +566,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		if frame.Client == "node" || frame.Client == "desktop" {
 			log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
 		}
-		s.writeJSONFrame(conn, s.welcomeFrame(""))
+		s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
 	case "auth_session":
 		reply, ok := s.handleAuthSessionFrame(conn, frame)
@@ -646,7 +648,7 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 				MinimumProtocolVersion: config.MinimumProtocolVersion,
 			}
 		}
-		return s.welcomeFrame("")
+		return s.welcomeFrame("", "")
 	case "ping":
 		return protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"}
 	case "get_peers":
@@ -698,7 +700,7 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 	_, _ = io.WriteString(conn, line)
 }
 
-func (s *Service) welcomeFrame(challenge string) protocol.Frame {
+func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.Frame {
 	listen := ""
 	if s.cfg.EffectiveListenerEnabled() {
 		listen = s.cfg.AdvertiseAddress
@@ -718,6 +720,7 @@ func (s *Service) welcomeFrame(challenge string) protocol.Frame {
 		PubKey:                 identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
 		BoxSig:                 s.selfBoxSig,
+		ObservedAddress:        observedAddr,
 		Challenge:              challenge,
 	}
 }
@@ -834,6 +837,68 @@ func remoteIP(addr net.Addr) string {
 		return host
 	}
 	return addr.String()
+}
+
+// observedAddrConsensusThreshold is the minimum number of distinct peers
+// that must report the same observed IP before the node trusts it.
+const observedAddrConsensusThreshold = 2
+
+// recordObservedAddress stores the IP that a remote peer observed for our
+// outbound connection.  Observations are keyed by peer identity (fingerprint),
+// not by dial address, so the same node always contributes exactly one vote
+// regardless of how many address aliases it has.  When enough distinct peers
+// agree on the same public IP and it differs from our advertise address,
+// the node logs a NAT detection event.
+func (s *Service) recordObservedAddress(peerID, observedIP string) {
+	if peerID == "" || observedIP == "" {
+		return
+	}
+	ip := net.ParseIP(observedIP)
+	if ip == nil {
+		return
+	}
+	// Ignore private, loopback, and link-local addresses — they are never
+	// useful as externally-visible observations.
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.observedAddrs[peerID] = observedIP
+
+	// Count how many distinct peers agree on the same IP.
+	votes := make(map[string]int, len(s.observedAddrs))
+	for _, obs := range s.observedAddrs {
+		votes[obs]++
+	}
+
+	best, bestCount := "", 0
+	for addr, cnt := range votes {
+		if cnt > bestCount {
+			best, bestCount = addr, cnt
+		}
+	}
+
+	if bestCount < observedAddrConsensusThreshold {
+		return
+	}
+
+	// Compare with our advertise address to detect NAT.
+	advHost, _, ok := splitHostPort(s.cfg.AdvertiseAddress)
+	if !ok {
+		return
+	}
+	if advHost == best {
+		return // our advertise address matches what peers see — no NAT
+	}
+	advIP := net.ParseIP(advHost)
+	if advIP != nil && !advIP.IsPrivate() && !advIP.IsLoopback() {
+		return // we already advertise a public IP — don't override
+	}
+	log.Printf("node: NAT detected — %d peers observe our IP as %s (advertise=%s)",
+		bestCount, best, s.cfg.AdvertiseAddress)
 }
 
 func (s *Service) isBlacklistedConn(conn net.Conn) bool {
@@ -1993,6 +2058,9 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	if err := s.authenticatePeerSession(session, welcome); err != nil {
 		return false, err
 	}
+	// Record observed address only after authentication succeeds so that
+	// an unauthenticated responder cannot influence NAT consensus.
+	s.recordObservedAddress(welcome.Address, welcome.ObservedAddress)
 	s.mu.Lock()
 	s.sessions[address] = session
 	s.mu.Unlock()
@@ -2934,6 +3002,9 @@ func (s *Service) markPeerDisconnected(address string, err error) {
 	} else {
 		health.ConsecutiveFailures = 0
 		health.Score = clampScore(health.Score + peerScoreDisconnect)
+	}
+	if peerID := s.peerIDs[address]; peerID != "" {
+		delete(s.observedAddrs, peerID)
 	}
 }
 

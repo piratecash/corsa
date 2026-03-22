@@ -194,7 +194,8 @@ Response:
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519-pubkey>",
   "boxkey": "<base64-x25519-pubkey>",
-  "boxsig": "<base64url-ed25519-signature>"
+  "boxsig": "<base64url-ed25519-signature>",
+  "observed_address": "203.0.113.50"
 }
 ```
 
@@ -214,6 +215,7 @@ Fields:
 - `pubkey` — optional; responder identity key
 - `boxkey` — optional; responder encryption key
 - `boxsig` — optional; signature proving the encryption key belongs to the responder identity
+- `observed_address` — optional; the IP address (without port) that the responder sees for the caller's TCP connection; used for NAT detection
 
 Role rules:
 
@@ -249,6 +251,16 @@ Key verification in `hello`/`welcome`:
 - when all key fields (`address`, `pubkey`, `boxkey`, `boxsig`) are present in a `hello` or `welcome` frame, the receiving node should verify the `boxkey` binding signature before storing the keys in memory
 - if verification fails, the keys are discarded but the connection is not terminated; the peer identity (`address`) is still recorded
 - when any key field is absent (e.g. an older node that does not advertise `boxkey`), the node should accept whatever fields are available for backward compatibility
+
+Observed address (NAT detection):
+
+- the `welcome` frame includes `observed_address` — the IP address (without ephemeral port) that the responder sees for the caller's inbound TCP connection
+- the connecting node records `observed_address` keyed by peer identity (fingerprint), so the same node always contributes exactly one vote regardless of how many address aliases it has
+- when at least 2 distinct peer identities report the same `observed_address` (consensus threshold), the node considers that its real public IP
+- if the consensus IP differs from the configured `AdvertiseAddress` and the current advertise address is private/loopback, the node logs a NAT detection event
+- observations are per-connection: when a peer disconnects, its observation is removed from the voting set
+- private, loopback, link-local, and unspecified IPs are ignored as observed addresses
+- the node never auto-rewrites `AdvertiseAddress` in the current implementation — NAT detection is informational only
 
 Authenticated session request:
 
@@ -1242,7 +1254,8 @@ Orphaned фреймы сохраняются между рестартами в 
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519-pubkey>",
   "boxkey": "<base64-x25519-pubkey>",
-  "boxsig": "<base64url-ed25519-signature>"
+  "boxsig": "<base64url-ed25519-signature>",
+  "observed_address": "203.0.113.50"
 }
 ```
 
@@ -1262,6 +1275,7 @@ Orphaned фреймы сохраняются между рестартами в 
 - `pubkey` — опциональное; identity key узла
 - `boxkey` — опциональное; encryption key узла
 - `boxsig` — опциональное; подпись, подтверждающая принадлежность encryption key этому identity
+- `observed_address` — опциональное; IP-адрес (без порта) вызывающей стороны, видимый респондеру по TCP-соединению; используется для обнаружения NAT
 
 Правила ролей:
 
@@ -1297,6 +1311,16 @@ Orphaned фреймы сохраняются между рестартами в 
 - когда во фрейме `hello` или `welcome` присутствуют все ключевые поля (`address`, `pubkey`, `boxkey`, `boxsig`), принимающая нода должна проверить подпись привязки `boxkey` перед сохранением ключей в памяти
 - если проверка не прошла, ключи отбрасываются, но соединение не разрывается; identity пира (`address`) по-прежнему фиксируется
 - если какое-либо ключевое поле отсутствует (например, старая нода, не публикующая `boxkey`), нода должна принять доступные поля для обратной совместимости
+
+Observed address (обнаружение NAT):
+
+- фрейм `welcome` содержит поле `observed_address` — IP-адрес (без эфемерного порта), который отвечающий узел видит для входящего TCP-соединения вызывающей стороны
+- подключающийся узел запоминает `observed_address` с привязкой к identity (fingerprint) пира, поэтому один и тот же узел всегда вносит ровно один голос, независимо от количества адресных алиасов
+- когда минимум 2 различных peer identity сообщают один и тот же `observed_address` (порог консенсуса), узел считает его своим реальным публичным IP
+- если консенсусный IP отличается от настроенного `AdvertiseAddress` и текущий advertise-адрес является приватным/loopback, узел логирует событие обнаружения NAT
+- наблюдения привязаны к соединению: при отключении пира его наблюдение удаляется из набора голосов
+- приватные, loopback, link-local и unspecified IP игнорируются как observed-адреса
+- в текущей реализации узел не перезаписывает `AdvertiseAddress` автоматически — обнаружение NAT носит информационный характер
 
 Запрос аутентификации сессии:
 
