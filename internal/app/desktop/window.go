@@ -56,6 +56,7 @@ type Window struct {
 	showLanguageMenu          bool
 	sendStatus                string
 	consoleOpen               bool
+	initialSyncDone           bool // true after first refresh populates seenIncoming
 
 	mu         sync.RWMutex
 	nodeStatus service.NodeStatus
@@ -898,8 +899,16 @@ func (w *Window) updateUnreadState(status service.NodeStatus) {
 	selected := strings.TrimSpace(w.selectedRecipient)
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
+	// On the first refresh cycle, populate seenIncoming with the existing
+	// backlog without triggering a notification sound.  Only messages that
+	// arrive after this initial sync are considered genuinely new.
+	firstSync := !w.initialSyncDone
+	if firstSync {
+		w.initialSyncDone = true
+	}
+
+	hasNew := false
 	for _, message := range status.DirectMessages {
 		if message.Sender == me || message.Recipient != me {
 			continue
@@ -909,10 +918,18 @@ func (w *Window) updateUnreadState(status service.NodeStatus) {
 			continue
 		}
 		w.seenIncoming[message.ID] = struct{}{}
+		if !firstSync {
+			hasNew = true
+		}
 		if message.Sender != selected {
 			w.unreadRecipients[message.Sender]++
 			w.promoteRecipientLocked(message.Sender)
 		}
+	}
+	w.mu.Unlock()
+
+	if hasNew {
+		go systemBeep()
 	}
 }
 
