@@ -28,6 +28,7 @@ The repository contains the current Go-based CORSA stack:
 - `internal/core/identity`: `ed25519` identity, `X25519` box keys, key binding signatures
 - `internal/core/directmsg`: encrypted and signed direct-message envelopes
 - `internal/core/gazeta`: encrypted anonymous notice transport
+- `internal/core/chatlog`: append-only file-backed chat message persistence (see [chatlog.md](chatlog.md))
 - `internal/core/node`: mesh node, trust store, peer sync, relay, storage
 - `internal/core/service`: desktop-facing application service layer
 - `internal/core/protocol`: protocol models
@@ -77,7 +78,7 @@ Current trust and discovery flow:
 1. surface trust conflicts in the desktop UI
 2. add signatures to `Gazeta` notices
 3. move from line protocol to structured frames
-4. add persistent storage for message history
+4. ~~add persistent storage for message history~~ — done, see [chatlog.md](chatlog.md)
 5. add mobile/light-client bindings over the same core
 
 ---
@@ -110,6 +111,7 @@ Current trust and discovery flow:
 - `internal/core/identity`: identity на `ed25519`, `X25519` box keys, подписи привязки ключей
 - `internal/core/directmsg`: зашифрованные и подписанные direct-message envelopes
 - `internal/core/gazeta`: зашифрованный анонимный transport для notices
+- `internal/core/chatlog`: append-only хранение истории сообщений на диске (см. [chatlog.md](chatlog.md))
 - `internal/core/node`: mesh-нода, trust store, peer sync, relay, хранение
 - `internal/core/service`: сервисный слой для desktop-клиента
 - `internal/core/protocol`: модели протокола
@@ -159,5 +161,5 @@ Current trust and discovery flow:
 1. показать trust conflicts в desktop UI
 2. добавить подписи для `Gazeta` notices
 3. перейти от line protocol к structured frames
-4. добавить персистентное хранение истории сообщений
+4. ~~добавить персистентное хранение истории сообщений~~ — сделано, см. [chatlog.md](chatlog.md)
 5. сделать mobile/light-client bindings поверх того же core

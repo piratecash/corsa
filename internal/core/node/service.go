@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"corsa/internal/core/chatlog"
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/gazeta"
@@ -65,6 +66,7 @@ type Service struct {
 	persistedMeta   map[string]*peerEntry // stable metadata from peers.json, keyed by address
 	observedAddrs   map[string]string     // peer identity (fingerprint) → observed IP they reported for us
 	reachableGroups map[NetGroup]struct{} // network groups this node can reach (computed at startup)
+	chatLog         *chatlog.Store        // append-only chatlog for DM and global messages
 }
 
 type subscriber struct {
@@ -371,6 +373,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		connPeerInfo:   make(map[net.Conn]*connPeerHello),
 		bans:           make(map[string]banEntry),
 		events:         make(map[chan struct{}]struct{}),
+		chatLog:        chatlog.NewStore(cfg.EffectiveChatLogDir(), id.Address, cfg.ListenAddress),
 	}
 }
 
@@ -701,6 +704,14 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.fetchNoticesFrame()
 	case "add_peer":
 		return s.addPeerFrame(frame)
+	case "fetch_chatlog":
+		return s.fetchChatlogFrame(frame)
+	case "fetch_chatlog_previews":
+		return s.fetchChatlogPreviewsFrame()
+	case "fetch_dm_headers":
+		return s.fetchDMHeadersFrame()
+	case "fetch_conversations":
+		return s.fetchConversationsFrame()
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand}
 	}
@@ -1452,7 +1463,35 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	count := len(s.topics[msg.Topic])
 	s.mu.Unlock()
 
-	s.emitLocalChange()
+	// Only messages that belong to this node (sender or recipient) get
+	// persisted to chatlog, emit UI events, and push to local subscribers.
+	// Transit messages (relayed DMs where neither party is us) have their
+	// own persistence via queue-<port>.json / relayRetry and must NOT
+	// pollute the local chat history or wake up the desktop UI.
+	isLocal := s.isLocalMessage(msg)
+
+	// Persist to chatlog BEFORE emitting local change so that
+	// desktop UI can safely read the new entry from disk when it
+	// reacts to the event.
+	if s.chatLog != nil && isLocal {
+		entry := chatlog.Entry{
+			ID:        string(msg.ID),
+			Sender:    msg.Sender,
+			Recipient: msg.Recipient,
+			Body:      msg.Body,
+			CreatedAt: msg.CreatedAt.Format(time.RFC3339Nano),
+			Flag:      string(msg.Flag),
+		}
+		if err := s.chatLog.Append(msg.Topic, s.identity.Address, entry); err != nil {
+			log.Printf("node: chatlog append failed topic=%s id=%s err=%v", msg.Topic, msg.ID, err)
+		}
+	}
+
+	// Only notify the desktop UI for messages this node participates in.
+	// Transit relay traffic must not wake up the UI.
+	if isLocal {
+		s.emitLocalChange()
+	}
 
 	log.Printf("node: stored message topic=%s id=%s from=%s to=%s flag=%s", msg.Topic, msg.ID, msg.Sender, msg.Recipient, msg.Flag)
 
@@ -1460,7 +1499,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		s.trackRelayMessage(envelope)
 		go s.gossipMessage(envelope)
 	}
-	if msg.Topic == "dm" && msg.Recipient != "*" {
+	// Push to local DM subscribers and emit delivery receipts only for
+	// messages where this node is a party.  Transit DMs must not be
+	// pushed to local subscribers — they are handled via gossip/relay.
+	if isLocal && msg.Topic == "dm" && msg.Recipient != "*" {
 		go s.pushMessageToSubscribers(envelope)
 		if validateTimestamp && msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
 			go s.emitDeliveryReceipt(msg)
@@ -1468,6 +1510,21 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	}
 
 	return true, count, ""
+}
+
+// isLocalMessage returns true if this node is a party to the message
+// (sender or recipient), meaning the message belongs in the local chatlog.
+// Broadcast messages (recipient="*") and global topics are always local.
+// Transit DMs — where this node is merely relaying between two other parties —
+// return false; their persistence is handled by queue-<port>.json / relayRetry.
+func (s *Service) isLocalMessage(msg incomingMessage) bool {
+	if msg.Topic != "dm" {
+		return true // global/broadcast messages are always local
+	}
+	if msg.Recipient == "*" || msg.Recipient == "" {
+		return true
+	}
+	return msg.Sender == s.identity.Address || msg.Recipient == s.identity.Address
 }
 
 func (s *Service) shouldRouteStoredMessage(msg incomingMessage) bool {
@@ -2726,6 +2783,140 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 // addPeerFrame handles the local "add_peer" console command.
 // The peer is prepended to the peer list so it becomes the first dial
 // candidate on the next bootstrap tick.
+func (s *Service) fetchChatlogFrame(frame protocol.Frame) protocol.Frame {
+	if s.chatLog == nil {
+		return protocol.Frame{Type: "error", Error: "chatlog not available"}
+	}
+	topic := strings.TrimSpace(frame.Topic)
+	if topic == "" {
+		topic = "dm"
+	}
+	peerAddr := strings.TrimSpace(frame.Address)
+	if topic == "dm" && peerAddr == "" {
+		return protocol.Frame{Type: "error", Error: "address is required for DM chatlog"}
+	}
+
+	var entries []chatlog.Entry
+	var err error
+	if frame.Limit > 0 {
+		entries, err = s.chatLog.ReadLast(topic, peerAddr, frame.Limit)
+	} else {
+		entries, err = s.chatLog.Read(topic, peerAddr)
+	}
+	if err != nil {
+		return protocol.Frame{Type: "error", Error: fmt.Sprintf("chatlog read: %v", err)}
+	}
+
+	chatEntries := make([]protocol.ChatEntryFrame, len(entries))
+	for i, e := range entries {
+		chatEntries[i] = protocol.ChatEntryFrame{
+			ID:        e.ID,
+			Sender:    e.Sender,
+			Recipient: e.Recipient,
+			Body:      e.Body,
+			CreatedAt: e.CreatedAt,
+			Flag:      e.Flag,
+		}
+	}
+
+	return protocol.Frame{
+		Type:        "chatlog",
+		Topic:       topic,
+		Address:     peerAddr,
+		ChatEntries: chatEntries,
+		Count:       len(chatEntries),
+	}
+}
+
+func (s *Service) fetchConversationsFrame() protocol.Frame {
+	if s.chatLog == nil {
+		return protocol.Frame{Type: "error", Error: "chatlog not available"}
+	}
+
+	summaries, err := s.chatLog.ListConversations()
+	if err != nil {
+		return protocol.Frame{Type: "error", Error: fmt.Sprintf("chatlog list: %v", err)}
+	}
+
+	conversations := make([]protocol.ConversationFrame, len(summaries))
+	for i, c := range summaries {
+		lastMsg := ""
+		if !c.LastMessage.IsZero() {
+			lastMsg = c.LastMessage.Format(time.RFC3339Nano)
+		}
+		conversations[i] = protocol.ConversationFrame{
+			PeerAddress: c.PeerAddress,
+			LastMessage: lastMsg,
+			Count:       c.Count,
+		}
+	}
+
+	return protocol.Frame{
+		Type:          "conversations",
+		Conversations: conversations,
+		Count:         len(conversations),
+	}
+}
+
+func (s *Service) fetchChatlogPreviewsFrame() protocol.Frame {
+	if s.chatLog == nil {
+		return protocol.Frame{Type: "error", Error: "chatlog not available"}
+	}
+
+	lastEntries, err := s.chatLog.ReadLastEntryPerPeer()
+	if err != nil {
+		return protocol.Frame{Type: "error", Error: fmt.Sprintf("chatlog previews: %v", err)}
+	}
+
+	previews := make([]protocol.ChatPreviewFrame, 0, len(lastEntries))
+	for peerAddr, entry := range lastEntries {
+		previews = append(previews, protocol.ChatPreviewFrame{
+			PeerAddress: peerAddr,
+			ID:          entry.ID,
+			Sender:      entry.Sender,
+			Recipient:   entry.Recipient,
+			Body:        entry.Body,
+			CreatedAt:   entry.CreatedAt,
+			Flag:        entry.Flag,
+		})
+	}
+
+	return protocol.Frame{
+		Type:         "chatlog_previews",
+		ChatPreviews: previews,
+		Count:        len(previews),
+	}
+}
+
+func (s *Service) fetchDMHeadersFrame() protocol.Frame {
+	s.cleanupExpiredMessages()
+
+	s.mu.RLock()
+	messages := append([]protocol.Envelope(nil), s.topics["dm"]...)
+	s.mu.RUnlock()
+
+	myAddr := s.identity.Address
+	headers := make([]protocol.DMHeaderFrame, 0, len(messages))
+	for _, msg := range messages {
+		// Skip transit DMs — only include messages where this node is sender or recipient.
+		if msg.Sender != myAddr && msg.Recipient != myAddr {
+			continue
+		}
+		headers = append(headers, protocol.DMHeaderFrame{
+			ID:        string(msg.ID),
+			Sender:    msg.Sender,
+			Recipient: msg.Recipient,
+			CreatedAt: msg.CreatedAt.Format(time.RFC3339Nano),
+		})
+	}
+
+	return protocol.Frame{
+		Type:      "dm_headers",
+		DMHeaders: headers,
+		Count:     len(headers),
+	}
+}
+
 func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	if len(frame.Peers) == 0 || strings.TrimSpace(frame.Peers[0]) == "" {
 		return protocol.Frame{Type: "error", Error: "address is required"}

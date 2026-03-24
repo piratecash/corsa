@@ -1309,6 +1309,10 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	if cfg.PeersStatePath == "" {
 		cfg.PeersStatePath = filepath.Join(t.TempDir(), "peers.json")
 	}
+	// Isolate chatlog directory.
+	if cfg.ChatLogDir == "" {
+		cfg.ChatLogDir = t.TempDir()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	id, err := identity.Generate()
@@ -1325,6 +1329,10 @@ func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Ident
 	// Isolate peer state so tests never load a real peers.json.
 	if cfg.PeersStatePath == "" {
 		cfg.PeersStatePath = filepath.Join(t.TempDir(), "peers.json")
+	}
+	// Isolate chatlog directory.
+	if cfg.ChatLogDir == "" {
+		cfg.ChatLogDir = t.TempDir()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -4053,5 +4061,363 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected manual peer 10.0.0.1:64646 in persisted state, got: %+v", state.Peers)
+	}
+}
+
+// --- Chatlog integration tests ---
+
+func TestChatlogInitializedOnService(t *testing.T) {
+	t.Parallel()
+	addr := freeAddress(t)
+	svc, cleanup := startTestNode(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+	})
+	defer cleanup()
+
+	if svc.chatLog == nil {
+		t.Fatal("expected chatLog to be initialized")
+	}
+}
+
+func TestFetchChatlogEmptyReturnsNoEntries(t *testing.T) {
+	t.Parallel()
+	addr := freeAddress(t)
+	svc, cleanup := startTestNode(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+	})
+	defer cleanup()
+
+	resp := svc.HandleLocalFrame(protocol.Frame{
+		Type:    "fetch_chatlog",
+		Topic:   "dm",
+		Address: "1111111111111111111111111111111111111111",
+	})
+	if resp.Type != "chatlog" {
+		t.Fatalf("expected type=chatlog, got %s (error=%s)", resp.Type, resp.Error)
+	}
+	if resp.Count != 0 {
+		t.Fatalf("expected 0 entries, got %d", resp.Count)
+	}
+}
+
+func TestFetchChatlogRequiresAddressForDM(t *testing.T) {
+	t.Parallel()
+	addr := freeAddress(t)
+	svc, cleanup := startTestNode(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+	})
+	defer cleanup()
+
+	resp := svc.HandleLocalFrame(protocol.Frame{
+		Type:  "fetch_chatlog",
+		Topic: "dm",
+	})
+	if resp.Type != "error" {
+		t.Fatalf("expected error for missing address, got %s", resp.Type)
+	}
+}
+
+func TestFetchConversationsEmpty(t *testing.T) {
+	t.Parallel()
+	addr := freeAddress(t)
+	svc, cleanup := startTestNode(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+	})
+	defer cleanup()
+
+	resp := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_conversations"})
+	if resp.Type != "conversations" {
+		t.Fatalf("expected type=conversations, got %s (error=%s)", resp.Type, resp.Error)
+	}
+	if resp.Count != 0 {
+		t.Fatalf("expected 0 conversations, got %d", resp.Count)
+	}
+}
+
+func TestChatlogPersistsAfterStoreMessage(t *testing.T) {
+	t.Parallel()
+
+	chatDir := t.TempDir()
+	addr := freeAddress(t)
+	svc, cleanup := startTestNode(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+		ChatLogDir:       chatDir,
+	})
+	defer cleanup()
+
+	// We need a known peer identity to send a DM. Import a contact first.
+	peerID, _ := identity.Generate()
+	peerAddr := peerID.Address
+	peerPubKey := identity.PublicKeyBase64(peerID.PublicKey)
+	peerBoxKey := identity.BoxPublicKeyBase64(peerID.BoxPublicKey)
+	peerBoxSig := identity.SignBoxKeyBinding(peerID)
+
+	svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: peerAddr,
+			PubKey:  peerPubKey,
+			BoxKey:  peerBoxKey,
+			BoxSig:  peerBoxSig,
+		}},
+	})
+
+	// Create a sealed DM envelope from peer to self.
+	sealed, err := directmsg.EncryptForParticipants(
+		peerID,
+		svc.identity.Address,
+		identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		"hello from peer",
+	)
+	if err != nil {
+		t.Fatalf("seal envelope: %v", err)
+	}
+
+	svc.addKnownPubKey(peerAddr, peerPubKey)
+
+	msgID, _ := protocol.NewMessageID()
+	now := time.Now().UTC()
+
+	stored, _, errCode := svc.storeIncomingMessage(incomingMessage{
+		ID:         msgID,
+		Topic:      "dm",
+		Sender:     peerAddr,
+		Recipient:  svc.identity.Address,
+		Flag:       protocol.MessageFlagImmutable,
+		CreatedAt:  now,
+		TTLSeconds: 86400,
+		Body:       sealed,
+	}, false)
+	if !stored || errCode != "" {
+		t.Fatalf("store message failed: stored=%v errCode=%q", stored, errCode)
+	}
+
+	// Give chatlog a moment (it's synchronous, so should be immediate).
+	chatResp := svc.HandleLocalFrame(protocol.Frame{
+		Type:    "fetch_chatlog",
+		Topic:   "dm",
+		Address: peerAddr,
+	})
+	if chatResp.Type != "chatlog" {
+		t.Fatalf("expected chatlog, got %s (error=%s)", chatResp.Type, chatResp.Error)
+	}
+	if chatResp.Count != 1 {
+		t.Fatalf("expected 1 chatlog entry, got %d", chatResp.Count)
+	}
+	if chatResp.ChatEntries[0].ID != string(msgID) {
+		t.Fatalf("expected message ID %s, got %s", msgID, chatResp.ChatEntries[0].ID)
+	}
+
+	// Verify fetch_conversations also shows this peer.
+	convResp := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_conversations"})
+	if convResp.Type != "conversations" {
+		t.Fatalf("expected conversations, got %s", convResp.Type)
+	}
+	if convResp.Count != 1 {
+		t.Fatalf("expected 1 conversation, got %d", convResp.Count)
+	}
+	if convResp.Conversations[0].PeerAddress != peerAddr {
+		t.Fatalf("expected peer %s, got %s", peerAddr, convResp.Conversations[0].PeerAddress)
+	}
+}
+
+// TestTransitDMDoesNotPolluteChatlog verifies that a DM being relayed through
+// a full node (where neither sender nor recipient is the local identity) does
+// NOT get written to the chatlog, does NOT emit SubscribeLocalChanges, and
+// does NOT push to local DM subscribers. Transit messages have their own
+// persistence mechanism via queue-<port>.json / relayRetry.
+func TestTransitDMDoesNotPolluteChatlog(t *testing.T) {
+	t.Parallel()
+
+	chatDir := t.TempDir()
+	relayID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate relay identity: %v", err)
+	}
+
+	addr := freeAddress(t)
+	svc, cleanup := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+		ChatLogDir:       chatDir,
+		Type:             config.NodeTypeFull, // full node can relay
+	}, relayID)
+	defer cleanup()
+
+	// Subscribe to local changes BEFORE storing the transit message.
+	eventCh, cancelSub := svc.SubscribeLocalChanges()
+	defer cancelSub()
+
+	// Generate two foreign identities (sender and recipient — neither is relay node).
+	senderID, _ := identity.Generate()
+	recipientID, _ := identity.Generate()
+
+	svc.addKnownPubKey(senderID.Address, identity.PublicKeyBase64(senderID.PublicKey))
+
+	// Create a sealed DM from sender to recipient (relay node is just forwarding).
+	sealed, err := directmsg.EncryptForParticipants(
+		senderID,
+		recipientID.Address,
+		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		"transit message",
+	)
+	if err != nil {
+		t.Fatalf("seal envelope: %v", err)
+	}
+
+	msgID, _ := protocol.NewMessageID()
+	now := time.Now().UTC()
+
+	// Store this transit message on the relay node.
+	stored, _, errCode := svc.storeIncomingMessage(incomingMessage{
+		ID:         msgID,
+		Topic:      "dm",
+		Sender:     senderID.Address,
+		Recipient:  recipientID.Address,
+		Flag:       protocol.MessageFlagSenderDelete,
+		CreatedAt:  now,
+		TTLSeconds: 86400,
+		Body:       sealed,
+	}, false) // false = skip timestamp validation for test
+	if !stored || errCode != "" {
+		t.Fatalf("store transit message: stored=%v errCode=%q", stored, errCode)
+	}
+
+	// The message should be in s.topics (in-memory) for relay purposes.
+	svc.mu.RLock()
+	topicCount := len(svc.topics["dm"])
+	svc.mu.RUnlock()
+	if topicCount == 0 {
+		t.Fatal("transit message should be in s.topics[dm] for relay")
+	}
+
+	// Transit DM must NOT emit SubscribeLocalChanges — UI should not wake up.
+	select {
+	case <-eventCh:
+		t.Fatal("transit DM must NOT emit SubscribeLocalChanges event")
+	case <-time.After(100 * time.Millisecond):
+		// Good — no event received.
+	}
+
+	// But it must NOT be in the chatlog — this is a transit message.
+	chatResp := svc.HandleLocalFrame(protocol.Frame{
+		Type:    "fetch_chatlog",
+		Topic:   "dm",
+		Address: senderID.Address,
+	})
+	if chatResp.Count != 0 {
+		t.Fatalf("transit DM must NOT appear in chatlog for sender, got %d entries", chatResp.Count)
+	}
+
+	chatResp2 := svc.HandleLocalFrame(protocol.Frame{
+		Type:    "fetch_chatlog",
+		Topic:   "dm",
+		Address: recipientID.Address,
+	})
+	if chatResp2.Count != 0 {
+		t.Fatalf("transit DM must NOT appear in chatlog for recipient, got %d entries", chatResp2.Count)
+	}
+
+	// Conversations list should also be empty — no local conversation.
+	convResp := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_conversations"})
+	if convResp.Count != 0 {
+		t.Fatalf("transit DM must NOT create a conversation entry, got %d", convResp.Count)
+	}
+
+	// fetch_dm_headers must NOT include transit DMs.
+	headersResp := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_dm_headers"})
+	if headersResp.Count != 0 {
+		t.Fatalf("fetch_dm_headers must NOT include transit DMs, got %d headers", headersResp.Count)
+	}
+}
+
+// TestFetchDMHeadersIncludesLocalExcludesTransit verifies that fetch_dm_headers
+// returns only messages where this node is sender or recipient.
+func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
+	t.Parallel()
+
+	relayID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate relay identity: %v", err)
+	}
+
+	addr := freeAddress(t)
+	svc, cleanup := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	}, relayID)
+	defer cleanup()
+
+	senderID, _ := identity.Generate()
+	recipientID, _ := identity.Generate()
+	foreignID, _ := identity.Generate()
+
+	svc.addKnownPubKey(senderID.Address, identity.PublicKeyBase64(senderID.PublicKey))
+
+	// 1. Store a LOCAL DM (from sender to this node).
+	localSealed, err := directmsg.EncryptForParticipants(
+		senderID,
+		relayID.Address,
+		identity.BoxPublicKeyBase64(relayID.BoxPublicKey),
+		"local message for me",
+	)
+	if err != nil {
+		t.Fatalf("seal local envelope: %v", err)
+	}
+	localMsgID, _ := protocol.NewMessageID()
+	svc.storeIncomingMessage(incomingMessage{
+		ID: localMsgID, Topic: "dm",
+		Sender: senderID.Address, Recipient: relayID.Address,
+		Flag: protocol.MessageFlagSenderDelete, CreatedAt: time.Now().UTC(),
+		TTLSeconds: 86400, Body: localSealed,
+	}, false)
+
+	// 2. Store a TRANSIT DM (foreign sender → foreign recipient, relay only).
+	transitSealed, err := directmsg.EncryptForParticipants(
+		foreignID,
+		recipientID.Address,
+		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		"transit only",
+	)
+	if err != nil {
+		t.Fatalf("seal transit envelope: %v", err)
+	}
+	svc.addKnownPubKey(foreignID.Address, identity.PublicKeyBase64(foreignID.PublicKey))
+	transitMsgID, _ := protocol.NewMessageID()
+	svc.storeIncomingMessage(incomingMessage{
+		ID: transitMsgID, Topic: "dm",
+		Sender: foreignID.Address, Recipient: recipientID.Address,
+		Flag: protocol.MessageFlagSenderDelete, CreatedAt: time.Now().UTC(),
+		TTLSeconds: 86400, Body: transitSealed,
+	}, false)
+
+	// Both should be in s.topics[dm] (in-memory for relay).
+	svc.mu.RLock()
+	topicCount := len(svc.topics["dm"])
+	svc.mu.RUnlock()
+	if topicCount != 2 {
+		t.Fatalf("expected 2 messages in topics[dm], got %d", topicCount)
+	}
+
+	// fetch_dm_headers must return ONLY the local DM.
+	headersResp := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_dm_headers"})
+	if headersResp.Count != 1 {
+		t.Fatalf("expected 1 local header, got %d", headersResp.Count)
+	}
+	if headersResp.DMHeaders[0].ID != string(localMsgID) {
+		t.Fatalf("expected local msg ID %s, got %s", localMsgID, headersResp.DMHeaders[0].ID)
 	}
 }

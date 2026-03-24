@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -58,6 +59,14 @@ type Window struct {
 	consoleOpen               bool
 	initialSyncDone           bool // true after first refresh populates seenIncoming
 
+	// On-demand conversation: loaded from chatlog when switching peers.
+	conversationMessages []service.DirectMessage // decrypted messages for the active conversation
+	conversationPeer     string                  // peer address for the loaded conversation
+
+	// Cached previews: last message body per peer for the sidebar.
+	previews       map[string]service.ConversationPreview // peer address → preview
+	previewsLoaded bool
+
 	mu         sync.RWMutex
 	nodeStatus service.NodeStatus
 	window     *app.Window
@@ -95,6 +104,7 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 		discoveredRecipients: make(map[string]struct{}),
 		unreadRecipients:     make(map[string]int),
 		recipientOrder:       make([]string, 0),
+		previews:             make(map[string]service.ConversationPreview),
 		sendStatus:           translate(language, "status.compose_default"),
 		contactsList:         widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:             widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
@@ -796,10 +806,24 @@ func (w *Window) refreshStatus() {
 	cancel()
 
 	recipient := strings.TrimSpace(w.selectedRecipient)
-	w.updateUnreadState(status)
+
+	// Load previews from chatlog on first refresh.
+	if !w.previewsLoaded {
+		w.previewsLoaded = true
+		go w.loadPreviews()
+	}
+
+	// Detect new incoming messages from lightweight DM headers.
+	w.updateUnreadStateFromHeaders(status)
+
+	// Load conversation from chatlog on demand when switching peers.
 	if recipient != "" {
 		w.clearUnreadRecipient(recipient)
-		conversationCount := len(w.conversationEntries(status, recipient))
+		if recipient != w.conversationPeer {
+			// Peer changed — load conversation from chatlog.
+			w.loadConversation(recipient)
+		}
+		conversationCount := len(w.conversationMessages)
 		if recipient != w.lastConversationRecipient || conversationCount > w.lastConversationCount {
 			w.chatList.Position.BeforeEnd = false
 		}
@@ -810,16 +834,78 @@ func (w *Window) refreshStatus() {
 		w.lastConversationCount = 0
 	}
 
-	if recipient != "" {
+	// Mark messages as seen for the active conversation.
+	if recipient != "" && len(w.conversationMessages) > 0 {
 		go func(recipient string, messages []service.DirectMessage) {
 			seenCtx, seenCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			_ = w.client.MarkConversationSeen(seenCtx, recipient, messages)
 			seenCancel()
-		}(recipient, append([]service.DirectMessage(nil), status.DirectMessages...))
+		}(recipient, append([]service.DirectMessage(nil), w.conversationMessages...))
 	}
 
 	w.mu.Lock()
 	w.nodeStatus = status
+	w.mu.Unlock()
+
+	if w.window != nil {
+		w.window.Invalidate()
+	}
+}
+
+// loadConversation fetches and decrypts the conversation with a specific peer
+// from the chatlog on disk.
+func (w *Window) loadConversation(peerAddress string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	messages, err := w.client.FetchConversation(ctx, peerAddress)
+	cancel()
+
+	if err != nil {
+		w.conversationMessages = nil
+	} else {
+		w.conversationMessages = messages
+	}
+	w.conversationPeer = peerAddress
+}
+
+// reloadActiveConversation reloads the conversation for the currently selected
+// peer. Called when a new message arrives for the active chat.
+func (w *Window) reloadActiveConversation() {
+	if w.conversationPeer == "" {
+		return
+	}
+	w.loadConversation(w.conversationPeer)
+}
+
+// loadPreviews fetches conversation previews from the chatlog.
+// It retries with exponential backoff (1s, 2s, 4s) if the initial attempt
+// fails or returns an empty result, because the node may still be starting up.
+func (w *Window) loadPreviews() {
+	const maxAttempts = 4
+
+	previews, ok := retryWithBackoff(maxAttempts, 1*time.Second, func() ([]service.ConversationPreview, bool) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		result, err := w.client.FetchConversationPreviews(ctx)
+		cancel()
+
+		if err != nil {
+			log.Printf("desktop: preview load failed: %v", err)
+			return nil, false
+		}
+		if len(result) == 0 {
+			return nil, false
+		}
+		return result, true
+	})
+
+	if !ok {
+		log.Printf("desktop: preview load failed after %d attempts, will update incrementally", maxAttempts)
+		return
+	}
+
+	w.mu.Lock()
+	for _, p := range previews {
+		w.previews[p.PeerAddress] = p
+	}
 	w.mu.Unlock()
 
 	if w.window != nil {
@@ -876,6 +962,12 @@ func (w *Window) ensureSelectedRecipient(recipients []string) {
 }
 
 func (w *Window) conversationEntries(status service.NodeStatus, recipient string) []service.DirectMessage {
+	// Use on-demand loaded conversation messages (from chatlog) instead of in-memory status.
+	if w.conversationPeer == recipient {
+		return w.conversationMessages
+	}
+
+	// Fallback: filter from status.DirectMessages if available (backward compat).
 	me := w.client.Address()
 	rows := make([]service.DirectMessage, 0, len(status.DirectMessages))
 
@@ -894,7 +986,7 @@ func (w *Window) conversationEntries(status service.NodeStatus, recipient string
 	return rows
 }
 
-func (w *Window) updateUnreadState(status service.NodeStatus) {
+func (w *Window) updateUnreadStateFromHeaders(status service.NodeStatus) {
 	me := w.client.Address()
 	selected := strings.TrimSpace(w.selectedRecipient)
 
@@ -909,27 +1001,58 @@ func (w *Window) updateUnreadState(status service.NodeStatus) {
 	}
 
 	hasNew := false
-	for _, message := range status.DirectMessages {
-		if message.Sender == me || message.Recipient != me {
+	needReloadConversation := false
+	peersToRefresh := make(map[string]struct{})
+	for _, header := range status.DMHeaders {
+		if _, ok := w.seenIncoming[header.ID]; ok {
 			continue
 		}
-		w.discoveredRecipients[message.Sender] = struct{}{}
-		if _, ok := w.seenIncoming[message.ID]; ok {
+
+		// Track the peer for this message.
+		var peer string
+		if header.Sender == me {
+			peer = header.Recipient
+		} else if header.Recipient == me {
+			peer = header.Sender
+			w.discoveredRecipients[header.Sender] = struct{}{}
+			if !firstSync {
+				hasNew = true
+			}
+		} else {
+			// Transit header — skip without recording in seenIncoming
+			// to avoid unbounded memory growth.
 			continue
 		}
-		w.seenIncoming[message.ID] = struct{}{}
-		if !firstSync {
-			hasNew = true
+
+		w.seenIncoming[header.ID] = struct{}{}
+
+		// Check if this message is for the currently active conversation.
+		if peer == selected {
+			needReloadConversation = true
+		} else if header.Sender != me && header.Recipient == me {
+			w.unreadRecipients[header.Sender]++
+			w.promoteRecipientLocked(header.Sender)
 		}
-		if message.Sender != selected {
-			w.unreadRecipients[message.Sender]++
-			w.promoteRecipientLocked(message.Sender)
+
+		// Collect unique peers that need a preview refresh.
+		if peer != "" {
+			peersToRefresh[peer] = struct{}{}
 		}
 	}
 	w.mu.Unlock()
 
+	// Refresh preview once per peer (not once per message).
+	for peer := range peersToRefresh {
+		go w.refreshPreviewForPeer(peer)
+	}
+
 	if hasNew {
 		go systemBeep()
+	}
+
+	// If new messages arrived for the currently selected conversation, reload it.
+	if needReloadConversation {
+		w.reloadActiveConversation()
 	}
 }
 
@@ -1005,6 +1128,20 @@ func mergeRecipientOrder(recipients, order []string) []string {
 
 func (w *Window) recipientPreview(status service.NodeStatus, recipient string) string {
 	me := w.client.Address()
+
+	// Use cached preview from chatlog.
+	w.mu.RLock()
+	preview, ok := w.previews[recipient]
+	w.mu.RUnlock()
+
+	if ok && preview.Body != "" {
+		if preview.Sender == me {
+			return "You: " + preview.Body
+		}
+		return preview.Body
+	}
+
+	// Fallback: scan in-memory DirectMessages (backward compat).
 	for i := len(status.DirectMessages) - 1; i >= 0; i-- {
 		msg := status.DirectMessages[i]
 		if msg.Sender == me && msg.Recipient == recipient {
@@ -1015,6 +1152,25 @@ func (w *Window) recipientPreview(status service.NodeStatus, recipient string) s
 		}
 	}
 	return ""
+}
+
+// refreshPreviewForPeer updates the cached preview for a single peer.
+func (w *Window) refreshPreviewForPeer(peerAddress string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	preview, err := w.client.FetchSinglePreview(ctx, peerAddress)
+	cancel()
+
+	if err != nil || preview == nil {
+		return
+	}
+
+	w.mu.Lock()
+	w.previews[peerAddress] = *preview
+	w.mu.Unlock()
+
+	if w.window != nil {
+		w.window.Invalidate()
+	}
 }
 
 func (w *Window) layoutUnreadBadge(gtx layout.Context, count int) layout.Dimensions {

@@ -929,6 +929,8 @@ func availableConsoleCommands() []consoleSuggestion {
 		{Label: "fetch_inbox <topic> [recipient]", Insert: "fetch_inbox"},
 		{Label: "fetch_delivery_receipts [recipient]", Insert: "fetch_delivery_receipts"},
 		{Label: "fetch_notices", Insert: "fetch_notices"},
+		{Label: "fetch_chatlog [topic] <peer_address>", Insert: "fetch_chatlog dm "},
+		{Label: "fetch_conversations", Insert: "fetch_conversations"},
 	}
 }
 

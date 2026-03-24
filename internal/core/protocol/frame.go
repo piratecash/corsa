@@ -46,6 +46,7 @@ type Frame struct {
 	Ciphertext             string                `json:"ciphertext,omitempty"`
 	ExpiresAt              int64                 `json:"expires_at,omitempty"`
 	Count                  int                   `json:"count,omitempty"`
+	Limit                  int                   `json:"limit,omitempty"`
 	Status                 string                `json:"status,omitempty"`
 	AckType                string                `json:"ack_type,omitempty"`
 	ObservedAddress        string                `json:"observed_address,omitempty"`
@@ -53,6 +54,10 @@ type Frame struct {
 	Signature              string                `json:"signature,omitempty"`
 	Code                   string                `json:"code,omitempty"`
 	Error                  string                `json:"error,omitempty"`
+	DMHeaders              []DMHeaderFrame        `json:"dm_headers,omitempty"`
+	ChatEntries            []ChatEntryFrame      `json:"chat_entries,omitempty"`
+	ChatPreviews           []ChatPreviewFrame    `json:"chat_previews,omitempty"`
+	Conversations          []ConversationFrame   `json:"conversations,omitempty"`
 }
 
 type ContactFrame struct {
@@ -131,4 +136,38 @@ func MarshalFrameLine(frame Frame) (string, error) {
 		return "", err
 	}
 	return string(data) + "\n", nil
+}
+
+type ChatEntryFrame struct {
+	ID        string `json:"id"`
+	Sender    string `json:"sender"`
+	Recipient string `json:"recipient"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+	Flag      string `json:"flag,omitempty"`
+}
+
+// DMHeaderFrame is a lightweight message header (no body) used for new-message detection.
+type DMHeaderFrame struct {
+	ID        string `json:"id"`
+	Sender    string `json:"sender"`
+	Recipient string `json:"recipient"`
+	CreatedAt string `json:"created_at"`
+}
+
+// ChatPreviewFrame holds the last message entry for a conversation, used for sidebar previews.
+type ChatPreviewFrame struct {
+	PeerAddress string `json:"peer_address"`
+	ID          string `json:"id"`
+	Sender      string `json:"sender"`
+	Recipient   string `json:"recipient"`
+	Body        string `json:"body"`
+	CreatedAt   string `json:"created_at"`
+	Flag        string `json:"flag,omitempty"`
+}
+
+type ConversationFrame struct {
+	PeerAddress string `json:"peer_address"`
+	LastMessage string `json:"last_message,omitempty"`
+	Count       int    `json:"count"`
 }

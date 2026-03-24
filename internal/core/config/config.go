@@ -34,6 +34,7 @@ type Node struct {
 	TrustStorePath   string
 	QueueStatePath   string
 	PeersStatePath   string
+	ChatLogDir       string // directory for chatlog .jsonl files (defaults to ".corsa")
 	ProxyAddress     string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
 	Type             NodeType
 	ListenerEnabled  bool
@@ -68,6 +69,7 @@ func Default() Config {
 	trustStorePath := envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress))
 	queueStatePath := envOrDefault("CORSA_QUEUE_STATE_PATH", defaultQueueStatePath(listenAddress))
 	peersStatePath := envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress))
+	chatLogDir := envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir())
 	proxyAddress := envOrDefault("CORSA_PROXY", "")
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
@@ -89,6 +91,7 @@ func Default() Config {
 			TrustStorePath:   trustStorePath,
 			QueueStatePath:   queueStatePath,
 			PeersStatePath:   peersStatePath,
+			ChatLogDir:       chatLogDir,
 			ProxyAddress:     proxyAddress,
 			Type:             nodeType,
 			ListenerEnabled:  listenerEnabled,
@@ -151,6 +154,13 @@ func (n Node) EffectivePeersStatePath() string {
 		return n.PeersStatePath
 	}
 	return defaultPeersStatePath(n.ListenAddress)
+}
+
+func (n Node) EffectiveChatLogDir() string {
+	if strings.TrimSpace(n.ChatLogDir) != "" {
+		return n.ChatLogDir
+	}
+	return defaultChatLogDir()
 }
 
 func envOrDefault(key, fallback string) string {
@@ -292,6 +302,10 @@ func maxOutgoingPeersFromEnv() int {
 		return 0
 	}
 	return value
+}
+
+func defaultChatLogDir() string {
+	return ".corsa"
 }
 
 func maxIncomingPeersFromEnv() int {

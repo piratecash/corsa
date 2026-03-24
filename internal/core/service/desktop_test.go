@@ -502,3 +502,72 @@ func timePtr(t *testing.T, value string) *time.Time {
 	ts := mustTime(t, value)
 	return &ts
 }
+
+func TestParseConsoleCommandFetchChatlog(t *testing.T) {
+	t.Parallel()
+
+	frame, text, err := parseConsoleCommand("fetch_chatlog dm abc123", "self-addr", "1.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("unexpected text: %s", text)
+	}
+	if frame.Type != "fetch_chatlog" {
+		t.Fatalf("expected type=fetch_chatlog, got %s", frame.Type)
+	}
+	if frame.Topic != "dm" {
+		t.Fatalf("expected topic=dm, got %s", frame.Topic)
+	}
+	if frame.Address != "abc123" {
+		t.Fatalf("expected address=abc123, got %s", frame.Address)
+	}
+}
+
+// TestNodeStatusHasNoDMBodyFields verifies that NodeStatus does not carry full
+// DM bodies. The poll loop (ProbeNode, every 2s) must use only lightweight
+// DMHeaders — never full inbox bodies. This test guards the documented
+// "header-only" contract from docs/chatlog.md.
+func TestNodeStatusHasNoDMBodyFields(t *testing.T) {
+	t.Parallel()
+
+	rt := reflect.TypeOf(NodeStatus{})
+	forbidden := []string{"DirectInbox"}
+	for _, name := range forbidden {
+		if _, found := rt.FieldByName(name); found {
+			t.Fatalf("NodeStatus must not have field %q — poll loop must be header-only (see docs/chatlog.md)", name)
+		}
+	}
+
+	// DMHeaders field must exist — it's the lightweight path.
+	if _, found := rt.FieldByName("DMHeaders"); !found {
+		t.Fatal("NodeStatus must have DMHeaders field for lightweight poll path")
+	}
+}
+
+func TestParseConsoleCommandFetchChatlogDefaultTopic(t *testing.T) {
+	t.Parallel()
+
+	frame, _, err := parseConsoleCommand("fetch_chatlog", "self-addr", "1.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if frame.Topic != "dm" {
+		t.Fatalf("expected default topic=dm, got %s", frame.Topic)
+	}
+}
+
+func TestParseConsoleCommandFetchConversations(t *testing.T) {
+	t.Parallel()
+
+	frame, text, err := parseConsoleCommand("fetch_conversations", "self-addr", "1.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("unexpected text: %s", text)
+	}
+	if frame.Type != "fetch_conversations" {
+		t.Fatalf("expected type=fetch_conversations, got %s", frame.Type)
+	}
+}

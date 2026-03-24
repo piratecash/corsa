@@ -73,11 +73,53 @@ func TestProxyAddressDefaultEmpty(t *testing.T) {
 	}
 }
 
+func TestDefaultChatLogDir(t *testing.T) {
+	t.Parallel()
+
+	dir := defaultChatLogDir()
+	if dir != ".corsa" {
+		t.Fatalf("unexpected default chatlog dir: %s", dir)
+	}
+}
+
+func TestEffectiveChatLogDirUsesDefault(t *testing.T) {
+	t.Parallel()
+
+	n := Node{ListenAddress: ":64646"}
+	dir := n.EffectiveChatLogDir()
+	if dir != ".corsa" {
+		t.Fatalf("unexpected effective chatlog dir: %s", dir)
+	}
+}
+
+func TestEffectiveChatLogDirUsesOverride(t *testing.T) {
+	t.Parallel()
+
+	n := Node{
+		ListenAddress: ":64646",
+		ChatLogDir:    "/custom/chatlogs",
+	}
+	dir := n.EffectiveChatLogDir()
+	if dir != "/custom/chatlogs" {
+		t.Fatalf("unexpected effective chatlog dir: %s", dir)
+	}
+}
+
+func TestChatLogDirFromEnv(t *testing.T) {
+	t.Setenv("CORSA_CHATLOG_DIR", "/tmp/test-chatlogs")
+
+	got := envOrDefault("CORSA_CHATLOG_DIR", "fallback")
+	if got != "/tmp/test-chatlogs" {
+		t.Fatalf("expected env value, got %s", got)
+	}
+}
+
 func TestDefaultConfigIncludesPeersAndProxy(t *testing.T) {
 	// t.Setenv restores the original value after the test.
 	t.Setenv("CORSA_PEERS_PATH", "")
 	t.Setenv("CORSA_PROXY", "")
 	t.Setenv("CORSA_LISTEN_ADDRESS", "")
+	t.Setenv("CORSA_CHATLOG_DIR", "")
 
 	cfg := Default()
 	if cfg.Node.PeersStatePath != ".corsa/peers-64646.json" {
@@ -85,5 +127,8 @@ func TestDefaultConfigIncludesPeersAndProxy(t *testing.T) {
 	}
 	if cfg.Node.ProxyAddress != "" {
 		t.Fatalf("expected empty ProxyAddress by default, got %s", cfg.Node.ProxyAddress)
+	}
+	if cfg.Node.ChatLogDir != ".corsa" {
+		t.Fatalf("unexpected default ChatLogDir: %s", cfg.Node.ChatLogDir)
 	}
 }

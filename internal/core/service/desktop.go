@@ -78,6 +78,22 @@ type DirectMessage struct {
 	DeliveredAt   *time.Time
 }
 
+// DMHeader is a lightweight message header (no body) for new-message detection.
+type DMHeader struct {
+	ID        string
+	Sender    string
+	Recipient string
+	Timestamp time.Time
+}
+
+// ConversationPreview holds the last decrypted message for a conversation peer.
+type ConversationPreview struct {
+	PeerAddress string
+	Sender      string
+	Body        string
+	Timestamp   time.Time
+}
+
 type PendingMessage struct {
 	ID            string
 	Recipient     string
@@ -127,10 +143,9 @@ type NodeStatus struct {
 	MessageIDs       []string
 	DirectMessages   []DirectMessage
 	DirectMessageIDs []string
+	DMHeaders        []DMHeader
 	PendingMessages  []PendingMessage
 	DeliveryReceipts []DeliveryReceipt
-	Inbox            []string
-	DirectInbox      []string
 	Gazeta           []string
 	Error            string
 	CheckedAt        time.Time
@@ -259,7 +274,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		status.CheckedAt = time.Now()
 		return status
 	}
-	directMessagesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+	dmHeadersReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_dm_headers"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
@@ -272,18 +287,6 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		return status
 	}
 	directMessageIDsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-	inboxReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: c.id.Address})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-	directInboxReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: c.id.Address})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
@@ -305,31 +308,29 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	peers := peersReply.Peers
 	ids := idsReply.Identities
 	contacts := contactsFromFrame(contactsReply)
-	decryptContacts := contacts
 	messages := messageRecordsFromFrames(messagesReply.Messages)
-	directMessages := messageRecordsFromFrames(directMessagesReply.Messages)
+	dmHeaders := dmHeadersFromFrame(dmHeadersReply)
 	messageIDs := messageIDsReply.IDs
 	directMessageIDs := directMessageIDsReply.IDs
-	inbox := messageRecordsFromFrames(inboxReply.Messages)
-	directInbox := messageRecordsFromFrames(directInboxReply.Messages)
 	deliveryReceipts := receiptRecordsFromFrames(receiptsReply.Receipts)
 	notices := decryptNoticeFrames(c.id, noticesReply.Notices)
 
-	if missing := missingDirectContacts(c.id.Address, contacts, directMessages); len(missing) > 0 {
+	// Check for missing contacts from DM headers (lightweight, no decryption needed).
+	if missing := missingDMHeaderContacts(c.id.Address, contacts, dmHeaders); len(missing) > 0 {
 		refreshedContactsReply, refreshErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
 		if refreshErr == nil {
-			decryptContacts = contactsFromFrame(refreshedContactsReply)
+			networkContacts := contactsFromFrame(refreshedContactsReply)
+			// Auto-import new contacts from DM headers.
+			if imported := c.importIncomingDMHeaderContacts(contacts, networkContacts, dmHeaders); imported > 0 {
+				trustedContactsReply, trustedErr := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+				if trustedErr == nil {
+					contacts = contactsFromFrame(trustedContactsReply)
+				}
+			}
 		}
 	}
 
 	pendingMessages := pendingMessagesFromFrame(pendingReply)
-	decryptedDirectMessages := decryptDirectMessages(c.id, decryptContacts, directMessages, deliveryReceipts, pendingMessages)
-	if imported := c.importIncomingContacts(contacts, decryptContacts, decryptedDirectMessages); imported > 0 {
-		trustedContactsReply, trustedErr := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
-		if trustedErr == nil {
-			contacts = contactsFromFrame(trustedContactsReply)
-		}
-	}
 
 	status.Connected = true
 	status.KnownIDs = ids
@@ -338,12 +339,11 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.PeerHealth = peerHealthFromFrame(peerHealthReply)
 	status.Messages = stringifyMessages(messages)
 	status.MessageIDs = messageIDs
-	status.DirectMessages = decryptedDirectMessages
+	status.DirectMessages = nil // no longer loaded in ProbeNode; use FetchConversation on demand
 	status.DirectMessageIDs = directMessageIDs
+	status.DMHeaders = dmHeaders
 	status.PendingMessages = pendingMessages
 	status.DeliveryReceipts = deliveryReceipts
-	status.Inbox = stringifyMessages(inbox)
-	status.DirectInbox = stringifyMessages(directInbox)
 	status.Gazeta = notices
 	status.CheckedAt = time.Now()
 	return status
@@ -382,22 +382,6 @@ func parseOptionalTime(value string) *time.Time {
 		return nil
 	}
 	return &ts
-}
-
-func (c *DesktopClient) importIncomingContacts(trustedContacts, decryptContacts map[string]Contact, messages []DirectMessage) int {
-	contacts := incomingContactsToTrust(c.id.Address, trustedContacts, decryptContacts, messages)
-	if len(contacts) == 0 {
-		return 0
-	}
-
-	reply, err := c.localRequestFrame(protocol.Frame{
-		Type:     "import_contacts",
-		Contacts: contacts,
-	})
-	if err != nil {
-		return 0
-	}
-	return reply.Count
 }
 
 func incomingContactsToTrust(self string, trustedContacts, decryptContacts map[string]Contact, messages []DirectMessage) []protocol.ContactFrame {
@@ -673,6 +657,16 @@ func parseConsoleCommand(input, selfAddress, clientVersion string) (protocol.Fra
 			return protocol.Frame{}, "", fmt.Errorf("usage: add_peer <host:port>")
 		}
 		return protocol.Frame{Type: "add_peer", Peers: []string{fields[1]}}, "", nil
+	case "fetch_chatlog":
+		topic := commandArg(fields, 1, "dm")
+		addr := commandArg(fields, 2, "")
+		return protocol.Frame{Type: "fetch_chatlog", Topic: topic, Address: addr}, "", nil
+	case "fetch_conversations":
+		return protocol.Frame{Type: "fetch_conversations"}, "", nil
+	case "fetch_chatlog_previews":
+		return protocol.Frame{Type: "fetch_chatlog_previews"}, "", nil
+	case "fetch_dm_headers":
+		return protocol.Frame{Type: "fetch_dm_headers"}, "", nil
 	case "get_peers", "fetch_identities", "fetch_contacts", "fetch_trusted_contacts", "fetch_peer_health", "fetch_notices":
 		return protocol.Frame{Type: command}, "", nil
 	case "fetch_pending_messages":
@@ -728,6 +722,12 @@ func consoleHelpText(selfAddress string) string {
 		"fetch_message <topic> <id>",
 		"fetch_inbox <topic> [recipient]",
 		"fetch_delivery_receipts [recipient]",
+		"",
+		"== Chat History ==",
+		"fetch_chatlog [topic] <peer_address>",
+		"fetch_chatlog_previews",
+		"fetch_dm_headers",
+		"fetch_conversations",
 		"",
 		"== Notices ==",
 		"fetch_notices",
@@ -1270,10 +1270,30 @@ func isConversationMessage(message protocol.MessageFrame, self, counterparty str
 		(message.Sender == counterparty && message.Recipient == self)
 }
 
-func missingDirectContacts(self string, contacts map[string]Contact, messages []MessageRecord) []string {
+func dmHeadersFromFrame(frame protocol.Frame) []DMHeader {
+	out := make([]DMHeader, 0, len(frame.DMHeaders))
+	for _, h := range frame.DMHeaders {
+		ts, err := time.Parse(time.RFC3339Nano, h.CreatedAt)
+		if err != nil {
+			ts, err = time.Parse(time.RFC3339, h.CreatedAt)
+			if err != nil {
+				continue
+			}
+		}
+		out = append(out, DMHeader{
+			ID:        h.ID,
+			Sender:    h.Sender,
+			Recipient: h.Recipient,
+			Timestamp: ts.UTC(),
+		})
+	}
+	return out
+}
+
+func missingDMHeaderContacts(self string, contacts map[string]Contact, headers []DMHeader) []string {
 	missing := make(map[string]struct{})
-	for _, item := range messages {
-		for _, address := range []string{item.Sender, item.Recipient} {
+	for _, h := range headers {
+		for _, address := range []string{h.Sender, h.Recipient} {
 			address = strings.TrimSpace(address)
 			if address == "" || address == "*" || address == self {
 				continue
@@ -1290,4 +1310,273 @@ func missingDirectContacts(self string, contacts map[string]Contact, messages []
 		out = append(out, address)
 	}
 	return out
+}
+
+// importIncomingDMHeaderContacts imports contacts for DM senders that are
+// not yet in the trusted store. This is the header-only variant that works
+// without decrypted message bodies.
+func (c *DesktopClient) importIncomingDMHeaderContacts(trustedContacts, networkContacts map[string]Contact, headers []DMHeader) int {
+	toImport := make(map[string]protocol.ContactFrame)
+
+	for _, h := range headers {
+		if h.Recipient != c.id.Address || h.Sender == c.id.Address {
+			continue
+		}
+		if _, ok := trustedContacts[h.Sender]; ok {
+			continue
+		}
+		contact, ok := networkContacts[h.Sender]
+		if !ok || contact.BoxKey == "" || contact.PubKey == "" || contact.BoxSignature == "" {
+			continue
+		}
+		toImport[h.Sender] = protocol.ContactFrame{
+			Address: h.Sender,
+			PubKey:  contact.PubKey,
+			BoxKey:  contact.BoxKey,
+			BoxSig:  contact.BoxSignature,
+		}
+	}
+
+	if len(toImport) == 0 {
+		return 0
+	}
+
+	contacts := make([]protocol.ContactFrame, 0, len(toImport))
+	addresses := make([]string, 0, len(toImport))
+	for address := range toImport {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	for _, address := range addresses {
+		contacts = append(contacts, toImport[address])
+	}
+
+	reply, err := c.localRequestFrame(protocol.Frame{
+		Type:     "import_contacts",
+		Contacts: contacts,
+	})
+	if err != nil {
+		return 0
+	}
+	return reply.Count
+}
+
+// FetchConversation loads the full chat history for a single peer from the
+// chatlog on disk, decrypts it, and returns the messages. This is called
+// on demand when the user switches to a conversation rather than keeping
+// all conversations in memory.
+func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress string) ([]DirectMessage, error) {
+	peerAddress = strings.TrimSpace(peerAddress)
+	if peerAddress == "" {
+		return nil, fmt.Errorf("peer address is required")
+	}
+
+	chatlogReply, err := c.localRequestFrame(protocol.Frame{
+		Type:    "fetch_chatlog",
+		Topic:   "dm",
+		Address: peerAddress,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	if err != nil {
+		return nil, err
+	}
+	contacts := contactsFromFrame(contactsReply)
+
+	// If sender contact is missing from trusted store, supplement with network contacts.
+	decryptContacts := contacts
+	needRefresh := false
+	for _, entry := range chatlogReply.ChatEntries {
+		sender := entry.Sender
+		if _, ok := contacts[sender]; !ok {
+			needRefresh = true
+			break
+		}
+	}
+	if needRefresh {
+		networkReply, networkErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+		if networkErr == nil {
+			networkContacts := contactsFromFrame(networkReply)
+			// Merge: trusted contacts take priority, fill gaps with network contacts.
+			merged := make(map[string]Contact, len(contacts)+len(networkContacts))
+			for addr, c := range networkContacts {
+				merged[addr] = c
+			}
+			for addr, c := range contacts {
+				merged[addr] = c
+			}
+			decryptContacts = merged
+		}
+	}
+
+	receiptsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_delivery_receipts", Recipient: c.id.Address})
+	if err != nil {
+		return nil, err
+	}
+	deliveryReceipts := receiptRecordsFromFrames(receiptsReply.Receipts)
+	pendingReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
+	if err != nil {
+		return nil, err
+	}
+	pendingMessages := pendingMessagesFromFrame(pendingReply)
+
+	// Convert chatlog entries to MessageRecord for decryption.
+	records := make([]MessageRecord, 0, len(chatlogReply.ChatEntries))
+	for _, entry := range chatlogReply.ChatEntries {
+		ts, parseErr := time.Parse(time.RFC3339Nano, entry.CreatedAt)
+		if parseErr != nil {
+			ts, parseErr = time.Parse(time.RFC3339, entry.CreatedAt)
+			if parseErr != nil {
+				continue
+			}
+		}
+		records = append(records, MessageRecord{
+			ID:        entry.ID,
+			Flag:      entry.Flag,
+			Timestamp: ts.UTC(),
+			Sender:    entry.Sender,
+			Recipient: entry.Recipient,
+			Body:      entry.Body,
+		})
+	}
+
+	return decryptDirectMessages(c.id, decryptContacts, records, deliveryReceipts, pendingMessages), nil
+}
+
+// FetchConversationPreviews loads the last message for each DM conversation
+// from the chatlog, decrypts them, and returns preview data for the sidebar.
+func (c *DesktopClient) FetchConversationPreviews(ctx context.Context) ([]ConversationPreview, error) {
+	previewsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_chatlog_previews"})
+	if err != nil {
+		return nil, err
+	}
+
+	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	if err != nil {
+		return nil, err
+	}
+	contacts := contactsFromFrame(contactsReply)
+
+	// Supplement with network contacts for unknown senders.
+	decryptContacts := contacts
+	for _, preview := range previewsReply.ChatPreviews {
+		if _, ok := contacts[preview.Sender]; !ok {
+			networkReply, networkErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+			if networkErr == nil {
+				networkContacts := contactsFromFrame(networkReply)
+				// Merge: trusted contacts take priority, fill gaps with network contacts.
+				merged := make(map[string]Contact, len(contacts)+len(networkContacts))
+				for addr, c := range networkContacts {
+					merged[addr] = c
+				}
+				for addr, c := range contacts {
+					merged[addr] = c
+				}
+				decryptContacts = merged
+			}
+			break
+		}
+	}
+
+	out := make([]ConversationPreview, 0, len(previewsReply.ChatPreviews))
+	for _, preview := range previewsReply.ChatPreviews {
+		sender := preview.Sender
+		contact, ok := decryptContacts[sender]
+		if !ok || contact.PubKey == "" {
+			// Can't decrypt — show placeholder.
+			ts, _ := time.Parse(time.RFC3339Nano, preview.CreatedAt)
+			out = append(out, ConversationPreview{
+				PeerAddress: preview.PeerAddress,
+				Sender:      sender,
+				Body:        "",
+				Timestamp:   ts.UTC(),
+			})
+			continue
+		}
+
+		message, err := directmsg.DecryptForIdentity(c.id, sender, contact.PubKey, preview.Recipient, preview.Body)
+		if err != nil {
+			ts, _ := time.Parse(time.RFC3339Nano, preview.CreatedAt)
+			out = append(out, ConversationPreview{
+				PeerAddress: preview.PeerAddress,
+				Sender:      sender,
+				Body:        "",
+				Timestamp:   ts.UTC(),
+			})
+			continue
+		}
+
+		ts, _ := time.Parse(time.RFC3339Nano, preview.CreatedAt)
+		out = append(out, ConversationPreview{
+			PeerAddress: preview.PeerAddress,
+			Sender:      sender,
+			Body:        message.Body,
+			Timestamp:   ts.UTC(),
+		})
+	}
+
+	return out, nil
+}
+
+// FetchSinglePreview loads and decrypts the last message for a single conversation.
+func (c *DesktopClient) FetchSinglePreview(ctx context.Context, peerAddress string) (*ConversationPreview, error) {
+	chatlogReply, err := c.localRequestFrame(protocol.Frame{
+		Type:    "fetch_chatlog",
+		Topic:   "dm",
+		Address: peerAddress,
+		Limit:   1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(chatlogReply.ChatEntries) == 0 {
+		return nil, nil
+	}
+
+	entry := chatlogReply.ChatEntries[0]
+	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	if err != nil {
+		return nil, err
+	}
+	contacts := contactsFromFrame(contactsReply)
+
+	sender := entry.Sender
+	contact, ok := contacts[sender]
+	if !ok || contact.PubKey == "" {
+		networkReply, networkErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+		if networkErr == nil {
+			networkContacts := contactsFromFrame(networkReply)
+			contact, ok = networkContacts[sender]
+		}
+	}
+
+	ts, _ := time.Parse(time.RFC3339Nano, entry.CreatedAt)
+	if !ok || contact.PubKey == "" {
+		return &ConversationPreview{
+			PeerAddress: peerAddress,
+			Sender:      sender,
+			Body:        "",
+			Timestamp:   ts.UTC(),
+		}, nil
+	}
+
+	message, err := directmsg.DecryptForIdentity(c.id, sender, contact.PubKey, entry.Recipient, entry.Body)
+	if err != nil {
+		return &ConversationPreview{
+			PeerAddress: peerAddress,
+			Sender:      sender,
+			Body:        "",
+			Timestamp:   ts.UTC(),
+		}, nil
+	}
+
+	return &ConversationPreview{
+		PeerAddress: peerAddress,
+		Sender:      sender,
+		Body:        message.Body,
+		Timestamp:   ts.UTC(),
+	}, nil
 }
