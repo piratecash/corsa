@@ -2,7 +2,8 @@ package node
 
 import (
 	"context"
-	"log"
+
+	"github.com/rs/zerolog/log"
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/identity"
@@ -25,11 +26,10 @@ func New() *App {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	log.Printf(
-		"starting node version=%s wire=%s listen=%s",
-		config.CorsaVersion,
-		config.CorsaWireVersion,
-		a.service.ListenAddress(),
-	)
+	log.Info().
+		Str("version", config.CorsaVersion).
+		Str("wire", config.CorsaWireVersion).
+		Str("listen", a.service.ListenAddress()).
+		Msg("starting node")
 	return a.service.Run(ctx)
 }

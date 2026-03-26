@@ -9,9 +9,6 @@ import (
 	"time"
 )
 
-// peerEntry represents a persisted peer address with metadata and scoring.
-// Each entry carries enough context to prioritise dial candidates on restart
-// without a full peer-exchange round.
 type peerEntry struct {
 	Address             string     `json:"address"`
 	NodeType            string     `json:"node_type,omitempty"`
@@ -51,9 +48,6 @@ const (
 	peerEvictInterval       = 10 * time.Minute // how often the eviction sweep runs
 )
 
-// peerCooldownDuration returns the exponential backoff duration for a peer
-// based on its consecutive failure count: min(base * 2^(failures-1), max).
-// Returns zero if failures <= 0 (no cooldown).
 func peerCooldownDuration(consecutiveFailures int) time.Duration {
 	if consecutiveFailures <= 0 {
 		return 0
@@ -125,8 +119,6 @@ func clampScore(score int) int {
 	return score
 }
 
-// sortPeerEntries orders peers by score descending, then by last-connected
-// time descending so that recently-successful peers are dialled first.
 func sortPeerEntries(entries []peerEntry) {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Score != entries[j].Score {
@@ -138,7 +130,6 @@ func sortPeerEntries(entries []peerEntry) {
 	})
 }
 
-// peerTime returns the time value or zero time if the pointer is nil.
 func peerTime(t *time.Time) time.Time {
 	if t == nil {
 		return time.Time{}
@@ -146,8 +137,6 @@ func peerTime(t *time.Time) time.Time {
 	return *t
 }
 
-// trimPeerEntries caps the persisted list at maxPersistedPeers, keeping
-// the highest-scoring entries. Entries must be pre-sorted.
 func trimPeerEntries(entries []peerEntry) []peerEntry {
 	if len(entries) <= maxPersistedPeers {
 		return entries

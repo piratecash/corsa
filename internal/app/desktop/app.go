@@ -2,7 +2,8 @@ package desktop
 
 import (
 	"context"
-	"log"
+
+	"github.com/rs/zerolog/log"
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/identity"
@@ -19,7 +20,7 @@ func Run() error {
 		return err
 	}
 
-	log.Printf("desktop identity address=%s path=%s", id.Address, cfg.Node.IdentityPath)
+	log.Info().Str("address", id.Address).Str("path", cfg.Node.IdentityPath).Msg("desktop identity loaded")
 
 	prefs, err := LoadPreferences(preferencePathForIdentity(cfg.Node.IdentityPath))
 	if err != nil {
@@ -34,6 +35,13 @@ func Run() error {
 	runtime.Start(ctx)
 
 	client := service.NewDesktopClient(cfg.App, cfg.Node, id, nodeService)
+	defer func() {
+		if err := client.Close(); err != nil {
+			log.Error().Err(err).Msg("chatlog close failed")
+		} else {
+			log.Info().Msg("chatlog closed")
+		}
+	}()
 	window := NewWindow(client, runtime, prefs)
 	return window.Run()
 }

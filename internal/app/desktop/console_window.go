@@ -292,7 +292,7 @@ func (c *ConsoleWindow) layoutTabButton(gtx layout.Context, clickable *widget.Cl
 }
 
 func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
-	status := c.parent.currentStatus()
+	status := c.parent.router.Snapshot().NodeStatus
 	switch c.activeTab {
 	case consoleTabPeers:
 		return c.layoutPeersTab(gtx, status)

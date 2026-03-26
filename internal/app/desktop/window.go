@@ -1,18 +1,16 @@
 package desktop
 
 import (
-	"context"
 	"image"
 	"image/color"
 	"io"
-	"log"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
+	"corsa/internal/core/crashlog"
 	"corsa/internal/core/service"
 
 	"gioui.org/app"
@@ -22,54 +20,41 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
+	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 )
 
 type Window struct {
+	router  *service.DMRouter
 	client  *service.DesktopClient
 	runtime *NodeRuntime
 	prefs   *Preferences
 	theme   *material.Theme
 	ops     op.Ops
 
-	recipientEditor           widget.Editor
-	identitySearchEditor      widget.Editor
-	messageEditor             widget.Editor
-	contactsList              widget.List
-	chatList                  widget.List
-	consoleButton             widget.Clickable
-	sendButton                widget.Clickable
-	syncButton                widget.Clickable
-	copyIdentityButton        widget.Clickable
-	languageToggle            widget.Clickable
-	languageOptions           map[string]*widget.Clickable
-	recipientButtons          map[string]*widget.Clickable
-	selectedRecipient         string
-	lastConversationRecipient string
-	lastConversationCount     int
-	seenIncoming              map[string]struct{}
-	discoveredRecipients      map[string]struct{}
-	unreadRecipients          map[string]int
-	recipientOrder            []string
-	language                  string
-	showLanguageMenu          bool
-	sendStatus                string
-	consoleOpen               bool
-	initialSyncDone           bool // true after first refresh populates seenIncoming
+	recipientEditor      widget.Editor
+	identitySearchEditor widget.Editor
+	messageEditor        widget.Editor
+	contactsList         widget.List
+	chatList             widget.List
+	consoleButton        widget.Clickable
+	sendButton           widget.Clickable
+	syncButton           widget.Clickable
+	copyIdentityButton   widget.Clickable
+	languageToggle       widget.Clickable
+	languageOptions      map[string]*widget.Clickable
+	recipientButtons     map[string]*widget.Clickable
+	language             string
+	showLanguageMenu     bool
+	consoleOpen          bool
 
-	// On-demand conversation: loaded from chatlog when switching peers.
-	conversationMessages []service.DirectMessage // decrypted messages for the active conversation
-	conversationPeer     string                  // peer address for the loaded conversation
+	snap service.RouterSnapshot
 
-	// Cached previews: last message body per peer for the sidebar.
-	previews       map[string]service.ConversationPreview // peer address → preview
-	previewsLoaded bool
+	consoleMu sync.Mutex
 
-	mu         sync.RWMutex
-	nodeStatus service.NodeStatus
-	window     *app.Window
+	window *app.Window
 }
 
 const (
@@ -93,26 +78,23 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 	}
 
 	return &Window{
-		client:               client,
-		runtime:              runtime,
-		prefs:                prefs,
-		theme:                theme,
-		language:             language,
-		languageOptions:      make(map[string]*widget.Clickable),
-		recipientButtons:     make(map[string]*widget.Clickable),
-		seenIncoming:         make(map[string]struct{}),
-		discoveredRecipients: make(map[string]struct{}),
-		unreadRecipients:     make(map[string]int),
-		recipientOrder:       make([]string, 0),
-		previews:             make(map[string]service.ConversationPreview),
-		sendStatus:           translate(language, "status.compose_default"),
-		contactsList:         widget.List{List: layout.List{Axis: layout.Vertical}},
-		chatList:             widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
+		router:           service.NewDMRouter(client),
+		client:           client,
+		runtime:          runtime,
+		prefs:            prefs,
+		theme:            theme,
+		language:         language,
+		languageOptions:  make(map[string]*widget.Clickable),
+		recipientButtons: make(map[string]*widget.Clickable),
+		contactsList:     widget.List{List: layout.List{Axis: layout.Vertical}},
+		chatList:         widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 	}
 }
 
 func (w *Window) Run() error {
 	go func() {
+		defer crashlog.DeferRecover()
+
 		window := new(app.Window)
 		w.window = window
 		window.Option(
@@ -133,22 +115,16 @@ func (w *Window) Run() error {
 }
 
 func (w *Window) startPolling(window *app.Window) {
-	events, cancel := w.client.SubscribeLocalChanges()
+	w.router.Start()
 
 	go func() {
-		defer cancel()
-		for range events {
-			w.refreshStatus()
-		}
-	}()
-
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			w.refreshStatus()
-			<-ticker.C
+		for ev := range w.router.Subscribe() {
+			if ev.Type == service.UIEventBeep {
+				go systemBeep()
+			}
+			if w.window != nil {
+				w.window.Invalidate()
+			}
 		}
 	}()
 }
@@ -167,6 +143,8 @@ func (w *Window) loop(window *app.Window) error {
 }
 
 func (w *Window) layout(gtx layout.Context) layout.Dimensions {
+	w.snap = w.router.Snapshot()
+	w.handlePendingActions()
 	w.handleActions(gtx)
 	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
 
@@ -192,6 +170,21 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	)
 }
 
+// Gio widgets are single-threaded — mutations MUST happen on the UI goroutine.
+func (w *Window) handlePendingActions() {
+	pa := w.router.ConsumePendingActions()
+
+	if pa.ClearEditor {
+		w.messageEditor.SetText("")
+	}
+	if pa.ScrollToEnd {
+		w.chatList.Position.BeforeEnd = false
+	}
+	if pa.RecipientText != "" {
+		w.recipientEditor.SetText(pa.RecipientText)
+	}
+}
+
 func (w *Window) handleActions(gtx layout.Context) {
 	for w.languageToggle.Clicked(gtx) {
 		w.showLanguageMenu = !w.showLanguageMenu
@@ -210,46 +203,28 @@ func (w *Window) handleActions(gtx layout.Context) {
 	for w.copyIdentityButton.Clicked(gtx) {
 		gtx.Execute(clipboard.WriteCmd{
 			Type: "text/plain",
-			Data: io.NopCloser(strings.NewReader(w.client.Address())),
+			Data: io.NopCloser(strings.NewReader(w.snap.MyAddress)),
 		})
-		w.sendStatus = w.t("status.identity_copied")
+		w.router.SetSendStatus(w.t("status.identity_copied"))
 		if w.window != nil {
 			w.window.Invalidate()
 		}
 	}
 
 	for w.syncButton.Clicked(gtx) {
-		recipient := strings.TrimSpace(w.selectedRecipient)
+		recipient := strings.TrimSpace(w.snap.ActivePeer)
 		if recipient == "" {
-			w.sendStatus = w.t("compose.select_first")
+			w.router.SetSendStatus(w.t("compose.select_first"))
 			continue
 		}
 
-		peers := append([]string(nil), w.currentStatus().Peers...)
+		peers := append([]string(nil), w.snap.NodeStatus.Peers...)
 		if len(peers) == 0 {
-			w.sendStatus = w.t("chat.sync_disabled")
+			w.router.SetSendStatus(w.t("chat.sync_disabled"))
 			continue
 		}
 
-		w.sendStatus = w.t("status.syncing")
-		go func(recipient string, peers []string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-			imported, err := w.client.SyncDirectMessagesFromPeers(ctx, peers, recipient)
-			cancel()
-
-			w.mu.Lock()
-			if err != nil {
-				w.sendStatus = w.t("status.sync_failed", err.Error())
-			} else {
-				w.sendStatus = w.t("status.sync_done", imported)
-			}
-			w.mu.Unlock()
-
-			w.refreshStatus()
-			if w.window != nil {
-				w.window.Invalidate()
-			}
-		}(recipient, peers)
+		w.router.SyncMessages(recipient, peers)
 	}
 
 }
@@ -275,7 +250,7 @@ func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
 }
 
 func (w *Window) triggerSend() {
-	to := strings.TrimSpace(w.selectedRecipient)
+	to := strings.TrimSpace(w.snap.ActivePeer)
 	if to == "" {
 		to = strings.TrimSpace(w.recipientEditor.Text())
 	}
@@ -283,30 +258,7 @@ func (w *Window) triggerSend() {
 	if body == "" {
 		return
 	}
-	w.sendStatus = w.t("status.sending")
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		err := w.client.SendDirectMessage(ctx, to, body)
-		cancel()
-
-		w.mu.Lock()
-		if err != nil {
-			w.sendStatus = w.t("status.send_failed", err.Error())
-		} else {
-			w.sendStatus = w.t("status.message_sent")
-			w.messageEditor.SetText("")
-		}
-		w.mu.Unlock()
-
-		if err == nil {
-			w.refreshStatus()
-		}
-
-		if w.window != nil {
-			w.window.Invalidate()
-		}
-	}()
+	w.router.SendMessage(to, body)
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
@@ -346,8 +298,8 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
-	status := w.currentStatus()
-	recipients := w.currentRecipients(status)
+	status := w.snap.NodeStatus
+	recipients := w.snapRecipients(status)
 	w.ensureSelectedRecipient(recipients)
 
 	return layout.Flex{
@@ -374,7 +326,7 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 
 func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatus, recipients []string) layout.Dimensions {
 	rows := []string{
-		w.t("clients.you", w.client.Address()),
+		w.t("clients.you", w.snap.MyAddress),
 		w.t("clients.known", len(recipients)),
 	}
 
@@ -385,7 +337,7 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 			return btn.Layout(gtx)
 		})
 	}, func(gtx layout.Context) layout.Dimensions {
-		searchResults := searchKnownIdentities(status.KnownIDs, recipients, w.client.Address(), w.identitySearchEditor.Text())
+		searchResults := searchKnownIdentities(status.KnownIDs, recipients, w.snap.MyAddress, w.identitySearchEditor.Text())
 
 		children := []layout.FlexChild{
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -470,14 +422,13 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 	btn := w.recipientButton(fingerprint)
 	return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		for btn.Clicked(gtx) {
-			w.selectedRecipient = fingerprint
 			w.recipientEditor.SetText(fingerprint)
-			w.clearUnreadRecipient(fingerprint)
-			w.sendStatus = w.t("status.chat_selected")
+			w.router.SetSendStatus(w.t("status.chat_selected"))
+			w.router.SelectPeer(fingerprint)
 		}
 
 		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-		if fingerprint == w.selectedRecipient {
+		if fingerprint == w.snap.ActivePeer {
 			bg = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
 		}
 
@@ -501,17 +452,17 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 								if !showUnread {
 									return layout.Dimensions{}
 								}
-								count := w.unreadCount(fingerprint)
-								if count == 0 {
+								ps := w.snap.Peers[fingerprint]
+								if ps == nil || ps.Unread == 0 {
 									return layout.Dimensions{}
 								}
-								return w.layoutUnreadBadge(gtx, count)
+								return w.layoutUnreadBadge(gtx, ps.Unread)
 							}),
 						)
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						preview := w.recipientPreview(status, fingerprint)
+						preview := w.snapPreview(fingerprint)
 						if strings.TrimSpace(preview) == "" {
 							preview = fingerprint
 						}
@@ -527,7 +478,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 }
 
 func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	recipient := w.selectedRecipient
+	recipient := w.snap.ActivePeer
 	title := w.t("chat.title")
 	var rows []string
 
@@ -538,8 +489,11 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 
 	title = w.t("chat.with", shortFingerprint(recipient))
 
-	conversation := w.conversationEntries(status, recipient)
+	conversation := w.snap.ActiveMessages
 	if len(conversation) == 0 {
+		if !w.snap.CacheReady {
+			return w.layoutLoadingCard(gtx, title)
+		}
 		rows = append(rows, w.t("chat.empty"))
 		return w.card(gtx, title, rows)
 	}
@@ -549,11 +503,53 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 	})
 }
 
+func (w *Window) layoutLoadingCard(gtx layout.Context, title string) layout.Dimensions {
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+
+		inset := layout.UniformInset(unit.Dp(18))
+		return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{
+				Axis: layout.Vertical,
+			}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Label(w.theme, unit.Sp(20), title)
+					label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+					return label.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{
+							Axis:      layout.Vertical,
+							Alignment: layout.Middle,
+						}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								label := material.Label(w.theme, unit.Sp(32), ". . .")
+								label.Color = color.NRGBA{R: 120, G: 144, B: 176, A: 255}
+								label.Alignment = text.Middle
+								return label.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								label := material.Label(w.theme, unit.Sp(16), w.t("chat.loading"))
+								label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+								label.Alignment = text.Middle
+								return label.Layout(gtx)
+							}),
+						)
+					})
+				}),
+			)
+		})
+	})
+}
+
 func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
-	recipient := w.selectedRecipient
-	status := w.currentStatus()
+	recipient := w.snap.ActivePeer
+	status := w.snap.NodeStatus
 	rows := []string{
-		w.sendStatusLine(),
+		w.snap.SendStatus,
 	}
 
 	if recipient == "" {
@@ -800,129 +796,25 @@ func (w *Window) localNodeErrorRow() string {
 	return w.t("node.error", w.t("node.error.none"))
 }
 
-func (w *Window) refreshStatus() {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	status := w.client.ProbeNode(ctx)
-	cancel()
-
-	recipient := strings.TrimSpace(w.selectedRecipient)
-
-	// Load previews from chatlog on first refresh.
-	if !w.previewsLoaded {
-		w.previewsLoaded = true
-		go w.loadPreviews()
-	}
-
-	// Detect new incoming messages from lightweight DM headers.
-	w.updateUnreadStateFromHeaders(status)
-
-	// Load conversation from chatlog on demand when switching peers.
-	if recipient != "" {
-		w.clearUnreadRecipient(recipient)
-		if recipient != w.conversationPeer {
-			// Peer changed — load conversation from chatlog.
-			w.loadConversation(recipient)
+func (w *Window) snapPreview(recipient string) string {
+	me := w.snap.MyAddress
+	ps, ok := w.snap.Peers[recipient]
+	if ok && ps.Preview.Body != "" {
+		if ps.Preview.Sender == me {
+			return "You: " + ps.Preview.Body
 		}
-		conversationCount := len(w.conversationMessages)
-		if recipient != w.lastConversationRecipient || conversationCount > w.lastConversationCount {
-			w.chatList.Position.BeforeEnd = false
-		}
-		w.lastConversationRecipient = recipient
-		w.lastConversationCount = conversationCount
-	} else {
-		w.lastConversationRecipient = ""
-		w.lastConversationCount = 0
+		return ps.Preview.Body
 	}
-
-	// Mark messages as seen for the active conversation.
-	if recipient != "" && len(w.conversationMessages) > 0 {
-		go func(recipient string, messages []service.DirectMessage) {
-			seenCtx, seenCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = w.client.MarkConversationSeen(seenCtx, recipient, messages)
-			seenCancel()
-		}(recipient, append([]service.DirectMessage(nil), w.conversationMessages...))
-	}
-
-	w.mu.Lock()
-	w.nodeStatus = status
-	w.mu.Unlock()
-
-	if w.window != nil {
-		w.window.Invalidate()
-	}
+	return ""
 }
 
-// loadConversation fetches and decrypts the conversation with a specific peer
-// from the chatlog on disk.
-func (w *Window) loadConversation(peerAddress string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	messages, err := w.client.FetchConversation(ctx, peerAddress)
-	cancel()
-
-	if err != nil {
-		w.conversationMessages = nil
-	} else {
-		w.conversationMessages = messages
+func (w *Window) snapRecipients(status service.NodeStatus) []string {
+	discovered := make(map[string]struct{}, len(w.snap.Peers))
+	for id := range w.snap.Peers {
+		discovered[id] = struct{}{}
 	}
-	w.conversationPeer = peerAddress
-}
-
-// reloadActiveConversation reloads the conversation for the currently selected
-// peer. Called when a new message arrives for the active chat.
-func (w *Window) reloadActiveConversation() {
-	if w.conversationPeer == "" {
-		return
-	}
-	w.loadConversation(w.conversationPeer)
-}
-
-// loadPreviews fetches conversation previews from the chatlog.
-// It retries with exponential backoff (1s, 2s, 4s) if the initial attempt
-// fails or returns an empty result, because the node may still be starting up.
-func (w *Window) loadPreviews() {
-	const maxAttempts = 4
-
-	previews, ok := retryWithBackoff(maxAttempts, 1*time.Second, func() ([]service.ConversationPreview, bool) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		result, err := w.client.FetchConversationPreviews(ctx)
-		cancel()
-
-		if err != nil {
-			log.Printf("desktop: preview load failed: %v", err)
-			return nil, false
-		}
-		if len(result) == 0 {
-			return nil, false
-		}
-		return result, true
-	})
-
-	if !ok {
-		log.Printf("desktop: preview load failed after %d attempts, will update incrementally", maxAttempts)
-		return
-	}
-
-	w.mu.Lock()
-	for _, p := range previews {
-		w.previews[p.PeerAddress] = p
-	}
-	w.mu.Unlock()
-
-	if w.window != nil {
-		w.window.Invalidate()
-	}
-}
-
-func (w *Window) currentStatus() service.NodeStatus {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.nodeStatus
-}
-
-func (w *Window) sendStatusLine() string {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.sendStatus
+	recipients := knownRecipients(status.Contacts, discovered, w.snap.MyAddress)
+	return mergeRecipientOrder(recipients, w.snap.PeerOrder)
 }
 
 func (w *Window) recipientButton(id string) *widget.Clickable {
@@ -936,9 +828,11 @@ func (w *Window) recipientButton(id string) *widget.Clickable {
 }
 
 func (w *Window) ensureSelectedRecipient(recipients []string) {
+	selected := w.snap.ActivePeer
+
 	if len(recipients) == 0 {
-		if strings.TrimSpace(w.selectedRecipient) != "" {
-			w.recipientEditor.SetText(w.selectedRecipient)
+		if strings.TrimSpace(selected) != "" {
+			w.recipientEditor.SetText(selected)
 		} else {
 			w.recipientEditor.SetText("")
 		}
@@ -946,155 +840,23 @@ func (w *Window) ensureSelectedRecipient(recipients []string) {
 	}
 
 	for _, recipient := range recipients {
-		if recipient == w.selectedRecipient {
+		if recipient == selected {
 			w.recipientEditor.SetText(recipient)
 			return
 		}
 	}
 
-	if strings.TrimSpace(w.selectedRecipient) != "" {
-		w.recipientEditor.SetText(w.selectedRecipient)
+	if strings.TrimSpace(selected) != "" {
+		w.recipientEditor.SetText(selected)
 		return
 	}
 
-	w.selectedRecipient = recipients[0]
+	// Auto-select first recipient. AutoSelectPeer sends seen receipts
+	// the same way SelectPeer does — the chat is on screen.
+	w.router.AutoSelectPeer(recipients[0])
 	w.recipientEditor.SetText(recipients[0])
 }
 
-func (w *Window) conversationEntries(status service.NodeStatus, recipient string) []service.DirectMessage {
-	// Use on-demand loaded conversation messages (from chatlog) instead of in-memory status.
-	if w.conversationPeer == recipient {
-		return w.conversationMessages
-	}
-
-	// Fallback: filter from status.DirectMessages if available (backward compat).
-	me := w.client.Address()
-	rows := make([]service.DirectMessage, 0, len(status.DirectMessages))
-
-	for _, raw := range status.DirectMessages {
-		sender := raw.Sender
-		target := raw.Recipient
-
-		switch {
-		case sender == me && target == recipient:
-			rows = append(rows, raw)
-		case sender == recipient && target == me:
-			rows = append(rows, raw)
-		}
-	}
-
-	return rows
-}
-
-func (w *Window) updateUnreadStateFromHeaders(status service.NodeStatus) {
-	me := w.client.Address()
-	selected := strings.TrimSpace(w.selectedRecipient)
-
-	w.mu.Lock()
-
-	// On the first refresh cycle, populate seenIncoming with the existing
-	// backlog without triggering a notification sound.  Only messages that
-	// arrive after this initial sync are considered genuinely new.
-	firstSync := !w.initialSyncDone
-	if firstSync {
-		w.initialSyncDone = true
-	}
-
-	hasNew := false
-	needReloadConversation := false
-	peersToRefresh := make(map[string]struct{})
-	for _, header := range status.DMHeaders {
-		if _, ok := w.seenIncoming[header.ID]; ok {
-			continue
-		}
-
-		// Track the peer for this message.
-		var peer string
-		if header.Sender == me {
-			peer = header.Recipient
-		} else if header.Recipient == me {
-			peer = header.Sender
-			w.discoveredRecipients[header.Sender] = struct{}{}
-			if !firstSync {
-				hasNew = true
-			}
-		} else {
-			// Transit header — skip without recording in seenIncoming
-			// to avoid unbounded memory growth.
-			continue
-		}
-
-		w.seenIncoming[header.ID] = struct{}{}
-
-		// Check if this message is for the currently active conversation.
-		if peer == selected {
-			needReloadConversation = true
-		} else if header.Sender != me && header.Recipient == me {
-			w.unreadRecipients[header.Sender]++
-			w.promoteRecipientLocked(header.Sender)
-		}
-
-		// Collect unique peers that need a preview refresh.
-		if peer != "" {
-			peersToRefresh[peer] = struct{}{}
-		}
-	}
-	w.mu.Unlock()
-
-	// Refresh preview once per peer (not once per message).
-	for peer := range peersToRefresh {
-		go w.refreshPreviewForPeer(peer)
-	}
-
-	if hasNew {
-		go systemBeep()
-	}
-
-	// If new messages arrived for the currently selected conversation, reload it.
-	if needReloadConversation {
-		w.reloadActiveConversation()
-	}
-}
-
-func (w *Window) clearUnreadRecipient(recipient string) {
-	w.mu.Lock()
-	delete(w.unreadRecipients, recipient)
-	w.mu.Unlock()
-}
-
-func (w *Window) unreadCount(recipient string) int {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.unreadRecipients[recipient]
-}
-
-func (w *Window) currentRecipients(status service.NodeStatus) []string {
-	w.mu.RLock()
-	discovered := make(map[string]struct{}, len(w.discoveredRecipients))
-	for id := range w.discoveredRecipients {
-		discovered[id] = struct{}{}
-	}
-	order := append([]string(nil), w.recipientOrder...)
-	w.mu.RUnlock()
-
-	recipients := knownRecipients(status.Contacts, discovered, w.client.Address())
-	return mergeRecipientOrder(recipients, order)
-}
-
-func (w *Window) promoteRecipientLocked(recipient string) {
-	recipient = strings.TrimSpace(recipient)
-	if recipient == "" {
-		return
-	}
-	filtered := w.recipientOrder[:0]
-	for _, item := range w.recipientOrder {
-		if item == recipient {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	w.recipientOrder = append([]string{recipient}, filtered...)
-}
 
 func mergeRecipientOrder(recipients, order []string) []string {
 	if len(recipients) == 0 {
@@ -1126,52 +888,6 @@ func mergeRecipientOrder(recipients, order []string) []string {
 	return out
 }
 
-func (w *Window) recipientPreview(status service.NodeStatus, recipient string) string {
-	me := w.client.Address()
-
-	// Use cached preview from chatlog.
-	w.mu.RLock()
-	preview, ok := w.previews[recipient]
-	w.mu.RUnlock()
-
-	if ok && preview.Body != "" {
-		if preview.Sender == me {
-			return "You: " + preview.Body
-		}
-		return preview.Body
-	}
-
-	// Fallback: scan in-memory DirectMessages (backward compat).
-	for i := len(status.DirectMessages) - 1; i >= 0; i-- {
-		msg := status.DirectMessages[i]
-		if msg.Sender == me && msg.Recipient == recipient {
-			return "You: " + msg.Body
-		}
-		if msg.Sender == recipient && msg.Recipient == me {
-			return msg.Body
-		}
-	}
-	return ""
-}
-
-// refreshPreviewForPeer updates the cached preview for a single peer.
-func (w *Window) refreshPreviewForPeer(peerAddress string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	preview, err := w.client.FetchSinglePreview(ctx, peerAddress)
-	cancel()
-
-	if err != nil || preview == nil {
-		return
-	}
-
-	w.mu.Lock()
-	w.previews[peerAddress] = *preview
-	w.mu.Unlock()
-
-	if w.window != nil {
-		w.window.Invalidate()
-	}
-}
 
 func (w *Window) layoutUnreadBadge(gtx layout.Context, count int) layout.Dimensions {
 	height := gtx.Dp(unit.Dp(24))
@@ -1232,7 +948,7 @@ func (w *Window) layoutConversation(gtx layout.Context, recipient string, conver
 }
 
 func (w *Window) layoutChatBubble(gtx layout.Context, recipient string, message service.DirectMessage) layout.Dimensions {
-	me := w.client.Address()
+	me := w.snap.MyAddress
 	isMine := message.Sender == me
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -1295,14 +1011,20 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				}),
 			}
 
-			if isMine && (message.DeliveredAt != nil || message.ReceiptStatus == "queued" || message.ReceiptStatus == "retrying" || message.ReceiptStatus == "failed" || message.ReceiptStatus == "expired" || message.ReceiptStatus == "sent") {
+			if isMine && (message.DeliveredAt != nil || message.ReceiptStatus == "queued" || message.ReceiptStatus == "retrying" || message.ReceiptStatus == "failed" || message.ReceiptStatus == "expired" || message.ReceiptStatus == "sent" || message.ReceiptStatus == "delivered" || message.ReceiptStatus == "seen") {
 				children = append(children,
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						statusText := ""
 						switch {
-						case message.DeliveredAt != nil && message.ReceiptStatus == "seen":
+						case message.ReceiptStatus == "seen" && message.DeliveredAt != nil:
 							statusText = "✓✓ " + message.DeliveredAt.Format("15:04")
+						case message.ReceiptStatus == "seen":
+							statusText = "✓✓"
+						case message.ReceiptStatus == "delivered" && message.DeliveredAt != nil:
+							statusText = "✓ " + message.DeliveredAt.Format("15:04")
+						case message.ReceiptStatus == "delivered":
+							statusText = "✓"
 						case message.DeliveredAt != nil:
 							statusText = "✓ " + message.DeliveredAt.Format("15:04")
 						case message.ReceiptStatus == "queued":
@@ -1434,18 +1156,18 @@ func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) openConsoleWindow() {
-	w.mu.Lock()
+	w.consoleMu.Lock()
 	if w.consoleOpen {
-		w.mu.Unlock()
+		w.consoleMu.Unlock()
 		return
 	}
 	w.consoleOpen = true
-	w.mu.Unlock()
+	w.consoleMu.Unlock()
 
 	console := NewConsoleWindow(w, func() {
-		w.mu.Lock()
+		w.consoleMu.Lock()
 		w.consoleOpen = false
-		w.mu.Unlock()
+		w.consoleMu.Unlock()
 	})
 	console.Open()
 }

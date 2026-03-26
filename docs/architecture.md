@@ -28,9 +28,9 @@ The repository contains the current Go-based CORSA stack:
 - `internal/core/identity`: `ed25519` identity, `X25519` box keys, key binding signatures
 - `internal/core/directmsg`: encrypted and signed direct-message envelopes
 - `internal/core/gazeta`: encrypted anonymous notice transport
-- `internal/core/chatlog`: append-only file-backed chat message persistence (see [chatlog.md](chatlog.md))
-- `internal/core/node`: mesh node, trust store, peer sync, relay, storage
-- `internal/core/service`: desktop-facing application service layer
+- `internal/core/chatlog`: append-only file-backed chat message persistence (see [chatlog.md](chatlog.md)). Owned by `DesktopClient` (service layer), not by `node.Service`.
+- `internal/core/node`: mesh node, trust store, peer sync, relay (see [mesh.md](mesh.md) for the full mesh network documentation). Does not own message persistence — delegates to a registered `MessageStore` handler (see [chatlog.md](chatlog.md)).
+- `internal/core/service`: desktop-facing application service layer (see [dm_router.md](dm_router.md) for the DMRouter service layer). `DesktopClient` owns `chatlog.Store` and implements `node.MessageStore`.
 - `internal/core/protocol`: protocol models
 - `internal/core/transport`: p2p transport abstractions
 - `internal/platform/mobile`: future mobile bindings
@@ -111,9 +111,9 @@ Current trust and discovery flow:
 - `internal/core/identity`: identity на `ed25519`, `X25519` box keys, подписи привязки ключей
 - `internal/core/directmsg`: зашифрованные и подписанные direct-message envelopes
 - `internal/core/gazeta`: зашифрованный анонимный transport для notices
-- `internal/core/chatlog`: append-only хранение истории сообщений на диске (см. [chatlog.md](chatlog.md))
-- `internal/core/node`: mesh-нода, trust store, peer sync, relay, хранение
-- `internal/core/service`: сервисный слой для desktop-клиента
+- `internal/core/chatlog`: append-only хранение истории сообщений на диске (см. [chatlog.md](chatlog.md)). Владеет `DesktopClient` (сервисный слой), а не `node.Service`.
+- `internal/core/node`: mesh-нода, trust store, peer sync, relay (см. [mesh.md](mesh.md) для полной документации mesh-сети). Не владеет хранением сообщений — делегирует зарегистрированному обработчику `MessageStore` (см. [chatlog.md](chatlog.md)).
+- `internal/core/service`: сервисный слой для desktop-клиента (см. [dm_router.md](dm_router.md) для сервисного слоя DMRouter). `DesktopClient` владеет `chatlog.Store` и реализует `node.MessageStore`.
 - `internal/core/protocol`: модели протокола
 - `internal/core/transport`: p2p-абстракции транспорта
 - `internal/platform/mobile`: будущие mobile bindings

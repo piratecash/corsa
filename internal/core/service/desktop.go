@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
+	"corsa/internal/core/chatlog"
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/gazeta"
@@ -25,6 +28,7 @@ type DesktopClient struct {
 	appCfg    config.App
 	nodeCfg   config.Node
 	localNode *node.Service
+	chatLog   *chatlog.Store // owned by DesktopClient, not the node
 }
 
 type Contact struct {
@@ -34,13 +38,14 @@ type Contact struct {
 }
 
 type MessageRecord struct {
-	ID         string
-	Flag       string
-	Timestamp  time.Time
-	TTLSeconds int
-	Sender     string
-	Recipient  string
-	Body       string
+	ID              string
+	Flag            string
+	Timestamp       time.Time
+	TTLSeconds      int
+	Sender          string
+	Recipient       string
+	Body            string
+	PersistedStatus string // delivery_status from SQLite chatlog (may be empty for legacy data)
 }
 
 type DeliveryReceipt struct {
@@ -78,7 +83,6 @@ type DirectMessage struct {
 	DeliveredAt   *time.Time
 }
 
-// DMHeader is a lightweight message header (no body) for new-message detection.
 type DMHeader struct {
 	ID        string
 	Sender    string
@@ -86,12 +90,12 @@ type DMHeader struct {
 	Timestamp time.Time
 }
 
-// ConversationPreview holds the last decrypted message for a conversation peer.
 type ConversationPreview struct {
 	PeerAddress string
 	Sender      string
 	Body        string
 	Timestamp   time.Time
+	UnreadCount int // number of incoming messages with delivery_status != 'seen'
 }
 
 type PendingMessage struct {
@@ -152,12 +156,84 @@ type NodeStatus struct {
 }
 
 func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service) *DesktopClient {
-	return &DesktopClient{
+	store := chatlog.NewStore(nodeCfg.EffectiveChatLogDir(), id.Address, nodeCfg.ListenAddress)
+
+	// Register DesktopClient as the node's MessageStore so the node
+	// delegates message persistence to the desktop layer instead of
+	// managing its own chatlog.
+	c := &DesktopClient{
 		id:        id,
 		appCfg:    appCfg,
 		nodeCfg:   nodeCfg,
 		localNode: localNode,
+		chatLog:   store,
 	}
+	if localNode != nil {
+		localNode.RegisterMessageStore(c)
+	}
+	return c
+}
+
+// Close releases the chatlog SQLite database. Called at shutdown so WAL
+// checkpoint and file handles are released cleanly.
+func (c *DesktopClient) Close() error {
+	if c.chatLog != nil {
+		return c.chatLog.Close()
+	}
+	return nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// node.MessageStore implementation — called by the node for
+// messages that belong to the local identity.
+// ──────────────────────────────────────────────────────────────
+
+func (c *DesktopClient) StoreMessage(envelope protocol.Envelope, isOutgoing bool) bool {
+	if c.chatLog == nil {
+		return false
+	}
+	status := chatlog.StatusDelivered
+	if isOutgoing {
+		status = chatlog.StatusSent
+	}
+	entry := chatlog.Entry{
+		ID:             string(envelope.ID),
+		Sender:         envelope.Sender,
+		Recipient:      envelope.Recipient,
+		Body:           string(envelope.Payload),
+		CreatedAt:      envelope.CreatedAt.Format(time.RFC3339Nano),
+		Flag:           string(envelope.Flag),
+		DeliveryStatus: status,
+		TTLSeconds:     envelope.TTLSeconds,
+	}
+	if err := c.chatLog.Append(envelope.Topic, c.id.Address, entry); err != nil {
+		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
+		return false
+	}
+	return true
+}
+
+func (c *DesktopClient) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool {
+	if c.chatLog == nil {
+		return false
+	}
+	// The receipt sender is the message recipient (confirming delivery/seen).
+	// The receipt recipient is the message sender (being notified).
+	// The peer in the chatlog is the other party.
+	var chatlogPeer string
+	if receipt.Sender == c.id.Address {
+		chatlogPeer = receipt.Recipient
+	} else if receipt.Recipient == c.id.Address {
+		chatlogPeer = receipt.Sender
+	}
+	if chatlogPeer == "" {
+		return true // not our message, nothing to update
+	}
+	if _, err := c.chatLog.UpdateStatus("dm", chatlogPeer, string(receipt.MessageID), receipt.Status); err != nil {
+		log.Error().Str("message_id", string(receipt.MessageID)).Str("status", receipt.Status).Err(err).Msg("chatlog update status failed")
+		return false
+	}
+	return true
 }
 
 func (c *DesktopClient) NetworkName() string {
@@ -199,9 +275,9 @@ func (c *DesktopClient) BootstrapPeers() []transport.Peer {
 	return peers
 }
 
-func (c *DesktopClient) SubscribeLocalChanges() (<-chan struct{}, func()) {
+func (c *DesktopClient) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, func()) {
 	if c.localNode == nil {
-		ch := make(chan struct{})
+		ch := make(chan protocol.LocalChangeEvent)
 		close(ch)
 		return ch, func() {}
 	}
@@ -452,6 +528,19 @@ func (c *DesktopClient) ExecuteConsoleCommand(input string) (string, error) {
 		return c.consolePeersJSON()
 	}
 
+	// Chatlog commands are handled directly by DesktopClient (owns chatlog.Store).
+	// These frame types were removed from node.HandleLocalFrame after the chatlog
+	// ownership refactor; routing them through localRequestFrame would return
+	// "unknown command".
+	switch frame.Type {
+	case "fetch_chatlog":
+		return c.consoleFetchChatlog(frame.Topic, frame.Address)
+	case "fetch_chatlog_previews":
+		return c.consoleFetchChatlogPreviews()
+	case "fetch_conversations":
+		return c.consoleFetchConversations()
+	}
+
 	reply, err := c.localRequestFrame(frame)
 	if err != nil {
 		return "", err
@@ -460,6 +549,57 @@ func (c *DesktopClient) ExecuteConsoleCommand(input string) (string, error) {
 	data, err := json.MarshalIndent(reply, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("format console response: %w", err)
+	}
+	return string(data), nil
+}
+
+// consoleFetchChatlog reads chat entries for a peer directly from the local chatlog.
+func (c *DesktopClient) consoleFetchChatlog(topic, peerAddress string) (string, error) {
+	if c.chatLog == nil {
+		return "", fmt.Errorf("chatlog not available")
+	}
+	if topic == "" {
+		topic = "dm"
+	}
+	entries, err := c.chatLog.Read(topic, peerAddress)
+	if err != nil {
+		return "", fmt.Errorf("chatlog read: %w", err)
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("format chatlog entries: %w", err)
+	}
+	return string(data), nil
+}
+
+// consoleFetchChatlogPreviews reads the last entry per peer from the local chatlog.
+func (c *DesktopClient) consoleFetchChatlogPreviews() (string, error) {
+	if c.chatLog == nil {
+		return "", fmt.Errorf("chatlog not available")
+	}
+	previews, err := c.chatLog.ReadLastEntryPerPeer()
+	if err != nil {
+		return "", fmt.Errorf("chatlog previews: %w", err)
+	}
+	data, err := json.MarshalIndent(previews, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("format chatlog previews: %w", err)
+	}
+	return string(data), nil
+}
+
+// consoleFetchConversations lists all conversations with message counts from the local chatlog.
+func (c *DesktopClient) consoleFetchConversations() (string, error) {
+	if c.chatLog == nil {
+		return "", fmt.Errorf("chatlog not available")
+	}
+	conversations, err := c.chatLog.ListConversations()
+	if err != nil {
+		return "", fmt.Errorf("chatlog conversations: %w", err)
+	}
+	data, err := json.MarshalIndent(conversations, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("format conversations: %w", err)
 	}
 	return string(data), nil
 }
@@ -835,29 +975,30 @@ func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAdd
 	return imported, nil
 }
 
-func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) error {
+func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) (*DirectMessage, error) {
 	to = strings.TrimSpace(to)
 	body = strings.TrimSpace(body)
 	if to == "" || body == "" {
-		return fmt.Errorf("recipient and message are required")
+		return nil, fmt.Errorf("recipient and message are required")
 	}
 
 	recipient, err := c.ensureRecipientContact(ctx, to)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ciphertext, err := directmsg.EncryptForParticipants(c.id, to, recipient.BoxKey, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	messageID, err := protocol.NewMessageID()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	createdAt := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC()
+	createdAt := now.Format(time.RFC3339)
 	reply, err := c.localRequestFrame(protocol.Frame{
 		Type:       "send_message",
 		Topic:      "dm",
@@ -870,14 +1011,22 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 		Body:       ciphertext,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if reply.Type == "message_stored" || reply.Type == "message_known" {
-		return nil
+	if reply.Type != "message_stored" && reply.Type != "message_known" {
+		return nil, fmt.Errorf("unexpected send reply: %s", reply.Type)
 	}
 
-	return fmt.Errorf("unexpected send reply: %s", reply.Type)
+	msg := &DirectMessage{
+		ID:            string(messageID),
+		Sender:        c.id.Address,
+		Recipient:     to,
+		Body:          body, // plaintext — already known to us
+		Timestamp:     now,
+		ReceiptStatus: "sent",
+	}
+	return msg, nil
 }
 
 func (c *DesktopClient) ensureRecipientContact(ctx context.Context, recipient string) (Contact, error) {
@@ -948,7 +1097,7 @@ func (c *DesktopClient) MarkConversationSeen(ctx context.Context, counterparty s
 			continue
 		}
 
-		reply, err := c.localRequestFrame(protocol.Frame{
+		reply, err := c.localRequestFrameCtx(ctx, protocol.Frame{
 			Type:        "send_delivery_receipt",
 			ID:          message.ID,
 			Address:     c.id.Address,
@@ -1069,8 +1218,26 @@ func (c *DesktopClient) requestFrame(conn net.Conn, reader *bufio.Reader, reques
 }
 
 func (c *DesktopClient) localRequestFrame(request protocol.Frame) (protocol.Frame, error) {
+	return c.localRequestFrameCtx(context.Background(), request)
+}
+
+// localRequestFrameCtx is a context-aware variant of localRequestFrame.
+// For TCP mode, ctx is propagated to the dialer so caller-imposed deadlines
+// are fully respected. For embedded mode (localNode != nil), ctx.Err() is
+// checked before and after HandleLocalFrame as a best-effort cancellation
+// check — HandleLocalFrame itself is synchronous and cannot be interrupted
+// mid-execution, so a stuck handler will block until it returns regardless
+// of ctx cancellation.
+func (c *DesktopClient) localRequestFrameCtx(ctx context.Context, request protocol.Frame) (protocol.Frame, error) {
+	if err := ctx.Err(); err != nil {
+		return protocol.Frame{}, err
+	}
+
 	if c.localNode != nil {
 		frame := c.localNode.HandleLocalFrame(request)
+		if err := ctx.Err(); err != nil {
+			return protocol.Frame{}, err
+		}
 		if frame.Type == "error" {
 			if frame.Code != "" {
 				return protocol.Frame{}, protocol.ErrorFromCode(frame.Code)
@@ -1080,7 +1247,7 @@ func (c *DesktopClient) localRequestFrame(request protocol.Frame) (protocol.Fram
 		return frame, nil
 	}
 
-	conn, reader, _, err := c.openLocalSession(context.Background())
+	conn, reader, _, err := c.openLocalSession(ctx)
 	if err != nil {
 		return protocol.Frame{}, err
 	}
@@ -1182,6 +1349,21 @@ func decryptNoticeFrames(id *identity.Identity, notices []protocol.NoticeFrame) 
 	return out
 }
 
+// receiptStatusRank returns the monotonic rank of a delivery status.
+// Higher rank = further along the lifecycle. Unknown/empty = 0.
+func receiptStatusRank(status string) int {
+	switch status {
+	case "sent":
+		return 1
+	case "delivered":
+		return 2
+	case "seen":
+		return 3
+	default:
+		return 0
+	}
+}
+
 func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingItems []PendingMessage) []DirectMessage {
 	receiptsByMessageID := make(map[string]DeliveryReceipt, len(receipts))
 	for _, receipt := range receipts {
@@ -1201,23 +1383,52 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 		recipient := item.Recipient
 		ciphertext := item.Body
 
-		contact, ok := contacts[sender]
-		if !ok || contact.PubKey == "" {
-			continue
+		// Determine the sender's public key for decryption.
+		// For outgoing messages (sender == self) use the identity key directly
+		// instead of relying on the contacts map, which typically does not
+		// contain the node's own address. Mirrors DecryptIncomingMessage().
+		var senderPubKey string
+		if sender == id.Address {
+			senderPubKey = identity.PublicKeyBase64(id.PublicKey)
+		} else {
+			contact, ok := contacts[sender]
+			if !ok || contact.PubKey == "" {
+				continue
+			}
+			senderPubKey = contact.PubKey
 		}
 
-		message, err := directmsg.DecryptForIdentity(id, sender, contact.PubKey, recipient, ciphertext)
+		message, err := directmsg.DecryptForIdentity(id, sender, senderPubKey, recipient, ciphertext)
 		if err != nil {
 			continue
 		}
 
 		var deliveredAt *time.Time
-		receiptStatus := ""
+
+		// Start from the persisted status in SQLite (survives restart).
+		receiptStatus := item.PersistedStatus
+
+		// Layer in-memory receipt on top — but only if it advances the status.
 		if receipt, ok := receiptsByMessageID[item.ID]; ok {
 			deliveredCopy := receipt.DeliveredAt
 			deliveredAt = &deliveredCopy
-			receiptStatus = receipt.Status
-		} else if item.Sender == id.Address {
+			if receiptStatusRank(receipt.Status) > receiptStatusRank(receiptStatus) {
+				receiptStatus = receipt.Status
+			}
+		}
+
+		// Synthesize DeliveredAt for persisted statuses that survive restart.
+		// After a restart the in-memory receipt map is empty, so deliveredAt
+		// would be nil even though SQLite has a valid "delivered" or "seen"
+		// status. Use the message timestamp as a reasonable approximation so
+		// the UI can render status badges (checkmarks) after restart.
+		if deliveredAt == nil && (receiptStatus == "delivered" || receiptStatus == "seen") {
+			t := item.Timestamp
+			deliveredAt = &t
+		}
+
+		// For outgoing messages with no persisted or receipt status, check pending state.
+		if receiptStatus == "" && item.Sender == id.Address {
 			if pendingItem, ok := pending[item.ID]; ok {
 				receiptStatus = pendingItem.Status
 			} else {
@@ -1237,6 +1448,56 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 	}
 
 	return out
+}
+
+func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) *DirectMessage {
+	if event.Type != protocol.LocalChangeNewMessage || event.Topic != "dm" {
+		return nil
+	}
+
+	// Determine the sender's public key for decryption.
+	// For outgoing messages (sender == self) use the identity key directly
+	// instead of relying on the trust store, which is more robust.
+	var senderPubKey string
+	if event.Sender == c.id.Address {
+		senderPubKey = identity.PublicKeyBase64(c.id.PublicKey)
+	} else {
+		contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+		if err != nil {
+			return nil
+		}
+		contacts := contactsFromFrame(contactsReply)
+		contact, ok := contacts[event.Sender]
+		if !ok || contact.PubKey == "" {
+			return nil
+		}
+		senderPubKey = contact.PubKey
+	}
+
+	msg, err := directmsg.DecryptForIdentity(c.id, event.Sender, senderPubKey, event.Recipient, event.Body)
+	if err != nil {
+		return nil
+	}
+
+	ts, parseErr := parseTimestamp(event.CreatedAt)
+	if parseErr != nil {
+		ts = time.Now().UTC()
+	}
+
+	// Incoming messages from others start as "delivered" (we just received them).
+	status := "delivered"
+	if event.Sender == c.id.Address {
+		status = "sent"
+	}
+
+	return &DirectMessage{
+		ID:            event.MessageID,
+		Sender:        event.Sender,
+		Recipient:     event.Recipient,
+		Body:          msg.Body,
+		Timestamp:     ts,
+		ReceiptStatus: status,
+	}
 }
 
 func pendingMessagesFromFrame(frame protocol.Frame) []PendingMessage {
@@ -1270,15 +1531,22 @@ func isConversationMessage(message protocol.MessageFrame, self, counterparty str
 		(message.Sender == counterparty && message.Recipient == self)
 }
 
+// parseTimestamp tries RFC3339Nano first, then falls back to RFC3339 for
+// legacy/migrated records that were stored with second precision.
+func parseTimestamp(s string) (time.Time, error) {
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		ts, err = time.Parse(time.RFC3339, s)
+	}
+	return ts, err
+}
+
 func dmHeadersFromFrame(frame protocol.Frame) []DMHeader {
 	out := make([]DMHeader, 0, len(frame.DMHeaders))
 	for _, h := range frame.DMHeaders {
-		ts, err := time.Parse(time.RFC3339Nano, h.CreatedAt)
+		ts, err := parseTimestamp(h.CreatedAt)
 		if err != nil {
-			ts, err = time.Parse(time.RFC3339, h.CreatedAt)
-			if err != nil {
-				continue
-			}
+			continue
 		}
 		out = append(out, DMHeader{
 			ID:        h.ID,
@@ -1361,6 +1629,63 @@ func (c *DesktopClient) importIncomingDMHeaderContacts(trustedContacts, networkC
 	return reply.Count
 }
 
+// fetchContactsForDecrypt loads trusted contacts and, if any sender in the
+// supplied list is missing, supplements with network contacts. Trusted
+// contacts always take precedence over network ones. This helper
+// deduplicates the contact-fetching pattern used by FetchConversation,
+// FetchConversationPreviews, and FetchSinglePreview.
+//
+// The local identity address (c.id.Address) is excluded from the missing-
+// sender check because all callers already handle sender==self via the
+// identity key, without needing contacts. This avoids a spurious
+// fetch_contacts roundtrip on every conversation that contains outgoing
+// messages.
+func (c *DesktopClient) fetchContactsForDecrypt(ctx context.Context, senders []string) (map[string]Contact, error) {
+	contactsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_trusted_contacts"})
+	if err != nil {
+		return nil, err
+	}
+	contacts := contactsFromFrame(contactsReply)
+
+	// Check if any non-self sender is missing from the trusted store.
+	// Self (outgoing messages) is decrypted via the identity key by all
+	// callers, so its absence in contacts is not a reason to fetch network
+	// contacts.
+	myAddr := c.id.Address
+	needNetwork := false
+	for _, sender := range senders {
+		if sender == myAddr {
+			continue
+		}
+		if _, ok := contacts[sender]; !ok {
+			needNetwork = true
+			break
+		}
+	}
+	if !needNetwork {
+		return contacts, nil
+	}
+
+	// Supplement with network contacts; trusted contacts take precedence.
+	// If this fails, propagate the error so callers can retry — silently
+	// returning trusted-only contacts would cause decryptDirectMessages to
+	// skip messages from unknown senders, producing an incomplete history
+	// or empty preview bodies without any error signal.
+	networkReply, networkErr := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_contacts"})
+	if networkErr != nil {
+		return nil, fmt.Errorf("fetch network contacts: %w", networkErr)
+	}
+	networkContacts := contactsFromFrame(networkReply)
+	merged := make(map[string]Contact, len(contacts)+len(networkContacts))
+	for addr, nc := range networkContacts {
+		merged[addr] = nc
+	}
+	for addr, tc := range contacts {
+		merged[addr] = tc // trusted wins
+	}
+	return merged, nil
+}
+
 // FetchConversation loads the full chat history for a single peer from the
 // chatlog on disk, decrypts it, and returns the messages. This is called
 // on demand when the user switches to a conversation rather than keeping
@@ -1370,76 +1695,57 @@ func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress strin
 	if peerAddress == "" {
 		return nil, fmt.Errorf("peer address is required")
 	}
+	if c.chatLog == nil {
+		return nil, fmt.Errorf("chatlog not available")
+	}
 
-	chatlogReply, err := c.localRequestFrame(protocol.Frame{
-		Type:    "fetch_chatlog",
-		Topic:   "dm",
-		Address: peerAddress,
-	})
+	// Read directly from the local chatlog — no node frame roundtrip.
+	// Use context-aware variant so caller deadlines bound SQLite I/O.
+	entries, err := c.chatLog.ReadCtx(ctx, "dm", peerAddress)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog read: %w", err)
+	}
+
+	// Collect unique senders for contact lookup.
+	senderSet := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		senderSet[entry.Sender] = struct{}{}
+	}
+	senders := make([]string, 0, len(senderSet))
+	for s := range senderSet {
+		senders = append(senders, s)
+	}
+	decryptContacts, err := c.fetchContactsForDecrypt(ctx, senders)
 	if err != nil {
 		return nil, err
 	}
 
-	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
-	if err != nil {
-		return nil, err
-	}
-	contacts := contactsFromFrame(contactsReply)
-
-	// If sender contact is missing from trusted store, supplement with network contacts.
-	decryptContacts := contacts
-	needRefresh := false
-	for _, entry := range chatlogReply.ChatEntries {
-		sender := entry.Sender
-		if _, ok := contacts[sender]; !ok {
-			needRefresh = true
-			break
-		}
-	}
-	if needRefresh {
-		networkReply, networkErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
-		if networkErr == nil {
-			networkContacts := contactsFromFrame(networkReply)
-			// Merge: trusted contacts take priority, fill gaps with network contacts.
-			merged := make(map[string]Contact, len(contacts)+len(networkContacts))
-			for addr, c := range networkContacts {
-				merged[addr] = c
-			}
-			for addr, c := range contacts {
-				merged[addr] = c
-			}
-			decryptContacts = merged
-		}
-	}
-
-	receiptsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_delivery_receipts", Recipient: c.id.Address})
+	receiptsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_delivery_receipts", Recipient: c.id.Address})
 	if err != nil {
 		return nil, err
 	}
 	deliveryReceipts := receiptRecordsFromFrames(receiptsReply.Receipts)
-	pendingReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
+	pendingReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
 	if err != nil {
 		return nil, err
 	}
 	pendingMessages := pendingMessagesFromFrame(pendingReply)
 
 	// Convert chatlog entries to MessageRecord for decryption.
-	records := make([]MessageRecord, 0, len(chatlogReply.ChatEntries))
-	for _, entry := range chatlogReply.ChatEntries {
-		ts, parseErr := time.Parse(time.RFC3339Nano, entry.CreatedAt)
+	records := make([]MessageRecord, 0, len(entries))
+	for _, entry := range entries {
+		ts, parseErr := parseTimestamp(entry.CreatedAt)
 		if parseErr != nil {
-			ts, parseErr = time.Parse(time.RFC3339, entry.CreatedAt)
-			if parseErr != nil {
-				continue
-			}
+			continue
 		}
 		records = append(records, MessageRecord{
-			ID:        entry.ID,
-			Flag:      entry.Flag,
-			Timestamp: ts.UTC(),
-			Sender:    entry.Sender,
-			Recipient: entry.Recipient,
-			Body:      entry.Body,
+			ID:              entry.ID,
+			Flag:            entry.Flag,
+			Timestamp:       ts.UTC(),
+			Sender:          entry.Sender,
+			Recipient:       entry.Recipient,
+			Body:            entry.Body,
+			PersistedStatus: entry.DeliveryStatus,
 		})
 	}
 
@@ -1448,73 +1754,89 @@ func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress strin
 
 // FetchConversationPreviews loads the last message for each DM conversation
 // from the chatlog, decrypts them, and returns preview data for the sidebar.
+// It also fetches conversation summaries (including UnreadCount) from SQLite
+// so the desktop UI can restore unread badges after a restart.
 func (c *DesktopClient) FetchConversationPreviews(ctx context.Context) ([]ConversationPreview, error) {
-	previewsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_chatlog_previews"})
+	if c.chatLog == nil {
+		return nil, fmt.Errorf("chatlog not available")
+	}
+
+	// Read directly from the local chatlog — no node frame roundtrip.
+	// Use context-aware variants so caller deadlines bound SQLite I/O.
+	lastEntries, err := c.chatLog.ReadLastEntryPerPeerCtx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog previews: %w", err)
+	}
+
+	// Fetch conversation summaries for unread counts.
+	// This query is the source of truth for unread badges after restart.
+	// If it fails, return an error so the caller can retry — silently
+	// continuing with an empty map would show all chats as read.
+	unreadByPeer := make(map[string]int)
+	summaries, err := c.chatLog.ListConversationsCtx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog summaries: %w", err)
+	}
+	for _, conv := range summaries {
+		if conv.UnreadCount > 0 {
+			unreadByPeer[conv.PeerAddress] = conv.UnreadCount
+		}
+	}
+
+	// Collect unique senders for contact lookup.
+	senders := make([]string, 0, len(lastEntries))
+	for _, entry := range lastEntries {
+		senders = append(senders, entry.Sender)
+	}
+	decryptContacts, err := c.fetchContactsForDecrypt(ctx, senders)
 	if err != nil {
 		return nil, err
 	}
 
-	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
-	if err != nil {
-		return nil, err
-	}
-	contacts := contactsFromFrame(contactsReply)
+	out := make([]ConversationPreview, 0, len(lastEntries))
+	for peerAddr, entry := range lastEntries {
+		sender := entry.Sender
 
-	// Supplement with network contacts for unknown senders.
-	decryptContacts := contacts
-	for _, preview := range previewsReply.ChatPreviews {
-		if _, ok := contacts[preview.Sender]; !ok {
-			networkReply, networkErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
-			if networkErr == nil {
-				networkContacts := contactsFromFrame(networkReply)
-				// Merge: trusted contacts take priority, fill gaps with network contacts.
-				merged := make(map[string]Contact, len(contacts)+len(networkContacts))
-				for addr, c := range networkContacts {
-					merged[addr] = c
-				}
-				for addr, c := range contacts {
-					merged[addr] = c
-				}
-				decryptContacts = merged
+		// For outgoing messages (sender == self) use the identity key directly.
+		var senderPubKey string
+		if sender == c.id.Address {
+			senderPubKey = identity.PublicKeyBase64(c.id.PublicKey)
+		} else {
+			contact, ok := decryptContacts[sender]
+			if !ok || contact.PubKey == "" {
+				ts, _ := parseTimestamp(entry.CreatedAt)
+				out = append(out, ConversationPreview{
+					PeerAddress: peerAddr,
+					Sender:      sender,
+					Body:        "",
+					Timestamp:   ts.UTC(),
+					UnreadCount: unreadByPeer[peerAddr],
+				})
+				continue
 			}
-			break
+			senderPubKey = contact.PubKey
 		}
-	}
 
-	out := make([]ConversationPreview, 0, len(previewsReply.ChatPreviews))
-	for _, preview := range previewsReply.ChatPreviews {
-		sender := preview.Sender
-		contact, ok := decryptContacts[sender]
-		if !ok || contact.PubKey == "" {
-			// Can't decrypt — show placeholder.
-			ts, _ := time.Parse(time.RFC3339Nano, preview.CreatedAt)
+		message, decryptErr := directmsg.DecryptForIdentity(c.id, sender, senderPubKey, entry.Recipient, entry.Body)
+		if decryptErr != nil {
+			ts, _ := parseTimestamp(entry.CreatedAt)
 			out = append(out, ConversationPreview{
-				PeerAddress: preview.PeerAddress,
+				PeerAddress: peerAddr,
 				Sender:      sender,
 				Body:        "",
 				Timestamp:   ts.UTC(),
+				UnreadCount: unreadByPeer[peerAddr],
 			})
 			continue
 		}
 
-		message, err := directmsg.DecryptForIdentity(c.id, sender, contact.PubKey, preview.Recipient, preview.Body)
-		if err != nil {
-			ts, _ := time.Parse(time.RFC3339Nano, preview.CreatedAt)
-			out = append(out, ConversationPreview{
-				PeerAddress: preview.PeerAddress,
-				Sender:      sender,
-				Body:        "",
-				Timestamp:   ts.UTC(),
-			})
-			continue
-		}
-
-		ts, _ := time.Parse(time.RFC3339Nano, preview.CreatedAt)
+		ts, _ := parseTimestamp(entry.CreatedAt)
 		out = append(out, ConversationPreview{
-			PeerAddress: preview.PeerAddress,
+			PeerAddress: peerAddr,
 			Sender:      sender,
 			Body:        message.Body,
 			Timestamp:   ts.UTC(),
+			UnreadCount: unreadByPeer[peerAddr],
 		})
 	}
 
@@ -1523,48 +1845,48 @@ func (c *DesktopClient) FetchConversationPreviews(ctx context.Context) ([]Conver
 
 // FetchSinglePreview loads and decrypts the last message for a single conversation.
 func (c *DesktopClient) FetchSinglePreview(ctx context.Context, peerAddress string) (*ConversationPreview, error) {
-	chatlogReply, err := c.localRequestFrame(protocol.Frame{
-		Type:    "fetch_chatlog",
-		Topic:   "dm",
-		Address: peerAddress,
-		Limit:   1,
-	})
-	if err != nil {
-		return nil, err
+	if c.chatLog == nil {
+		return nil, fmt.Errorf("chatlog not available")
 	}
-	if len(chatlogReply.ChatEntries) == 0 {
+
+	// Read directly from the local chatlog — no node frame roundtrip.
+	// Use context-aware variant so caller deadlines bound SQLite I/O.
+	entry, err := c.chatLog.ReadLastEntryCtx(ctx, "dm", peerAddress)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog read last: %w", err)
+	}
+	if entry == nil {
 		return nil, nil
 	}
 
-	entry := chatlogReply.ChatEntries[0]
-	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	sender := entry.Sender
+	contacts, err := c.fetchContactsForDecrypt(ctx, []string{sender})
 	if err != nil {
 		return nil, err
 	}
-	contacts := contactsFromFrame(contactsReply)
 
-	sender := entry.Sender
-	contact, ok := contacts[sender]
-	if !ok || contact.PubKey == "" {
-		networkReply, networkErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
-		if networkErr == nil {
-			networkContacts := contactsFromFrame(networkReply)
-			contact, ok = networkContacts[sender]
+	// For outgoing messages (sender == self) use the identity key directly.
+	var senderPubKey string
+	if sender == c.id.Address {
+		senderPubKey = identity.PublicKeyBase64(c.id.PublicKey)
+	} else {
+		contact, ok := contacts[sender]
+		if !ok || contact.PubKey == "" {
+			ts, _ := parseTimestamp(entry.CreatedAt)
+			return &ConversationPreview{
+				PeerAddress: peerAddress,
+				Sender:      sender,
+				Body:        "",
+				Timestamp:   ts.UTC(),
+			}, nil
 		}
+		senderPubKey = contact.PubKey
 	}
 
-	ts, _ := time.Parse(time.RFC3339Nano, entry.CreatedAt)
-	if !ok || contact.PubKey == "" {
-		return &ConversationPreview{
-			PeerAddress: peerAddress,
-			Sender:      sender,
-			Body:        "",
-			Timestamp:   ts.UTC(),
-		}, nil
-	}
+	ts, _ := parseTimestamp(entry.CreatedAt)
 
-	message, err := directmsg.DecryptForIdentity(c.id, sender, contact.PubKey, entry.Recipient, entry.Body)
-	if err != nil {
+	message, decryptErr := directmsg.DecryptForIdentity(c.id, sender, senderPubKey, entry.Recipient, entry.Body)
+	if decryptErr != nil {
 		return &ConversationPreview{
 			PeerAddress: peerAddress,
 			Sender:      sender,

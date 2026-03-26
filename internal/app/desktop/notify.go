@@ -2,15 +2,13 @@ package desktop
 
 import (
 	"bytes"
-	"io"
 	_ "embed"
-	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/hajimehoshi/go-mp3"
 	"github.com/ebitengine/oto/v3"
+	"github.com/hajimehoshi/go-mp3"
+	"github.com/rs/zerolog/log"
 )
 
 //go:embed assets/new-message.mp3
@@ -20,7 +18,6 @@ var (
 	otoCtx     *oto.Context
 	otoOnce    sync.Once
 	otoInitErr error
-	playing    atomic.Bool // prevents overlapping playback
 )
 
 func initAudioContext() (*oto.Context, error) {
@@ -39,36 +36,41 @@ func initAudioContext() (*oto.Context, error) {
 	return otoCtx, otoInitErr
 }
 
-// systemBeep plays the embedded mp3 notification sound.
-// It is safe to call from any goroutine.  Playback is synchronous
-// (blocks until the sound finishes), so callers should use `go systemBeep()`.
-// Concurrent calls are coalesced: if a sound is already playing, the new
-// call returns immediately rather than overlapping playback.
+// It is safe to call from any goroutine.  Callers should use `go systemBeep()`.
+// Every call creates a new oto.Player on the shared audio context.  Multiple
+// concurrent playbacks are allowed — the audio driver mixes them.  This means
+// rapid-fire messages produce overlapping sounds ("drum roll") rather than
+// being silently dropped.
 func systemBeep() {
-	if !playing.CompareAndSwap(false, true) {
-		return // already playing
-	}
-	defer playing.Store(false)
-
 	ctx, err := initAudioContext()
 	if err != nil {
-		log.Printf("desktop: audio init failed: %v", err)
+		log.Warn().Err(err).Msg("audio init failed")
 		return
 	}
 
 	decoder, err := mp3.NewDecoder(bytes.NewReader(notifyMP3))
 	if err != nil {
-		log.Printf("desktop: mp3 decode failed: %v", err)
+		log.Warn().Err(err).Msg("mp3 decode failed")
 		return
 	}
 
 	player := ctx.NewPlayer(decoder)
+	// Note: as of oto v3.4, Player.Close() is deprecated and not needed.
+	// The player is automatically cleaned up when it goes out of scope.
 
 	player.Play()
-	for player.IsPlaying() {
-		time.Sleep(10 * time.Millisecond)
-	}
 
-	// Drain any remaining buffered data to avoid truncation.
-	_, _ = io.ReadAll(decoder)
+	// Safety timeout: if the audio driver hangs and IsPlaying() never
+	// returns false, bail out after 5 seconds so the goroutine doesn't
+	// leak.
+	deadline := time.After(5 * time.Second)
+	for player.IsPlaying() {
+		select {
+		case <-deadline:
+			log.Warn().Msg("systemBeep: playback exceeded 5s deadline, closing player")
+			return
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }

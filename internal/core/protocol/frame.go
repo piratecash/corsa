@@ -139,15 +139,17 @@ func MarshalFrameLine(frame Frame) (string, error) {
 }
 
 type ChatEntryFrame struct {
-	ID        string `json:"id"`
-	Sender    string `json:"sender"`
-	Recipient string `json:"recipient"`
-	Body      string `json:"body"`
-	CreatedAt string `json:"created_at"`
-	Flag      string `json:"flag,omitempty"`
+	ID             string `json:"id"`
+	Sender         string `json:"sender"`
+	Recipient      string `json:"recipient"`
+	Body           string `json:"body"`
+	CreatedAt      string `json:"created_at"`
+	Flag           string `json:"flag,omitempty"`
+	DeliveryStatus string `json:"delivery_status,omitempty"`
+	TTLSeconds     int    `json:"ttl_seconds,omitempty"`
+	Metadata       string `json:"metadata,omitempty"`
 }
 
-// DMHeaderFrame is a lightweight message header (no body) used for new-message detection.
 type DMHeaderFrame struct {
 	ID        string `json:"id"`
 	Sender    string `json:"sender"`
@@ -155,19 +157,22 @@ type DMHeaderFrame struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// ChatPreviewFrame holds the last message entry for a conversation, used for sidebar previews.
 type ChatPreviewFrame struct {
-	PeerAddress string `json:"peer_address"`
-	ID          string `json:"id"`
-	Sender      string `json:"sender"`
-	Recipient   string `json:"recipient"`
-	Body        string `json:"body"`
-	CreatedAt   string `json:"created_at"`
-	Flag        string `json:"flag,omitempty"`
+	PeerAddress    string `json:"peer_address"`
+	ID             string `json:"id"`
+	Sender         string `json:"sender"`
+	Recipient      string `json:"recipient"`
+	Body           string `json:"body"`
+	CreatedAt      string `json:"created_at"`
+	Flag           string `json:"flag,omitempty"`
+	DeliveryStatus string `json:"delivery_status,omitempty"`
+	TTLSeconds     int    `json:"ttl_seconds,omitempty"`
+	Metadata       string `json:"metadata,omitempty"`
 }
 
 type ConversationFrame struct {
 	PeerAddress string `json:"peer_address"`
 	LastMessage string `json:"last_message,omitempty"`
 	Count       int    `json:"count"`
+	UnreadCount int    `json:"unread_count"`
 }

@@ -50,6 +50,8 @@ flowchart LR
     B -->|"9. decrypt locally"| P["Plaintext chat message"]
 ```
 
+*Diagram 1 — Direct message flow*
+
 ### Direct-message envelope
 
 The ciphertext token wraps a signed envelope:
@@ -142,6 +144,8 @@ flowchart LR
     B -->|"6. decrypt locally"| P["Readable notice"]
 ```
 
+*Diagram 2 — Gazeta bulletin board flow*
+
 ### Current limitations
 
 - `Gazeta` payloads are encrypted but not signed yet
@@ -206,6 +210,8 @@ flowchart LR
     N2 -->|"7. verify signature\n8. expose ciphertext to desktop"| B["Bob desktop"]
     B -->|"9. decrypt locally"| P["Plaintext chat message"]
 ```
+
+*Диаграмма 1 — Поток direct message*
 
 ### Direct-message envelope
 
@@ -298,6 +304,8 @@ flowchart LR
     N2 -->|"5. FETCH_NOTICES"| B["Recipient desktop"]
     B -->|"6. decrypt locally"| P["Readable notice"]
 ```
+
+*Диаграмма 2 — Поток Gazeta*
 
 ### Текущие ограничения
 

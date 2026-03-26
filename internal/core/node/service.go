@@ -8,21 +8,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"corsa/internal/core/chatlog"
+	"github.com/rs/zerolog/log"
+
 	"corsa/internal/core/config"
+	"corsa/internal/core/crashlog"
 	"corsa/internal/core/directmsg"
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/transport"
 )
+
+// MessageStore allows the desktop layer to own message persistence, while
+// relay-only nodes (corsa-node) leave this nil to skip local storage.
+type MessageStore interface {
+	StoreMessage(envelope protocol.Envelope, isOutgoing bool) bool
+	UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool
+}
 
 type Service struct {
 	identity       *identity.Identity
@@ -53,10 +61,11 @@ type Service struct {
 	outbound       map[string]outboundDelivery
 	upstream       map[string]struct{}
 	inboundConns   map[net.Conn]struct{}
+	connWg         sync.WaitGroup // tracks active handleConn goroutines for graceful shutdown
 	connAuth       map[net.Conn]*connAuthState
 	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
 	bans           map[string]banEntry
-	events         map[chan struct{}]struct{}
+	events         map[chan protocol.LocalChangeEvent]struct{}
 	listener       net.Listener
 	lastSync       time.Time
 	peersStatePath string
@@ -66,7 +75,7 @@ type Service struct {
 	persistedMeta   map[string]*peerEntry // stable metadata from peers.json, keyed by address
 	observedAddrs   map[string]string     // peer identity (fingerprint) → observed IP they reported for us
 	reachableGroups map[NetGroup]struct{} // network groups this node can reach (computed at startup)
-	chatLog         *chatlog.Store        // append-only chatlog for DM and global messages
+	messageStore    MessageStore           // optional: persistence handler registered by desktop layer
 }
 
 type subscriber struct {
@@ -129,12 +138,10 @@ type connAuthState struct {
 	Verified  bool
 }
 
-// connPeerHello stores info extracted from a peer's hello frame, so that
-// later frames on the same connection can look up the peer's identity and
-// self-declared reachability without re-parsing the hello.
+// connPeerHello caches hello frame info to avoid re-parsing for subsequent frames.
 type connPeerHello struct {
-	address  string              // peer's advertised listen address or identity fingerprint
-	networks map[NetGroup]struct{} // self-declared reachable groups (from hello "networks" field)
+	address  string
+	networks map[NetGroup]struct{}
 }
 
 type banEntry struct {
@@ -174,7 +181,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	peersStatePath := cfg.EffectivePeersStatePath()
 	peerState, err := loadPeerState(peersStatePath)
 	if err != nil {
-		log.Printf("node: peer state load failed path=%s err=%v", peersStatePath, err)
+		log.Error().Str("path", peersStatePath).Err(err).Msg("peer state load failed")
 		peerState = peerStateFile{Version: peerStateVersion, Peers: []peerEntry{}}
 	}
 
@@ -230,7 +237,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	queueStatePath := cfg.EffectiveQueueStatePath()
 	queueState, err := loadQueueState(queueStatePath)
 	if err != nil {
-		log.Printf("node: queue state load failed path=%s err=%v", queueStatePath, err)
+		log.Error().Str("path", queueStatePath).Err(err).Msg("queue state load failed")
 		queueState = queueStateFile{
 			Pending:       map[string][]pendingFrame{},
 			RelayRetry:    map[string]relayAttempt{},
@@ -258,7 +265,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 				// Malformed address — orphan to avoid silent loss.
 				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
 				delete(queueState.Pending, address)
-				log.Printf("node: orphaned %d pending frames for malformed address %s", len(queueState.Orphaned[address]), address)
+				log.Warn().Str("address", address).Int("count", len(queueState.Orphaned[address])).Msg("orphaned pending frames for malformed address")
 				continue
 			}
 			candidates := hostPrimaries[h]
@@ -269,7 +276,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 				// data is preserved on disk for manual recovery.
 				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
 				delete(queueState.Pending, address)
-				log.Printf("node: orphaned %d pending frames for unknown host %s", len(queueState.Orphaned[address]), address)
+				log.Warn().Str("address", address).Int("count", len(queueState.Orphaned[address])).Msg("orphaned pending frames for unknown host")
 			case 1:
 				primary := candidates[0]
 				if primary == address {
@@ -283,7 +290,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 				// Orphan so data survives for manual recovery.
 				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
 				delete(queueState.Pending, address)
-				log.Printf("node: orphaned %d pending frames for ambiguous address %s (candidates=%d)", len(queueState.Orphaned[address]), address, len(candidates))
+				log.Warn().Str("address", address).Int("count", len(queueState.Orphaned[address])).Int("candidates", len(candidates)).Msg("orphaned pending frames for ambiguous address")
 			}
 		}
 		queueState.Version = queueStateVersion
@@ -372,14 +379,29 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		connAuth:       make(map[net.Conn]*connAuthState),
 		connPeerInfo:   make(map[net.Conn]*connPeerHello),
 		bans:           make(map[string]banEntry),
-		events:         make(map[chan struct{}]struct{}),
-		chatLog:        chatlog.NewStore(cfg.EffectiveChatLogDir(), id.Address, cfg.ListenAddress),
+		events:         make(map[chan protocol.LocalChangeEvent]struct{}),
 	}
 }
 
+// RegisterMessageStore sets the optional handler for message persistence.
+// Must be called before Run(). Desktop nodes register a store so the UI layer
+// owns chatlog; relay-only nodes skip this — messages are relayed but not stored.
+func (s *Service) RegisterMessageStore(store MessageStore) {
+	s.messageStore = store
+}
+
 func (s *Service) Run(ctx context.Context) error {
+	// On shutdown: close all inbound connections so handleConn goroutines
+	// exit, wait for them to finish.
+	defer func() {
+		s.closeAllInboundConns()
+		log.Info().Msg("waiting for inbound connections to finish")
+		s.connWg.Wait()
+	}()
+
 	bootstrapDone := make(chan struct{})
 	go func() {
+		defer crashlog.DeferRecover()
 		s.bootstrapLoop(ctx)
 		close(bootstrapDone)
 	}()
@@ -423,7 +445,12 @@ func (s *Service) Run(ctx context.Context) error {
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
-		go s.handleConn(conn)
+		s.connWg.Add(1)
+		go func(c net.Conn) {
+			defer s.connWg.Done()
+			defer crashlog.DeferRecover()
+			s.handleConn(c)
+		}(conn)
 	}
 }
 
@@ -464,8 +491,8 @@ func (s *Service) SubscriberCount(recipient string) int {
 	return len(s.subs[recipient])
 }
 
-func (s *Service) SubscribeLocalChanges() (<-chan struct{}, func()) {
-	ch := make(chan struct{}, 8)
+func (s *Service) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, func()) {
+	ch := make(chan protocol.LocalChangeEvent, 16)
 
 	s.mu.Lock()
 	s.events[ch] = struct{}{}
@@ -498,7 +525,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		return
 	}
 	if !s.registerInboundConn(conn) {
-		log.Printf("node: reject connection from %s reason=max-connections", conn.RemoteAddr())
+		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections").Msg("reject connection")
 		_ = conn.Close()
 		return
 	}
@@ -509,7 +536,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		_ = conn.Close()
 	}()
 
-	log.Printf("node: incoming connection from %s", conn.RemoteAddr())
+	log.Info().Str("addr", conn.RemoteAddr().String()).Msg("incoming connection")
 	enableTCPKeepAlive(conn)
 
 	reader := bufio.NewReader(conn)
@@ -572,7 +599,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			}
 			s.rememberConnPeerAddr(conn, frame)
 			if frame.Client == "node" || frame.Client == "desktop" {
-				log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
+				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
 			s.writeJSONFrame(conn, s.welcomeFrame(challenge, remoteIP(conn.RemoteAddr())))
 			return true
@@ -581,7 +608,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.registerHelloRoute(conn, frame)
 		s.rememberConnPeerAddr(conn, frame)
 		if frame.Client == "node" || frame.Client == "desktop" {
-			log.Printf("node: hello client=%s address=%s listen=%s node_type=%s version=%s", frame.Client, frame.Address, frame.Listen, frame.NodeType, frame.ClientVersion)
+			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 		}
 		s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
@@ -704,14 +731,8 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.fetchNoticesFrame()
 	case "add_peer":
 		return s.addPeerFrame(frame)
-	case "fetch_chatlog":
-		return s.fetchChatlogFrame(frame)
-	case "fetch_chatlog_previews":
-		return s.fetchChatlogPreviewsFrame()
 	case "fetch_dm_headers":
 		return s.fetchDMHeadersFrame()
-	case "fetch_conversations":
-		return s.fetchConversationsFrame()
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand}
 	}
@@ -981,8 +1002,7 @@ func (s *Service) recordObservedAddress(peerID, observedIP string) {
 	if advIP != nil && !advIP.IsPrivate() && !advIP.IsLoopback() {
 		return // we already advertise a public IP — don't override
 	}
-	log.Printf("node: NAT detected — %d peers observe our IP as %s (advertise=%s)",
-		bestCount, best, s.cfg.AdvertiseAddress)
+	log.Warn().Int("count", bestCount).Str("observed_ip", best).Str("advertise", s.cfg.AdvertiseAddress).Msg("NAT detected")
 }
 
 func (s *Service) isBlacklistedConn(conn net.Conn) bool {
@@ -997,7 +1017,7 @@ func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 		return false
 	}
 	if !entry.Blacklisted.IsZero() && time.Now().UTC().Before(entry.Blacklisted) {
-		log.Printf("node: reject connection from %s reason=blacklisted until=%s", ip, entry.Blacklisted.Format(time.RFC3339))
+		log.Warn().Str("addr", ip).Time("until", entry.Blacklisted).Msg("reject connection: blacklisted")
 		return true
 	}
 	if !entry.Blacklisted.IsZero() && time.Now().UTC().After(entry.Blacklisted) {
@@ -1020,7 +1040,7 @@ func (s *Service) addBanScore(conn net.Conn, delta int) {
 	s.bans[ip] = entry
 	s.mu.Unlock()
 	if !entry.Blacklisted.IsZero() {
-		log.Printf("node: blacklist ip=%s score=%d until=%s", ip, entry.Score, entry.Blacklisted.Format(time.RFC3339))
+		log.Warn().Str("ip", ip).Int("score", entry.Score).Time("until", entry.Blacklisted).Msg("blacklist")
 	}
 }
 
@@ -1250,7 +1270,7 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 	s.subs[recipient][subID] = sub
 	count := len(s.subs[recipient])
 	s.mu.Unlock()
-	log.Printf("node: subscribe_inbox recipient=%s subscriber=%s active=%d", recipient, subID, count)
+	log.Info().Str("recipient", recipient).Str("subscriber", subID).Int("active", count).Msg("subscribe_inbox")
 	go s.pushBacklogToSubscriber(sub)
 
 	return protocol.Frame{
@@ -1296,7 +1316,7 @@ func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
 		recipient: recipient,
 		conn:      conn,
 	}
-	log.Printf("node: route_via_hello recipient=%s subscriber=%s active=%d", recipient, subID, len(s.subs[recipient]))
+	log.Debug().Str("recipient", recipient).Str("subscriber", subID).Int("active", len(s.subs[recipient])).Msg("route_via_hello")
 }
 
 func (s *Service) removeSubscriberConnLocked(recipient string, conn net.Conn) {
@@ -1403,7 +1423,7 @@ func (s *Service) handleAckDeleteFrame(conn net.Conn, frame protocol.Frame) (pro
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "unknown ack type"}, false
 	}
-	log.Printf("node: ack_delete_applied address=%s type=%s id=%s status=%s removed=%d", frame.Address, frame.AckType, frame.ID, frame.Status, count)
+	log.Info().Str("address", frame.Address).Str("type", frame.AckType).Str("id", frame.ID).Str("status", frame.Status).Int("removed", count).Msg("ack_delete_applied")
 	return protocol.Frame{Type: "ack_deleted", AckType: frame.AckType, ID: frame.ID, Count: count, Status: "ok"}, true
 }
 
@@ -1470,30 +1490,36 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// pollute the local chat history or wake up the desktop UI.
 	isLocal := s.isLocalMessage(msg)
 
-	// Persist to chatlog BEFORE emitting local change so that
-	// desktop UI can safely read the new entry from disk when it
-	// reacts to the event.
-	if s.chatLog != nil && isLocal {
-		entry := chatlog.Entry{
-			ID:        string(msg.ID),
-			Sender:    msg.Sender,
-			Recipient: msg.Recipient,
-			Body:      msg.Body,
-			CreatedAt: msg.CreatedAt.Format(time.RFC3339Nano),
-			Flag:      string(msg.Flag),
-		}
-		if err := s.chatLog.Append(msg.Topic, s.identity.Address, entry); err != nil {
-			log.Printf("node: chatlog append failed topic=%s id=%s err=%v", msg.Topic, msg.ID, err)
-		}
+	// Persist message via the registered MessageStore (owned by the desktop
+	// layer). If no store is registered (relay-only node), skip persistence.
+	// Persist BEFORE emitting local change so the desktop UI can safely read
+	// the new entry from disk when it reacts to the event. If the write
+	// fails, skip emitLocalChange — the UI reads from SQLite, so waking it
+	// up with stale data would violate the "DB first, then UI event" invariant.
+	storeOK := true
+	if isLocal && s.messageStore != nil {
+		isOutgoing := msg.Sender == s.identity.Address
+		storeOK = s.messageStore.StoreMessage(envelope, isOutgoing)
 	}
 
 	// Only notify the desktop UI for messages this node participates in.
 	// Transit relay traffic must not wake up the UI.
-	if isLocal {
-		s.emitLocalChange()
+	// Skip the event if the store write failed — the UI would see stale data.
+	if isLocal && storeOK {
+		s.emitLocalChange(protocol.LocalChangeEvent{
+			Type:       protocol.LocalChangeNewMessage,
+			Topic:      msg.Topic,
+			MessageID:  string(msg.ID),
+			Sender:     msg.Sender,
+			Recipient:  msg.Recipient,
+			Body:       msg.Body,
+			Flag:       string(msg.Flag),
+			CreatedAt:  msg.CreatedAt.Format(time.RFC3339Nano),
+			TTLSeconds: msg.TTLSeconds,
+		})
 	}
 
-	log.Printf("node: stored message topic=%s id=%s from=%s to=%s flag=%s", msg.Topic, msg.ID, msg.Sender, msg.Recipient, msg.Flag)
+	log.Info().Str("topic", msg.Topic).Str("id", string(msg.ID)).Str("from", msg.Sender).Str("to", msg.Recipient).Str("flag", string(msg.Flag)).Msg("stored message")
 
 	if s.shouldRouteStoredMessage(msg) {
 		s.trackRelayMessage(envelope)
@@ -1513,7 +1539,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 }
 
 // isLocalMessage returns true if this node is a party to the message
-// (sender or recipient), meaning the message belongs in the local chatlog.
+// (sender or recipient), meaning the message should be persisted locally.
 // Broadcast messages (recipient="*") and global topics are always local.
 // Transit DMs — where this node is merely relaying between two other parties —
 // return false; their persistence is handled by queue-<port>.json / relayRetry.
@@ -1564,9 +1590,27 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
 
-	s.emitLocalChange()
+	// Update delivery status via the registered MessageStore BEFORE emitting
+	// local change so the desktop UI can safely read the new status from
+	// SQLite when it reacts to the event. Same invariant as storeIncomingMessage.
+	receiptStoreOK := true
+	if s.messageStore != nil {
+		receiptStoreOK = s.messageStore.UpdateDeliveryStatus(receipt)
+	}
 
-	log.Printf("node: stored delivery receipt message_id=%s sender=%s recipient=%s status=%s delivered_at=%s", receipt.MessageID, receipt.Sender, receipt.Recipient, receipt.Status, receipt.DeliveredAt.Format(time.RFC3339))
+	if receiptStoreOK {
+		s.emitLocalChange(protocol.LocalChangeEvent{
+			Type:        protocol.LocalChangeReceiptUpdate,
+			Topic:       "dm",
+			MessageID:   string(receipt.MessageID),
+			Sender:      receipt.Sender,
+			Recipient:   receipt.Recipient,
+			Status:      receipt.Status,
+			DeliveredAt: receipt.DeliveredAt,
+		})
+	}
+
+	log.Info().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Time("delivered_at", receipt.DeliveredAt).Msg("stored delivery receipt")
 
 	if receipt.Recipient == s.identity.Address {
 		return true, count
@@ -1779,7 +1823,7 @@ func (s *Service) flushPeerState() {
 		Peers:   entries,
 	}
 	if err := savePeerState(path, state); err != nil {
-		log.Printf("node: peer state save failed path=%s err=%v", path, err)
+		log.Error().Str("path", path).Err(err).Msg("peer state save failed")
 		return
 	}
 
@@ -2042,11 +2086,12 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 }
 
 func (s *Service) syncPeer(ctx context.Context, address string) {
-	if session := s.peerSession(address); session != nil {
-		_ = s.syncPeerSession(session)
-		return
-	}
-
+	// Always open a fresh connection instead of reusing the active session.
+	// syncPeer is called from handlePeerSessionFrame when a push_message
+	// fails with ErrCodeUnknownSenderKey.  That handler runs inline inside
+	// peerSessionRequest.  Reusing the session would call syncPeerSession →
+	// peerSessionRequest on the same inboxCh, consuming frames meant for the
+	// outer caller and causing a 12-second stall (peerRequestTimeout).
 	conn, err := s.dialPeer(ctx, address, 1500*time.Millisecond)
 	if err != nil {
 		return
@@ -2136,6 +2181,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 }
 
 func (s *Service) runPeerSession(ctx context.Context, address string) {
+	defer crashlog.DeferRecover()
 	for {
 		select {
 		case <-ctx.Done():
@@ -2224,7 +2270,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 		return true, err
 	}
 	_ = conn.SetDeadline(time.Time{})
-	log.Printf("node: upstream subscription established peer=%s recipient=%s", address, s.identity.Address)
+	log.Info().Str("peer", address).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 
 	if err := s.syncPeerSession(session); err != nil {
 		return true, err
@@ -2247,7 +2293,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		case <-ctx.Done():
 			return nil
 		case err := <-session.errCh:
-			log.Printf("node: upstream subscription closed peer=%s recipient=%s err=%v", session.address, s.identity.Address, err)
+			log.Info().Str("peer", session.address).Str("recipient", s.identity.Address).Err(err).Msg("upstream subscription closed")
 			s.markPeerDisconnected(session.address, err)
 			return err
 		case frame := <-session.inboxCh:
@@ -2255,7 +2301,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		case <-syncTicker.C:
 			if s.peerState(session.address) == peerStateStalled {
 				err := fmt.Errorf("peer session stalled")
-				log.Printf("node: upstream session stalled peer=%s recipient=%s", session.address, s.identity.Address)
+				log.Warn().Str("peer", session.address).Str("recipient", s.identity.Address).Msg("upstream session stalled")
 				s.markPeerDisconnected(session.address, err)
 				return err
 			}
@@ -2266,14 +2312,14 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			s.flushPendingPeerFrames(session.address)
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
-				log.Printf("node: upstream ping failed peer=%s recipient=%s err=%v", session.address, s.identity.Address, err)
+				log.Error().Str("peer", session.address).Str("recipient", s.identity.Address).Err(err).Msg("upstream ping failed")
 				s.markPeerDisconnected(session.address, err)
 				return err
 			}
 			pingTimer.Reset(nextHeartbeatDuration())
 		case outbound := <-session.sendCh:
 			if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
-				log.Printf("node: peer session send failed peer=%s type=%s err=%v", session.address, outbound.Type, err)
+				log.Error().Str("peer", session.address).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
 				s.markPeerDisconnected(session.address, err)
 				return err
 			}
@@ -2302,6 +2348,7 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 }
 
 func (s *Service) gossipMessage(msg protocol.Envelope) {
+	defer crashlog.DeferRecover()
 	for _, address := range s.routingTargetsForMessage(msg) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
@@ -2438,7 +2485,27 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Unlock()
 }
 
+// closeAllInboundConns closes every tracked inbound connection so that
+// handleConn goroutines unblock and exit. Called during graceful shutdown
+// before connWg.Wait().
+func (s *Service) closeAllInboundConns() {
+	s.mu.Lock()
+	conns := make([]net.Conn, 0, len(s.inboundConns))
+	for c := range s.inboundConns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	if len(conns) > 0 {
+		log.Info().Int("count", len(conns)).Msg("closed inbound connections for shutdown")
+	}
+}
+
 func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
+	defer crashlog.DeferRecover()
 	if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
 		return
 	}
@@ -2447,10 +2514,10 @@ func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
 		if msg.Recipient == s.identity.Address {
 			return
 		}
-		log.Printf("node: no active subscribers for recipient=%s topic=%s id=%s", msg.Recipient, msg.Topic, msg.ID)
+		log.Debug().Str("recipient", msg.Recipient).Str("topic", msg.Topic).Str("id", string(msg.ID)).Msg("no active subscribers")
 		return
 	}
-	log.Printf("node: push_message id=%s topic=%s recipient=%s subscribers=%d", msg.ID, msg.Topic, msg.Recipient, len(subs))
+	log.Info().Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("recipient", msg.Recipient).Int("subscribers", len(subs)).Msg("push_message")
 
 	frame := protocol.Frame{
 		Type:      "push_message",
@@ -2468,11 +2535,12 @@ func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
 }
 
 func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
+	defer crashlog.DeferRecover()
 	subs := s.subscribersForRecipient(receipt.Recipient)
 	if len(subs) == 0 {
 		return
 	}
-	log.Printf("node: push_delivery_receipt message_id=%s recipient=%s status=%s subscribers=%d", receipt.MessageID, receipt.Recipient, receipt.Status, len(subs))
+	log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("subscribers", len(subs)).Msg("push_delivery_receipt")
 
 	frame := protocol.Frame{
 		Type:      "push_delivery_receipt",
@@ -2489,6 +2557,7 @@ func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
 }
 
 func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
+	defer crashlog.DeferRecover()
 	if sub == nil || strings.TrimSpace(sub.recipient) == "" {
 		return
 	}
@@ -2567,6 +2636,7 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 }
 
 func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
+	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
 		Type:       "send_message",
 		Topic:      msg.Topic,
@@ -2580,18 +2650,19 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 	}
 	if s.enqueuePeerFrame(address, frame) {
 		s.clearOutboundQueued(frame.ID)
-		log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=session", msg.ID, msg.Recipient, address)
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", address).Str("mode", "session").Msg("route_message_attempt")
 		return
 	}
 	if s.queuePeerFrame(address, frame) {
-		log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=queued", msg.ID, msg.Recipient, address)
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", address).Str("mode", "queued").Msg("route_message_attempt")
 		return
 	}
 	s.markOutboundTerminal(frame, "failed", "unable to queue outbound frame")
-	log.Printf("node: route_message_attempt id=%s recipient=%s peer=%s mode=dropped", msg.ID, msg.Recipient, address)
+	log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", address).Str("mode", "dropped").Msg("route_message_attempt")
 }
 
 func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
+	defer crashlog.DeferRecover()
 	for _, address := range s.routingTargets() {
 		if address == "" || s.isSelfAddress(address) {
 			continue
@@ -2601,6 +2672,7 @@ func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
 }
 
 func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext string) {
+	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
 		Type:       "publish_notice",
 		TTLSeconds: int(ttl.Seconds()),
@@ -2664,6 +2736,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 }
 
 func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
+	defer crashlog.DeferRecover()
 	for _, address := range s.routingTargetsForRecipient(receipt.Recipient) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
@@ -2673,6 +2746,7 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 }
 
 func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryReceipt) {
+	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
 		Type:        "send_delivery_receipt",
 		ID:          string(receipt.MessageID),
@@ -2682,14 +2756,14 @@ func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryRec
 		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
 	}
 	if s.enqueuePeerFrame(address, frame) {
-		log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=session status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "session").Str("status", receipt.Status).Msg("route_receipt_attempt")
 		return
 	}
 	if s.queuePeerFrame(address, frame) {
-		log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=queued status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "queued").Str("status", receipt.Status).Msg("route_receipt_attempt")
 		return
 	}
-	log.Printf("node: route_receipt_attempt message_id=%s recipient=%s peer=%s mode=dropped status=%s", receipt.MessageID, receipt.Recipient, address, receipt.Status)
+	log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "dropped").Str("status", receipt.Status).Msg("route_receipt_attempt")
 }
 
 func (s *Service) nodeHelloJSONLine() string {
@@ -2783,111 +2857,6 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 // addPeerFrame handles the local "add_peer" console command.
 // The peer is prepended to the peer list so it becomes the first dial
 // candidate on the next bootstrap tick.
-func (s *Service) fetchChatlogFrame(frame protocol.Frame) protocol.Frame {
-	if s.chatLog == nil {
-		return protocol.Frame{Type: "error", Error: "chatlog not available"}
-	}
-	topic := strings.TrimSpace(frame.Topic)
-	if topic == "" {
-		topic = "dm"
-	}
-	peerAddr := strings.TrimSpace(frame.Address)
-	if topic == "dm" && peerAddr == "" {
-		return protocol.Frame{Type: "error", Error: "address is required for DM chatlog"}
-	}
-
-	var entries []chatlog.Entry
-	var err error
-	if frame.Limit > 0 {
-		entries, err = s.chatLog.ReadLast(topic, peerAddr, frame.Limit)
-	} else {
-		entries, err = s.chatLog.Read(topic, peerAddr)
-	}
-	if err != nil {
-		return protocol.Frame{Type: "error", Error: fmt.Sprintf("chatlog read: %v", err)}
-	}
-
-	chatEntries := make([]protocol.ChatEntryFrame, len(entries))
-	for i, e := range entries {
-		chatEntries[i] = protocol.ChatEntryFrame{
-			ID:        e.ID,
-			Sender:    e.Sender,
-			Recipient: e.Recipient,
-			Body:      e.Body,
-			CreatedAt: e.CreatedAt,
-			Flag:      e.Flag,
-		}
-	}
-
-	return protocol.Frame{
-		Type:        "chatlog",
-		Topic:       topic,
-		Address:     peerAddr,
-		ChatEntries: chatEntries,
-		Count:       len(chatEntries),
-	}
-}
-
-func (s *Service) fetchConversationsFrame() protocol.Frame {
-	if s.chatLog == nil {
-		return protocol.Frame{Type: "error", Error: "chatlog not available"}
-	}
-
-	summaries, err := s.chatLog.ListConversations()
-	if err != nil {
-		return protocol.Frame{Type: "error", Error: fmt.Sprintf("chatlog list: %v", err)}
-	}
-
-	conversations := make([]protocol.ConversationFrame, len(summaries))
-	for i, c := range summaries {
-		lastMsg := ""
-		if !c.LastMessage.IsZero() {
-			lastMsg = c.LastMessage.Format(time.RFC3339Nano)
-		}
-		conversations[i] = protocol.ConversationFrame{
-			PeerAddress: c.PeerAddress,
-			LastMessage: lastMsg,
-			Count:       c.Count,
-		}
-	}
-
-	return protocol.Frame{
-		Type:          "conversations",
-		Conversations: conversations,
-		Count:         len(conversations),
-	}
-}
-
-func (s *Service) fetchChatlogPreviewsFrame() protocol.Frame {
-	if s.chatLog == nil {
-		return protocol.Frame{Type: "error", Error: "chatlog not available"}
-	}
-
-	lastEntries, err := s.chatLog.ReadLastEntryPerPeer()
-	if err != nil {
-		return protocol.Frame{Type: "error", Error: fmt.Sprintf("chatlog previews: %v", err)}
-	}
-
-	previews := make([]protocol.ChatPreviewFrame, 0, len(lastEntries))
-	for peerAddr, entry := range lastEntries {
-		previews = append(previews, protocol.ChatPreviewFrame{
-			PeerAddress: peerAddr,
-			ID:          entry.ID,
-			Sender:      entry.Sender,
-			Recipient:   entry.Recipient,
-			Body:        entry.Body,
-			CreatedAt:   entry.CreatedAt,
-			Flag:        entry.Flag,
-		})
-	}
-
-	return protocol.Frame{
-		Type:         "chatlog_previews",
-		ChatPreviews: previews,
-		Count:        len(previews),
-	}
-}
-
 func (s *Service) fetchDMHeadersFrame() protocol.Frame {
 	s.cleanupExpiredMessages()
 
@@ -2992,7 +2961,7 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	// Flush immediately so the manual peer survives a crash.
 	s.flushPeerState()
 
-	log.Printf("node: add_peer address=%s network=%s queued=first", address, classifyAddress(address))
+	log.Info().Str("address", address).Str("network", classifyAddress(address).String()).Str("queued", "first").Msg("add_peer")
 
 	return protocol.Frame{
 		Type:   "ok",
@@ -3120,9 +3089,9 @@ func (s *Service) addKnownBoxSig(address, boxSig string) {
 	s.boxSigs[address] = boxSig
 }
 
-func (s *Service) emitLocalChange() {
+func (s *Service) emitLocalChange(event protocol.LocalChangeEvent) {
 	s.mu.RLock()
-	subs := make([]chan struct{}, 0, len(s.events))
+	subs := make([]chan protocol.LocalChangeEvent, 0, len(s.events))
 	for ch := range s.events {
 		subs = append(subs, ch)
 	}
@@ -3130,8 +3099,9 @@ func (s *Service) emitLocalChange() {
 
 	for _, ch := range subs {
 		select {
-		case ch <- struct{}{}:
+		case ch <- event:
 		default:
+			log.Warn().Str("type", string(event.Type)).Str("message_id", event.MessageID).Msg("local change event dropped (channel full)")
 		}
 	}
 }
@@ -3156,7 +3126,7 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		Source:       source,
 	}); err != nil {
 		if err == errTrustConflict {
-			log.Printf("node: trust conflict for address=%s source=%s", address, source)
+			log.Warn().Str("address", address).Str("source", source).Msg("trust conflict")
 		}
 		return
 	}
@@ -3165,11 +3135,12 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 	s.addKnownBoxKey(address, boxKey)
 	s.addKnownPubKey(address, pubKey)
 	if !existed {
-		log.Printf("node: trusted new contact address=%s source=%s", address, source)
+		log.Info().Str("address", address).Str("source", source).Msg("trusted new contact")
 	}
 }
 
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
+	defer crashlog.DeferRecover()
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -3305,7 +3276,7 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			_, _, _ = s.storeIncomingMessage(msg, true)
 		}
 		s.sendAckDeleteToPeer(address, "dm", msg.ID, "")
-		log.Printf("node: received pushed message peer=%s id=%s recipient=%s", address, msg.ID, msg.Recipient)
+		log.Info().Str("peer", address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("received pushed message")
 	case "push_delivery_receipt":
 		if frame.Receipt == nil {
 			return
@@ -3316,7 +3287,7 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		}
 		s.storeDeliveryReceipt(receipt)
 		s.sendAckDeleteToPeer(address, "receipt", receipt.MessageID, receipt.Status)
-		log.Printf("node: received pushed delivery receipt peer=%s message_id=%s recipient=%s status=%s", address, receipt.MessageID, receipt.Recipient, receipt.Status)
+		log.Info().Str("peer", address).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
 	}
 }
 
@@ -3334,11 +3305,11 @@ func (s *Service) sendAckDeleteToPeer(address, ackType string, id protocol.Messa
 		Signature: identity.SignPayload(s.identity, ackDeletePayload(s.identity.Address, ackType, string(id), status)),
 	}
 	if s.enqueuePeerFrame(address, frame) {
-		log.Printf("node: ack_delete_send peer=%s type=%s id=%s status=%s mode=session", address, ackType, id, status)
+		log.Debug().Str("peer", address).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session").Msg("ack_delete_send")
 		return
 	}
 	if s.queuePeerFrame(address, frame) {
-		log.Printf("node: ack_delete_send peer=%s type=%s id=%s status=%s mode=queued", address, ackType, id, status)
+		log.Debug().Str("peer", address).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
 	}
 }
 
@@ -3439,7 +3410,7 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 		return
 	}
 	if health.State != "" {
-		log.Printf("node: peer_state_change peer=%s from=%s to=%s pending=%d failures=%d", health.Address, health.State, next, len(s.pending[health.Address]), health.ConsecutiveFailures)
+		log.Info().Str("peer", health.Address).Str("from", health.State).Str("to", next).Int("pending", len(s.pending[health.Address])).Int("failures", health.ConsecutiveFailures).Msg("peer_state_change")
 	}
 	health.State = next
 }
@@ -3654,11 +3625,11 @@ func (s *Service) retryRelayDeliveries() {
 
 	now := time.Now().UTC()
 	for _, msg := range s.retryableRelayMessages(now) {
-		log.Printf("node: relay_retry_message id=%s recipient=%s attempts=%d", msg.ID, msg.Recipient, s.noteRelayAttempt(relayMessageKey(msg.ID), now))
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", s.noteRelayAttempt(relayMessageKey(msg.ID), now)).Msg("relay_retry_message")
 		go s.gossipMessage(msg)
 	}
 	for _, receipt := range s.retryableRelayReceipts(now) {
-		log.Printf("node: relay_retry_receipt message_id=%s recipient=%s status=%s attempts=%d", receipt.MessageID, receipt.Recipient, receipt.Status, s.noteRelayAttempt(relayReceiptKey(receipt), now))
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
 		go s.gossipReceipt(receipt)
 	}
 }
@@ -3952,7 +3923,7 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 func (s *Service) persistQueueState(snapshot queueStateFile) {
 	path := s.cfg.EffectiveQueueStatePath()
 	if err := saveQueueState(path, snapshot); err != nil {
-		log.Printf("node: queue state save failed path=%s err=%v", path, err)
+		log.Error().Str("path", path).Err(err).Msg("queue state save failed")
 	}
 }
 
@@ -4129,6 +4100,7 @@ func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
 }
 
 func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
+	defer crashlog.DeferRecover()
 	sub.mu.Lock()
 	defer sub.mu.Unlock()
 
@@ -4399,6 +4371,7 @@ func (s *Service) resolveHealthAddress(address string) string {
 }
 
 func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
+	defer crashlog.DeferRecover()
 	receipt := protocol.DeliveryReceipt{
 		MessageID:   msg.ID,
 		Sender:      s.identity.Address,

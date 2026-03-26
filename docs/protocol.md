@@ -920,6 +920,8 @@ sequenceDiagram
     S->>F: ack_delete(receipt seen)
 ```
 
+*Diagram 1 — Message delivery flow*
+
 Message flags:
 
 - `immutable` — nobody may delete the message
@@ -1995,6 +1997,8 @@ sequenceDiagram
     F-->>S: push_delivery_receipt(seen)
     S->>F: ack_delete(receipt seen)
 ```
+
+*Диаграмма 1 — Схема доставки сообщений*
 
 Флаги сообщений:
 
