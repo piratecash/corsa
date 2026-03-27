@@ -48,14 +48,16 @@ func Setup() func() {
 	// GOTRACEBACK=single only prints the crashing goroutine.
 	debug.SetTraceback("all")
 
-	consoleWriter := zerolog.ConsoleWriter{
-		Out:        os.Stdout,
-		TimeFormat: "15:04:05",
-	}
+	// On Windows GUI applications stdout may not exist (invalid handle).
+	// Detect this early so we never pass a broken writer to zerolog.
+	stdoutAvailable := isWriterUsable(os.Stdout)
 
 	dir := logDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		log.Logger = zerolog.New(consoleWriter).With().Timestamp().Caller().Logger()
+		if stdoutAvailable {
+			cw := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05"}
+			log.Logger = zerolog.New(cw).With().Timestamp().Caller().Logger()
+		}
 		log.Warn().Str("dir", dir).Err(err).Msg("cannot create log directory, falling back to console")
 		return func() { recoverAndLog(dir) }
 	}
@@ -69,13 +71,20 @@ func Setup() func() {
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		log.Logger = zerolog.New(consoleWriter).With().Timestamp().Caller().Logger()
+		if stdoutAvailable {
+			cw := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05"}
+			log.Logger = zerolog.New(cw).With().Timestamp().Caller().Logger()
+		}
 		log.Warn().Str("path", logPath).Err(err).Msg("cannot open log file, falling back to console")
 		return func() { recoverAndLog(dir) }
 	}
 
-	multi := io.MultiWriter(consoleWriter, f)
-	log.Logger = zerolog.New(multi).With().Timestamp().Caller().Logger()
+	var out io.Writer = f
+	if stdoutAvailable {
+		cw := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05"}
+		out = io.MultiWriter(cw, f)
+	}
+	log.Logger = zerolog.New(out).With().Timestamp().Caller().Logger()
 
 	// Set the global zerolog level from CORSA_LOG_LEVEL env var.
 	// Supported values: trace, debug, info (default), warn, error.
@@ -182,6 +191,17 @@ func cleanOldCrashLogs(dir string) {
 	for _, path := range toRemove {
 		_ = os.Remove(path)
 	}
+}
+
+// isWriterUsable returns true when w is non-nil and can accept at least a
+// zero-length write. On Windows GUI apps os.Stdout / os.Stderr are backed by
+// invalid handles, so even a 0-byte Write returns an error.
+func isWriterUsable(w io.Writer) bool {
+	if w == nil {
+		return false
+	}
+	_, err := w.Write(nil)
+	return err == nil
 }
 
 func logDir() string {
