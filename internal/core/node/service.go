@@ -65,6 +65,7 @@ type Service struct {
 	connWg         sync.WaitGroup // tracks active handleConn goroutines for graceful shutdown
 	connAuth       map[net.Conn]*connAuthState
 	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
+	connWriteMu    map[net.Conn]*sync.Mutex        // per-connection write mutex; serialises all writes (response + push) to a single TCP stream
 	bans           map[string]banEntry
 	events         map[chan protocol.LocalChangeEvent]struct{}
 	listener       net.Listener
@@ -83,7 +84,6 @@ type subscriber struct {
 	id        string
 	recipient string
 	conn      net.Conn
-	mu        sync.Mutex
 }
 
 type peerSession struct {
@@ -383,6 +383,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		inboundMetered: make(map[net.Conn]*MeteredConn),
 		connAuth:       make(map[net.Conn]*connAuthState),
 		connPeerInfo:   make(map[net.Conn]*connPeerHello),
+		connWriteMu:    make(map[net.Conn]*sync.Mutex),
 		bans:           make(map[string]banEntry),
 		events:         make(map[chan protocol.LocalChangeEvent]struct{}),
 	}
@@ -717,7 +718,11 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, s.fetchDeliveryReceiptsFrame(frame.Recipient))
 		return true
 	case "subscribe_inbox":
-		s.writeJSONFrame(conn, s.subscribeInboxFrame(conn, frame))
+		reply, sub := s.subscribeInboxFrame(conn, frame)
+		s.writeJSONFrame(conn, reply)
+		if sub != nil {
+			go s.pushBacklogToSubscriber(sub)
+		}
 		return true
 	case "publish_notice":
 		s.writeJSONFrame(conn, s.publishNoticeFrame(frame))
@@ -827,6 +832,15 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	}
 }
 
+// connMu returns the per-connection write mutex, or nil if the connection
+// was not registered (e.g. outbound peer sessions that bypass handleConn).
+func (s *Service) connMu(conn net.Conn) *sync.Mutex {
+	s.mu.RLock()
+	mu := s.connWriteMu[conn]
+	s.mu.RUnlock()
+	return mu
+}
+
 func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 	log.Debug().
 		Str("protocol", "json/tcp").
@@ -839,10 +853,22 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
-		_, _ = io.WriteString(conn, string(fallback)+"\n")
+		if mu := s.connMu(conn); mu != nil {
+			mu.Lock()
+			_, _ = io.WriteString(conn, string(fallback)+"\n")
+			mu.Unlock()
+		} else {
+			_, _ = io.WriteString(conn, string(fallback)+"\n")
+		}
 		return
 	}
-	_, _ = io.WriteString(conn, line)
+	if mu := s.connMu(conn); mu != nil {
+		mu.Lock()
+		_, _ = io.WriteString(conn, line)
+		mu.Unlock()
+	} else {
+		_, _ = io.WriteString(conn, line)
+	}
 }
 
 func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.Frame {
@@ -1359,11 +1385,11 @@ func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol
 	}
 }
 
-func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) protocol.Frame {
+func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, *subscriber) {
 	topic := strings.TrimSpace(frame.Topic)
 	recipient := strings.TrimSpace(frame.Recipient)
 	if topic != "dm" || recipient == "" {
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSubscribeInbox}
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSubscribeInbox}, nil
 	}
 
 	subID := strings.TrimSpace(frame.Subscriber)
@@ -1388,7 +1414,6 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 	count := len(s.subs[recipient])
 	s.mu.Unlock()
 	log.Info().Str("recipient", recipient).Str("subscriber", subID).Int("active", count).Msg("subscribe_inbox")
-	go s.pushBacklogToSubscriber(sub)
 
 	return protocol.Frame{
 		Type:       "subscribed",
@@ -1397,7 +1422,7 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) proto
 		Subscriber: subID,
 		Status:     "ok",
 		Count:      count,
-	}
+	}, sub
 }
 
 func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
@@ -2588,6 +2613,7 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 		return false
 	}
 	s.inboundConns[conn] = struct{}{}
+	s.connWriteMu[conn] = &sync.Mutex{}
 	if mc, ok := conn.(*MeteredConn); ok {
 		s.inboundMetered[conn] = mc
 	}
@@ -2599,6 +2625,7 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	delete(s.inboundConns, conn)
 	delete(s.inboundMetered, conn)
 	delete(s.connPeerInfo, conn)
+	delete(s.connWriteMu, conn)
 	s.mu.Unlock()
 }
 
@@ -4644,8 +4671,13 @@ func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
 
 func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	defer crashlog.DeferRecover()
-	sub.mu.Lock()
-	defer sub.mu.Unlock()
+
+	mu := s.connMu(sub.conn)
+	if mu == nil {
+		// Connection already unregistered — subscriber is stale.
+		s.removeSubscriberByID(sub.recipient, sub.id)
+		return
+	}
 
 	log.Debug().
 		Str("protocol", "json/tcp").
@@ -4659,7 +4691,10 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	if err != nil {
 		return
 	}
-	if _, err := io.WriteString(sub.conn, line); err != nil {
+	mu.Lock()
+	_, writeErr := io.WriteString(sub.conn, line)
+	mu.Unlock()
+	if writeErr != nil {
 		s.removeSubscriberByID(sub.recipient, sub.id)
 	}
 }

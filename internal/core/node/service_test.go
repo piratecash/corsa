@@ -5343,3 +5343,185 @@ func TestHeartbeatConstants(t *testing.T) {
 		}
 	}
 }
+
+// TestConcurrentWriteJSONFrameAndPush verifies that simultaneous response
+// writes (writeJSONFrame) and push writes (writePushFrame) on the same TCP
+// connection produce valid, non-interleaved JSON lines.
+//
+// Before the per-connection write mutex was introduced, these two paths could
+// race, corrupting the TCP stream and causing the receiving side to silently
+// drop messages (the exact symptom that prompted the fix).
+func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+
+	// The node identity acts as the DM recipient.
+	recipientID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate recipient identity: %v", err)
+	}
+	svc, stop := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	}, recipientID)
+	defer stop()
+
+	recipientAddr := svc.Address()
+
+	// Create a sender identity and register it as a trusted contact on the node
+	// so that DM signature verification succeeds.
+	senderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate sender identity: %v", err)
+	}
+	senderBoxSig := identity.SignBoxKeyBinding(senderID)
+
+	importReply := svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: senderID.Address,
+			PubKey:  identity.PublicKeyBase64(senderID.PublicKey),
+			BoxKey:  identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+			BoxSig:  senderBoxSig,
+		}},
+	})
+	if importReply.Type != "contacts_imported" || importReply.Count != 1 {
+		t.Fatalf("import_contacts failed: %#v", importReply)
+	}
+
+	// Pre-encrypt messages so the hot loop only sends frames.
+	const messageCount = 50
+	ts := time.Now().UTC().Format(time.RFC3339)
+	ciphertexts := make([]string, messageCount)
+	for i := 0; i < messageCount; i++ {
+		ct, err := directmsg.EncryptForParticipants(
+			senderID,
+			recipientAddr,
+			identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+			fmt.Sprintf("body-%d", i),
+		)
+		if err != nil {
+			t.Fatalf("encrypt message %d: %v", i, err)
+		}
+		ciphertexts[i] = ct
+	}
+
+	// --- subscriber connection: subscribes to own inbox and reads all frames ---
+	subConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial subscriber: %v", err)
+	}
+	defer func() { _ = subConn.Close() }()
+	_ = subConn.SetDeadline(time.Now().Add(15 * time.Second))
+	subReader := bufio.NewReader(subConn)
+
+	// handshake
+	writeJSONFrame(t, subConn, protocol.Frame{
+		Type: "hello", Version: config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "test-sub", ClientVersion: config.CorsaWireVersion,
+	})
+	welcome := readJSONTestFrame(t, subReader)
+	if welcome.Type != "welcome" {
+		t.Fatalf("expected welcome, got %s", welcome.Type)
+	}
+
+	// subscribe
+	writeJSONFrame(t, subConn, protocol.Frame{
+		Type: "subscribe_inbox", Topic: "dm", Recipient: recipientAddr, Subscriber: "sub-1",
+	})
+	subReply := readJSONTestFrame(t, subReader)
+	if subReply.Type != "subscribed" {
+		t.Fatalf("expected subscribed, got %s: %s", subReply.Type, subReply.Error)
+	}
+
+	// --- sender connection: sends messages concurrently ---
+	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial sender: %v", err)
+	}
+	defer func() { _ = senderConn.Close() }()
+	_ = senderConn.SetDeadline(time.Now().Add(15 * time.Second))
+	senderReader := bufio.NewReader(senderConn)
+
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type: "hello", Version: config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "test-sender", ClientVersion: config.CorsaWireVersion,
+	})
+	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
+		t.Fatalf("sender expected welcome, got %s", f.Type)
+	}
+
+	// Concurrently: sender sends DMs AND subscriber sends ping requests.
+	// Both cause writes to subConn (push_message + pong response).
+	var wg sync.WaitGroup
+
+	// goroutine 1: sender fires encrypted DMs
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < messageCount; i++ {
+			msgID := fmt.Sprintf("race-msg-%d", i)
+			writeJSONFrame(t, senderConn, sendMessageFrame("dm", msgID, senderID.Address, recipientAddr, "sender-delete", ts, 0, ciphertexts[i]))
+			reply := readJSONTestFrame(t, senderReader)
+			if reply.Type == "error" {
+				t.Errorf("send_message %d returned error: %s (code=%s)", i, reply.Error, reply.Code)
+				return
+			}
+		}
+	}()
+
+	// goroutine 2: subscriber sends pings to force writeJSONFrame on subConn
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < messageCount; i++ {
+			writeJSONFrame(t, subConn, protocol.Frame{Type: "ping"})
+		}
+	}()
+
+	wg.Wait()
+
+	// Read all frames from subscriber connection.
+	// We expect: messageCount pong frames + up to messageCount push_message frames.
+	// The critical assertion: every line must be valid JSON (no interleaving).
+	_ = subConn.SetDeadline(time.Now().Add(5 * time.Second))
+	pongs := 0
+	pushes := 0
+	for pongs+pushes < messageCount*2 {
+		line, err := subReader.ReadString('\n')
+		if err != nil {
+			break
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if !json.Valid([]byte(trimmed)) {
+			t.Fatalf("corrupted JSON line on subscriber connection (pongs=%d, pushes=%d): %q", pongs, pushes, trimmed)
+		}
+		var frame protocol.Frame
+		if err := json.Unmarshal([]byte(trimmed), &frame); err != nil {
+			t.Fatalf("unmarshal failed: %v; line: %q", err, trimmed)
+		}
+		switch frame.Type {
+		case "pong":
+			pongs++
+		case "push_message":
+			pushes++
+		default:
+			t.Logf("unexpected frame type: %s", frame.Type)
+		}
+	}
+
+	if pongs != messageCount {
+		t.Errorf("expected %d pong frames, got %d", messageCount, pongs)
+	}
+	if pushes == 0 {
+		t.Errorf("expected push_message frames, got none — messages not delivered in real-time")
+	}
+	t.Logf("received %d pongs, %d pushes (of %d sent)", pongs, pushes, messageCount)
+}

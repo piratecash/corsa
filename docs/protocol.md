@@ -903,6 +903,8 @@ Routing rules:
 - after a valid `ack_delete`, the serving full node removes the corresponding backlog item and stops re-sending it on future reconnects
 - `client` nodes still keep polling/sync as a fallback, but can receive `dm` immediately over the subscribed session
 - public topics such as `global` are still relayed by mesh gossip, not by inbox subscription
+- all writes to a subscriber TCP connection are serialised by a per-connection mutex (`connWriteMu`); this prevents interleaved JSON when a response frame and a push frame target the same connection concurrently
+- backlog replay (`pushBacklogToSubscriber`) starts only after the `subscribed` acknowledgement has been fully written to the connection
 
 Backlog delete acknowledgement:
 
@@ -2018,6 +2020,8 @@ Push-кадр delivery receipt:
 - после валидного `ack_delete` обслуживающая full node удаляет соответствующий backlog item и перестает переотправлять его на будущих reconnect
 - `client`-узлы все еще сохраняют polling/sync как fallback, но могут получать `dm` сразу по подписанной сессии
 - публичные темы вроде `global` по-прежнему идут через mesh gossip, а не через inbox subscription
+- все записи в TCP-соединение подписчика сериализуются per-connection мьютексом (`connWriteMu`); это предотвращает чередование JSON, когда ответный фрейм и push-фрейм одновременно пишутся в одно и то же соединение
+- воспроизведение backlog (`pushBacklogToSubscriber`) начинается только после того, как подтверждение `subscribed` полностью записано в соединение
 
 Подтверждение удаления backlog:
 
