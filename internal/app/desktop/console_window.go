@@ -87,7 +87,7 @@ type ConsoleWindow struct {
 func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 	window := &ConsoleWindow{
 		parent:  parent,
-		theme:   parent.theme,
+		theme:   newAppTheme(),
 		onClose: onClose,
 		closed:  make(chan struct{}),
 		peerList: widget.List{

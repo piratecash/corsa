@@ -67,12 +67,20 @@ const (
 	languageMenuHeight  = 316
 )
 
-func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable *rpc.CommandTable, runtime *NodeRuntime, prefs *Preferences) *Window {
+// newAppTheme creates a fresh material.Theme with the application colour scheme.
+// Each window must own its own Theme because the embedded text.Shaper uses an
+// unsynchronised map cache and is therefore not safe for concurrent use.
+func newAppTheme() *material.Theme {
 	theme := material.NewTheme()
 	theme.Bg = color.NRGBA{R: 18, G: 21, B: 26, A: 255}
 	theme.Fg = color.NRGBA{R: 235, G: 239, B: 244, A: 255}
 	theme.ContrastBg = color.NRGBA{R: 36, G: 67, B: 126, A: 255}
 	theme.ContrastFg = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	return theme
+}
+
+func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable *rpc.CommandTable, runtime *NodeRuntime, prefs *Preferences) *Window {
+	theme := newAppTheme()
 
 	language := normalizeLanguage(client.Language())
 	if prefs != nil && prefs.Language != "" {
