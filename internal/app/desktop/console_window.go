@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"corsa/internal/core/rpc"
@@ -33,11 +34,16 @@ const (
 	maxVisibleSuggestions      = 5
 )
 
-type consoleTab int
+type consoleTab int32
+
+func (c *ConsoleWindow) currentTab() consoleTab {
+	return consoleTab(atomic.LoadInt32(&c.activeTab))
+}
 
 const (
 	consoleTabConsole consoleTab = iota
 	consoleTabPeers
+	consoleTabTraffic
 	consoleTabInfo
 )
 
@@ -68,10 +74,17 @@ type ConsoleWindow struct {
 	suggestList      widget.List
 	consoleEditor    widget.Editor
 	runButton        widget.Clickable
-	consoleTabButton widget.Clickable
-	peersTabButton   widget.Clickable
-	infoTabButton    widget.Clickable
-	activeTab        consoleTab
+	consoleTabButton  widget.Clickable
+	peersTabButton    widget.Clickable
+	trafficTabButton  widget.Clickable
+	infoTabButton     widget.Clickable
+	activeTab         int32 // consoleTab value; accessed atomically (UI writes, ticker reads)
+	trafficSamplesIn  []float32    // per-second received bytes/s (newest last)
+	trafficSamplesOut []float32    // per-second sent bytes/s (newest last)
+	trafficTotalSent  int64        // cumulative sent (for totals display)
+	trafficTotalRecv  int64        // cumulative received (for totals display)
+	trafficLoaded     bool         // true after initial history load
+	trafficTicker     *time.Ticker
 	mu               sync.RWMutex
 	consoleEntries   []consoleEntry
 	consoleBusy      bool
@@ -199,13 +212,17 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 	suggestions := c.consoleSuggestions()
 
 	for c.consoleTabButton.Clicked(gtx) {
-		c.activeTab = consoleTabConsole
+		atomic.StoreInt32(&c.activeTab, int32(consoleTabConsole))
 	}
 	for c.peersTabButton.Clicked(gtx) {
-		c.activeTab = consoleTabPeers
+		atomic.StoreInt32(&c.activeTab, int32(consoleTabPeers))
+	}
+	for c.trafficTabButton.Clicked(gtx) {
+		atomic.StoreInt32(&c.activeTab, int32(consoleTabTraffic))
+		c.startTrafficTicker()
 	}
 	for c.infoTabButton.Clicked(gtx) {
-		c.activeTab = consoleTabInfo
+		atomic.StoreInt32(&c.activeTab, int32(consoleTabInfo))
 	}
 	for c.runButton.Clicked(gtx) {
 		c.submitConsoleCommand()
@@ -270,15 +287,19 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 func (c *ConsoleWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.consoleTabButton, c.activeTab == consoleTabConsole, c.parent.t("console.tab.console"))
+			return c.layoutTabButton(gtx, &c.consoleTabButton, c.currentTab() == consoleTabConsole, c.parent.t("console.tab.console"))
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.peersTabButton, c.activeTab == consoleTabPeers, c.parent.t("console.tab.peers"))
+			return c.layoutTabButton(gtx, &c.peersTabButton, c.currentTab() == consoleTabPeers, c.parent.t("console.tab.peers"))
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.infoTabButton, c.activeTab == consoleTabInfo, c.parent.t("console.tab.info"))
+			return c.layoutTabButton(gtx, &c.trafficTabButton, c.currentTab() == consoleTabTraffic, c.parent.t("console.tab.traffic"))
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutTabButton(gtx, &c.infoTabButton, c.currentTab() == consoleTabInfo, c.parent.t("console.tab.info"))
 		}),
 	)
 }
@@ -303,9 +324,11 @@ func (c *ConsoleWindow) layoutTabButton(gtx layout.Context, clickable *widget.Cl
 
 func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
 	status := c.parent.router.Snapshot().NodeStatus
-	switch c.activeTab {
+	switch c.currentTab() {
 	case consoleTabPeers:
 		return c.layoutPeersTab(gtx, status)
+	case consoleTabTraffic:
+		return c.layoutTrafficTab(gtx)
 	case consoleTabInfo:
 		return c.layoutInfoTab(gtx, status)
 	default:
@@ -1029,10 +1052,11 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 	commands := table.Commands()
 
 	// Group by category, preserving display order.
-	categoryOrder := []string{"system", "network", "identity", "message", "chatlog", "notice"}
+	categoryOrder := []string{"system", "network", "metrics", "identity", "message", "chatlog", "notice"}
 	categoryLabels := map[string]string{
 		"system":   "Control",
 		"network":  "Network",
+		"metrics":  "Metrics",
 		"identity": "Identity & Contacts",
 		"message":  "Messages",
 		"chatlog":  "Chat History",
@@ -1298,11 +1322,562 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 	if item.Connected {
 		connected = c.parent.t("node.link.up")
 	}
-	text := c.parent.t("node.peer_health.meta", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score)
+	text := c.parent.t("node.peer_health.meta", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
 	if text == "node.peer_health.meta" {
-		return fmt.Sprintf("%s | pending %d | recv %s | pong %s | fails %d | score %d", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score)
+		return fmt.Sprintf("%s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
 	}
 	return text
+}
+
+// formatBytes formats a byte count into a human-readable string (B, KB, MB, GB, TB).
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTP"[exp])
+}
+
+// --- Traffic tab ---
+
+const trafficGraphVisiblePoints = 600  // visible data points (10 min at 1 sample/sec)
+const trafficMaxSamples         = 3600 // hard cap matching metrics.Collector ring buffer
+
+// Shared palette for traffic visualization (bars, line, legend, badges).
+var (
+	trafficInColor    = color.NRGBA{R: 59, G: 186, B: 130, A: 200}  // green bars
+	trafficOutColor   = color.NRGBA{R: 86, G: 156, B: 231, A: 200}  // blue bars
+	trafficTotalColor = color.NRGBA{R: 230, G: 180, B: 60, A: 255}  // yellow line
+	trafficInSolid    = color.NRGBA{R: 59, G: 186, B: 130, A: 255}  // green solid (legend/badges)
+	trafficOutSolid   = color.NRGBA{R: 86, G: 156, B: 231, A: 255}  // blue solid (legend/badges)
+)
+
+// loadTrafficHistory fetches the full history from the metrics collector
+// and populates the local sample slices. Called when the tab opens and on
+// every ticker restart so reopening shows accurate data.
+// On any failure (RPC error, unmarshal error, nil collector) the cached
+// graph state is cleared to prevent rendering stale data from a previous
+// session or a pre-restart collector.
+func (c *ConsoleWindow) loadTrafficHistory() {
+	if c.parent.cmdTable == nil {
+		c.resetTrafficState()
+		return
+	}
+	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetch_traffic_history"})
+	if resp.Error != nil {
+		c.resetTrafficState()
+		return
+	}
+	var frame struct {
+		TrafficHistory *struct {
+			Samples []struct {
+				BytesSentPS   int64 `json:"bytes_sent_ps"`
+				BytesRecvPS   int64 `json:"bytes_recv_ps"`
+				TotalSent     int64 `json:"total_sent"`
+				TotalReceived int64 `json:"total_received"`
+			} `json:"samples"`
+		} `json:"traffic_history"`
+	}
+	if err := json.Unmarshal(resp.Data, &frame); err != nil || frame.TrafficHistory == nil {
+		c.resetTrafficState()
+		return
+	}
+
+	samples := frame.TrafficHistory.Samples
+
+	c.mu.Lock()
+	c.trafficSamplesIn = make([]float32, 0, len(samples))
+	c.trafficSamplesOut = make([]float32, 0, len(samples))
+	for _, s := range samples {
+		c.trafficSamplesIn = append(c.trafficSamplesIn, float32(s.BytesRecvPS))
+		c.trafficSamplesOut = append(c.trafficSamplesOut, float32(s.BytesSentPS))
+	}
+	if len(samples) > 0 {
+		last := samples[len(samples)-1]
+		c.trafficTotalSent = last.TotalSent
+		c.trafficTotalRecv = last.TotalReceived
+		c.trafficLoaded = true
+	} else {
+		// Empty history (e.g. collector just restarted). Do NOT set trafficLoaded
+		// so the next sampleTraffic call records the current counters as baseline
+		// instead of computing a bogus delta against stale values.
+		c.trafficTotalSent = 0
+		c.trafficTotalRecv = 0
+		c.trafficLoaded = false
+	}
+	c.mu.Unlock()
+}
+
+// resetTrafficState clears all cached traffic graph data so the UI does not
+// render stale samples from a previous session or failed reload.
+func (c *ConsoleWindow) resetTrafficState() {
+	c.mu.Lock()
+	c.trafficSamplesIn = nil
+	c.trafficSamplesOut = nil
+	c.trafficTotalSent = 0
+	c.trafficTotalRecv = 0
+	c.trafficLoaded = false
+	c.mu.Unlock()
+}
+
+// startTrafficTicker launches a 1-second ticker that samples traffic stats
+// and invalidates the window. Reloads the full history from the collector
+// on every call so that reopening the tab shows accurate per-second data
+// instead of compressing the missed interval into a single spike.
+// Called from the UI goroutine (handleActions); the ticker goroutine
+// accesses trafficTicker under c.mu to avoid races.
+func (c *ConsoleWindow) startTrafficTicker() {
+	c.mu.Lock()
+	if c.trafficTicker != nil {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+
+	// Always reload full history from the collector — the collector kept
+	// sampling while the tab was inactive, so we get accurate per-second data.
+	c.loadTrafficHistory()
+
+	c.mu.Lock()
+	ticker := time.NewTicker(1 * time.Second)
+	c.trafficTicker = ticker
+	c.mu.Unlock()
+
+	go func() {
+		for {
+			select {
+			case <-c.closed:
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				if c.currentTab() != consoleTabTraffic {
+					ticker.Stop()
+					c.mu.Lock()
+					c.trafficTicker = nil
+					c.mu.Unlock()
+					return
+				}
+				c.sampleTraffic()
+				c.invalidateWindow()
+			}
+		}
+	}()
+}
+
+func (c *ConsoleWindow) sampleTraffic() {
+	if c.parent.cmdTable == nil {
+		return
+	}
+	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetch_network_stats"})
+	if resp.Error != nil {
+		return
+	}
+	var frame struct {
+		NetworkStats *struct {
+			TotalBytesSent     int64 `json:"total_bytes_sent"`
+			TotalBytesReceived int64 `json:"total_bytes_received"`
+		} `json:"network_stats"`
+	}
+	if err := json.Unmarshal(resp.Data, &frame); err != nil || frame.NetworkStats == nil {
+		return
+	}
+
+	sent := frame.NetworkStats.TotalBytesSent
+	recv := frame.NetworkStats.TotalBytesReceived
+
+	c.mu.Lock()
+	if c.trafficLoaded {
+		deltaSent := sent - c.trafficTotalSent
+		deltaRecv := recv - c.trafficTotalRecv
+		if deltaSent < 0 {
+			deltaSent = 0
+		}
+		if deltaRecv < 0 {
+			deltaRecv = 0
+		}
+		c.trafficSamplesOut = append(c.trafficSamplesOut, float32(deltaSent))
+		c.trafficSamplesIn = append(c.trafficSamplesIn, float32(deltaRecv))
+
+		// Trim to trafficMaxSamples to prevent unbounded growth.
+		if len(c.trafficSamplesIn) > trafficMaxSamples {
+			c.trafficSamplesIn = c.trafficSamplesIn[len(c.trafficSamplesIn)-trafficMaxSamples:]
+		}
+		if len(c.trafficSamplesOut) > trafficMaxSamples {
+			c.trafficSamplesOut = c.trafficSamplesOut[len(c.trafficSamplesOut)-trafficMaxSamples:]
+		}
+	}
+	c.trafficTotalSent = sent
+	c.trafficTotalRecv = recv
+	c.trafficLoaded = true
+	c.mu.Unlock()
+}
+
+func (c *ConsoleWindow) layoutTrafficTab(gtx layout.Context) layout.Dimensions {
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		return layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				// Title
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.H6(c.theme, c.parent.t("console.traffic_title"))
+					label.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+					return label.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				// Graph area
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return c.layoutTrafficGraph(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+				// Legend (below graph)
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return c.layoutTrafficLegend(gtx)
+				}),
+			)
+		})
+	})
+}
+
+func (c *ConsoleWindow) layoutTrafficLegend(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutColorDot(gtx, trafficInSolid)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Caption(c.theme, c.parent.t("console.traffic_in"))
+			lbl.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(20)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutColorDot(gtx, trafficOutSolid)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Caption(c.theme, c.parent.t("console.traffic_out"))
+			lbl.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(20)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutColorDot(gtx, trafficTotalColor)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Caption(c.theme, c.parent.t("console.traffic_total"))
+			lbl.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+			return lbl.Layout(gtx)
+		}),
+	)
+}
+
+func (c *ConsoleWindow) layoutColorDot(gtx layout.Context, clr color.NRGBA) layout.Dimensions {
+	sz := gtx.Dp(unit.Dp(10))
+	defer clip.UniformRRect(image.Rectangle{Max: image.Pt(sz, sz)}, sz/2).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: clr}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	return layout.Dimensions{Size: image.Pt(sz, sz)}
+}
+
+// trafficVisibleSlice returns a copy of the tail portion of data visible on the graph.
+// A copy is required because the caller reads under RLock while the ticker goroutine
+// may append to the original slice — sharing the backing array would be a data race.
+func trafficVisibleSlice(data []float32, maxVisible int) []float32 {
+	src := data
+	if len(src) > maxVisible {
+		src = src[len(src)-maxVisible:]
+	}
+	out := make([]float32, len(src))
+	copy(out, src)
+	return out
+}
+
+func (c *ConsoleWindow) layoutTrafficGraph(gtx layout.Context) layout.Dimensions {
+	// snapshot traffic data under read-lock to avoid races with ticker goroutine
+	c.mu.RLock()
+	visIn := trafficVisibleSlice(c.trafficSamplesIn, trafficGraphVisiblePoints)
+	visOut := trafficVisibleSlice(c.trafficSamplesOut, trafficGraphVisiblePoints)
+	totalSent := c.trafficTotalSent
+	totalRecv := c.trafficTotalRecv
+	c.mu.RUnlock()
+
+	// reserve left margin for Y-axis labels
+	yAxisWidth := gtx.Dp(unit.Dp(60))
+	totalWidth := gtx.Constraints.Max.X
+	height := gtx.Constraints.Max.Y
+	if height <= 0 {
+		height = gtx.Dp(unit.Dp(200))
+	}
+	graphWidth := totalWidth - yAxisWidth
+	if graphWidth < 10 {
+		graphWidth = 10
+	}
+
+	// dark background for entire area
+	graphBg := color.NRGBA{R: 15, G: 19, B: 27, A: 255}
+	defer clip.Rect{Max: image.Pt(totalWidth, height)}.Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: graphBg}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	count := len(visIn)
+	if len(visOut) > count {
+		count = len(visOut)
+	}
+
+	// find max across in, out, and total for unified scale
+	var maxVal float32
+	for i := 0; i < count; i++ {
+		var inVal, outVal float32
+		if i < len(visIn) {
+			inVal = visIn[i]
+		}
+		if i < len(visOut) {
+			outVal = visOut[i]
+		}
+		total := inVal + outVal
+		if total > maxVal {
+			maxVal = total
+		}
+	}
+	if maxVal < 1 {
+		maxVal = 1
+	}
+	maxVal *= 1.1 // 10% headroom
+
+	// draw Y-axis labels and horizontal grid lines (4 lines)
+	gridColor := color.NRGBA{R: 40, G: 48, B: 60, A: 255}
+	labelColor := color.NRGBA{R: 100, G: 110, B: 125, A: 255}
+	for i := 1; i <= 4; i++ {
+		y := height * i / 5
+		drawHLine(gtx, yAxisWidth, totalWidth, y, gridColor)
+		gridVal := maxVal * float32(5-i) / 5.0
+		lbl := material.Caption(c.theme, formatBytes(int64(gridVal))+"/s")
+		lbl.Color = labelColor
+		stack := op.Offset(image.Pt(0, y-gtx.Dp(unit.Dp(7)))).Push(gtx.Ops)
+		lbl.Layout(gtx)
+		stack.Pop()
+	}
+
+	if count == 0 {
+		return layout.Dimensions{Size: image.Pt(totalWidth, height)}
+	}
+
+	fHeight := float32(height)
+	fGraphW := float32(graphWidth)
+
+	// all samples are spread across the full graph width
+	visibleCount := count
+	if visibleCount > trafficGraphVisiblePoints {
+		visibleCount = trafficGraphVisiblePoints
+	}
+
+	// pixels per sample (fractional for smooth distribution)
+	pxPerSample := fGraphW / float32(visibleCount)
+
+	// bar width: half of step, minimum 1px; gap = 1px between in and out
+	barW := int(pxPerSample/2) - 1
+	if barW < 1 {
+		barW = 1
+	}
+
+	// draw IN and OUT bars side by side across full width
+	for i := 0; i < visibleCount; i++ {
+		dataIdx := count - visibleCount + i
+		var inVal, outVal float32
+		if dataIdx < len(visIn) {
+			inVal = visIn[dataIdx]
+		}
+		if dataIdx < len(visOut) {
+			outVal = visOut[dataIdx]
+		}
+
+		// center of this sample on X axis
+		centerX := yAxisWidth + int(float32(i)*pxPerSample+pxPerSample/2)
+
+		// IN bar (green) — left of center
+		if inVal > 0 {
+			inH := int((inVal / maxVal) * fHeight)
+			if inH < 1 {
+				inH = 1
+			}
+			x0 := centerX - barW - 1
+			drawRect(gtx, image.Rect(x0, height-inH, x0+barW, height), trafficInColor)
+		}
+
+		// OUT bar (blue) — right of center
+		if outVal > 0 {
+			outH := int((outVal / maxVal) * fHeight)
+			if outH < 1 {
+				outH = 1
+			}
+			x0 := centerX + 1
+			drawRect(gtx, image.Rect(x0, height-outH, x0+barW, height), trafficOutColor)
+		}
+	}
+
+	// draw Total line (in+out) across full width on top of bars
+	if visibleCount >= 2 {
+		drawTrafficLine(gtx, visIn, visOut, count, visibleCount, yAxisWidth, pxPerSample, fHeight, maxVal, trafficTotalColor)
+	}
+
+	// draw badges (Total In / Total Out) in the top-right corner of the graph
+	c.drawTrafficBadges(gtx, totalWidth, height, totalSent, totalRecv)
+
+	return layout.Dimensions{Size: image.Pt(totalWidth, height)}
+}
+
+// drawTrafficBadges renders Total In / Total Out stacked vertically
+// inside a single rounded rectangle in the top-right corner of the graph.
+func (c *ConsoleWindow) drawTrafficBadges(gtx layout.Context, totalWidth, height int, totalSent, totalRecv int64) {
+	inText := c.parent.t("console.traffic_total_in", formatBytes(totalRecv))
+	outText := c.parent.t("console.traffic_total_out", formatBytes(totalSent))
+
+	padH := gtx.Dp(unit.Dp(10))
+	padV := gtx.Dp(unit.Dp(8))
+	lineGap := gtx.Dp(unit.Dp(4))
+	margin := gtx.Dp(unit.Dp(10))
+	radius := gtx.Dp(unit.Dp(6))
+
+	badgeBg := color.NRGBA{R: 30, G: 36, B: 48, A: 220}
+
+	// measure text with unconstrained width
+	measureGtx := gtx
+	measureGtx.Constraints.Min = image.Point{}
+	measureGtx.Constraints.Max = image.Pt(totalWidth, height)
+
+	inMacro := op.Record(gtx.Ops)
+	inLbl := material.Caption(c.theme, inText)
+	inLbl.Color = trafficInSolid
+	inDims := inLbl.Layout(measureGtx)
+	inCall := inMacro.Stop()
+
+	outMacro := op.Record(gtx.Ops)
+	outLbl := material.Caption(c.theme, outText)
+	outLbl.Color = trafficOutSolid
+	outDims := outLbl.Layout(measureGtx)
+	outCall := outMacro.Stop()
+
+	// box size: widest text + padding, both lines stacked
+	textW := inDims.Size.X
+	if outDims.Size.X > textW {
+		textW = outDims.Size.X
+	}
+	boxW := textW + padH*2
+	boxH := inDims.Size.Y + lineGap + outDims.Size.Y + padV*2
+
+	// position: top-right corner
+	boxX := totalWidth - boxW - margin
+	boxY := margin
+
+	// draw single rounded background
+	drawRoundedRect(gtx, image.Rect(boxX, boxY, boxX+boxW, boxY+boxH), radius, badgeBg)
+
+	// draw In text
+	s1 := op.Offset(image.Pt(boxX+padH, boxY+padV)).Push(gtx.Ops)
+	inCall.Add(gtx.Ops)
+	s1.Pop()
+
+	// draw Out text below In
+	s2 := op.Offset(image.Pt(boxX+padH, boxY+padV+inDims.Size.Y+lineGap)).Push(gtx.Ops)
+	outCall.Add(gtx.Ops)
+	s2.Pop()
+}
+
+func drawRoundedRect(gtx layout.Context, r image.Rectangle, radius int, clr color.NRGBA) {
+	defer clip.UniformRRect(r, radius).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: clr}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+}
+
+// drawTrafficLine draws the total (in+out) as a continuous line
+// connecting all non-zero sample points across zero gaps between clusters.
+func drawTrafficLine(gtx layout.Context, visIn, visOut []float32, totalCount, visibleCount, yAxisWidth int, pxPerSample, height, maxVal float32, clr color.NRGBA) {
+	const lineW = 2
+
+	startIdx := totalCount - visibleCount
+	prevX, prevY := -1, -1
+	for i := 0; i < visibleCount; i++ {
+		dataIdx := startIdx + i
+		var inVal, outVal float32
+		if dataIdx < len(visIn) {
+			inVal = visIn[dataIdx]
+		}
+		if dataIdx < len(visOut) {
+			outVal = visOut[dataIdx]
+		}
+		total := inVal + outVal
+		if total <= 0 {
+			continue // skip zeros but keep prev point for continuity
+		}
+
+		curX := yAxisWidth + int(float32(i)*pxPerSample+pxPerSample/2)
+		curY := int(height - (total/maxVal)*height)
+
+		if prevX >= 0 {
+			drawLineBresenham(gtx, prevX, prevY, curX, curY, lineW, clr)
+		} else {
+			drawRect(gtx, image.Rect(curX, curY, curX+lineW, curY+lineW), clr)
+		}
+
+		prevX = curX
+		prevY = curY
+	}
+}
+
+// drawLineBresenham draws a line from (x0,y0) to (x1,y1) using
+// Bresenham's algorithm, rendering each point as a [w x w] square.
+func drawLineBresenham(gtx layout.Context, x0, y0, x1, y1, w int, clr color.NRGBA) {
+	dx := x1 - x0
+	dy := y1 - y0
+	if dx < 0 {
+		dx = -dx
+	}
+	if dy < 0 {
+		dy = -dy
+	}
+
+	sx := 1
+	if x0 > x1 {
+		sx = -1
+	}
+	sy := 1
+	if y0 > y1 {
+		sy = -1
+	}
+
+	err := dx - dy
+	for {
+		drawRect(gtx, image.Rect(x0, y0, x0+w, y0+w), clr)
+		if x0 == x1 && y0 == y1 {
+			break
+		}
+		e2 := 2 * err
+		if e2 > -dy {
+			err -= dy
+			x0 += sx
+		}
+		if e2 < dx {
+			err += dx
+			y0 += sy
+		}
+	}
+}
+
+func drawRect(gtx layout.Context, r image.Rectangle, clr color.NRGBA) {
+	defer clip.Rect(r).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: clr}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+}
+
+func drawHLine(gtx layout.Context, x0, x1, y int, clr color.NRGBA) {
+	defer clip.Rect{Min: image.Pt(x0, y), Max: image.Pt(x1, y+1)}.Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: clr}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
 }
 
 func peerStateColors(state string) (color.NRGBA, color.NRGBA) {

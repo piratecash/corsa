@@ -40,6 +40,14 @@ func testTable() *rpc.CommandTable {
 		},
 	)
 
+	t.Register(
+		rpc.CommandInfo{Name: "fetch_traffic_history", Description: "Traffic history", Category: "metrics"},
+		func(req rpc.CommandRequest) rpc.CommandResponse {
+			data, _ := json.Marshal(map[string]string{"status": "ok"})
+			return rpc.CommandResponse{Data: data}
+		},
+	)
+
 	t.RegisterUnavailable(
 		rpc.CommandInfo{Name: "fetch_chatlog", Description: "Unavailable in test mode", Category: "chatlog"},
 	)
@@ -212,6 +220,14 @@ func TestConsoleHelpTextGroupsByCategory(t *testing.T) {
 	// Unavailable commands should not appear.
 	if strings.Contains(text, "fetch_chatlog") {
 		t.Error("unavailable command fetch_chatlog should not appear in console help")
+	}
+
+	// Metrics category must be present with its command.
+	if !strings.Contains(text, "== Metrics ==") {
+		t.Error("expected '== Metrics ==' section in console help")
+	}
+	if !strings.Contains(text, "fetch_traffic_history") {
+		t.Error("expected fetch_traffic_history in console help")
 	}
 }
 

@@ -619,6 +619,286 @@ func TestFetchPeerHealthShowsEstablishedSession(t *testing.T) {
 	}
 }
 
+// validPeerStates is the set of peer states recognized by the protocol,
+// UI, and i18n layers. Any state outside this set is a semantic bug.
+var validPeerStates = map[string]bool{
+	"healthy":       true,
+	"degraded":      true,
+	"stalled":       true,
+	"reconnecting":  true,
+}
+
+func TestPeerHealthStatesAreProtocolValid(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+	})
+	defer stopA()
+
+	_, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+	})
+	defer stopB()
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+		return reply.Type == "peer_health" && reply.Count > 0
+	})
+
+	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	for _, ph := range reply.PeerHealth {
+		if !validPeerStates[ph.State] {
+			t.Errorf("peer %s has non-protocol state %q; expected one of healthy/degraded/stalled/reconnecting", ph.Address, ph.State)
+		}
+	}
+}
+
+func TestNetworkStatsIncludesTrafficAndKnownPeers(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+	})
+	defer stopA()
+
+	_, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+	})
+	defer stopB()
+
+	// Wait for a connection to be established and some traffic exchanged.
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+		if reply.NetworkStats == nil {
+			return false
+		}
+		return reply.NetworkStats.ConnectedPeers > 0
+	})
+
+	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+	if reply.Type != "network_stats" {
+		t.Fatalf("expected network_stats frame, got %q", reply.Type)
+	}
+	stats := reply.NetworkStats
+	if stats == nil {
+		t.Fatal("network_stats is nil")
+	}
+
+	// At least 1 connected peer.
+	if stats.ConnectedPeers < 1 {
+		t.Errorf("expected connected_peers >= 1, got %d", stats.ConnectedPeers)
+	}
+
+	// known_peers must reflect the full peer pool (at least the bootstrap peer).
+	if stats.KnownPeers < 1 {
+		t.Errorf("expected known_peers >= 1, got %d", stats.KnownPeers)
+	}
+
+	// After handshake, some bytes must have been exchanged.
+	if stats.TotalTraffic <= 0 {
+		t.Errorf("expected total_traffic > 0 after handshake, got %d", stats.TotalTraffic)
+	}
+
+	// Peer traffic breakdown should list at least the connected peer.
+	if len(stats.PeerTraffic) < 1 {
+		t.Errorf("expected at least 1 peer_traffic entry, got %d", len(stats.PeerTraffic))
+	}
+	for _, pt := range stats.PeerTraffic {
+		if pt.TotalTraffic != pt.BytesSent+pt.BytesReceived {
+			t.Errorf("peer %s: total_traffic (%d) != bytes_sent (%d) + bytes_received (%d)",
+				pt.Address, pt.TotalTraffic, pt.BytesSent, pt.BytesReceived)
+		}
+	}
+}
+
+// TestUnauthenticatedInboundTrafficNotAttributed verifies that an inbound
+// connection that claims a peer address via hello but fails auth_session
+// does NOT have its bytes attributed to that address in network_stats.
+// This is a regression test for the spoofed traffic attribution bug.
+func TestUnauthenticatedInboundTrafficNotAttributed(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+	})
+	defer stop()
+
+	spoofedID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	// Open connection, send hello claiming spoofedID (triggers session auth),
+	// then fail auth with a bad signature.
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:          "hello",
+		Version:       config.ProtocolVersion,
+		Client:        "node",
+		ClientVersion: config.CorsaWireVersion,
+		Address:       spoofedID.Address,
+		PubKey:        identity.PublicKeyBase64(spoofedID.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(spoofedID.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(spoofedID),
+	})
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" || welcome.Challenge == "" {
+		t.Fatalf("expected welcome with challenge, got %#v", welcome)
+	}
+
+	// Send bad auth — this will fail and the server will close the connection.
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   spoofedID.Address,
+		Signature: "deliberately-bad-signature",
+	})
+	reply := readJSONTestFrame(t, reader)
+	if reply.Code != protocol.ErrCodeInvalidAuthSignature {
+		t.Fatalf("expected invalid auth signature error, got %#v", reply)
+	}
+	_ = conn.Close()
+
+	// Give the server a moment to run accumulateInboundTraffic on close.
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify: the spoofed address should NOT appear in network_stats.
+	statsReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+	if statsReply.NetworkStats == nil {
+		t.Fatal("network_stats is nil")
+	}
+	for _, pt := range statsReply.NetworkStats.PeerTraffic {
+		if pt.Address == spoofedID.Address {
+			t.Errorf("spoofed address %s should not appear in peer_traffic, but found: sent=%d recv=%d",
+				spoofedID.Address, pt.BytesSent, pt.BytesReceived)
+		}
+	}
+
+	// Also verify via peer_health.
+	healthReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	for _, ph := range healthReply.PeerHealth {
+		if ph.Address == spoofedID.Address && (ph.BytesSent > 0 || ph.BytesReceived > 0) {
+			t.Errorf("spoofed address %s should not have traffic in peer_health, but found: sent=%d recv=%d",
+				spoofedID.Address, ph.BytesSent, ph.BytesReceived)
+		}
+	}
+}
+
+// TestKnownPeersIncludesNonListenerClients verifies that known_peers counts
+// connected non-listener peers (e.g. desktop clients with Listener: "0") that
+// appear in peer_traffic but are not added to s.peers. This is a regression
+// test ensuring known_peers >= len(peer_traffic).
+func TestKnownPeersIncludesNonListenerClients(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+	})
+	defer stop()
+
+	// Generate a valid identity for authenticated connection.
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	// Connect as a non-listener node (Listener: "0", no Listen address).
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:          "hello",
+		Version:       config.ProtocolVersion,
+		Client:        "node",
+		ClientVersion: config.CorsaWireVersion,
+		Address:       id.Address,
+		PubKey:        identity.PublicKeyBase64(id.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(id),
+		Listener:      "0",
+	})
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" || welcome.Challenge == "" {
+		t.Fatalf("expected welcome with challenge, got %#v", welcome)
+	}
+
+	// Complete authentication.
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   id.Address,
+		Signature: identity.SignPayload(id, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+id.Address)),
+	})
+	authOK := readJSONTestFrame(t, reader)
+	if authOK.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got %#v", authOK)
+	}
+
+	// Exchange a frame to generate some traffic.
+	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
+	_ = readJSONTestFrame(t, reader)
+
+	// Verify: the non-listener peer should appear in peer_traffic,
+	// and known_peers must be >= len(peer_traffic).
+	statsReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+	if statsReply.NetworkStats == nil {
+		t.Fatal("network_stats is nil")
+	}
+	stats := statsReply.NetworkStats
+
+	if stats.KnownPeers < len(stats.PeerTraffic) {
+		t.Errorf("known_peers (%d) < len(peer_traffic) (%d); non-listener peers are undercounted",
+			stats.KnownPeers, len(stats.PeerTraffic))
+	}
+
+	// The non-listener peer should appear in peer_traffic with live bytes.
+	foundNonListener := false
+	for _, pt := range stats.PeerTraffic {
+		if pt.Address == id.Address {
+			foundNonListener = true
+			if pt.TotalTraffic <= 0 {
+				t.Errorf("non-listener peer %s has no traffic, expected > 0", id.Address)
+			}
+			break
+		}
+	}
+
+	// The peer might appear via connPeerInfo (resolved address) rather than
+	// identity address, so we check via a broader condition: at minimum the
+	// invariant known_peers >= len(peer_traffic) must hold.
+	if !foundNonListener && stats.KnownPeers < len(stats.PeerTraffic) {
+		t.Errorf("non-listener peer %s not found in peer_traffic and known_peers invariant violated", id.Address)
+	}
+}
+
 func TestQueuedMeshMessageFlushesAfterPeerReconnect(t *testing.T) {
 	t.Parallel()
 

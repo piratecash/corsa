@@ -301,11 +301,12 @@ func TestClientNamedCommandStillUsesExec(t *testing.T) {
 func TestClientNoLegacyRoutes(t *testing.T) {
 	commands := []string{
 		"ping", "help", "version", "hello",
-		"get_peers", "fetch_peer_health",
+		"get_peers", "fetch_peer_health", "fetch_network_stats",
 		"add_peer 1.2.3.4:8080",
 		"fetch_messages dm",
 		"fetch_dm_headers",
 		"fetch_notices",
+		"fetch_traffic_history",
 	}
 
 	for _, cmd := range commands {

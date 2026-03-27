@@ -71,6 +71,9 @@ type PeerHealth struct {
 	ConsecutiveFailures int
 	LastError           string
 	Score               int
+	BytesSent           int64
+	BytesReceived       int64
+	TotalTraffic        int64
 }
 
 type DirectMessage struct {
@@ -109,12 +112,15 @@ type PendingMessage struct {
 }
 
 type ConsolePeerStatus struct {
-	Address      string `json:"address"`
-	Network      string `json:"network,omitempty"`
-	State        string `json:"state"`
-	Connected    bool   `json:"connected"`
-	PendingCount int    `json:"pending_count,omitempty"`
-	LastError    string `json:"last_error,omitempty"`
+	Address       string `json:"address"`
+	Network       string `json:"network,omitempty"`
+	State         string `json:"state"`
+	Connected     bool   `json:"connected"`
+	PendingCount  int    `json:"pending_count,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+	BytesSent     int64  `json:"bytes_sent"`
+	BytesReceived int64  `json:"bytes_received"`
+	TotalTraffic  int64  `json:"total_traffic"`
 }
 
 type ConsolePingStatus struct {
@@ -443,6 +449,9 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			ConsecutiveFailures: item.ConsecutiveFailures,
 			LastError:           item.LastError,
 			Score:               item.Score,
+			BytesSent:           item.BytesSent,
+			BytesReceived:       item.BytesReceived,
+			TotalTraffic:        item.TotalTraffic,
 		})
 	}
 	return items
@@ -739,16 +748,21 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		byAddress[strings.TrimSpace(item.Address)] = item
 	}
 
-	allPeers := make([]ConsolePeerStatus, 0, len(peers))
+	allPeers := make([]ConsolePeerStatus, 0, len(peers)+len(health))
 	connected := make([]ConsolePeerStatus, 0, len(peers))
 	knownWithState := make([]ConsolePeerStatus, 0, len(health))
 	knownOnly := make([]string, 0, len(peers))
+
+	// Track addresses we've already processed so we can pick up
+	// health-only peers (e.g. inbound-only connections) in a second pass.
+	seen := make(map[string]struct{}, len(peers))
 
 	for _, address := range peers {
 		address = strings.TrimSpace(address)
 		if address == "" {
 			continue
 		}
+		seen[address] = struct{}{}
 		item, ok := byAddress[address]
 		if !ok {
 			knownOnly = append(knownOnly, address)
@@ -757,15 +771,51 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		}
 
 		status := ConsolePeerStatus{
-			Address:      address,
-			Network:      node.ClassifyAddress(address).String(),
-			State:        "known",
-			Connected:    item.Connected,
-			PendingCount: item.PendingCount,
-			LastError:    item.LastError,
+			Address:       address,
+			Network:       node.ClassifyAddress(address).String(),
+			State:         "known",
+			Connected:     item.Connected,
+			PendingCount:  item.PendingCount,
+			LastError:     item.LastError,
+			BytesSent:     item.BytesSent,
+			BytesReceived: item.BytesReceived,
+			TotalTraffic:  item.TotalTraffic,
 		}
 		if strings.TrimSpace(item.State) != "" {
 			status.State = item.State
+		}
+		allPeers = append(allPeers, status)
+		if item.Connected {
+			connected = append(connected, status)
+		} else {
+			knownWithState = append(knownWithState, status)
+		}
+	}
+
+	// Second pass: include health-only peers whose address is not in the
+	// peers[] list (e.g. inbound-only connections that appear in
+	// fetch_peer_health but not in the configured peer list).
+	// Collect and sort addresses for deterministic output order.
+	healthOnlyAddrs := make([]string, 0, len(byAddress))
+	for addr := range byAddress {
+		if _, ok := seen[addr]; !ok {
+			healthOnlyAddrs = append(healthOnlyAddrs, addr)
+		}
+	}
+	sort.Strings(healthOnlyAddrs)
+
+	for _, addr := range healthOnlyAddrs {
+		item := byAddress[addr]
+		status := ConsolePeerStatus{
+			Address:       addr,
+			Network:       node.ClassifyAddress(addr).String(),
+			State:         item.State,
+			Connected:     item.Connected,
+			PendingCount:  item.PendingCount,
+			LastError:     item.LastError,
+			BytesSent:     item.BytesSent,
+			BytesReceived: item.BytesReceived,
+			TotalTraffic:  item.TotalTraffic,
 		}
 		allPeers = append(allPeers, status)
 		if item.Connected {

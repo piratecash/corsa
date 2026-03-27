@@ -373,6 +373,43 @@ Fields:
 - `peer_health[].last_useful_receive_at` — optional; last non-heartbeat inbound frame time
 - `peer_health[].consecutive_failures` — optional; reconnect failure streak
 - `peer_health[].last_error` — optional; most recent session error
+- `peer_health[].bytes_sent` — total bytes sent to this peer across all sessions
+- `peer_health[].bytes_received` — total bytes received from this peer across all sessions
+- `peer_health[].total_traffic` — sum of bytes_sent and bytes_received
+
+### Network stats
+
+Frame type: `network_stats`
+
+Aggregated traffic statistics for the entire node. Combines cumulative counters from closed sessions with live byte counts from active MeteredConn instances.
+
+- `network_stats.total_bytes_sent` — total bytes sent across all peers
+- `network_stats.total_bytes_received` — total bytes received across all peers
+- `network_stats.total_traffic` — sum of total_bytes_sent and total_bytes_received
+- `network_stats.connected_peers` — number of currently connected peers
+- `network_stats.known_peers` — total number of known peers (configured, connected, and previously seen — includes non-listener clients)
+- `network_stats.peer_traffic[]` — per-peer traffic breakdown, sorted by total_traffic descending:
+  - `address` — peer address
+  - `bytes_sent` — bytes sent to this peer
+  - `bytes_received` — bytes received from this peer
+  - `total_traffic` — sum of bytes_sent and bytes_received
+  - `connected` — whether the peer is currently connected
+
+### Traffic history
+
+Frame type: `traffic_history`
+
+Rolling per-second traffic history collected by the metrics layer. The ring buffer holds up to 3600 samples (1 hour). Samples are returned in chronological order (oldest first).
+
+- `traffic_history.interval_seconds` — sampling interval (always 1)
+- `traffic_history.capacity` — maximum number of samples (3600)
+- `traffic_history.count` — current number of recorded samples
+- `traffic_history.samples[]` — array of traffic samples:
+  - `timestamp` — ISO 8601 timestamp (UTC)
+  - `bytes_sent_ps` — bytes sent delta since previous sample
+  - `bytes_recv_ps` — bytes received delta since previous sample
+  - `total_sent` — cumulative bytes sent at this moment
+  - `total_received` — cumulative bytes received at this moment
 
 Routing notes:
 
@@ -1447,6 +1484,43 @@ Observed address (обнаружение NAT):
 - `peer_health[].last_useful_receive_at` — опциональное; время последнего не-heartbeat inbound frame
 - `peer_health[].consecutive_failures` — опциональное; длина текущей серии ошибок reconnect
 - `peer_health[].last_error` — опциональное; последняя ошибка session
+- `peer_health[].bytes_sent` — всего байт отправлено этому пиру за все сессии
+- `peer_health[].bytes_received` — всего байт получено от этого пира за все сессии
+- `peer_health[].total_traffic` — сумма bytes_sent и bytes_received
+
+### Статистика сети
+
+Тип фрейма: `network_stats`
+
+Агрегированная статистика трафика для всей ноды. Объединяет кумулятивные счётчики закрытых сессий с live-счётчиками от активных MeteredConn.
+
+- `network_stats.total_bytes_sent` — всего байт отправлено по всем пирам
+- `network_stats.total_bytes_received` — всего байт получено от всех пиров
+- `network_stats.total_traffic` — сумма total_bytes_sent и total_bytes_received
+- `network_stats.connected_peers` — количество подключённых сейчас пиров
+- `network_stats.known_peers` — общее количество известных пиров (настроенные, подключённые и ранее виденные — включая non-listener клиентов)
+- `network_stats.peer_traffic[]` — трафик по каждому пиру, отсортированный по total_traffic по убыванию:
+  - `address` — адрес пира
+  - `bytes_sent` — байт отправлено этому пиру
+  - `bytes_received` — байт получено от этого пира
+  - `total_traffic` — сумма bytes_sent и bytes_received
+  - `connected` — подключён ли пир сейчас
+
+### История трафика
+
+Тип фрейма: `traffic_history`
+
+Посекундная история трафика, собираемая слоем метрик. Кольцевой буфер вмещает до 3600 семплов (1 час). Семплы возвращаются в хронологическом порядке (от старых к новым).
+
+- `traffic_history.interval_seconds` — интервал сбора (всегда 1)
+- `traffic_history.capacity` — максимальное количество семплов (3600)
+- `traffic_history.count` — текущее количество записанных семплов
+- `traffic_history.samples[]` — массив семплов трафика:
+  - `timestamp` — ISO 8601 метка времени (UTC)
+  - `bytes_sent_ps` — дельта байт отправленных с предыдущего семпла
+  - `bytes_recv_ps` — дельта байт полученных с предыдущего семпла
+  - `total_sent` — кумулятивные байты отправленные на этот момент
+  - `total_received` — кумулятивные байты полученные на этот момент
 
 Правила маршрутизации:
 

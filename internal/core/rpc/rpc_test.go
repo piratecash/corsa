@@ -95,7 +95,7 @@ func (m *mockDMRouterProvider) SendMessage(to, body string) {
 // Pass nil for chatlogProvider or dmRouter to simulate node-only mode.
 func buildTestTable(nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider, dmRouter rpc.DMRouterProvider) *rpc.CommandTable {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter)
+	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter, nil)
 	return table
 }
 

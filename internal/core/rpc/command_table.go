@@ -175,14 +175,16 @@ func (t *CommandTable) AllNames() []string {
 // RegisterAllCommands registers every command group into the table.
 // This is the single registration point — used by the application bootstrap
 // and by tests that need a fully populated CommandTable.
-// Pass nil for chatlog or dmRouter to simulate standalone node mode.
-func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider) {
+// Pass nil for chatlog, dmRouter, or metricsProvider to simulate standalone
+// node mode — those commands are registered as unavailable (503, hidden from help).
+func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider) {
 	RegisterSystemCommands(t, node)
 	RegisterNetworkCommands(t, node)
 	RegisterIdentityCommands(t, node)
 	RegisterMessageCommands(t, node, dmRouter)
 	RegisterChatlogCommands(t, chatlog)
 	RegisterNoticeCommands(t, node)
+	RegisterMetricsCommands(t, metricsProvider)
 }
 
 // --- Helper constructors for building responses ---
@@ -293,6 +295,14 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
+		CommandInfo{Name: "fetch_network_stats", Description: "Get aggregated network traffic statistics per peer and total", Category: "network"},
+		func(req CommandRequest) CommandResponse {
+			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+			return frameResponse(reply)
+		},
+	)
+
+	t.Register(
 		CommandInfo{Name: "add_peer", Description: "Add a new peer by address", Category: "network", Usage: "<address>"},
 		func(req CommandRequest) CommandResponse {
 			address, _ := req.Args["address"].(string)
@@ -303,6 +313,26 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 				Type:  "add_peer",
 				Peers: []string{address},
 			})
+			return frameResponse(reply)
+		},
+	)
+}
+
+// RegisterMetricsCommands registers fetch_traffic_history.
+// When the metrics provider is nil (nodes that don't run a collector),
+// the command is registered as unavailable — hidden from help/autocomplete
+// and returning 503 on execution, consistent with other mode-gated commands.
+func RegisterMetricsCommands(t *CommandTable, m MetricsProvider) {
+	trafficHistoryInfo := CommandInfo{Name: "fetch_traffic_history", Description: "Get rolling traffic history (1 sample/sec, 1 hour window)", Category: "metrics"}
+
+	if m == nil {
+		t.RegisterUnavailable(trafficHistoryInfo)
+		return
+	}
+
+	t.Register(trafficHistoryInfo,
+		func(req CommandRequest) CommandResponse {
+			reply := m.TrafficSnapshot()
 			return frameResponse(reply)
 		},
 	)

@@ -61,6 +61,7 @@ type Service struct {
 	outbound       map[string]outboundDelivery
 	upstream       map[string]struct{}
 	inboundConns   map[net.Conn]struct{}
+	inboundMetered map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
 	connWg         sync.WaitGroup // tracks active handleConn goroutines for graceful shutdown
 	connAuth       map[net.Conn]*connAuthState
 	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
@@ -88,6 +89,7 @@ type subscriber struct {
 type peerSession struct {
 	address string
 	conn    net.Conn
+	metered *MeteredConn // tracks bytes for this session; nil when conn is not metered
 	sendCh  chan protocol.Frame
 	inboxCh chan protocol.Frame
 	errCh   chan error
@@ -108,6 +110,8 @@ type peerHealth struct {
 	ConsecutiveFailures int
 	LastError           string
 	Score               int // peer quality score for persistence priority
+	BytesSent           int64 // total bytes sent to this peer across all sessions
+	BytesReceived       int64 // total bytes received from this peer across all sessions
 }
 
 type pendingFrame struct {
@@ -376,6 +380,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		observedAddrs:   make(map[string]string),
 		reachableGroups: computeReachableGroups(cfg),
 		inboundConns:   make(map[net.Conn]struct{}),
+		inboundMetered: make(map[net.Conn]*MeteredConn),
 		connAuth:       make(map[net.Conn]*connAuthState),
 		connPeerInfo:   make(map[net.Conn]*connPeerHello),
 		bans:           make(map[string]banEntry),
@@ -524,20 +529,23 @@ func (s *Service) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	if !s.registerInboundConn(conn) {
+	metered := NewMeteredConn(conn)
+	if !s.registerInboundConn(metered) {
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections").Msg("reject connection")
 		_ = conn.Close()
 		return
 	}
 	defer func() {
-		s.unregisterInboundConn(conn)
-		s.removeSubscriberConn(conn)
-		s.clearConnAuth(conn)
-		_ = conn.Close()
+		s.accumulateInboundTraffic(metered)
+		s.unregisterInboundConn(metered)
+		s.removeSubscriberConn(metered)
+		s.clearConnAuth(metered)
+		_ = metered.Close()
 	}()
 
 	log.Info().Str("addr", conn.RemoteAddr().String()).Msg("incoming connection")
 	enableTCPKeepAlive(conn)
+	conn = metered
 
 	reader := bufio.NewReader(conn)
 	for {
@@ -635,6 +643,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "fetch_peer_health":
 		s.writeJSONFrame(conn, s.peerHealthFrame())
 		return true
+	case "fetch_network_stats":
+		s.writeJSONFrame(conn, s.networkStatsFrame())
+		return true
 	case "fetch_pending_messages":
 		s.writeJSONFrame(conn, s.pendingMessagesFrame(frame.Topic))
 		return true
@@ -705,6 +716,8 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 		return s.trustedContactsFrame()
 	case "fetch_peer_health":
 		return s.peerHealthFrame()
+	case "fetch_network_stats":
+		return s.networkStatsFrame()
 	case "fetch_pending_messages":
 		return s.pendingMessagesFrame(frame.Topic)
 	case "import_contacts":
@@ -2221,12 +2234,16 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 }
 
 func (s *Service) openPeerSession(ctx context.Context, address string) (bool, error) {
-	conn, err := s.dialPeer(ctx, address, 2*time.Second)
+	rawConn, err := s.dialPeer(ctx, address, 2*time.Second)
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = conn.Close() }()
-	enableTCPKeepAlive(conn)
+	conn := NewMeteredConn(rawConn)
+	defer func() {
+		s.accumulateSessionTraffic(address, conn)
+		_ = conn.Close()
+	}()
+	enableTCPKeepAlive(rawConn)
 
 	go func() {
 		<-ctx.Done()
@@ -2238,6 +2255,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	session := &peerSession{
 		address: address,
 		conn:    conn,
+		metered: conn,
 		sendCh:  make(chan protocol.Frame, 64),
 		inboxCh: make(chan protocol.Frame, 64),
 		errCh:   make(chan error, 1),
@@ -2475,12 +2493,16 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 		return false
 	}
 	s.inboundConns[conn] = struct{}{}
+	if mc, ok := conn.(*MeteredConn); ok {
+		s.inboundMetered[conn] = mc
+	}
 	return true
 }
 
 func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.inboundConns, conn)
+	delete(s.inboundMetered, conn)
 	delete(s.connPeerInfo, conn)
 	s.mu.Unlock()
 }
@@ -3393,6 +3415,63 @@ func (s *Service) markPeerUsefulReceive(address string) {
 	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
 }
 
+// accumulateSessionTraffic adds byte counters from an outbound MeteredConn
+// to the peer's cumulative traffic totals. Called when a peer session closes.
+func (s *Service) accumulateSessionTraffic(address string, mc *MeteredConn) {
+	sent := mc.BytesWritten()
+	received := mc.BytesRead()
+	if sent == 0 && received == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	address = s.resolveHealthAddress(address)
+	health := s.ensurePeerHealthLocked(address)
+	health.BytesSent += sent
+	health.BytesReceived += received
+}
+
+// isConnTrafficTrustedLocked returns true when the connection's claimed
+// peer address can be trusted for traffic attribution.  On the session-auth
+// path connAuth exists and we require Verified==true; on the legacy
+// (no-session-auth) path connAuth is nil and attribution is allowed.
+// Caller must hold s.mu (read or write).
+func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
+	state := s.connAuth[conn]
+	return state == nil || state.Verified
+}
+
+// accumulateInboundTraffic adds byte counters from an inbound MeteredConn
+// to the peer's cumulative traffic totals. The peer address is resolved
+// from the connPeerInfo map populated during the hello handshake.
+// Traffic is only attributed when the connection's identity has been
+// verified (or no session-auth was required), preventing unauthenticated
+// clients from spoofing another peer's traffic counters.
+func (s *Service) accumulateInboundTraffic(mc *MeteredConn) {
+	sent := mc.BytesWritten()
+	received := mc.BytesRead()
+	if sent == 0 && received == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.isConnTrafficTrustedLocked(mc) {
+		return
+	}
+	info := s.connPeerInfo[mc]
+	if info == nil || info.address == "" {
+		return
+	}
+	address := s.resolveHealthAddress(info.address)
+	health := s.ensurePeerHealthLocked(address)
+	health.BytesSent += sent
+	health.BytesReceived += received
+}
+
 func (s *Service) ensurePeerHealthLocked(address string) *peerHealth {
 	health := s.health[address]
 	if health == nil {
@@ -3419,8 +3498,18 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	items := make([]protocol.PeerHealthFrame, 0, len(s.health))
+	live := s.liveTrafficLocked()
+
+	seen := make(map[string]struct{}, len(s.health))
+	items := make([]protocol.PeerHealthFrame, 0, len(s.health)+len(live))
 	for _, health := range s.health {
+		seen[health.Address] = struct{}{}
+		sent := health.BytesSent
+		recv := health.BytesReceived
+		if lv, ok := live[health.Address]; ok {
+			sent += lv.sent
+			recv += lv.received
+		}
 		items = append(items, protocol.PeerHealthFrame{
 			Address:             health.Address,
 			Network:             classifyAddress(health.Address).String(),
@@ -3437,6 +3526,26 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			ConsecutiveFailures: health.ConsecutiveFailures,
 			LastError:           health.LastError,
 			Score:               health.Score,
+			BytesSent:           sent,
+			BytesReceived:       recv,
+			TotalTraffic:        sent + recv,
+		})
+	}
+
+	// Include inbound-only peers that have live traffic but no health entry yet.
+	for addr, lv := range live {
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		items = append(items, protocol.PeerHealthFrame{
+			Address:       addr,
+			Network:       classifyAddress(addr).String(),
+			ClientVersion: s.peerVersions[addr],
+			State:         peerStateHealthy,
+			Connected:     true,
+			BytesSent:     lv.sent,
+			BytesReceived: lv.received,
+			TotalTraffic:  lv.sent + lv.received,
 		})
 	}
 
@@ -3444,6 +3553,139 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		return items[i].Address < items[j].Address
 	})
 	return items
+}
+
+type liveTraffic struct {
+	sent     int64
+	received int64
+}
+
+// liveTrafficLocked collects current byte counters from all active
+// MeteredConn instances (both outbound peer sessions and inbound
+// connections). Must be called while holding s.mu at least for read.
+func (s *Service) liveTrafficLocked() map[string]liveTraffic {
+	result := make(map[string]liveTraffic)
+
+	// outbound peer sessions
+	for addr, session := range s.sessions {
+		if session.metered == nil {
+			continue
+		}
+		address := s.resolveHealthAddress(addr)
+		lt := result[address]
+		lt.sent += session.metered.BytesWritten()
+		lt.received += session.metered.BytesRead()
+		result[address] = lt
+	}
+
+	// inbound connections — only attribute traffic for verified (or
+	// non-session-auth) connections to prevent address spoofing.
+	for conn, mc := range s.inboundMetered {
+		if !s.isConnTrafficTrustedLocked(conn) {
+			continue
+		}
+		info := s.connPeerInfo[conn]
+		if info == nil || info.address == "" {
+			continue
+		}
+		address := s.resolveHealthAddress(info.address)
+		lt := result[address]
+		lt.sent += mc.BytesWritten()
+		lt.received += mc.BytesRead()
+		result[address] = lt
+	}
+
+	return result
+}
+
+func (s *Service) networkStatsFrame() protocol.Frame {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	live := s.liveTrafficLocked()
+
+	var totalSent, totalReceived int64
+	var connectedCount int
+	peerTraffic := make([]protocol.PeerTrafficFrame, 0, len(s.health)+len(live))
+
+	// Track which addresses we've already counted from s.health so we can
+	// pick up inbound-only peers that have live traffic but no health entry yet.
+	seen := make(map[string]struct{}, len(s.health))
+
+	for _, health := range s.health {
+		seen[health.Address] = struct{}{}
+		sent := health.BytesSent
+		recv := health.BytesReceived
+		if lv, ok := live[health.Address]; ok {
+			sent += lv.sent
+			recv += lv.received
+		}
+		totalSent += sent
+		totalReceived += recv
+		if health.Connected {
+			connectedCount++
+		}
+		peerTraffic = append(peerTraffic, protocol.PeerTrafficFrame{
+			Address:       health.Address,
+			BytesSent:     sent,
+			BytesReceived: recv,
+			TotalTraffic:  sent + recv,
+			Connected:     health.Connected,
+		})
+	}
+
+	// Include inbound-only peers whose address is not yet in s.health.
+	for addr, lv := range live {
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		totalSent += lv.sent
+		totalReceived += lv.received
+		connectedCount++
+		peerTraffic = append(peerTraffic, protocol.PeerTrafficFrame{
+			Address:       addr,
+			BytesSent:     lv.sent,
+			BytesReceived: lv.received,
+			TotalTraffic:  lv.sent + lv.received,
+			Connected:     true,
+		})
+	}
+
+	sort.Slice(peerTraffic, func(i, j int) bool {
+		if peerTraffic[i].TotalTraffic != peerTraffic[j].TotalTraffic {
+			return peerTraffic[i].TotalTraffic > peerTraffic[j].TotalTraffic
+		}
+		return peerTraffic[i].Address < peerTraffic[j].Address
+	})
+
+	// known_peers is the union of the configured peer list and any peers
+	// we've seen via health/live traffic (includes non-listener clients
+	// that don't appear in s.peers but are actively connected).
+	knownSet := make(map[string]struct{}, len(s.peers)+len(seen))
+	for _, p := range s.peers {
+		knownSet[p.Address] = struct{}{}
+	}
+	for addr := range seen {
+		knownSet[addr] = struct{}{}
+	}
+	// live-only peers were appended after the seen loop; add them too.
+	for addr := range live {
+		knownSet[addr] = struct{}{}
+	}
+
+	stats := &protocol.NetworkStatsFrame{
+		TotalBytesSent:     totalSent,
+		TotalBytesReceived: totalReceived,
+		TotalTraffic:       totalSent + totalReceived,
+		ConnectedPeers:     connectedCount,
+		KnownPeers:         len(knownSet),
+		PeerTraffic:        peerTraffic,
+	}
+
+	return protocol.Frame{
+		Type:         "network_stats",
+		NetworkStats: stats,
+	}
 }
 
 func (s *Service) computePeerStateLocked(health *peerHealth) string {

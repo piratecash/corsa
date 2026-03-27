@@ -206,7 +206,11 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	// Network
 	rpc.Post("/network/peers", s.legacyHandler("get_peers"))
 	rpc.Post("/network/health", s.legacyHandler("fetch_peer_health"))
+	rpc.Post("/network/stats", s.legacyHandler("fetch_network_stats"))
 	rpc.Post("/network/add_peer", s.legacyArgHandler("add_peer"))
+
+	// Metrics
+	rpc.Post("/metrics/traffic_history", s.legacyHandler("fetch_traffic_history"))
 
 	// Identity
 	rpc.Post("/identity/identities", s.legacyHandler("fetch_identities"))

@@ -527,16 +527,24 @@ func TestLegacyArgHandlerEmptyBody(t *testing.T) {
 // return 503 through /exec, matching the legacy endpoint behavior.
 func TestUniversalExecUnavailableCommand(t *testing.T) {
 	node := &mockNodeProvider{}
-	server := setupTestServer(t, node, nil) // chatlog=nil, dmRouter=nil
+	server := setupTestServer(t, node, nil) // chatlog=nil, dmRouter=nil, metricsProvider=nil
 
-	// fetch_chatlog is registered as unavailable (chatlog provider is nil)
-	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
-		"command": "fetch_chatlog",
-		"args":    map[string]interface{}{"topic": "dm", "peer_address": "addr"},
-	})
+	unavailableCases := []struct {
+		command string
+		args    map[string]interface{}
+	}{
+		{"fetch_chatlog", map[string]interface{}{"topic": "dm", "peer_address": "addr"}},
+		{"fetch_traffic_history", map[string]interface{}{}},
+	}
 
-	expectStatusCode(t, code, 503)
-	expectFieldExists(t, result, "error")
+	for _, tc := range unavailableCases {
+		code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
+			"command": tc.command,
+			"args":    tc.args,
+		})
+		expectStatusCode(t, code, 503)
+		expectFieldExists(t, result, "error")
+	}
 }
 
 // TestUniversalExecUnavailableSendDM verifies send_dm returns 503 via /exec
@@ -566,6 +574,7 @@ func TestCommandsExcludesUnavailable(t *testing.T) {
 		"fetch_chatlog_previews": true,
 		"fetch_conversations":    true,
 		"send_dm":                true,
+		"fetch_traffic_history":  true,
 	}
 
 	for _, cmd := range commands {
@@ -583,6 +592,7 @@ func TestHasReturnsTrueForUnavailable(t *testing.T) {
 
 	unavailableNames := []string{
 		"fetch_chatlog", "fetch_chatlog_previews", "fetch_conversations", "send_dm",
+		"fetch_traffic_history",
 	}
 
 	for _, name := range unavailableNames {
@@ -696,7 +706,7 @@ func TestFrameEndpointChatlogDispatch(t *testing.T) {
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, chatlog, nil)
+	rpc.RegisterAllCommands(table, node, chatlog, nil, nil)
 	server, err := rpc.NewServer(cfg, table, node)
 	if err != nil {
 		t.Fatalf("create server: %v", err)
@@ -730,7 +740,7 @@ func TestFrameEndpointUnavailableChatlog(t *testing.T) {
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil) // chatlog=nil
+	rpc.RegisterAllCommands(table, node, nil, nil, nil) // chatlog=nil
 	server, err := rpc.NewServer(cfg, table, node)
 	if err != nil {
 		t.Fatalf("create server: %v", err)

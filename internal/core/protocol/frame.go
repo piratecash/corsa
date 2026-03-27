@@ -58,6 +58,8 @@ type Frame struct {
 	ChatEntries            []ChatEntryFrame      `json:"chat_entries,omitempty"`
 	ChatPreviews           []ChatPreviewFrame    `json:"chat_previews,omitempty"`
 	Conversations          []ConversationFrame   `json:"conversations,omitempty"`
+	NetworkStats           *NetworkStatsFrame    `json:"network_stats,omitempty"`
+	TrafficHistory         *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
 }
 
 type ContactFrame struct {
@@ -107,6 +109,45 @@ type PeerHealthFrame struct {
 	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
 	LastError           string `json:"last_error,omitempty"`
 	Score               int    `json:"score"`
+	BytesSent           int64  `json:"bytes_sent"`
+	BytesReceived       int64  `json:"bytes_received"`
+	TotalTraffic        int64  `json:"total_traffic"`
+}
+
+// NetworkStatsFrame provides aggregated traffic statistics for the entire node.
+type NetworkStatsFrame struct {
+	TotalBytesSent     int64            `json:"total_bytes_sent"`
+	TotalBytesReceived int64            `json:"total_bytes_received"`
+	TotalTraffic       int64            `json:"total_traffic"`
+	ConnectedPeers     int              `json:"connected_peers"`
+	KnownPeers         int              `json:"known_peers"`
+	PeerTraffic        []PeerTrafficFrame `json:"peer_traffic"`
+}
+
+// PeerTrafficFrame holds per-peer traffic counters.
+type PeerTrafficFrame struct {
+	Address       string `json:"address"`
+	BytesSent     int64  `json:"bytes_sent"`
+	BytesReceived int64  `json:"bytes_received"`
+	TotalTraffic  int64  `json:"total_traffic"`
+	Connected     bool   `json:"connected"`
+}
+
+// TrafficHistoryFrame holds a rolling window of per-second traffic samples.
+type TrafficHistoryFrame struct {
+	IntervalSeconds int                  `json:"interval_seconds"`
+	Capacity        int                  `json:"capacity"`
+	Count           int                  `json:"count"`
+	Samples         []TrafficSampleFrame `json:"samples"`
+}
+
+// TrafficSampleFrame is a single data point in the traffic history.
+type TrafficSampleFrame struct {
+	Timestamp     string `json:"timestamp"`
+	BytesSentPS   int64  `json:"bytes_sent_ps"`
+	BytesRecvPS   int64  `json:"bytes_recv_ps"`
+	TotalSent     int64  `json:"total_sent"`
+	TotalReceived int64  `json:"total_received"`
 }
 
 type PendingMessageFrame struct {

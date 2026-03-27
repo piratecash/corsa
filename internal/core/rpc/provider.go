@@ -27,6 +27,12 @@ type DMRouterProvider interface {
 	SendMessage(to, body string)
 }
 
+// MetricsProvider abstracts access to the metrics collector.
+// Returns traffic history snapshots for RPC consumption.
+type MetricsProvider interface {
+	TrafficSnapshot() protocol.Frame
+}
+
 // DiagnosticProvider abstracts access to desktop-level diagnostic commands.
 // Only the desktop client implements this; standalone node uses the base
 // handlers from RegisterSystemCommands.

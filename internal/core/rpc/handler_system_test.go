@@ -158,7 +158,7 @@ func TestDesktopOverridePingReplaces(t *testing.T) {
 	// the desktop diagnostic version.
 	node := &mockNodeProvider{}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil)
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
 	// Before override: base handler returns raw pong frame.
 	resp := table.Execute(rpc.CommandRequest{Name: "ping"})
@@ -184,7 +184,7 @@ func TestDesktopOverridePingReplaces(t *testing.T) {
 func TestDesktopOverrideGetPeersReplaces(t *testing.T) {
 	node := &mockNodeProvider{}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil)
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
 	diag := &mockDiagnosticProvider{
 		peersResult: `{"type":"peers","count":1,"total":5,"peers":[]}`,
@@ -204,7 +204,7 @@ func TestDesktopOverrideNilSkips(t *testing.T) {
 	// RegisterDesktopOverrides(nil) should not panic or change anything.
 	node := &mockNodeProvider{}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil)
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 	rpc.RegisterDesktopOverrides(table, nil, node)
 
 	resp := table.Execute(rpc.CommandRequest{Name: "ping"})
@@ -241,7 +241,7 @@ func TestDesktopOverrideHelloIdentifiesAsDesktop(t *testing.T) {
 		},
 	}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil)
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
 	// Before override: base handler identifies as "rpc".
 	resp := table.Execute(rpc.CommandRequest{Name: "hello"})
@@ -383,7 +383,7 @@ func TestSystemHelpUsagePresent(t *testing.T) {
 	// this field — if it regresses to empty, the UI loses argument hints.
 	node := &mockNodeProvider{}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil)
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
 	commands := table.Commands()
 
@@ -435,7 +435,7 @@ func TestSystemHelpUsageModeGatedCommands(t *testing.T) {
 	dmRouter := &mockDMRouterProvider{}
 
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, chatlog, dmRouter)
+	rpc.RegisterAllCommands(table, node, chatlog, dmRouter, nil)
 
 	commands := table.Commands()
 

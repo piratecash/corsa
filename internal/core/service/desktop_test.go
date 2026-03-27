@@ -608,6 +608,58 @@ func TestBuildConsolePeersPayloadIncludesStatuses(t *testing.T) {
 	}
 }
 
+func TestBuildConsolePeersPayloadIncludesHealthOnlyPeers(t *testing.T) {
+	t.Parallel()
+
+	// "c:3" and "e:5" appear only in health (inbound-only), not in peers[].
+	// Using two health-only peers to verify deterministic sort order.
+	payload := buildConsolePeersPayload(
+		[]string{"a:1"},
+		[]PeerHealth{
+			{Address: "a:1", State: "healthy", Connected: true, BytesSent: 100},
+			{Address: "e:5", State: "healthy", Connected: true, BytesSent: 500, BytesReceived: 300, TotalTraffic: 800},
+			{Address: "c:3", State: "healthy", Connected: true, BytesSent: 200, BytesReceived: 100, TotalTraffic: 300},
+		},
+	)
+
+	// Unmarshal into a structured type for precise ordering assertions.
+	type peersPayload struct {
+		Type      string              `json:"type"`
+		Count     int                 `json:"count"`
+		Total     int                 `json:"total"`
+		Connected []ConsolePeerStatus `json:"connected"`
+		Peers     []ConsolePeerStatus `json:"peers"`
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	var result peersPayload
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+
+	// All three peers should be present.
+	if result.Total != 3 {
+		t.Fatalf("expected total=3, got %d", result.Total)
+	}
+	if result.Count != 3 {
+		t.Fatalf("expected connected count=3, got %d", result.Count)
+	}
+
+	// Verify ordering: a:1 (from peers[] first pass), then health-only in
+	// sorted order: c:3 before e:5.
+	if len(result.Peers) != 3 {
+		t.Fatalf("expected 3 peers, got %d", len(result.Peers))
+	}
+	expectedOrder := []string{"a:1", "c:3", "e:5"}
+	for i, want := range expectedOrder {
+		if result.Peers[i].Address != want {
+			t.Errorf("peers[%d]: expected address %q, got %q (health-only peers must be sorted)", i, want, result.Peers[i].Address)
+		}
+	}
+}
+
 func TestConsolePingPayloadShape(t *testing.T) {
 	t.Parallel()
 

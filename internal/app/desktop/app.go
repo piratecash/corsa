@@ -7,6 +7,7 @@ import (
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/identity"
+	"corsa/internal/core/metrics"
 	"corsa/internal/core/node"
 	"corsa/internal/core/rpc"
 	"corsa/internal/core/service"
@@ -46,10 +47,14 @@ func Run() error {
 
 	router := service.NewDMRouter(client)
 
+	// Metrics collector — samples node traffic every second, keeps 1 hour history.
+	metricsCollector := metrics.NewCollector(nodeService)
+	go metricsCollector.Run(ctx)
+
 	// Build command table — single source of truth for all RPC commands.
 	// Desktop UI calls this directly (no HTTP), HTTP server wraps it for external clients.
 	cmdTable := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(cmdTable, nodeService, client, router)
+	rpc.RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector)
 	rpc.RegisterDesktopOverrides(cmdTable, client, nodeService)
 
 	// Start HTTP RPC server for external access (corsa-cli, third-party tools)
