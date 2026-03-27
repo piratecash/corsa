@@ -2,6 +2,7 @@ package node
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,8 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
@@ -4750,5 +4755,591 @@ func TestNodeWithoutMessageStoreStillRelays(t *testing.T) {
 	svc.mu.RUnlock()
 	if n != 1 {
 		t.Fatalf("expected 1 message in topics, got %d", n)
+	}
+}
+
+// syncWriter wraps a bytes.Buffer with a mutex so that concurrent goroutines
+// writing log entries do not race with the test reading the buffer.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+func TestProtocolTraceLogging(t *testing.T) {
+	// NOT parallel: this test mutates the global zerolog logger and level.
+	var buf syncWriter
+	origLogger := log.Logger
+	origLevel := zerolog.GlobalLevel()
+	log.Logger = zerolog.New(&buf).With().Logger()
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	defer func() {
+		log.Logger = origLogger
+		zerolog.SetGlobalLevel(origLevel)
+	}()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// --- Test HandleLocalFrame (local/RPC path) ---
+	resp := svc.HandleLocalFrame(protocol.Frame{
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client:                 "test",
+	})
+	if resp.Type != "welcome" {
+		t.Fatalf("expected welcome, got %q", resp.Type)
+	}
+
+	resp = svc.HandleLocalFrame(protocol.Frame{Type: "ping"})
+	if resp.Type != "pong" {
+		t.Fatalf("expected pong, got %q", resp.Type)
+	}
+
+	// Unknown command should log accepted=false.
+	resp = svc.HandleLocalFrame(protocol.Frame{Type: "nonexistent_command"})
+	if resp.Type != "error" {
+		t.Fatalf("expected error for unknown command, got %q", resp.Type)
+	}
+
+	// --- Test TCP path (handleJSONCommand) ---
+	_ = exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "get_peers"},
+	)
+
+	// --- Test non-JSON inbound line (P3: handleCommand before JSON parse) ---
+	func() {
+		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 3*time.Second)
+		if err != nil {
+			t.Fatalf("dial for non-json test: %v", err)
+		}
+		defer conn.Close() //nolint:errcheck
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = conn.Write([]byte("THIS IS NOT JSON\n"))
+		// Read error response to confirm it was processed.
+		scanner := bufio.NewScanner(conn)
+		if scanner.Scan() {
+			var errFrame protocol.Frame
+			if err := json.Unmarshal([]byte(scanner.Text()), &errFrame); err == nil {
+				if errFrame.Type != "error" {
+					t.Errorf("expected error frame for non-json input, got %q", errFrame.Type)
+				}
+			}
+		}
+	}()
+
+	// Allow handleConn goroutines to finish writing their log entries.
+	time.Sleep(50 * time.Millisecond)
+
+	// Parse captured log lines and verify protocol_trace entries.
+	lines := strings.Split(buf.String(), "\n")
+	type traceEntry struct {
+		Protocol  string `json:"protocol"`
+		Addr      string `json:"addr"`
+		Direction string `json:"direction"`
+		Command   string `json:"command"`
+		Accepted  bool   `json:"accepted"`
+		Message   string `json:"message"`
+	}
+
+	var traces []traceEntry
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry traceEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Message == "protocol_trace" {
+			traces = append(traces, entry)
+		}
+	}
+
+	if len(traces) == 0 {
+		t.Fatal("no protocol_trace log entries found")
+	}
+
+	// Verify all trace entries have required fields.
+	for i, tr := range traces {
+		if tr.Protocol == "" {
+			t.Errorf("trace[%d]: missing protocol field", i)
+		}
+		if tr.Direction == "" {
+			t.Errorf("trace[%d]: missing direction field", i)
+		}
+		if tr.Direction != "recv" && tr.Direction != "send" {
+			t.Errorf("trace[%d]: invalid direction %q", i, tr.Direction)
+		}
+	}
+
+	// Verify local hello was logged as accepted.
+	foundLocalHello := false
+	for _, tr := range traces {
+		if tr.Protocol == "json/local" && tr.Command == "hello" && tr.Accepted {
+			foundLocalHello = true
+			break
+		}
+	}
+	if !foundLocalHello {
+		t.Error("expected protocol_trace for local hello (accepted=true)")
+	}
+
+	// Verify unknown command was logged as not accepted.
+	foundUnknown := false
+	for _, tr := range traces {
+		if tr.Protocol == "json/local" && tr.Command == "nonexistent_command" && !tr.Accepted {
+			foundUnknown = true
+			break
+		}
+	}
+	if !foundUnknown {
+		t.Error("expected protocol_trace for unknown command (accepted=false)")
+	}
+
+	// Verify TCP inbound hello was logged.
+	foundTCPHello := false
+	for _, tr := range traces {
+		if tr.Protocol == "json/tcp" && tr.Command == "hello" && tr.Direction == "recv" && tr.Accepted {
+			foundTCPHello = true
+			break
+		}
+	}
+	if !foundTCPHello {
+		t.Error("expected protocol_trace for TCP hello (recv, accepted=true)")
+	}
+
+	// Verify TCP outbound welcome response was logged.
+	foundTCPWelcome := false
+	for _, tr := range traces {
+		if tr.Protocol == "json/tcp" && tr.Command == "welcome" && tr.Direction == "send" && tr.Accepted {
+			foundTCPWelcome = true
+			break
+		}
+	}
+	if !foundTCPWelcome {
+		t.Error("expected protocol_trace for TCP welcome (send, accepted=true)")
+	}
+
+	// Verify non-JSON inbound line was traced (P3 fix).
+	foundNonJSON := false
+	for _, tr := range traces {
+		if tr.Protocol == "json/tcp" && tr.Command == "non-json" && tr.Direction == "recv" && !tr.Accepted {
+			foundNonJSON = true
+			break
+		}
+	}
+	if !foundNonJSON {
+		t.Error("expected protocol_trace for non-json inbound line (recv, accepted=false)")
+	}
+}
+
+func TestComputePeerStateThresholds(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		health: map[string]*peerHealth{},
+	}
+
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name      string
+		health    peerHealth
+		wantState string
+	}{
+		{
+			name:      "disconnected peer is reconnecting",
+			health:    peerHealth{Connected: false},
+			wantState: peerStateReconnecting,
+		},
+		{
+			name:      "connected with no useful traffic is degraded",
+			health:    peerHealth{Connected: true},
+			wantState: peerStateDegraded,
+		},
+		{
+			name:      "recent pong keeps peer healthy",
+			health:    peerHealth{Connected: true, LastPongAt: now.Add(-30 * time.Second)},
+			wantState: peerStateHealthy,
+		},
+		{
+			name:      "useful receive 1 min ago is healthy",
+			health:    peerHealth{Connected: true, LastUsefulReceiveAt: now.Add(-1 * time.Minute)},
+			wantState: peerStateHealthy,
+		},
+		{
+			name:      "no useful traffic for heartbeatInterval is degraded",
+			health:    peerHealth{Connected: true, LastUsefulReceiveAt: now.Add(-heartbeatInterval - 1*time.Second)},
+			wantState: peerStateDegraded,
+		},
+		{
+			name:      "no useful traffic for heartbeatInterval + pongStallTimeout is stalled",
+			health:    peerHealth{Connected: true, LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - 1*time.Second)},
+			wantState: peerStateStalled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc.mu.Lock()
+			svc.health["test:1"] = &tt.health
+			svc.mu.Unlock()
+
+			svc.mu.RLock()
+			got := svc.computePeerStateLocked(svc.health["test:1"])
+			svc.mu.RUnlock()
+
+			if got != tt.wantState {
+				t.Errorf("got state %q, want %q", got, tt.wantState)
+			}
+		})
+	}
+}
+
+func TestAnnouncePeerOnAuth(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Send announce_peer with a public address via the TCP protocol path.
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "announce_peer", Peers: []string{"83.172.44.178:64646"}, NodeType: "full"},
+	)
+	if frames[0].Type != "welcome" {
+		t.Fatalf("expected welcome, got %q", frames[0].Type)
+	}
+	if frames[1].Type != "announce_peer_ack" {
+		t.Fatalf("expected announce_peer_ack, got %q", frames[1].Type)
+	}
+
+	// Verify the announced address was added to the peer dial list.
+	// announce_peer populates s.peers/peerTypes (not s.known, which is
+	// for discovered identities/contacts).
+	svc.mu.RLock()
+	found := false
+	for _, p := range svc.peers {
+		if p.Address == "83.172.44.178:64646" {
+			found = true
+			break
+		}
+	}
+	svc.mu.RUnlock()
+	if !found {
+		t.Error("expected announced peer to be added to dial list")
+	}
+
+	// Announce a local address — it should be ignored.
+	frames2 := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "announce_peer", Peers: []string{"192.168.1.100:64646"}, NodeType: "full"},
+	)
+	if frames2[1].Type != "announce_peer_ack" {
+		t.Fatalf("expected announce_peer_ack for local address, got %q", frames2[1].Type)
+	}
+
+	svc.mu.RLock()
+	foundLocal := false
+	for _, p := range svc.peers {
+		if p.Address == "192.168.1.100:64646" {
+			foundLocal = true
+			break
+		}
+	}
+	svc.mu.RUnlock()
+	if foundLocal {
+		t.Error("local address should not be added from announce_peer")
+	}
+}
+
+// TestAddPeerAddressNoRetag verifies that addPeerAddress does not overwrite
+// the node type of an already-known peer. This prevents unauthenticated
+// announce_peer from downgrading a "full" peer to "client".
+func TestAddPeerAddressNoRetag(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Add a peer as "full" — simulates trusted initial discovery.
+	svc.addPeerAddress("5.5.5.5:64646", "full", "")
+
+	svc.mu.RLock()
+	before := svc.peerTypes["5.5.5.5:64646"]
+	svc.mu.RUnlock()
+	if before != config.NodeTypeFull {
+		t.Fatalf("expected full, got %s", before)
+	}
+
+	// Call addPeerAddress again with "client" — must not overwrite.
+	svc.addPeerAddress("5.5.5.5:64646", "client", "")
+
+	svc.mu.RLock()
+	after := svc.peerTypes["5.5.5.5:64646"]
+	svc.mu.RUnlock()
+	if after != config.NodeTypeFull {
+		t.Fatalf("addPeerAddress must not retag existing peer; expected full, got %s", after)
+	}
+}
+
+func TestAnnouncePeerHelpers(t *testing.T) {
+	t.Parallel()
+
+	// peerListenAddress should return empty for non-listener peers.
+	noListener := protocol.Frame{Listener: "0", Listen: "some:64646"}
+	if addr := peerListenAddress(noListener); addr != "" {
+		t.Errorf("expected empty for non-listener, got %q", addr)
+	}
+
+	// peerListenAddress should return address for listener peers.
+	listener := protocol.Frame{Listener: "1", Listen: "83.172.44.178:64646"}
+	if addr := peerListenAddress(listener); addr != "83.172.44.178:64646" {
+		t.Errorf("expected 83.172.44.178:64646, got %q", addr)
+	}
+
+	// Verify local addresses are filtered by classifyAddress.
+	localAddrs := []string{"127.0.0.1:64646", "192.168.1.1:64646", "10.0.0.1:64646"}
+	for _, addr := range localAddrs {
+		if classifyAddress(addr) != NetGroupLocal {
+			t.Errorf("expected %q to be classified as local", addr)
+		}
+	}
+
+	publicAddrs := []string{"83.172.44.178:64646", "65.108.204.190:64646"}
+	for _, addr := range publicAddrs {
+		if classifyAddress(addr) == NetGroupLocal {
+			t.Errorf("expected %q to NOT be classified as local", addr)
+		}
+	}
+}
+
+// TestPromotePeerAddress verifies that promotePeerAddress adds a peer to the
+// end of the dial list (no front-promotion), resets cooldown, updates type
+// for already-known peers, and rejects local addresses.
+func TestPromotePeerAddress(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Seed two peers so we can verify ordering is preserved.
+	svc.addPeerAddress("1.1.1.1:64646", "full", "")
+	svc.addPeerAddress("2.2.2.2:64646", "full", "")
+
+	// Set cooldown on first peer to simulate failed connections.
+	svc.mu.Lock()
+	svc.health["1.1.1.1:64646"] = &peerHealth{
+		Address:             "1.1.1.1:64646",
+		ConsecutiveFailures: 5,
+		LastDisconnectedAt:  time.Now(),
+	}
+	svc.mu.Unlock()
+
+	// Promote a new peer — it should be appended at the end (not front).
+	svc.promotePeerAddress("3.3.3.3:64646", "full")
+
+	svc.mu.RLock()
+	if len(svc.peers) < 3 {
+		svc.mu.RUnlock()
+		t.Fatalf("expected at least 3 peers, got %d", len(svc.peers))
+	}
+	lastAddr := svc.peers[len(svc.peers)-1].Address
+	firstAddr := svc.peers[0].Address
+	svc.mu.RUnlock()
+	if lastAddr != "3.3.3.3:64646" {
+		t.Fatalf("expected new peer at end, got %s", lastAddr)
+	}
+	if firstAddr == "3.3.3.3:64646" {
+		t.Fatal("new peer must not be placed at front — trust-no-one policy")
+	}
+
+	// Promote existing peer with cooldown — cooldown must reset, order unchanged.
+	svc.promotePeerAddress("1.1.1.1:64646", "full")
+
+	svc.mu.RLock()
+	h := svc.health["1.1.1.1:64646"]
+	if h == nil || h.ConsecutiveFailures != 0 {
+		svc.mu.RUnlock()
+		t.Fatal("expected cooldown reset after promote")
+	}
+	svc.mu.RUnlock()
+
+	// Promote with different type — authenticated promote updates type.
+	svc.promotePeerAddress("1.1.1.1:64646", "client")
+	svc.mu.RLock()
+	pt := svc.peerTypes["1.1.1.1:64646"]
+	svc.mu.RUnlock()
+	if pt != config.NodeTypeClient {
+		t.Errorf("expected type update to client, got %s", pt)
+	}
+
+	// Different port on the same host must be treated as a distinct peer.
+	peersBefore := len(svc.peers)
+	svc.promotePeerAddress("2.2.2.2:12345", "client")
+	svc.mu.RLock()
+	peersAfter := len(svc.peers)
+	newType := svc.peerTypes["2.2.2.2:12345"]
+	svc.mu.RUnlock()
+	if peersAfter != peersBefore+1 {
+		t.Errorf("different port should create new peer, count went from %d to %d", peersBefore, peersAfter)
+	}
+	if newType != config.NodeTypeClient {
+		t.Errorf("expected client type for new peer, got %s", newType)
+	}
+}
+
+// TestIsKnownNodeType verifies node type validation for announce_peer.
+func TestIsKnownNodeType(t *testing.T) {
+	t.Parallel()
+
+	if !isKnownNodeType("full") {
+		t.Error("expected 'full' to be a known node type")
+	}
+	if !isKnownNodeType("client") {
+		t.Error("expected 'client' to be a known node type")
+	}
+	if isKnownNodeType("") {
+		t.Error("empty string should not be a known node type")
+	}
+	if isKnownNodeType("unknown_future_type") {
+		t.Error("unknown type should not be accepted")
+	}
+}
+
+// TestAnnouncePeerPendingQueue verifies that announce_peer frames are queued
+// via the pending mechanism when sendCh is full, instead of being silently dropped.
+func TestAnnouncePeerPendingQueue(t *testing.T) {
+	t.Parallel()
+
+	// Verify pendingFrameKey returns a valid key for announce_peer.
+	frame := protocol.Frame{Type: "announce_peer", Peers: []string{"5.5.5.5:64646"}}
+	key := pendingFrameKey("1.1.1.1:64646", frame)
+	if key == "" {
+		t.Fatal("expected non-empty pending key for announce_peer")
+	}
+
+	// Verify deduplication: same peer address should produce the same key.
+	key2 := pendingFrameKey("1.1.1.1:64646", frame)
+	if key != key2 {
+		t.Errorf("expected identical keys, got %q and %q", key, key2)
+	}
+
+	// Different peer addresses should produce different keys.
+	frame2 := protocol.Frame{Type: "announce_peer", Peers: []string{"6.6.6.6:64646"}}
+	key3 := pendingFrameKey("1.1.1.1:64646", frame2)
+	if key == key3 {
+		t.Error("expected different keys for different peer addresses")
+	}
+}
+
+// TestPendingQueueReplacesStaleFrame verifies that queuePeerFrame replaces
+// the payload of an already-queued frame when the same key is enqueued again.
+// This ensures that node_type changes are propagated even when the send
+// channel is full and the frame is stuck in the pending queue.
+func TestPendingQueueReplacesStaleFrame(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	target := "9.9.9.9:64646"
+
+	// Directly populate pending to simulate a full sendCh scenario.
+	frameV1 := protocol.Frame{Type: "announce_peer", Peers: []string{"7.7.7.7:64646"}, NodeType: "full"}
+	svc.mu.Lock()
+	key := pendingFrameKey(target, frameV1)
+	svc.pending[target] = append(svc.pending[target], pendingFrame{
+		Frame:    frameV1,
+		QueuedAt: time.Now().UTC(),
+	})
+	svc.pendingKeys[key] = struct{}{}
+	svc.mu.Unlock()
+
+	// Queue the same peer address but with a different node_type.
+	frameV2 := protocol.Frame{Type: "announce_peer", Peers: []string{"7.7.7.7:64646"}, NodeType: "client"}
+	svc.queuePeerFrame(target, frameV2)
+
+	// The pending queue should still have exactly one entry for this key,
+	// but the frame should be updated to the latest version.
+	svc.mu.RLock()
+	frames := svc.pending[target]
+	var found bool
+	for _, pf := range frames {
+		if pendingFrameKey(target, pf.Frame) == key {
+			if pf.Frame.NodeType != "client" {
+				svc.mu.RUnlock()
+				t.Fatalf("expected replaced frame to have node_type=client, got %q", pf.Frame.NodeType)
+			}
+			found = true
+			break
+		}
+	}
+	svc.mu.RUnlock()
+	if !found {
+		t.Fatal("expected to find the queued frame in pending")
+	}
+}
+
+func TestHeartbeatConstants(t *testing.T) {
+	t.Parallel()
+
+	// heartbeatInterval should be ~2 minutes (Bitcoin-style).
+	if heartbeatInterval != 2*time.Minute {
+		t.Errorf("heartbeatInterval = %v, want 2m", heartbeatInterval)
+	}
+
+	// pongStallTimeout should be less than heartbeatInterval to detect stalls
+	// before the next heartbeat fires.
+	if pongStallTimeout >= heartbeatInterval {
+		t.Errorf("pongStallTimeout (%v) should be less than heartbeatInterval (%v)", pongStallTimeout, heartbeatInterval)
+	}
+
+	// nextHeartbeatDuration should return values in [heartbeatInterval, heartbeatInterval+15s).
+	for i := 0; i < 20; i++ {
+		d := nextHeartbeatDuration()
+		if d < heartbeatInterval || d >= heartbeatInterval+15*time.Second {
+			t.Errorf("nextHeartbeatDuration() = %v, want [%v, %v)", d, heartbeatInterval, heartbeatInterval+15*time.Second)
+		}
 	}
 }

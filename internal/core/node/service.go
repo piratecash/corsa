@@ -565,6 +565,13 @@ func (s *Service) handleConn(conn net.Conn) {
 
 func (s *Service) handleCommand(conn net.Conn, line string) bool {
 	if !protocol.IsJSONLine(line) {
+		log.Debug().
+			Str("protocol", "json/tcp").
+			Str("addr", conn.RemoteAddr().String()).
+			Str("direction", "recv").
+			Str("command", "non-json").
+			Bool("accepted", false).
+			Msg("protocol_trace")
 		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 		return false
 	}
@@ -574,14 +581,39 @@ func (s *Service) handleCommand(conn net.Conn, line string) bool {
 func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	frame, err := protocol.ParseFrameLine(line)
 	if err != nil {
+		log.Debug().
+			Str("protocol", "json/tcp").
+			Str("addr", conn.RemoteAddr().String()).
+			Str("direction", "recv").
+			Str("command", "").
+			Bool("accepted", false).
+			Msg("protocol_trace")
 		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
 		return false
 	}
 
 	if !s.isCommandAllowedForConn(conn, frame.Type) {
+		log.Debug().
+			Str("protocol", "json/tcp").
+			Str("addr", conn.RemoteAddr().String()).
+			Str("direction", "recv").
+			Str("command", frame.Type).
+			Bool("accepted", false).
+			Msg("protocol_trace")
 		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
 		return false
 	}
+
+	accepted := true
+	defer func() {
+		log.Debug().
+			Str("protocol", "json/tcp").
+			Str("addr", conn.RemoteAddr().String()).
+			Str("direction", "recv").
+			Str("command", frame.Type).
+			Bool("accepted", accepted).
+			Msg("protocol_trace")
+	}()
 
 	switch frame.Type {
 	case "ping":
@@ -589,6 +621,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	case "hello":
 		if err := validateProtocolHandshake(frame); err != nil {
+			accepted = false
 			s.writeJSONFrame(conn, protocol.Frame{
 				Type:                   "error",
 				Code:                   protocol.ErrCodeIncompatibleProtocol,
@@ -601,6 +634,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		if requiresSessionAuth(frame) {
 			challenge, err := s.prepareConnAuth(conn, frame)
 			if err != nil {
+				accepted = false
 				s.addBanScore(conn, banIncrementInvalidSig)
 				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
@@ -622,10 +656,16 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	case "auth_session":
 		reply, ok := s.handleAuthSessionFrame(conn, frame)
+		if !ok {
+			accepted = false
+		}
 		s.writeJSONFrame(conn, reply)
 		return ok
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(conn, frame)
+		if !ok {
+			accepted = false
+		}
 		s.writeJSONFrame(conn, reply)
 		return ok
 	case "get_peers":
@@ -685,13 +725,49 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "fetch_notices":
 		s.writeJSONFrame(conn, s.fetchNoticesFrame())
 		return true
+	case "announce_peer":
+		nodeType := frame.NodeType
+		if !isKnownNodeType(nodeType) {
+			s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
+			return true
+		}
+		// Only promote (move to front + reset cooldown) when the sender is
+		// authenticated. Unauthenticated connections can still learn peers
+		// but must not reprioritize the dial list or clear cooldowns.
+		authenticated := s.isConnAuthenticated(conn)
+		for _, peer := range frame.Peers {
+			if peer == "" || classifyAddress(peer) == NetGroupLocal {
+				continue
+			}
+			if authenticated {
+				s.promotePeerAddress(peer, nodeType)
+			} else {
+				s.addPeerAddress(peer, nodeType, "")
+			}
+		}
+		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
+		return true
 	default:
+		accepted = false
 		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 }
 
 func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
+	resp := s.handleLocalFrameDispatch(frame)
+	accepted := resp.Type != "error"
+	log.Debug().
+		Str("protocol", "json/local").
+		Str("addr", "local").
+		Str("direction", "recv").
+		Str("command", frame.Type).
+		Bool("accepted", accepted).
+		Msg("protocol_trace")
+	return resp
+}
+
+func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame {
 	switch frame.Type {
 	case "hello":
 		if err := validateProtocolHandshake(frame); err != nil {
@@ -752,6 +828,14 @@ func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 }
 
 func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
+	log.Debug().
+		Str("protocol", "json/tcp").
+		Str("addr", conn.RemoteAddr().String()).
+		Str("direction", "send").
+		Str("command", frame.Type).
+		Bool("accepted", frame.Type != "error").
+		Msg("protocol_trace")
+
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
@@ -795,6 +879,18 @@ func validateProtocolHandshake(frame protocol.Frame) error {
 
 func requiresSessionAuth(frame protocol.Frame) bool {
 	return strings.TrimSpace(frame.Client) == "node" || strings.TrimSpace(frame.Client) == "desktop"
+}
+
+// isConnAuthenticated returns true when the connection has completed
+// session auth (auth_session verified). Connections that never initiated
+// auth (connAuth entry is nil) are considered unauthenticated — they may
+// still issue commands, but they should not trigger high-trust side effects
+// such as peer promotion.
+func (s *Service) isConnAuthenticated(conn net.Conn) bool {
+	s.mu.RLock()
+	state := s.connAuth[conn]
+	s.mu.RUnlock()
+	return state != nil && state.Verified
 }
 
 func (s *Service) isCommandAllowedForConn(conn net.Conn, command string) bool {
@@ -870,6 +966,14 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 
 	s.learnPeerFromFrame(conn.RemoteAddr().String(), state.Hello)
 	s.registerHelloRoute(conn, state.Hello)
+
+	// Announce the newly authenticated peer to all active outbound sessions.
+	// Only direct neighbors are notified (no recursive relay) and local
+	// addresses are excluded to avoid leaking private network topology.
+	if addr := peerListenAddress(state.Hello); addr != "" && classifyAddress(addr) != NetGroupLocal {
+		go s.announcePeerToSessions(addr, state.Hello.NodeType)
+	}
+
 	return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
 }
 
@@ -2301,9 +2405,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 
 
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
-	syncTicker := time.NewTicker(4 * time.Second)
 	pingTimer := time.NewTimer(nextHeartbeatDuration())
-	defer syncTicker.Stop()
 	defer pingTimer.Stop()
 
 	for {
@@ -2315,22 +2417,11 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			s.markPeerDisconnected(session.address, err)
 			return err
 		case frame := <-session.inboxCh:
+			s.markPeerRead(session.address, frame)
 			s.handlePeerSessionFrame(session.address, frame)
-		case <-syncTicker.C:
-			if s.peerState(session.address) == peerStateStalled {
-				err := fmt.Errorf("peer session stalled")
-				log.Warn().Str("peer", session.address).Str("recipient", s.identity.Address).Msg("upstream session stalled")
-				s.markPeerDisconnected(session.address, err)
-				return err
-			}
-			if err := s.syncPeerSession(session); err != nil {
-				s.markPeerDisconnected(session.address, err)
-				return err
-			}
-			s.flushPendingPeerFrames(session.address)
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
-				log.Error().Str("peer", session.address).Str("recipient", s.identity.Address).Err(err).Msg("upstream ping failed")
+				log.Warn().Str("peer", session.address).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
 				s.markPeerDisconnected(session.address, err)
 				return err
 			}
@@ -2342,6 +2433,10 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				return err
 			}
 			s.clearRelayRetryForOutbound(outbound)
+			// After a successful send, drain any pending frames that were
+			// queued when sendCh was full.  This replaces the old periodic
+			// sync ticker and keeps delivery event-driven.
+			s.flushPendingPeerFrames(session.address)
 		}
 	}
 }
@@ -2817,7 +2912,12 @@ func (s *Service) nodeHelloJSONLine() string {
 func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
 		if normalized, ok := s.normalizePeerAddress(observedAddr, frame.Listen); ok {
-			s.addPeerAddress(normalized, frame.NodeType, frame.Address)
+			// Use promotePeerAddress: this is a direct hello from the peer
+			// itself, so its self-reported node_type is authoritative and
+			// must overwrite any earlier value (which could have come from
+			// an unauthenticated announce_peer with a wrong type).
+			s.promotePeerAddress(normalized, frame.NodeType)
+			s.addPeerID(normalized, frame.Address)
 			s.addPeerVersion(normalized, frame.ClientVersion)
 		}
 	}
@@ -2855,10 +2955,52 @@ func listenerFlag(enabled bool) string {
 	return "0"
 }
 
+// peerListenAddress extracts the advertised listen address from a hello frame.
+// Returns empty string if the peer does not accept inbound connections.
+func peerListenAddress(hello protocol.Frame) string {
+	if !listenerEnabledFromFrame(hello) {
+		return ""
+	}
+	return strings.TrimSpace(hello.Listen)
+}
+
+// announcePeerToSessions sends an announce_peer frame with a single new
+// peer address and its node type to every active outbound session.  The
+// announcement is non-recursive: recipients learn the address but do not
+// relay it further.
+func (s *Service) announcePeerToSessions(peerAddress, nodeType string) {
+	defer crashlog.DeferRecover()
+
+	s.mu.RLock()
+	sessions := make([]*peerSession, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		sessions = append(sessions, session)
+	}
+	s.mu.RUnlock()
+
+	frame := protocol.Frame{
+		Type:     "announce_peer",
+		Peers:    []string{peerAddress},
+		NodeType: nodeType,
+	}
+	for _, session := range sessions {
+		select {
+		case session.sendCh <- frame:
+		default:
+			// sendCh full — queue for delivery after drain.
+			s.queuePeerFrame(session.address, frame)
+		}
+	}
+	log.Debug().Str("peer", peerAddress).Str("node_type", nodeType).Int("sessions", len(sessions)).Msg("announce_peer sent to neighbors")
+}
+
 func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
 		if normalized, ok := s.normalizePeerAddress(frame.Listen, frame.Listen); ok {
-			s.addPeerAddress(normalized, frame.NodeType, frame.Address)
+			// Same as learnPeerFromFrame: the welcome is a direct response
+			// from the peer, so its node_type is authoritative.
+			s.promotePeerAddress(normalized, frame.NodeType)
+			s.addPeerID(normalized, frame.Address)
 			s.addPeerVersion(normalized, frame.ClientVersion)
 		}
 	}
@@ -3002,7 +3144,11 @@ func (s *Service) addPeerAddress(address string, nodeType string, peerID string)
 
 	for _, peer := range s.peers {
 		if peer.Address == address {
-			s.peerTypes[address] = normalizePeerNodeType(nodeType)
+			// Peer already known — do not overwrite its node type.
+			// The type was set from a trusted source (bootstrap config,
+			// auth handshake, or authenticated announce_peer). Allowing
+			// any caller to retag it would let unauthenticated senders
+			// downgrade a "full" peer to "client" and break routing.
 			if peerID != "" {
 				s.peerIDs[address] = peerID
 			}
@@ -3031,6 +3177,81 @@ func (s *Service) addPeerAddress(address string, nodeType string, peerID string)
 	}
 }
 
+// promotePeerAddress adds or updates a peer learned from an authenticated
+// announce_peer. Unlike addPeerAddress it is allowed to update the node
+// type and reset cooldown for an already-known peer, because the sender
+// has been verified.
+//
+// The peer is NOT moved to the front of the dial list. Letting remote
+// peers control dial priority would allow an attacker to flood the list
+// with fake addresses and push real peers down. The dial order is managed
+// solely by the local bootstrap/health logic.
+func (s *Service) promotePeerAddress(address, nodeType string) {
+	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
+		return
+	}
+
+	peerType := normalizePeerNodeType(nodeType)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	found := false
+	for _, peer := range s.peers {
+		if peer.Address == address {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		now := time.Now().UTC()
+		s.peers = append(s.peers, transport.Peer{
+			ID:      fmt.Sprintf("peer-%d", now.UnixMilli()),
+			Address: address,
+		})
+		if _, ok := s.persistedMeta[address]; !ok {
+			s.persistedMeta[address] = &peerEntry{
+				Address:  address,
+				NodeType: string(peerType),
+				Source:   "announce",
+				AddedAt:  &now,
+			}
+		}
+	}
+
+	s.peerTypes[address] = peerType
+
+	// Reset cooldown so the peer is dialled on the next bootstrap tick.
+	// Use resolveHealthAddress to find the primary entry: if this address
+	// is a known fallback variant, reset cooldown on the primary too so
+	// the shared reputation invariant is maintained.
+	healthAddr := s.resolveHealthAddress(address)
+	if h := s.health[healthAddr]; h != nil {
+		h.ConsecutiveFailures = 0
+		h.LastDisconnectedAt = time.Time{}
+	}
+	// Also reset the direct address entry if it differs from primary
+	// (the announced address itself may have accumulated failures).
+	if healthAddr != address {
+		if h := s.health[address]; h != nil {
+			h.ConsecutiveFailures = 0
+			h.LastDisconnectedAt = time.Time{}
+		}
+	}
+}
+
+// addPeerID associates a peer identity (fingerprint) with a dial address.
+// Safe to call multiple times; empty values are ignored.
+func (s *Service) addPeerID(address, peerID string) {
+	if address == "" || peerID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.peerIDs[address] = peerID
+	s.mu.Unlock()
+}
+
 func (s *Service) addPeerVersion(address, clientVersion string) {
 	address = strings.TrimSpace(address)
 	clientVersion = strings.TrimSpace(clientVersion)
@@ -3049,6 +3270,18 @@ func normalizePeerNodeType(raw string) config.NodeType {
 		return config.NodeTypeClient
 	default:
 		return config.NodeTypeFull
+	}
+}
+
+// isKnownNodeType returns true if the node type is one we recognize and can
+// work with. Unknown types from future protocol versions are rejected so we
+// don't add peers we cannot meaningfully interact with.
+func isKnownNodeType(raw string) bool {
+	switch strings.TrimSpace(raw) {
+	case string(config.NodeTypeFull), string(config.NodeTypeClient):
+		return true
+	default:
+		return false
 	}
 }
 
@@ -3209,7 +3442,15 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 		}
 	}
 	_ = session.conn.SetWriteDeadline(time.Time{})
-	_ = session.conn.SetReadDeadline(time.Now().Add(peerRequestTimeout))
+
+	// Use a longer read deadline for ping so that the heartbeat timeout
+	// (pongStallTimeout) governs stall detection instead of the generic
+	// peerRequestTimeout.
+	readTimeout := peerRequestTimeout
+	if frame.Type == "ping" {
+		readTimeout = pongStallTimeout
+	}
+	_ = session.conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 	for {
 		select {
@@ -3225,6 +3466,10 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				continue
 			}
 			if incoming.Type == "push_delivery_receipt" {
+				s.handlePeerSessionFrame(session.address, incoming)
+				continue
+			}
+			if incoming.Type == "announce_peer" {
 				s.handlePeerSessionFrame(session.address, incoming)
 				continue
 			}
@@ -3310,6 +3555,18 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		s.storeDeliveryReceipt(receipt)
 		s.sendAckDeleteToPeer(address, "receipt", receipt.MessageID, receipt.Status)
 		log.Info().Str("peer", address).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
+	case "announce_peer":
+		nodeType := frame.NodeType
+		if !isKnownNodeType(nodeType) {
+			return
+		}
+		for _, peer := range frame.Peers {
+			if peer == "" || classifyAddress(peer) == NetGroupLocal {
+				continue
+			}
+			s.promotePeerAddress(peer, nodeType)
+			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", address).Msg("learned peer from announce")
+		}
 	}
 }
 
@@ -3374,6 +3631,14 @@ func (s *Service) markPeerDisconnected(address string, err error) {
 }
 
 func (s *Service) markPeerWrite(address string, frame protocol.Frame) {
+	log.Debug().
+		Str("protocol", "json/tcp").
+		Str("addr", address).
+		Str("direction", "send").
+		Str("command", frame.Type).
+		Bool("accepted", true).
+		Msg("protocol_trace")
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -3389,6 +3654,15 @@ func (s *Service) markPeerWrite(address string, frame protocol.Frame) {
 }
 
 func (s *Service) markPeerRead(address string, frame protocol.Frame) {
+	accepted := frame.Type != "error"
+	log.Debug().
+		Str("protocol", "json/tcp").
+		Str("addr", address).
+		Str("direction", "recv").
+		Str("command", frame.Type).
+		Bool("accepted", accepted).
+		Msg("protocol_trace")
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -3702,11 +3976,14 @@ func (s *Service) computePeerStateLocked(health *peerHealth) string {
 		return peerStateDegraded
 	}
 
+	// Thresholds are based on heartbeatInterval (~2 min).
+	// degraded: no useful response for longer than one heartbeat cycle + stall timeout buffer.
+	// stalled:  no useful response for two full heartbeat cycles — peer is unreachable.
 	age := now.Sub(lastUseful)
 	switch {
-	case age >= 60*time.Second:
+	case age >= heartbeatInterval+pongStallTimeout:
 		return peerStateStalled
-	case age >= 25*time.Second:
+	case age >= heartbeatInterval:
 		return peerStateDegraded
 	default:
 		return peerStateHealthy
@@ -3779,7 +4056,18 @@ func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
 	}
 
 	if _, exists := s.pendingKeys[key]; exists {
+		// Key already queued. For frames where metadata can change
+		// between queuing and drain (e.g. announce_peer node_type),
+		// replace the payload so the receiver sees the latest state.
+		for i := range s.pending[primary] {
+			if pendingFrameKey(primary, s.pending[primary][i].Frame) == key {
+				s.pending[primary][i].Frame = frame
+				break
+			}
+		}
+		snapshot := s.queueStateSnapshotLocked()
 		s.mu.Unlock()
+		s.persistQueueState(snapshot)
 		return true
 	}
 	s.pending[primary] = append(s.pending[primary], pendingFrame{
@@ -3800,6 +4088,11 @@ func pendingFrameKey(address string, frame protocol.Frame) string {
 		return address + "|send_message|" + frame.ID + "|" + frame.Recipient
 	case "send_delivery_receipt":
 		return address + "|send_delivery_receipt|" + frame.ID + "|" + frame.Recipient + "|" + frame.Status
+	case "announce_peer":
+		if len(frame.Peers) > 0 {
+			return address + "|announce_peer|" + frame.Peers[0]
+		}
+		return ""
 	default:
 		return ""
 	}
@@ -4323,10 +4616,18 @@ func (s *Service) peerState(address string) string {
 	return s.computePeerStateLocked(health)
 }
 
+// heartbeatInterval is the base interval between ping/pong heartbeats.
+// Mirrors Bitcoin's 2-minute PING_INTERVAL to reduce idle chatter while
+// keeping the connection provably alive.
+const heartbeatInterval = 2 * time.Minute
+
+// pongStallTimeout is the maximum time to wait for a pong reply before
+// declaring the peer stalled and tearing down the session.
+const pongStallTimeout = 45 * time.Second
+
 func nextHeartbeatDuration() time.Duration {
-	base := 15 * time.Second
-	jitter := time.Duration(time.Now().UTC().UnixNano()%7) * time.Second
-	return base + jitter
+	jitter := time.Duration(time.Now().UTC().UnixNano()%15) * time.Second
+	return heartbeatInterval + jitter
 }
 
 func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
@@ -4345,6 +4646,14 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	defer crashlog.DeferRecover()
 	sub.mu.Lock()
 	defer sub.mu.Unlock()
+
+	log.Debug().
+		Str("protocol", "json/tcp").
+		Str("addr", sub.conn.RemoteAddr().String()).
+		Str("direction", "send").
+		Str("command", frame.Type).
+		Bool("accepted", true).
+		Msg("protocol_trace")
 
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {

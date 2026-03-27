@@ -133,9 +133,10 @@ peer's reputation to prevent cooldown bypass.
 4. Client signs the challenge with `ed25519` and sends `auth_session`.
    Server verifies; invalid signatures accumulate ban points (1 000 points
    → 24-hour IP ban).
-5. Session enters `servePeerSession()`: sync tick fires every 4 s
-   (`get_peers`, `fetch_contacts`, flush pending frames). Heartbeat pings
-   are sent every 15–30 s.
+5. Session enters `servePeerSession()`: initial one-time sync
+   (`get_peers`, `fetch_contacts`, flush pending frames), then
+   steady-state with heartbeat pings every ~2 min and event-driven
+   push frames only (no periodic polling).
 
 **Inbound:**
 
@@ -160,7 +161,7 @@ sequenceDiagram
     S->>S: Verify signature
     alt Valid
         S->>S: Enter servePeerSession()
-        Note over C,S: Session active:<br/>sync tick 4s, heartbeat 15-30s
+        Note over C,S: Session active:<br/>heartbeat ~2 min,<br/>event-driven push only
     else Invalid
         S->>S: Ban points += 1000
         Note over S: 1000 pts → 24h IP ban
@@ -169,16 +170,126 @@ sequenceDiagram
 ```
 *Diagram 3 — TCP connection handshake and authentication*
 
+### Peer session lifecycle (full flow)
+
+```mermaid
+sequenceDiagram
+    participant A as Node A (initiator)
+    participant B as Node B (responder)
+
+    Note over A,B: Phase 1: Handshake
+
+    A->>B: hello (version, address, client, box_key, pub_key, box_sig)
+    B->>A: welcome (address, challenge, observed_address)
+
+    Note over A,B: Phase 2: Authentication
+
+    A->>B: auth_session (address, signature)
+    B->>A: auth_ok
+
+    Note over A,B: Phase 3: Subscription
+
+    A->>B: subscribe_inbox (topic="dm", recipient=A.address)
+    B->>A: subscribed
+
+    Note over A,B: Phase 4: Initial Sync (one-time)
+
+    A->>B: get_peers
+    B->>A: peers [...]
+    A->>B: fetch_contacts
+    B->>A: contacts [...]
+
+    A->>B: flush pending frames (push_message, push_delivery_receipt)
+
+    Note over A,B: Phase 5: Steady-state
+
+    rect rgb(240, 248, 255)
+        Note over A,B: Heartbeat (every ~2 min)
+        A->>B: ping
+        B->>A: pong
+    end
+
+    rect rgb(255, 248, 240)
+        Note over A,B: Message relay (event-driven)
+        B-->>A: push_message (new message for A)
+        A-->>B: ack_delete
+    end
+
+    rect rgb(255, 248, 240)
+        Note over A,B: Delivery receipt relay (event-driven)
+        B-->>A: push_delivery_receipt
+        A-->>B: ack_delete
+    end
+
+    rect rgb(240, 255, 240)
+        Note over A,B: Peer announcement (event-driven)
+        B-->>A: announce_peer (new peer address)
+        A-->>B: announce_peer_ack
+        Note right of A: Non-recursive:<br/>not relayed further
+    end
+
+    rect rgb(255, 240, 240)
+        Note over A,B: Stall detection
+        Note right of A: If pong not received<br/>within 45s → disconnect
+    end
+```
+*Diagram 4 — Peer session lifecycle: handshake → auth → sync → steady-state*
+
 ### Health monitoring
 
-- **Heartbeat** — pings sent every 15–30 s (randomized). If no pong arrives
-  before the next heartbeat, the peer is marked disconnected.
-- **Sync tick** — every 4 s: exchange `get_peers`/`fetch_contacts`, flush
-  queued pending frames.
-- **Stall detection** — if no useful traffic is seen for 5 s despite an active
-  connection, the peer is marked _stalled_ and the session is closed for retry.
+- **Heartbeat** — pings sent every ~2 min (with jitter up to 15 s). If
+  no pong arrives within 45 s (`pongStallTimeout`), the peer is declared
+  stalled and the session is torn down.
+- **Initial sync** — on connect only: `get_peers`, `fetch_contacts`,
+  flush pending frames. No periodic polling in steady-state.
+- **Peer announcement** — when a new peer authenticates on an inbound
+  connection, its advertised listen address is announced to all active
+  outbound sessions via `announce_peer`. The frame includes the peer's
+  `node_type` ("full" or "client") so recipients know what kind of peer
+  is being offered. The announcement is non-recursive: recipients learn
+  the address locally but do not relay it further.
+  Local/private addresses are excluded. If the outbound send channel is
+  full, the frame is queued via the pending mechanism and delivered after
+  drain. If a frame with the same dedup key is already queued, its
+  payload is **replaced** with the newer version so that metadata changes
+  (e.g. `node_type`) are not lost while the queue is blocked.
+  `node_type` is a **required** field: on the receiving side it is
+  validated against known types (`isKnownNodeType`); frames with an
+  unknown or empty `node_type` are silently ignored — the ack is still
+  returned but the peer address is not learned. Local/private addresses
+  (`NetGroupLocal`) are filtered in the `announce_peer` handler itself,
+  but **not** in `addPeerAddress`/`promotePeerAddress` — those lower-level
+  functions accept LAN peers so that dev/LAN meshes can discover 10.x /
+  192.168.x nodes via direct hello/welcome and `get_peers`.
+  Authenticated senders trigger promotion: the peer's cooldown is reset
+  (via `resolveHealthAddress` so fallback-variant cooldown shares with
+  the primary) and its `node_type` is updated, but it is **not** moved
+  to the front
+  of the dial list. Dial priority is managed locally — remote peers
+  cannot influence it (trust-no-one policy). Only the local `add_peer`
+  RPC command (explicit user action) prepends to the front.
+  Unauthenticated senders can only add **new** peers; if the address is
+  already known, its `node_type` is preserved to prevent an unauthenticated
+  client from retagging a "full" peer as "client" and disrupting routing.
+  Different ports on the same host are treated as distinct peers (multiple
+  nodes may share an IP); the fallback-variant model handles same-host
+  resolution at dial time, not at discovery time.
+- **Stall detection** — based on heartbeat response:
+  - no useful traffic for ≥ 2 min (`heartbeatInterval`): _degraded_
+  - no useful traffic for ≥ 2 min 45 s (`heartbeatInterval` + `pongStallTimeout`): _stalled_
 
 Peer states: `healthy` → `degraded` → `stalled` → `reconnecting`.
+
+**Aggregate network status** is derived from the number of _usable_ peers
+(healthy + degraded). Stalled peers have a live TCP session but are excluded
+from message routing, so they do not count as usable. Per-peer details are
+shown in the breakdown line.
+
+- `offline` — no known peers
+- `reconnecting` — all peers are reconnecting, none connected
+- `limited` — zero or one usable peer (stalled-only counts here too)
+- `warning` — usable peers exist but less than half of total
+- `healthy` — at least half of known peers are usable (2+)
 
 ### Message routing
 
@@ -229,7 +340,7 @@ flowchart LR
     style UI fill:#e1f5fe,stroke:#333
     style RECEIPT fill:#c8e6c9,stroke:#333
 ```
-*Diagram 4 — Direct message routing and gossip*
+*Diagram 5 — Direct message routing and gossip*
 
 **Delivery receipts:**
 
@@ -261,7 +372,7 @@ sequenceDiagram
     Mesh-->>A: delivery_receipt "seen"
     A->>A: UpdateDeliveryStatus("seen")
 ```
-*Diagram 5 — Delivery receipt flow and status updates*
+*Diagram 6 — Delivery receipt flow and status updates*
 
 **Transit relay:**
 
@@ -466,9 +577,10 @@ sequenceDiagram
 4. Клиент подписывает challenge через `ed25519` и отправляет `auth_session`.
    Сервер проверяет; невалидные подписи накапливают ban-баллы (1 000 баллов
    → бан IP на 24 часа).
-5. Сессия переходит в `servePeerSession()`: sync tick каждые 4 с
-   (`get_peers`, `fetch_contacts`, flush pending фреймов). Heartbeat-пинги
-   каждые 15–30 с.
+5. Сессия переходит в `servePeerSession()`: однократная начальная
+   синхронизация (`get_peers`, `fetch_contacts`, flush pending фреймов),
+   затем steady-state с heartbeat-пингами каждые ~2 мин и только
+   event-driven push-фреймами (без периодического polling).
 
 **Входящее:**
 
@@ -493,7 +605,7 @@ sequenceDiagram
     S->>S: Проверка подписи
     alt Валидна
         S->>S: Переход в servePeerSession()
-        Note over C,S: Сессия активна:<br/>sync tick 4с, heartbeat 15-30с
+        Note over C,S: Сессия активна:<br/>heartbeat ~2 мин,<br/>только event-driven push
     else Невалидна
         S->>S: Ban-баллы += 1000
         Note over S: 1000 баллов → бан IP 24ч
@@ -502,17 +614,129 @@ sequenceDiagram
 ```
 *Диаграмма 3 — TCP-хендшейк и аутентификация*
 
+### Жизненный цикл peer-сессии (полный flow)
+
+```mermaid
+sequenceDiagram
+    participant A as Нода A (инициатор)
+    participant B as Нода B (ответчик)
+
+    Note over A,B: Фаза 1: Хендшейк
+
+    A->>B: hello (version, address, client, box_key, pub_key, box_sig)
+    B->>A: welcome (address, challenge, observed_address)
+
+    Note over A,B: Фаза 2: Аутентификация
+
+    A->>B: auth_session (address, signature)
+    B->>A: auth_ok
+
+    Note over A,B: Фаза 3: Подписка
+
+    A->>B: subscribe_inbox (topic="dm", recipient=A.address)
+    B->>A: subscribed
+
+    Note over A,B: Фаза 4: Начальная синхронизация (однократно)
+
+    A->>B: get_peers
+    B->>A: peers [...]
+    A->>B: fetch_contacts
+    B->>A: contacts [...]
+
+    A->>B: flush pending фреймов (push_message, push_delivery_receipt)
+
+    Note over A,B: Фаза 5: Steady-state
+
+    rect rgb(240, 248, 255)
+        Note over A,B: Heartbeat (каждые ~2 мин)
+        A->>B: ping
+        B->>A: pong
+    end
+
+    rect rgb(255, 248, 240)
+        Note over A,B: Ретрансляция сообщений (event-driven)
+        B-->>A: push_message (новое сообщение для A)
+        A-->>B: ack_delete
+    end
+
+    rect rgb(255, 248, 240)
+        Note over A,B: Ретрансляция квитанций (event-driven)
+        B-->>A: push_delivery_receipt
+        A-->>B: ack_delete
+    end
+
+    rect rgb(240, 255, 240)
+        Note over A,B: Анонс нового peer'а (event-driven)
+        B-->>A: announce_peer (адрес нового peer'а)
+        A-->>B: announce_peer_ack
+        Note right of A: Без рекурсии:<br/>не ретранслируется дальше
+    end
+
+    rect rgb(255, 240, 240)
+        Note over A,B: Обнаружение зависания
+        Note right of A: Если pong не получен<br/>в течение 45с → disconnect
+    end
+```
+*Диаграмма 4 — Жизненный цикл peer-сессии: хендшейк → аутентификация → синхронизация → steady-state*
+
 ### Мониторинг здоровья
 
-- **Heartbeat** — пинги каждые 15–30 с (рандомизировано). Если pong не
-  приходит до следующего heartbeat, peer отмечается отключённым.
-- **Sync tick** — каждые 4 с: обмен `get_peers`/`fetch_contacts`, flush
-  очереди pending-фреймов.
-- **Обнаружение зависания** — если за 5 с нет полезного трафика при активном
-  соединении, peer отмечается как _stalled_, сессия закрывается для повторной
-  попытки.
+- **Heartbeat** — пинги каждые ~2 мин (с jitter до 15 с). Если pong не
+  приходит в течение 45 с (`pongStallTimeout`), peer объявляется зависшим
+  и сессия разрывается.
+- **Начальная синхронизация** — только при подключении: `get_peers`,
+  `fetch_contacts`, flush pending фреймов. В steady-state нет
+  периодического polling.
+- **Анонс peer'ов** — когда новый peer аутентифицируется через входящее
+  соединение, его объявленный listen-адрес анонсируется всем активным
+  исходящим сессиям через `announce_peer`. Фрейм включает `node_type`
+  пира ("full" или "client"), чтобы получатели знали тип предлагаемого
+  узла. Анонс нерекурсивный: получатели сохраняют адрес локально, но
+  не ретранслируют дальше. Локальные/приватные адреса исключаются. Если
+  канал отправки переполнен, фрейм ставится в pending-очередь и
+  доставляется после освобождения. Если фрейм с таким же ключом
+  дедупликации уже в очереди, его payload **заменяется** на новую
+  версию, чтобы изменения метаданных (например, `node_type`) не
+  терялись пока очередь заблокирована.
+  `node_type` — **обязательное** поле:
+  на принимающей стороне оно валидируется (`isKnownNodeType`); фреймы с
+  неизвестным или пустым `node_type` молча игнорируются — ack
+  возвращается, но адрес пира не сохраняется. Локальные/приватные адреса
+  (`NetGroupLocal`) фильтруются в самом handler'е `announce_peer`, но
+  **не** в `addPeerAddress`/`promotePeerAddress` — эти низкоуровневые
+  функции принимают LAN-пиры, чтобы dev/LAN-меши могли обнаруживать
+  10.x / 192.168.x узлы через прямые hello/welcome и `get_peers`.
+  Аутентифицированные отправители вызывают промоцию пира: cooldown
+  сбрасывается (через `resolveHealthAddress`, чтобы fallback-вариант
+  разделял cooldown с primary) и `node_type` обновляется, но пир
+  **не** перемещается
+  в начало dial-списка. Приоритет dial управляется локально — удалённые
+  пиры не могут на него влиять (политика «никому не доверять»). Только
+  локальная RPC-команда `add_peer` (явное действие пользователя)
+  добавляет пир в начало списка.
+  Неаутентифицированные отправители могут только добавлять **новые** пиры;
+  если адрес уже известен, его `node_type` сохраняется, чтобы
+  неаутентифицированный клиент не мог перетегировать «full»-пир как
+  «client» и нарушить маршрутизацию.
+  Разные порты на одном хосте считаются разными пирами (на одном IP
+  могут работать несколько нод); модель fallback-вариантов разрешает
+  same-host коллизии на этапе dial, а не на этапе discovery.
+- **Обнаружение зависания** — на основе ответа heartbeat:
+  - нет полезного трафика ≥ 2 мин (`heartbeatInterval`): _degraded_
+  - нет полезного трафика ≥ 2 мин 45 с (`heartbeatInterval` + `pongStallTimeout`): _stalled_
 
 Состояния peer'а: `healthy` → `degraded` → `stalled` → `reconnecting`.
+
+**Агрегированный статус сети** определяется по количеству _пригодных_ пиров
+(healthy + degraded). Stalled-пиры имеют живое TCP-соединение, но исключены
+из маршрутизации сообщений, поэтому не считаются пригодными. Детали по
+каждому пиру отображаются в breakdown-строке.
+
+- `offline` — нет известных пиров
+- `reconnecting` — все пиры переподключаются, ни один не подключён
+- `limited` — ноль или один пригодный пир (stalled-only тоже попадает сюда)
+- `warning` — есть пригодные пиры, но менее половины от общего числа
+- `healthy` — как минимум половина известных пиров пригодна (2+)
 
 ### Маршрутизация сообщений
 
@@ -563,7 +787,7 @@ flowchart LR
     style UI fill:#e1f5fe,stroke:#333
     style RECEIPT fill:#c8e6c9,stroke:#333
 ```
-*Диаграмма 4 — Маршрутизация прямых сообщений и gossip*
+*Диаграмма 5 — Маршрутизация прямых сообщений и gossip*
 
 **Delivery receipts:**
 
@@ -595,7 +819,7 @@ sequenceDiagram
     Mesh-->>A: delivery_receipt "seen"
     A->>A: UpdateDeliveryStatus("seen")
 ```
-*Диаграмма 5 — Поток квитанций доставки и обновление статусов*
+*Диаграмма 6 — Поток квитанций доставки и обновление статусов*
 
 **Транзитный relay:**
 

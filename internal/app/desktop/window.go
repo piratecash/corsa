@@ -584,7 +584,7 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 					Alignment: layout.Middle,
 				}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						canSync := recipient != "" && len(status.Peers) > 0
+						canSync := recipient != "" && countConnectedPeers(status.PeerHealth) > 0
 						return w.layoutChatActions(gtx, canSync)
 					}),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -652,19 +652,21 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 	})
 }
 
+// networkStatusSummary computes the aggregate network status based on the
+// number of usable peers. Stalled peers have a live TCP session but are
+// excluded from message routing (routingTargets skips peerStateStalled),
+// so they do not count as usable. Per-peer health details (degraded,
+// stalled) are shown in the breakdown line instead.
 func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
-	healthy := 0
-	degraded := 0
-	stalled := 0
+	usable := 0   // healthy + degraded — can route messages
+	stalled := 0  // connected at TCP level but not routing
 	reconnecting := 0
 	pending := 0
 
 	for _, item := range status.PeerHealth {
 		switch item.State {
-		case "healthy":
-			healthy++
-		case "degraded":
-			degraded++
+		case "healthy", "degraded":
+			usable++
 		case "stalled":
 			stalled++
 		case "reconnecting":
@@ -673,7 +675,7 @@ func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
 		pending += item.PendingCount
 	}
 
-	connected := healthy + degraded + stalled
+	connected := usable + stalled
 	total := connected + reconnecting
 
 	switch {
@@ -681,18 +683,16 @@ func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
 		return "offline", 0, 0, pending
 	case connected == 0:
 		return "reconnecting", 0, total, pending
-	case healthy > 0 && connected*2 >= total:
-		// More than half connected and at least one healthy — network is fine.
-		return "healthy", connected, total, pending
-	case healthy > 0:
-		// Some healthy peers but less than half connected — warn.
+	case usable == 0:
+		// Peers exist but none can route — functionally limited.
+		return "limited", connected, total, pending
+	case usable == 1:
+		return "limited", connected, total, pending
+	case usable*2 < total:
+		// Less than half of known peers are usable.
 		return "warning", connected, total, pending
-	case degraded > 0:
-		return "degraded", connected, total, pending
-	case stalled > 0:
-		return "stalled", connected, total, pending
 	default:
-		return "offline", 0, total, pending
+		return "healthy", connected, total, pending
 	}
 }
 
@@ -730,15 +730,11 @@ func networkStateColors(state string) (color.NRGBA, color.NRGBA) {
 	switch state {
 	case "healthy":
 		return color.NRGBA{R: 36, G: 92, B: 63, A: 255}, color.NRGBA{R: 231, G: 255, B: 239, A: 255}
-	case "warning":
+	case "limited", "warning":
 		return color.NRGBA{R: 140, G: 110, B: 20, A: 255}, color.NRGBA{R: 255, G: 240, B: 180, A: 255}
-	case "degraded":
-		return color.NRGBA{R: 110, G: 82, B: 25, A: 255}, color.NRGBA{R: 255, G: 244, B: 210, A: 255}
-	case "stalled":
-		return color.NRGBA{R: 118, G: 50, B: 37, A: 255}, color.NRGBA{R: 255, G: 225, B: 220, A: 255}
 	case "reconnecting":
 		return color.NRGBA{R: 57, G: 67, B: 84, A: 255}, color.NRGBA{R: 231, G: 237, B: 246, A: 255}
-	default:
+	default: // offline, unknown
 		return color.NRGBA{R: 51, G: 56, B: 66, A: 255}, color.NRGBA{R: 214, G: 221, B: 232, A: 255}
 	}
 }

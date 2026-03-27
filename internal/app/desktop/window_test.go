@@ -119,3 +119,146 @@ func TestEllipsize(t *testing.T) {
 		t.Fatalf("expected empty, got %q", got)
 	}
 }
+
+// TestNetworkStatusSummary verifies that the aggregate network status is based
+// on the number of usable peers (healthy + degraded). Stalled peers are
+// connected at TCP level but excluded from routing, so they do not count
+// as usable for the aggregate status label.
+func TestNetworkStatusSummary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		peers         []service.PeerHealth
+		wantState     string
+		wantConnected int
+		wantTotal     int
+	}{
+		{
+			name:      "no peers is offline",
+			peers:     nil,
+			wantState: "offline",
+		},
+		{
+			name: "all reconnecting",
+			peers: []service.PeerHealth{
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+			},
+			wantState:     "reconnecting",
+			wantConnected: 0,
+			wantTotal:     2,
+		},
+		{
+			name: "single healthy peer is limited",
+			peers: []service.PeerHealth{
+				{State: "healthy"},
+			},
+			wantState:     "limited",
+			wantConnected: 1,
+			wantTotal:     1,
+		},
+		{
+			name: "single stalled peer is limited (connected but not usable)",
+			peers: []service.PeerHealth{
+				{State: "stalled"},
+			},
+			wantState:     "limited",
+			wantConnected: 1,
+			wantTotal:     1,
+		},
+		{
+			name: "two usable peers are healthy",
+			peers: []service.PeerHealth{
+				{State: "healthy"},
+				{State: "degraded"},
+			},
+			wantState:     "healthy",
+			wantConnected: 2,
+			wantTotal:     2,
+		},
+		{
+			name: "all stalled is limited not healthy (P2 regression)",
+			peers: []service.PeerHealth{
+				{State: "stalled"},
+				{State: "stalled"},
+				{State: "stalled"},
+			},
+			wantState:     "limited",
+			wantConnected: 3,
+			wantTotal:     3,
+		},
+		{
+			name: "less than half usable is warning",
+			peers: []service.PeerHealth{
+				{State: "healthy"},
+				{State: "degraded"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+			},
+			wantState:     "warning",
+			wantConnected: 2,
+			wantTotal:     7,
+		},
+		{
+			name: "half usable is healthy",
+			peers: []service.PeerHealth{
+				{State: "healthy"},
+				{State: "degraded"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+			},
+			wantState:     "healthy",
+			wantConnected: 2,
+			wantTotal:     4,
+		},
+		{
+			name: "mix of stalled and degraded uses only usable for status",
+			peers: []service.PeerHealth{
+				{State: "stalled"},
+				{State: "degraded"},
+				{State: "stalled"},
+				{State: "degraded"},
+			},
+			wantState:     "healthy",
+			wantConnected: 4,
+			wantTotal:     4,
+		},
+		{
+			name: "stalled peers do not help reach healthy threshold",
+			peers: []service.PeerHealth{
+				{State: "healthy"},
+				{State: "degraded"},
+				{State: "stalled"},
+				{State: "stalled"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+				{State: "reconnecting"},
+			},
+			wantState:     "warning",
+			wantConnected: 4,
+			wantTotal:     9,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := service.NodeStatus{PeerHealth: tt.peers}
+			gotState, gotConnected, gotTotal, _ := networkStatusSummary(status)
+			if gotState != tt.wantState {
+				t.Errorf("state: got %q, want %q", gotState, tt.wantState)
+			}
+			if gotConnected != tt.wantConnected {
+				t.Errorf("connected: got %d, want %d", gotConnected, tt.wantConnected)
+			}
+			if gotTotal != tt.wantTotal {
+				t.Errorf("total: got %d, want %d", gotTotal, tt.wantTotal)
+			}
+		})
+	}
+}
