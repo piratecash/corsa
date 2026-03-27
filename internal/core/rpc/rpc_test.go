@@ -92,28 +92,31 @@ func (m *mockDMRouterProvider) SendMessage(to, body string) {
 }
 
 // buildTestTable creates a CommandTable with all commands registered using given providers.
-// Pass nil for chatlogProvider or dmRouter to simulate node-only mode.
-func buildTestTable(nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider, dmRouter rpc.DMRouterProvider) *rpc.CommandTable {
+// Pass nil for chatlogProvider, dmRouter, or metricsProvider to simulate modes where
+// those features are unavailable — their commands are registered via RegisterUnavailable
+// (503, hidden from help).
+func buildTestTable(nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider, dmRouter rpc.DMRouterProvider, metricsProvider rpc.MetricsProvider) *rpc.CommandTable {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter, nil)
+	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter, metricsProvider)
 	return table
 }
 
-// setupTestServer creates a test RPC server backed by a CommandTable with all commands.
-// MessageService is created with dmRouter=nil (node-only mode for message commands).
+// setupTestServer creates a test RPC server with chatlog=nil, dmRouter=nil,
+// metricsProvider=nil — simulating a minimal node where only core commands are available.
 func setupTestServer(t *testing.T, nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider) *rpc.Server {
 	t.Helper()
 	return setupTestServerWithDMRouter(t, nodeProvider, chatlogProvider, nil)
 }
 
 // setupTestServerWithDMRouter creates a test RPC server with an explicit DMRouterProvider.
+// MetricsProvider defaults to nil; use setupTestServerWithMetrics for metrics tests.
 func setupTestServerWithDMRouter(t *testing.T, nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider, dmRouter rpc.DMRouterProvider) *rpc.Server {
 	t.Helper()
 	cfg := config.RPC{
 		Host: "127.0.0.1",
 		Port: "0",
 	}
-	table := buildTestTable(nodeProvider, chatlogProvider, dmRouter)
+	table := buildTestTable(nodeProvider, chatlogProvider, dmRouter, nil)
 	server, err := rpc.NewServer(cfg, table)
 	if err != nil {
 		t.Fatalf("create test server: %v", err)

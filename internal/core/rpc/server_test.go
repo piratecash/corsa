@@ -265,7 +265,7 @@ func TestServerMultipleCommandCategories(t *testing.T) {
 
 func TestCommandTableCommands(t *testing.T) {
 	node := &mockNodeProvider{}
-	table := buildTestTable(node, nil, nil)
+	table := buildTestTable(node, nil, nil, nil)
 
 	allCommands := table.Commands()
 
@@ -292,7 +292,7 @@ func TestCommandTableCommandsSortedByName(t *testing.T) {
 	node := &mockNodeProvider{}
 	chatlog := &mockChatlogProvider{}
 	dmRouter := &mockDMRouterProvider{}
-	table := buildTestTable(node, chatlog, dmRouter)
+	table := buildTestTable(node, chatlog, dmRouter, nil)
 
 	commands := table.Commands()
 	for i := 1; i < len(commands); i++ {
@@ -566,7 +566,7 @@ func TestUniversalExecUnavailableSendDM(t *testing.T) {
 // unavailable (mode-gated) commands.
 func TestCommandsExcludesUnavailable(t *testing.T) {
 	node := &mockNodeProvider{}
-	table := buildTestTable(node, nil, nil) // chatlog=nil, dmRouter=nil
+	table := buildTestTable(node, nil, nil, nil) // chatlog=nil, dmRouter=nil
 
 	commands := table.Commands()
 	unavailableNames := map[string]bool{
@@ -588,7 +588,7 @@ func TestCommandsExcludesUnavailable(t *testing.T) {
 // unavailable commands (they are registered, just return 503).
 func TestHasReturnsTrueForUnavailable(t *testing.T) {
 	node := &mockNodeProvider{}
-	table := buildTestTable(node, nil, nil) // chatlog=nil, dmRouter=nil
+	table := buildTestTable(node, nil, nil, nil) // chatlog=nil, dmRouter=nil
 
 	unavailableNames := []string{
 		"fetch_chatlog", "fetch_chatlog_previews", "fetch_conversations", "send_dm",

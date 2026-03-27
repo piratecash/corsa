@@ -359,7 +359,7 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 }
 
 func (c *ConsoleWindow) layoutInfoTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	return c.parent.card(gtx, c.parent.t("console.info_title"), c.infoRows(status))
+	return c.card(gtx, c.parent.t("console.info_title"), c.infoRows(status))
 }
 
 func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
@@ -406,7 +406,7 @@ func (c *ConsoleWindow) layoutConsoleTab(gtx layout.Context) layout.Dimensions {
 		c.parent.t("console.help"),
 	}
 
-	return c.parent.card(gtx, c.parent.t("console.title"), rows, func(gtx layout.Context) layout.Dimensions {
+	return c.card(gtx, c.parent.t("console.title"), rows, func(gtx layout.Context) layout.Dimensions {
 		return layout.Stack{}.Layout(gtx,
 			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -890,6 +890,48 @@ func (c *ConsoleWindow) layoutSelectableOutput(gtx layout.Context, entry *consol
 
 	entry.OutputText.SetText(entry.Output)
 	return entry.OutputText.Layout(gtx, c.theme.Shaper, font.Font{Typeface: c.theme.Face}, c.theme.TextSize, textMaterial, selectionMaterial)
+}
+
+// card renders a styled card using the console window's own theme to avoid
+// a data race with the parent window's text shaper (not thread-safe on Linux).
+func (c *ConsoleWindow) card(gtx layout.Context, titleText string, rows []string, extras ...func(layout.Context) layout.Dimensions) layout.Dimensions {
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+
+		inset := layout.UniformInset(unit.Dp(18))
+		return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			children := make([]layout.FlexChild, 0, len(rows)+len(extras)+2)
+			if strings.TrimSpace(titleText) != "" {
+				children = append(children,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						label := material.Label(c.theme, unit.Sp(20), titleText)
+						label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+						return label.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				)
+			}
+
+			for _, row := range rows {
+				text := row
+				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Body1(c.theme, text)
+					label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+					return label.Layout(gtx)
+				}))
+				children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+			}
+
+			for _, extra := range extras {
+				children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
+				children = append(children, layout.Rigid(extra))
+			}
+
+			return layout.Flex{
+				Axis: layout.Vertical,
+			}.Layout(gtx, children...)
+		})
+	})
 }
 
 func (c *ConsoleWindow) layoutInfoRows(gtx layout.Context, rows []string) layout.Dimensions {

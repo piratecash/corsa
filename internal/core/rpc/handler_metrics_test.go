@@ -20,8 +20,7 @@ func (m *mockMetricsProvider) TrafficSnapshot() protocol.Frame {
 func setupTestServerWithMetrics(t *testing.T, node rpc.NodeProvider, metrics rpc.MetricsProvider) *rpc.Server {
 	t.Helper()
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
-	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil, metrics)
+	table := buildTestTable(node, nil, nil, metrics)
 	server, err := rpc.NewServer(cfg, table)
 	if err != nil {
 		t.Fatalf("create test server: %v", err)
