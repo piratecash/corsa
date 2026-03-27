@@ -75,5 +75,24 @@ build-node-all: build-node-macos-arm64 build-node-macos-amd64 build-node-linux-a
 .PHONY: build-desktop-all
 build-desktop-all: build-desktop-macos-arm64 build-desktop-macos-amd64 build-desktop-linux-amd64 build-desktop-windows-amd64
 
+.PHONY: build-cli-macos-arm64
+build-cli-macos-arm64: build-dirs
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -o $(DIST_DIR)/corsa-cli-darwin-arm64 ./cmd/corsa-cli
+
+.PHONY: build-cli-macos-amd64
+build-cli-macos-amd64: build-dirs
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-cli-darwin-amd64 ./cmd/corsa-cli
+
+.PHONY: build-cli-linux-amd64
+build-cli-linux-amd64: build-dirs
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-cli-linux-amd64 ./cmd/corsa-cli
+
+.PHONY: build-cli-windows-amd64
+build-cli-windows-amd64: build-dirs
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-cli-windows-amd64.exe ./cmd/corsa-cli
+
+.PHONY: build-cli-all
+build-cli-all: build-cli-macos-arm64 build-cli-macos-amd64 build-cli-linux-amd64 build-cli-windows-amd64
+
 .PHONY: build-all
-build-all: build-node-all build-desktop-all
+build-all: build-node-all build-desktop-all build-cli-all

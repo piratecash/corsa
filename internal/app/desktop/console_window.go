@@ -1,6 +1,8 @@
 package desktop
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -9,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"corsa/internal/core/rpc"
 	"corsa/internal/core/service"
 
 	"gioui.org/app"
@@ -78,6 +81,7 @@ type ConsoleWindow struct {
 	selectedSuggest  int
 	suggestBaseQuery string
 	suggestSnapshot  []consoleSuggestion
+	cachedCommands   []consoleSuggestion // loaded from CommandTable at init
 }
 
 func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
@@ -109,6 +113,12 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 			CreatedAt: time.Now(),
 		}),
 	}
+
+	// Load available commands directly from CommandTable — no HTTP, always available.
+	if parent.cmdTable != nil {
+		window.loadCommands()
+	}
+
 	return window
 }
 
@@ -583,7 +593,8 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 	c.suggestSnapshot = nil
 
 	go func(command string) {
-		output, err := c.parent.client.ExecuteConsoleCommand(command)
+		output, err := c.executeCommand(command)
+
 		entry := newConsoleEntry(consoleEntry{
 			Command:   command,
 			CreatedAt: time.Now(),
@@ -664,7 +675,7 @@ func (c *ConsoleWindow) consoleSuggestions() []consoleSuggestion {
 	if c.hideSuggestions {
 		return nil
 	}
-	all := availableConsoleCommands()
+	all := c.getCommands()
 	if query == "" {
 		return nil
 	}
@@ -822,7 +833,7 @@ func (c *ConsoleWindow) computeConsoleSuggestions(query string) []consoleSuggest
 	if c.hideSuggestions || query == "" {
 		return nil
 	}
-	all := availableConsoleCommands()
+	all := c.getCommands()
 	matches := make([]consoleSuggestion, 0, len(all))
 	for _, item := range all {
 		if strings.HasPrefix(strings.ToLower(item.Label), query) || strings.Contains(strings.ToLower(item.Label), query) {
@@ -911,27 +922,158 @@ func (c *ConsoleWindow) layoutPeersContent(gtx layout.Context, connectedPeers, p
 	})
 }
 
-func availableConsoleCommands() []consoleSuggestion {
-	return []consoleSuggestion{
-		{Label: "help", Insert: "help"},
-		{Label: "ping", Insert: "ping"},
-		{Label: "hello", Insert: "hello"},
-		{Label: "add_peer <host:port>", Insert: "add_peer "},
-		{Label: "get_peers", Insert: "get_peers"},
-		{Label: "fetch_peer_health", Insert: "fetch_peer_health"},
-		{Label: "fetch_identities", Insert: "fetch_identities"},
-		{Label: "fetch_contacts", Insert: "fetch_contacts"},
-		{Label: "fetch_trusted_contacts", Insert: "fetch_trusted_contacts"},
-		{Label: "fetch_pending_messages [topic]", Insert: "fetch_pending_messages"},
-		{Label: "fetch_messages [topic]", Insert: "fetch_messages"},
-		{Label: "fetch_message_ids [topic]", Insert: "fetch_message_ids"},
-		{Label: "fetch_message <topic> <id>", Insert: "fetch_message"},
-		{Label: "fetch_inbox <topic> [recipient]", Insert: "fetch_inbox"},
-		{Label: "fetch_delivery_receipts [recipient]", Insert: "fetch_delivery_receipts"},
-		{Label: "fetch_notices", Insert: "fetch_notices"},
-		{Label: "fetch_chatlog [topic] <peer_address>", Insert: "fetch_chatlog dm "},
-		{Label: "fetch_conversations", Insert: "fetch_conversations"},
+// executeCommand parses console input and dispatches it through CommandTable.
+// Falls back to DesktopClient.ExecuteConsoleCommand if CommandTable is unavailable.
+func (c *ConsoleWindow) executeCommand(input string) (string, error) {
+	if c.parent.cmdTable == nil {
+		return c.parent.client.ExecuteConsoleCommand(input)
 	}
+
+	trimmed := strings.TrimSpace(input)
+
+	// Raw JSON frames are routed directly through ExecuteConsoleCommand,
+	// which preserves all wire fields via protocol.ParseFrameLine. Going
+	// through CommandTable would lose caller-supplied fields (e.g. a hello
+	// frame's Client/ClientVersion) because handlers rebuild frames from args.
+	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+		if c.parent.client != nil {
+			return c.parent.client.ExecuteConsoleCommand(input)
+		}
+	}
+
+	req, err := rpc.ParseConsoleInput(input)
+	if err != nil {
+		return "", err
+	}
+
+	// Console-specific "help" — human-readable text with categories,
+	// defaults, and self-address. The CommandTable help handler returns
+	// machine JSON for API consumers; the console needs a different format.
+	if req.Name == "help" {
+		addr := ""
+		if c.parent.client != nil {
+			addr = c.parent.client.Address()
+		}
+		return consoleHelpText(c.parent.cmdTable, addr), nil
+	}
+
+	resp := c.parent.cmdTable.Execute(req)
+
+	// Unknown command fallback: forward raw input to the old
+	// ExecuteConsoleCommand path, which can pass arbitrary JSON frames
+	// through to HandleLocalFrame. This preserves passthrough for
+	// named command types not registered in CommandTable.
+	if resp.ErrorKind == rpc.ErrNotFound && c.parent.client != nil {
+		return c.parent.client.ExecuteConsoleCommand(input)
+	}
+
+	if resp.Error != nil {
+		return "", resp.Error
+	}
+
+	// Pretty-print JSON response for console display
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, resp.Data, "", "  "); err != nil {
+		return string(resp.Data), nil
+	}
+	return prettyJSON.String(), nil
+}
+
+// loadCommands populates command suggestions from CommandTable — synchronous, no HTTP.
+func (c *ConsoleWindow) loadCommands() {
+	commands := c.parent.cmdTable.Commands()
+	suggestions := commandInfoToSuggestions(commands)
+	c.mu.Lock()
+	c.cachedCommands = suggestions
+	c.mu.Unlock()
+}
+
+// getCommands returns the current command suggestions.
+func (c *ConsoleWindow) getCommands() []consoleSuggestion {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cachedCommands
+}
+
+// defaultPrefills maps command names to default argument templates
+// that should be inserted on autocomplete selection. This preserves
+// the old desktop console UX where fetch_chatlog prefilled "dm" as topic.
+var defaultPrefills = map[string]string{
+	"fetch_chatlog": "fetch_chatlog dm",
+}
+
+func commandInfoToSuggestions(commands []rpc.CommandInfo) []consoleSuggestion {
+	suggestions := make([]consoleSuggestion, 0, len(commands))
+	for _, cmd := range commands {
+		label := cmd.Name
+		if cmd.Usage != "" {
+			label = cmd.Name + " " + cmd.Usage
+		}
+		insert := cmd.Name
+		if prefill, ok := defaultPrefills[cmd.Name]; ok {
+			insert = prefill
+		}
+		suggestions = append(suggestions, consoleSuggestion{
+			Label:  label,
+			Insert: insert,
+		})
+	}
+	return suggestions
+}
+
+// consoleHelpText formats CommandTable metadata into a human-readable help
+// screen for the desktop console. Grouped by category with usage hints,
+// defaults, and self-address — matching the legacy consoleHelpText from
+// DesktopClient but generated dynamically from CommandTable.
+func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
+	commands := table.Commands()
+
+	// Group by category, preserving display order.
+	categoryOrder := []string{"system", "network", "identity", "message", "chatlog", "notice"}
+	categoryLabels := map[string]string{
+		"system":   "Control",
+		"network":  "Network",
+		"identity": "Identity & Contacts",
+		"message":  "Messages",
+		"chatlog":  "Chat History",
+		"notice":   "Notices",
+	}
+	grouped := make(map[string][]rpc.CommandInfo)
+	for _, cmd := range commands {
+		grouped[cmd.Category] = append(grouped[cmd.Category], cmd)
+	}
+
+	var lines []string
+	for _, cat := range categoryOrder {
+		cmds := grouped[cat]
+		if len(cmds) == 0 {
+			continue
+		}
+		label := categoryLabels[cat]
+		if label == "" {
+			label = cat
+		}
+		lines = append(lines, fmt.Sprintf("== %s ==", label))
+		for _, cmd := range cmds {
+			if cmd.Usage != "" {
+				lines = append(lines, cmd.Name+" "+cmd.Usage)
+			} else {
+				lines = append(lines, cmd.Name)
+			}
+		}
+		lines = append(lines, "")
+	}
+
+	lines = append(lines,
+		"Defaults:",
+		"  topic for fetch_messages/fetch_message_ids: global",
+		"  topic for fetch_pending_messages/fetch_inbox: dm",
+		"  recipient: "+selfAddress,
+		"",
+		"You can also paste a raw JSON protocol frame.",
+	)
+
+	return strings.Join(lines, "\n")
 }
 
 func stringItemsToChildren(values []string, render func(layout.Context, string) layout.Dimensions) []layout.FlexChild {

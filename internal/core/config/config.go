@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -45,9 +46,17 @@ type Node struct {
 	MaxIncomingPeers int
 }
 
+type RPC struct {
+	Host     string
+	Port     string
+	Username string
+	Password string
+}
+
 type Config struct {
 	App  App
 	Node Node
+	RPC  RPC
 }
 
 const (
@@ -100,6 +109,12 @@ func Default() Config {
 			MaxClockDrift:    maxClockDrift,
 			MaxOutgoingPeers: maxOutgoingPeers,
 			MaxIncomingPeers: maxIncomingPeers,
+		},
+		RPC: RPC{
+			Host:     envOrDefault("CORSA_RPC_HOST", "127.0.0.1"),
+			Port:     envOrDefault("CORSA_RPC_PORT", "46464"),
+			Username: envOrDefault("CORSA_RPC_USERNAME", ""),
+			Password: envOrDefault("CORSA_RPC_PASSWORD", ""),
 		},
 	}
 }
@@ -318,4 +333,23 @@ func maxIncomingPeersFromEnv() int {
 		return 0
 	}
 	return value
+}
+
+func (r RPC) ListenAddress() string {
+	return net.JoinHostPort(r.Host, r.Port)
+}
+
+// ValidateAuth returns an error if auth is partially configured.
+// Either both Username and Password must be set, or neither.
+func (r RPC) ValidateAuth() error {
+	hasUser := r.Username != ""
+	hasPass := r.Password != ""
+	if hasUser != hasPass {
+		return fmt.Errorf("rpc auth partially configured: both CORSA_RPC_USERNAME and CORSA_RPC_PASSWORD must be set together")
+	}
+	return nil
+}
+
+func (r RPC) AuthEnabled() bool {
+	return r.Username != "" && r.Password != ""
 }

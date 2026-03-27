@@ -7,10 +7,15 @@ services:
     restart: unless-stopped
     ports:
       - "64646:64646"
+    #  - "46464:46464"
     environment:
       CORSA_LISTEN_ADDRESS: ":64646"
       CORSA_ADVERTISE_ADDRESS: "<your-public-ip>:64646"
       CORSA_BOOTSTRAP_PEERS: "65.108.204.190:64646"
+      CORSA_RPC_HOST: "0.0.0.0"
+      CORSA_RPC_PORT: "46464"
+      # CORSA_RPC_USERNAME: ""
+      # CORSA_RPC_PASSWORD: ""
     volumes:
       - corsa-data:/home/corsa/.corsa
 

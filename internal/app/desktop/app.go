@@ -8,6 +8,7 @@ import (
 	"corsa/internal/core/config"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/node"
+	"corsa/internal/core/rpc"
 	"corsa/internal/core/service"
 )
 
@@ -42,6 +43,31 @@ func Run() error {
 			log.Info().Msg("chatlog closed")
 		}
 	}()
-	window := NewWindow(client, runtime, prefs)
+
+	router := service.NewDMRouter(client)
+
+	// Build command table — single source of truth for all RPC commands.
+	// Desktop UI calls this directly (no HTTP), HTTP server wraps it for external clients.
+	cmdTable := rpc.NewCommandTable()
+	rpc.RegisterAllCommands(cmdTable, nodeService, client, router)
+	rpc.RegisterDesktopOverrides(cmdTable, client, nodeService)
+
+	// Start HTTP RPC server for external access (corsa-cli, third-party tools)
+	rpcServer, err := rpc.NewServer(cfg.RPC, cmdTable, nodeService)
+	if err != nil {
+		log.Fatal().Err(err).Msg("rpc server config invalid")
+	}
+
+	if err := rpcServer.StartAsync(); err != nil {
+		log.Error().Err(err).Msg("rpc server failed to start")
+	}
+	defer func() {
+		if err := rpcServer.Shutdown(); err != nil {
+			log.Error().Err(err).Msg("rpc server shutdown failed")
+		}
+	}()
+
+	// Desktop UI gets CommandTable directly — no HTTP round-trip needed.
+	window := NewWindow(client, router, cmdTable, runtime, prefs)
 	return window.Run()
 }

@@ -604,6 +604,40 @@ func (c *DesktopClient) consoleFetchConversations() (string, error) {
 	return string(data), nil
 }
 
+// FetchChatlog reads chat entries for a peer from the local chatlog.
+func (c *DesktopClient) FetchChatlog(topic, peerAddress string) (string, error) {
+	return c.consoleFetchChatlog(topic, peerAddress)
+}
+
+// FetchChatlogPreviews reads the last entry per peer from the local chatlog.
+func (c *DesktopClient) FetchChatlogPreviews() (string, error) {
+	return c.consoleFetchChatlogPreviews()
+}
+
+// FetchConversations lists all conversations with message counts.
+func (c *DesktopClient) FetchConversations() (string, error) {
+	return c.consoleFetchConversations()
+}
+
+// ConsolePingJSON pings every connected peer over TCP and returns a
+// structured JSON report. Implements rpc.DiagnosticProvider.
+func (c *DesktopClient) ConsolePingJSON() (string, error) {
+	return c.consolePingJSON()
+}
+
+// ConsolePeersJSON merges the raw peer list with peer health data and
+// categorizes peers into connected/pending/known_only groups.
+// Implements rpc.DiagnosticProvider.
+func (c *DesktopClient) ConsolePeersJSON() (string, error) {
+	return c.consolePeersJSON()
+}
+
+// DesktopVersion returns the desktop application version.
+// Implements rpc.DiagnosticProvider.
+func (c *DesktopClient) DesktopVersion() string {
+	return c.appCfg.Version
+}
+
 func (c *DesktopClient) consolePeersJSON() (string, error) {
 	peersReply, err := c.localRequestFrame(protocol.Frame{Type: "get_peers"})
 	if err != nil {

@@ -24,5 +24,6 @@ USER corsa
 ENV CORSA_LISTEN_ADDRESS=:64646
 VOLUME ["/home/corsa/.corsa"]
 EXPOSE 64646/tcp
+EXPOSE 46464/tcp
 
 ENTRYPOINT ["/usr/local/bin/corsa-node"]

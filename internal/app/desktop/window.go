@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"corsa/internal/core/crashlog"
+	"corsa/internal/core/rpc"
 	"corsa/internal/core/service"
 
 	"gioui.org/app"
@@ -27,12 +28,13 @@ import (
 )
 
 type Window struct {
-	router  *service.DMRouter
-	client  *service.DesktopClient
-	runtime *NodeRuntime
-	prefs   *Preferences
-	theme   *material.Theme
-	ops     op.Ops
+	router    *service.DMRouter
+	client    *service.DesktopClient
+	cmdTable *rpc.CommandTable
+	runtime   *NodeRuntime
+	prefs     *Preferences
+	theme     *material.Theme
+	ops       op.Ops
 
 	recipientEditor      widget.Editor
 	identitySearchEditor widget.Editor
@@ -65,7 +67,7 @@ const (
 	languageMenuHeight  = 316
 )
 
-func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Preferences) *Window {
+func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable *rpc.CommandTable, runtime *NodeRuntime, prefs *Preferences) *Window {
 	theme := material.NewTheme()
 	theme.Bg = color.NRGBA{R: 18, G: 21, B: 26, A: 255}
 	theme.Fg = color.NRGBA{R: 235, G: 239, B: 244, A: 255}
@@ -78,8 +80,9 @@ func NewWindow(client *service.DesktopClient, runtime *NodeRuntime, prefs *Prefe
 	}
 
 	return &Window{
-		router:           service.NewDMRouter(client),
+		router:           router,
 		client:           client,
+		cmdTable:         cmdTable,
 		runtime:          runtime,
 		prefs:            prefs,
 		theme:            theme,
