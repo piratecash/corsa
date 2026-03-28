@@ -158,7 +158,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.handleActions(gtx)
 	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
 
-	inset := layout.UniformInset(unit.Dp(24))
+	inset := layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(12), Left: unit.Dp(12), Right: unit.Dp(12)}
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -311,7 +311,7 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return w.layoutChatCard(gtx, status)
 				}),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 				layout.Rigid(w.layoutComposerCard),
 			)
 		}),
@@ -1243,43 +1243,61 @@ func (w *Window) languageMenuCard(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) card(gtx layout.Context, titleText string, rows []string, extras ...func(layout.Context) layout.Dimensions) layout.Dimensions {
-	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+	// Record the content layout first so we know the actual height,
+	// then draw the background to match. Without this, fill() would
+	// use gtx.Constraints.Max.Y which stretches Rigid cards (like the
+	// composer) to the bottom of the window.
+	macro := op.Record(gtx.Ops)
 
-		inset := layout.UniformInset(unit.Dp(18))
-		return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			children := make([]layout.FlexChild, 0, len(rows)+len(extras)+2)
-			if strings.TrimSpace(titleText) != "" {
-				children = append(children,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						label := material.Label(w.theme, unit.Sp(20), titleText)
-						label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
-						return label.Layout(gtx)
-					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-				)
-			}
-
-			for _, row := range rows {
-				text := row
-				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Body1(w.theme, text)
-					label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+	inset := layout.UniformInset(unit.Dp(18))
+	dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		children := make([]layout.FlexChild, 0, len(rows)+len(extras)+2)
+		if strings.TrimSpace(titleText) != "" {
+			children = append(children,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Label(w.theme, unit.Sp(20), titleText)
+					label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 					return label.Layout(gtx)
-				}))
-				children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
-			}
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+			)
+		}
 
-			for _, extra := range extras {
-				children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
-				children = append(children, layout.Rigid(extra))
-			}
+		for _, row := range rows {
+			text := row
+			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := material.Body1(w.theme, text)
+				label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+				return label.Layout(gtx)
+			}))
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+		}
 
-			return layout.Flex{
-				Axis: layout.Vertical,
-			}.Layout(gtx, children...)
-		})
+		for _, extra := range extras {
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
+			children = append(children, layout.Rigid(extra))
+		}
+
+		return layout.Flex{
+			Axis: layout.Vertical,
+		}.Layout(gtx, children...)
 	})
+
+	contentOps := macro.Stop()
+
+	// Draw the background sized to the actual content (or Max.Y for
+	// Flexed cards like the chat area that should fill available space).
+	bgHeight := dims.Size.Y
+	if gtx.Constraints.Min.Y > bgHeight {
+		bgHeight = gtx.Constraints.Min.Y
+	}
+	bgStack := clip.Rect{Max: image.Pt(gtx.Constraints.Max.X, bgHeight)}.Push(gtx.Ops)
+	paint.ColorOp{Color: color.NRGBA{R: 21, G: 26, B: 34, A: 255}}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	bgStack.Pop()
+
+	contentOps.Add(gtx.Ops)
+	return dims
 }
 
 func fill(gtx layout.Context, c color.NRGBA) {
