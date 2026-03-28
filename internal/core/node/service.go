@@ -54,6 +54,7 @@ type Service struct {
 	peerTypes      map[string]config.NodeType
 	peerIDs        map[string]string
 	peerVersions   map[string]string
+	peerBuilds     map[string]int
 	pending        map[string][]pendingFrame
 	pendingKeys    map[string]struct{}
 	orphaned       map[string][]pendingFrame // legacy fallback-keyed frames that could not be migrated
@@ -371,6 +372,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		peerTypes:      make(map[string]config.NodeType),
 		peerIDs:        make(map[string]string),
 		peerVersions:   make(map[string]string),
+		peerBuilds:     make(map[string]int),
 		pending:        queueState.Pending,
 		pendingKeys:    pendingKeys,
 		orphaned:       queueState.Orphaned,
@@ -1057,6 +1059,7 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		Listener:               listenerFlag(s.cfg.EffectiveListenerEnabled()),
 		NodeType:               string(s.NodeType()),
 		ClientVersion:          s.ClientVersion(),
+		ClientBuild:            config.ClientBuild,
 		Services:               s.Services(),
 		Address:                s.identity.Address,
 		PubKey:                 identity.PublicKeyBase64(s.identity.PublicKey),
@@ -2201,6 +2204,7 @@ func (s *Service) evictStalePeers() {
 				delete(s.peerTypes, peer.Address)
 				delete(s.peerIDs, peer.Address)
 				delete(s.peerVersions, peer.Address)
+				delete(s.peerBuilds, peer.Address)
 				delete(s.persistedMeta, peer.Address)
 				continue
 			}
@@ -3117,6 +3121,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		Listener:      listenerFlag(s.cfg.EffectiveListenerEnabled()),
 		NodeType:      string(s.NodeType()),
 		ClientVersion: s.ClientVersion(),
+		ClientBuild:   config.ClientBuild,
 		Services:      s.Services(),
 		Networks:      reachableGroupNames(s.reachableGroups),
 		Address:       s.identity.Address,
@@ -3140,6 +3145,7 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 			s.promotePeerAddress(normalized, frame.NodeType)
 			s.addPeerID(normalized, frame.Address)
 			s.addPeerVersion(normalized, frame.ClientVersion)
+			s.addPeerBuild(normalized, frame.ClientBuild)
 		}
 	}
 	if frame.Address != "" {
@@ -3223,6 +3229,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 			s.promotePeerAddress(normalized, frame.NodeType)
 			s.addPeerID(normalized, frame.Address)
 			s.addPeerVersion(normalized, frame.ClientVersion)
+			s.addPeerBuild(normalized, frame.ClientBuild)
 		}
 	}
 	if frame.Address != "" {
@@ -3482,6 +3489,17 @@ func (s *Service) addPeerVersion(address, clientVersion string) {
 
 	s.mu.Lock()
 	s.peerVersions[address] = clientVersion
+	s.mu.Unlock()
+}
+
+func (s *Service) addPeerBuild(address string, build int) {
+	address = strings.TrimSpace(address)
+	if address == "" || build == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	s.peerBuilds[address] = build
 	s.mu.Unlock()
 }
 
@@ -4009,6 +4027,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			Address:             health.Address,
 			Network:             classifyAddress(health.Address).String(),
 			ClientVersion:       s.peerVersions[health.Address],
+			ClientBuild:         s.peerBuilds[health.Address],
 			State:               s.computePeerStateLocked(health),
 			Connected:           health.Connected,
 			PendingCount:        len(s.pending[health.Address]),
@@ -4036,6 +4055,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			Address:       addr,
 			Network:       classifyAddress(addr).String(),
 			ClientVersion: s.peerVersions[addr],
+			ClientBuild:   s.peerBuilds[addr],
 			State:         peerStateHealthy,
 			Connected:     true,
 			BytesSent:     lv.sent,

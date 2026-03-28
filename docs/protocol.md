@@ -119,7 +119,8 @@ Primary JSON desktop request:
   "type": "hello",
   "version": 2,
   "client": "desktop",
-  "client_version": "<corsa-version-wire>"
+  "client_version": "<corsa-version-wire>",
+  "client_build": 19
 }
 ```
 
@@ -129,6 +130,7 @@ Fields:
 - `version` — required; sender protocol version
 - `client` — required; caller kind such as `desktop` or `node`
 - `client_version` — optional; app/client build version in wire form
+- `client_build` — optional; monotonically increasing integer build number; peers compare this value to detect newer software releases
 
 Primary JSON node-to-node request:
 
@@ -141,6 +143,7 @@ Primary JSON node-to-node request:
   "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
+  "client_build": 19,
   "services": [
     "identity",
     "contacts",
@@ -166,6 +169,7 @@ Fields:
 - when `listener="0"`, the node identity may still be known to the network, but it must not be used as a dialable peer endpoint
 - `node_type` — optional; node role, currently `full` or `client`
 - `client_version` — optional; node software version
+- `client_build` — optional; monotonically increasing integer build number; peers compare this value to detect newer software releases
 - `services` — optional; declared capabilities supported by the node
 - `networks` — optional; self-declared list of reachable network groups (e.g. `["ipv4","ipv6","torv3"]`); the remote node validates the declaration against the advertised address — overlay claims are accepted only when the address confirms the overlay; when absent, reachability is inferred from the advertised address
 - `address` — optional; node identity fingerprint
@@ -186,6 +190,7 @@ Response:
   "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
+  "client_build": 19,
   "services": [
     "identity",
     "contacts",
@@ -212,6 +217,7 @@ Fields:
 - `listen` — optional; dialable peer endpoint only when `listener="1"`
 - `node_type` — optional; responder role
 - `client_version` — optional; responder software version
+- `client_build` — optional; monotonically increasing integer build number; peers compare this value to detect newer software releases
 - `services` — optional; responder capabilities
 - `address` — optional; responder fingerprint identity
 - `pubkey` — optional; responder identity key
@@ -362,6 +368,8 @@ Fields:
 - `count` — required; number of peer health rows
 - `peer_health` — required; per-peer health snapshots
 - `peer_health[].address` — required; peer endpoint
+- `peer_health[].client_version` — optional; peer software version string
+- `peer_health[].client_build` — optional; peer build number; compare with own `ClientBuild` to detect newer releases
 - `peer_health[].state` — required; `healthy`, `degraded`, `stalled`, or `reconnecting`
 - `peer_health[].connected` — required; whether a live session currently exists
 - `peer_health[].pending_count` — optional; number of queued outbound frames waiting for reconnect
@@ -1232,7 +1240,8 @@ Orphaned фреймы сохраняются между рестартами в 
   "type": "hello",
   "version": 2,
   "client": "desktop",
-  "client_version": "<corsa-version-wire>"
+  "client_version": "<corsa-version-wire>",
+  "client_build": 19
 }
 ```
 
@@ -1242,6 +1251,7 @@ Orphaned фреймы сохраняются между рестартами в 
 - `version` — обязательное; текущая версия протокола у отправителя
 - `client` — обязательное; тип вызывающей стороны, например `desktop` или `node`
 - `client_version` — опциональное; версия приложения в wire-форме
+- `client_build` — опциональное; монотонно возрастающий целочисленный номер сборки; пиры сравнивают это значение для обнаружения новых версий ПО
 
 Основной JSON-запрос node-to-node:
 
@@ -1254,6 +1264,7 @@ Orphaned фреймы сохраняются между рестартами в 
   "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
+  "client_build": 19,
   "services": [
     "identity",
     "contacts",
@@ -1279,6 +1290,7 @@ Orphaned фреймы сохраняются между рестартами в 
 - при `listener="0"` identity узла может быть известен сети, но он не должен использоваться как dialable peer endpoint
 - `node_type` — опциональное; роль узла, сейчас `full` или `client`
 - `client_version` — опциональное; версия ПО узла
+- `client_build` — опциональное; монотонно возрастающий целочисленный номер сборки; пиры сравнивают это значение для обнаружения новых версий ПО
 - `services` — опциональное; список capabilities, которые поддерживает узел
 - `networks` — опциональное; список доступных сетевых групп (например `["ipv4","ipv6","torv3"]`); удалённый узел валидирует декларацию по advertised-адресу — overlay-заявки принимаются только если адрес подтверждает overlay; при отсутствии достижимость выводится из advertised-адреса
 - `address` — опциональное; fingerprint identity этого узла
@@ -1299,6 +1311,7 @@ Orphaned фреймы сохраняются между рестартами в 
   "listen": "<your-public-ip>:64646",
   "node_type": "full",
   "client_version": "<corsa-version-wire>",
+  "client_build": 19,
   "services": [
     "identity",
     "contacts",
@@ -1325,6 +1338,7 @@ Orphaned фреймы сохраняются между рестартами в 
 - `listen` — опциональное; dialable peer endpoint только если `listener="1"`
 - `node_type` — опциональное; роль отвечающего узла
 - `client_version` — опциональное; версия ПО отвечающего узла
+- `client_build` — опциональное; монотонно возрастающий целочисленный номер сборки; пиры сравнивают это значение для обнаружения новых версий ПО
 - `services` — опциональное; capabilities отвечающего узла
 - `address` — опциональное; fingerprint identity отвечающего узла
 - `pubkey` — опциональное; identity key узла
@@ -1475,6 +1489,8 @@ Observed address (обнаружение NAT):
 - `count` — обязательное; число строк состояния пиров
 - `peer_health` — обязательное; snapshots состояния по каждому peer
 - `peer_health[].address` — обязательное; endpoint пира
+- `peer_health[].client_version` — опциональное; строковая версия ПО пира
+- `peer_health[].client_build` — опциональное; номер сборки пира; сравнивается с собственным `ClientBuild` для обнаружения новых релизов
 - `peer_health[].state` — обязательное; `healthy`, `degraded`, `stalled` или `reconnecting`
 - `peer_health[].connected` — обязательное; есть ли сейчас живая session
 - `peer_health[].pending_count` — опциональное; сколько outbound frames ждут восстановления session

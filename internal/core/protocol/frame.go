@@ -16,6 +16,7 @@ type Frame struct {
 	Listener               string                `json:"listener,omitempty"`
 	NodeType               string                `json:"node_type,omitempty"`
 	ClientVersion          string                `json:"client_version,omitempty"`
+	ClientBuild            int                   `json:"client_build,omitempty"`
 	Services               []string              `json:"services,omitempty"`
 	Networks               []string              `json:"networks,omitempty"` // self-declared reachable network groups (hello frame)
 	Address                string                `json:"address,omitempty"`
@@ -97,6 +98,7 @@ type PeerHealthFrame struct {
 	Address             string `json:"address"`
 	Network             string `json:"network,omitempty"`
 	ClientVersion       string `json:"client_version,omitempty"`
+	ClientBuild         int    `json:"client_build,omitempty"`
 	State               string `json:"state"`
 	Connected           bool   `json:"connected"`
 	PendingCount        int    `json:"pending_count,omitempty"`

@@ -624,6 +624,40 @@ func TestFetchPeerHealthShowsEstablishedSession(t *testing.T) {
 	}
 }
 
+func TestPeerHealthRetainsClientBuild(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+	})
+	defer stopA()
+
+	_, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+	})
+	defer stopB()
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+		return reply.Type == "peer_health" && reply.Count > 0
+	})
+
+	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if reply.Type != "peer_health" || reply.Count == 0 {
+		t.Fatalf("expected peer_health with items, got %#v", reply)
+	}
+	if reply.PeerHealth[0].ClientBuild != config.ClientBuild {
+		t.Errorf("expected ClientBuild=%d from peer, got %d", config.ClientBuild, reply.PeerHealth[0].ClientBuild)
+	}
+}
+
 // validPeerStates is the set of peer states recognized by the protocol,
 // UI, and i18n layers. Any state outside this set is a semantic bug.
 var validPeerStates = map[string]bool{

@@ -443,6 +443,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 			{
 				Address:             "198.51.100.1:64646",
 				ClientVersion:       "0.11-alpha",
+				ClientBuild:         17,
 				State:               "healthy",
 				Connected:           true,
 				PendingCount:        2,
@@ -466,6 +467,7 @@ func TestPeerHealthFromFrame(t *testing.T) {
 	want := PeerHealth{
 		Address:             "198.51.100.1:64646",
 		ClientVersion:       "0.11-alpha",
+		ClientBuild:         17,
 		State:               "healthy",
 		Connected:           true,
 		PendingCount:        2,
@@ -544,7 +546,7 @@ func TestParseConsoleCommandHello(t *testing.T) {
 	if output != "" {
 		t.Fatalf("expected empty inline output, got %q", output)
 	}
-	if frame.Type != "hello" || frame.Version != config.ProtocolVersion || frame.Client != "desktop" || frame.ClientVersion != "desktop-test" {
+	if frame.Type != "hello" || frame.Version != config.ProtocolVersion || frame.Client != "desktop" || frame.ClientVersion != "desktop-test" || frame.ClientBuild != config.ClientBuild {
 		t.Fatalf("unexpected hello frame: %#v", frame)
 	}
 }
@@ -657,6 +659,47 @@ func TestBuildConsolePeersPayloadIncludesHealthOnlyPeers(t *testing.T) {
 		if result.Peers[i].Address != want {
 			t.Errorf("peers[%d]: expected address %q, got %q (health-only peers must be sorted)", i, want, result.Peers[i].Address)
 		}
+	}
+}
+
+func TestBuildConsolePeersPayloadIncludesClientBuild(t *testing.T) {
+	t.Parallel()
+
+	payload := buildConsolePeersPayload(
+		[]string{"a:1", "b:2"},
+		[]PeerHealth{
+			{Address: "a:1", ClientVersion: "0.19-alpha", ClientBuild: 19, State: "healthy", Connected: true},
+			{Address: "b:2", ClientVersion: "", ClientBuild: 0, State: "healthy", Connected: true},
+		},
+	)
+
+	type peersPayload struct {
+		Peers []ConsolePeerStatus `json:"peers"`
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	var result peersPayload
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+
+	if len(result.Peers) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(result.Peers))
+	}
+
+	if result.Peers[0].ClientVersion != "0.19-alpha" {
+		t.Errorf("peers[0]: expected client_version='0.19-alpha', got %q", result.Peers[0].ClientVersion)
+	}
+	if result.Peers[0].ClientBuild != 19 {
+		t.Errorf("peers[0]: expected client_build=19, got %d", result.Peers[0].ClientBuild)
+	}
+	if result.Peers[1].ClientVersion != "" {
+		t.Errorf("peers[1]: expected empty client_version, got %q", result.Peers[1].ClientVersion)
+	}
+	if result.Peers[1].ClientBuild != 0 {
+		t.Errorf("peers[1]: expected client_build=0, got %d", result.Peers[1].ClientBuild)
 	}
 }
 

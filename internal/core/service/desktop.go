@@ -59,6 +59,7 @@ type DeliveryReceipt struct {
 type PeerHealth struct {
 	Address             string
 	ClientVersion       string
+	ClientBuild         int
 	State               string
 	Connected           bool
 	PendingCount        int
@@ -114,6 +115,8 @@ type PendingMessage struct {
 type ConsolePeerStatus struct {
 	Address       string `json:"address"`
 	Network       string `json:"network,omitempty"`
+	ClientVersion string `json:"client_version"`
+	ClientBuild   int    `json:"client_build"`
 	State         string `json:"state"`
 	Connected     bool   `json:"connected"`
 	PendingCount  int    `json:"pending_count,omitempty"`
@@ -306,6 +309,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		Version:       config.ProtocolVersion,
 		Client:        "desktop",
 		ClientVersion: strings.ReplaceAll(c.appCfg.Version, " ", "-"),
+		ClientBuild:   config.ClientBuild,
 	})
 	if err != nil {
 		status.Error = err.Error()
@@ -437,6 +441,7 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 		items = append(items, PeerHealth{
 			Address:             item.Address,
 			ClientVersion:       item.ClientVersion,
+			ClientBuild:         item.ClientBuild,
 			State:               item.State,
 			Connected:           item.Connected,
 			PendingCount:        item.PendingCount,
@@ -773,6 +778,8 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		status := ConsolePeerStatus{
 			Address:       address,
 			Network:       node.ClassifyAddress(address).String(),
+			ClientVersion: item.ClientVersion,
+			ClientBuild:   item.ClientBuild,
 			State:         "known",
 			Connected:     item.Connected,
 			PendingCount:  item.PendingCount,
@@ -809,6 +816,8 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		status := ConsolePeerStatus{
 			Address:       addr,
 			Network:       node.ClassifyAddress(addr).String(),
+			ClientVersion: item.ClientVersion,
+			ClientBuild:   item.ClientBuild,
 			State:         item.State,
 			Connected:     item.Connected,
 			PendingCount:  item.PendingCount,
@@ -875,6 +884,7 @@ func parseConsoleCommand(input, selfAddress, clientVersion string) (protocol.Fra
 			Version:       config.ProtocolVersion,
 			Client:        "desktop",
 			ClientVersion: strings.ReplaceAll(clientVersion, " ", "-"),
+			ClientBuild:   config.ClientBuild,
 		}, "", nil
 	case "add_peer":
 		if len(fields) < 2 {
@@ -1234,6 +1244,7 @@ func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind s
 		Version:       config.ProtocolVersion,
 		Client:        clientKind,
 		ClientVersion: strings.ReplaceAll(c.appCfg.Version, " ", "-"),
+		ClientBuild:   config.ClientBuild,
 		Address:       c.id.Address,
 		PubKey:        identity.PublicKeyBase64(c.id.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(c.id.BoxPublicKey),
