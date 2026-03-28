@@ -5,11 +5,14 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
+	"corsa/internal/core/config"
 	"corsa/internal/core/crashlog"
 	"corsa/internal/core/rpc"
 	"corsa/internal/core/service"
@@ -42,6 +45,7 @@ type Window struct {
 	contactsList         widget.List
 	chatList             widget.List
 	consoleButton        widget.Clickable
+	updateButton         widget.Clickable
 	sendButton           widget.Clickable
 	copyIdentityButton   widget.Clickable
 	languageToggle       widget.Clickable
@@ -108,7 +112,7 @@ func (w *Window) Run() error {
 		window := new(app.Window)
 		w.window = window
 		window.Option(
-			app.Title(w.t("app.title")),
+			app.Title(w.t("app.title")+" — "+w.t("app.subtitle")),
 			app.Size(unit.Dp(1100), unit.Dp(1100)),
 		)
 
@@ -158,7 +162,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.handleActions(gtx)
 	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
 
-	inset := layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(12), Left: unit.Dp(12), Right: unit.Dp(12)}
+	inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -166,7 +170,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 					Axis: layout.Vertical,
 				}.Layout(gtx,
 					layout.Rigid(w.layoutHeader),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Flexed(1, w.layoutMain),
 				)
 			})
@@ -202,6 +206,10 @@ func (w *Window) handleActions(gtx layout.Context) {
 
 	for w.consoleButton.Clicked(gtx) {
 		w.openConsoleWindow()
+	}
+
+	for w.updateButton.Clicked(gtx) {
+		openBrowser("https://github.com/piratecash/corsa/releases")
 	}
 
 	for w.sendButton.Clicked(gtx) {
@@ -256,11 +264,9 @@ func (w *Window) triggerSend() {
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
-	title := material.H3(w.theme, w.t("app.title"))
+	title := material.Label(w.theme, unit.Sp(24), w.t("app.title"))
 	title.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
-
-	subtitle := material.Body1(w.theme, w.t("app.subtitle"))
-	subtitle.Color = color.NRGBA{R: 144, G: 156, B: 173, A: 255}
+	title.Font.Weight = 700
 
 	return layout.Flex{
 		Axis:      layout.Horizontal,
@@ -268,23 +274,18 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 		Alignment: layout.Middle,
 	}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{
-				Axis: layout.Vertical,
-			}.Layout(gtx,
-				layout.Rigid(title.Layout),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-				layout.Rigid(subtitle.Layout),
-			)
+			return title.Layout(gtx)
 		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{
 				Axis:      layout.Horizontal,
 				Alignment: layout.Middle,
-				Spacing:   layout.SpaceBetween,
 			}.Layout(gtx,
+				layout.Rigid(w.layoutUpdateBadge),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 				layout.Rigid(w.layoutConsoleButton),
-				layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 				layout.Rigid(w.layoutLanguageSelectorInline),
 			)
 		}),
@@ -301,17 +302,37 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 		Spacing: layout.SpaceBetween,
 	}.Layout(gtx,
 		layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
-			return w.layoutContactsCard(gtx, status, recipients)
+			return layout.Flex{
+				Axis: layout.Vertical,
+			}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(w.theme, unit.Sp(15), w.t("app.subtitle"))
+					lbl.Color = color.NRGBA{R: 144, G: 156, B: 173, A: 255}
+					return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, lbl.Layout)
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return w.layoutContactsCard(gtx, status, recipients)
+				}),
+			)
 		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{
 				Axis: layout.Vertical,
 			}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					recipient := w.snap.ActivePeer
+					if recipient == "" {
+						return layout.Dimensions{}
+					}
+					lbl := material.Label(w.theme, unit.Sp(15), w.t("chat.with", shortFingerprint(recipient)))
+					lbl.Color = color.NRGBA{R: 200, G: 212, B: 228, A: 255}
+					lbl.Font.Weight = 600
+					return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, lbl.Layout)
+				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return w.layoutChatCard(gtx, status)
 				}),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 				layout.Rigid(w.layoutComposerCard),
 			)
 		}),
@@ -473,26 +494,23 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 
 func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
 	recipient := w.snap.ActivePeer
-	title := w.t("chat.title")
 	var rows []string
 
 	if recipient == "" {
 		rows = append(rows, w.t("chat.choose"))
-		return w.card(gtx, title, rows)
+		return w.card(gtx, w.t("chat.title"), rows)
 	}
-
-	title = w.t("chat.with", shortFingerprint(recipient))
 
 	conversation := w.snap.ActiveMessages
 	if len(conversation) == 0 {
 		if !w.snap.CacheReady {
-			return w.layoutLoadingCard(gtx, title)
+			return w.layoutLoadingCard(gtx, "")
 		}
 		rows = append(rows, w.t("chat.empty"))
-		return w.card(gtx, title, rows)
+		return w.card(gtx, "", rows)
 	}
 
-	return w.card(gtx, title, rows, func(gtx layout.Context) layout.Dimensions {
+	return w.card(gtx, "", rows, func(gtx layout.Context) layout.Dimensions {
 		return w.layoutConversation(gtx, recipient, conversation)
 	})
 }
@@ -501,7 +519,7 @@ func (w *Window) layoutLoadingCard(gtx layout.Context, title string) layout.Dime
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 
-		inset := layout.UniformInset(unit.Dp(18))
+		inset := layout.UniformInset(unit.Dp(8))
 		return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{
 				Axis: layout.Vertical,
@@ -542,37 +560,31 @@ func (w *Window) layoutLoadingCard(gtx layout.Context, title string) layout.Dime
 func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 	recipient := w.snap.ActivePeer
 	status := w.snap.NodeStatus
-	rows := []string{
-		w.snap.SendStatus,
+
+	var rows []string
+	if sendStatus := w.snap.SendStatus; sendStatus != "" {
+		rows = append(rows, sendStatus)
 	}
 
-	if recipient == "" {
-		rows = append(rows, w.t("compose.recipient.select"))
-	} else {
-		rows = append(rows, w.t("compose.recipient.value", recipient))
-	}
-
-	return w.card(gtx, w.t("compose.title"), rows, func(gtx layout.Context) layout.Dimensions {
+	return w.card(gtx, "", rows, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{
 			Axis: layout.Vertical,
 		}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.messageInputCard(gtx)
 			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{
 					Axis:      layout.Horizontal,
 					Spacing:   layout.SpaceBetween,
 					Alignment: layout.Middle,
 				}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return w.layoutNetworkStatus(gtx, status)
+					}),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 						return layout.Dimensions{}
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							return w.layoutNetworkStatus(gtx, status)
-						})
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						label := w.t("compose.send")
@@ -601,7 +613,7 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 	bg, fg := networkStateColors(state)
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		inset := layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(12), Right: unit.Dp(12)}
+		inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(8), Right: unit.Dp(8)}
 		macro := op.Record(gtx.Ops)
 		dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -739,7 +751,7 @@ func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 		return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			fill(gtx, backgroundColor)
 
-			inset := layout.UniformInset(unit.Dp(14))
+			inset := layout.UniformInset(unit.Dp(8))
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{
 					Axis: layout.Vertical,
@@ -749,7 +761,7 @@ func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 						label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
 						return label.Layout(gtx)
 					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						w.messageEditor.SingleLine = false
 						editor := material.Editor(w.theme, &w.messageEditor, w.t("compose.placeholder"))
@@ -1131,6 +1143,39 @@ func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
 	return btn.Layout(gtx)
 }
 
+func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
+	if !w.hasNewerPeerBuild() {
+		return layout.Dimensions{}
+	}
+	btn := material.Button(w.theme, &w.updateButton, w.t("header.update"))
+	btn.Background = color.NRGBA{R: 230, G: 126, B: 34, A: 255}
+	btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	return btn.Layout(gtx)
+}
+
+func (w *Window) hasNewerPeerBuild() bool {
+	myBuild := config.ClientBuild
+	for _, ph := range w.snap.NodeStatus.PeerHealth {
+		if ph.ClientBuild > myBuild {
+			return true
+		}
+	}
+	return false
+}
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	_ = cmd.Start()
+}
+
 func (w *Window) openConsoleWindow() {
 	w.consoleMu.Lock()
 	if w.consoleOpen {
@@ -1254,32 +1299,32 @@ func (w *Window) card(gtx layout.Context, titleText string, rows []string, extra
 	// composer) to the bottom of the window.
 	macro := op.Record(gtx.Ops)
 
-	inset := layout.UniformInset(unit.Dp(18))
+	inset := layout.UniformInset(unit.Dp(8))
 	dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		children := make([]layout.FlexChild, 0, len(rows)+len(extras)+2)
 		if strings.TrimSpace(titleText) != "" {
 			children = append(children,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Label(w.theme, unit.Sp(20), titleText)
+					label := material.Label(w.theme, unit.Sp(16), titleText)
 					label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 					return label.Layout(gtx)
 				}),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 			)
 		}
 
 		for _, row := range rows {
 			text := row
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				label := material.Body1(w.theme, text)
+				label := material.Body2(w.theme, text)
 				label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 				return label.Layout(gtx)
 			}))
-			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout))
 		}
 
 		for _, extra := range extras {
-			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout))
 			children = append(children, layout.Rigid(extra))
 		}
 
