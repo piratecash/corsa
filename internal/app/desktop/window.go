@@ -951,7 +951,7 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 
 	borderColor := color.NRGBA{R: 55, G: 68, B: 86, A: 255}
 	authorColor := color.NRGBA{R: 162, G: 176, B: 196, A: 255}
-	statusColor := color.NRGBA{R: 142, G: 178, B: 230, A: 255}
+	statusColor := color.NRGBA{R: 110, G: 130, B: 160, A: 180}
 	if isMine {
 		borderColor = color.NRGBA{R: 74, G: 109, B: 176, A: 255}
 		authorColor = color.NRGBA{R: 173, G: 205, B: 255, A: 255}
@@ -964,7 +964,6 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{
 						Axis:      layout.Horizontal,
-						Spacing:   layout.SpaceBetween,
 						Alignment: layout.Middle,
 					}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -972,12 +971,10 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 							label.Color = authorColor
 							return label.Layout(gtx)
 						}),
-						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							return layout.Dimensions{}
-						}),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							label := material.Caption(w.theme, message.Timestamp.Format("15:04"))
-							label.Color = color.NRGBA{R: 132, G: 144, B: 160, A: 255}
+							label := material.Caption(w.theme, message.Timestamp.Local().Format("15:04"))
+							label.Color = color.NRGBA{R: 160, G: 185, B: 220, A: 255}
 							return label.Layout(gtx)
 						}),
 					)
@@ -997,15 +994,15 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 						statusText := ""
 						switch {
 						case message.ReceiptStatus == "seen" && message.DeliveredAt != nil:
-							statusText = "✓✓ " + message.DeliveredAt.Format("15:04")
+							statusText = "✓✓ " + message.DeliveredAt.Local().Format("15:04")
 						case message.ReceiptStatus == "seen":
 							statusText = "✓✓"
 						case message.ReceiptStatus == "delivered" && message.DeliveredAt != nil:
-							statusText = "✓ " + message.DeliveredAt.Format("15:04")
+							statusText = "✓ " + message.DeliveredAt.Local().Format("15:04")
 						case message.ReceiptStatus == "delivered":
 							statusText = "✓"
 						case message.DeliveredAt != nil:
-							statusText = "✓ " + message.DeliveredAt.Format("15:04")
+							statusText = "✓ " + message.DeliveredAt.Local().Format("15:04")
 						case message.ReceiptStatus == "queued":
 							statusText = w.t("chat.status.queued")
 						case message.ReceiptStatus == "retrying":
