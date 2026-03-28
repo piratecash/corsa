@@ -58,6 +58,7 @@ type DeliveryReceipt struct {
 
 type PeerHealth struct {
 	Address             string
+	Direction           string
 	ClientVersion       string
 	ClientBuild         int
 	State               string
@@ -115,6 +116,7 @@ type PendingMessage struct {
 type ConsolePeerStatus struct {
 	Address       string `json:"address"`
 	Network       string `json:"network,omitempty"`
+	Direction     string `json:"direction,omitempty"`
 	ClientVersion string `json:"client_version"`
 	ClientBuild   int    `json:"client_build"`
 	State         string `json:"state"`
@@ -440,6 +442,7 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 	for _, item := range frame.PeerHealth {
 		items = append(items, PeerHealth{
 			Address:             item.Address,
+			Direction:           item.Direction,
 			ClientVersion:       item.ClientVersion,
 			ClientBuild:         item.ClientBuild,
 			State:               item.State,
@@ -778,6 +781,7 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		status := ConsolePeerStatus{
 			Address:       address,
 			Network:       node.ClassifyAddress(address).String(),
+			Direction:     item.Direction,
 			ClientVersion: item.ClientVersion,
 			ClientBuild:   item.ClientBuild,
 			State:         "known",
@@ -816,6 +820,7 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		status := ConsolePeerStatus{
 			Address:       addr,
 			Network:       node.ClassifyAddress(addr).String(),
+			Direction:     item.Direction,
 			ClientVersion: item.ClientVersion,
 			ClientBuild:   item.ClientBuild,
 			State:         item.State,

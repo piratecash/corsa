@@ -644,17 +644,37 @@ func TestPeerHealthRetainsClientBuild(t *testing.T) {
 	})
 	defer stopB()
 
+	// Wait until the outbound session completes and the build is
+	// propagated via learnIdentityFromWelcome / learnPeerFromFrame.
+	// A health entry may exist earlier from a failed dial attempt
+	// (before nodeB is listening), so we must wait for the build
+	// specifically — not just for Count > 0.
+	var reply protocol.Frame
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
-		return reply.Type == "peer_health" && reply.Count > 0
+		reply = nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+		if reply.Type != "peer_health" || reply.Count == 0 {
+			return false
+		}
+		for _, ph := range reply.PeerHealth {
+			if ph.ClientBuild == config.ClientBuild {
+				return true
+			}
+		}
+		return false
 	})
 
-	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
 	if reply.Type != "peer_health" || reply.Count == 0 {
 		t.Fatalf("expected peer_health with items, got %#v", reply)
 	}
-	if reply.PeerHealth[0].ClientBuild != config.ClientBuild {
-		t.Errorf("expected ClientBuild=%d from peer, got %d", config.ClientBuild, reply.PeerHealth[0].ClientBuild)
+	found := false
+	for _, ph := range reply.PeerHealth {
+		if ph.ClientBuild == config.ClientBuild {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected at least one peer with ClientBuild=%d, got %+v", config.ClientBuild, reply.PeerHealth)
 	}
 }
 
@@ -2685,7 +2705,7 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 	// Add peers and mark one as connected.
 	svc1.addPeerAddress("10.0.0.5:64646", "full", "")
 	svc1.addPeerAddress("10.0.0.6:64646", "full", "")
-	svc1.markPeerConnected("10.0.0.5:64646")
+	svc1.markPeerConnected("10.0.0.5:64646", "outbound")
 	svc1.markPeerDisconnected("10.0.0.6:64646", fmt.Errorf("refused"))
 
 	stop1() // triggers flush via bootstrapLoop shutdown
@@ -2954,9 +2974,9 @@ func TestPeerDialCandidatesSortedByScore(t *testing.T) {
 	svc.addPeerAddress("10.0.0.3:64646", "full", "peer-3")
 
 	// Simulate scoring: peer-2 is best, peer-3 is worst.
-	svc.markPeerConnected("10.0.0.2:64646") // +10
-	svc.markPeerConnected("10.0.0.2:64646") // +10 (total 20)
-	svc.markPeerConnected("10.0.0.1:64646") // +10 (total 10)
+	svc.markPeerConnected("10.0.0.2:64646", "outbound") // +10
+	svc.markPeerConnected("10.0.0.2:64646", "outbound") // +10 (total 20)
+	svc.markPeerConnected("10.0.0.1:64646", "outbound") // +10 (total 10)
 	svc.markPeerDisconnected("10.0.0.1:64646", nil) // clean (-2, total 8)
 	svc.markPeerDisconnected("10.0.0.2:64646", nil) // clean (-2, total 18)
 
@@ -3291,7 +3311,7 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 	}
 
 	// Now markPeerConnected on fallback should also go to primary.
-	svc.markPeerConnected("10.0.0.1:64646")
+	svc.markPeerConnected("10.0.0.1:64646", "outbound")
 
 	svc.mu.RLock()
 	primaryHealth = svc.health["10.0.0.1:64647"]
@@ -3359,7 +3379,7 @@ func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
 	svc.dialOrigin[fallbackAddr] = "10.0.0.1:64647"
 	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr}
 	svc.mu.Unlock()
-	svc.markPeerConnected(fallbackAddr)
+	svc.markPeerConnected(fallbackAddr, "outbound")
 
 	// routingTargets() filters out client peers. Since 10.0.0.1:64647 is
 	// a client, the fallback session should NOT appear in routing targets.
@@ -5756,4 +5776,349 @@ func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
 
 	// Clean up maps.
 	svc.unregisterInboundConn(server)
+}
+
+// TestMarkPeerConnectedSetsDirection verifies that markPeerConnected records
+// the connection direction (outbound vs inbound) in the health entry.
+func TestMarkPeerConnectedSetsDirection(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	svc.markPeerConnected("10.0.0.1:64646", peerDirectionOutbound)
+
+	svc.mu.RLock()
+	h := svc.health["10.0.0.1:64646"]
+	svc.mu.RUnlock()
+
+	if h == nil {
+		t.Fatal("expected health entry")
+	}
+	if h.Direction != peerDirectionOutbound {
+		t.Fatalf("expected direction %q, got %q", peerDirectionOutbound, h.Direction)
+	}
+
+	// Inbound connection records inbound direction.
+	svc.markPeerConnected("10.0.0.2:64646", peerDirectionInbound)
+
+	svc.mu.RLock()
+	h2 := svc.health["10.0.0.2:64646"]
+	svc.mu.RUnlock()
+
+	if h2 == nil {
+		t.Fatal("expected health entry for inbound peer")
+	}
+	if h2.Direction != peerDirectionInbound {
+		t.Fatalf("expected direction %q, got %q", peerDirectionInbound, h2.Direction)
+	}
+}
+
+// TestMarkPeerDisconnectedClearsDirection verifies that markPeerDisconnected
+// resets the direction field to empty.
+func TestMarkPeerDisconnectedClearsDirection(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	svc.markPeerConnected("10.0.0.1:64646", peerDirectionOutbound)
+	svc.markPeerDisconnected("10.0.0.1:64646", nil)
+
+	svc.mu.RLock()
+	h := svc.health["10.0.0.1:64646"]
+	svc.mu.RUnlock()
+
+	if h == nil {
+		t.Fatal("expected health entry")
+	}
+	if h.Direction != "" {
+		t.Fatalf("expected empty direction after disconnect, got %q", h.Direction)
+	}
+}
+
+// TestConnectedHostsLocked verifies that connectedHostsLocked collects
+// host IPs from both outbound sessions and inbound connections.
+// Inbound hosts are derived from the actual TCP remote address (not the
+// self-reported overlay address) to correctly handle NATed peers.
+func TestConnectedHostsLocked(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Create a real TCP connection so conn.RemoteAddr() returns a real IP.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			connCh <- c
+		}
+	}()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	server := <-connCh
+	defer func() { _ = server.Close() }()
+
+	svc.mu.Lock()
+	// Simulate an outbound upstream session.
+	svc.upstream["10.0.0.1:64646"] = struct{}{}
+	// Register the real TCP connection as inbound.
+	svc.inboundConns[server] = struct{}{}
+
+	hosts := svc.connectedHostsLocked()
+	svc.mu.Unlock()
+
+	if _, ok := hosts["10.0.0.1"]; !ok {
+		t.Error("expected outbound host 10.0.0.1 in connectedHosts")
+	}
+	// The inbound connection's remote address is 127.0.0.1 (the client side).
+	if _, ok := hosts["127.0.0.1"]; !ok {
+		t.Error("expected inbound host 127.0.0.1 in connectedHosts")
+	}
+}
+
+// TestDialCandidatesSkipsConnectedInboundHost verifies that peerDialCandidates
+// excludes peers whose host already has an active inbound connection.
+// The dedup uses the real TCP remote IP, so a loopback peer (127.0.0.1)
+// is used here to simulate the inbound connection.
+func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Add two peers: one whose host matches the inbound connection's
+	// real remote IP (127.0.0.1), and one that doesn't.
+	svc.addPeerAddress("127.0.0.1:64646", "full", "test")
+	svc.addPeerAddress("10.0.0.3:64646", "full", "test")
+
+	// Create a real TCP connection so conn.RemoteAddr() returns 127.0.0.1.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			connCh <- c
+		}
+	}()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	server := <-connCh
+	defer func() { _ = server.Close() }()
+
+	svc.mu.Lock()
+	svc.inboundConns[server] = struct{}{}
+	svc.mu.Unlock()
+
+	candidates := svc.peerDialCandidates()
+	addrs := candidateAddresses(candidates)
+
+	for _, addr := range addrs {
+		host, _, _ := net.SplitHostPort(addr)
+		if host == "127.0.0.1" {
+			t.Fatalf("expected host 127.0.0.1 to be skipped due to active inbound connection, but found candidate %q", addr)
+		}
+	}
+
+	// 10.0.0.3 should still be a candidate.
+	found := false
+	for _, addr := range addrs {
+		host, _, _ := net.SplitHostPort(addr)
+		if host == "10.0.0.3" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected 10.0.0.3 to remain as dial candidate")
+	}
+}
+
+// TestInboundPeerHealthIncludesDirection verifies that peerHealthFrames
+// returns the direction field for outbound and inbound peers.
+func TestInboundPeerHealthIncludesDirection(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	svc.markPeerConnected("10.0.0.1:64646", peerDirectionOutbound)
+	svc.markPeerConnected("10.0.0.2:64646", peerDirectionInbound)
+
+	frames := svc.peerHealthFrames()
+
+	dirByAddr := make(map[string]string, len(frames))
+	for _, f := range frames {
+		dirByAddr[f.Address] = f.Direction
+	}
+
+	if dirByAddr["10.0.0.1:64646"] != peerDirectionOutbound {
+		t.Errorf("expected outbound direction for 10.0.0.1:64646, got %q", dirByAddr["10.0.0.1:64646"])
+	}
+	if dirByAddr["10.0.0.2:64646"] != peerDirectionInbound {
+		t.Errorf("expected inbound direction for 10.0.0.2:64646, got %q", dirByAddr["10.0.0.2:64646"])
+	}
+}
+
+// TestInboundRefCountKeepsHealthAlive verifies that closing one inbound
+// connection does not mark the peer disconnected when another inbound
+// connection to the same address remains active.
+func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	peer := "10.0.0.5:64646"
+
+	// Two inbound connections to the same peer.
+	svc.trackInboundConnect(peer)
+	svc.trackInboundConnect(peer)
+
+	// Peer should be connected.
+	svc.mu.RLock()
+	h := svc.health[peer]
+	svc.mu.RUnlock()
+
+	if h == nil || !h.Connected {
+		t.Fatal("expected peer to be connected after two inbound connects")
+	}
+
+	// Close the first connection — peer should remain connected.
+	svc.trackInboundDisconnect(peer)
+
+	svc.mu.RLock()
+	h = svc.health[peer]
+	connected := h != nil && h.Connected
+	dir := ""
+	if h != nil {
+		dir = h.Direction
+	}
+	svc.mu.RUnlock()
+
+	if !connected {
+		t.Fatal("expected peer to remain connected after first disconnect (second conn still alive)")
+	}
+	if dir != peerDirectionInbound {
+		t.Fatalf("expected direction %q, got %q", peerDirectionInbound, dir)
+	}
+
+	// Close the second connection — now the peer should disconnect.
+	svc.trackInboundDisconnect(peer)
+
+	svc.mu.RLock()
+	h = svc.health[peer]
+	svc.mu.RUnlock()
+
+	if h == nil {
+		t.Fatal("expected health entry to exist")
+	}
+	if h.Connected {
+		t.Fatal("expected peer to be disconnected after all inbound connections closed")
+	}
+	if h.Direction != "" {
+		t.Fatalf("expected empty direction after disconnect, got %q", h.Direction)
+	}
+}
+
+// TestInboundDedup uses transport-level IP not overlay address.
+// A peer advertising "1.2.3.4:64646" but connecting from 127.0.0.1
+// should reserve 127.0.0.1 in the connected hosts set.
+func TestConnectedHostsUsesTransportIP(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Real TCP connection from 127.0.0.1.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			connCh <- c
+		}
+	}()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	server := <-connCh
+	defer func() { _ = server.Close() }()
+
+	svc.mu.Lock()
+	// Register inbound connection + peer info with a different overlay address.
+	svc.inboundConns[server] = struct{}{}
+	svc.connPeerInfo[server] = &connPeerHello{address: "1.2.3.4:64646"}
+
+	hosts := svc.connectedHostsLocked()
+	svc.mu.Unlock()
+
+	// The real remote IP (127.0.0.1) should be in the set.
+	if _, ok := hosts["127.0.0.1"]; !ok {
+		t.Error("expected transport IP 127.0.0.1 in connectedHosts")
+	}
+	// The overlay address (1.2.3.4) should NOT be in the set.
+	if _, ok := hosts["1.2.3.4"]; ok {
+		t.Error("overlay address 1.2.3.4 should not be in connectedHosts (only transport IP)")
+	}
 }

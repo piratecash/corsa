@@ -1291,6 +1291,17 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							arrow := peerDirectionArrow(item.Direction)
+							if arrow == "" {
+								return layout.Dimensions{}
+							}
+							return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								label := material.Body1(c.theme, arrow)
+								label.Color = peerDirectionColor(item.Direction)
+								return label.Layout(gtx)
+							})
+						}),
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 							label := material.Body1(c.theme, item.Address)
 							label.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
@@ -1364,9 +1375,13 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 	if item.Connected {
 		connected = c.parent.t("node.link.up")
 	}
-	text := c.parent.t("node.peer_health.meta", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
+	dirLabel := ""
+	if item.Direction != "" {
+		dirLabel = " " + item.Direction
+	}
+	text := c.parent.t("node.peer_health.meta", connected+dirLabel, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
 	if text == "node.peer_health.meta" {
-		return fmt.Sprintf("%s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s", connected, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
+		return fmt.Sprintf("%s%s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s", connected, dirLabel, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
 	}
 	return text
 }
@@ -1920,6 +1935,31 @@ func drawHLine(gtx layout.Context, x0, x1, y int, clr color.NRGBA) {
 	defer clip.Rect{Min: image.Pt(x0, y), Max: image.Pt(x1, y+1)}.Push(gtx.Ops).Pop()
 	paint.ColorOp{Color: clr}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
+}
+
+// peerDirectionArrow returns a Unicode arrow for the connection direction:
+// ↑ for outbound (we initiated), ↓ for inbound (they connected to us).
+func peerDirectionArrow(direction string) string {
+	switch direction {
+	case "outbound":
+		return "↑"
+	case "inbound":
+		return "↓"
+	default:
+		return ""
+	}
+}
+
+// peerDirectionColor returns the color for the direction arrow.
+func peerDirectionColor(direction string) color.NRGBA {
+	switch direction {
+	case "outbound":
+		return color.NRGBA{R: 100, G: 200, B: 255, A: 255} // light blue
+	case "inbound":
+		return color.NRGBA{R: 180, G: 130, B: 255, A: 255} // light purple
+	default:
+		return color.NRGBA{R: 196, G: 205, B: 218, A: 255} // gray
+	}
 }
 
 func peerStateColors(state string) (color.NRGBA, color.NRGBA) {

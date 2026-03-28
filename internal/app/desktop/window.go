@@ -680,6 +680,8 @@ func (w *Window) networkBreakdownText(status service.NodeStatus) string {
 	degraded := 0
 	stalled := 0
 	reconnecting := 0
+	outbound := 0
+	inbound := 0
 
 	for _, item := range status.PeerHealth {
 		switch item.State {
@@ -692,6 +694,12 @@ func (w *Window) networkBreakdownText(status service.NodeStatus) string {
 		case "reconnecting":
 			reconnecting++
 		}
+		switch item.Direction {
+		case "outbound":
+			outbound++
+		case "inbound":
+			inbound++
+		}
 	}
 
 	if healthy == 0 && degraded == 0 && stalled == 0 && reconnecting == 0 {
@@ -700,7 +708,7 @@ func (w *Window) networkBreakdownText(status service.NodeStatus) string {
 
 	text := w.t("compose.network_breakdown", healthy, degraded, stalled, reconnecting)
 	if text == "compose.network_breakdown" {
-		return "H " + strconv.Itoa(healthy) + " | D " + strconv.Itoa(degraded) + " | S " + strconv.Itoa(stalled) + " | R " + strconv.Itoa(reconnecting)
+		return "H " + strconv.Itoa(healthy) + " | D " + strconv.Itoa(degraded) + " | S " + strconv.Itoa(stalled) + " | R " + strconv.Itoa(reconnecting) + " | ↑" + strconv.Itoa(outbound) + " ↓" + strconv.Itoa(inbound)
 	}
 	return text
 }

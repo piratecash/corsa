@@ -61,9 +61,10 @@ type Service struct {
 	relayRetry     map[string]relayAttempt
 	outbound       map[string]outboundDelivery
 	upstream       map[string]struct{}
-	inboundConns   map[net.Conn]struct{}
-	inboundMetered map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
-	connWg         sync.WaitGroup // tracks active handleConn goroutines for graceful shutdown
+	inboundConns      map[net.Conn]struct{}
+	inboundMetered    map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
+	inboundHealthRefs map[string]int            // resolved overlay address → active inbound connection count
+	connWg            sync.WaitGroup            // tracks active handleConn goroutines for graceful shutdown
 	connAuth       map[net.Conn]*connAuthState
 	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
 	connSendCh     map[net.Conn]chan sendItem         // per-connection buffered send channel; decouples callers from socket I/O
@@ -102,6 +103,7 @@ type peerSession struct {
 type peerHealth struct {
 	Address             string
 	Connected           bool
+	Direction           string // "outbound", "inbound", or "" (unknown)
 	State               string
 	LastConnectedAt     time.Time
 	LastDisconnectedAt  time.Time
@@ -160,6 +162,8 @@ const (
 	peerStateDegraded      = "degraded"
 	peerStateStalled       = "stalled"
 	peerStateReconnecting  = "reconnecting"
+	peerDirectionOutbound  = "outbound"
+	peerDirectionInbound   = "inbound"
 	peerRequestTimeout     = 12 * time.Second
 	pendingFrameTTL        = 5 * time.Minute
 	relayRetryTTL          = 3 * time.Minute
@@ -382,8 +386,9 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		dialOrigin:      make(map[string]string),
 		observedAddrs:   make(map[string]string),
 		reachableGroups: computeReachableGroups(cfg),
-		inboundConns:   make(map[net.Conn]struct{}),
-		inboundMetered: make(map[net.Conn]*MeteredConn),
+		inboundConns:      make(map[net.Conn]struct{}),
+		inboundMetered:    make(map[net.Conn]*MeteredConn),
+		inboundHealthRefs: make(map[string]int),
 		connAuth:       make(map[net.Conn]*connAuthState),
 		connPeerInfo:   make(map[net.Conn]*connPeerHello),
 		connSendCh:     make(map[net.Conn]chan sendItem),
@@ -541,6 +546,9 @@ func (s *Service) handleConn(conn net.Conn) {
 		return
 	}
 	defer func() {
+		if addr := s.inboundPeerAddress(metered); addr != "" {
+			s.trackInboundDisconnect(addr)
+		}
 		s.accumulateInboundTraffic(metered)
 		// Close TCP before waiting for the writer goroutine to drain.
 		// Without this, the writer might be stuck in conn.Write with a
@@ -661,6 +669,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.rememberConnPeerAddr(conn, frame)
 		if frame.Client == "node" || frame.Client == "desktop" {
 			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
+		}
+		if addr := s.inboundPeerAddress(conn); addr != "" {
+			s.trackInboundConnect(addr)
 		}
 		s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
@@ -1174,6 +1185,10 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 		go s.announcePeerToSessions(addr, state.Hello.NodeType)
 	}
 
+	if addr := s.inboundPeerAddress(conn); addr != "" {
+		s.trackInboundConnect(addr)
+	}
+
 	return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
 }
 
@@ -1209,6 +1224,55 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 	s.mu.Lock()
 	s.connPeerInfo[conn] = info
 	s.mu.Unlock()
+}
+
+// inboundPeerAddress returns the overlay address declared by the
+// remote peer during the hello handshake, or "" if no address is
+// known yet. The returned address is suitable for health tracking.
+func (s *Service) inboundPeerAddress(conn net.Conn) string {
+	s.mu.RLock()
+	info := s.connPeerInfo[conn]
+	s.mu.RUnlock()
+	if info == nil {
+		return ""
+	}
+	return info.address
+}
+
+// trackInboundConnect increments the inbound connection reference count
+// for the given overlay address and marks the peer as connected when this
+// is the first active inbound connection for that address.
+func (s *Service) trackInboundConnect(address string) {
+	s.mu.Lock()
+	resolved := s.resolveHealthAddress(address)
+	first := s.inboundHealthRefs[resolved] == 0
+	s.inboundHealthRefs[resolved]++
+	s.mu.Unlock()
+
+	if first {
+		s.markPeerConnected(resolved, peerDirectionInbound)
+	}
+}
+
+// trackInboundDisconnect decrements the inbound connection reference count.
+// Only when the last inbound connection for an address closes is the peer
+// marked as disconnected — earlier closes are silent so that the health
+// row stays connected while at least one TCP session remains alive.
+func (s *Service) trackInboundDisconnect(address string) {
+	s.mu.Lock()
+	resolved := s.resolveHealthAddress(address)
+	if s.inboundHealthRefs[resolved] > 0 {
+		s.inboundHealthRefs[resolved]--
+	}
+	last := s.inboundHealthRefs[resolved] == 0
+	if last {
+		delete(s.inboundHealthRefs, resolved)
+	}
+	s.mu.Unlock()
+
+	if last {
+		s.markPeerDisconnected(resolved, nil)
+	}
 }
 
 // connPeerReachableGroups returns the set of network groups the remote
@@ -2313,6 +2377,38 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 	}
 }
 
+// connectedHostsLocked returns the set of hosts (IP addresses or
+// hostnames) that already have an active connection — either an
+// outbound peer session or an inbound connection. Used by
+// peerDialCandidates to avoid dialing hosts we are already connected
+// to, since the goal is fault tolerance across distinct hosts.
+//
+// For inbound connections the actual TCP remote IP is used instead of the
+// peer's self-reported overlay address.  A NATed peer or a peer that
+// advertises a different endpoint would not reserve its real host if we
+// relied on connPeerInfo.address, allowing a second outbound connection
+// to the same machine.
+// Caller must hold s.mu at least for read.
+func (s *Service) connectedHostsLocked() map[string]struct{} {
+	hosts := make(map[string]struct{}, len(s.upstream)+len(s.inboundConns))
+
+	// Outbound sessions.
+	for addr := range s.upstream {
+		if host, _, ok := splitHostPort(addr); ok {
+			hosts[host] = struct{}{}
+		}
+	}
+
+	// Inbound connections — use the real transport-level remote IP.
+	for conn := range s.inboundConns {
+		if ip := remoteIP(conn.RemoteAddr()); ip != "" {
+			hosts[ip] = struct{}{}
+		}
+	}
+
+	return hosts
+}
+
 // peerDialCandidate is a scored candidate for outgoing connection attempts.
 type peerDialCandidate struct {
 	address string // actual address to dial (may be a fallback port variant)
@@ -2330,6 +2426,8 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 	if limit > 0 && active >= limit {
 		return nil
 	}
+
+	connectedHosts := s.connectedHostsLocked()
 
 	now := time.Now()
 	var scored []peerDialCandidate
@@ -2370,6 +2468,15 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 			}
 			if _, ok := s.upstream[address]; ok {
 				continue
+			}
+			// Skip hosts that already have an active connection
+			// (outbound or inbound). The goal is fault tolerance
+			// across distinct hosts, not accumulating multiple
+			// connections to the same IP.
+			if host, _, ok := splitHostPort(address); ok {
+				if _, connected := connectedHosts[host]; connected {
+					continue
+				}
 			}
 			if _, ok := seen[address]; ok {
 				continue
@@ -2581,7 +2688,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	s.mu.Lock()
 	s.sessions[address] = session
 	s.mu.Unlock()
-	s.markPeerConnected(address)
+	s.markPeerConnected(address, peerDirectionOutbound)
 
 	if _, err := s.peerSessionRequest(session, protocol.Frame{
 		Type:       "subscribe_inbox",
@@ -3831,7 +3938,7 @@ func (s *Service) sendAckDeleteToPeer(address, ackType string, id protocol.Messa
 	}
 }
 
-func (s *Service) markPeerConnected(address string) {
+func (s *Service) markPeerConnected(address, direction string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -3839,6 +3946,7 @@ func (s *Service) markPeerConnected(address string) {
 	health := s.ensurePeerHealthLocked(address)
 	now := time.Now().UTC()
 	health.Connected = true
+	health.Direction = direction
 	s.updatePeerStateLocked(health, peerStateHealthy)
 	health.LastConnectedAt = now
 	health.LastError = ""
@@ -3854,6 +3962,7 @@ func (s *Service) markPeerDisconnected(address string, err error) {
 	health := s.ensurePeerHealthLocked(address)
 	now := time.Now().UTC()
 	health.Connected = false
+	health.Direction = ""
 	s.updatePeerStateLocked(health, peerStateReconnecting)
 	health.LastDisconnectedAt = now
 	if err != nil {
@@ -4026,6 +4135,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		items = append(items, protocol.PeerHealthFrame{
 			Address:             health.Address,
 			Network:             classifyAddress(health.Address).String(),
+			Direction:           health.Direction,
 			ClientVersion:       s.peerVersions[health.Address],
 			ClientBuild:         s.peerBuilds[health.Address],
 			State:               s.computePeerStateLocked(health),
@@ -4054,6 +4164,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		items = append(items, protocol.PeerHealthFrame{
 			Address:       addr,
 			Network:       classifyAddress(addr).String(),
+			Direction:     peerDirectionInbound,
 			ClientVersion: s.peerVersions[addr],
 			ClientBuild:   s.peerBuilds[addr],
 			State:         peerStateHealthy,
@@ -4988,6 +5099,14 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 		}
 		if observedIP != nil && !s.isForbiddenDialIP(observedIP) {
 			if advertisedIP != nil && isForbiddenAdvertisedIP(advertisedIP) {
+				// When both hosts match the peer is genuinely local (e.g.
+				// loopback-to-loopback in tests or a single-machine
+				// cluster), so its self-reported port is authoritative.
+				// Only fall back to DefaultPeerPort when the hosts differ,
+				// meaning the advertised IP was likely spoofed.
+				if advertisedHost == observedHost {
+					return net.JoinHostPort(observedHost, advertisedPort), true
+				}
 				return net.JoinHostPort(observedHost, config.DefaultPeerPort), true
 			}
 			return net.JoinHostPort(observedHost, advertisedPort), true

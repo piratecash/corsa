@@ -75,6 +75,7 @@ Outgoing connection candidates are selected using score-based ordering instead o
 - cooldown and score are evaluated against the primary peer address (the one stored in `s.peers`); fallback dial variants (e.g. same host with default port) inherit the primary's reputation so that cooldown cannot be bypassed by dialling an alternative port
 - the pending outbound queue is also keyed by primary peer address, so frames queued while connected via a fallback variant are correctly flushed when any variant reconnects
 - dial candidates with equal scores are sorted by insertion order (stable sort), preserving bootstrap-first priority
+- **host deduplication**: if any active connection (outbound or inbound) already exists to a given host IP, all dial candidates with the same host are skipped; this maximises fault tolerance by spreading connections across distinct hosts rather than accumulating multiple connections to the same IP
 
 ### Queue state migration
 
@@ -344,10 +345,11 @@ Response:
 ```json
 {
   "type": "peer_health",
-  "count": 1,
+  "count": 2,
   "peer_health": [
     {
       "address": "65.108.204.190:64646",
+      "direction": "outbound",
       "state": "healthy",
       "connected": true,
       "pending_count": 0,
@@ -357,6 +359,13 @@ Response:
       "last_useful_send_at": "2026-03-20T09:10:58Z",
       "last_useful_receive_at": "2026-03-20T09:10:59Z",
       "consecutive_failures": 0
+    },
+    {
+      "address": "203.0.113.42:64646",
+      "direction": "inbound",
+      "state": "healthy",
+      "connected": true,
+      "last_connected_at": "2026-03-20T09:12:00Z"
     }
   ]
 }
@@ -366,8 +375,9 @@ Fields:
 
 - `type` — required; frame kind, here `peer_health`
 - `count` — required; number of peer health rows
-- `peer_health` — required; per-peer health snapshots
+- `peer_health` — required; per-peer health snapshots (includes both outbound and inbound connections)
 - `peer_health[].address` — required; peer endpoint
+- `peer_health[].direction` — optional; `"outbound"` for connections initiated by this node, `"inbound"` for connections accepted from remote peers, empty when direction is unknown (e.g. reconnecting peers)
 - `peer_health[].client_version` — optional; peer software version string
 - `peer_health[].client_build` — optional; peer build number; compare with own `ClientBuild` to detect newer releases
 - `peer_health[].state` — required; `healthy`, `degraded`, `stalled`, or `reconnecting`
@@ -1196,6 +1206,7 @@ Fields:
 - cooldown и score вычисляются по основному адресу пира (тому, что хранится в `s.peers`); fallback-варианты (тот же хост с портом по умолчанию) наследуют репутацию основного, чтобы cooldown нельзя было обойти попыткой подключения на альтернативный порт
 - очередь исходящих pending-фреймов также привязана к основному адресу пира, поэтому фреймы, поставленные в очередь через fallback-вариант, корректно отправляются при переподключении через любой вариант
 - кандидаты для подключения с одинаковым score сортируются по порядку добавления (стабильная сортировка), сохраняя приоритет bootstrap-пиров
+- **дедупликация по хосту**: если к данному IP-хосту уже есть активное соединение (исходящее или входящее), все кандидаты с тем же хостом пропускаются; это максимизирует отказоустойчивость за счёт распределения соединений по разным хостам, а не накопления нескольких соединений к одному IP
 
 ### Миграция queue state
 
@@ -1465,10 +1476,11 @@ Observed address (обнаружение NAT):
 ```json
 {
   "type": "peer_health",
-  "count": 1,
+  "count": 2,
   "peer_health": [
     {
       "address": "65.108.204.190:64646",
+      "direction": "outbound",
       "state": "healthy",
       "connected": true,
       "pending_count": 0,
@@ -1478,6 +1490,13 @@ Observed address (обнаружение NAT):
       "last_useful_send_at": "2026-03-20T09:10:58Z",
       "last_useful_receive_at": "2026-03-20T09:10:59Z",
       "consecutive_failures": 0
+    },
+    {
+      "address": "203.0.113.42:64646",
+      "direction": "inbound",
+      "state": "healthy",
+      "connected": true,
+      "last_connected_at": "2026-03-20T09:12:00Z"
     }
   ]
 }
@@ -1487,8 +1506,9 @@ Observed address (обнаружение NAT):
 
 - `type` — обязательное; тип кадра, здесь `peer_health`
 - `count` — обязательное; число строк состояния пиров
-- `peer_health` — обязательное; snapshots состояния по каждому peer
+- `peer_health` — обязательное; snapshots состояния по каждому peer (включает исходящие и входящие соединения)
 - `peer_health[].address` — обязательное; endpoint пира
+- `peer_health[].direction` — опциональное; `"outbound"` для соединений, инициированных этой нодой, `"inbound"` для входящих соединений от удалённых пиров, пустое если направление неизвестно (например, для пиров в состоянии reconnecting)
 - `peer_health[].client_version` — опциональное; строковая версия ПО пира
 - `peer_health[].client_build` — опциональное; номер сборки пира; сравнивается с собственным `ClientBuild` для обнаружения новых релизов
 - `peer_health[].state` — обязательное; `healthy`, `degraded`, `stalled` или `reconnecting`

@@ -24,7 +24,7 @@ func TestMarkPeerConnectedIncrementsScore(t *testing.T) {
 	})
 	defer stop()
 
-	svc.markPeerConnected("10.0.0.1:64646")
+	svc.markPeerConnected("10.0.0.1:64646", "outbound")
 
 	svc.mu.RLock()
 	health := svc.health["10.0.0.1:64646"]
@@ -52,7 +52,7 @@ func TestMarkPeerDisconnectedWithErrorDecrementsScore(t *testing.T) {
 	})
 	defer stop()
 
-	svc.markPeerConnected("10.0.0.1:64646")
+	svc.markPeerConnected("10.0.0.1:64646", "outbound")
 	svc.markPeerDisconnected("10.0.0.1:64646", errors.New("connection reset"))
 
 	svc.mu.RLock()
@@ -79,7 +79,7 @@ func TestMarkPeerDisconnectedCleanDecrementsLess(t *testing.T) {
 	})
 	defer stop()
 
-	svc.markPeerConnected("10.0.0.1:64646")
+	svc.markPeerConnected("10.0.0.1:64646", "outbound")
 	svc.markPeerDisconnected("10.0.0.1:64646", nil)
 
 	svc.mu.RLock()
@@ -263,7 +263,7 @@ func TestFlushPeerStateWritesFile(t *testing.T) {
 
 	// Add a peer and mark it connected so it has health data.
 	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-test")
-	svc.markPeerConnected("10.0.0.2:64646")
+	svc.markPeerConnected("10.0.0.2:64646", "outbound")
 
 	svc.flushPeerState()
 
@@ -430,7 +430,7 @@ func TestCleanDisconnectResetsConsecutiveFailures(t *testing.T) {
 	}
 
 	// Clean disconnect should reset the counter.
-	svc.markPeerConnected("10.0.0.1:64646")
+	svc.markPeerConnected("10.0.0.1:64646", "outbound")
 	svc.markPeerDisconnected("10.0.0.1:64646", nil)
 
 	svc.mu.RLock()
