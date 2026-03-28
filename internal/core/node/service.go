@@ -64,6 +64,7 @@ type Service struct {
 	inboundConns      map[net.Conn]struct{}
 	inboundMetered    map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
 	inboundHealthRefs map[string]int            // resolved overlay address → active inbound connection count
+	inboundTracked    map[net.Conn]struct{}     // connections promoted via trackInboundConnect (auth complete or auth not required)
 	connWg            sync.WaitGroup            // tracks active handleConn goroutines for graceful shutdown
 	connAuth       map[net.Conn]*connAuthState
 	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
@@ -171,6 +172,12 @@ const (
 	banThreshold           = 1000
 	banIncrementInvalidSig = 100
 	banDuration            = 24 * time.Hour
+	// nodeName and networkName are the protocol-level identifiers included
+	// in handshake, ping/pong and other frames. Defined once here so that
+	// all call-sites stay consistent. When these values become configurable
+	// at runtime they should move to config.Node or config.App.
+	nodeName    = "corsa"
+	networkName = "gazeta-devnet"
 )
 
 type incomingMessage struct {
@@ -389,6 +396,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		inboundConns:      make(map[net.Conn]struct{}),
 		inboundMetered:    make(map[net.Conn]*MeteredConn),
 		inboundHealthRefs: make(map[string]int),
+		inboundTracked:    make(map[net.Conn]struct{}),
 		connAuth:       make(map[net.Conn]*connAuthState),
 		connPeerInfo:   make(map[net.Conn]*connPeerHello),
 		connSendCh:     make(map[net.Conn]chan sendItem),
@@ -547,7 +555,7 @@ func (s *Service) handleConn(conn net.Conn) {
 	}
 	defer func() {
 		if addr := s.inboundPeerAddress(metered); addr != "" {
-			s.trackInboundDisconnect(addr)
+			s.trackInboundDisconnect(metered, addr)
 		}
 		s.accumulateInboundTraffic(metered)
 		// Close TCP before waiting for the writer goroutine to drain.
@@ -565,6 +573,13 @@ func (s *Service) handleConn(conn net.Conn) {
 	enableTCPKeepAlive(conn)
 	conn = metered
 
+	var heartbeatStop chan struct{}
+	defer func() {
+		if heartbeatStop != nil {
+			close(heartbeatStop)
+		}
+	}()
+
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadString('\n')
@@ -577,6 +592,19 @@ func (s *Service) handleConn(conn net.Conn) {
 
 		if !s.handleCommand(conn, strings.TrimSpace(line)) {
 			return
+		}
+
+		// Start the inbound heartbeat goroutine once the peer is fully
+		// connected (tracked in inboundHealthRefs). For authenticated
+		// peers this happens after auth_session; for unauthenticated
+		// peers — immediately after hello. Both sides ping independently
+		// so that each node has its own proof of liveness regardless of
+		// who initiated the TCP connection.
+		if heartbeatStop == nil {
+			if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+				heartbeatStop = make(chan struct{})
+				go s.inboundHeartbeat(conn, addr, heartbeatStop)
+			}
 		}
 	}
 }
@@ -635,7 +663,19 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 
 	switch frame.Type {
 	case "ping":
-		s.writeJSONFrame(conn, protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"})
+		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+			s.markPeerRead(addr, frame)
+		}
+		pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
+		s.writeJSONFrame(conn, pongFrame)
+		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+			s.markPeerWrite(addr, pongFrame)
+		}
+		return true
+	case "pong":
+		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+			s.markPeerRead(addr, frame)
+		}
 		return true
 	case "hello":
 		if err := validateProtocolHandshake(frame); err != nil {
@@ -671,7 +711,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 		}
 		if addr := s.inboundPeerAddress(conn); addr != "" {
-			s.trackInboundConnect(addr)
+			s.trackInboundConnect(conn, addr)
 		}
 		s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
@@ -810,7 +850,7 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		}
 		return s.welcomeFrame("", "")
 	case "ping":
-		return protocol.Frame{Type: "pong", Node: "corsa", Network: "gazeta-devnet"}
+		return protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
 	case "get_peers":
 		return s.peersFrame(nil, true) // local command — unfiltered
 	case "fetch_identities":
@@ -1064,8 +1104,8 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		Type:                   "welcome",
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Node:                   "corsa",
-		Network:                "gazeta-devnet",
+		Node:                   nodeName,
+		Network:                networkName,
 		Listen:                 listen,
 		Listener:               listenerFlag(s.cfg.EffectiveListenerEnabled()),
 		NodeType:               string(s.NodeType()),
@@ -1105,7 +1145,7 @@ func (s *Service) isConnAuthenticated(conn net.Conn) bool {
 }
 
 func (s *Service) isCommandAllowedForConn(conn net.Conn, command string) bool {
-	if command == "hello" || command == "ping" || command == "auth_session" {
+	if command == "hello" || command == "ping" || command == "pong" || command == "auth_session" {
 		return true
 	}
 	s.mu.RLock()
@@ -1186,7 +1226,7 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 	}
 
 	if addr := s.inboundPeerAddress(conn); addr != "" {
-		s.trackInboundConnect(addr)
+		s.trackInboundConnect(conn, addr)
 	}
 
 	return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
@@ -1239,14 +1279,34 @@ func (s *Service) inboundPeerAddress(conn net.Conn) string {
 	return info.address
 }
 
+// trackedInboundPeerAddress returns the peer overlay address only when
+// this specific connection has been promoted via trackInboundConnect
+// (i.e. after successful authentication or for peers that do not require
+// auth). Returns "" if the peer address is unknown or this connection
+// has not been promoted, preventing unauthenticated connections from
+// creating or refreshing health entries — even if another legitimate
+// connection for the same address is already tracked.
+func (s *Service) trackedInboundPeerAddress(conn net.Conn) string {
+	s.mu.RLock()
+	_, tracked := s.inboundTracked[conn]
+	info := s.connPeerInfo[conn]
+	s.mu.RUnlock()
+	if !tracked || info == nil {
+		return ""
+	}
+	return info.address
+}
+
 // trackInboundConnect increments the inbound connection reference count
-// for the given overlay address and marks the peer as connected when this
-// is the first active inbound connection for that address.
-func (s *Service) trackInboundConnect(address string) {
+// for the given overlay address, marks the concrete connection as promoted,
+// and marks the peer as connected when this is the first active inbound
+// connection for that address.
+func (s *Service) trackInboundConnect(conn net.Conn, address string) {
 	s.mu.Lock()
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
 	s.inboundHealthRefs[resolved]++
+	s.inboundTracked[conn] = struct{}{}
 	s.mu.Unlock()
 
 	if first {
@@ -1254,19 +1314,26 @@ func (s *Service) trackInboundConnect(address string) {
 	}
 }
 
-// trackInboundDisconnect decrements the inbound connection reference count.
-// Only when the last inbound connection for an address closes is the peer
+// trackInboundDisconnect decrements the inbound connection reference count
+// and removes the per-connection tracked flag.
+// Only when the last tracked connection for an address closes is the peer
 // marked as disconnected — earlier closes are silent so that the health
 // row stays connected while at least one TCP session remains alive.
-func (s *Service) trackInboundDisconnect(address string) {
+// If trackInboundConnect was never called for this connection (e.g. auth
+// failed), the disconnect is silently ignored to avoid creating phantom
+// health entries for unauthenticated connections.
+func (s *Service) trackInboundDisconnect(conn net.Conn, address string) {
 	s.mu.Lock()
+	_, wasTracked := s.inboundTracked[conn]
+	delete(s.inboundTracked, conn)
 	resolved := s.resolveHealthAddress(address)
-	if s.inboundHealthRefs[resolved] > 0 {
+	var last bool
+	if wasTracked && s.inboundHealthRefs[resolved] > 0 {
 		s.inboundHealthRefs[resolved]--
-	}
-	last := s.inboundHealthRefs[resolved] == 0
-	if last {
-		delete(s.inboundHealthRefs, resolved)
+		last = s.inboundHealthRefs[resolved] == 0
+		if last {
+			delete(s.inboundHealthRefs, resolved)
+		}
 	}
 	s.mu.Unlock()
 
@@ -3947,8 +4014,12 @@ func (s *Service) markPeerConnected(address, direction string) {
 	now := time.Now().UTC()
 	health.Connected = true
 	health.Direction = direction
-	s.updatePeerStateLocked(health, peerStateHealthy)
 	health.LastConnectedAt = now
+	// Treat the TCP handshake itself as proof of liveness so that
+	// computePeerStateLocked does not immediately return "degraded"
+	// before any ping/pong or data exchange has occurred.
+	health.LastUsefulReceiveAt = now
+	s.updatePeerStateLocked(health, peerStateHealthy)
 	health.LastError = ""
 	health.ConsecutiveFailures = 0
 	health.Score = clampScore(health.Score + peerScoreConnect)
@@ -4980,6 +5051,55 @@ const pongStallTimeout = 45 * time.Second
 func nextHeartbeatDuration() time.Duration {
 	jitter := time.Duration(time.Now().UTC().UnixNano()%15) * time.Second
 	return heartbeatInterval + jitter
+}
+
+// inboundHeartbeat periodically pings an inbound peer to independently verify
+// liveness. The pong reply is handled by handleCommand which calls markPeerRead.
+// If the peer does not respond within pongStallTimeout after a ping, the
+// connection is closed — same semantics as outbound session heartbeats.
+func (s *Service) inboundHeartbeat(conn net.Conn, address string, stop <-chan struct{}) {
+	defer crashlog.DeferRecover()
+	timer := time.NewTimer(nextHeartbeatDuration())
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+			pingFrame := protocol.Frame{Type: "ping", Node: nodeName, Network: networkName}
+			s.writeJSONFrame(conn, pingFrame)
+			s.markPeerWrite(address, pingFrame)
+
+			// Record the time we sent the ping and wait for pongStallTimeout.
+			// If LastPongAt has not advanced past our ping time by then,
+			// the peer is unresponsive — close the connection.
+			sentAt := time.Now().UTC()
+
+			select {
+			case <-stop:
+				return
+			case <-time.After(pongStallTimeout):
+			}
+
+			s.mu.RLock()
+			health := s.health[s.resolveHealthAddress(address)]
+			pongReceived := health != nil && !health.LastPongAt.IsZero() && health.LastPongAt.After(sentAt)
+			connected := health != nil && health.Connected
+			s.mu.RUnlock()
+
+			if !connected {
+				return
+			}
+			if !pongReceived {
+				log.Warn().Str("peer", address).Msg("inbound heartbeat failed, peer stalled — closing connection")
+				_ = conn.Close()
+				return
+			}
+
+			timer.Reset(nextHeartbeatDuration())
+		}
+	}
 }
 
 func (s *Service) subscribersForRecipient(recipient string) []*subscriber {

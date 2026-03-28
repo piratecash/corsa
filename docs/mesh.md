@@ -204,9 +204,11 @@ sequenceDiagram
     Note over A,B: Phase 5: Steady-state
 
     rect rgb(240, 248, 255)
-        Note over A,B: Heartbeat (every ~2 min)
+        Note over A,B: Heartbeat (every ~2 min, both sides independently)
         A->>B: ping
         B->>A: pong
+        B->>A: ping
+        A->>B: pong
     end
 
     rect rgb(255, 248, 240)
@@ -237,9 +239,13 @@ sequenceDiagram
 
 ### Health monitoring
 
-- **Heartbeat** — pings sent every ~2 min (with jitter up to 15 s). If
-  no pong arrives within 45 s (`pongStallTimeout`), the peer is declared
-  stalled and the session is torn down.
+- **Heartbeat** — both sides of a connection independently send pings
+  every ~2 min (with jitter up to 15 s). Outbound sessions ping via
+  `servePeerSession`; inbound connections ping via `inboundHeartbeat`.
+  If no pong arrives within 45 s (`pongStallTimeout`), the peer is
+  declared stalled and the connection is torn down. This bidirectional
+  approach ensures each node has its own proof of liveness regardless of
+  who initiated the TCP connection.
 - **Initial sync** — on connect only: `get_peers`, `fetch_contacts`,
   flush pending frames. No periodic polling in steady-state.
 - **Peer announcement** — when a new peer authenticates on an inbound
@@ -274,6 +280,13 @@ sequenceDiagram
   Different ports on the same host are treated as distinct peers (multiple
   nodes may share an IP); the fallback-variant model handles same-host
   resolution at dial time, not at discovery time.
+- **Connection liveness seeding** — `markPeerConnected` sets
+  `LastUsefulReceiveAt = now` so that `computePeerStateLocked` does not
+  immediately return "degraded" before any ping/pong exchange occurs.
+- **Inbound health tracking** — when an inbound peer sends a `ping`,
+  the handler calls `markPeerRead` to update `LastUsefulReceiveAt`. When
+  the node's own heartbeat receives a `pong`, `LastPongAt` is updated.
+  Either timestamp keeps the peer in `healthy` state.
 - **Stall detection** — based on heartbeat response:
   - no useful traffic for ≥ 2 min (`heartbeatInterval`): _degraded_
   - no useful traffic for ≥ 2 min 45 s (`heartbeatInterval` + `pongStallTimeout`): _stalled_
@@ -810,9 +823,11 @@ sequenceDiagram
     Note over A,B: Фаза 5: Steady-state
 
     rect rgb(240, 248, 255)
-        Note over A,B: Heartbeat (каждые ~2 мин)
+        Note over A,B: Heartbeat (каждые ~2 мин, обе стороны независимо)
         A->>B: ping
         B->>A: pong
+        B->>A: ping
+        A->>B: pong
     end
 
     rect rgb(255, 248, 240)
@@ -843,9 +858,13 @@ sequenceDiagram
 
 ### Мониторинг здоровья
 
-- **Heartbeat** — пинги каждые ~2 мин (с jitter до 15 с). Если pong не
-  приходит в течение 45 с (`pongStallTimeout`), peer объявляется зависшим
-  и сессия разрывается.
+- **Heartbeat** — обе стороны соединения независимо шлют пинги каждые ~2 мин
+  (с jitter до 15 с). Исходящие сессии пингуют через `servePeerSession`;
+  входящие соединения — через `inboundHeartbeat`. Если pong не приходит
+  в течение 45 с (`pongStallTimeout`), peer объявляется зависшим и
+  соединение разрывается. Двусторонний подход гарантирует каждому узлу
+  независимое подтверждение liveness, вне зависимости от того, кто
+  инициировал TCP-соединение.
 - **Начальная синхронизация** — только при подключении: `get_peers`,
   `fetch_contacts`, flush pending фреймов. В steady-state нет
   периодического polling.
@@ -883,6 +902,13 @@ sequenceDiagram
   Разные порты на одном хосте считаются разными пирами (на одном IP
   могут работать несколько нод); модель fallback-вариантов разрешает
   same-host коллизии на этапе dial, а не на этапе discovery.
+- **Сид liveness при подключении** — `markPeerConnected` устанавливает
+  `LastUsefulReceiveAt = now`, чтобы `computePeerStateLocked` не возвращал
+  "degraded" до первого обмена ping/pong.
+- **Трекинг здоровья inbound** — когда входящий пир шлёт `ping`, обработчик
+  вызывает `markPeerRead` для обновления `LastUsefulReceiveAt`. Когда
+  собственный heartbeat получает `pong`, обновляется `LastPongAt`. Любой
+  из этих timestamp'ов поддерживает состояние `healthy`.
 - **Обнаружение зависания** — на основе ответа heartbeat:
   - нет полезного трафика ≥ 2 мин (`heartbeatInterval`): _degraded_
   - нет полезного трафика ≥ 2 мин 45 с (`heartbeatInterval` + `pongStallTimeout`): _stalled_

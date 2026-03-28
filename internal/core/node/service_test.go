@@ -865,6 +865,86 @@ func TestUnauthenticatedInboundTrafficNotAttributed(t *testing.T) {
 	}
 }
 
+// TestUnauthenticatedPingDoesNotCreateHealth verifies that an inbound
+// connection that sends ping frames before completing authentication does not
+// create or refresh peerHealth entries for the claimed address.
+func TestUnauthenticatedPingDoesNotCreateHealth(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+	})
+	defer stop()
+
+	spoofedID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	// Send hello as a node client (requires auth).
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:          "hello",
+		Version:       config.ProtocolVersion,
+		Client:        "node",
+		ClientVersion: config.CorsaWireVersion,
+		Address:       spoofedID.Address,
+		PubKey:        identity.PublicKeyBase64(spoofedID.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(spoofedID.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(spoofedID),
+	})
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" || welcome.Challenge == "" {
+		t.Fatalf("expected welcome with challenge, got %#v", welcome)
+	}
+
+	// Instead of finishing auth, send ping frames. The server must reply
+	// with pong (protocol-level liveness) but must NOT create a health
+	// entry for the unverified claimed address.
+	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
+	pong := readJSONTestFrame(t, reader)
+	if pong.Type != "pong" {
+		t.Fatalf("expected pong, got %#v", pong)
+	}
+
+	// Send a second ping to exercise the "refresh" path.
+	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
+	pong2 := readJSONTestFrame(t, reader)
+	if pong2.Type != "pong" {
+		t.Fatalf("expected second pong, got %#v", pong2)
+	}
+
+	_ = conn.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	// The spoofed address must not appear in peer_health at all.
+	healthReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	for _, ph := range healthReply.PeerHealth {
+		if ph.Address == spoofedID.Address {
+			t.Errorf("unauthenticated peer %s should not appear in peer_health (state=%s, direction=%s)",
+				spoofedID.Address, ph.State, ph.Direction)
+		}
+	}
+
+	// Also must not appear in network_stats peer_traffic.
+	statsReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+	if statsReply.NetworkStats != nil {
+		for _, pt := range statsReply.NetworkStats.PeerTraffic {
+			if pt.Address == spoofedID.Address {
+				t.Errorf("unauthenticated peer %s should not appear in peer_traffic", spoofedID.Address)
+			}
+		}
+	}
+}
+
 // TestKnownPeersIncludesNonListenerClients verifies that known_peers counts
 // connected non-listener peers (e.g. desktop clients with Listener: "0") that
 // appear in peer_traffic but are not added to s.peers. This is a regression
@@ -6019,9 +6099,15 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 
 	peer := "10.0.0.5:64646"
 
+	// Create two fake connections to simulate two inbound from the same peer.
+	conn1a, conn1b := net.Pipe()
+	defer func() { _ = conn1b.Close() }()
+	conn2a, conn2b := net.Pipe()
+	defer func() { _ = conn2b.Close() }()
+
 	// Two inbound connections to the same peer.
-	svc.trackInboundConnect(peer)
-	svc.trackInboundConnect(peer)
+	svc.trackInboundConnect(conn1a, peer)
+	svc.trackInboundConnect(conn2a, peer)
 
 	// Peer should be connected.
 	svc.mu.RLock()
@@ -6033,7 +6119,8 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	}
 
 	// Close the first connection — peer should remain connected.
-	svc.trackInboundDisconnect(peer)
+	_ = conn1a.Close()
+	svc.trackInboundDisconnect(conn1a, peer)
 
 	svc.mu.RLock()
 	h = svc.health[peer]
@@ -6052,7 +6139,8 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	}
 
 	// Close the second connection — now the peer should disconnect.
-	svc.trackInboundDisconnect(peer)
+	_ = conn2a.Close()
+	svc.trackInboundDisconnect(conn2a, peer)
 
 	svc.mu.RLock()
 	h = svc.health[peer]

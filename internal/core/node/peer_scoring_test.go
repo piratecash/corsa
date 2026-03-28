@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/identity"
+	"corsa/internal/core/protocol"
 )
 
 func TestMarkPeerConnectedIncrementsScore(t *testing.T) {
@@ -473,4 +475,191 @@ func TestFlushPeerStateRetryOnWriteFailure(t *testing.T) {
 	if !lastSave.IsZero() {
 		t.Fatalf("expected lastPeerSave to remain zero after failed save, got %v", lastSave)
 	}
+}
+
+// TestMarkPeerConnectedSetsLastUsefulReceiveAt verifies that markPeerConnected
+// seeds LastUsefulReceiveAt so that computePeerStateLocked does not immediately
+// return "degraded" before any ping/pong exchange has occurred.
+func TestMarkPeerConnectedSetsLastUsefulReceiveAt(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	before := time.Now().UTC().Add(-time.Second)
+	svc.markPeerConnected("10.0.0.1:64646", peerDirectionInbound)
+
+	svc.mu.RLock()
+	health := svc.health["10.0.0.1:64646"]
+	state := svc.computePeerStateLocked(health)
+	svc.mu.RUnlock()
+
+	if health == nil {
+		t.Fatal("expected health entry")
+	}
+	if health.LastUsefulReceiveAt.Before(before) {
+		t.Fatalf("LastUsefulReceiveAt not set on connect: %v", health.LastUsefulReceiveAt)
+	}
+	if state != peerStateHealthy {
+		t.Fatalf("expected state %q immediately after connect, got %q", peerStateHealthy, state)
+	}
+}
+
+// TestComputePeerStateHealthyAfterInboundConnect verifies that a freshly
+// connected inbound peer is reported as healthy when the UI polls for
+// peer_health (which recomputes state via computePeerStateLocked).
+func TestComputePeerStateHealthyAfterInboundConnect(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	svc.markPeerConnected("10.0.0.1:64646", peerDirectionInbound)
+
+	// Simulate the UI polling fetch_peer_health which calls peerHealthFrames.
+	frames := svc.peerHealthFrames()
+
+	found := false
+	for _, f := range frames {
+		if f.Address == "10.0.0.1:64646" {
+			found = true
+			if f.State != peerStateHealthy {
+				t.Fatalf("expected inbound peer state %q in health frame, got %q", peerStateHealthy, f.State)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("inbound peer not found in health frames")
+	}
+}
+
+// TestInboundPingUpdatesHealth verifies that receiving a ping from an inbound
+// peer (handled by markPeerRead) updates LastUsefulReceiveAt and keeps the
+// peer in healthy state.
+func TestInboundPingUpdatesHealth(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	peerAddr := "10.0.0.1:64646"
+	svc.markPeerConnected(peerAddr, peerDirectionInbound)
+
+	// Simulate receiving a ping from the inbound peer.
+	svc.markPeerRead(peerAddr, protocol.Frame{Type: "ping"})
+
+	svc.mu.RLock()
+	health := svc.health[peerAddr]
+	state := svc.computePeerStateLocked(health)
+	svc.mu.RUnlock()
+
+	if state != peerStateHealthy {
+		t.Fatalf("expected %q after inbound ping, got %q", peerStateHealthy, state)
+	}
+	if health.LastUsefulReceiveAt.IsZero() {
+		t.Fatal("LastUsefulReceiveAt should be set after receiving ping")
+	}
+}
+
+// TestInboundPongUpdatesHealth verifies that receiving a pong from an inbound
+// peer (in response to our heartbeat ping) updates LastPongAt and keeps the
+// peer healthy.
+func TestInboundPongUpdatesHealth(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	peerAddr := "10.0.0.1:64646"
+	svc.markPeerConnected(peerAddr, peerDirectionInbound)
+
+	// Simulate our heartbeat sending a ping.
+	svc.markPeerWrite(peerAddr, protocol.Frame{Type: "ping"})
+
+	// Simulate receiving a pong response.
+	svc.markPeerRead(peerAddr, protocol.Frame{Type: "pong"})
+
+	svc.mu.RLock()
+	health := svc.health[peerAddr]
+	state := svc.computePeerStateLocked(health)
+	svc.mu.RUnlock()
+
+	if health.LastPongAt.IsZero() {
+		t.Fatal("LastPongAt should be set after receiving pong")
+	}
+	if health.LastPingAt.IsZero() {
+		t.Fatal("LastPingAt should be set after sending ping")
+	}
+	if state != peerStateHealthy {
+		t.Fatalf("expected %q after inbound pong, got %q", peerStateHealthy, state)
+	}
+}
+
+// TestTrackedInboundPeerAddressIsPerConnection verifies that
+// trackedInboundPeerAddress gates on the concrete conn, not just on
+// whether the address is globally tracked. A second unauthenticated
+// connection claiming the same address must not pass the guard.
+func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	peerAddr := "10.0.0.1:64646"
+
+	// Create two fake connections.
+	authConn, authPeer := net.Pipe()
+	defer func() { _ = authPeer.Close() }()
+	spoofConn, spoofPeer := net.Pipe()
+	defer func() { _ = spoofPeer.Close() }()
+
+	// Simulate hello on both connections (stores connPeerInfo).
+	svc.rememberConnPeerAddr(authConn, protocol.Frame{Address: peerAddr, Listen: peerAddr})
+	svc.rememberConnPeerAddr(spoofConn, protocol.Frame{Address: peerAddr, Listen: peerAddr})
+
+	// Only the first connection completes auth and is promoted.
+	svc.trackInboundConnect(authConn, peerAddr)
+
+	// The authenticated connection should return the address.
+	if got := svc.trackedInboundPeerAddress(authConn); got != peerAddr {
+		t.Fatalf("expected tracked address %q for auth conn, got %q", peerAddr, got)
+	}
+
+	// The spoofed connection must NOT return the address even though
+	// the same address is globally tracked via the auth connection.
+	if got := svc.trackedInboundPeerAddress(spoofConn); got != "" {
+		t.Fatalf("expected empty address for untracked conn, got %q", got)
+	}
+
+	// Clean up.
+	_ = authConn.Close()
+	svc.trackInboundDisconnect(authConn, peerAddr)
+	_ = spoofConn.Close()
+	svc.trackInboundDisconnect(spoofConn, peerAddr)
 }
