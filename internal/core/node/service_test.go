@@ -5525,3 +5525,201 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	}
 	t.Logf("received %d pongs, %d pushes (of %d sent)", pongs, pushes, messageCount)
 }
+
+// TestErrorPathTeardownDoesNotHang verifies that when a writer goroutine is
+// blocked on a slow peer and the protocol handler hits an error path (return
+// false), the handleConn teardown completes promptly instead of hanging until
+// the 30-second write deadline expires.
+//
+// Sequence:
+//  1. Connect and complete the hello handshake.
+//  2. Stop reading from the TCP connection to create back-pressure.
+//  3. Flood pings to fill the 128-slot send channel and TCP send buffer,
+//     which causes the writer goroutine to block in conn.Write.
+//  4. Send a malformed (non-JSON) line that triggers writeJSONFrameSync
+//     followed by return false.
+//  5. Assert the server closes the connection within a tight deadline.
+//
+// If the teardown hangs, the test will exceed the deadline and fail.
+func TestErrorPathTeardownDoesNotHang(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	reader := bufio.NewReader(conn)
+
+	// Handshake so the connection gets a registered send channel.
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client:                 "test-teardown",
+		ClientVersion:          config.CorsaWireVersion,
+	})
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" {
+		t.Fatalf("expected welcome, got %s", welcome.Type)
+	}
+
+	// Flood pings without reading responses. This fills the send channel
+	// (128 slots) and eventually the TCP send buffer, causing the writer
+	// goroutine to block in conn.Write.
+	for i := 0; i < 300; i++ {
+		_, err := fmt.Fprint(conn, `{"type":"ping"}`+"\n")
+		if err != nil {
+			break // server may have already closed
+		}
+	}
+
+	// Send a malformed line that is not valid JSON. This triggers the error
+	// path in handleCommand: writeJSONFrameSync → return false → teardown.
+	_, _ = fmt.Fprint(conn, "NOT-JSON\n")
+
+	// The server should close the connection promptly. If teardown hangs
+	// (blocked writer), this read will timeout after the deadline below.
+	deadline := 6 * time.Second // syncFlushTimeout is 5s; add 1s margin
+	_ = conn.SetDeadline(time.Now().Add(deadline))
+
+	start := time.Now()
+
+	// Drain anything the server sends until we get EOF or an error.
+	for {
+		_, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+	}
+
+	elapsed := time.Since(start)
+
+	// The critical assertion: teardown must complete well under the 30s
+	// connWriteTimeout. The syncFlushTimeout (5s) plus small margin is the
+	// expected upper bound.
+	if elapsed > deadline {
+		t.Fatalf("teardown took %v, expected <%v — writer goroutine likely hung", elapsed, deadline)
+	}
+	t.Logf("connection closed after %v (deadline was %v)", elapsed, deadline)
+}
+
+// TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead verifies that
+// enqueueFrameSync does not block for the full syncFlushTimeout when the
+// writer goroutine has already exited (e.g. because conn.Write returned an
+// error). It must observe writerDone and return enqueueDropped immediately.
+//
+// Reproduces the P1 scenario: another goroutine already caused conn.Close()
+// (slow-peer eviction or write error), the writer exited, but the send
+// channel is still visible in the map because unregisterInboundConn has not
+// run yet. A subsequent enqueueFrameSync must not stall for 5 seconds.
+func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:0",
+		AdvertiseAddress: "127.0.0.1:0",
+		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
+	}, id)
+
+	server, client := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	// Register the pipe as an inbound connection — starts connWriter.
+	svc.registerInboundConn(server)
+
+	// Close the server side so the next conn.Write will fail.
+	_ = server.Close()
+
+	// The writer goroutine is still alive — it's blocking on channel
+	// receive (for item := range sendCh), not on conn.Write. Send a
+	// trigger frame so the writer attempts conn.Write, fails, and exits.
+	svc.enqueueFrame(server, []byte("trigger\n"))
+
+	// Give the writer goroutine a moment to pick up the frame, fail on
+	// conn.Write, exit, and close(writerDone).
+	time.Sleep(50 * time.Millisecond)
+
+	// The writer is now dead. The channel is still in the map because
+	// unregisterInboundConn has not been called. This is the P1 scenario:
+	// enqueueFrameSync must detect writerDone and return immediately.
+	start := time.Now()
+	result := svc.enqueueFrameSync(server, []byte(`{"type":"error"}`+"\n"))
+	elapsed := time.Since(start)
+
+	if result != enqueueDropped {
+		t.Fatalf("expected enqueueDropped, got %v", result)
+	}
+	// Allow generous margin (500ms) but nowhere near syncFlushTimeout (5s).
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("enqueueFrameSync blocked for %v; expected near-instant return via writerDone", elapsed)
+	}
+	t.Logf("enqueueFrameSync returned %v in %v", result, elapsed)
+
+	// Clean up maps.
+	svc.unregisterInboundConn(server)
+}
+
+// TestEnqueueFrameSyncReportsDroppedOnWriteError verifies that when
+// conn.Write fails, enqueueFrameSync returns enqueueDropped (not
+// enqueueSent). The writer goroutine must NOT close the ack channel on a
+// failed write — only writerDone fires.
+//
+// Reproduces the P2 scenario: the sync caller puts a sendItem with an ack
+// channel into the queue, the writer picks it up, conn.Write fails, but the
+// original (buggy) code closed ack before checking err, making the caller
+// believe the frame was delivered.
+func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    "127.0.0.1:0",
+		AdvertiseAddress: "127.0.0.1:0",
+		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
+	}, id)
+
+	server, client := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	// Register the pipe — starts connWriter.
+	svc.registerInboundConn(server)
+
+	// Enqueue one normal frame so the writer is busy.
+	svc.enqueueFrame(server, []byte(`{"type":"pong"}`+"\n"))
+
+	// Drain the normal frame from the client side so the writer proceeds.
+	buf := make([]byte, 256)
+	_, _ = client.Read(buf)
+
+	// Now close the server side. The next conn.Write will fail.
+	_ = server.Close()
+
+	// Enqueue a sync frame. The writer will pick it up, conn.Write fails,
+	// writer exits without closing ack, writerDone fires.
+	result := svc.enqueueFrameSync(server, []byte(`{"type":"error","code":"test"}`+"\n"))
+
+	if result != enqueueDropped {
+		t.Fatalf("expected enqueueDropped (write failed), got %v", result)
+	}
+	t.Logf("enqueueFrameSync correctly returned enqueueDropped on write failure")
+
+	// Clean up maps.
+	svc.unregisterInboundConn(server)
+}

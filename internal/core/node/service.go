@@ -65,7 +65,8 @@ type Service struct {
 	connWg         sync.WaitGroup // tracks active handleConn goroutines for graceful shutdown
 	connAuth       map[net.Conn]*connAuthState
 	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
-	connWriteMu    map[net.Conn]*sync.Mutex        // per-connection write mutex; serialises all writes (response + push) to a single TCP stream
+	connSendCh     map[net.Conn]chan sendItem         // per-connection buffered send channel; decouples callers from socket I/O
+	connWriterDone map[net.Conn]chan struct{}        // closed by connWriter when it exits; used to wait for drain before TCP close
 	bans           map[string]banEntry
 	events         map[chan protocol.LocalChangeEvent]struct{}
 	listener       net.Listener
@@ -383,7 +384,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		inboundMetered: make(map[net.Conn]*MeteredConn),
 		connAuth:       make(map[net.Conn]*connAuthState),
 		connPeerInfo:   make(map[net.Conn]*connPeerHello),
-		connWriteMu:    make(map[net.Conn]*sync.Mutex),
+		connSendCh:     make(map[net.Conn]chan sendItem),
+		connWriterDone: make(map[net.Conn]chan struct{}),
 		bans:           make(map[string]banEntry),
 		events:         make(map[chan protocol.LocalChangeEvent]struct{}),
 	}
@@ -538,10 +540,15 @@ func (s *Service) handleConn(conn net.Conn) {
 	}
 	defer func() {
 		s.accumulateInboundTraffic(metered)
+		// Close TCP before waiting for the writer goroutine to drain.
+		// Without this, the writer might be stuck in conn.Write with a
+		// 30-second deadline and unregisterInboundConn would hang waiting
+		// for writerDone. Closing the socket unblocks conn.Write with an
+		// error, letting the writer exit promptly.
+		_ = metered.Close()
 		s.unregisterInboundConn(metered)
 		s.removeSubscriberConn(metered)
 		s.clearConnAuth(metered)
-		_ = metered.Close()
 	}()
 
 	log.Info().Str("addr", conn.RemoteAddr().String()).Msg("incoming connection")
@@ -553,7 +560,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
-				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
+				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
 			}
 			return
 		}
@@ -573,7 +580,7 @@ func (s *Service) handleCommand(conn net.Conn, line string) bool {
 			Str("command", "non-json").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 		return false
 	}
 	return s.handleJSONCommand(conn, line)
@@ -589,7 +596,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			Str("command", "").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
+		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
 		return false
 	}
 
@@ -601,7 +608,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			Str("command", frame.Type).
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
+		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
 		return false
 	}
 
@@ -637,7 +644,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			if err != nil {
 				accepted = false
 				s.addBanScore(conn, banIncrementInvalidSig)
-				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
+				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
 			s.rememberConnPeerAddr(conn, frame)
@@ -659,16 +666,20 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		reply, ok := s.handleAuthSessionFrame(conn, frame)
 		if !ok {
 			accepted = false
+			s.writeJSONFrameSync(conn, reply)
+			return false
 		}
 		s.writeJSONFrame(conn, reply)
-		return ok
+		return true
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(conn, frame)
 		if !ok {
 			accepted = false
+			s.writeJSONFrameSync(conn, reply)
+			return false
 		}
 		s.writeJSONFrame(conn, reply)
-		return ok
+		return true
 	case "get_peers":
 		s.writeJSONFrame(conn, s.peersFrame(s.connPeerReachableGroups(conn), false))
 		return true
@@ -754,7 +765,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		return true
 	default:
 		accepted = false
-		s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 }
@@ -832,13 +843,148 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	}
 }
 
-// connMu returns the per-connection write mutex, or nil if the connection
+// connSend returns the per-connection send channel, or nil if the connection
 // was not registered (e.g. outbound peer sessions that bypass handleConn).
-func (s *Service) connMu(conn net.Conn) *sync.Mutex {
+func (s *Service) connSend(conn net.Conn) chan sendItem {
 	s.mu.RLock()
-	mu := s.connWriteMu[conn]
+	ch := s.connSendCh[conn]
 	s.mu.RUnlock()
-	return mu
+	return ch
+}
+
+// connSendWithDone returns the send channel and the writerDone channel for
+// the connection. Used by enqueueFrameSync to detect a dead writer goroutine
+// without waiting for the full syncFlushTimeout.
+func (s *Service) connSendWithDone(conn net.Conn) (chan sendItem, <-chan struct{}) {
+	s.mu.RLock()
+	ch := s.connSendCh[conn]
+	done := s.connWriterDone[conn]
+	s.mu.RUnlock()
+	return ch, done
+}
+
+const connWriteTimeout = 30 * time.Second
+
+// sendItem carries serialised frame data through the per-connection send
+// channel. When ack is non-nil the writer goroutine closes it after the
+// data has been handed to the socket, letting the caller block until the
+// write completes (used by writeJSONFrameSync for error-path frames that
+// must reach the wire before the connection is torn down).
+type sendItem struct {
+	data []byte
+	ack  chan struct{}
+}
+
+// connWriter is the single writer goroutine per inbound connection. It drains
+// the send channel and performs the actual TCP write with a deadline. If the
+// remote peer is slow, only this goroutine blocks — all callers that enqueue
+// data via the channel remain free. The goroutine exits when sendCh is closed
+// (by unregisterInboundConn), after draining any remaining buffered frames.
+// It closes writerDone on exit so unregisterInboundConn can wait for the
+// drain to complete before the TCP connection is closed.
+//
+// ack semantics: ack is closed only after a successful conn.Write, confirming
+// the bytes reached the socket. On write error the goroutine exits without
+// closing ack — callers waiting in enqueueFrameSync observe writerDone
+// instead and receive enqueueDropped.
+func (s *Service) connWriter(conn net.Conn, sendCh <-chan sendItem, writerDone chan<- struct{}) {
+	defer crashlog.DeferRecover()
+	defer close(writerDone)
+	for item := range sendCh {
+		_ = conn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
+		if _, err := conn.Write(item.data); err != nil {
+			// Write failed — do NOT close ack. The caller will see
+			// writerDone close and interpret it as enqueueDropped.
+			return
+		}
+		if item.ack != nil {
+			close(item.ack)
+		}
+		_ = conn.SetWriteDeadline(time.Time{})
+	}
+}
+
+type enqueueResult int
+
+const (
+	enqueueSent         enqueueResult = iota // data accepted into the channel
+	enqueueUnregistered                      // connection has no send channel (outbound peer session)
+	enqueueDropped                           // channel full or closed — data lost, conn closing
+)
+
+// enqueueFrame sends the serialised bytes to the per-connection writer
+// goroutine. Fire-and-forget: the caller does not wait for the write.
+func (s *Service) enqueueFrame(conn net.Conn, data []byte) (result enqueueResult) {
+	ch := s.connSend(conn)
+	if ch == nil {
+		return enqueueUnregistered
+	}
+
+	// Catch send-on-closed-channel: unregisterInboundConn may close ch between
+	// our connSend lookup and the actual send below. This is the only correct
+	// recovery — the connection is already gone.
+	defer func() {
+		if r := recover(); r != nil {
+			result = enqueueDropped
+		}
+	}()
+
+	select {
+	case ch <- sendItem{data: data}:
+		return enqueueSent
+	default:
+		// Send buffer full — peer is too slow. Close the connection so the
+		// writer goroutine exits and handleConn cleans up.
+		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
+		_ = conn.Close()
+		return enqueueDropped
+	}
+}
+
+const syncFlushTimeout = 5 * time.Second
+
+// enqueueFrameSync sends the serialised bytes to the per-connection writer
+// goroutine and blocks until the writer has handed the data to the socket.
+// Used by writeJSONFrameSync for error-path frames that must be delivered
+// before the connection is torn down.
+//
+// It observes writerDone so that if the writer goroutine has already exited
+// (conn.Write error or slow-peer eviction by another goroutine) the call
+// returns immediately instead of waiting for the full syncFlushTimeout.
+func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) (result enqueueResult) {
+	ch, writerDone := s.connSendWithDone(conn)
+	if ch == nil {
+		return enqueueUnregistered
+	}
+
+	ack := make(chan struct{})
+
+	defer func() {
+		if r := recover(); r != nil {
+			result = enqueueDropped
+		}
+	}()
+
+	select {
+	case ch <- sendItem{data: data, ack: ack}:
+		// Enqueued — wait for the writer goroutine to flush.
+	default:
+		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
+		_ = conn.Close()
+		return enqueueDropped
+	}
+
+	select {
+	case <-ack:
+		return enqueueSent
+	case <-writerDone:
+		// Writer exited (write error or conn closed) without closing ack —
+		// the frame was not delivered.
+		return enqueueDropped
+	case <-time.After(syncFlushTimeout):
+		_ = conn.Close()
+		return enqueueDropped
+	}
 }
 
 func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
@@ -853,20 +999,45 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
-		if mu := s.connMu(conn); mu != nil {
-			mu.Lock()
-			_, _ = io.WriteString(conn, string(fallback)+"\n")
-			mu.Unlock()
-		} else {
-			_, _ = io.WriteString(conn, string(fallback)+"\n")
+		data := append(fallback, '\n')
+		if s.enqueueFrame(conn, data) == enqueueUnregistered {
+			// Outbound peer session — no send channel, write directly.
+			_, _ = conn.Write(data)
 		}
 		return
 	}
-	if mu := s.connMu(conn); mu != nil {
-		mu.Lock()
+	if s.enqueueFrame(conn, []byte(line)) == enqueueUnregistered {
+		// Outbound peer session — no send channel, write directly.
 		_, _ = io.WriteString(conn, line)
-		mu.Unlock()
-	} else {
+	}
+}
+
+// writeJSONFrameSync serialises a protocol frame and blocks until the
+// per-connection writer goroutine has handed the bytes to the socket.
+// Use this instead of writeJSONFrame on error paths where the caller is
+// about to return false and the deferred cleanup will close the connection:
+// the sync variant guarantees the error frame reaches the wire before
+// teardown, preserving the "write completed before return" contract that
+// error-path callers rely on.
+func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) {
+	log.Debug().
+		Str("protocol", "json/tcp").
+		Str("addr", conn.RemoteAddr().String()).
+		Str("direction", "send").
+		Str("command", frame.Type).
+		Bool("accepted", frame.Type != "error").
+		Msg("protocol_trace")
+
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
+		data := append(fallback, '\n')
+		if s.enqueueFrameSync(conn, data) == enqueueUnregistered {
+			_, _ = conn.Write(data)
+		}
+		return
+	}
+	if s.enqueueFrameSync(conn, []byte(line)) == enqueueUnregistered {
 		_, _ = io.WriteString(conn, line)
 	}
 }
@@ -2613,7 +2784,13 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 		return false
 	}
 	s.inboundConns[conn] = struct{}{}
-	s.connWriteMu[conn] = &sync.Mutex{}
+
+	sendCh := make(chan sendItem, 128)
+	writerDone := make(chan struct{})
+	s.connSendCh[conn] = sendCh
+	s.connWriterDone[conn] = writerDone
+	go s.connWriter(conn, sendCh, writerDone)
+
 	if mc, ok := conn.(*MeteredConn); ok {
 		s.inboundMetered[conn] = mc
 	}
@@ -2622,11 +2799,28 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 
 func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Lock()
+	ch := s.connSendCh[conn]
+	writerDone := s.connWriterDone[conn]
 	delete(s.inboundConns, conn)
 	delete(s.inboundMetered, conn)
 	delete(s.connPeerInfo, conn)
-	delete(s.connWriteMu, conn)
+	delete(s.connSendCh, conn)
+	delete(s.connWriterDone, conn)
 	s.mu.Unlock()
+
+	// Close the send channel so the writer goroutine drains remaining frames
+	// and exits. Any concurrent enqueueFrame callers that already hold a
+	// reference to this channel will catch the send-on-closed-channel panic
+	// via recover in enqueueFrame.
+	if ch != nil {
+		close(ch)
+	}
+	// Wait for the writer goroutine to finish draining before the caller
+	// closes the TCP connection — otherwise conn.Write inside connWriter
+	// would fail and remaining queued frames would be lost.
+	if writerDone != nil {
+		<-writerDone
+	}
 }
 
 // closeAllInboundConns closes every tracked inbound connection so that
@@ -4672,13 +4866,6 @@ func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
 func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	defer crashlog.DeferRecover()
 
-	mu := s.connMu(sub.conn)
-	if mu == nil {
-		// Connection already unregistered — subscriber is stale.
-		s.removeSubscriberByID(sub.recipient, sub.id)
-		return
-	}
-
 	log.Debug().
 		Str("protocol", "json/tcp").
 		Str("addr", sub.conn.RemoteAddr().String()).
@@ -4691,10 +4878,8 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	if err != nil {
 		return
 	}
-	mu.Lock()
-	_, writeErr := io.WriteString(sub.conn, line)
-	mu.Unlock()
-	if writeErr != nil {
+	if s.enqueueFrame(sub.conn, []byte(line)) != enqueueSent {
+		// Connection unregistered or send buffer full — remove stale subscriber.
 		s.removeSubscriberByID(sub.recipient, sub.id)
 	}
 }

@@ -434,6 +434,168 @@ A dead-drop / bulletin-board channel for encrypted notices:
 4. Peers store the notice until its TTL expires, then purge it.
 5. Recipients fetch via `fetch_notices` and decrypt with their identity key.
 
+### Connection I/O architecture
+
+Each inbound TCP connection is served by two goroutines: a **reader** (the
+`handleConn` loop) and a dedicated **writer** (`connWriter`). They communicate
+through a buffered channel, never sharing a mutex for socket I/O.
+
+```mermaid
+flowchart LR
+    subgraph "Per-Connection Goroutines"
+        R["Reader goroutine<br/>(handleConn)"]
+        W["Writer goroutine<br/>(connWriter)"]
+    end
+
+    TCP["TCP Socket"]
+    CH["sendCh<br/>chan sendItem<br/>cap=128"]
+
+    TCP -- "ReadString(\\n)" --> R
+    R -- "enqueueFrame(data)" --> CH
+    CH -- "data := <-sendCh" --> W
+    W -- "conn.Write(data)<br/>+ WriteDeadline 30s" --> TCP
+
+    style CH fill:#fff3e0,stroke:#e65100
+    style W fill:#e8f5e9,stroke:#2e7d32
+    style R fill:#e3f2fd,stroke:#1565c0
+```
+*Diagram — Per-connection reader/writer goroutine pair*
+
+The design guarantees three properties:
+
+1. **No blocking on write.** `writeJSONFrame`, `writePushFrame`, and most
+   command responses serialise the frame into bytes, then push them into the
+   channel. The call returns immediately regardless of the remote peer's read
+   speed. Error-path responses use `writeJSONFrameSync` which waits for the
+   writer goroutine to flush the frame to the socket before returning — this
+   preserves the "response delivered before teardown" contract.
+2. **Slow-peer eviction.** If the channel is full (128 pending frames), the
+   connection is closed and the subscriber is removed. This prevents one slow
+   peer from consuming memory or blocking other operations.
+3. **Write deadline.** The writer goroutine sets a 30-second write deadline on
+   every `conn.Write`. If the TCP send buffer stays full beyond that, the OS
+   returns an error and the writer closes the connection.
+
+#### Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Listener
+    participant Reader as Reader goroutine
+    participant SendCh as sendCh (chan sendItem)
+    participant Writer as Writer goroutine
+    participant Socket as TCP Socket
+
+    Listener->>Reader: accept conn → registerInboundConn()
+    Note over Reader,Writer: registerInboundConn creates sendCh (cap=128),<br/>starts Writer goroutine
+
+    loop Read commands
+        Socket->>Reader: ReadString('\n')
+        Reader->>Reader: handleJSONCommand()
+        Reader->>SendCh: enqueueFrame(response bytes)
+        SendCh->>Writer: data := <-sendCh
+        Writer->>Socket: conn.Write(data) with 30s deadline
+    end
+
+    Note over Reader: connection closed or error
+    Reader->>Reader: unregisterInboundConn()
+    Reader->>SendCh: close(sendCh)
+    Note over Writer: sendCh closed → Writer drains remaining frames
+    Writer->>Reader: close(writerDone)
+    Note over Reader: TCP connection closed after writer finishes
+```
+*Diagram — Inbound connection lifecycle*
+
+#### Write path: all protocol commands
+
+Every TCP write on an inbound connection goes through the same channel —
+responses to commands, error responses, and asynchronous pushes alike. The
+difference is how the caller interacts with the channel:
+
+```mermaid
+flowchart TD
+    subgraph "Success responses (handleJSONCommand)"
+        CMD["Any command:<br/>hello, ping, get_peers,<br/>store_message, fetch_inbox,<br/>subscribe_inbox, ..."]
+        WJF["writeJSONFrame()<br/>(async, fire-and-forget)"]
+    end
+
+    subgraph "Error responses (return false paths)"
+        ERR["Protocol error:<br/>invalid JSON, auth failure,<br/>unknown command, ..."]
+        WJFS["writeJSONFrameSync()<br/>(blocks until written)"]
+    end
+
+    subgraph "Async pushes"
+        PUSH["Push event:<br/>push_message, push_delivery_receipt,<br/>announce_peer"]
+        WPF["writePushFrame()"]
+    end
+
+    ENQ["enqueueFrame()"]
+    ENQS["enqueueFrameSync()"]
+    CH["sendCh<br/>(single channel per conn)"]
+    CW["connWriter goroutine"]
+    TCP["TCP Socket"]
+
+    CMD --> WJF
+    WJF --> ENQ
+    ERR --> WJFS
+    WJFS --> ENQS
+    PUSH --> WPF
+    WPF --> ENQ
+    ENQ -->|"non-blocking<br/>select"| CH
+    ENQS -->|"non-blocking select<br/>+ wait for ack"| CH
+    CH --> CW
+    CW -->|"Write + deadline 30s"| TCP
+    CW -.->|"close(ack)"| ENQS
+
+    ENQ -->|"channel full"| EVICT["conn.Close()<br/>slow peer eviction"]
+
+    style ENQ fill:#fff3e0,stroke:#e65100
+    style ENQS fill:#fff3e0,stroke:#e65100
+    style EVICT fill:#ffebee,stroke:#c62828
+    style CW fill:#e8f5e9,stroke:#2e7d32
+    style CH fill:#fff3e0,stroke:#e65100
+    style WJFS fill:#fce4ec,stroke:#c62828
+```
+*Diagram — Single-writer guarantee for all protocol frames*
+
+This guarantees that no two goroutines ever call `conn.Write` concurrently,
+regardless of whether the write originates from a command response or an
+asynchronous push.
+
+#### Synchronous writes on error paths
+
+When a command handler returns `false` (invalid JSON, authentication failure,
+unknown command, etc.), the deferred cleanup in `handleConn` closes the TCP
+connection. If the error frame were enqueued asynchronously, the TCP socket
+would close before the writer goroutine could flush the frame — the client
+would see EOF instead of the error.
+
+`writeJSONFrameSync` solves this by attaching an `ack` channel to the send
+item. The writer goroutine closes `ack` only after a successful `conn.Write`,
+unblocking the caller. Only then does the command handler return `false`,
+allowing the deferred cleanup to proceed.
+
+If the writer goroutine has already exited (write error or slow-peer eviction
+by another goroutine), `enqueueFrameSync` detects this via the `writerDone`
+channel and returns `enqueueDropped` immediately instead of waiting for the
+timeout. A 5-second timeout acts as a last-resort safety net for cases that
+neither `ack` nor `writerDone` can cover.
+
+#### Why not a per-connection mutex?
+
+The previous implementation used a `sync.Mutex` per connection that was held
+during `io.WriteString`. If the remote peer was slow or unresponsive, the mutex
+was held indefinitely, which caused:
+
+- The reader goroutine to block when sending a response (waiting for the
+  mutex), freezing the entire read loop.
+- Backlog replay goroutines to queue behind the mutex, cascading the stall.
+- The peer to appear "hung" from the local node's perspective.
+
+The channel-based approach decouples all callers from the actual socket I/O:
+only the dedicated writer goroutine ever touches `conn.Write`, and it is the
+only goroutine that blocks on a slow peer.
+
 ### Persistence summary
 
 | File | Contents |
@@ -881,6 +1043,169 @@ Peer'ы классифицируются по доступным сетевым 
 4. Peer'ы хранят notice до истечения TTL, затем удаляют.
 5. Получатели запрашивают через `fetch_notices` и расшифровывают своим
    identity key.
+
+### Архитектура I/O соединений
+
+Каждое входящее TCP-соединение обслуживается двумя горутинами: **reader**
+(`handleConn` цикл чтения) и выделенный **writer** (`connWriter`). Они
+обмениваются данными через буферизованный канал, без мьютексов на сокетном I/O.
+
+```mermaid
+flowchart LR
+    subgraph "Горутины на одно соединение"
+        R["Reader горутина<br/>(handleConn)"]
+        W["Writer горутина<br/>(connWriter)"]
+    end
+
+    TCP["TCP Сокет"]
+    CH["sendCh<br/>chan sendItem<br/>cap=128"]
+
+    TCP -- "ReadString(\\n)" --> R
+    R -- "enqueueFrame(data)" --> CH
+    CH -- "data := <-sendCh" --> W
+    W -- "conn.Write(data)<br/>+ WriteDeadline 30с" --> TCP
+
+    style CH fill:#fff3e0,stroke:#e65100
+    style W fill:#e8f5e9,stroke:#2e7d32
+    style R fill:#e3f2fd,stroke:#1565c0
+```
+*Диаграмма — Пара горутин reader/writer на соединение*
+
+Дизайн гарантирует три свойства:
+
+1. **Нет блокировки на записи.** `writeJSONFrame`, `writePushFrame` и
+   большинство ответов на команды сериализуют фрейм в байты и кладут их в
+   канал. Вызов возвращается немедленно независимо от скорости чтения
+   удалённого пира. Ответы на ошибки используют `writeJSONFrameSync`, который
+   ждёт, пока writer горутина запишет фрейм на сокет, сохраняя контракт
+   «ответ доставлен до разрыва соединения».
+2. **Отключение медленных пиров.** Если канал заполнен (128 ожидающих фреймов),
+   соединение закрывается и подписчик удаляется. Это предотвращает ситуацию,
+   когда один медленный пир занимает память или блокирует другие операции.
+3. **Таймаут записи.** Writer горутина устанавливает 30-секундный write deadline
+   на каждый `conn.Write`. Если TCP send buffer остаётся заполненным дольше —
+   ОС возвращает ошибку, и writer закрывает соединение.
+
+#### Жизненный цикл
+
+```mermaid
+sequenceDiagram
+    participant Listener
+    participant Reader as Reader горутина
+    participant SendCh as sendCh (chan sendItem)
+    participant Writer as Writer горутина
+    participant Socket as TCP Сокет
+
+    Listener->>Reader: accept conn → registerInboundConn()
+    Note over Reader,Writer: registerInboundConn создаёт sendCh (cap=128),<br/>запускает Writer горутину
+
+    loop Чтение команд
+        Socket->>Reader: ReadString('\n')
+        Reader->>Reader: handleJSONCommand()
+        Reader->>SendCh: enqueueFrame(байты ответа)
+        SendCh->>Writer: data := <-sendCh
+        Writer->>Socket: conn.Write(data) с дедлайном 30с
+    end
+
+    Note over Reader: соединение закрыто или ошибка
+    Reader->>Reader: unregisterInboundConn()
+    Reader->>SendCh: close(sendCh)
+    Note over Writer: sendCh закрыт → Writer дочитывает оставшиеся фреймы
+    Writer->>Reader: close(writerDone)
+    Note over Reader: TCP соединение закрывается после завершения writer
+```
+*Диаграмма — Жизненный цикл входящего соединения*
+
+#### Путь записи: все команды протокола
+
+Каждая TCP-запись на входящем соединении проходит через один и тот же канал —
+ответы на команды, ошибки и асинхронные push-уведомления. Отличается только
+способ взаимодействия вызывающего с каналом:
+
+```mermaid
+flowchart TD
+    subgraph "Успешные ответы (handleJSONCommand)"
+        CMD["Любая команда:<br/>hello, ping, get_peers,<br/>store_message, fetch_inbox,<br/>subscribe_inbox, ..."]
+        WJF["writeJSONFrame()<br/>(async, fire-and-forget)"]
+    end
+
+    subgraph "Ответы на ошибки (return false пути)"
+        ERR["Ошибка протокола:<br/>невалидный JSON, ошибка авторизации,<br/>неизвестная команда, ..."]
+        WJFS["writeJSONFrameSync()<br/>(блокирует до записи)"]
+    end
+
+    subgraph "Асинхронные push"
+        PUSH["Push событие:<br/>push_message, push_delivery_receipt,<br/>announce_peer"]
+        WPF["writePushFrame()"]
+    end
+
+    ENQ["enqueueFrame()"]
+    ENQS["enqueueFrameSync()"]
+    CH["sendCh<br/>(один канал на соединение)"]
+    CW["connWriter горутина"]
+    TCP["TCP Сокет"]
+
+    CMD --> WJF
+    WJF --> ENQ
+    ERR --> WJFS
+    WJFS --> ENQS
+    PUSH --> WPF
+    WPF --> ENQ
+    ENQ -->|"неблокирующий<br/>select"| CH
+    ENQS -->|"неблокирующий select<br/>+ ожидание ack"| CH
+    CH --> CW
+    CW -->|"Write + deadline 30с"| TCP
+    CW -.->|"close(ack)"| ENQS
+
+    ENQ -->|"канал полон"| EVICT["conn.Close()<br/>отключение медленного пира"]
+
+    style ENQ fill:#fff3e0,stroke:#e65100
+    style ENQS fill:#fff3e0,stroke:#e65100
+    style EVICT fill:#ffebee,stroke:#c62828
+    style CW fill:#e8f5e9,stroke:#2e7d32
+    style CH fill:#fff3e0,stroke:#e65100
+    style WJFS fill:#fce4ec,stroke:#c62828
+```
+*Диаграмма — Гарантия единственного writer для всех фреймов протокола*
+
+Это гарантирует, что никакие две горутины не вызывают `conn.Write`
+одновременно, независимо от того, является ли запись ответом на команду или
+асинхронным push-уведомлением.
+
+#### Синхронная запись на error-path
+
+Когда обработчик команды возвращает `false` (невалидный JSON, ошибка
+авторизации, неизвестная команда и т.д.), отложенная очистка в `handleConn`
+закрывает TCP-соединение. Если бы error-фрейм ставился в очередь асинхронно,
+TCP-сокет закрылся бы до того, как writer горутина успела бы отправить фрейм —
+клиент увидел бы EOF вместо ошибки.
+
+`writeJSONFrameSync` решает эту проблему, добавляя канал `ack` к элементу
+отправки. Writer горутина закрывает `ack` только после успешного `conn.Write`,
+разблокируя вызывающего. Только после этого обработчик возвращает `false`,
+позволяя отложенной очистке выполниться.
+
+Если writer горутина уже завершилась (ошибка записи или отключение медленного
+пира другой горутиной), `enqueueFrameSync` обнаруживает это через канал
+`writerDone` и немедленно возвращает `enqueueDropped`, не дожидаясь таймаута.
+5-секундный таймаут служит последним рубежом защиты для случаев, которые не
+покрываются ни `ack`, ни `writerDone`.
+
+#### Почему не мьютекс на соединение?
+
+Предыдущая реализация использовала `sync.Mutex` на соединение, который
+удерживался во время `io.WriteString`. Если удалённый пир был медленным или не
+отвечал, мьютекс удерживался бесконечно, что приводило к:
+
+- Reader горутина блокировалась при отправке ответа (ожидание мьютекса),
+  замораживая весь цикл чтения.
+- Горутины replay бэклога выстраивались в очередь за мьютексом, каскадируя
+  зависание.
+- Пир казался «подвисшим» с точки зрения локальной ноды.
+
+Подход на каналах отвязывает всех вызывающих от реального сокетного I/O:
+только выделенная writer горутина вызывает `conn.Write`, и только она
+блокируется на медленном пире.
 
 ### Файлы персистентности
 
