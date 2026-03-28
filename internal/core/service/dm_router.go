@@ -257,29 +257,6 @@ func (r *DMRouter) SendMessage(to, body string) {
 	}()
 }
 
-func (r *DMRouter) SyncMessages(peerAddress string, peers []string) {
-	r.setSendStatus("syncing…")
-
-	go func() {
-		defer recoverLog("SyncMessages")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		imported, err := r.client.SyncDirectMessagesFromPeers(ctx, peers, peerAddress)
-		cancel()
-
-		r.mu.Lock()
-		if err != nil {
-			r.sendStatus = "sync failed: " + err.Error()
-		} else {
-			r.sendStatus = "sync done, imported: " + intStr(imported)
-		}
-		r.mu.Unlock()
-
-		r.loadConversation(peerAddress)
-		r.notify(UIEventMessagesUpdated)
-	}()
-}
-
 func (r *DMRouter) ActivePeer() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -1150,16 +1127,4 @@ func recoverLog(label string) {
 	if r := recover(); r != nil {
 		log.Error().Interface("panic", r).Str("label", label).Msg("recovered panic in DMRouter")
 	}
-}
-
-func intStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	return s
 }

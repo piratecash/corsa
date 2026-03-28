@@ -43,7 +43,6 @@ type Window struct {
 	chatList             widget.List
 	consoleButton        widget.Clickable
 	sendButton           widget.Clickable
-	syncButton           widget.Clickable
 	copyIdentityButton   widget.Clickable
 	languageToggle       widget.Clickable
 	languageOptions      map[string]*widget.Clickable
@@ -220,22 +219,6 @@ func (w *Window) handleActions(gtx layout.Context) {
 		if w.window != nil {
 			w.window.Invalidate()
 		}
-	}
-
-	for w.syncButton.Clicked(gtx) {
-		recipient := strings.TrimSpace(w.snap.ActivePeer)
-		if recipient == "" {
-			w.router.SetSendStatus(w.t("compose.select_first"))
-			continue
-		}
-
-		peers := append([]string(nil), w.snap.NodeStatus.Peers...)
-		if len(peers) == 0 {
-			w.router.SetSendStatus(w.t("chat.sync_disabled"))
-			continue
-		}
-
-		w.router.SyncMessages(recipient, peers)
 	}
 
 }
@@ -583,10 +566,6 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 					Spacing:   layout.SpaceBetween,
 					Alignment: layout.Middle,
 				}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						canSync := recipient != "" && countConnectedPeers(status.PeerHealth) > 0
-						return w.layoutChatActions(gtx, canSync)
-					}),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 						return layout.Dimensions{}
 					}),
@@ -780,21 +759,6 @@ func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-func (w *Window) layoutChatActions(gtx layout.Context, canSync bool) layout.Dimensions {
-	label := w.t("chat.sync")
-	if !canSync {
-		label = w.t("chat.sync_disabled")
-	}
-
-	return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(280)))
-		btn := material.Button(w.theme, &w.syncButton, label)
-		if !canSync {
-			btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
-		}
-		return btn.Layout(gtx)
-	})
-}
 
 func (w *Window) localNodeErrorRow() string {
 	if err := w.runtime.Error(); err != "" {
