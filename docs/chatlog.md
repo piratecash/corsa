@@ -446,7 +446,7 @@ the initialization point:
      background polling.
    - `defer crashlog.DeferRecover()` in node-side goroutines:
      `bootstrapLoop`, `handleConn`, `runPeerSession`, `readPeerSession`,
-     `gossipMessage`, `pushMessageToSubscribers`, `pushReceiptToSubscribers`,
+     `gossipMessage`, `pushToSubscriberSnapshot`, `pushReceiptToSubscribers`,
      `emitDeliveryReceipt`, `gossipReceipt`, `gossipNotice`,
      `sendMessageToPeer`, `sendNoticeToPeer`, `sendReceiptToPeer`,
      `writePushFrame`, `pushBacklogToSubscriber`. This ensures panics
@@ -1152,7 +1152,7 @@ sidebar остаётся пустым, а 5-секундный тикер чер
      поллинга.
    - `defer crashlog.DeferRecover()` во всех горутинах ноды:
      `bootstrapLoop`, `handleConn`, `runPeerSession`, `readPeerSession`,
-     `gossipMessage`, `pushMessageToSubscribers`, `pushReceiptToSubscribers`,
+     `gossipMessage`, `pushToSubscriberSnapshot`, `pushReceiptToSubscribers`,
      `emitDeliveryReceipt`, `gossipReceipt`, `gossipNotice`,
      `sendMessageToPeer`, `sendNoticeToPeer`, `sendReceiptToPeer`,
      `writePushFrame`, `pushBacklogToSubscriber`. Паники в любой

@@ -317,8 +317,17 @@ shown in the breakdown line.
    `routingTargetsForMessage()`:
    - broadcast (`recipient="*"`): all full nodes
    - addressed: all full nodes + the specific recipient if client role
-5. If the target peer has no active session, the message is queued in
-   `pending[address]` and flushed when the session reconnects.
+5. **Push and gossip are independent.** For addressed DMs the node takes
+   an atomic snapshot of subscribers via `subscribersForRecipient()`
+   (under `s.mu`). If the snapshot is non-empty, `pushToSubscriberSnapshot()`
+   delivers instantly to locally connected recipients. Independently,
+   `gossipMessage()` fans the message to relay peers ensuring mesh-wide
+   propagation. Push is an optimization for latency; gossip guarantees
+   the message reaches every relay so the recipient can retrieve it
+   from any node it reconnects to.
+6. The message is always persisted in `s.topics` before push/gossip, so
+   even if a subscriber disconnects mid-write, the recipient can pick
+   it up via backlog on the next `subscribe_inbox`.
 
 ```mermaid
 flowchart LR
@@ -939,8 +948,18 @@ sequenceDiagram
    `routingTargetsForMessage()`:
    - broadcast (`recipient="*"`): все full-ноды
    - адресное: все full-ноды + конкретный получатель (если client)
-5. Если у целевого peer'а нет активной сессии, сообщение ставится в
-   `pending[address]` и отправляется при переподключении.
+5. **Push и gossip независимы.** Для адресных DM нода атомарно берёт
+   snapshot подписчиков через `subscribersForRecipient()` (под `s.mu`).
+   Если snapshot не пуст, `pushToSubscriberSnapshot()` мгновенно
+   доставляет локально подключённым получателям. Независимо от этого,
+   `gossipMessage()` рассылает сообщение relay-пирам, обеспечивая
+   распространение по всей mesh-сети. Push — оптимизация для
+   латентности; gossip гарантирует, что сообщение попадёт на каждый
+   relay, и получатель сможет забрать его с любой ноды, к которой
+   переподключится.
+6. Сообщение всегда сохраняется в `s.topics` до push/gossip, поэтому
+   даже если подписчик отключится во время записи, получатель заберёт
+   его через backlog при следующем `subscribe_inbox`.
 
 ```mermaid
 flowchart LR

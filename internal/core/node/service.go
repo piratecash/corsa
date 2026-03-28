@@ -1996,15 +1996,34 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 
 	log.Info().Str("topic", msg.Topic).Str("id", string(msg.ID)).Str("from", msg.Sender).Str("to", msg.Recipient).Str("flag", string(msg.Flag)).Msg("stored message")
 
+	// Push and gossip are independent delivery mechanisms:
+	//
+	// Push  — instant delivery to locally connected subscribers.
+	//         An optimization; not a guarantee.  The subscriber may
+	//         disconnect before the write completes.
+	//
+	// Gossip — mesh-wide propagation to peer nodes.  Ensures every
+	//          relay in the network stores a copy so the recipient can
+	//          retrieve the message from any node it reconnects to.
+	//
+	// Both happen unconditionally when applicable.  Push without gossip
+	// would strand the message on this relay if the subscriber
+	// reconnects to a different node.  Gossip without push would add
+	// up to relayRetryTTL latency for a locally connected recipient.
+	if msg.Topic == "dm" && msg.Recipient != "*" {
+		subs := s.subscribersForRecipient(msg.Recipient)
+		if len(subs) > 0 {
+			go s.pushToSubscriberSnapshot(envelope, subs)
+		}
+	}
+
 	if s.shouldRouteStoredMessage(msg) {
 		s.trackRelayMessage(envelope)
 		go s.gossipMessage(envelope)
 	}
-	// Push to local DM subscribers and emit delivery receipts only for
-	// messages where this node is a party.  Transit DMs must not be
-	// pushed to local subscribers — they are handled via gossip/relay.
+
+	// Delivery receipts are emitted only when this node IS the recipient.
 	if isLocal && msg.Topic == "dm" && msg.Recipient != "*" {
-		go s.pushMessageToSubscribers(envelope)
 		if validateTimestamp && msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
 			go s.emitDeliveryReceipt(msg)
 		}
@@ -3049,17 +3068,16 @@ func (s *Service) closeAllInboundConns() {
 	}
 }
 
-func (s *Service) pushMessageToSubscribers(msg protocol.Envelope) {
+
+// pushToSubscriberSnapshot delivers a message to a pre-captured snapshot of
+// subscribers. The snapshot is taken under s.mu by the caller so that the
+// decision "route exists → push, not gossip" and the actual send targets
+// are determined atomically. If a subscriber's connection has broken by the
+// time we write, the message is still safe in s.topics and will be delivered
+// via backlog on the next subscribe_inbox.
+func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscriber) {
 	defer crashlog.DeferRecover()
 	if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
-		return
-	}
-	subs := s.subscribersForRecipient(msg.Recipient)
-	if len(subs) == 0 {
-		if msg.Recipient == s.identity.Address {
-			return
-		}
-		log.Debug().Str("recipient", msg.Recipient).Str("topic", msg.Topic).Str("id", string(msg.ID)).Msg("no active subscribers")
 		return
 	}
 	log.Info().Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("recipient", msg.Recipient).Int("subscribers", len(subs)).Msg("push_message")
@@ -5175,6 +5193,7 @@ func (s *Service) activePeerSession(address string) (*peerSession, bool) {
 	}
 	return session, true
 }
+
 
 func (s *Service) peerState(address string) string {
 	s.mu.RLock()

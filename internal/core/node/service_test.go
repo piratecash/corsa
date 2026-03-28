@@ -6210,3 +6210,370 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 		t.Error("overlay address 1.2.3.4 should not be in connectedHosts (only transport IP)")
 	}
 }
+
+// TestTransitDMLiveInboxRoute verifies that a relay node delivers a transit
+// DM immediately to a recipient that has a live inbox route (subscribe_inbox).
+// Push and gossip are independent: push provides instant local delivery while
+// gossip ensures mesh-wide propagation regardless of local subscriber state.
+func TestTransitDMLiveInboxRoute(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+
+	// Relay node — distinct identity from both sender and recipient.
+	relayID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate relay identity: %v", err)
+	}
+	svc, stop := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	}, relayID)
+	defer stop()
+
+	// Create sender and recipient identities — both foreign to the relay.
+	senderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate sender identity: %v", err)
+	}
+	recipientID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate recipient identity: %v", err)
+	}
+	recipientAddr := recipientID.Address
+
+	// Register both as trusted contacts so DM signature verification passes.
+	senderBoxSig := identity.SignBoxKeyBinding(senderID)
+	recipientBoxSig := identity.SignBoxKeyBinding(recipientID)
+	importReply := svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{
+			{
+				Address: senderID.Address,
+				PubKey:  identity.PublicKeyBase64(senderID.PublicKey),
+				BoxKey:  identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+				BoxSig:  senderBoxSig,
+			},
+			{
+				Address: recipientAddr,
+				PubKey:  identity.PublicKeyBase64(recipientID.PublicKey),
+				BoxKey:  identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+				BoxSig:  recipientBoxSig,
+			},
+		},
+	})
+	if importReply.Type != "contacts_imported" || importReply.Count != 2 {
+		t.Fatalf("import contacts failed: %#v", importReply)
+	}
+
+	// Encrypt a test message from sender to recipient.
+	ct, err := directmsg.EncryptForParticipants(
+		senderID,
+		recipientAddr,
+		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		"hello via transit relay",
+	)
+	if err != nil {
+		t.Fatalf("encrypt message: %v", err)
+	}
+
+	// --- Recipient connects and registers a live inbox route ---
+	recipConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial recipient: %v", err)
+	}
+	defer func() { _ = recipConn.Close() }()
+	_ = recipConn.SetDeadline(time.Now().Add(10 * time.Second))
+	recipReader := bufio.NewReader(recipConn)
+
+	// hello + auth
+	writeJSONFrame(t, recipConn, protocol.Frame{
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client:                 "node",
+		ClientVersion:          config.CorsaWireVersion,
+		Address:                recipientID.Address,
+		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
+	})
+	welcome := readJSONTestFrame(t, recipReader)
+	if welcome.Type != "welcome" || welcome.Challenge == "" {
+		t.Fatalf("expected welcome with challenge, got %s", welcome.Type)
+	}
+
+	writeJSONFrame(t, recipConn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   recipientID.Address,
+		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+recipientID.Address)),
+	})
+	authOK := readJSONTestFrame(t, recipReader)
+	if authOK.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got %s: %s", authOK.Type, authOK.Error)
+	}
+
+	// subscribe_inbox — registers the live inbox route.
+	writeJSONFrame(t, recipConn, protocol.Frame{
+		Type:       "subscribe_inbox",
+		Topic:      "dm",
+		Recipient:  recipientAddr,
+		Subscriber: "test-recip-sub",
+	})
+	subReply := readJSONTestFrame(t, recipReader)
+	if subReply.Type != "subscribed" {
+		t.Fatalf("expected subscribed, got %s: %s", subReply.Type, subReply.Error)
+	}
+
+	// Drain the reverse subscribe_inbox that the relay sends back.
+	reverseFrame := readJSONTestFrame(t, recipReader)
+	if reverseFrame.Type == "subscribe_inbox" {
+		writeJSONFrame(t, recipConn, protocol.Frame{
+			Type:       "subscribed",
+			Topic:      reverseFrame.Topic,
+			Recipient:  reverseFrame.Recipient,
+			Subscriber: reverseFrame.Subscriber,
+		})
+	}
+
+	// --- Sender sends DM through relay ---
+	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial sender: %v", err)
+	}
+	defer func() { _ = senderConn.Close() }()
+	_ = senderConn.SetDeadline(time.Now().Add(10 * time.Second))
+	senderReader := bufio.NewReader(senderConn)
+
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type: "hello", Version: config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "test-sender", ClientVersion: config.CorsaWireVersion,
+	})
+	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
+		t.Fatalf("sender expected welcome, got %s", f.Type)
+	}
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	writeJSONFrame(t, senderConn, sendMessageFrame("dm", "transit-live-1", senderID.Address, recipientAddr, "sender-delete", ts, 0, ct))
+	storeReply := readJSONTestFrame(t, senderReader)
+	if storeReply.Type != "message_stored" {
+		t.Fatalf("expected message_stored, got %s: %s", storeReply.Type, storeReply.Error)
+	}
+
+	// --- Verify: recipient receives push_message via the live inbox route ---
+	pushed := readJSONTestFrame(t, recipReader)
+	if pushed.Type != "push_message" {
+		t.Fatalf("expected push_message on recipient connection, got %s: %s", pushed.Type, pushed.Error)
+	}
+	if pushed.Item == nil {
+		t.Fatal("push_message has nil Item")
+	}
+	if pushed.Item.ID != "transit-live-1" {
+		t.Errorf("expected message ID transit-live-1, got %s", pushed.Item.ID)
+	}
+	if pushed.Recipient != recipientAddr {
+		t.Errorf("expected recipient %s, got %s", recipientAddr, pushed.Recipient)
+	}
+}
+
+// TestTransitDMBacklogAfterRouteDisappears verifies that if a live inbox
+// route disappears (subscriber disconnects) after the snapshot is taken but
+// before the push frame is written, the message is still available through
+// backlog on the next subscribe_inbox. Even though gossip also propagates
+// the message to the mesh, the local backlog provides a safety net for
+// recipients reconnecting to this same node.
+func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+
+	relayID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate relay identity: %v", err)
+	}
+	svc, stop := startTestNodeWithIdentity(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	}, relayID)
+	defer stop()
+
+	senderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate sender identity: %v", err)
+	}
+	recipientID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate recipient identity: %v", err)
+	}
+	recipientAddr := recipientID.Address
+
+	senderBoxSig := identity.SignBoxKeyBinding(senderID)
+	recipientBoxSig := identity.SignBoxKeyBinding(recipientID)
+	importReply := svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{
+			{
+				Address: senderID.Address,
+				PubKey:  identity.PublicKeyBase64(senderID.PublicKey),
+				BoxKey:  identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+				BoxSig:  senderBoxSig,
+			},
+			{
+				Address: recipientAddr,
+				PubKey:  identity.PublicKeyBase64(recipientID.PublicKey),
+				BoxKey:  identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+				BoxSig:  recipientBoxSig,
+			},
+		},
+	})
+	if importReply.Type != "contacts_imported" || importReply.Count != 2 {
+		t.Fatalf("import contacts failed: %#v", importReply)
+	}
+
+	ct, err := directmsg.EncryptForParticipants(
+		senderID,
+		recipientAddr,
+		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		"backlog recovery test",
+	)
+	if err != nil {
+		t.Fatalf("encrypt message: %v", err)
+	}
+
+	// Step 1: recipient connects, subscribes, then disconnects.
+	recipConn1, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial recipient (1st): %v", err)
+	}
+	_ = recipConn1.SetDeadline(time.Now().Add(10 * time.Second))
+	recipReader1 := bufio.NewReader(recipConn1)
+
+	writeJSONFrame(t, recipConn1, protocol.Frame{
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client:                 "node",
+		ClientVersion:          config.CorsaWireVersion,
+		Address:                recipientID.Address,
+		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
+	})
+	welcome := readJSONTestFrame(t, recipReader1)
+	if welcome.Type != "welcome" {
+		t.Fatalf("expected welcome, got %s", welcome.Type)
+	}
+	writeJSONFrame(t, recipConn1, protocol.Frame{
+		Type:      "auth_session",
+		Address:   recipientID.Address,
+		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+recipientID.Address)),
+	})
+	if f := readJSONTestFrame(t, recipReader1); f.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got %s", f.Type)
+	}
+	writeJSONFrame(t, recipConn1, protocol.Frame{
+		Type: "subscribe_inbox", Topic: "dm", Recipient: recipientAddr, Subscriber: "recip-sub-1",
+	})
+	if f := readJSONTestFrame(t, recipReader1); f.Type != "subscribed" {
+		t.Fatalf("expected subscribed, got %s", f.Type)
+	}
+	// Drain reverse subscribe_inbox.
+	if f := readJSONTestFrame(t, recipReader1); f.Type == "subscribe_inbox" {
+		writeJSONFrame(t, recipConn1, protocol.Frame{
+			Type: "subscribed", Topic: f.Topic, Recipient: f.Recipient, Subscriber: f.Subscriber,
+		})
+	}
+
+	// Disconnect: route is gone.
+	_ = recipConn1.Close()
+	time.Sleep(50 * time.Millisecond) // let cleanup run
+
+	// Step 2: sender sends DM. The stale subscriber snapshot may be taken
+	// but the push will fail (conn closed). Gossip was skipped because
+	// snapshot was non-empty. The message must still be in topics/backlog.
+	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial sender: %v", err)
+	}
+	defer func() { _ = senderConn.Close() }()
+	_ = senderConn.SetDeadline(time.Now().Add(10 * time.Second))
+	senderReader := bufio.NewReader(senderConn)
+
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type: "hello", Version: config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "test-sender", ClientVersion: config.CorsaWireVersion,
+	})
+	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
+		t.Fatalf("sender expected welcome, got %s", f.Type)
+	}
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	writeJSONFrame(t, senderConn, sendMessageFrame("dm", "backlog-msg-1", senderID.Address, recipientAddr, "sender-delete", ts, 0, ct))
+	storeReply := readJSONTestFrame(t, senderReader)
+	if storeReply.Type != "message_stored" {
+		t.Fatalf("expected message_stored, got %s: %s", storeReply.Type, storeReply.Error)
+	}
+
+	// Step 3: new recipient connection subscribes — should get the message
+	// via backlog even though the push to the old connection failed.
+	recipConn2, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial recipient (2nd): %v", err)
+	}
+	defer func() { _ = recipConn2.Close() }()
+	_ = recipConn2.SetDeadline(time.Now().Add(10 * time.Second))
+	recipReader2 := bufio.NewReader(recipConn2)
+
+	writeJSONFrame(t, recipConn2, protocol.Frame{
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client:                 "node",
+		ClientVersion:          config.CorsaWireVersion,
+		Address:                recipientID.Address,
+		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
+	})
+	welcome2 := readJSONTestFrame(t, recipReader2)
+	if welcome2.Type != "welcome" {
+		t.Fatalf("expected welcome (2nd), got %s", welcome2.Type)
+	}
+	writeJSONFrame(t, recipConn2, protocol.Frame{
+		Type:      "auth_session",
+		Address:   recipientID.Address,
+		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome2.Challenge+"|"+recipientID.Address)),
+	})
+	if f := readJSONTestFrame(t, recipReader2); f.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok (2nd), got %s", f.Type)
+	}
+
+	writeJSONFrame(t, recipConn2, protocol.Frame{
+		Type: "subscribe_inbox", Topic: "dm", Recipient: recipientAddr, Subscriber: "recip-sub-2",
+	})
+	if f := readJSONTestFrame(t, recipReader2); f.Type != "subscribed" {
+		t.Fatalf("expected subscribed (2nd), got %s", f.Type)
+	}
+
+	// Read all frames — expect the backlog message to arrive.
+	_ = recipConn2.SetDeadline(time.Now().Add(3 * time.Second))
+	foundBacklogMsg := false
+	for i := 0; i < 10; i++ {
+		f := readJSONTestFrame(t, recipReader2)
+		if f.Type == "" {
+			break
+		}
+		if f.Type == "push_message" && f.Item != nil && f.Item.ID == "backlog-msg-1" {
+			foundBacklogMsg = true
+			break
+		}
+	}
+	if !foundBacklogMsg {
+		t.Error("message was NOT delivered via backlog after route disappeared — potential message loss")
+	}
+}
+
