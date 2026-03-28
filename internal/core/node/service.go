@@ -91,14 +91,15 @@ type subscriber struct {
 }
 
 type peerSession struct {
-	address string
-	conn    net.Conn
-	metered *MeteredConn // tracks bytes for this session; nil when conn is not metered
-	sendCh  chan protocol.Frame
-	inboxCh chan protocol.Frame
-	errCh   chan error
-	version int
-	authOK  bool
+	address      string
+	peerIdentity string // peer's Ed25519 identity fingerprint from welcome.Address
+	conn         net.Conn
+	metered      *MeteredConn // tracks bytes for this session; nil when conn is not metered
+	sendCh       chan protocol.Frame
+	inboxCh      chan protocol.Frame
+	errCh        chan error
+	version      int
+	authOK       bool
 }
 
 type peerHealth struct {
@@ -787,6 +788,33 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		if sub != nil {
 			go s.pushBacklogToSubscriber(sub)
 		}
+		// Reverse subscription: subscribe on the outbound peer so that this
+		// node receives both the stored backlog and live updates for its own
+		// identity.  subscribe_inbox is a superset of the old request_inbox
+		// (it pushes backlog AND registers a live subscriber), so a single
+		// frame in each direction is sufficient for full bidirectional sync.
+		// Sent here (not after auth_ok) so that short-lived connections like
+		// syncPeer — which never send subscribe_inbox — are not affected.
+		if s.isConnAuthenticated(conn) {
+			s.writeJSONFrame(conn, protocol.Frame{
+				Type:       "subscribe_inbox",
+				Topic:      "dm",
+				Recipient:  s.identity.Address,
+				Subscriber: s.cfg.AdvertiseAddress,
+			})
+		}
+		return true
+	case "subscribed":
+		// Response to our reverse subscribe_inbox sent to the outbound peer.
+		// The outbound side has registered us as a subscriber and will push
+		// backlog + live updates.  Nothing to do here — just acknowledge.
+		log.Info().Str("recipient", frame.Recipient).Str("subscriber", frame.Subscriber).Msg("reverse subscription confirmed by outbound peer")
+		return true
+	case "push_message":
+		s.handleInboundPushMessage(conn, frame)
+		return true
+	case "push_delivery_receipt":
+		s.handleInboundPushDeliveryReceipt(conn, frame)
 		return true
 	case "publish_notice":
 		s.writeJSONFrame(conn, s.publishNoticeFrame(frame))
@@ -2745,6 +2773,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 		return false, err
 	}
 	session.version = welcome.Version
+	session.peerIdentity = welcome.Address
 	s.learnIdentityFromWelcome(welcome)
 	if err := s.authenticatePeerSession(session, welcome); err != nil {
 		return false, err
@@ -3886,6 +3915,14 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				s.handlePeerSessionFrame(session.address, incoming)
 				continue
 			}
+			if incoming.Type == "request_inbox" {
+				s.handlePeerSessionFrame(session.address, incoming)
+				continue
+			}
+			if incoming.Type == "subscribe_inbox" {
+				s.handlePeerSessionFrame(session.address, incoming)
+				continue
+			}
 			if expectedType == "" || incoming.Type == expectedType {
 				_ = session.conn.SetReadDeadline(time.Time{})
 				return incoming, nil
@@ -3968,6 +4005,22 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		s.storeDeliveryReceipt(receipt)
 		s.sendAckDeleteToPeer(address, "receipt", receipt.MessageID, receipt.Status)
 		log.Info().Str("peer", address).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
+	case "request_inbox":
+		s.mu.RLock()
+		session := s.sessions[address]
+		s.mu.RUnlock()
+		s.respondToInboxRequest(session)
+	case "subscribe_inbox":
+		s.mu.RLock()
+		session := s.sessions[address]
+		s.mu.RUnlock()
+		if session != nil {
+			reply, sub := s.subscribeInboxFrame(session.conn, frame)
+			s.writeJSONFrame(session.conn, reply)
+			if sub != nil {
+				go s.pushBacklogToSubscriber(sub)
+			}
+		}
 	case "announce_peer":
 		nodeType := frame.NodeType
 		if !isKnownNodeType(nodeType) {
@@ -3981,6 +4034,100 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", address).Msg("learned peer from announce")
 		}
 	}
+}
+
+// handleInboundPushMessage processes a push_message frame received on an
+// inbound connection. This happens when the remote peer responds to our
+// request_inbox with messages destined for this node. The peer identity
+// is implicit — already established during authentication.
+func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) {
+	if frame.Item == nil {
+		return
+	}
+
+	msg, err := incomingMessageFromFrame(protocol.Frame{
+		ID:         frame.Item.ID,
+		Topic:      frame.Topic,
+		Address:    frame.Item.Sender,
+		Recipient:  frame.Item.Recipient,
+		Flag:       frame.Item.Flag,
+		CreatedAt:  frame.Item.CreatedAt,
+		TTLSeconds: frame.Item.TTLSeconds,
+		Body:       frame.Item.Body,
+	})
+	if err != nil {
+		return
+	}
+
+	peerAddr := s.inboundPeerAddress(conn)
+
+	if stored, _, errCode := s.storeIncomingMessage(msg, true); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+		if peerAddr != "" {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			s.syncPeer(refreshCtx, peerAddr)
+			cancel()
+			_, _, _ = s.storeIncomingMessage(msg, true)
+		}
+	}
+	s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
+	log.Info().Str("peer", peerAddr).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("received pushed message (inbound request_inbox)")
+}
+
+// handleInboundPushDeliveryReceipt processes a push_delivery_receipt frame
+// received on an inbound connection. This happens when the remote peer
+// responds to our request_inbox with delivery receipts destined for this node.
+func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol.Frame) {
+	if frame.Receipt == nil {
+		return
+	}
+	receipt, err := receiptFromReceiptFrame(*frame.Receipt)
+	if err != nil {
+		return
+	}
+	s.storeDeliveryReceipt(receipt)
+	peerAddr := s.inboundPeerAddress(conn)
+	s.sendAckDeleteToPeer(peerAddr, "receipt", receipt.MessageID, receipt.Status)
+	log.Info().Str("peer", peerAddr).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound request_inbox)")
+}
+
+// respondToInboxRequest is called by the outbound session when the remote
+// inbound side sends a request_inbox frame after authentication.  Messages
+// and receipts are stored by identity fingerprint (peerIdentity), not by
+// transport/dial address.  The function pushes any locally stored messages
+// and delivery receipts for the peer back over the outbound connection.
+func (s *Service) respondToInboxRequest(session *peerSession) {
+	if session == nil {
+		return
+	}
+	peerID := session.peerIdentity
+	if peerID == "" {
+		peerID = session.address
+	}
+
+	inbox := s.fetchInboxFrame("dm", peerID)
+	for _, item := range inbox.Messages {
+		if createdAt, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil && s.messageDeliveryExpired(createdAt.UTC(), item.TTLSeconds) {
+			continue
+		}
+		msgFrame := item
+		s.writeJSONFrame(session.conn, protocol.Frame{
+			Type:      "push_message",
+			Topic:     "dm",
+			Recipient: peerID,
+			Item:      &msgFrame,
+		})
+	}
+
+	receipts := s.fetchDeliveryReceiptsFrame(peerID)
+	for _, item := range receipts.Receipts {
+		receiptFrame := item
+		s.writeJSONFrame(session.conn, protocol.Frame{
+			Type:      "push_delivery_receipt",
+			Recipient: peerID,
+			Receipt:   &receiptFrame,
+		})
+	}
+	log.Info().Str("peer", session.address).Str("identity", peerID).Int("messages", len(inbox.Messages)).Int("receipts", len(receipts.Receipts)).Msg("responded to request_inbox")
 }
 
 func (s *Service) sendAckDeleteToPeer(address, ackType string, id protocol.MessageID, status string) {

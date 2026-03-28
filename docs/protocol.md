@@ -979,6 +979,42 @@ sequenceDiagram
 
 *Diagram 1 — Message delivery flow*
 
+### Bidirectional inbox subscription
+
+Inbox exchange between peers is fully symmetrical: each side sends `subscribe_inbox` to the other. The outbound peer sends `subscribe_inbox` as part of the initial session setup. The inbound peer sends its own `subscribe_inbox` back after responding with `subscribed`. This ensures both peers receive the stored backlog and a live subscription for new messages in a single connection — without needing a separate outbound session in the reverse direction. The reverse `subscribe_inbox` is sent after the first `subscribe_inbox` (not after `auth_ok`) so that short-lived connections — such as contact-sync dials — are not affected.
+
+Each `subscribe_inbox` triggers two things on the receiving side: registration of a live subscriber (for future `push_message` delivery) and an immediate backlog push via `pushBacklogToSubscriber`.
+
+```mermaid
+sequenceDiagram
+    participant A as "Caller (outbound)"
+    participant B as "Responder (inbound)"
+
+    A->>B: hello
+    B->>A: welcome (challenge)
+    A->>B: auth_session (signature)
+    B->>A: auth_ok
+    A->>B: subscribe_inbox (dm, recipient=A)
+    B->>A: subscribed
+    B-->>A: push_message (backlog for A)
+    B->>A: subscribe_inbox (dm, recipient=B)
+    A->>B: subscribed
+    A-->>B: push_message (backlog for B)
+    note over A,B: Both sides now have live subscriptions
+```
+
+*Diagram 2 — Bidirectional inbox subscription after authentication*
+
+Rules:
+
+- each peer sends `subscribe_inbox` to the other; both get backlog + live subscription
+- the outbound side handles incoming `subscribe_inbox` through the session frame dispatcher, registering the subscriber and responding with `subscribed`
+- the inbound side handles the `subscribed` response as an acknowledgement; no further action required
+- `ack_delete` for messages received via the subscription is sent through the normal outbound session (if available) or deferred until one is established
+- message deduplication (`seen` map) prevents double-storage when the same message arrives from multiple paths
+
+Backward compatibility: the `request_inbox` frame is still accepted by the outbound side for peers that have not been updated to bidirectional `subscribe_inbox`. It performs a one-time backlog dump without registering a live subscriber.
+
 Message flags:
 
 - `immutable` — nobody may delete the message
@@ -2113,6 +2149,42 @@ sequenceDiagram
 ```
 
 *Диаграмма 1 — Схема доставки сообщений*
+
+### Двунаправленная подписка на входящие
+
+Обмен входящими между пирами полностью симметричен: каждая сторона отправляет `subscribe_inbox` другой. Исходящий пир отправляет `subscribe_inbox` в рамках начальной настройки сессии. Входящий пир отправляет свой `subscribe_inbox` обратно после ответа `subscribed`. Это обеспечивает обеим сторонам получение накопленного бэклога и живую подписку на новые сообщения в рамках одного соединения — без необходимости отдельной исходящей сессии в обратном направлении. Обратный `subscribe_inbox` отправляется после первого `subscribe_inbox` (а не после `auth_ok`), чтобы короткоживущие соединения — такие как синхронизация контактов — не были затронуты.
+
+Каждый `subscribe_inbox` вызывает два действия на принимающей стороне: регистрацию живого подписчика (для будущей доставки `push_message`) и немедленную отправку бэклога через `pushBacklogToSubscriber`.
+
+```mermaid
+sequenceDiagram
+    participant A as "Вызывающая (outbound)"
+    participant B as "Отвечающая (inbound)"
+
+    A->>B: hello
+    B->>A: welcome (challenge)
+    A->>B: auth_session (signature)
+    B->>A: auth_ok
+    A->>B: subscribe_inbox (dm, recipient=A)
+    B->>A: subscribed
+    B-->>A: push_message (бэклог для A)
+    B->>A: subscribe_inbox (dm, recipient=B)
+    A->>B: subscribed
+    A-->>B: push_message (бэклог для B)
+    note over A,B: Обе стороны теперь имеют живые подписки
+```
+
+*Диаграмма 2 — Двунаправленная подписка на входящие после аутентификации*
+
+Правила:
+
+- каждый пир отправляет `subscribe_inbox` другому; оба получают бэклог + живую подписку
+- исходящая сторона обрабатывает входящий `subscribe_inbox` через диспетчер фреймов сессии, регистрируя подписчика и отвечая `subscribed`
+- входящая сторона обрабатывает ответ `subscribed` как подтверждение; дальнейших действий не требуется
+- `ack_delete` для сообщений, полученных через подписку, отправляется через обычную исходящую сессию (если доступна) или откладывается до её установления
+- дедупликация сообщений (карта `seen`) предотвращает двойное сохранение, когда одно и то же сообщение приходит из нескольких путей
+
+Обратная совместимость: фрейм `request_inbox` по-прежнему принимается исходящей стороной для пиров, которые ещё не обновлены до двунаправленного `subscribe_inbox`. Он выполняет одноразовую отправку бэклога без регистрации живого подписчика.
 
 Флаги сообщений:
 
