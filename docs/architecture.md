@@ -34,6 +34,7 @@ The repository contains the current Go-based CORSA stack:
 - `internal/core/protocol`: protocol models
 - `internal/core/transport`: p2p transport abstractions
 - `internal/platform/mobile`: future mobile bindings
+- see [debug.md](debug.md) for log levels and protocol tracing
 
 ### Runtime model
 
@@ -117,6 +118,7 @@ Current trust and discovery flow:
 - `internal/core/protocol`: модели протокола
 - `internal/core/transport`: p2p-абстракции транспорта
 - `internal/platform/mobile`: будущие mobile bindings
+- см. [debug.md](debug.md) для уровней логирования и трассировки протокола
 
 ### Модель запуска
 

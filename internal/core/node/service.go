@@ -854,7 +854,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 	resp := s.handleLocalFrameDispatch(frame)
 	accepted := resp.Type != "error"
-	log.Debug().
+	log.Trace().
 		Str("protocol", "json/local").
 		Str("addr", "local").
 		Str("direction", "recv").

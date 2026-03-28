@@ -4917,7 +4917,7 @@ func TestProtocolTraceLogging(t *testing.T) {
 	origLogger := log.Logger
 	origLevel := zerolog.GlobalLevel()
 	log.Logger = zerolog.New(&buf).With().Logger()
-	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	zerolog.SetGlobalLevel(zerolog.TraceLevel)
 	defer func() {
 		log.Logger = origLogger
 		zerolog.SetGlobalLevel(origLevel)
