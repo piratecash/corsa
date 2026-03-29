@@ -82,6 +82,7 @@ type Service struct {
 	observedAddrs   map[string]string     // peer identity (fingerprint) → observed IP they reported for us
 	reachableGroups map[NetGroup]struct{} // network groups this node can reach (computed at startup)
 	messageStore    MessageStore           // optional: persistence handler registered by desktop layer
+	router          Router                 // routing strategy for outbound message delivery
 }
 
 type subscriber struct {
@@ -100,6 +101,7 @@ type peerSession struct {
 	errCh        chan error
 	version      int
 	authOK       bool
+	capabilities []string // intersection of local and remote capabilities negotiated during handshake
 }
 
 type peerHealth struct {
@@ -150,8 +152,9 @@ type connAuthState struct {
 
 // connPeerHello caches hello frame info to avoid re-parsing for subsequent frames.
 type connPeerHello struct {
-	address  string
-	networks map[NetGroup]struct{}
+	address      string
+	networks     map[NetGroup]struct{}
+	capabilities []string // intersection of local and remote capabilities from handshake
 }
 
 type banEntry struct {
@@ -361,7 +364,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		restoredHealth[addr] = h
 	}
 
-	return &Service{
+	svc := &Service{
 		identity:       id,
 		cfg:            cfg,
 		selfBoxSig:     selfContact.BoxSignature,
@@ -405,6 +408,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		bans:           make(map[string]banEntry),
 		events:         make(map[chan protocol.LocalChangeEvent]struct{}),
 	}
+	svc.router = NewGossipRouter(svc)
+	return svc
 }
 
 // RegisterMessageStore sets the optional handler for message persistence.
@@ -1146,6 +1151,7 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		BoxSig:                 s.selfBoxSig,
 		ObservedAddress:        observedAddr,
 		Challenge:              challenge,
+		Capabilities:           localCapabilities(),
 	}
 }
 
@@ -1286,8 +1292,9 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 		addr = strings.TrimSpace(hello.Address)
 	}
 	info := &connPeerHello{
-		address:  addr,
-		networks: parseNetGroups(hello.Networks),
+		address:      addr,
+		networks:     parseNetGroups(hello.Networks),
+		capabilities: intersectCapabilities(localCapabilities(), hello.Capabilities),
 	}
 	s.mu.Lock()
 	s.connPeerInfo[conn] = info
@@ -2010,16 +2017,15 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// would strand the message on this relay if the subscriber
 	// reconnects to a different node.  Gossip without push would add
 	// up to relayRetryTTL latency for a locally connected recipient.
-	if msg.Topic == "dm" && msg.Recipient != "*" {
-		subs := s.subscribersForRecipient(msg.Recipient)
-		if len(subs) > 0 {
-			go s.pushToSubscriberSnapshot(envelope, subs)
-		}
+	decision := s.router.Route(envelope)
+
+	if len(decision.PushSubscribers) > 0 {
+		go s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers)
 	}
 
 	if s.shouldRouteStoredMessage(msg) {
 		s.trackRelayMessage(envelope)
-		go s.gossipMessage(envelope)
+		go s.executeGossipTargets(envelope, decision.GossipTargets)
 	}
 
 	// Delivery receipts are emitted only when this node IS the recipient.
@@ -2793,6 +2799,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	}
 	session.version = welcome.Version
 	session.peerIdentity = welcome.Address
+	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
 	s.learnIdentityFromWelcome(welcome)
 	if err := s.authenticatePeerSession(session, welcome); err != nil {
 		return false, err
@@ -2882,9 +2889,12 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 	return nil
 }
 
-func (s *Service) gossipMessage(msg protocol.Envelope) {
+// executeGossipTargets sends a message to pre-computed gossip targets from a
+// RoutingDecision. The target list is provided by the Router — targets are not
+// recomputed here.
+func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []string) {
 	defer crashlog.DeferRecover()
-	for _, address := range s.routingTargetsForMessage(msg) {
+	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
@@ -3349,6 +3359,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
 		BoxSig:        s.selfBoxSig,
+		Capabilities:  localCapabilities(),
 	})
 	if err != nil {
 		return ""
@@ -4749,7 +4760,8 @@ func (s *Service) retryRelayDeliveries() {
 	now := time.Now().UTC()
 	for _, msg := range s.retryableRelayMessages(now) {
 		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", s.noteRelayAttempt(relayMessageKey(msg.ID), now)).Msg("relay_retry_message")
-		go s.gossipMessage(msg)
+		decision := s.router.Route(msg)
+		go s.executeGossipTargets(msg, decision.GossipTargets)
 	}
 	for _, receipt := range s.retryableRelayReceipts(now) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")

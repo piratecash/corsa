@@ -306,6 +306,8 @@ shown in the breakdown line.
 
 ### Message routing
 
+**Routing abstraction:** The `Router` interface (`internal/core/node/routing.go`) encapsulates the delivery strategy. `Router.Route(msg)` returns a `RoutingDecision` with four independent delivery paths: `PushSubscribers` (local push), `DirectPeers` (recipient's direct connections), `RelayNextHop` (routing table lookup), and `GossipTargets` (top-N peers by score). The current implementation (`GossipRouter`) wraps the existing logic without changing network behavior. See [roadmap.md](roadmap.md) for the iterative migration plan.
+
 **Direct messages:**
 
 1. Desktop encrypts the message with the recipient's X25519 box key and
@@ -936,6 +938,8 @@ sequenceDiagram
 - `healthy` — как минимум половина известных пиров пригодна (2+)
 
 ### Маршрутизация сообщений
+
+**Абстракция маршрутизации:** Интерфейс `Router` (`internal/core/node/routing.go`) инкапсулирует стратегию доставки. `Router.Route(msg)` возвращает `RoutingDecision` с четырьмя независимыми путями доставки: `PushSubscribers` (локальный push), `DirectPeers` (прямые подключения получателя), `RelayNextHop` (поиск в таблице маршрутов), `GossipTargets` (топ-N пиров по скору). Текущая реализация (`GossipRouter`) оборачивает существующую логику без изменения поведения сети. См. [roadmap.md](roadmap.md) — план итеративной миграции.
 
 **Direct messages:**
 

@@ -61,6 +61,7 @@ type Frame struct {
 	Conversations          []ConversationFrame   `json:"conversations,omitempty"`
 	NetworkStats           *NetworkStatsFrame    `json:"network_stats,omitempty"`
 	TrafficHistory         *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
+	Capabilities           []string              `json:"capabilities,omitempty"`
 }
 
 type ContactFrame struct {

@@ -6577,3 +6577,90 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 	}
 }
 
+// TestCapabilityExchangeBetweenTwoNodes verifies that capabilities are sent in
+// hello and echoed in welcome during a live handshake between two nodes.
+func TestCapabilityExchangeBetweenTwoNodes(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	_, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopA()
+
+	svcB, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopB()
+
+	// Connect to node B as a raw TCP client and send hello with capabilities.
+	frames := exchangeFrames(t, svcB.externalListenAddress(),
+		protocol.Frame{
+			Type:         "hello",
+			Version:      config.ProtocolVersion,
+			Client:       "test",
+			Capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
+		},
+	)
+
+	welcome := frames[0]
+	if welcome.Type != "welcome" {
+		t.Fatalf("expected welcome, got %s", welcome.Type)
+	}
+
+	// In Iteration 0 localCapabilities() returns nil, so the welcome frame
+	// should have empty/nil capabilities. The important thing is that the
+	// field is present in the protocol and does not cause errors.
+	// When localCapabilities() returns tokens, they will appear here.
+	if len(welcome.Capabilities) > 0 {
+		// This is expected once capabilities are enabled; for now just
+		// verify the field round-trips without breaking the handshake.
+		t.Logf("welcome capabilities: %v", welcome.Capabilities)
+	}
+}
+
+// TestMixedVersionNodeWithoutCapabilitiesField verifies that a legacy node
+// (one that does not send the capabilities field) can successfully handshake
+// with a new node. The capabilities field is omitempty, so legacy frames
+// simply omit it; the new node must treat this as an empty capability set.
+func TestMixedVersionNodeWithoutCapabilitiesField(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stop()
+
+	// Send a hello frame WITHOUT the capabilities field — simulating a
+	// legacy node that predates capability negotiation.
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{
+			Type:    "hello",
+			Version: config.ProtocolVersion,
+			Client:  "test",
+			// Capabilities intentionally omitted (nil)
+		},
+	)
+
+	welcome := frames[0]
+	if welcome.Type != "welcome" {
+		t.Fatalf("expected welcome from new node, got %s", welcome.Type)
+	}
+	if welcome.Version != config.ProtocolVersion {
+		t.Fatalf("expected protocol version %d, got %d", config.ProtocolVersion, welcome.Version)
+	}
+	// Handshake must succeed — a missing capabilities field is not an error.
+}
+

@@ -41,6 +41,7 @@ The handshake commands establish peer connections, negotiate protocol version co
   "client_build": 21,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
   "networks": ["ipv4", "ipv6", "torv3"],
+  "capabilities": ["mesh_relay_v1"],
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519>",
   "boxkey": "<base64-x25519>",
@@ -63,6 +64,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `client_build` | integer | optional | Monotonic build number for version tracking. Incremented on each release |
 | `services` | array | optional | Capability list: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
 | `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against `listen` address |
+| `capabilities` | array | optional | Extended capability tokens for feature negotiation (e.g., `["mesh_relay_v1", "mesh_routing_v1"]`). Both peers advertise capabilities during handshake; the session uses the intersection. Nodes without this field are treated as having an empty capability set. See [Capability Negotiation](#capability-negotiation) |
 | `address` | string | optional | Peer fingerprint (identity public key hash in hex). Required for mutual authentication on v2+ |
 | `pubkey` | string | optional | Ed25519 public key in base64. Used for message signature verification |
 | `boxkey` | string | optional | X25519 public key in base64. Used for message encryption |
@@ -84,6 +86,7 @@ The handshake commands establish peer connections, negotiate protocol version co
   "client_version": "<wire>",
   "client_build": 21,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
+  "capabilities": ["mesh_relay_v1"],
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519>",
   "boxkey": "<base64-x25519>",
@@ -108,6 +111,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `client_version` | string | Same as in `hello` |
 | `client_build` | integer | Same as in `hello` |
 | `services` | array | Responder's capability list |
+| `capabilities` | array | Responder's extended capability tokens. The session uses the intersection of initiator and responder capabilities. See [Capability Negotiation](#capability-negotiation) |
 | `address` | string | Responder's fingerprint |
 | `pubkey` | string | Responder's Ed25519 public key |
 | `boxkey` | string | Responder's X25519 public key |
@@ -284,6 +288,16 @@ The `networks` array is validated against the format of `listen`. For example, i
 
 ---
 
+## Capability Negotiation
+
+The `capabilities` field enables additive feature negotiation without incrementing `ProtocolVersion`. Each capability is a string token (e.g., `"mesh_relay_v1"`, `"mesh_routing_v1"`). Both peers advertise their supported capabilities during the handshake. The session uses only the intersection of both sets.
+
+Capability tokens gate new frame types and behaviors. A peer must not send a capability-gated frame type unless the session has that capability in its negotiated set. This allows mixed-version networks: legacy nodes without the `capabilities` field are treated as having an empty set — they never receive unknown frame types.
+
+Currently defined tokens: none (the mechanism is introduced but no capabilities are active yet). Future iterations will add tokens such as `"mesh_relay_v1"` for hop-by-hop relay and `"mesh_routing_v1"` for routing table announcements.
+
+---
+
 ## Error Handling
 
 On version mismatch:
@@ -394,6 +408,7 @@ stateDiagram-v2
   "client_build": 21,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
   "networks": ["ipv4", "ipv6", "torv3"],
+  "capabilities": ["mesh_relay_v1"],
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519>",
   "boxkey": "<base64-x25519>",
@@ -416,6 +431,7 @@ stateDiagram-v2
 | `client_build` | integer | опционально | Монотонный номер сборки для отслеживания версий. Увеличивается при каждом релизе |
 | `services` | array | опционально | Список возможностей: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
 | `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против адреса `listen` |
+| `capabilities` | array | опционально | Расширенные capability-токены для согласования функций (например, `["mesh_relay_v1", "mesh_routing_v1"]`). Оба пира объявляют capabilities при handshake; сессия использует пересечение. Ноды без этого поля считаются с пустым набором. См. [Согласование capabilities](#согласование-capabilities) |
 | `address` | string | опционально | Fingerprint пира (хеш публичного ключа identity в hex). Требуется для взаимной аутентификации на v2+ |
 | `pubkey` | string | опционально | Ed25519 публичный ключ в base64. Используется для проверки подписей сообщений |
 | `boxkey` | string | опционально | X25519 публичный ключ в base64. Используется для шифрования сообщений |
@@ -437,6 +453,7 @@ stateDiagram-v2
   "client_version": "<wire>",
   "client_build": 21,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
+  "capabilities": ["mesh_relay_v1"],
   "address": "<fingerprint>",
   "pubkey": "<base64-ed25519>",
   "boxkey": "<base64-x25519>",
@@ -461,6 +478,7 @@ stateDiagram-v2
 | `client_version` | string | Аналогично полю в `hello` |
 | `client_build` | integer | Аналогично полю в `hello` |
 | `services` | array | Список возможностей ответчика |
+| `capabilities` | array | Расширенные capability-токены ответчика. Сессия использует пересечение capabilities инициатора и ответчика. См. [Согласование capabilities](#согласование-capabilities) |
 | `address` | string | Fingerprint ответчика |
 | `pubkey` | string | Ed25519 публичный ключ ответчика |
 | `boxkey` | string | X25519 публичный ключ ответчика |
@@ -634,6 +652,16 @@ sequenceDiagram
 - `unknown` — тип адреса не распознан
 
 Массив `networks` валидируется против формата `listen`. Например, если `listen="192.168.1.100:64646"`, только `ipv4` и `local` допустимы.
+
+---
+
+## Согласование capabilities
+
+Поле `capabilities` позволяет аддитивное согласование функций без повышения `ProtocolVersion`. Каждая capability — строковый токен (например, `"mesh_relay_v1"`, `"mesh_routing_v1"`). Оба пира объявляют поддерживаемые capabilities при handshake. Сессия использует только пересечение обоих наборов.
+
+Capability-токены гейтят новые типы фреймов и поведения. Пир не должен отправлять capability-gated тип фрейма, если в согласованном наборе сессии нет соответствующей capability. Это позволяет работать сетям со смешанными версиями: legacy-ноды без поля `capabilities` считаются с пустым набором — они никогда не получат неизвестные типы фреймов.
+
+Текущие определённые токены: нет (механизм введён, но ни одна capability пока не активна). Будущие итерации добавят токены, такие как `"mesh_relay_v1"` для hop-by-hop relay и `"mesh_routing_v1"` для объявлений таблиц маршрутизации.
 
 ---
 
