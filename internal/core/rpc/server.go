@@ -234,6 +234,9 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 
 	// Notice
 	rpc.Post("/notice/list", s.legacyHandler("fetch_notices"))
+
+	// Mesh
+	rpc.Post("/mesh/relay_status", s.legacyHandler("fetch_relay_status"))
 }
 
 // legacyHandler creates a Fiber handler for a no-args command.

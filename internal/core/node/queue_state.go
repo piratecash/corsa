@@ -17,13 +17,14 @@ import (
 const queueStateVersion = 1
 
 type queueStateFile struct {
-	Version       int                         `json:"version"`
-	Pending       map[string][]pendingFrame   `json:"pending,omitempty"`
-	Orphaned      map[string][]pendingFrame   `json:"orphaned,omitempty"`
-	RelayRetry    map[string]relayAttempt     `json:"relay_retry,omitempty"`
-	RelayMessages []protocol.Envelope         `json:"relay_messages,omitempty"`
-	RelayReceipts []protocol.DeliveryReceipt  `json:"relay_receipts,omitempty"`
-	OutboundState map[string]outboundDelivery `json:"outbound_state,omitempty"`
+	Version            int                         `json:"version"`
+	Pending            map[string][]pendingFrame   `json:"pending,omitempty"`
+	Orphaned           map[string][]pendingFrame   `json:"orphaned,omitempty"`
+	RelayRetry         map[string]relayAttempt     `json:"relay_retry,omitempty"`
+	RelayMessages      []protocol.Envelope         `json:"relay_messages,omitempty"`
+	RelayReceipts      []protocol.DeliveryReceipt  `json:"relay_receipts,omitempty"`
+	OutboundState      map[string]outboundDelivery `json:"outbound_state,omitempty"`
+	RelayForwardStates []relayForwardState         `json:"relay_forward_states,omitempty"`
 }
 
 func loadQueueState(path string) (queueStateFile, error) {

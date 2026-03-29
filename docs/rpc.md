@@ -173,6 +173,7 @@ graph TD
     REG_MSG["RegisterMessageCommands<br/>fetch_messages · fetch_message_ids · fetch_message<br/>fetch_inbox · fetch_pending_messages · fetch_delivery_receipts<br/>fetch_dm_headers · send_dm*"]
     REG_CHT["RegisterChatlogCommands<br/>fetch_chatlog · fetch_chatlog_previews · fetch_conversations*"]
     REG_NTC["RegisterNoticeCommands<br/>fetch_notices"]
+    REG_MSH["RegisterMeshCommands<br/>fetch_relay_status"]
     REG_MET["RegisterMetricsCommands<br/>fetch_traffic_history"]
 
     REG_SYS -->|"Register()"| TABLE
@@ -181,6 +182,7 @@ graph TD
     REG_MSG -->|"Register()"| TABLE
     REG_CHT -->|"Register()"| TABLE
     REG_NTC -->|"Register()"| TABLE
+    REG_MSH -->|"Register()"| TABLE
     REG_MET -->|"Register()"| TABLE
 
     TABLE --> SERVER["Fiber HTTP Server<br/>(wraps CommandTable)"]
@@ -246,6 +248,7 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | **message** | send_dm | Always registered; unavailable (503, hidden from help) when DMRouter is nil |
 | **chatlog** | fetch_chatlog, fetch_chatlog_previews, fetch_conversations | Always registered; unavailable (503, hidden from help) when ChatlogProvider is nil |
 | **notice** | fetch_notices | Always registered |
+| **mesh** | fetch_relay_status | Always registered |
 | **metrics** | fetch_traffic_history | Always registered; unavailable (503, hidden from help) when MetricsProvider is nil |
 
 #### Dependency Injection
@@ -287,161 +290,18 @@ Malformed JSON body on legacy arg routes returns 400 immediately, before command
 
 ### API Reference
 
-#### Universal Dispatch
+Per-command documentation is in the [rpc/](rpc/) folder. See [rpc/README.md](rpc/README.md) for the full command index with dispatch endpoints.
 
-**POST /rpc/v1/exec** — execute any registered command.
-
-Request:
-```json
-{"command": "ping", "args": {}}
-```
-
-Response: command-specific JSON.
-
-#### Raw Frame Dispatch
-
-**POST /rpc/v1/frame** — accept a raw JSON protocol frame and dispatch it through `CommandTable`, falling back to `HandleLocalFrame` for unregistered frame types. This matches the desktop console's `ExecuteConsoleCommand` behavior.
-
-Request: a raw protocol frame JSON object with a `type` field:
-```json
-{"type": "fetch_chatlog", "topic": "dm", "address": "peer-addr-123"}
-```
-
-Response: the command's response (JSON).
-
-Dispatch logic:
-1. The frame's `type` is extracted as the command name, wire field names are normalized to RPC arg names via `normalizeFrameArgs` (e.g. `peers` → `address`, `address` → `peer_address` for chatlog).
-2. If the command is registered in `CommandTable`, it is dispatched there. Registered handlers may rebuild the frame from scratch (e.g. `hello` ignores caller-supplied `Client`/`ClientVersion` and uses its own values; desktop-enriched `ping` builds a per-peer diagnostic report instead of proxying the frame).
-3. If the command is not found in `CommandTable`, the raw frame is forwarded to `HandleLocalFrame` with all caller-supplied wire fields preserved.
-
-This endpoint is only available when the server is created with a `NodeProvider`.
-
-The Go client (`rpc.Client.ExecuteCommand`) automatically detects raw JSON input and routes it to `/frame` instead of `/exec`.
-
-#### Legacy Routes
-
-All endpoints accept `POST` with `Content-Type: application/json`. These routes map to the same CommandTable commands.
-
-##### System
-
-**POST /rpc/v1/system/help** — list all available commands.
-
-Response:
-```json
-{
-  "version": "1.0",
-  "commands": [
-    {"name": "help", "description": "List all available RPC commands", "category": "system"},
-    {"name": "get_peers", "description": "Get list of connected peers", "category": "network"}
-  ]
-}
-```
-
-`version` is the help response schema version (currently `"1.0"`). It tracks the structure of the help response itself — not the protocol or client version. Clients can use it to detect format changes (e.g. new fields in command metadata). Bump when the help response structure changes.
-
-**POST /rpc/v1/system/ping** — send local ping, returns pong response. In desktop mode, replaced by `DiagnosticProvider` — pings every connected peer over TCP and reports per-peer status.
-
-**POST /rpc/v1/system/hello** — send hello frame for identification. The handler populates `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion`, and `ClientBuild` before forwarding to the node — without these fields the handshake is rejected. The standalone node handler identifies as `Client: "rpc"`; in desktop mode, `RegisterDesktopOverrides` replaces it with `Client: "desktop"` and the desktop application version. `ClientBuild` is a monotonically increasing integer that peers compare to detect newer software releases.
-
-**POST /rpc/v1/system/version** — client and protocol version.
-
-Response:
-```json
-{
-  "client_version": "0.21-alpha",
-  "protocol_version": 3,
-  "node_address": "a1b2c3d4..."
-}
-```
-
-##### Network
-
-**POST /rpc/v1/network/peers** — list all known peers. In desktop mode, returns enriched JSON with health data and per-peer `client_version` / `client_build`. Peers without a known build report `client_build: 0`.
-
-Response (desktop mode):
-```json
-{
-  "type": "peers",
-  "count": 1,
-  "total": 2,
-  "connected": [
-    {
-      "address": "65.108.204.190:64646",
-      "network": "ipv4",
-      "client_version": "0.19-alpha",
-      "client_build": 19,
-      "state": "healthy",
-      "connected": true,
-      "bytes_sent": 1024,
-      "bytes_received": 2048,
-      "total_traffic": 3072
-    }
-  ],
-  "pending": [],
-  "known_only": ["192.0.2.1:64646"],
-  "peers": [...]
-}
-```
-
-**POST /rpc/v1/network/health** — peer health status.
-
-**POST /rpc/v1/network/stats** — aggregated network traffic statistics.
-
-Response includes per-peer bytes sent/received and total node traffic.
-
-**POST /rpc/v1/network/add_peer** — add a peer.
-
-Request: `{"address": "host:port"}`
-
-##### Metrics
-
-**POST /rpc/v1/metrics/traffic_history** — rolling traffic history (1 sample/sec, 1 hour window).
-
-Response contains an array of per-second samples with bytes sent/received deltas and cumulative totals. The buffer holds up to 3600 entries (1 hour). Samples are ordered oldest-first.
-
-##### Identity
-
-**POST /rpc/v1/identity/identities** — all known identities.
-
-**POST /rpc/v1/identity/contacts** — all contacts.
-
-**POST /rpc/v1/identity/trusted_contacts** — trusted contacts (TOFU pinned).
-
-##### Messages
-
-**POST /rpc/v1/message/list** — request: `{"topic": "global"}`
-
-**POST /rpc/v1/message/ids** — request: `{"topic": "global"}`
-
-**POST /rpc/v1/message/get** — request: `{"topic": "dm", "id": "message-uuid"}`
-
-**POST /rpc/v1/message/inbox** — request: `{"topic": "dm", "recipient": "address (optional, defaults to self)"}`
-
-**POST /rpc/v1/message/pending** — request: `{"topic": "dm"}`
-
-**POST /rpc/v1/message/receipts** — request: `{"recipient": "address (optional, defaults to self)"}`
-
-**POST /rpc/v1/message/dm_headers** — fetch direct message headers.
-
-**POST /rpc/v1/message/send_dm** — queue a direct message for delivery (desktop mode only, returns 503 on standalone node).
-
-Request: `{"to": "address", "body": "message text"}`
-
-Response: `{"status": "queued", "to": "address"}`. The message is accepted for async delivery via DMRouter. Actual delivery happens in a background goroutine — check delivery receipts for confirmation.
-
-##### Chat History
-
-Available only in desktop mode. In standalone node mode returns 503.
-
-**POST /rpc/v1/chatlog/entries** — request: `{"topic": "dm", "peer_address": "address"}`
-
-**POST /rpc/v1/chatlog/previews** — last message from each peer.
-
-**POST /rpc/v1/chatlog/conversations** — metadata for all conversations.
-
-##### Notices
-
-**POST /rpc/v1/notice/list** — anonymous encrypted notices (Gazeta).
+| Group | Commands | File |
+|---|---|---|
+| [System](rpc/system.md) | `help`, `ping`, `hello`, `version` | [rpc/system.md](rpc/system.md) |
+| [Network](rpc/network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [rpc/network.md](rpc/network.md) |
+| [Identity](rpc/identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [rpc/identity.md](rpc/identity.md) |
+| [Message](rpc/message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [rpc/message.md](rpc/message.md) |
+| [Chatlog](rpc/chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [rpc/chatlog.md](rpc/chatlog.md) |
+| [Notice](rpc/notice.md) | `fetch_notices` | [rpc/notice.md](rpc/notice.md) |
+| [Mesh](rpc/mesh.md) | `fetch_relay_status` | [rpc/mesh.md](rpc/mesh.md) |
+| [Metrics](rpc/metrics.md) | `fetch_traffic_history` | [rpc/metrics.md](rpc/metrics.md) |
 
 ### corsa-cli
 
@@ -735,6 +595,7 @@ graph TD
     REG_MSG["RegisterMessageCommands<br/>fetch_messages · fetch_message_ids · fetch_message<br/>fetch_inbox · fetch_pending_messages · fetch_delivery_receipts<br/>fetch_dm_headers · send_dm*"]
     REG_CHT["RegisterChatlogCommands<br/>fetch_chatlog · fetch_chatlog_previews · fetch_conversations*"]
     REG_NTC["RegisterNoticeCommands<br/>fetch_notices"]
+    REG_MSH["RegisterMeshCommands<br/>fetch_relay_status"]
     REG_MET["RegisterMetricsCommands<br/>fetch_traffic_history"]
 
     REG_SYS -->|"Register()"| TABLE
@@ -743,6 +604,7 @@ graph TD
     REG_MSG -->|"Register()"| TABLE
     REG_CHT -->|"Register()"| TABLE
     REG_NTC -->|"Register()"| TABLE
+    REG_MSH -->|"Register()"| TABLE
     REG_MET -->|"Register()"| TABLE
 
     TABLE --> SERVER["Fiber HTTP сервер<br/>(обёртка над CommandTable)"]
@@ -808,6 +670,7 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | **message** | send_dm | Всегда зарегистрирована; недоступна (503, скрыта из help) при DMRouter = nil |
 | **chatlog** | fetch_chatlog, fetch_chatlog_previews, fetch_conversations | Всегда зарегистрированы; недоступны (503, скрыты из help) при ChatlogProvider = nil |
 | **notice** | fetch_notices | Всегда зарегистрированы |
+| **mesh** | fetch_relay_status | Всегда зарегистрированы |
 | **metrics** | fetch_traffic_history | Всегда зарегистрирована; недоступна (503, скрыта из help) при MetricsProvider = nil |
 
 #### Внедрение зависимостей
@@ -849,161 +712,18 @@ Mode-gated команды регистрируются через `RegisterUnava
 
 ### Справочник API
 
-#### Универсальная диспетчеризация
+Документация по командам вынесена в папку [rpc/](rpc/). Полный индекс с dispatch-эндпоинтами: [rpc/README.md](rpc/README.md).
 
-**POST /rpc/v1/exec** — выполнение любой зарегистрированной команды.
-
-Запрос:
-```json
-{"command": "ping", "args": {}}
-```
-
-Ответ: JSON, специфичный для команды.
-
-#### Диспетчеризация фреймов
-
-**POST /rpc/v1/frame** — принимает сырой JSON-фрейм протокола и диспетчеризует его через `CommandTable`, с fallback на `HandleLocalFrame` для незарегистрированных типов фреймов. Повторяет поведение `ExecuteConsoleCommand` в desktop-консоли.
-
-Запрос: сырой JSON-объект фрейма протокола с полем `type`:
-```json
-{"type": "fetch_chatlog", "topic": "dm", "address": "peer-addr-123"}
-```
-
-Ответ: JSON ответа команды.
-
-Логика диспетчеризации:
-1. Из фрейма извлекается `type` как имя команды, wire-имена полей нормализуются в RPC-аргументы через `normalizeFrameArgs` (например, `peers` → `address`, `address` → `peer_address` для chatlog).
-2. Если команда зарегистрирована в `CommandTable`, она диспетчеризуется туда. Зарегистрированные обработчики могут пересобрать фрейм с нуля (например, `hello` игнорирует переданные `Client`/`ClientVersion` и использует собственные значения; desktop-обогащённый `ping` строит диагностический отчёт по каждому пиру вместо проксирования фрейма).
-3. Если команда не найдена в `CommandTable`, сырой фрейм пересылается в `HandleLocalFrame` с сохранением всех wire-полей отправителя.
-
-Эндпоинт доступен только когда сервер создан с `NodeProvider`.
-
-Go-клиент (`rpc.Client.ExecuteCommand`) автоматически определяет сырой JSON на входе и направляет его на `/frame` вместо `/exec`.
-
-#### Legacy-маршруты
-
-Все эндпоинты принимают `POST` с `Content-Type: application/json`. Эти маршруты отображаются на те же команды CommandTable.
-
-##### Системные
-
-**POST /rpc/v1/system/help** — список всех доступных команд.
-
-Ответ:
-```json
-{
-  "version": "1.0",
-  "commands": [
-    {"name": "help", "description": "Список всех доступных RPC команд", "category": "system"},
-    {"name": "get_peers", "description": "Получить список подключённых пиров", "category": "network"}
-  ]
-}
-```
-
-`version` — версия схемы ответа help (сейчас `"1.0"`). Отслеживает структуру самого ответа help, а не версию протокола или клиента. Клиенты могут использовать это поле для обнаружения изменений формата (например, новых полей в метаданных команд). Инкрементируется при изменении структуры ответа help.
-
-**POST /rpc/v1/system/ping** — локальный пинг, возвращает pong-ответ. В desktop-режиме заменяется через `DiagnosticProvider` — пингует каждого подключённого пира по TCP и сообщает статус по каждому.
-
-**POST /rpc/v1/system/hello** — отправка hello-фрейма для идентификации. Обработчик заполняет `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion` и `ClientBuild` перед отправкой ноде — без этих полей handshake отклоняется. Standalone-нода идентифицируется как `Client: "rpc"`; в desktop-режиме `RegisterDesktopOverrides` заменяет обработчик на `Client: "desktop"` с версией desktop-приложения. `ClientBuild` — монотонно возрастающий целочисленный номер сборки, по которому пиры определяют наличие новых версий ПО.
-
-**POST /rpc/v1/system/version** — версия клиента и протокола.
-
-Ответ:
-```json
-{
-  "client_version": "0.21-alpha",
-  "protocol_version": 3,
-  "node_address": "a1b2c3d4..."
-}
-```
-
-##### Сеть
-
-**POST /rpc/v1/network/peers** — список всех известных пиров. В desktop-режиме возвращает обогащённый JSON с данными о здоровье и полями `client_version` / `client_build` для каждого пира. Пиры без известного билда возвращают `client_build: 0`.
-
-Ответ (desktop-режим):
-```json
-{
-  "type": "peers",
-  "count": 1,
-  "total": 2,
-  "connected": [
-    {
-      "address": "65.108.204.190:64646",
-      "network": "ipv4",
-      "client_version": "0.19-alpha",
-      "client_build": 19,
-      "state": "healthy",
-      "connected": true,
-      "bytes_sent": 1024,
-      "bytes_received": 2048,
-      "total_traffic": 3072
-    }
-  ],
-  "pending": [],
-  "known_only": ["192.0.2.1:64646"],
-  "peers": [...]
-}
-```
-
-**POST /rpc/v1/network/health** — состояние здоровья пиров.
-
-**POST /rpc/v1/network/stats** — агрегированная статистика сетевого трафика.
-
-Ответ включает количество байт отправленных/полученных по каждому пиру и общий трафик ноды.
-
-**POST /rpc/v1/network/add_peer** — добавление пира.
-
-Запрос: `{"address": "host:port"}`
-
-##### Метрики
-
-**POST /rpc/v1/metrics/traffic_history** — история трафика (1 семпл/сек, окно 1 час).
-
-Ответ содержит массив посекундных семплов с дельтами байт отправленных/полученных и кумулятивными итогами. Буфер вмещает до 3600 записей (1 час). Семплы отсортированы от старых к новым.
-
-##### Идентификация
-
-**POST /rpc/v1/identity/identities** — все известные идентификаторы.
-
-**POST /rpc/v1/identity/contacts** — все контакты.
-
-**POST /rpc/v1/identity/trusted_contacts** — доверенные контакты (закреплённые по TOFU).
-
-##### Сообщения
-
-**POST /rpc/v1/message/list** — запрос: `{"topic": "global"}`
-
-**POST /rpc/v1/message/ids** — запрос: `{"topic": "global"}`
-
-**POST /rpc/v1/message/get** — запрос: `{"topic": "dm", "id": "message-uuid"}`
-
-**POST /rpc/v1/message/inbox** — запрос: `{"topic": "dm", "recipient": "address (опционально, по умолчанию — свой)"}`
-
-**POST /rpc/v1/message/pending** — запрос: `{"topic": "dm"}`
-
-**POST /rpc/v1/message/receipts** — запрос: `{"recipient": "address (опционально, по умолчанию — свой)"}`
-
-**POST /rpc/v1/message/dm_headers** — получение заголовков прямых сообщений.
-
-**POST /rpc/v1/message/send_dm** — постановка прямого сообщения в очередь доставки (только desktop-режим, возвращает 503 на standalone-ноде).
-
-Запрос: `{"to": "address", "body": "текст сообщения"}`
-
-Ответ: `{"status": "queued", "to": "address"}`. Сообщение принято для асинхронной доставки через DMRouter. Фактическая отправка происходит в фоновой goroutine — используйте delivery receipts для подтверждения.
-
-##### История чатов
-
-Доступно только в desktop-режиме. В режиме standalone-ноды возвращает 503.
-
-**POST /rpc/v1/chatlog/entries** — запрос: `{"topic": "dm", "peer_address": "address"}`
-
-**POST /rpc/v1/chatlog/previews** — последнее сообщение от каждого пира.
-
-**POST /rpc/v1/chatlog/conversations** — метаданные всех разговоров.
-
-##### Уведомления
-
-**POST /rpc/v1/notice/list** — анонимные зашифрованные уведомления (Gazeta).
+| Группа | Команды | Файл |
+|---|---|---|
+| [Системные](rpc/system.md) | `help`, `ping`, `hello`, `version` | [rpc/system.md](rpc/system.md) |
+| [Сеть](rpc/network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [rpc/network.md](rpc/network.md) |
+| [Идентификация](rpc/identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [rpc/identity.md](rpc/identity.md) |
+| [Сообщения](rpc/message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [rpc/message.md](rpc/message.md) |
+| [История чатов](rpc/chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [rpc/chatlog.md](rpc/chatlog.md) |
+| [Уведомления](rpc/notice.md) | `fetch_notices` | [rpc/notice.md](rpc/notice.md) |
+| [Mesh](rpc/mesh.md) | `fetch_relay_status` | [rpc/mesh.md](rpc/mesh.md) |
+| [Метрики](rpc/metrics.md) | `fetch_traffic_history` | [rpc/metrics.md](rpc/metrics.md) |
 
 ### corsa-cli
 

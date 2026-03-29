@@ -2021,6 +2021,88 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	})
 }
 
+// TestRelayMessageDoesNotStallGossipDelivery is a regression test for the
+// fire-and-forget relay_message fix. Before the fix, relay_message frames
+// went through peerSessionRequest which blocked the sender's outbound
+// session for up to peerRequestTimeout (12s) waiting for a response that
+// the full node never sent. This blocked the subsequent gossip send_message
+// from being delivered in time.
+//
+// The test verifies that when a client sends a DM through a full node,
+// the gossip message reaches the full node within a reasonable time (3s)
+// even though a relay_message is also sent on the same session.
+func TestRelayMessageDoesNotStallGossipDelivery(t *testing.T) {
+	t.Parallel()
+
+	addressFull := freeAddress(t)
+	addressSender := freeAddress(t)
+
+	idRecipient, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient identity failed: %v", err)
+	}
+
+	fullNode, stopFull := startTestNode(t, config.Node{
+		ListenAddress:    addressFull,
+		AdvertiseAddress: normalizeAddress(addressFull),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopFull()
+
+	senderNode, stopSender := startTestNode(t, config.Node{
+		ListenAddress:    addressSender,
+		AdvertiseAddress: "",
+		BootstrapPeers:   []string{normalizeAddress(addressFull)},
+		Type:             config.NodeTypeClient,
+	})
+	defer stopSender()
+
+	// Wait for sender to connect and be recognized by full node.
+	waitForCondition(t, 6*time.Second, func() bool {
+		reply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_identities"})
+		for _, address := range reply.Identities {
+			if address == senderNode.Address() {
+				return true
+			}
+		}
+		return false
+	})
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		senderNode.identity,
+		idRecipient.Address,
+		identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
+		"relay-stall-test-secret",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	reply := senderNode.HandleLocalFrame(sendMessageFrame(
+		"dm",
+		"relay-stall-test-1",
+		senderNode.Address(),
+		idRecipient.Address,
+		"sender-delete",
+		ts,
+		0,
+		ciphertext,
+	))
+	if reply.Type != "message_stored" {
+		t.Fatalf("unexpected sender direct store response: %#v", reply)
+	}
+
+	// The message should arrive at the full node within 3 seconds via gossip.
+	// Before the fire-and-forget fix, relay_message stalled the session for
+	// 12 seconds, causing this check to time out at 3s.
+	waitForCondition(t, 3*time.Second, func() bool {
+		fullReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: idRecipient.Address})
+		return fullReply.Type == "inbox" && len(fullReply.Messages) == 1 && fullReply.Messages[0].ID == "relay-stall-test-1"
+	})
+}
+
 func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 	t.Parallel()
 
@@ -6662,5 +6744,202 @@ func TestMixedVersionNodeWithoutCapabilitiesField(t *testing.T) {
 		t.Fatalf("expected protocol version %d, got %d", config.ProtocolVersion, welcome.Version)
 	}
 	// Handshake must succeed — a missing capabilities field is not an error.
+}
+
+// TestUnauthenticatedPeerCannotSendRelayMessage verifies the trust boundary:
+// an inbound peer that sends hello with Client != "node"/"desktop" (thus
+// skipping auth_session) must NOT be able to send relay_message frames, even
+// if it advertises mesh_relay_v1 capability.
+//
+// Before the fix, isCommandAllowedForConn returned true for nil connAuth,
+// and connHasCapability + inboundPeerAddress were populated from the
+// unauthenticated hello frame, allowing anyone to inject relay traffic.
+func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddress(t)
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	svc := NewService(config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: addr,
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		Type:             config.NodeTypeFull,
+	}, id)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	svc, stop := startTestService(t, ctx, cancel, svc)
+	defer stop()
+
+	// Connect as an unauthenticated client (Client: "mobile" — does NOT
+	// trigger requiresSessionAuth, so no auth_session handshake).
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	// Send hello claiming mesh_relay_v1 capability.
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client:                 "mobile",
+		ClientVersion:          "1.0",
+		Address:                "fake-attacker-address",
+		Listen:                 "10.0.0.99:64646",
+		Capabilities:           []string{"mesh_relay_v1"},
+	})
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" {
+		t.Fatalf("expected welcome, got %q", welcome.Type)
+	}
+
+	// Attempt to send a relay_message without completing auth_session.
+	// Use topic "general" (not "dm") so the payload passes
+	// storeIncomingMessage — a DM would be rejected at the sender-key
+	// check, masking the real vulnerability. The attack vector is about
+	// the auth boundary, not payload validation.
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:        "relay_message",
+		ID:          "unauthenticated-relay-1",
+		Address:     "spoofed-origin-sender",
+		Recipient:   id.Address, // addressed to this node so it would be "delivered"
+		Topic:       "general",
+		Body:        "malicious-payload",
+		Flag:        string(protocol.MessageFlagImmutable),
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		HopCount:    1,
+		MaxHops:     10,
+		PreviousHop: "10.0.0.99:64646",
+	})
+
+	// The relay_message should be rejected. We try to read a response with
+	// a short timeout — either we get an error frame, or no response at all
+	// (silent drop). Either way, the relay must NOT produce a hop-ack with
+	// "delivered"/"forwarded"/"stored" status.
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		// Timeout or connection closed — acceptable, relay was rejected.
+		return
+	}
+
+	var response protocol.Frame
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(line)), &response); jsonErr != nil {
+		// Unparseable response — acceptable.
+		return
+	}
+
+	// If we got a relay_hop_ack with a success status, the trust boundary
+	// is broken — the unauthenticated peer was able to inject relay traffic.
+	if response.Type == "relay_hop_ack" {
+		t.Fatalf("SECURITY: unauthenticated peer received relay_hop_ack with status %q — "+
+			"relay_message must be rejected for non-authenticated connections", response.Status)
+	}
+}
+
+// TestRelayDMSyncsUnknownSenderKeyFromPreviousHop verifies that when a
+// relay_message carrying a DM arrives at the final recipient (or an
+// intermediate full node storing for offline delivery), and the sender's
+// public key is not yet known, the node syncs keys from the previous hop
+// (senderAddress) and retries the store — matching the existing push_message
+// behavior. Before the fix, deliverRelayedMessage treated
+// ErrCodeUnknownSenderKey as a terminal rejection.
+func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	// NodeA: full node that knows the sender's keys.
+	senderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate sender: %v", err)
+	}
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopA()
+
+	// Do NOT register sender keys on nodeA yet — nodeB's bootstrap sync
+	// would learn them during the initial fetch_contacts exchange.
+
+	// NodeB: full node, bootstrap to nodeA, does NOT know sender keys yet.
+	nodeB, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		Type:             config.NodeTypeFull,
+	})
+	defer stopB()
+
+	// Wait for nodeB to connect to nodeA.
+	waitForCondition(t, 5*time.Second, func() bool {
+		return len(nodeB.Peers()) >= 1
+	})
+
+	// Now register sender keys on nodeA — after the initial peer sync,
+	// so nodeB has not yet learned them. The relay delivery path will
+	// trigger syncPeer to fetch these keys on demand.
+	nodeA.mu.Lock()
+	nodeA.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
+	nodeA.boxKeys[senderID.Address] = identity.BoxPublicKeyBase64(senderID.BoxPublicKey)
+	nodeA.boxSigs[senderID.Address] = identity.SignBoxKeyBinding(senderID)
+	nodeA.known[senderID.Address] = struct{}{}
+	nodeA.mu.Unlock()
+
+	// Verify nodeB does NOT know the sender's key yet.
+	nodeB.mu.RLock()
+	_, hasSenderKey := nodeB.pubKeys[senderID.Address]
+	nodeB.mu.RUnlock()
+	if hasSenderKey {
+		t.Fatal("precondition failed: nodeB should not know sender key before relay")
+	}
+
+	// Create a properly encrypted DM from senderID to nodeB.
+	ciphertext, err := directmsg.EncryptForParticipants(
+		senderID,
+		nodeB.Address(),
+		identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
+		"relay-sync-test-secret",
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants: %v", err)
+	}
+
+	// Simulate: nodeA forwards a relay_message to nodeB via the peer session.
+	// We inject it as a handleRelayMessage call with senderAddress = nodeA's
+	// advertise address (the address nodeB has an outbound session to).
+	frame := protocol.Frame{
+		Type:        "relay_message",
+		ID:          "relay-sync-key-1",
+		Address:     senderID.Address,
+		Recipient:   nodeB.Address(),
+		Topic:       "dm",
+		Body:        ciphertext,
+		Flag:        "sender-delete",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		HopCount:    2,
+		MaxHops:     10,
+		PreviousHop: normalizeAddress(addressA),
+	}
+
+	status := nodeB.handleRelayMessage(normalizeAddress(addressA), frame)
+	if status != "delivered" {
+		t.Fatalf("expected \"delivered\" after key sync from previous hop, got %q — "+
+			"deliverRelayedMessage should sync unknown sender keys before rejecting", status)
+	}
 }
 

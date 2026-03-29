@@ -124,10 +124,10 @@ func normalizeFrameArgs(command string, args map[string]interface{}) {
 func mapPositionalArgs(command string, args []string) (map[string]interface{}, error) {
 	noArgCommands := map[string]bool{
 		"help": true, "ping": true, "hello": true, "version": true,
-		"get_peers": true, "fetch_peer_health": true,
+		"get_peers": true, "fetch_peer_health": true, "fetch_network_stats": true,
 		"fetch_identities": true, "fetch_contacts": true, "fetch_trusted_contacts": true,
 		"fetch_notices": true, "fetch_chatlog_previews": true, "fetch_conversations": true,
-		"fetch_dm_headers": true,
+		"fetch_dm_headers": true, "fetch_relay_status": true,
 	}
 
 	if noArgCommands[command] {

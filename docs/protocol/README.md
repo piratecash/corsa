@@ -31,6 +31,7 @@ Every frame carries a `type` field that determines the command. Commands are gro
 | [Delivery receipts](delivery.md) | `send_delivery_receipt`, `fetch_delivery_receipts` | Delivery and seen tracking |
 | [Contacts](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers` | Identity management and contact exchange |
 | [Peers](peers.md) | `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`, `fetch_traffic_history` | Peer discovery, health monitoring, network stats, traffic history |
+| [Relay](relay.md) | `relay_message`, `relay_hop_ack`, `fetch_relay_status` | Hop-by-hop message forwarding (Iteration 1, capability-gated by `mesh_relay_v1`) |
 | [Gazeta](gazeta.md) | `publish_notice`, `fetch_notices` | Anonymous encrypted notice board |
 | [Errors](errors.md) | `error` | All error codes and their meaning |
 
@@ -69,6 +70,9 @@ Not every command is available on every connection type:
 | `fetch_peer_health` | yes | yes | — |
 | `fetch_network_stats` | yes | yes | — |
 | `fetch_traffic_history` | yes | — | — |
+| `relay_message` | — | yes (capability-gated) | yes (capability-gated) |
+| `relay_hop_ack` | — | yes (capability-gated) | yes (capability-gated) |
+| `fetch_relay_status` | yes | — | — |
 | `publish_notice` | yes | yes | — |
 | `fetch_notices` | yes | yes | — |
 
@@ -175,6 +179,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 | [Delivery receipts](delivery.md) | `send_delivery_receipt`, `fetch_delivery_receipts` | Отслеживание доставки и просмотра |
 | [Контакты](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers` | Управление identity и обмен контактами |
 | [Пиры](peers.md) | `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`, `fetch_traffic_history` | Обнаружение пиров, мониторинг, статистика, история трафика |
+| [Ретрансляция](relay.md) | `relay_message`, `relay_hop_ack`, `fetch_relay_status` | Пошаговая пересылка сообщений (Итерация 1, гейтинг по capability `mesh_relay_v1`) |
 | [Gazeta](gazeta.md) | `publish_notice`, `fetch_notices` | Анонимная зашифрованная доска объявлений |
 | [Ошибки](errors.md) | `error` | Все коды ошибок и их значение |
 
@@ -213,6 +218,9 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 | `fetch_peer_health` | да | да | — |
 | `fetch_network_stats` | да | да | — |
 | `fetch_traffic_history` | да | — | — |
+| `relay_message` | — | да (capability-gated) | да (capability-gated) |
+| `relay_hop_ack` | — | да (capability-gated) | да (capability-gated) |
+| `fetch_relay_status` | да | — | — |
 | `publish_notice` | да | да | — |
 | `fetch_notices` | да | да | — |
 

@@ -83,6 +83,7 @@ type Service struct {
 	reachableGroups map[NetGroup]struct{} // network groups this node can reach (computed at startup)
 	messageStore    MessageStore           // optional: persistence handler registered by desktop layer
 	router          Router                 // routing strategy for outbound message delivery
+	relayStates     *relayStateStore       // hop-by-hop relay forwarding state (Iteration 1)
 }
 
 type subscriber struct {
@@ -409,6 +410,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		events:         make(map[chan protocol.LocalChangeEvent]struct{}),
 	}
 	svc.router = NewGossipRouter(svc)
+	svc.relayStates = newRelayStateStore()
+	svc.relayStates.restore(queueState.RelayForwardStates)
 	return svc
 }
 
@@ -420,6 +423,13 @@ func (s *Service) RegisterMessageStore(store MessageStore) {
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	// Wire relay state persistence: when the TTL ticker evicts expired
+	// entries, persist the updated state so disk stays in sync with memory.
+	s.relayStates.onEvict = func() { s.persistRelayState() }
+	// Start relay state TTL ticker; stopped on shutdown.
+	s.relayStates.start()
+	defer s.relayStates.stop()
+
 	// On shutdown: close all inbound connections so handleConn goroutines
 	// exit, wait for them to finish.
 	defer func() {
@@ -849,6 +859,51 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		}
 		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 		return true
+	case "relay_message":
+		// Relay frames require an authenticated session. Without this gate,
+		// any unauthenticated client could advertise mesh_relay_v1 in its
+		// hello frame and inject relay traffic or spoof previous_hop addresses.
+		if !s.isConnAuthenticated(conn) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(conn, capMeshRelayV1) {
+			accepted = false
+			return true // silently ignore from non-capable peers
+		}
+		senderAddr := s.inboundPeerAddress(conn)
+		if senderAddr == "" {
+			accepted = false
+			return true
+		}
+		ackStatus := s.handleRelayMessage(senderAddr, frame)
+		// Write a single relay_hop_ack with the semantic status directly
+		// on the inbound connection. This is the only ack the sender
+		// receives — handleRelayMessage itself does not send acks.
+		// Empty status means the message was dropped (dedupe, max hops,
+		// client node); no ack is sent for drops.
+		if ackStatus != "" {
+			s.writeJSONFrame(conn, protocol.Frame{
+				Type:   "relay_hop_ack",
+				ID:     frame.ID,
+				Status: ackStatus,
+			})
+		}
+		return true
+	case "relay_hop_ack":
+		if !s.isConnAuthenticated(conn) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(conn, capMeshRelayV1) {
+			accepted = false
+			return true
+		}
+		senderAddr := s.inboundPeerAddress(conn)
+		if senderAddr != "" {
+			s.handleRelayHopAck(senderAddr, frame)
+		}
+		return true
 	default:
 		accepted = false
 		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
@@ -924,6 +979,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.addPeerFrame(frame)
 	case "fetch_dm_headers":
 		return s.fetchDMHeadersFrame()
+	case "fetch_relay_status":
+		return s.relayStatusFrame()
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand}
 	}
@@ -2025,12 +2082,30 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 
 	if s.shouldRouteStoredMessage(msg) {
 		s.trackRelayMessage(envelope)
+
+		// Gossip is the baseline delivery mechanism — always runs.
+		// It ensures store-and-forward (transit DMs stored on relay
+		// nodes for offline recipients), push delivery to connected
+		// clients, and backlog drain. Never skip or filter gossip.
 		go s.executeGossipTargets(envelope, decision.GossipTargets)
+
+		// Relay is an additional optimization for multi-hop DMs.
+		// Fire-and-forget: sends relay_message to full-node peers with
+		// mesh_relay_v1 capability. Receivers dedupe via seen[messageID]
+		// if gossip arrives first; relay provides faster multi-hop
+		// traversal for recipients unreachable by direct gossip.
+		if msg.Topic == "dm" && msg.Recipient != "" && msg.Recipient != "*" {
+			s.tryRelayToCapableFullNodes(envelope, decision.GossipTargets)
+		}
 	}
 
-	// Delivery receipts are emitted only when this node IS the recipient.
+	// Delivery receipts are emitted when this node IS the final recipient,
+	// regardless of how the message arrived (gossip, relay, or local).
+	// Receipt emission must not be gated by validateTimestamp — relayed
+	// DMs arrive via deliverRelayedMessage which passes validateTimestamp=false,
+	// but the recipient still needs to acknowledge delivery to the sender.
 	if isLocal && msg.Topic == "dm" && msg.Recipient != "*" {
-		if validateTimestamp && msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
+		if msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
 			go s.emitDeliveryReceipt(msg)
 		}
 	}
@@ -2117,7 +2192,12 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	}
 
 	s.trackRelayReceipt(receipt)
-	go s.gossipReceipt(receipt)
+	// Try relay receipt return path first. Only fall back to gossip if the
+	// relay chain could not forward (no state, or hop unavailable).
+	relayForwarded := s.handleRelayReceipt(receipt)
+	if !relayForwarded {
+		go s.gossipReceipt(receipt)
+	}
 	go s.pushReceiptToSubscribers(receipt)
 
 	return true, count
@@ -2856,7 +2936,25 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			}
 			pingTimer.Reset(nextHeartbeatDuration())
 		case outbound := <-session.sendCh:
-			if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
+			if isFireAndForgetFrame(outbound.Type) {
+				// Fire-and-forget frames (relay_message, relay_hop_ack) are
+				// written directly without waiting for a response. The remote
+				// side may or may not send an ack — we don't block the session
+				// waiting for one.
+				line, err := protocol.MarshalFrameLine(outbound)
+				if err != nil {
+					continue
+				}
+				_ = session.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+				s.markPeerWrite(session.address, outbound)
+				if _, writeErr := io.WriteString(session.conn, line); writeErr != nil {
+					log.Warn().Str("peer", session.address).Str("type", outbound.Type).Err(writeErr).Msg("fire_and_forget_write_failed")
+					_ = session.conn.SetWriteDeadline(time.Time{})
+					s.markPeerDisconnected(session.address, writeErr)
+					return writeErr
+				}
+				_ = session.conn.SetWriteDeadline(time.Time{})
+			} else if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
 				log.Error().Str("peer", session.address).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
 				s.markPeerDisconnected(session.address, err)
 				return err
@@ -3318,7 +3416,7 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 	}
 }
 
-func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryReceipt) {
+func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryReceipt) bool {
 	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
 		Type:        "send_delivery_receipt",
@@ -3330,13 +3428,14 @@ func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryRec
 	}
 	if s.enqueuePeerFrame(address, frame) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "session").Str("status", receipt.Status).Msg("route_receipt_attempt")
-		return
+		return true
 	}
 	if s.queuePeerFrame(address, frame) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "queued").Str("status", receipt.Status).Msg("route_receipt_attempt")
-		return
+		return true
 	}
 	log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "dropped").Str("status", receipt.Status).Msg("route_receipt_attempt")
+	return false
 }
 
 func (s *Service) nodeHelloJSONLine() string {
@@ -3769,6 +3868,10 @@ func (s *Service) peerTypeForAddressLocked(address string) config.NodeType {
 	return config.NodeTypeFull
 }
 
+func (s *Service) peerIsClientNode(address string) bool {
+	return s.peerTypeForAddress(address) == config.NodeTypeClient
+}
+
 func (s *Service) peerIdentityForAddress(address string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -3952,6 +4055,10 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				s.handlePeerSessionFrame(session.address, incoming)
 				continue
 			}
+			if incoming.Type == "relay_hop_ack" {
+				s.handlePeerSessionFrame(session.address, incoming)
+				continue
+			}
 			if expectedType == "" || incoming.Type == expectedType {
 				_ = session.conn.SetReadDeadline(time.Time{})
 				return incoming, nil
@@ -4062,6 +4169,18 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			s.promotePeerAddress(peer, nodeType)
 			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", address).Msg("learned peer from announce")
 		}
+	case "relay_message":
+		if !s.sessionHasCapability(address, capMeshRelayV1) {
+			return
+		}
+		if ackStatus := s.handleRelayMessage(address, frame); ackStatus != "" {
+			s.sendRelayHopAck(address, frame.ID, ackStatus)
+		}
+	case "relay_hop_ack":
+		if !s.sessionHasCapability(address, capMeshRelayV1) {
+			return
+		}
+		s.handleRelayHopAck(address, frame)
 	}
 }
 
@@ -4400,6 +4519,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			BytesSent:           sent,
 			BytesReceived:       recv,
 			TotalTraffic:        sent + recv,
+			Capabilities:        s.peerCapabilitiesLocked(health.Address),
 		})
 	}
 
@@ -4419,6 +4539,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			BytesSent:     lv.sent,
 			BytesReceived: lv.received,
 			TotalTraffic:  lv.sent + lv.received,
+			Capabilities:  s.peerCapabilitiesLocked(addr),
 		})
 	}
 
@@ -4426,6 +4547,25 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		return items[i].Address < items[j].Address
 	})
 	return items
+}
+
+// peerCapabilitiesLocked returns the negotiated capabilities for a peer.
+// Checks outbound sessions first, then falls back to inbound connPeerInfo.
+// Must be called while holding s.mu at least for read.
+func (s *Service) peerCapabilitiesLocked(address string) []string {
+	if session, ok := s.sessions[address]; ok && len(session.capabilities) > 0 {
+		caps := make([]string, len(session.capabilities))
+		copy(caps, session.capabilities)
+		return caps
+	}
+	for _, info := range s.connPeerInfo {
+		if info.address == address && len(info.capabilities) > 0 {
+			caps := make([]string, len(info.capabilities))
+			copy(caps, info.capabilities)
+			return caps
+		}
+	}
+	return nil
 }
 
 type liveTraffic struct {
@@ -4692,6 +4832,11 @@ func pendingFrameKey(address string, frame protocol.Frame) string {
 			return address + "|announce_peer|" + frame.Peers[0]
 		}
 		return ""
+	case "relay_message":
+		// relay_message must be queueable so sendRelayMessage's fallback
+		// to queuePeerFrame actually works when the session is unavailable.
+		// Keyed by message ID + recipient to dedupe identical relay attempts.
+		return address + "|relay_message|" + frame.ID + "|" + frame.Recipient
 	default:
 		return ""
 	}
@@ -4762,10 +4907,13 @@ func (s *Service) retryRelayDeliveries() {
 		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", s.noteRelayAttempt(relayMessageKey(msg.ID), now)).Msg("relay_retry_message")
 		decision := s.router.Route(msg)
 		go s.executeGossipTargets(msg, decision.GossipTargets)
+		s.tryRelayToCapableFullNodes(msg, decision.GossipTargets)
 	}
 	for _, receipt := range s.retryableRelayReceipts(now) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
-		go s.gossipReceipt(receipt)
+		if !s.handleRelayReceipt(receipt) {
+			go s.gossipReceipt(receipt)
+		}
 	}
 }
 
@@ -5045,13 +5193,14 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 	}
 
 	return queueStateFile{
-		Version:       queueStateVersion,
-		Pending:       pending,
-		Orphaned:      orphaned,
-		RelayRetry:    relayRetry,
-		RelayMessages: relayMessages,
-		RelayReceipts: relayReceipts,
-		OutboundState: outbound,
+		Version:            queueStateVersion,
+		Pending:            pending,
+		Orphaned:           orphaned,
+		RelayRetry:         relayRetry,
+		RelayMessages:      relayMessages,
+		RelayReceipts:      relayReceipts,
+		OutboundState:      outbound,
+		RelayForwardStates: s.relayStates.snapshot(),
 	}
 }
 
@@ -5183,6 +5332,19 @@ func expectedReplyType(requestType string) string {
 		return ""
 	default:
 		return ""
+	}
+}
+
+// isFireAndForgetFrame returns true for frame types that should be written to
+// the peer session without waiting for a response. These frames are delivered
+// on a best-effort basis; the remote side may send an ack asynchronously, but
+// the sender must not block the session waiting for it.
+func isFireAndForgetFrame(frameType string) bool {
+	switch frameType {
+	case "relay_message", "relay_hop_ack":
+		return true
+	default:
+		return false
 	}
 }
 

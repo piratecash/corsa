@@ -62,6 +62,11 @@ type Frame struct {
 	NetworkStats           *NetworkStatsFrame    `json:"network_stats,omitempty"`
 	TrafficHistory         *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
 	Capabilities           []string              `json:"capabilities,omitempty"`
+
+	// Relay fields (Iteration 1 — hop-by-hop relay)
+	HopCount    int    `json:"hop_count,omitempty"`
+	MaxHops     int    `json:"max_hops,omitempty"`
+	PreviousHop string `json:"previous_hop,omitempty"`
 }
 
 type ContactFrame struct {
@@ -96,26 +101,27 @@ type NoticeFrame struct {
 }
 
 type PeerHealthFrame struct {
-	Address             string `json:"address"`
-	Network             string `json:"network,omitempty"`
-	Direction           string `json:"direction,omitempty"`
-	ClientVersion       string `json:"client_version,omitempty"`
-	ClientBuild         int    `json:"client_build,omitempty"`
-	State               string `json:"state"`
-	Connected           bool   `json:"connected"`
-	PendingCount        int    `json:"pending_count,omitempty"`
-	LastConnectedAt     string `json:"last_connected_at,omitempty"`
-	LastDisconnectedAt  string `json:"last_disconnected_at,omitempty"`
-	LastPingAt          string `json:"last_ping_at,omitempty"`
-	LastPongAt          string `json:"last_pong_at,omitempty"`
-	LastUsefulSendAt    string `json:"last_useful_send_at,omitempty"`
-	LastUsefulReceiveAt string `json:"last_useful_receive_at,omitempty"`
-	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
-	LastError           string `json:"last_error,omitempty"`
-	Score               int    `json:"score"`
-	BytesSent           int64  `json:"bytes_sent"`
-	BytesReceived       int64  `json:"bytes_received"`
-	TotalTraffic        int64  `json:"total_traffic"`
+	Address             string   `json:"address"`
+	Network             string   `json:"network,omitempty"`
+	Direction           string   `json:"direction,omitempty"`
+	ClientVersion       string   `json:"client_version,omitempty"`
+	ClientBuild         int      `json:"client_build,omitempty"`
+	State               string   `json:"state"`
+	Connected           bool     `json:"connected"`
+	PendingCount        int      `json:"pending_count,omitempty"`
+	LastConnectedAt     string   `json:"last_connected_at,omitempty"`
+	LastDisconnectedAt  string   `json:"last_disconnected_at,omitempty"`
+	LastPingAt          string   `json:"last_ping_at,omitempty"`
+	LastPongAt          string   `json:"last_pong_at,omitempty"`
+	LastUsefulSendAt    string   `json:"last_useful_send_at,omitempty"`
+	LastUsefulReceiveAt string   `json:"last_useful_receive_at,omitempty"`
+	ConsecutiveFailures int      `json:"consecutive_failures,omitempty"`
+	LastError           string   `json:"last_error,omitempty"`
+	Score               int      `json:"score"`
+	BytesSent           int64    `json:"bytes_sent"`
+	BytesReceived       int64    `json:"bytes_received"`
+	TotalTraffic        int64    `json:"total_traffic"`
+	Capabilities        []string `json:"capabilities,omitempty"`
 }
 
 // NetworkStatsFrame provides aggregated traffic statistics for the entire node.

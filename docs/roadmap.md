@@ -9,6 +9,33 @@ Related documentation:
 Source (planned): `internal/core/node/routing.go`, `internal/core/node/routing_table.go`,
 `internal/core/node/relay.go`, `internal/core/node/route_announce.go`
 
+Quick links:
+
+- [Current problem](#current-problem)
+- [Design principles](#design-principles)
+- [Protocol versioning policy](#protocol-versioning-policy)
+- [Iteration 1 — Hop-by-hop relay](#iter-1)
+- [Stabilization step — Relay refactor](#iter-stabilization)
+- [Iteration 2 — Routing table](#iter-2)
+- [Iteration 3 — Reliability, reputation, and multi-path](#iter-3)
+- [Iteration 4 — Optimization and scaling](#iter-4)
+- [Iteration 5 — Structured overlay (DHT)](#iter-5)
+- [Iteration A1 — Local names](#iter-a1)
+- [Iteration A2 — Global names](#iter-a2)
+- [Iteration A3 — Message deletion](#iter-a3)
+- [Iteration A4 — Android app](#iter-a4)
+- [Iteration A5 — Second-layer encryption](#iter-a5)
+- [Iteration A6 — DPI bypass](#iter-a6)
+- [Iteration A7 — Google WSS fallback](#iter-a7)
+- [Iteration A8 — SOCKS5 tunnel](#iter-a8)
+- [Iteration A9 — Gazeta extensions](#iter-a9)
+- [Iteration A10 — iOS app](#iter-a10)
+- [Iteration A11 — BLE last mile](#iter-a11)
+- [Iteration A12 — Onion DM](#iter-a12)
+- [Iteration A13 — Meshtastic last mile](#iter-a13)
+- [Iteration A14 — Custom encryption builder](#iter-a14)
+- [Key architectural decisions](#key-architectural-decisions-rationale)
+
 ### Current problem
 
 `gossipMessage()` sends the message to the top 3 peers by score and **hopes** it
@@ -73,6 +100,7 @@ behavior, the protocol version must be raised.
 - [ ] Update `protocol.md` after each protocol bump
 - [ ] Update `config.ProtocolVersion` and `config.MinimumProtocolVersion` only in a dedicated commit/PR after passing compatibility checklist
 
+<a id="iter-1"></a>
 ### Iteration 1 — Hop-by-hop relay (capability-gated)
 
 **Goal:** messages can traverse intermediate nodes, not just direct
@@ -277,24 +305,24 @@ with one legacy node in the middle.
 
 **Progress:**
 
-- [ ] Define `relay_message` frame type in `protocol/frame.go`
-- [ ] Define `relay_hop_ack` frame type in `protocol/frame.go`
-- [ ] Add `hop_count`, `max_hops`, `previous_hop` fields to relay frame
-- [ ] Implement `relayForwardState` map with TTL-based cleanup
-- [ ] Gate `relay_message` sending on `sessionHasCapability("mesh_relay_v1")`
-- [ ] Add `relay_message` handler in `handleCommand()` / `handlePeerSessionFrame()`
-- [ ] Implement relay dedupe: drop `relay_message` if `relayForwardState` exists for `message_id` (even from different neighbor)
-- [ ] Implement loop detection via existing `relayForwardState` for message_id
-- [ ] Implement max hops check (drop if exceeded, default 10)
-- [ ] Implement direct peer forwarding (recipient is direct peer → forward)
-- [ ] Implement gossip fallback for capable peers (recipient unknown → forward)
-- [ ] Implement hop-by-hop ack (`relay_hop_ack`) back to `previous_hop`
-- [ ] Implement receipt return via local `receipt_forward_to` lookup
-- [ ] Implement receipt fallback to gossip when previous_hop is unavailable
-- [ ] Extend `retryRelayDeliveries()` for relay messages
-- [ ] Persist relay forward state in `queue-{port}.json`
-- [ ] Write unit tests for relay processing logic
-- [ ] Write unit tests for capability gating (legacy peer gets gossip, not relay)
+- [x] Define `relay_message` frame type in `protocol/frame.go`
+- [x] Define `relay_hop_ack` frame type in `protocol/frame.go`
+- [x] Add `hop_count`, `max_hops`, `previous_hop` fields to relay frame
+- [x] Implement `relayForwardState` map with TTL-based cleanup
+- [x] Gate `relay_message` sending on `sessionHasCapability("mesh_relay_v1")`
+- [x] Add `relay_message` handler in `handleCommand()` / `handlePeerSessionFrame()`
+- [x] Implement relay dedupe: drop `relay_message` if `relayForwardState` exists for `message_id` (even from different neighbor)
+- [x] Implement loop detection via existing `relayForwardState` for message_id
+- [x] Implement max hops check (drop if exceeded, default 10)
+- [x] Implement direct peer forwarding (recipient is direct peer → forward)
+- [x] Implement gossip fallback for capable peers (recipient unknown → forward)
+- [x] Implement hop-by-hop ack (`relay_hop_ack`) back to `previous_hop`
+- [x] Implement receipt return via local `receipt_forward_to` lookup
+- [x] Implement receipt fallback to gossip when previous_hop is unavailable
+- [x] Extend `retryRelayDeliveries()` for relay messages
+- [x] Persist relay forward state in `queue-{port}.json`
+- [x] Write unit tests for relay processing logic
+- [x] Write unit tests for capability gating (legacy peer gets gossip, not relay)
 - [ ] Integration test: 4 nodes in chain, DM from first to last
 - [ ] Integration test: mixed network with one legacy node
 - [ ] Integration test: verify relay dedupe (same message_id from two neighbors → only one forward)
@@ -302,13 +330,83 @@ with one legacy node in the middle.
 
 **Release / Compatibility:**
 
-- [ ] `relay_message` is sent only to peers with `mesh_relay_v1`
-- [ ] Legacy peer never receives `relay_message`
-- [ ] If peer lacks `mesh_relay_v1`, the existing delivery path is used
+- [x] `relay_message` is sent only to peers with `mesh_relay_v1`
+- [x] Legacy peer never receives `relay_message`
+- [x] If peer lacks `mesh_relay_v1`, the existing delivery path is used
 - [ ] Mixed-version test: new → old uses legacy path
 - [ ] Mixed-version test: old → new continues to work without relay
-- [ ] Confirmed: iteration 1 does not require raising `MinimumProtocolVersion`
+- [x] Confirmed: iteration 1 does not require raising `MinimumProtocolVersion`
 
+<a id="iter-stabilization"></a>
+### Stabilization step — Relay refactor after Iteration 1
+
+**Goal:** after iteration 1 is functionally complete, simplify the relay
+implementation before adding routing tables. This is a **stabilization
+refactor**, not a redesign of protocol behavior. The purpose is to reduce
+logic duplication, make invariants explicit, and lower the cost of changes
+in iterations 2-4.
+
+**Why here, not later:** iteration 1 already touches multiple surfaces:
+inbound command handling, peer-session writes, relay forwarding, gossip
+fallback, backlog/store-and-forward, receipts, persistence, and capability
+gating. Iteration 2 will add routing-table state and withdrawals on top of
+this. If the relay flow stays scattered, each next iteration will multiply
+the number of places where routing bugs can hide.
+
+**Non-goal:** do **not** rewrite relay because "the code feels messy". If a
+piece is likely to disappear in later iterations, keep it. Refactor only the
+parts that are already cross-cutting and are likely to remain as stable
+transport/routing seams.
+
+**Target outcome:** iteration 2 starts on top of a relay subsystem with one
+clear processing pipeline and explicit invariants, instead of several partially
+overlapping code paths.
+
+**What should be extracted / clarified:**
+
+- One relay receive pipeline: `receive -> validate -> decide -> persist/forward -> ack`
+- One place that defines relay invariants:
+  - who may be a transit hop
+  - when a node must store locally
+  - when gossip always runs
+  - when relay is optional optimization only
+  - which hop-ack statuses exist
+- Clear separation of concerns:
+  - transport/session mechanics
+  - relay routing decisions
+  - backlog/store-and-forward semantics
+  - receipt return-path handling
+- Reduced duplication between:
+  - `handleJSONCommand`
+  - `handlePeerSessionFrame`
+  - `servePeerSession`
+  - `peerSessionRequest`
+- Protocol/documentation parity for relay states and hop-ack semantics
+
+**Concrete refactor candidates:**
+
+- Consolidate relay ack handling into one documented path
+- Move relay decision logic behind a small internal API (`handleRelayMessage`, `tryRelayTo...`, receipt return path)
+- Isolate fire-and-forget session write behavior from routing semantics
+- Centralize capability-gated frame classification
+- Make backlog/store-and-forward behavior explicit for transit relay DMs
+- Add invariant-style tests instead of only happy-path integration tests
+
+**Done when:**
+
+- The relay subsystem has one documented processing pipeline
+- The main relay invariants are covered by focused tests
+- Adding route-table next-hop selection in iteration 2 does not require
+  touching unrelated session/plumbing code
+- The refactor does not change wire compatibility or require a protocol bump
+
+**Remaining:**
+
+- [ ] Freeze iteration 1 relay behavior with green full test suite
+- [ ] Test: send failure on fire-and-forget relay frame disconnects peer (code fixed, test missing)
+- [ ] Separate relay routing logic from peer-session transport logic (75% done — capability checks still duplicated between `handleJSONCommand` and `handlePeerSessionFrame`, but these use different APIs: `connHasCapability` vs `sessionHasCapability`)
+
+<a id="iter-2"></a>
 ### Iteration 2 — Routing table (distance vector with withdrawals)
 
 **Goal:** each node knows which identities are reachable through which
@@ -624,6 +722,7 @@ The table converges within 1-2 announce cycles (30-60 seconds).
 - [ ] Confirmed: iteration 2 remains additive, no protocol bump required
 - [ ] Confirmed: iteration 2 does not require raising `MinimumProtocolVersion`
 
+<a id="iter-3"></a>
 ### Iteration 3 — Reliability, reputation, and multi-path
 
 **Goal:** multiple routes per identity, automatic failover based on
@@ -747,6 +846,7 @@ after 5 messages.
 - [ ] Black-hole mitigation does not cause false full ban without fallback path
 - [ ] Confirmed: iteration 3 does not require raising `MinimumProtocolVersion`
 
+<a id="iter-4"></a>
 ### Iteration 4 — Optimization and scaling
 
 **Goal:** pure optimization for network growth to hundreds of nodes.
@@ -812,6 +912,7 @@ does not produce false negatives.
 - [ ] Mixed-version test: node with delta sync works with node on full sync
 - [ ] Confirmed: iteration 4 does not require raising `MinimumProtocolVersion`
 
+<a id="iter-5"></a>
 ### Iteration 5 (future) — Structured overlay (DHT)
 
 **Goal:** scaling to thousands of nodes.
@@ -853,34 +954,235 @@ changes.
 
 ```mermaid
 graph LR
-    I0["Iteration 0<br/>Refactoring +<br/>capabilities"]
     I1["Iteration 1<br/>Hop-by-hop relay<br/>(capability-gated)"]
+    R1["Stabilization<br/>Relay refactor<br/>(post-I1)"]
     I2["Iteration 2<br/>Routing table<br/>+ withdrawals"]
     I3["Iteration 3<br/>Multi-path +<br/>reputation"]
     I4["Iteration 4<br/>Optimization +<br/>scaling"]
     I5["Iteration 5<br/>DHT<br/>(future)"]
 
-    I0 --> I1 --> I2 --> I3 --> I4 --> I5
+    I1 --> R1 --> I2 --> I3 --> I4 --> I5
 
-    I0 -.- W0["Capabilities exchanged<br/>existing behavior unchanged"]
     I1 -.- W1["+ hop forwarding<br/>legacy nodes unaffected"]
+    R1 -.- W1R["+ relay invariants fixed<br/>+ code paths simplified"]
     I2 -.- W2["+ directed routing<br/>+ fast withdrawal"]
     I3 -.- W3["+ failover in 10-20s<br/>+ black-hole detection"]
     I4 -.- W4["+ 50+ nodes<br/>bandwidth optimized"]
 
-    style I0 fill:#e3f2fd,stroke:#1565c0
     style I1 fill:#e8f5e9,stroke:#2e7d32
+    style R1 fill:#fffde7,stroke:#f9a825
     style I2 fill:#e8f5e9,stroke:#2e7d32
     style I3 fill:#fff3e0,stroke:#e65100
     style I4 fill:#fff3e0,stroke:#e65100
     style I5 fill:#f3e5f5,stroke:#7b1fa2
-    style W0 fill:#ffffff,stroke:#ccc
     style W1 fill:#ffffff,stroke:#ccc
+    style W1R fill:#ffffff,stroke:#ccc
     style W2 fill:#ffffff,stroke:#ccc
     style W3 fill:#ffffff,stroke:#ccc
     style W4 fill:#ffffff,stroke:#ccc
 ```
 *Diagram — Iteration dependency and incremental delivery*
+
+### Product iterations after mesh
+
+These iterations continue the roadmap after the mesh foundation is stable.
+They are ordered by practical delivery value for product growth, privacy, and
+hostile-network resilience.
+
+<a id="iter-a1"></a>
+### Iteration A1 — Local names for identities
+
+**Goal:** let the user assign a human-readable local label to each identity.
+
+**Why now:** cheapest UX win before broader user growth.
+
+**Done when:** the desktop shows local aliases everywhere identity fingerprints
+are shown, while preserving the real identity as the canonical underlying key.
+
+<a id="iter-a2"></a>
+### Iteration A2 — Global names instead of raw identity
+
+**Goal:** introduce a global naming layer so users can find and recognize peers
+without memorizing fingerprints.
+
+**Dependency:** follows A1 because local naming UX should exist first.
+
+**Done when:** a user can publish, resolve, and verify a global name bound to
+an identity with conflict handling and ownership proof.
+
+<a id="iter-a3"></a>
+### Iteration A3 — Message deletion controls
+
+**Goal:** add dialog/message deletion behavior with explicit flags and policy.
+
+**Why now:** expected mainstream UX before mobile multiplies sync complexity.
+
+**Done when:** users can delete local history, request two-sided deletion where
+allowed, and see when a message is protected from deletion by policy flags.
+
+<a id="iter-a4"></a>
+### Iteration A4 — Android app
+
+**Goal:** ship the first mobile client on Android.
+
+**Dependency:** comes after A1-A3 so mobile is not built on obviously rough
+chat UX.
+
+**Done when:** Android can run as a light client with identity, contacts,
+direct messaging, and reliable sync with desktop/full nodes.
+
+<a id="iter-a5"></a>
+### Iteration A5 — Second-layer encryption and key exchange
+
+**Goal:** add optional contact-level payload encryption on top of network
+transport encryption.
+
+**Constraint:** this should be an audited/extensible envelope model such as
+PGP-compatible or external-module based, not custom cryptography.
+
+**Done when:** each contact can have an additional public/private key pair,
+public-key exchange is visible in UI, and messages can be wrapped in a second
+verified encryption layer.
+
+<a id="iter-a6"></a>
+### Iteration A6 — DPI bypass
+
+**Goal:** improve reachability in hostile networks where traffic is throttled,
+classified, or blocked.
+
+**Dependency:** easier to validate after routing and privacy behavior are better
+understood.
+
+**Done when:** the transport layer supports at least one obfuscation strategy
+that measurably improves connectivity in filtered environments.
+
+<a id="iter-a7"></a>
+### Iteration A7 — Backup channels via Google WSS
+
+**Goal:** add fallback transport for networks where direct connections are
+unreliable or blocked.
+
+**Positioning:** this is part of the broader hostile-network resilience story,
+not a standalone headline.
+
+**Done when:** a node can fall back to WSS relay/bootstrap transport without
+breaking existing identity, delivery, or capability semantics.
+
+<a id="iter-a8"></a>
+### Iteration A8 — SOCKS5 tunnel between identities
+
+**Goal:** allow identity-to-identity private tunneling, not only chat delivery.
+
+**Dependency:** strongest after privacy and resilient transport exist.
+
+**Done when:** two identities can establish a SOCKS5-backed routed channel with
+clear permissions, lifecycle controls, and bandwidth limits.
+
+<a id="iter-a9"></a>
+### Iteration A9 — Gazeta protocol extensions
+
+**Goal:** expand the anonymous/broadcast protocol where it creates clear product
+value beyond direct messaging.
+
+**Why later:** useful, but easier to define once the main anonymous/broadcast
+story is sharper.
+
+**Done when:** the protocol gains clearly specified extensions with documented
+use-cases and compatibility rules.
+
+<a id="iter-a10"></a>
+### Iteration A10 — iOS app
+
+**Goal:** ship the second mobile client on iOS.
+
+**Dependency:** should follow Android so mobile UX and sync assumptions are
+already validated.
+
+**Done when:** iOS reaches parity with the scoped Android light-client feature
+set that is practical on the chosen framework.
+
+<a id="iter-a11"></a>
+### Iteration A11 — BLE last mile
+
+**Goal:** add short-range local transport for mobile/offline-adjacent scenarios.
+
+**Dependency:** follows mobile because BLE is most useful once the mobile
+transport abstraction is proven.
+
+**Done when:** nearby devices can exchange the required routing or message data
+over BLE without changing higher-level identity semantics.
+
+<a id="iter-a12"></a>
+### Iteration A12 — Onion delivery for DMs
+
+**Goal:** hide more path metadata in multi-hop DM delivery.
+
+**Dependency:** strictly after stable mesh and intentionally after BLE/mobile
+transport work. Mesh answers “does the message get there?”; onion answers “how
+much can intermediate nodes learn about the path?”.
+
+**Done when:** DM delivery uses layered hop encryption over stable relay/routing
+primitives and no intermediate hop sees the full route.
+
+<a id="iter-a13"></a>
+### Iteration A13 — Meshtastic last mile
+
+**Goal:** integrate a radio-based last-mile path for niche field/off-grid use.
+
+**Why later:** strong ecosystem expansion, but should not block the core
+privacy-messenger story.
+
+**Done when:** CORSA can bridge message transport through Meshtastic where
+available, while preserving clear boundaries between radio transport and core
+protocol semantics.
+
+<a id="iter-a14"></a>
+### Iteration A14 — Custom encryption builder
+
+**Goal:** keep any custom “brick-based” encryption workflow strictly isolated as
+an experimental laboratory feature.
+
+**Constraint:** this must never replace audited cryptography or be marketed as
+stronger than reviewed encryption.
+
+**Done when:** if implemented at all, it is clearly marked unsafe/experimental,
+disabled by default, and separated from the main security claims of the
+product.
+
+### Product iteration dependency graph
+
+```mermaid
+graph LR
+    A1["A1<br/>Local names"] --> A2["A2<br/>Global names"]
+    A2 --> A3["A3<br/>Message deletion"]
+    A3 --> A4["A4<br/>Android"]
+    A4 --> A5["A5<br/>Second-layer encryption"]
+    A5 --> A6["A6<br/>DPI bypass"]
+    A6 --> A7["A7<br/>Google WSS fallback"]
+    A7 --> A8["A8<br/>SOCKS5 tunnel"]
+    A8 --> A9["A9<br/>Gazeta extensions"]
+    A9 --> A10["A10<br/>iOS"]
+    A10 --> A11["A11<br/>BLE last mile"]
+    A11 --> A12["A12<br/>Onion DM"]
+    A12 --> A13["A13<br/>Meshtastic last mile"]
+    A13 --> A14["A14<br/>Custom encryption builder"]
+
+    style A1 fill:#e8f5e9,stroke:#2e7d32
+    style A2 fill:#e8f5e9,stroke:#2e7d32
+    style A3 fill:#e8f5e9,stroke:#2e7d32
+    style A4 fill:#e8f5e9,stroke:#2e7d32
+    style A5 fill:#fff3e0,stroke:#e65100
+    style A6 fill:#fff3e0,stroke:#e65100
+    style A7 fill:#fff3e0,stroke:#e65100
+    style A8 fill:#fff3e0,stroke:#e65100
+    style A9 fill:#fff3e0,stroke:#e65100
+    style A10 fill:#f3e5f5,stroke:#7b1fa2
+    style A11 fill:#f3e5f5,stroke:#7b1fa2
+    style A12 fill:#f3e5f5,stroke:#7b1fa2
+    style A13 fill:#f3e5f5,stroke:#7b1fa2
+    style A14 fill:#ffebee,stroke:#c62828
+```
+*Diagram — Product iterations after mesh*
 
 ### Key architectural decisions (rationale)
 

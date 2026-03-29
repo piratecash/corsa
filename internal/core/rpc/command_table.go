@@ -180,6 +180,7 @@ func (t *CommandTable) AllNames() []string {
 func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider) {
 	RegisterSystemCommands(t, node)
 	RegisterNetworkCommands(t, node)
+	RegisterMeshCommands(t, node)
 	RegisterIdentityCommands(t, node)
 	RegisterMessageCommands(t, node, dmRouter)
 	RegisterChatlogCommands(t, chatlog)
@@ -314,6 +315,17 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 				Type:  "add_peer",
 				Peers: []string{address},
 			})
+			return frameResponse(reply)
+		},
+	)
+}
+
+// RegisterMeshCommands registers relay and routing diagnostic commands.
+func RegisterMeshCommands(t *CommandTable, node NodeProvider) {
+	t.Register(
+		CommandInfo{Name: "fetch_relay_status", Description: "Get hop-by-hop relay subsystem status (active states, capable peers)", Category: "mesh"},
+		func(req CommandRequest) CommandResponse {
+			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_relay_status"})
 			return frameResponse(reply)
 		},
 	)

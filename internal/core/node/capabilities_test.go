@@ -9,8 +9,14 @@ import (
 
 func TestLocalCapabilities(t *testing.T) {
 	caps := localCapabilities()
-	if caps != nil {
-		t.Fatalf("localCapabilities() should return nil in iteration 0, got %v", caps)
+	expected := []string{"mesh_relay_v1"}
+	if len(caps) != len(expected) {
+		t.Fatalf("localCapabilities() = %v, want %v", caps, expected)
+	}
+	for i, cap := range expected {
+		if caps[i] != cap {
+			t.Fatalf("localCapabilities()[%d] = %q, want %q", i, caps[i], cap)
+		}
 	}
 }
 
@@ -163,11 +169,10 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 		t.Fatal("connPeerInfo should be set after rememberConnPeerAddr")
 	}
 
-	// In Iteration 0 localCapabilities() returns nil, so the intersection
-	// with any remote set is always nil. This verifies the mechanism is
-	// wired correctly — when localCapabilities() starts returning tokens,
-	// the intersection will be non-empty.
-	if info.capabilities != nil {
-		t.Fatalf("expected nil capabilities (localCapabilities is empty), got %v", info.capabilities)
+	// localCapabilities() returns ["mesh_relay_v1"] in Iteration 1.
+	// The remote hello advertises ["mesh_relay_v1", "mesh_routing_v1"].
+	// The intersection should contain only "mesh_relay_v1".
+	if len(info.capabilities) != 1 || info.capabilities[0] != "mesh_relay_v1" {
+		t.Fatalf("expected [mesh_relay_v1], got %v", info.capabilities)
 	}
 }

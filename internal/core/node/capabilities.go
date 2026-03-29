@@ -3,11 +3,11 @@ package node
 import "net"
 
 // localCapabilities returns the set of capability tokens this node advertises
-// during the handshake. In Iteration 0 the list is empty — the mechanism is
-// introduced but no new frame types are gated yet. Future iterations add
-// tokens such as "mesh_relay_v1" and "mesh_routing_v1" here.
+// during the handshake. Iteration 1 enables hop-by-hop relay via
+// "mesh_relay_v1". Only peers whose negotiated set includes this token
+// will receive relay_message frames.
 func localCapabilities() []string {
-	return nil
+	return []string{"mesh_relay_v1"}
 }
 
 // intersectCapabilities returns the intersection of two capability slices.
@@ -32,8 +32,6 @@ func intersectCapabilities(local, remote []string) []string {
 
 // sessionHasCapability returns true when the outbound peer session for the
 // given address has the specified capability in its negotiated set.
-//
-//nolint:unused // prepared for Iteration 1 (relay capability gating)
 func (s *Service) sessionHasCapability(address, cap string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -51,8 +49,6 @@ func (s *Service) sessionHasCapability(address, cap string) bool {
 
 // connHasCapability returns true when the inbound connection has the specified
 // capability in its negotiated set (stored during the hello handshake).
-//
-//nolint:unused // prepared for Iteration 1 (relay capability gating)
 func (s *Service) connHasCapability(conn net.Conn, cap string) bool {
 	s.mu.RLock()
 	info := s.connPeerInfo[conn]

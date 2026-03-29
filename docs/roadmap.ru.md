@@ -12,6 +12,33 @@
 Исходники (планируемые): `internal/core/node/routing.go`, `internal/core/node/routing_table.go`,
 `internal/core/node/relay.go`, `internal/core/node/route_announce.go`
 
+Быстрые ссылки:
+
+- [Текущая проблема](#текущая-проблема)
+- [Принципы проектирования](#принципы-проектирования)
+- [Политика версионирования протокола](#политика-версионирования-протокола)
+- [Итерация 1 — Hop-by-hop relay](#iter-1)
+- [Шаг стабилизации — рефактор relay](#iter-stabilization)
+- [Итерация 2 — Таблица маршрутов](#iter-2)
+- [Итерация 3 — Надёжность, репутация и multi-path](#iter-3)
+- [Итерация 4 — Оптимизация и масштабирование](#iter-4)
+- [Итерация 5 — Структурированный overlay (DHT)](#iter-5)
+- [Итерация A1 — Локальные имена](#iter-a1)
+- [Итерация A2 — Глобальные имена](#iter-a2)
+- [Итерация A3 — Удаление сообщений](#iter-a3)
+- [Итерация A4 — Android-приложение](#iter-a4)
+- [Итерация A5 — Второй слой шифрования](#iter-a5)
+- [Итерация A6 — Обход DPI](#iter-a6)
+- [Итерация A7 — Google WSS fallback](#iter-a7)
+- [Итерация A8 — SOCKS5-туннель](#iter-a8)
+- [Итерация A9 — Расширения Gazeta](#iter-a9)
+- [Итерация A10 — iOS-приложение](#iter-a10)
+- [Итерация A11 — BLE last mile](#iter-a11)
+- [Итерация A12 — Onion DM](#iter-a12)
+- [Итерация A13 — Meshtastic last mile](#iter-a13)
+- [Итерация A14 — Конструктор шифрования](#iter-a14)
+- [Ключевые архитектурные решения](#ключевые-архитектурные-решения-обоснование)
+
 ### Текущая проблема
 
 `gossipMessage()` отправляет сообщение топ-3 peer'ам по скору и **надеется**,
@@ -76,6 +103,7 @@ graph LR
 - [ ] Обновить `protocol.md` после каждого повышения версии протокола
 - [ ] Обновлять `config.ProtocolVersion` и `config.MinimumProtocolVersion` только отдельным коммитом/PR после прохождения compatibility checklist
 
+<a id="iter-1"></a>
 ### Итерация 1 — Hop-by-hop relay (с гейтингом capabilities)
 
 **Цель:** сообщения могут проходить через промежуточные ноды, а не только до
@@ -255,24 +283,24 @@ legacy-нодой посередине.
 
 **Прогресс:**
 
-- [ ] Определить тип фрейма `relay_message` в `protocol/frame.go`
-- [ ] Определить тип фрейма `relay_hop_ack` в `protocol/frame.go`
-- [ ] Добавить поля `hop_count`, `max_hops`, `previous_hop` в relay-фрейм
-- [ ] Реализовать map `relayForwardState` с TTL-очисткой
-- [ ] Гейтить отправку `relay_message` через `sessionHasCapability("mesh_relay_v1")`
-- [ ] Добавить обработчик `relay_message` в `handleCommand()` / `handlePeerSessionFrame()`
-- [ ] Реализовать дедупликацию relay: drop `relay_message` если `relayForwardState` существует для `message_id` (даже от другого соседа)
-- [ ] Реализовать обнаружение циклов через существующий `relayForwardState` для message_id
-- [ ] Реализовать проверку max hops (drop если превышен, по умолчанию 10)
-- [ ] Реализовать пересылку прямому peer'у (recipient — прямой peer → forward)
-- [ ] Реализовать gossip fallback для capable peer'ов (recipient неизвестен → переслать)
-- [ ] Реализовать hop-by-hop ack (`relay_hop_ack`) обратно в `previous_hop`
-- [ ] Реализовать возврат receipt через локальный lookup `receipt_forward_to`
-- [ ] Реализовать fallback receipt на gossip когда previous_hop недоступен
-- [ ] Расширить `retryRelayDeliveries()` для relay-сообщений
-- [ ] Персистить relay forward state в `queue-{port}.json`
-- [ ] Написать unit-тесты для логики обработки relay
-- [ ] Написать unit-тесты для гейтинга capabilities (legacy peer получает gossip, не relay)
+- [x] Определить тип фрейма `relay_message` в `protocol/frame.go`
+- [x] Определить тип фрейма `relay_hop_ack` в `protocol/frame.go`
+- [x] Добавить поля `hop_count`, `max_hops`, `previous_hop` в relay-фрейм
+- [x] Реализовать map `relayForwardState` с TTL-очисткой
+- [x] Гейтить отправку `relay_message` через `sessionHasCapability("mesh_relay_v1")`
+- [x] Добавить обработчик `relay_message` в `handleCommand()` / `handlePeerSessionFrame()`
+- [x] Реализовать дедупликацию relay: drop `relay_message` если `relayForwardState` существует для `message_id` (даже от другого соседа)
+- [x] Реализовать обнаружение циклов через существующий `relayForwardState` для message_id
+- [x] Реализовать проверку max hops (drop если превышен, по умолчанию 10)
+- [x] Реализовать пересылку прямому peer'у (recipient — прямой peer → forward)
+- [x] Реализовать gossip fallback для capable peer'ов (recipient неизвестен → переслать)
+- [x] Реализовать hop-by-hop ack (`relay_hop_ack`) обратно в `previous_hop`
+- [x] Реализовать возврат receipt через локальный lookup `receipt_forward_to`
+- [x] Реализовать fallback receipt на gossip когда previous_hop недоступен
+- [x] Расширить `retryRelayDeliveries()` для relay-сообщений
+- [x] Персистить relay forward state в `queue-{port}.json`
+- [x] Написать unit-тесты для логики обработки relay
+- [x] Написать unit-тесты для гейтинга capabilities (legacy peer получает gossip, не relay)
 - [ ] Интеграционный тест: 4 ноды цепочкой, DM от первой к последней
 - [ ] Интеграционный тест: смешанная сеть с одной legacy-нодой
 - [ ] Интеграционный тест: проверка дедупликации relay (тот же message_id от двух соседей → только одна пересылка)
@@ -280,13 +308,82 @@ legacy-нодой посередине.
 
 **Release / Compatibility:**
 
-- [ ] `relay_message` отправляется только peer'ам с `mesh_relay_v1`
-- [ ] Legacy peer никогда не получает `relay_message`
-- [ ] Если у peer нет `mesh_relay_v1`, используется старый путь доставки
+- [x] `relay_message` отправляется только peer'ам с `mesh_relay_v1`
+- [x] Legacy peer никогда не получает `relay_message`
+- [x] Если у peer нет `mesh_relay_v1`, используется старый путь доставки
 - [ ] Mixed-version тест: new → old использует legacy path
 - [ ] Mixed-version тест: old → new продолжает работать без relay
-- [ ] Подтверждено: итерация 1 не требует повышения `MinimumProtocolVersion`
+- [x] Подтверждено: итерация 1 не требует повышения `MinimumProtocolVersion`
 
+<a id="iter-stabilization"></a>
+### Шаг стабилизации — рефактор relay после Итерации 1
+
+**Цель:** после функционального завершения итерации 1 упростить реализацию
+relay перед добавлением таблицы маршрутов. Это **стабилизационный рефактор**,
+а не редизайн протокола. Его задача — убрать дублирование логики, сделать
+инварианты явными и снизить стоимость изменений в итерациях 2-4.
+
+**Почему здесь, а не позже:** итерация 1 уже затрагивает несколько слоёв:
+обработку inbound-команд, peer-session writes, relay forwarding, gossip
+fallback, backlog/store-and-forward, receipts, persistence и capability
+gating. Итерация 2 добавит поверх этого состояние таблицы маршрутов и
+withdrawal. Если relay-поток останется размазанным по коду, каждая следующая
+итерация увеличит число мест, где могут прятаться routing-баги.
+
+**Не цель:** не переписывать relay просто потому, что «код выглядит
+неаккуратно». Если какая-то часть, скорее всего, исчезнет в будущих
+итерациях, её не нужно полировать. Рефакторить стоит только те участки,
+которые уже стали cross-cutting и, вероятно, останутся стабильными
+transport/routing seams.
+
+**Ожидаемый результат:** итерация 2 стартует поверх relay-подсистемы с одним
+понятным processing pipeline и явными инвариантами, а не поверх нескольких
+частично перекрывающихся code path.
+
+**Что нужно выделить / прояснить:**
+
+- Один pipeline обработки relay: `receive -> validate -> decide -> persist/forward -> ack`
+- Одно место, где определены relay-инварианты:
+  - кто может быть transit hop
+  - когда нода обязана сохранять сообщение локально
+  - когда gossip запускается всегда
+  - когда relay — только опциональная оптимизация
+  - какие статусы hop-ack существуют
+- Чёткое разделение обязанностей:
+  - transport/session mechanics
+  - relay routing decisions
+  - backlog/store-and-forward semantics
+  - receipt return-path handling
+- Уменьшение дублирования между:
+  - `handleJSONCommand`
+  - `handlePeerSessionFrame`
+  - `servePeerSession`
+  - `peerSessionRequest`
+- Синхронизация протокола/документации с фактическими relay states и hop-ack semantics
+
+**Кандидаты на рефактор:**
+
+- Свести обработку relay ack к одному задокументированному пути
+- Спрятать relay decision logic за небольшим внутренним API (`handleRelayMessage`, `tryRelayTo...`, receipt return path)
+- Отделить fire-and-forget session writes от routing semantics
+- Централизовать классификацию capability-gated фреймов
+- Явно оформить backlog/store-and-forward поведение для transit relay DM
+- Добавить invariant-style тесты, а не только happy-path integration tests
+
+**Готово когда:**
+
+- relay-подсистема имеет один задокументированный processing pipeline
+- основные relay-инварианты покрыты точечными тестами
+- добавление route-table next-hop selection в итерации 2 не требует трогать несвязанный session/plumbing code
+- рефактор не меняет wire compatibility и не требует protocol bump
+
+**Осталось:**
+
+- [ ] Заморозить поведение relay из итерации 1 зелёными тестами (полный test suite)
+- [ ] Тест: send failure на fire-and-forget relay frame отключает пир (код исправлен, тест отсутствует)
+- [ ] Отделить relay routing logic от peer-session transport logic (75% готово — capability checks дублируются между `handleJSONCommand` и `handlePeerSessionFrame`, но это разные API: `connHasCapability` vs `sessionHasCapability`)
+
+<a id="iter-2"></a>
 ### Итерация 2 — Таблица маршрутов (distance vector с withdrawal)
 
 **Цель:** каждая нода знает, какие identity доступны через каких соседей.
@@ -570,6 +667,7 @@ sequenceDiagram
 - [ ] Подтверждено: итерация 2 остаётся аддитивной, protocol bump не требуется
 - [ ] Подтверждено: итерация 2 не требует повышения `MinimumProtocolVersion`
 
+<a id="iter-3"></a>
 ### Итерация 3 — Надёжность, репутация и multi-path
 
 **Цель:** несколько маршрутов на identity, автоматический failover на основе
@@ -668,6 +766,7 @@ Score пересчитывается.
 - [ ] Black-hole mitigation не приводит к ложному полному ban без fallback path
 - [ ] Подтверждено: итерация 3 не требует повышения `MinimumProtocolVersion`
 
+<a id="iter-4"></a>
 ### Итерация 4 — Оптимизация и масштабирование
 
 **Цель:** чистая оптимизация для роста сети до сотен нод. Никаких новых
@@ -731,6 +830,7 @@ gzip-сжатие payload анонса.
 - [ ] Mixed-version тест: нода с delta sync работает с нодой на full sync
 - [ ] Подтверждено: итерация 4 не требует повышения `MinimumProtocolVersion`
 
+<a id="iter-5"></a>
 ### Итерация 5 (будущее) — Структурированный overlay (DHT)
 
 **Цель:** масштабирование до тысяч нод.
@@ -771,34 +871,242 @@ O(n). Lookup за O(log n) хопов.
 
 ```mermaid
 graph LR
-    I0["Итерация 0<br/>Рефакторинг +<br/>capabilities"]
     I1["Итерация 1<br/>Hop-by-hop relay<br/>(с гейтингом capabilities)"]
+    R1["Стабилизация<br/>Рефактор relay<br/>(после I1)"]
     I2["Итерация 2<br/>Таблица маршрутов<br/>+ withdrawal"]
     I3["Итерация 3<br/>Multi-path +<br/>репутация"]
     I4["Итерация 4<br/>Оптимизация +<br/>масштабирование"]
     I5["Итерация 5<br/>DHT<br/>(будущее)"]
 
-    I0 --> I1 --> I2 --> I3 --> I4 --> I5
+    I1 --> R1 --> I2 --> I3 --> I4 --> I5
 
-    I0 -.- W0["Capabilities обмениваются<br/>поведение не меняется"]
     I1 -.- W1["+ hop forwarding<br/>legacy-ноды не затронуты"]
+    R1 -.- W1R["+ исправлены relay-инварианты<br/>+ упрощены code path"]
     I2 -.- W2["+ направленная маршрутизация<br/>+ быстрый withdrawal"]
     I3 -.- W3["+ failover за 10-20с<br/>+ обнаружение black-hole"]
     I4 -.- W4["+ 50+ нод<br/>bandwidth оптимизирован"]
 
-    style I0 fill:#e3f2fd,stroke:#1565c0
     style I1 fill:#e8f5e9,stroke:#2e7d32
+    style R1 fill:#fffde7,stroke:#f9a825
     style I2 fill:#e8f5e9,stroke:#2e7d32
     style I3 fill:#fff3e0,stroke:#e65100
     style I4 fill:#fff3e0,stroke:#e65100
     style I5 fill:#f3e5f5,stroke:#7b1fa2
-    style W0 fill:#ffffff,stroke:#ccc
     style W1 fill:#ffffff,stroke:#ccc
+    style W1R fill:#ffffff,stroke:#ccc
     style W2 fill:#ffffff,stroke:#ccc
     style W3 fill:#ffffff,stroke:#ccc
     style W4 fill:#ffffff,stroke:#ccc
 ```
 *Диаграмма — Зависимости итераций и инкрементальная поставка*
+
+### Продуктовые итерации после mesh
+
+Эти итерации продолжают roadmap после стабилизации mesh-основания. Порядок
+ниже отражает практическую ценность для роста продукта, приватности и
+устойчивости в hostile-network сценариях.
+
+<a id="iter-a1"></a>
+### Итерация A1 — Локальные имена для identity
+
+**Цель:** дать пользователю человекочитаемую локальную метку для каждой
+identity.
+
+**Почему сейчас:** самый дешёвый UX-win до более широкого роста аудитории.
+
+**Готово когда:** desktop показывает локальные alias во всех ключевых местах,
+но canonical-идентификатором остаётся реальный identity/fingerprint.
+
+<a id="iter-a2"></a>
+### Итерация A2 — Глобальные имена вместо raw identity
+
+**Цель:** ввести глобальный naming layer, чтобы пользователей можно было
+узнавать и искать без запоминания fingerprint.
+
+**Зависимость:** идёт после A1, потому что локальный naming UX должен уже
+существовать.
+
+**Готово когда:** пользователь может опубликовать, разрешить и проверить
+глобальное имя, связанное с identity, с политикой конфликтов и подтверждением
+владения.
+
+<a id="iter-a3"></a>
+### Итерация A3 — Управление удалением сообщений
+
+**Цель:** добавить поведение удаления диалогов и отдельных сообщений с явными
+флагами и политиками.
+
+**Почему сейчас:** это ожидаемая mainstream-функция до того, как mobile
+усложнит синхронизацию состояния.
+
+**Готово когда:** пользователь может удалить локальную историю, запросить
+двустороннее удаление там, где это разрешено, и видеть, когда сообщение
+защищено от удаления policy-флагами.
+
+<a id="iter-a4"></a>
+### Итерация A4 — Android-приложение
+
+**Цель:** выпустить первый mobile-клиент на Android.
+
+**Зависимость:** идёт после A1-A3, чтобы mobile не строился на сыром chat UX.
+
+**Готово когда:** Android может работать как light client с identity,
+контактами, direct messaging и надёжной синхронизацией с desktop/full node.
+
+<a id="iter-a5"></a>
+### Итерация A5 — Второй слой шифрования и обмен ключами
+
+**Цель:** добавить опциональное contact-level payload encryption поверх
+текущего transport encryption.
+
+**Ограничение:** это должен быть audited/extensible envelope подход, например
+PGP-compatible или внешний модуль, а не самодельная криптография.
+
+**Готово когда:** у контакта может быть дополнительная пара ключей, обмен
+публичными ключами виден в UI, а сообщения можно завернуть во второй
+проверяемый слой шифрования.
+
+<a id="iter-a6"></a>
+### Итерация A6 — Обход DPI
+
+**Цель:** улучшить доступность в hostile networks, где трафик режется,
+классифицируется или блокируется.
+
+**Зависимость:** проще валидировать после того, как поведение маршрутизации и
+privacy-слоя уже лучше понятно.
+
+**Готово когда:** transport layer поддерживает хотя бы одну стратегию
+обфускации, которая измеримо улучшает связность в фильтруемых сетях.
+
+<a id="iter-a7"></a>
+### Итерация A7 — Резервные каналы через Google WSS
+
+**Цель:** добавить fallback transport для сетей, где прямые соединения
+нестабильны или заблокированы.
+
+**Позиционирование:** это часть общей hostile-network resilience story, а не
+отдельная headline-фича.
+
+**Готово когда:** нода может откатиться на WSS relay/bootstrap transport без
+поломки существующей identity-, delivery- и capability-семантики.
+
+<a id="iter-a8"></a>
+### Итерация A8 — SOCKS5-туннель между identity
+
+**Цель:** дать identity-to-identity private tunneling, а не только доставку
+чата.
+
+**Зависимость:** наиболее убедительно после privacy и resilient transport.
+
+**Готово когда:** две identity могут поднять SOCKS5-backed routed channel с
+понятными разрешениями, управлением жизненным циклом и лимитами bandwidth.
+
+<a id="iter-a9"></a>
+### Итерация A9 — Расширения протокола Gazeta
+
+**Цель:** расширить anonymous/broadcast protocol там, где это даёт ясную
+продуктовую ценность помимо direct messaging.
+
+**Почему позже:** это полезно, но формулируется проще после прояснения общего
+anonymous/broadcast story.
+
+**Готово когда:** протокол получает чётко описанные расширения с
+задокументированными use-case'ами и compatibility rules.
+
+<a id="iter-a10"></a>
+### Итерация A10 — iOS-приложение
+
+**Цель:** выпустить второй mobile-клиент на iOS.
+
+**Зависимость:** должно идти после Android, чтобы mobile UX и sync-решения уже
+были подтверждены.
+
+**Готово когда:** iOS достигает паритета с тем scoped Android light-client
+feature set, который реалистичен на выбранном фреймворке.
+
+<a id="iter-a11"></a>
+### Итерация A11 — BLE last mile
+
+**Цель:** добавить short-range local transport для mobile/offline-adjacent
+сценариев.
+
+**Зависимость:** идёт после mobile, потому что BLE ценнее после проверки mobile
+transport abstractions.
+
+**Готово когда:** соседние устройства могут обмениваться нужными routing- или
+message-данными по BLE без изменения semantics identity верхнего уровня.
+
+<a id="iter-a12"></a>
+### Итерация A12 — Onion-доставка DM
+
+**Цель:** скрыть больше path-метаданных в многохоповой доставке DM.
+
+**Зависимость:** строго после стабильного mesh и осознанно после mobile/BLE.
+Mesh отвечает на вопрос “доходит ли сообщение?”, а onion — “сколько о пути
+знают промежуточные узлы?”.
+
+**Готово когда:** DM использует layered hop encryption поверх стабильных relay
+и routing-примитивов, а промежуточный хоп не видит полный маршрут.
+
+<a id="iter-a13"></a>
+### Итерация A13 — Meshtastic last mile
+
+**Цель:** интегрировать radio-based last-mile path для нишевых field/off-grid
+сценариев.
+
+**Почему позже:** это сильное расширение экосистемы, но оно не должно
+задерживать основной privacy-messenger story.
+
+**Готово когда:** CORSA может мостить transport через Meshtastic там, где он
+доступен, сохраняя понятную границу между radio transport и core protocol.
+
+<a id="iter-a14"></a>
+### Итерация A14 — Конструктор кастомного шифрования
+
+**Цель:** оставить любой brick-based encryption workflow строго как
+экспериментальную лабораторную функцию.
+
+**Ограничение:** это никогда не должно заменять audited crypto или продаваться
+как более сильная защита, чем reviewed encryption.
+
+**Готово когда:** если функция вообще реализована, она чётко помечена как
+unsafe/experimental, выключена по умолчанию и отделена от основных security
+claims продукта.
+
+### Граф зависимостей продуктовых итераций
+
+```mermaid
+graph LR
+    A1["A1<br/>Локальные имена"] --> A2["A2<br/>Глобальные имена"]
+    A2 --> A3["A3<br/>Удаление сообщений"]
+    A3 --> A4["A4<br/>Android"]
+    A4 --> A5["A5<br/>Второй слой шифрования"]
+    A5 --> A6["A6<br/>Обход DPI"]
+    A6 --> A7["A7<br/>Google WSS fallback"]
+    A7 --> A8["A8<br/>SOCKS5-туннель"]
+    A8 --> A9["A9<br/>Расширения Gazeta"]
+    A9 --> A10["A10<br/>iOS"]
+    A10 --> A11["A11<br/>BLE last mile"]
+    A11 --> A12["A12<br/>Onion DM"]
+    A12 --> A13["A13<br/>Meshtastic last mile"]
+    A13 --> A14["A14<br/>Конструктор шифрования"]
+
+    style A1 fill:#e8f5e9,stroke:#2e7d32
+    style A2 fill:#e8f5e9,stroke:#2e7d32
+    style A3 fill:#e8f5e9,stroke:#2e7d32
+    style A4 fill:#e8f5e9,stroke:#2e7d32
+    style A5 fill:#fff3e0,stroke:#e65100
+    style A6 fill:#fff3e0,stroke:#e65100
+    style A7 fill:#fff3e0,stroke:#e65100
+    style A8 fill:#fff3e0,stroke:#e65100
+    style A9 fill:#fff3e0,stroke:#e65100
+    style A10 fill:#f3e5f5,stroke:#7b1fa2
+    style A11 fill:#f3e5f5,stroke:#7b1fa2
+    style A12 fill:#f3e5f5,stroke:#7b1fa2
+    style A13 fill:#f3e5f5,stroke:#7b1fa2
+    style A14 fill:#ffebee,stroke:#c62828
+```
+*Диаграмма — Продуктовые итерации после mesh*
 
 ### Ключевые архитектурные решения (обоснование)
 

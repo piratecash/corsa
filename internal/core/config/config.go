@@ -60,9 +60,9 @@ type Config struct {
 }
 
 const (
-	CorsaVersion           = "0.21 alpha"
-	CorsaWireVersion       = "0.21-alpha"
-	ClientBuild            = 21
+	CorsaVersion           = "0.22 alpha"
+	CorsaWireVersion       = "0.22-alpha"
+	ClientBuild            = 22
 	ProtocolVersion        = 3
 	MinimumProtocolVersion = 2
 	DefaultOutgoingPeers   = 8

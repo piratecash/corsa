@@ -1,0 +1,83 @@
+# System Commands
+
+## English
+
+### POST /rpc/v1/system/help
+
+List all available commands.
+
+Response:
+```json
+{
+  "version": "1.0",
+  "commands": [
+    {"name": "help", "description": "List all available RPC commands", "category": "system"},
+    {"name": "get_peers", "description": "Get list of connected peers", "category": "network"}
+  ]
+}
+```
+
+`version` is the help response schema version (currently `"1.0"`). It tracks the structure of the help response itself — not the protocol or client version. Clients can use it to detect format changes (e.g. new fields in command metadata). Bump when the help response structure changes.
+
+### POST /rpc/v1/system/ping
+
+Send local ping, returns pong response. In desktop mode, replaced by `DiagnosticProvider` — pings every connected peer over TCP and reports per-peer status.
+
+### POST /rpc/v1/system/hello
+
+Send hello frame for identification. The handler populates `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion`, and `ClientBuild` before forwarding to the node — without these fields the handshake is rejected. The standalone node handler identifies as `Client: "rpc"`; in desktop mode, `RegisterDesktopOverrides` replaces it with `Client: "desktop"` and the desktop application version. `ClientBuild` is a monotonically increasing integer that peers compare to detect newer software releases.
+
+### POST /rpc/v1/system/version
+
+Client and protocol version.
+
+Response:
+```json
+{
+  "client_version": "0.21-alpha",
+  "protocol_version": 3,
+  "node_address": "a1b2c3d4..."
+}
+```
+
+---
+
+## Русский
+
+### POST /rpc/v1/system/help
+
+Список всех доступных команд.
+
+Ответ:
+```json
+{
+  "version": "1.0",
+  "commands": [
+    {"name": "help", "description": "Список всех доступных RPC команд", "category": "system"},
+    {"name": "get_peers", "description": "Получить список подключённых пиров", "category": "network"}
+  ]
+}
+```
+
+`version` — версия схемы ответа help (сейчас `"1.0"`). Отслеживает структуру самого ответа help, а не версию протокола или клиента. Клиенты могут использовать это поле для обнаружения изменений формата (например, новых полей в метаданных команд). Инкрементируется при изменении структуры ответа help.
+
+### POST /rpc/v1/system/ping
+
+Локальный пинг, возвращает pong-ответ. В desktop-режиме заменяется через `DiagnosticProvider` — пингует каждого подключённого пира по TCP и сообщает статус по каждому.
+
+### POST /rpc/v1/system/hello
+
+Отправка hello-фрейма для идентификации. Обработчик заполняет `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion` и `ClientBuild` перед отправкой ноде — без этих полей handshake отклоняется. Standalone-нода идентифицируется как `Client: "rpc"`; в desktop-режиме `RegisterDesktopOverrides` заменяет обработчик на `Client: "desktop"` с версией desktop-приложения. `ClientBuild` — монотонно возрастающий целочисленный номер сборки, по которому пиры определяют наличие новых версий ПО.
+
+### POST /rpc/v1/system/version
+
+Версия клиента и протокола.
+
+Ответ:
+```json
+{
+  "client_version": "0.21-alpha",
+  "protocol_version": 3,
+  "node_address": "a1b2c3d4..."
+}
+```
