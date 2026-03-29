@@ -1260,3 +1260,13 @@ TCP-сокет закрылся бы до того, как writer горутин
 | `trust-{port}.json` | TOFU-pinned контакты и лог конфликтов |
 | `queue-{port}.json` | Pending исходящие фреймы, состояние retry relay |
 | `chatlog.db` (SQLite) | История сообщений, статусы доставки (только desktop) |
+
+---
+
+## Mesh Routing Roadmap
+
+See [roadmap.md](roadmap.md) — iterative migration plan from gossip to real mesh routing.
+
+## Дорожная карта маршрутизации Mesh
+
+См. [roadmap.ru.md](roadmap.ru.md) — поэтапный план миграции с gossip на реальную mesh-маршрутизацию.
