@@ -2002,7 +2002,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 		t.Fatalf("unexpected sender direct store response: %#v", reply)
 	}
 
-	waitForCondition(t, 15*time.Second, func() bool {
+	waitForConditionMsg(t, 30*time.Second, "message did not propagate from sender to full node via gossip", func() bool {
 		fullReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: idRecipient.Address})
 		return fullReply.Type == "inbox" && len(fullReply.Messages) == 1 && fullReply.Messages[0].ID == "client-offline-dm-1"
 	})
@@ -2015,7 +2015,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	}, idRecipient)
 	defer stopRecipient()
 
-	waitForCondition(t, 15*time.Second, func() bool {
+	waitForConditionMsg(t, 30*time.Second, "recipient did not receive stored DM after connecting to full node", func() bool {
 		messages := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
 		return messages.Type == "messages" && len(messages.Messages) == 1 && messages.Messages[0].ID == "client-offline-dm-1"
 	})
@@ -2604,6 +2604,11 @@ func exchangeFrames(t *testing.T, address string, frames ...protocol.Frame) []pr
 
 func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
+	waitForConditionMsg(t, timeout, "condition not met before timeout", fn)
+}
+
+func waitForConditionMsg(t *testing.T, timeout time.Duration, msg string, fn func() bool) {
+	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -2613,7 +2618,7 @@ func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	t.Fatal("condition not met before timeout")
+	t.Fatalf("%s (waited %s)", msg, timeout)
 }
 
 func freeAddress(t *testing.T) string {

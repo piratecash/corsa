@@ -4550,6 +4550,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		}
 		items = append(items, protocol.PeerHealthFrame{
 			Address:             health.Address,
+			PeerID:              s.peerIDs[health.Address],
 			Network:             classifyAddress(health.Address).String(),
 			Direction:           health.Direction,
 			ClientVersion:       s.peerVersions[health.Address],
@@ -4580,6 +4581,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		}
 		items = append(items, protocol.PeerHealthFrame{
 			Address:       addr,
+			PeerID:        s.peerIDs[addr],
 			Network:       classifyAddress(addr).String(),
 			Direction:     peerDirectionInbound,
 			ClientVersion: s.peerVersions[addr],

@@ -18,6 +18,7 @@ import (
 	"corsa/internal/core/service"
 
 	"gioui.org/app"
+	"gioui.org/font"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/key"
 	"gioui.org/layout"
@@ -31,13 +32,13 @@ import (
 )
 
 type Window struct {
-	router    *service.DMRouter
-	client    *service.DesktopClient
+	router   *service.DMRouter
+	client   *service.DesktopClient
 	cmdTable *rpc.CommandTable
-	runtime   *NodeRuntime
-	prefs     *Preferences
-	theme     *material.Theme
-	ops       op.Ops
+	runtime  *NodeRuntime
+	prefs    *Preferences
+	theme    *material.Theme
+	ops      op.Ops
 
 	recipientEditor      widget.Editor
 	identitySearchEditor widget.Editor
@@ -51,6 +52,8 @@ type Window struct {
 	languageToggle       widget.Clickable
 	languageOptions      map[string]*widget.Clickable
 	recipientButtons     map[string]*widget.Clickable
+	messageSelectables   map[string]*widget.Selectable
+	lastChatPeer         string
 	language             string
 	showLanguageMenu     bool
 	consoleOpen          bool
@@ -91,17 +94,18 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 	}
 
 	return &Window{
-		router:           router,
-		client:           client,
-		cmdTable:         cmdTable,
-		runtime:          runtime,
-		prefs:            prefs,
-		theme:            theme,
-		language:         language,
-		languageOptions:  make(map[string]*widget.Clickable),
-		recipientButtons: make(map[string]*widget.Clickable),
-		contactsList:     widget.List{List: layout.List{Axis: layout.Vertical}},
-		chatList:         widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
+		router:             router,
+		client:             client,
+		cmdTable:           cmdTable,
+		runtime:            runtime,
+		prefs:              prefs,
+		theme:              theme,
+		language:           language,
+		languageOptions:    make(map[string]*widget.Clickable),
+		recipientButtons:   make(map[string]*widget.Clickable),
+		messageSelectables: make(map[string]*widget.Selectable),
+		contactsList:       widget.List{List: layout.List{Axis: layout.Vertical}},
+		chatList:           widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 	}
 }
 
@@ -228,7 +232,6 @@ func (w *Window) handleActions(gtx layout.Context) {
 			w.window.Invalidate()
 		}
 	}
-
 }
 
 func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
@@ -524,13 +527,13 @@ func (w *Window) layoutLoadingCard(gtx layout.Context, title string) layout.Dime
 			return layout.Flex{
 				Axis: layout.Vertical,
 			}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					label := material.Label(w.theme, unit.Sp(20), title)
 					label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 					return label.Layout(gtx)
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{
 							Axis:      layout.Vertical,
@@ -649,8 +652,8 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 // so they do not count as usable. Per-peer health details (degraded,
 // stalled) are shown in the breakdown line instead.
 func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
-	usable := 0   // healthy + degraded — can route messages
-	stalled := 0  // connected at TCP level but not routing
+	usable := 0  // healthy + degraded — can route messages
+	stalled := 0 // connected at TCP level but not routing
 	reconnecting := 0
 	pending := 0
 
@@ -779,7 +782,6 @@ func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-
 func (w *Window) localNodeErrorRow() string {
 	if err := w.runtime.Error(); err != "" {
 		return w.t("node.error", err)
@@ -848,7 +850,6 @@ func (w *Window) ensureSelectedRecipient(recipients []string) {
 	w.recipientEditor.SetText(recipients[0])
 }
 
-
 func mergeRecipientOrder(recipients, order []string) []string {
 	if len(recipients) == 0 {
 		return nil
@@ -878,7 +879,6 @@ func mergeRecipientOrder(recipients, order []string) []string {
 	}
 	return out
 }
-
 
 func (w *Window) layoutUnreadBadge(gtx layout.Context, count int) layout.Dimensions {
 	height := gtx.Dp(unit.Dp(24))
@@ -993,9 +993,20 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Body1(w.theme, message.Body)
-					label.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-					return label.Layout(gtx)
+					sel := w.messageSelectable(message.ID)
+					sel.SetText(message.Body)
+					textColor := color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+					selColor := color.NRGBA{R: 72, G: 96, B: 140, A: 180}
+
+					textMacro := op.Record(gtx.Ops)
+					paint.ColorOp{Color: textColor}.Add(gtx.Ops)
+					textMaterial := textMacro.Stop()
+
+					selMacro := op.Record(gtx.Ops)
+					paint.ColorOp{Color: selColor}.Add(gtx.Ops)
+					selMaterial := selMacro.Stop()
+
+					return sel.Layout(gtx, w.theme.Shaper, font.Font{Typeface: w.theme.Face}, w.theme.TextSize, textMaterial, selMaterial)
 				}),
 			}
 
@@ -1038,6 +1049,24 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 		})
 	})
+}
+
+// messageSelectable returns a reusable Selectable widget for the given
+// message ID, creating one on first access. This allows users to select
+// and copy message text in the chat view. The cache is cleared when the
+// active conversation changes to prevent unbounded growth across
+// different chat peers.
+func (w *Window) messageSelectable(id string) *widget.Selectable {
+	if peer := w.snap.ActivePeer; peer != w.lastChatPeer {
+		w.messageSelectables = make(map[string]*widget.Selectable)
+		w.lastChatPeer = peer
+	}
+	sel := w.messageSelectables[id]
+	if sel == nil {
+		sel = &widget.Selectable{}
+		w.messageSelectables[id] = sel
+	}
+	return sel
 }
 
 func knownRecipients(contacts map[string]service.Contact, discovered map[string]struct{}, self string) []string {
@@ -1153,10 +1182,32 @@ func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
 	return btn.Layout(gtx)
 }
 
+// hasNewerPeerBuild returns true when at least 2 distinct peer identities
+// report a ClientBuild higher than ours. A single peer is not enough
+// because someone could build a custom version with an inflated build
+// number to trigger false upgrade prompts across the network.
+// Deduplication uses PeerID (the peer's mesh identity) so that the same
+// node appearing under multiple addresses counts only once.
 func (w *Window) hasNewerPeerBuild() bool {
 	myBuild := config.ClientBuild
+	seen := make(map[string]struct{})
+	count := 0
 	for _, ph := range w.snap.NodeStatus.PeerHealth {
-		if ph.ClientBuild > myBuild {
+		if ph.ClientBuild <= myBuild {
+			continue
+		}
+		// Deduplicate by peer identity. Fall back to Address when the
+		// identity is not yet known (pre-handshake health entries).
+		key := ph.PeerID
+		if key == "" {
+			key = ph.Address
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		count++
+		if count >= 2 {
 			return true
 		}
 	}

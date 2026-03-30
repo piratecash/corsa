@@ -58,6 +58,7 @@ type DeliveryReceipt struct {
 
 type PeerHealth struct {
 	Address             string
+	PeerID              string
 	Direction           string
 	ClientVersion       string
 	ClientBuild         int
@@ -442,6 +443,7 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 	for _, item := range frame.PeerHealth {
 		items = append(items, PeerHealth{
 			Address:             item.Address,
+			PeerID:              item.PeerID,
 			Direction:           item.Direction,
 			ClientVersion:       item.ClientVersion,
 			ClientBuild:         item.ClientBuild,

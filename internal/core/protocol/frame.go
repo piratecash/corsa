@@ -55,7 +55,7 @@ type Frame struct {
 	Signature              string                `json:"signature,omitempty"`
 	Code                   string                `json:"code,omitempty"`
 	Error                  string                `json:"error,omitempty"`
-	DMHeaders              []DMHeaderFrame        `json:"dm_headers,omitempty"`
+	DMHeaders              []DMHeaderFrame       `json:"dm_headers,omitempty"`
 	ChatEntries            []ChatEntryFrame      `json:"chat_entries,omitempty"`
 	ChatPreviews           []ChatPreviewFrame    `json:"chat_previews,omitempty"`
 	Conversations          []ConversationFrame   `json:"conversations,omitempty"`
@@ -102,6 +102,7 @@ type NoticeFrame struct {
 
 type PeerHealthFrame struct {
 	Address             string   `json:"address"`
+	PeerID              string   `json:"peer_id,omitempty"`
 	Network             string   `json:"network,omitempty"`
 	Direction           string   `json:"direction,omitempty"`
 	ClientVersion       string   `json:"client_version,omitempty"`
@@ -126,11 +127,11 @@ type PeerHealthFrame struct {
 
 // NetworkStatsFrame provides aggregated traffic statistics for the entire node.
 type NetworkStatsFrame struct {
-	TotalBytesSent     int64            `json:"total_bytes_sent"`
-	TotalBytesReceived int64            `json:"total_bytes_received"`
-	TotalTraffic       int64            `json:"total_traffic"`
-	ConnectedPeers     int              `json:"connected_peers"`
-	KnownPeers         int              `json:"known_peers"`
+	TotalBytesSent     int64              `json:"total_bytes_sent"`
+	TotalBytesReceived int64              `json:"total_bytes_received"`
+	TotalTraffic       int64              `json:"total_traffic"`
+	ConnectedPeers     int                `json:"connected_peers"`
+	KnownPeers         int                `json:"known_peers"`
 	PeerTraffic        []PeerTrafficFrame `json:"peer_traffic"`
 }
 
