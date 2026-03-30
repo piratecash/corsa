@@ -375,6 +375,32 @@ In-memory peer lists are periodically pruned to remove stale entries.  Every 10 
 
 Eviction cleans up all associated state (health, peer type, version, persisted metadata).  Bootstrap peers and currently-connected peers are **never** evicted regardless of score.
 
+## Stale inbound connection cleanup
+
+When internet drops, TCP sockets may linger for minutes due to OS-level retransmission timeouts — even after the heartbeat has declared the peer `stalled`. These zombie connections occupy a slot in `inboundConns` and block outbound dial attempts to the same host (because `connectedHostsLocked` would see the host as already connected).
+
+The `evictStaleInboundConns` sweep runs on every bootstrap tick (~2 s) and force-closes inbound TCP connections whose peer health state is `stalled`. This frees the host slot so the remote peer's retry loop can re-establish the connection. Additionally, `connectedHostsLocked` excludes stalled inbound connections when computing the set of connected hosts — allowing `peerDialCandidates` to attempt a fresh outbound connection to the same host without waiting for the zombie socket to time out.
+
+Recovery timeline after internet outage:
+
+1. Heartbeat detects unresponsive peer within ~2 min 45 s (heartbeat interval + pong timeout)
+2. Peer health transitions to `stalled`
+3. Next bootstrap tick force-closes the zombie TCP socket and unblocks the host slot
+4. Remote peer's retry loop (or local outbound retry) re-establishes the connection
+
+## Очистка зависших inbound-соединений
+
+При потере интернета TCP-сокеты могут оставаться «живыми» минуты из-за тайм-аутов ретрансмиссии на уровне ОС — даже после того, как heartbeat объявил пир `stalled`. Эти зомби-соединения занимают слот в `inboundConns` и блокируют исходящие попытки подключения к тому же хосту (потому что `connectedHostsLocked` видит хост как уже подключённый).
+
+Очистка `evictStaleInboundConns` выполняется на каждом тике bootstrap (~2 с) и принудительно закрывает inbound TCP-соединения, чей peer health находится в состоянии `stalled`. Это освобождает слот хоста, чтобы retry-цикл удалённого пира мог восстановить соединение. Кроме того, `connectedHostsLocked` исключает зависшие inbound-соединения при вычислении набора подключённых хостов — позволяя `peerDialCandidates` попытаться установить новое исходящее соединение к тому же хосту, не дожидаясь тайм-аута зомби-сокета.
+
+Таймлайн восстановления после обрыва интернета:
+
+1. Heartbeat обнаруживает неотвечающий пир в течение ~2 мин 45 с (интервал heartbeat + тайм-аут pong)
+2. Состояние здоровья пира переходит в `stalled`
+3. Следующий тик bootstrap принудительно закрывает зомби TCP-сокет и освобождает слот хоста
+4. Retry-цикл удалённого пира (или локальный исходящий retry) восстанавливает соединение
+
 ## Mesh learning (peer re-sync via syncTicker)
 
 `servePeerSession` runs a `syncTicker` that fires every 4 seconds.  Each tick calls `syncPeerSession`, which sends `get_peers` to the connected peer and merges newly discovered addresses into the local pool via `addPeerAddress`.  This ensures the mesh constantly learns about new nodes through its existing connections without requiring a separate re-sync goroutine.

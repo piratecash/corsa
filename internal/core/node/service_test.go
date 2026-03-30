@@ -5213,6 +5213,24 @@ func TestComputePeerStateThresholds(t *testing.T) {
 			health:    peerHealth{Connected: true, LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - 1*time.Second)},
 			wantState: peerStateStalled,
 		},
+		{
+			name: "stale useful receive but recent pong keeps peer healthy",
+			health: peerHealth{
+				Connected:           true,
+				LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
+				LastPongAt:          now.Add(-30 * time.Second),
+			},
+			wantState: peerStateHealthy,
+		},
+		{
+			name: "stale useful receive and stale pong is stalled",
+			health: peerHealth{
+				Connected:           true,
+				LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
+				LastPongAt:          now.Add(-heartbeatInterval - pongStallTimeout - 5*time.Second),
+			},
+			wantState: peerStateStalled,
+		},
 	}
 
 	for _, tt := range tests {
@@ -6940,5 +6958,295 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	if status != "delivered" {
 		t.Fatalf("expected \"delivered\" after key sync from previous hop, got %q — "+
 			"deliverRelayedMessage should sync unknown sender keys before rejecting", status)
+	}
+}
+
+// TestEvictStaleInboundConnsClosesZombies verifies that evictStaleInboundConns
+// force-closes inbound TCP connections whose peer health state is stalled.
+// After an internet outage the TCP socket may linger while the heartbeat has
+// already declared the peer unresponsive; closing the zombie frees the host
+// slot so the remote peer can reconnect.
+func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Create a real TCP connection pair.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			connCh <- c
+		}
+	}()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	server := <-connCh
+	defer func() { _ = server.Close() }()
+
+	peerAddr := "10.0.0.99:64646"
+
+	// Register as inbound connection with peer info.
+	svc.mu.Lock()
+	svc.inboundConns[server] = struct{}{}
+	svc.connPeerInfo[server] = &connPeerHello{address: peerAddr}
+	// Create a stalled health entry: connected but no useful traffic for a long time.
+	svc.health[peerAddr] = &peerHealth{
+		Address:             peerAddr,
+		Connected:           true,
+		Direction:           peerDirectionInbound,
+		State:               peerStateStalled,
+		LastUsefulReceiveAt: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
+	}
+	svc.mu.Unlock()
+
+	// Verify the connection is in inboundConns before eviction.
+	svc.mu.RLock()
+	_, exists := svc.inboundConns[server]
+	svc.mu.RUnlock()
+	if !exists {
+		t.Fatal("expected server conn in inboundConns before eviction")
+	}
+
+	// Run the eviction sweep.
+	svc.evictStaleInboundConns()
+
+	// The connection should be closed. Read should fail.
+	_ = server.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	buf := make([]byte, 1)
+	_, readErr := server.Read(buf)
+	if readErr == nil {
+		t.Fatal("expected read error on force-closed inbound connection, got nil")
+	}
+}
+
+// TestEvictStaleInboundConnsSkipsHealthy verifies that evictStaleInboundConns
+// does not close connections whose peer health state is healthy.
+func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			connCh <- c
+		}
+	}()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	server := <-connCh
+	defer func() { _ = server.Close() }()
+
+	peerAddr := "10.0.0.88:64646"
+
+	svc.mu.Lock()
+	svc.inboundConns[server] = struct{}{}
+	svc.connPeerInfo[server] = &connPeerHello{address: peerAddr}
+	svc.health[peerAddr] = &peerHealth{
+		Address:             peerAddr,
+		Connected:           true,
+		Direction:           peerDirectionInbound,
+		State:               peerStateHealthy,
+		LastUsefulReceiveAt: time.Now(),
+	}
+	svc.mu.Unlock()
+
+	svc.evictStaleInboundConns()
+
+	// Connection should still be open. Write should succeed.
+	_ = server.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	_, writeErr := server.Write([]byte("ping"))
+	if writeErr != nil {
+		t.Fatalf("expected healthy inbound connection to remain open, got write error: %v", writeErr)
+	}
+}
+
+// TestConnectedHostsLockedSkipsStalledInbound verifies that connectedHostsLocked
+// excludes inbound connections whose peer is in the stalled state. This allows
+// peerDialCandidates to attempt an outbound connection to the same host,
+// which is the fastest path to recovery after an internet outage.
+func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Create two real TCP connections to simulate healthy and stalled inbound peers.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	makeConn := func() (client, server net.Conn) {
+		connCh := make(chan net.Conn, 1)
+		go func() {
+			c, err := listener.Accept()
+			if err == nil {
+				connCh <- c
+			}
+		}()
+		cl, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		sv := <-connCh
+		return cl, sv
+	}
+
+	_, server1 := makeConn()
+	defer func() { _ = server1.Close() }()
+
+	stalledPeerAddr := "10.0.0.50:64646"
+
+	svc.mu.Lock()
+	// Clear any pre-existing inbound connections left over from
+	// startTestNode's health-check dial to avoid 127.0.0.1 collisions.
+	for c := range svc.inboundConns {
+		delete(svc.inboundConns, c)
+	}
+	svc.inboundConns[server1] = struct{}{}
+	svc.connPeerInfo[server1] = &connPeerHello{address: stalledPeerAddr}
+	svc.health[stalledPeerAddr] = &peerHealth{
+		Address:             stalledPeerAddr,
+		Connected:           true,
+		Direction:           peerDirectionInbound,
+		State:               peerStateStalled,
+		LastUsefulReceiveAt: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
+	}
+
+	// Also add an outbound session as control.
+	svc.upstream["10.0.0.1:64646"] = struct{}{}
+
+	hosts := svc.connectedHostsLocked()
+	svc.mu.Unlock()
+
+	// Outbound host must still be present.
+	if _, ok := hosts["10.0.0.1"]; !ok {
+		t.Error("expected outbound host 10.0.0.1 in connectedHosts")
+	}
+	// Stalled inbound host (127.0.0.1 from TCP) must be excluded.
+	if _, ok := hosts["127.0.0.1"]; ok {
+		t.Error("stalled inbound host 127.0.0.1 should be excluded from connectedHosts")
+	}
+}
+
+// TestPeerVersionStoredByHealthKey verifies that version/build are stored
+// by the same key used for health tracking so peerHealthFrames can find them.
+func TestPeerVersionStoredByHealthKey(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Case 1: direct dial address — no dialOrigin alias.
+	directAddr := "185.223.82.127:64646"
+	svc.addPeerVersion(directAddr, "0.22-alpha")
+	svc.addPeerBuild(directAddr, 22)
+
+	svc.mu.RLock()
+	ver := svc.peerVersions[directAddr]
+	build := svc.peerBuilds[directAddr]
+	svc.mu.RUnlock()
+
+	if ver != "0.22-alpha" {
+		t.Errorf("peerVersions[%q] = %q, want %q", directAddr, ver, "0.22-alpha")
+	}
+	if build != 22 {
+		t.Errorf("peerBuilds[%q] = %d, want %d", directAddr, build, 22)
+	}
+
+	// Case 2: fallback-port dial variant — resolveHealthAddress maps
+	// the dial address to the primary address. Verify version is stored
+	// under the primary key.
+	primaryAddr := "10.0.0.5:12345"
+	fallbackAddr := "10.0.0.5:64646"
+
+	svc.mu.Lock()
+	svc.dialOrigin[fallbackAddr] = primaryAddr
+	svc.mu.Unlock()
+
+	// Simulate what openPeerSession does: resolve then store.
+	svc.mu.RLock()
+	healthKey := svc.resolveHealthAddress(fallbackAddr)
+	svc.mu.RUnlock()
+
+	svc.addPeerVersion(healthKey, "0.21-beta")
+	svc.addPeerBuild(healthKey, 21)
+
+	if healthKey != primaryAddr {
+		t.Fatalf("resolveHealthAddress(%q) = %q, want %q", fallbackAddr, healthKey, primaryAddr)
+	}
+
+	svc.mu.RLock()
+	ver2 := svc.peerVersions[primaryAddr]
+	build2 := svc.peerBuilds[primaryAddr]
+	svc.mu.RUnlock()
+
+	if ver2 != "0.21-beta" {
+		t.Errorf("peerVersions[%q] = %q, want %q", primaryAddr, ver2, "0.21-beta")
+	}
+	if build2 != 21 {
+		t.Errorf("peerBuilds[%q] = %d, want %d", primaryAddr, build2, 21)
+	}
+
+	// Case 3: inbound peer without listen field — version stored by
+	// inboundPeerAddress (hello.Address fallback).
+	inboundAddr := "abcdef1234567890"
+	svc.addPeerVersion(inboundAddr, "0.20-gamma")
+	svc.addPeerBuild(inboundAddr, 20)
+
+	svc.mu.RLock()
+	ver3 := svc.peerVersions[inboundAddr]
+	build3 := svc.peerBuilds[inboundAddr]
+	svc.mu.RUnlock()
+
+	if ver3 != "0.20-gamma" {
+		t.Errorf("peerVersions[%q] = %q, want %q", inboundAddr, ver3, "0.20-gamma")
+	}
+	if build3 != 20 {
+		t.Errorf("peerBuilds[%q] = %d, want %d", inboundAddr, build3, 20)
 	}
 }

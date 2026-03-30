@@ -733,6 +733,12 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		}
 		if addr := s.inboundPeerAddress(conn); addr != "" {
 			s.trackInboundConnect(conn, addr)
+			// Store version/build by the health-tracking address so that
+			// peerHealthFrames can find them. learnPeerFromFrame only
+			// stores these when listenerEnabled, which excludes peers
+			// that omit the listen field.
+			s.addPeerVersion(addr, frame.ClientVersion)
+			s.addPeerBuild(addr, frame.ClientBuild)
 		}
 		s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
@@ -1328,6 +1334,8 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 
 	if addr := s.inboundPeerAddress(conn); addr != "" {
 		s.trackInboundConnect(conn, addr)
+		s.addPeerVersion(addr, state.Hello.ClientVersion)
+		s.addPeerBuild(addr, state.Hello.ClientBuild)
 	}
 
 	return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
@@ -2378,6 +2386,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.cleanupExpiredMessages()
 			s.cleanupExpiredNotices()
 			s.evictStalePeers()
+			s.evictStaleInboundConns()
 			s.ensurePeerSessions(ctx)
 			s.retryRelayDeliveries()
 			s.relayLimiter.cleanup(5 * time.Minute)
@@ -2611,7 +2620,17 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 	}
 
 	// Inbound connections — use the real transport-level remote IP.
+	// Skip connections whose peer health is stalled: these are zombie TCP
+	// sockets that survived an internet outage. Excluding them allows
+	// peerDialCandidates to attempt a fresh outbound connection to the
+	// same host, which is the fastest path to recovery.
 	for conn := range s.inboundConns {
+		if info := s.connPeerInfo[conn]; info != nil {
+			resolved := s.resolveHealthAddress(info.address)
+			if h := s.health[resolved]; h != nil && s.computePeerStateLocked(h) == peerStateStalled {
+				continue
+			}
+		}
 		if ip := remoteIP(conn.RemoteAddr()); ip != "" {
 			hosts[ip] = struct{}{}
 		}
@@ -2769,6 +2788,11 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		}
 	}
 	s.learnIdentityFromWelcome(welcome)
+	s.mu.RLock()
+	syncHealthKey := s.resolveHealthAddress(address)
+	s.mu.RUnlock()
+	s.addPeerVersion(syncHealthKey, welcome.ClientVersion)
+	s.addPeerBuild(syncHealthKey, welcome.ClientBuild)
 
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
 		if _, err := io.WriteString(conn, line); err != nil {
@@ -2892,6 +2916,16 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	session.peerIdentity = welcome.Address
 	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
 	s.learnIdentityFromWelcome(welcome)
+	// learnIdentityFromWelcome stores version/build keyed by the normalized
+	// listen address, which may differ from the dial address (or be absent
+	// entirely when the peer omits the listen field). Store by the
+	// health-tracking key (resolveHealthAddress) so peerHealthFrames can
+	// always find the version — even for fallback-port dial variants.
+	s.mu.RLock()
+	healthKey := s.resolveHealthAddress(address)
+	s.mu.RUnlock()
+	s.addPeerVersion(healthKey, welcome.ClientVersion)
+	s.addPeerBuild(healthKey, welcome.ClientBuild)
 	if err := s.authenticatePeerSession(session, welcome); err != nil {
 		return false, err
 	}
@@ -4724,7 +4758,11 @@ func (s *Service) computePeerStateLocked(health *peerHealth) string {
 
 	now := time.Now().UTC()
 	lastUseful := health.LastUsefulReceiveAt
-	if lastUseful.IsZero() {
+	// A pong response is proof of liveness — use the most recent of
+	// LastUsefulReceiveAt and LastPongAt. Previously LastPongAt was
+	// only a fallback when LastUsefulReceiveAt was zero, which caused
+	// idle-but-responsive peers to drift into stalled after ~2:45.
+	if health.LastPongAt.After(lastUseful) {
 		lastUseful = health.LastPongAt
 	}
 	if lastUseful.IsZero() {
@@ -5475,6 +5513,46 @@ func (s *Service) inboundHeartbeat(conn net.Conn, address string, stop <-chan st
 
 			timer.Reset(nextHeartbeatDuration())
 		}
+	}
+}
+
+// evictStaleInboundConns force-closes inbound TCP connections whose peer
+// health state is stalled. When internet drops, the heartbeat detects
+// unresponsive peers within ~2:45 and marks them stalled; however the
+// underlying TCP socket may linger in the OS for much longer (TCP
+// retransmission timeouts). These zombie connections occupy a slot in
+// inboundConns and block outbound dial attempts to the same host via
+// connectedHostsLocked. By actively closing them we free the slot so the
+// remote peer's retry loop can re-establish the connection faster.
+func (s *Service) evictStaleInboundConns() {
+	s.mu.RLock()
+	var stale []net.Conn
+	for conn := range s.inboundConns {
+		info := s.connPeerInfo[conn]
+		if info == nil {
+			continue
+		}
+		resolved := s.resolveHealthAddress(info.address)
+		health := s.health[resolved]
+		if health == nil {
+			continue
+		}
+		state := s.computePeerStateLocked(health)
+		if state == peerStateStalled {
+			stale = append(stale, conn)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, conn := range stale {
+		addr := ""
+		s.mu.RLock()
+		if info := s.connPeerInfo[conn]; info != nil {
+			addr = info.address
+		}
+		s.mu.RUnlock()
+		log.Warn().Str("peer", addr).Msg("force-closing stale inbound connection")
+		_ = conn.Close()
 	}
 }
 

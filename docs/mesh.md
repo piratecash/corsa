@@ -293,6 +293,15 @@ sequenceDiagram
 
 Peer states: `healthy` → `degraded` → `stalled` → `reconnecting`.
 
+- **Stale inbound connection cleanup** — zombie TCP sockets from inbound
+  peers that survived an internet outage are force-closed once health
+  transitions to `stalled`. The `evictStaleInboundConns` sweep runs on
+  every bootstrap tick and closes the dead socket, freeing the host slot.
+  `connectedHostsLocked` also excludes stalled inbound connections so
+  that `peerDialCandidates` can attempt a fresh outbound dial to the
+  same host immediately. See [protocol/peers.md](protocol/peers.md) for
+  the full recovery timeline.
+
 **Aggregate network status** is derived from the number of _usable_ peers
 (healthy + degraded). Stalled peers have a live TCP session but are excluded
 from message routing, so they do not count as usable. Per-peer details are
@@ -925,6 +934,15 @@ sequenceDiagram
   - нет полезного трафика ≥ 2 мин 45 с (`heartbeatInterval` + `pongStallTimeout`): _stalled_
 
 Состояния peer'а: `healthy` → `degraded` → `stalled` → `reconnecting`.
+
+- **Очистка зависших inbound-соединений** — зомби TCP-сокеты от inbound-пиров,
+  пережившие обрыв интернета, принудительно закрываются, как только здоровье
+  переходит в `stalled`. Очистка `evictStaleInboundConns` выполняется на каждом
+  тике bootstrap и закрывает мёртвый сокет, освобождая слот хоста.
+  `connectedHostsLocked` также исключает зависшие inbound-соединения, чтобы
+  `peerDialCandidates` мог немедленно попытаться установить новое исходящее
+  соединение к тому же хосту. Подробный таймлайн восстановления — в
+  [protocol/peers.md](protocol/peers.md).
 
 **Агрегированный статус сети** определяется по количеству _пригодных_ пиров
 (healthy + degraded). Stalled-пиры имеют живое TCP-соединение, но исключены
