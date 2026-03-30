@@ -179,7 +179,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 | [Delivery receipts](delivery.md) | `send_delivery_receipt`, `fetch_delivery_receipts` | Отслеживание доставки и просмотра |
 | [Контакты](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers` | Управление identity и обмен контактами |
 | [Пиры](peers.md) | `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`, `fetch_traffic_history` | Обнаружение пиров, мониторинг, статистика, история трафика |
-| [Ретрансляция](relay.md) | `relay_message`, `relay_hop_ack`, `fetch_relay_status` | Пошаговая пересылка сообщений (Итерация 1, гейтинг по capability `mesh_relay_v1`) |
+| [Ретрансляция](relay.md) | `relay_message`, `relay_hop_ack`, `fetch_relay_status` | Пошаговая пересылка сообщений (Итерация 1, ограничение по capability `mesh_relay_v1`) |
 | [Gazeta](gazeta.md) | `publish_notice`, `fetch_notices` | Анонимная зашифрованная доска объявлений |
 | [Ошибки](errors.md) | `error` | Все коды ошибок и их значение |
 

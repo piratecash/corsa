@@ -21,19 +21,33 @@ Quick links:
 - [Iteration 4 — Optimization and scaling](#iter-4)
 - [Iteration 5 — Structured overlay (DHT)](#iter-5)
 - [Iteration A1 — Local names](#iter-a1)
-- [Iteration A2 — Global names](#iter-a2)
-- [Iteration A3 — Message deletion](#iter-a3)
-- [Iteration A4 — Android app](#iter-a4)
-- [Iteration A5 — Second-layer encryption](#iter-a5)
-- [Iteration A6 — DPI bypass](#iter-a6)
-- [Iteration A7 — Google WSS fallback](#iter-a7)
-- [Iteration A8 — SOCKS5 tunnel](#iter-a8)
-- [Iteration A9 — Gazeta extensions](#iter-a9)
-- [Iteration A10 — iOS app](#iter-a10)
-- [Iteration A11 — BLE last mile](#iter-a11)
-- [Iteration A12 — Onion DM](#iter-a12)
-- [Iteration A13 — Meshtastic last mile](#iter-a13)
-- [Iteration A14 — Custom encryption builder](#iter-a14)
+- [Iteration A2 — Message deletion](#iter-a2)
+- [Iteration A3 — Android app](#iter-a3)
+- [Iteration A4 — Second-layer encryption](#iter-a4)
+- [Iteration A5 — DPI bypass](#iter-a5)
+- [Iteration A6 — Google WSS fallback](#iter-a6)
+- [Iteration A7 — SOCKS5 tunnel](#iter-a7)
+- [Iteration A8 — Group chats](#iter-a8)
+- [Iteration A9 — Onion DM](#iter-a9)
+  - [A9.1 — Onion wrapping for DM envelope](#iter-a9-1)
+  - [A9.2 — Onion receipts](#iter-a9-2)
+  - [A9.3 — Ephemeral keys and forward secrecy](#iter-a9-3)
+  - [A9.4 — Path selection and circuit diversity](#iter-a9-4)
+  - [A9.5 — Traffic analysis resistance](#iter-a9-5)
+- [Iteration A10 — Global names](#iter-a10)
+- [Iteration A11 — Gazeta extensions](#iter-a11)
+- [Iteration A12 — iOS app](#iter-a12)
+- [Iteration A13 — BLE last mile](#iter-a13)
+  - [A13.1 — BLE transport and peer discovery](#iter-a13-1)
+  - [A13.2 — BLE fragmentation and MTU adaptation](#iter-a13-2)
+  - [A13.3 — BLE deduplication and relay](#iter-a13-3)
+  - [A13.4 — BLE rate limiting and QoS](#iter-a13-4)
+- [Iteration A14 — Meshtastic last mile](#iter-a14)
+  - [A14.1 — Meshtastic transport bridge](#iter-a14-1)
+  - [A14.2 — Radio-aware fragmentation and pacing](#iter-a14-2)
+  - [A14.3 — Radio mesh relay and deduplication](#iter-a14-3)
+- [Iteration A15 — Custom encryption builder](#iter-a15)
+- [Iteration A16 — Voice calls](#iter-a16)
 - [Key architectural decisions](#key-architectural-decisions-rationale)
 
 ### Current problem
@@ -78,6 +92,33 @@ graph LR
    and direct-peer delivery already works. New routing must not regress
    it. The routing abstraction produces a multi-strategy decision, not
    just a flat address list.
+
+### Hostile-Internet Guardrails
+
+The network should be designed as if abuse and DDoS are the normal case,
+not an edge case. At the same time, protection must not become a trap for
+honest nodes. Cross-cutting rules:
+
+1. **Bounded resource usage everywhere.** Every inbound frame, queue,
+   table, handshake state, and retry mechanism must have explicit limits
+   on memory, CPU, bandwidth, and lifetime.
+2. **Soft degradation instead of hard failure.** Under overload, a node
+   should first reduce priority, lower fan-out, enable backpressure, and
+   use fallback paths rather than stop delivering messages entirely.
+3. **Distrust unauthenticated input.** Before handshake completion, a peer
+   must not gain access to expensive CPU/memory work, large quotas, or
+   influence over routing/reputation.
+4. **Local observations beat external claims.** A node should not ban,
+   penalize, or reroute purely because another participant said so.
+5. **Adaptive defenses, not always-on friction.** Proof-of-work, hard
+   challenges, and aggressive quotas are acceptable only as under-attack
+   modes, so normal delivery and weak/mobile clients are not harmed.
+6. **No irreversible punishments from weak signals.** Cooldown,
+   quarantine, traffic shaping, and expiry are safer than permanent bans.
+7. **Protection must be verified with overload tests.** Every anti-abuse
+   mechanism should have a test showing that the network degrades in a
+   controlled way under attack and does not lock itself out for honest
+   peers.
 
 ### Protocol versioning policy
 
@@ -327,6 +368,10 @@ with one legacy node in the middle.
 - [ ] Integration test: mixed network with one legacy node
 - [ ] Integration test: verify relay dedupe (same message_id from two neighbors → only one forward)
 - [ ] Integration test: mixed chain with legacy node in middle (new→legacy→new fallback to gossip)
+- [ ] Bound inbound relay frame size and the number of in-flight `relayForwardState` entries per peer / per node
+- [ ] Add bounded queue/backpressure for relay retry so flood traffic cannot grow `queue-{port}.json` without limit
+- [ ] Add per-peer token bucket for gossip/relay fan-out under load
+- [ ] Add overload test: `relay_message` flood does not cause unbounded memory/disk growth
 
 **Release / Compatibility:**
 
@@ -405,6 +450,7 @@ overlapping code paths.
 - [ ] Freeze iteration 1 relay behavior with green full test suite
 - [ ] Test: send failure on fire-and-forget relay frame disconnects peer (code fixed, test missing)
 - [ ] Separate relay routing logic from peer-session transport logic (75% done — capability checks still duplicated between `handleJSONCommand` and `handlePeerSessionFrame`, but these use different APIs: `connHasCapability` vs `sessionHasCapability`)
+- [ ] Centralize admission control: frame size limits, handshake timeout, session quotas, overload-mode hooks
 
 <a id="iter-2"></a>
 ### Iteration 2 — Routing table (distance vector with withdrawals)
@@ -538,6 +584,31 @@ constantly appear and disappear.
 node A, it **does not announce** routes that it learned through A. Routes
 learned from A are announced to A with `hops=16` (infinity). This is a
 classic defense from RIP/BGP.
+
+**Protection against route poisoning:** `announce_routes` remains an
+advisory mechanism, not a source of truth. A neighbor can lie about
+reachability, so receivers apply strict acceptance rules:
+
+1. **Never trust an announcement more than direct/hop_ack.**
+   `announcement` must not override `direct`, and must not displace an
+   already confirmed `hop_ack` route without a fresher `SeqNo`.
+2. **Accept only physically plausible updates.** A neighbor may advertise
+   a route only with `hops >= 1`, and forwarding must increase the metric
+   by exactly 1. If a peer suddenly advertises an anomalously large set of
+   identities or sharply improves a metric without a new `SeqNo`, the
+   update is rejected or assigned a reduced TTL.
+3. **Bind learned routes to the specific session and neighbor identity.**
+   When the session closes, all routes learned from it are invalidated
+   immediately regardless of `RemainingTTL`.
+4. **Do not make the table a single point of failure.** Even a suspicious
+   or stale route must not break delivery: on doubt, the node lowers the
+   route's priority and falls back to gossip rather than trusting it to
+   completion.
+
+In the future this can be strengthened with a capability such as
+`mesh_attested_links_v1`, where adjacencies or path segments are backed by
+signatures. But iteration 2 should remain fully functional without a
+cryptographically attested map of the whole network.
 
 **Table is a hint, not the truth:** if the routing table suggests a
 next_hop, the node tries it first. If the next_hop session is not
@@ -701,6 +772,11 @@ The table converges within 1-2 announce cycles (30-60 seconds).
 - [ ] Handle identity change on reconnect: withdraw old identity, add new
 - [ ] Implement fairness rotation for announcement size limit (direct always included, offset rotation)
 - [ ] Implement periodic full sync every 5th cycle (split across multiple frames if needed)
+- [ ] Add anti-poisoning acceptance rules: `announcement` stays advisory-only and cannot override fresher `direct`/`hop_ack` data
+- [ ] Reject or deprioritize anomalous route announcements (implausible `hops`, sudden identity spikes, no fresh `SeqNo`)
+- [ ] Rate-limit `announce_routes` / `withdrawal` per peer so triggered updates cannot become a routing flood
+- [ ] Add quotas for how many new identities and route entries one peer may introduce per time window
+- [ ] Add jitter / pacing for periodic full sync so nodes do not synchronize bandwidth spikes
 - [ ] Add `route_via_table` / `route_via_gossip` log markers
 - [ ] Write unit tests for routing table operations
 - [ ] Write unit tests for poisoned reverse logic
@@ -709,9 +785,12 @@ The table converges within 1-2 announce cycles (30-60 seconds).
 - [ ] Write unit tests for trust hierarchy (direct overrides announcement, hop_ack overrides announcement)
 - [ ] Write unit tests for route-session binding (all routes removed on disconnect)
 - [ ] Write unit tests for announcement fairness rotation
+- [ ] Write unit tests for anti-poisoning announcement acceptance rules
 - [ ] Integration test: 5 nodes, verify shortest path selection
 - [ ] Integration test: disconnect node, verify withdrawal propagation < 5s
 - [ ] Integration test: reconnect with different identity, verify old routes withdrawn
+- [ ] Integration test: malicious peer advertises false routes, delivery degrades at most to gossip fallback
+- [ ] Integration test: route-update flood does not evict honest peers or trigger a full-sync storm
 
 **Release / Compatibility:**
 
@@ -754,6 +833,24 @@ The reputation of a route is measured by the success rate of
 critical because a delivery receipt can arrive via gossip even when the
 chosen next_hop dropped the message.
 
+**Protection against false penalties:** penalties must not be transferable
+across the network. Otherwise an attacker can not only poison routing, but
+also falsely bury honest nodes through slander. Therefore, in this
+iteration reputation is strictly **local**:
+
+1. **Penalize only locally observed behavior.** A node penalizes a
+   next_hop only for its own observed `relay_hop_ack` timeout, locally
+   observed failover, and repeated delivery failures through that next_hop.
+2. **Third-party complaints are not evidence.** No inbound frames, route
+   announcements, or negative claims such as "peer X is bad" should
+   directly change `ReliabilityScore`.
+3. **Penalty is soft and reversible.** The route is first deprioritized or
+   placed into cooldown/quarantine, not permanently banned.
+4. **The score applies to the route, not absolute guilt.** If the path via
+   `nextHop=A` often fails, that is a reason to lower `route_score`, not a
+   reason to globally classify identity A as malicious for the whole
+   network.
+
 **Why receipt path failures reinforce this choice:** the hop-by-hop
 receipt return path (from iteration 1) can partially fail — for example,
 node C delivers to F and sends receipt back toward A, but node B is
@@ -782,8 +879,9 @@ route is deprioritized (but not removed — it may recover).
 
 **3c. Composite route selection:**
 
-Routes are ranked by: `ReliabilityScore * 100 - Hops * 10`. A longer but
-reliable route beats a shorter but flaky one.
+Routes are ranked by a locally computed `RouteScore`:
+`ReliabilityScore * 100 - Hops * 10`. A longer but reliable route beats a
+shorter but flaky one.
 
 ```mermaid
 flowchart TD
@@ -808,7 +906,22 @@ flowchart TD
 ```
 *Diagram — Multi-path failover with hop-ack based reputation*
 
-**3d. Black-hole detection:**
+**3d. Multi-path and blast-radius reduction:**
+
+The node should not blindly trust a single "best" route, especially when
+that route is new or has only recently recovered from cooldown. For an
+identity with multiple routes, selection should be multi-path:
+
+- a stable primary gets most of the traffic;
+- a secondary stays warm and is used periodically to verify liveness;
+- new or suspicious routes get only a small traffic share until they build
+  local success history.
+
+This reduces the impact of route poisoning and black-hole attacks: an
+attacker does not receive the entire flow immediately even after a
+successful route announcement.
+
+**3e. Black-hole detection:**
 
 A node that consistently claims routes via `announce_routes` but never
 returns `relay_hop_ack` is a suspected black hole. After 5 consecutive
@@ -828,15 +941,27 @@ after 5 messages.
 - [ ] Track hop-ack success/failure per `(identity, nextHop)` pair
 - [ ] Implement 10s hop-ack timeout → mark attempt as failed
 - [ ] Implement composite route ranking: `reliability * 100 - hops * 10`
+- [ ] Keep penalties local: do not accept external claims about "bad" peers as input to `ReliabilityScore`
 - [ ] Implement automatic failover: try next route on hop-ack timeout
+- [ ] Implement multi-path traffic shaping: new/suspicious routes get only partial traffic until they build history
 - [ ] Implement gossip fallback as last resort
 - [ ] Implement black-hole detection: 5 consecutive failures → 2-min cooldown
+- [ ] Add slow-start trust for new peers: a fresh next-hop cannot immediately receive all traffic
+- [ ] Cap the maximum influence of a single peer on route selection so one node cannot attract the whole flow
+- [ ] Add decay/recovery for reputation and cooldown expiry so defenses do not create eternal bans
 - [ ] Log warning on suspected black-hole node
 - [ ] Write unit tests for reputation scoring
+- [ ] Write unit tests for protection against false penalties (external negative signal does not change score)
 - [ ] Write unit tests for failover logic (primary fails → secondary → gossip)
+- [ ] Write unit tests for progressive rollout on new/suspicious routes
 - [ ] Write unit tests for black-hole detection and cooldown
 - [ ] Integration test: disconnect middle node, verify rerouting within 20s
 - [ ] Integration test: black-hole node (accepts relay, never acks), verify detection
+- [ ] Integration test: attacker attempts to force false reputation decay of an honest peer; score does not enter permanent penalty
+- [ ] Implement ingress suppression: exclude the arrival link from relay candidate set for each relayed message — prevents back-routing and reduces unnecessary relay load
+- [ ] Implement per-peer handshake rate budget: cap handshake initiation attempts to `max_handshake_attempts_per_peer` (default 3 per 60 s) to prevent resource exhaustion by rapid reconnect/handshake loops
+- [ ] Unit test: ingress link excluded from relay candidates for relayed message
+- [ ] Unit test: handshake rate budget exhausted → further attempts deferred until window expires
 
 **Release / Compatibility:**
 
@@ -885,6 +1010,20 @@ For networks with 100+ identities, route announcements can be large.
 Use delta encoding (only changed routes) and, if needed, gzip
 compression of the announce frame payload.
 
+**4e. Overload mode and anti-DoS operation:**
+
+When a node detects overload by CPU, memory, handshake count, or queue
+length, it should enter a degradable overload mode:
+
+- lower gossip fan-out and the frequency of non-critical announce cycles;
+- compress / defer non-urgent sync work;
+- prioritize already authenticated peers and active sessions;
+- enable stricter admission limits only for the duration of the attack.
+
+An optional adaptive challenge (for example, lightweight proof-of-work or a
+stronger handshake challenge) is acceptable only as an emergency mode and
+must not become a mandatory requirement for normal network operation.
+
 **Done when:** a network of 50 nodes converges within 2 minutes. Route
 announcement traffic does not exceed 5% of total traffic. Bloom filter
 does not produce false negatives.
@@ -898,11 +1037,22 @@ does not produce false negatives.
 - [ ] Add RTT measurement to peer sessions (from ping/pong round-trip)
 - [ ] Add latency component to composite route metric
 - [ ] Implement announce compression for large route tables
+- [ ] Implement overload mode: adaptive backpressure, lower gossip fan-out, prioritize authenticated peers
+- [ ] Enforce hard limits for concurrent handshakes, frame decode budget, and queue growth budget
+- [ ] Protect against compression/decompression bombs and oversized frame payloads
 - [ ] Measure route announcement traffic as percentage of total
 - [ ] Write benchmarks for Bloom filter false positive rate
 - [ ] Write benchmarks for routing table operations at 100+ entries
 - [ ] Load test: 50 node simulation, measure convergence time
 - [ ] Load test: measure bandwidth savings from delta announcements
+- [ ] Load test: handshake/relay flood, verify controlled degradation without stopping honest traffic
+- [ ] Implement adaptive relay aggressiveness based on node degree: nodes with degree > `high_degree_threshold` (default 15) reduce gossip fanout ratio to dampen broadcast storms in dense clusters; low-degree nodes relay at full aggressiveness to ensure connectivity
+- [ ] Implement density-aware announce intervals: `announce_interval_dense` (default 60 s, when peer count > threshold) vs `announce_interval_sparse` (default 30 s) — adapts announcement frequency to network size, reducing overhead in large networks
+- [ ] Implement signed route announcements (capability `mesh_attested_links_v1`): Ed25519 signature covering `identity_fingerprint || box_public_key || timestamp || route_table_hash` — prevents route announcement spoofing without the signing key; unsigned announcements still accepted from nodes without the capability (backward compatible)
+- [ ] Unit test: high-degree node reduces fanout ratio; low-degree node relays at full rate
+- [ ] Unit test: dense announce interval applied when peer count > threshold
+- [ ] Unit test: signed announcement with wrong key rejected; unsigned announcement still accepted when capability absent
+- [ ] Load test: 100-node dense cluster with adaptive fanout vs without — measure message amplification reduction
 
 **Release / Compatibility:**
 
@@ -933,6 +1083,7 @@ changes.
 - [ ] Implement `DHTRouter` behind `Router` interface (same contract as `TableRouter`)
 - [ ] Implement migration path from `PeerAwarenessTable` to DHT
 - [ ] Implement Sybil resistance mechanisms
+- [ ] Investigate adaptive admission under attack: optional puzzles / stake / invitation mode without an always-on barrier
 - [ ] Benchmarks: DHT lookup latency at 1000+ nodes
 - [ ] Integration test: mixed network with `TableRouter` and `DHTRouter` nodes coexisting
 - [ ] Integration test: fallback to gossip on failed DHT lookup (unreachable key range)
@@ -1000,18 +1151,7 @@ hostile-network resilience.
 are shown, while preserving the real identity as the canonical underlying key.
 
 <a id="iter-a2"></a>
-### Iteration A2 — Global names instead of raw identity
-
-**Goal:** introduce a global naming layer so users can find and recognize peers
-without memorizing fingerprints.
-
-**Dependency:** follows A1 because local naming UX should exist first.
-
-**Done when:** a user can publish, resolve, and verify a global name bound to
-an identity with conflict handling and ownership proof.
-
-<a id="iter-a3"></a>
-### Iteration A3 — Message deletion controls
+### Iteration A2 — Message deletion controls
 
 **Goal:** add dialog/message deletion behavior with explicit flags and policy.
 
@@ -1020,19 +1160,19 @@ an identity with conflict handling and ownership proof.
 **Done when:** users can delete local history, request two-sided deletion where
 allowed, and see when a message is protected from deletion by policy flags.
 
-<a id="iter-a4"></a>
-### Iteration A4 — Android app
+<a id="iter-a3"></a>
+### Iteration A3 — Android app
 
 **Goal:** ship the first mobile client on Android.
 
-**Dependency:** comes after A1-A3 so mobile is not built on obviously rough
+**Dependency:** comes after A1-A2 so mobile is not built on obviously rough
 chat UX.
 
 **Done when:** Android can run as a light client with identity, contacts,
 direct messaging, and reliable sync with desktop/full nodes.
 
-<a id="iter-a5"></a>
-### Iteration A5 — Second-layer encryption and key exchange
+<a id="iter-a4"></a>
+### Iteration A4 — Second-layer encryption and key exchange
 
 **Goal:** add optional contact-level payload encryption on top of network
 transport encryption.
@@ -1044,8 +1184,8 @@ PGP-compatible or external-module based, not custom cryptography.
 public-key exchange is visible in UI, and messages can be wrapped in a second
 verified encryption layer.
 
-<a id="iter-a6"></a>
-### Iteration A6 — DPI bypass
+<a id="iter-a5"></a>
+### Iteration A5 — DPI bypass
 
 **Goal:** improve reachability in hostile networks where traffic is throttled,
 classified, or blocked.
@@ -1056,8 +1196,8 @@ understood.
 **Done when:** the transport layer supports at least one obfuscation strategy
 that measurably improves connectivity in filtered environments.
 
-<a id="iter-a7"></a>
-### Iteration A7 — Backup channels via Google WSS
+<a id="iter-a6"></a>
+### Iteration A6 — Backup channels via Google WSS
 
 **Goal:** add fallback transport for networks where direct connections are
 unreliable or blocked.
@@ -1068,8 +1208,8 @@ not a standalone headline.
 **Done when:** a node can fall back to WSS relay/bootstrap transport without
 breaking existing identity, delivery, or capability semantics.
 
-<a id="iter-a8"></a>
-### Iteration A8 — SOCKS5 tunnel between identities
+<a id="iter-a7"></a>
+### Iteration A7 — SOCKS5 tunnel between identities
 
 **Goal:** allow identity-to-identity private tunneling, not only chat delivery.
 
@@ -1078,8 +1218,1155 @@ breaking existing identity, delivery, or capability semantics.
 **Done when:** two identities can establish a SOCKS5-backed routed channel with
 clear permissions, lifecycle controls, and bandwidth limits.
 
+<a id="iter-a8"></a>
+### Iteration A8 — Group chats
+
+**Goal:** enable multi-party conversations where a message sent once is
+delivered to all group members, with consistent group membership visible to
+every participant.
+
+**Dependency:** requires stable DM delivery (Iteration 1–3) and identity
+model (A1). Benefits from onion delivery (A9) for private group signaling
+but does not hard-depend on it — initial version works over regular relay.
+
+**Key constraints:**
+
+- **No central server.** Group state (membership list, group key) is
+  replicated across members via the mesh, not stored on a coordinator.
+- **Membership changes are signed.** Adding or removing a member requires a
+  membership-change message signed by a member with admin role. Every member
+  independently validates the signature before updating local group state.
+- **Per-group symmetric key.** Messages inside a group are encrypted with a
+  shared group key derived via a key-agreement round among current members.
+  On membership change the group key is rotated (forward secrecy for removed
+  members).
+- **Delivery model:** the sender encrypts once with the group key, then
+  fans out via mesh relay (one `relay_message` per member, or gossip to
+  group topic). Receipt semantics: per-member delivery receipts, aggregated
+  in the UI as "delivered to N of M".
+- **Ordering:** causal ordering via vector clocks or Lamport timestamps
+  (not total order). Members may see messages in slightly different order
+  during partitions; the UI sorts by causal timestamp.
+- **Offline members:** messages are stored-and-forwarded. When a member
+  comes online, it syncs missed messages from any reachable group member
+  (same as DM pending delivery). If the member was removed while offline,
+  it receives the removal message and stops decrypting new traffic.
+
+**Done when:** a group of N identities can exchange messages with consistent
+membership, key rotation on member change, and delivery receipts — all
+operating over the existing mesh relay without a central server.
+
 <a id="iter-a9"></a>
-### Iteration A9 — Gazeta protocol extensions
+### Iteration A9 — Onion delivery for DMs
+
+**Goal:** hide path metadata in multi-hop DM delivery. Onion is an opt-in
+transport wrapper around the existing sealed DM envelope — not a replacement.
+The DM format stays the same; onion only changes how the message travels
+through the network.
+
+**Core idea:** when a sender enables onion mode, the standard sealed DM
+envelope is wrapped in N layers of encryption (one per hop). Each intermediate
+node peels one layer and learns only its next hop. The final recipient unwraps
+the last layer and receives an ordinary sealed DM envelope (unchanged).
+The fact of onion delivery is determined by the processing pipeline, not
+by a flag inside the envelope. Receipts also travel back through an
+onion route.
+
+**Dependency:** strictly after stable mesh (Iterations 1–4) and intentionally
+after SOCKS5 (A7). Mesh answers "does the message get there?"; onion answers
+"how much can intermediate nodes learn about the path?". BLE last mile (A13)
+and iOS (A12) follow onion, as onion is the privacy foundation.
+
+**Done when:** all five sub-iterations below are complete.
+
+#### Onion encapsulation (sender side)
+
+The sender wraps the sealed DM envelope layer by layer, starting from the
+final recipient and working outward to the first hop. Each layer is encrypted
+to the corresponding hop's public key.
+
+```mermaid
+graph TB
+    DM["Sealed DM envelope"]
+
+    subgraph "Layer 3 — for hop C (final recipient)"
+        L3["Encrypt(key_C):<br/>next_hop = ∅<br/>payload = Sealed DM"]
+    end
+
+    subgraph "Layer 2 — for hop B"
+        L2["Encrypt(key_B):<br/>next_hop = C<br/>payload = Layer 3"]
+    end
+
+    subgraph "Layer 1 — for hop A (first hop)"
+        L1["Encrypt(key_A):<br/>next_hop = B<br/>payload = Layer 2"]
+    end
+
+    DM --> L3 --> L2 --> L1
+
+    SEND["Sender sends onion_relay_message<br/>with layer = Layer 1"]
+    L1 --> SEND
+```
+*Diagram — Onion encapsulation: sender wraps DM in N layers*
+
+#### Hop-by-hop peeling
+
+Each intermediate node decrypts its layer, learns only the next hop, and
+forwards the inner blob. The final recipient decrypts the last layer and
+gets the original DM.
+
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant A as Hop A
+    participant B as Hop B
+    participant C as Recipient C
+
+    S->>A: onion_relay_message(Layer 1)
+    Note over A: Decrypt(key_A) → next_hop=B, inner=Layer 2
+    A->>B: onion_relay_message(Layer 2)
+    Note over B: Decrypt(key_B) → next_hop=C, inner=Layer 3
+    B->>C: onion_relay_message(Layer 3)
+    Note over C: Decrypt(key_C) → next_hop=∅, payload=Sealed DM
+    Note over C: Store DM (arrived via onion pipeline)
+```
+*Diagram — Hop-by-hop onion peeling*
+
+#### Full onion DM + receipt flow
+
+The DM travels forward through an onion route. The recipient determines
+onion delivery via the processing pipeline and builds an independent
+onion route back for receipts.
+
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant A as Hop A
+    participant B as Hop B
+    participant C as Recipient
+
+    rect rgb(232, 245, 253)
+        Note over S,C: Forward path (onion DM)
+        S->>A: onion_relay(DM Layer 1)
+        A->>B: onion_relay(DM Layer 2)
+        B->>C: onion_relay(DM Layer 3)
+        Note over C: Peel → Sealed DM<br/>Store as normal DM (onion flag in local state)
+    end
+
+    rect rgb(232, 253, 232)
+        Note over S,C: Return path (onion receipt, independent route)
+        C->>B: onion_relay(Receipt Layer 1)
+        B->>A: onion_relay(Receipt Layer 2)
+        A->>S: onion_relay(Receipt Layer 3)
+        Note over S: Peel → delivery_receipt
+    end
+```
+*Diagram — Full onion DM delivery and receipt return flow*
+
+<a id="iter-a9-1"></a>
+#### A9.1 — Onion wrapping for DM envelope
+
+**Goal:** no intermediate hop sees the recipient address or DM content.
+
+**How it works:** the sender knows a path from the routing table (Iteration 2)
+and the public box key of each node on that path. The sender takes the sealed
+DM envelope and wraps it in N encryption layers — one per hop, innermost layer
+for the final recipient, outermost for the first hop. Each hop decrypts its
+layer, discovers only "forward to address X" plus an opaque blob, and relays.
+The final hop decrypts the last layer (`is_final: true`) and gets the original
+sealed DM envelope unchanged.
+
+**New frame type — `onion_relay_message`:**
+
+```json
+{
+  "type": "onion_relay_message",
+  "layer": "encrypted_base64"
+}
+```
+
+The frame is intentionally minimal — all routing info is inside the encrypted
+layer. The frame has **no** global `onion_id`: a stable UUID visible to all
+hops would become a correlation marker — two compromised hops could link the
+same packet simply by matching `onion_id`, without decrypting any content.
+Instead, deduplication is hop-local: each hop computes
+`dedupe_tag = HMAC(node_key, layer_ciphertext)[:16]` — the tag is unique for
+a given (hop, encrypted layer) pair and useless to an outside observer because
+`node_key` differs on each hop.
+
+Each decrypted layer yields:
+
+```json
+{
+  "next_hop": "identity_fingerprint_or_empty",
+  "layer": "encrypted_base64_or_dm_envelope"
+}
+```
+
+When `next_hop` is empty the node is the final recipient; `layer` contains the
+sealed DM envelope.
+
+**Addressing in `next_hop` — identity, not session address:** the
+`next_hop` field contains the node's identity fingerprint, not a transport
+session address. Reason: the current mesh/relay already knows that session
+addresses are unstable (reconnect, address change — see
+`tryForwardToDirectPeer` in relay.go). When forwarding, the onion hop
+resolves `identity fingerprint → active session`, iterating sessions the
+same way relay forwarding does. If no session is found, the frame is
+placed in a retry queue (analogous to relay backlog) with TTL. This makes
+the onion circuit resilient to reconnects of intermediate hops.
+
+**Recovery model priority (retry-queue vs circuit rebuild):** two recovery
+mechanisms interact at the forwarding hop:
+
+1. **Retry queue (hop-level, short):** when identity → session resolve
+   fails, the frame enters a per-identity retry queue with
+   `onion_retry_ttl` (default 15 s). The hop expects the next-hop node to
+   reconnect within this window (transient disconnect, address change).
+2. **Circuit rebuild (sender-level, long):** the sender expects a hop-ack
+   within `onion_hop_ack_timeout` (default 10 s from Iteration 3). If the
+   ack does not arrive, the sender marks the circuit as failed and rebuilds
+   through alternative nodes (A9.4).
+
+**Responsibility boundary (who owns what):**
+
+| Responsibility | Owner | Scope |
+|---|---|---|
+| Local retry on transient disconnect | Each intermediate hop | Per-frame, per-next-hop identity; hop has no knowledge of the full circuit or the origin sender |
+| hop-ack timeout detection | Origin sender | End-to-end per-circuit; sender tracks expected hop-ack for each sent message |
+| Circuit rebuild decision | Origin sender | Chooses new path via A9.4 path selection; intermediate hops are never notified of rebuild — they simply stop receiving frames for the old circuit |
+| Retry queue eviction | Each intermediate hop | TTL-based (`onion_retry_ttl`); hop drops silently, no upstream signal |
+
+An intermediate hop **never** initiates circuit rebuild — it has no sender
+context, no knowledge of total_hops, and no way to signal the origin. The
+origin sender **never** observes the retry queue — it only sees hop-ack
+presence or absence.
+
+**Ordering:** the retry queue fires first — it is the hop's local fast path
+for transient disconnects. If the retry TTL expires without delivery, the
+frame is dropped silently; the sender independently detects the failure via
+missing hop-ack and triggers circuit rebuild.
+Invariant: `onion_retry_ttl < onion_hop_ack_timeout` to
+guarantee that hop-level retry resolves or fails before the sender gives up.
+
+**Capability gate:** `onion_relay_v1`. Nodes without the capability never
+receive `onion_relay_message`.
+
+**Key distribution:** nodes publish their box public key via routing
+announcements (Iteration 2) — this is the primary and only mechanism in
+A9.1. A separate `onion_key_announce` frame is **not** introduced: it
+would complicate the capability model, increase announce frame size, and
+create desynchronization between routing state and key state. If onion key
+rotation at a different frequency is needed in the future,
+`onion_key_announce` can be added as a separate sub-iteration with its own
+capability gate, coexistence matrix, and migration plan.
+
+**Trust model for transit box keys (non-contact hops):**
+the current contact trust model (see `docs/encryption.md`, Contact trust
+model) is TOFU-pinning for **contacts**: identity ↔ boxkey is bound on
+first exchange, conflicts are rejected. But onion hops are transit nodes
+that the sender does not contact directly. A different model applies:
+
+1. **Key source:** the transit box key comes from a routing announcement
+   (Iteration 2). The announcement is signed by the node's ed25519 key —
+   identity is self-authenticating.
+2. **Validation:** the announcement recipient verifies: (a) ed25519
+   signature of the announcement; (b) binding signature of the box key —
+   format `corsa-boxkey-v1|address|boxkey_base64`, signed by the identity
+   key (same format as `boxKeyBindingPayload` in
+   `internal/core/identity/identity.go`). Both signatures are required.
+3. **Versioning and anti-replay:** the binding payload includes the format
+   string `corsa-boxkey-v1`, which ties the signature to a specific
+   version. To protect against replay of an old announcement with a
+   revoked key, a monotonic sequence number from the routing announcement
+   (Iteration 2) is used: each new announcement has seq > previous.
+   A transit key is accepted only if seq in the announcement >= seq in the
+   cache. Announcements with seq < cached seq are dropped (downgrade
+   protection).
+4. **Caching:** the transit key is cached in `routingTable` alongside the
+   routing entry together with the seq number. TTL matches the routing
+   entry TTL. When a new announcement arrives with a different box key and
+   seq >= cached seq, the key is updated (not rejected, unlike contacts).
+   This is acceptable: a transit hop is not a trusted contact, its key
+   may rotate.
+5. **Conflict/rotation:** when assembling an onion path, the key with the
+   highest seq number is used. The old cache entry is overwritten.
+6. **Missing key:** if a routing entry does not contain a box key (node
+   does not publish one), the node is excluded from path selection as
+   non-capable.
+
+**Onion marker — not part of the DM envelope:** `onion: true` does
+**not** live inside `sealedEnvelope`. The DM envelope (`dm-v1`) signs a
+fixed set of fields `{version, from, to, recipient, sender}` via
+`marshalUnsignedEnvelope`, and changing this contract for a transport
+hint is not acceptable: any field inside the envelope either must be
+included in the signature (which would make it `dm-v2`) or gives an
+intermediate/final node the ability to alter transport provenance without
+breaking the signature.
+
+Instead, the onion marker is conveyed **outside** the envelope, inside
+the final decrypted onion layer. When a hop peels the last layer
+(`is_final: true`), the plaintext contains the sealed DM envelope **as
+is** (unmodified). The fact of onion delivery is determined by the
+processing pipeline itself: the message arrived via
+`onion_relay_message` → peel → `is_final`. The recipient client knows
+the DM came through onion because it went through the onion processing
+pipeline, not because of a flag in the envelope.
+
+For receipts (A9.2): the recipient marks in local state that the DM
+arrived via onion, and sends the receipt through an onion route. The
+marker is stored in the local `messageStore`, not in a protocol frame.
+
+**What does not change (protocol / wire format):** `sealedEnvelope`,
+`marshalUnsignedEnvelope`, signature, `dm-v1` wire format, UI rendering.
+The onion layer is fully peeled before the message enters the existing
+DM pipeline.
+
+**What changes (local message metadata):** `messageStore` gains a new
+field `arrived_via_onion: bool`. It is populated by the onion processing
+pipeline on final peel and is used for: (a) deciding whether to send
+the receipt via onion (A9.2); (b) displaying a privacy indicator in the
+UI (optional). This is a **local storage contract** change, not a wire
+protocol change.
+
+**Privacy mode:** the sender selects one of two modes per conversation:
+
+- `best_effort_onion` (default) — if an onion path is unavailable (too
+  few capable nodes or all paths are down), the message is sent via
+  regular relay with a warning to the client. Delivery takes priority
+  over privacy.
+- `require_onion` — if an onion path is unavailable, the message is
+  **not** sent; the client receives an `onion_path_unavailable` error.
+  Privacy takes priority over delivery.
+
+Without this distinction the implementation will inevitably reduce onion
+to "tried and fell back", which defeats the privacy guarantee. The mode
+is stored in conversation settings and passed to `buildOnionLayers` /
+fallback logic.
+
+**Coexistence matrix — onion-capable vs legacy:**
+
+| Sender | All hops on path | Behavior |
+|---|---|---|
+| onion-capable | All `onion_relay_v1` | Full onion path. Each hop peels its layer. |
+| onion-capable | Legacy hop in the middle | Onion path is **not built** through this route. Path selection (A9.4) looks for an alternative path using only capable nodes. If no alternative exists → behavior is determined by privacy mode. |
+| onion-capable | Legacy recipient | Onion impossible: recipient cannot peel layers. Fallback to regular relay (in `best_effort_onion`) or error (in `require_onion`). |
+| legacy | Any | Regular relay/gossip. Onion not involved. |
+
+Mixed chain: unlike mesh relay (where a legacy hop in the middle can be
+bypassed via gossip fallback), onion **requires** capability on every hop
+in the path. A layer cannot be "skipped" — if a hop cannot decrypt its
+layer, the chain breaks. Therefore path selection must build paths
+exclusively from `onion_relay_v1` nodes.
+
+**Behavior when a hop is lost after circuit assembly:** if an intermediate
+hop goes offline after the sender has assembled the onion path, the
+message is not delivered. The sender detects this via missing hop-ack
+(timeout) and rebuilds the circuit through other nodes. This is not a
+protocol error — it is expected behavior in a dynamic network.
+
+- [ ] `buildOnionLayers(path []NodeInfo, sealedEnvelope) → []byte`
+- [ ] `peelOnionLayer(myKey, frame) → (nextHop, innerLayer)`
+- [ ] `onion_relay_message` frame handler
+- [ ] `onion_relay_v1` capability gate
+- [ ] Box key publication in routing announcements
+- [ ] Onion marker NOT in DM envelope; determined by processing pipeline (`is_final` in onion layer)
+- [ ] `next_hop` addressed by identity fingerprint; resolve identity → active session on forward
+- [ ] Transit box key validation from routing announcement (ed25519 signature + binding signature `corsa-boxkey-v1`)
+- [ ] Transit key anti-replay: monotonic seq number; accept only seq >= cached seq (downgrade protection)
+- [ ] Transit key cache in routing table with seq number; update on new announcement (no TOFU rejection)
+- [ ] Privacy mode: `best_effort_onion` (default) and `require_onion`; stored in conversation settings
+- [ ] Fallback to regular relay only in `best_effort_onion`; `onion_path_unavailable` error in `require_onion`
+- [ ] Path selection: build paths only from `onion_relay_v1` nodes (no legacy hops)
+- [ ] Circuit rebuild on hop loss (hop-ack timeout → rebuild through other nodes)
+- [ ] `max_onion_hops` config limit (default 10); drop frame if layer count exceeds it
+- [ ] Inbound onion frame size hard limit (reject before decryption to bound CPU; guardrail 1)
+- [ ] Per-peer rate limit for `onion_relay_message` (token bucket; guardrail 1)
+- [ ] Hop-local dedupe: `dedupe_tag = HMAC(node_key, layer_ciphertext)[:16]`; map with TTL (same pattern as `relayForwardState`; replay prevention without global ID)
+- [ ] Drop and log invalid/undecryptable layers; do not forward garbage (guardrail 3)
+- [ ] Unit tests: wrap / peel / deliver / fallback
+- [ ] Unit test: frame exceeding `max_onion_hops` is dropped
+- [ ] Unit test: oversized onion frame is rejected before decryption
+- [ ] Unit test: invalid layer (bad ciphertext) is dropped, not forwarded
+- [ ] Unit test: `require_onion` blocks send when no onion path available
+- [ ] Unit test: `best_effort_onion` falls back to relay with warning
+- [ ] Unit test: path with legacy hop in the middle is rejected by path selection
+- [ ] Unit test: circuit rebuild when intermediate hop is lost
+- [ ] Unit test: DM envelope unchanged by onion transport (no `onion` field in envelope)
+- [ ] Unit test: transit key with seq < cached seq is rejected (downgrade protection)
+- [ ] Unit test: next_hop resolve — identity with multiple sessions, one active
+- [ ] Unit test: dedupe_tag is unique across hops for the same layer ciphertext
+- [ ] Unit test: transit box key is updated on new announcement (not rejected as conflict)
+- [ ] Integration test: mixed network — onion-capable sender, partially legacy network
+- [ ] Negative local-state test: old node upgraded to onion-capable reads message store entries created before onion metadata existed (`arrived_via_onion` absent) — must treat as non-onion, no crash
+- [ ] Update `docs/protocol/relay.md` (new `onion_relay_message` frame, capability gate)
+- [ ] Update `docs/encryption.md` (transit key trust model, `arrived_via_onion` in messageStore, privacy mode)
+- [ ] Update `docs/protocol/delivery.md` (onion receipt flow, `require_onion` receipt suppression)
+
+**Release / Compatibility for A9.1:**
+
+- [ ] `onion_relay_message` sent only to peers with `onion_relay_v1`
+- [ ] Legacy peer never receives `onion_relay_message`
+- [ ] Box key published only via routing announcements (no separate frame)
+- [ ] Mixed-version test: onion-capable → legacy uses regular relay
+- [ ] Mixed-version test: legacy → onion-capable does not involve onion
+- [ ] Confirm: A9.1 does not require raising `MinimumProtocolVersion`
+
+<a id="iter-a9-2"></a>
+#### A9.2 — Onion receipts
+
+**Goal:** delivery and read receipts for onion DMs also travel through onion
+routes, so no intermediate node can correlate a receipt back to the original
+message path.
+
+**Problem after A9.1:** the DM itself is hidden, but receipts go through
+regular relay or gossip — leaking that "node F just sent a delivery receipt
+to node A", which re-exposes the communication pair.
+
+**How it works:** when the recipient determines that the DM arrived via onion
+(through the onion processing pipeline, see A9.1), it builds its own onion
+route back to the sender (the recipient knows the sender's address from the
+sealed envelope). The receipt uses the existing `send_delivery_receipt` format
+(see `docs/protocol/delivery.md`) with status `delivered` or `seen`. This
+receipt is wrapped in onion layers and sent as `onion_relay_message`. The
+original sender peels the layers and gets a standard `send_delivery_receipt`.
+
+**Protocol alignment:** the roadmap uses `send_delivery_receipt` with
+`status: "delivered"` / `status: "seen"` — this is the only receipt model
+in the protocol. Separate `delivery_receipt` / `read_receipt` types do not
+exist.
+
+**Key difference from A9.1:** the recipient builds the return path
+independently — it does not know the forward path used by the sender. This is
+intentional: the return path should be different for better privacy.
+
+**Invariant: receipt absence ≠ delivery failure.** In `require_onion` mode
+the receipt is suppressed when no onion return path exists. The sender
+**cannot** distinguish "receipt privacy-suppressed" from "receipt delayed"
+or "message lost". Therefore the DM lifecycle must treat a missing receipt
+under `require_onion` as **unknown** — not as **failed**. The UI shows
+"receipt pending / unknown" indefinitely; the message is never automatically
+moved to a failed state. Only an explicit user-initiated retry may re-send.
+Without this invariant, `require_onion` visually degrades to a broken
+delivery experience — privacy mode looks like a bug.
+
+- [ ] Recipient-side onion path construction for receipts
+- [ ] Onion receipt determined by processing pipeline (no `onion: true` marker in receipt frame)
+- [ ] Receipt fallback: respects conversation privacy mode (`best_effort_onion` → regular relay with warning; `require_onion` → receipt not sent)
+- [ ] UX caveat for `require_onion`: sender cannot distinguish "receipt privacy-suppressed" from "receipt not yet produced"; UI must display as "receipt pending / unknown", not as delivery failure
+- [ ] One receipt per DM; deduplicate by `(message_id, receipt_type)` to prevent amplification
+- [ ] Rate limit outbound onion receipts per conversation (guardrail 1)
+- [ ] Unit tests: onion receipt round-trip
+- [ ] Unit test: duplicate receipt for the same DM is dropped
+- [ ] Update `docs/protocol/relay.md` (onion receipt relay)
+- [ ] Update `docs/protocol/delivery.md` (receipt via onion, privacy mode suppression)
+
+**Release / Compatibility for A9.2:**
+
+- [ ] Mixed-version test: sender onion-capable, all hops capable, recipient onion-capable — receipt returns via onion
+- [ ] Mixed-version test: sender onion-capable, recipient legacy (no `onion_relay_v1`) — sender receives receipt via regular relay (recipient cannot build onion return path)
+- [ ] Mixed-version test: sender legacy, recipient onion-capable — recipient receives DM via regular relay, sends receipt via regular relay (no onion context)
+- [ ] Confirm: A9.2 does not require raising `MinimumProtocolVersion`
+
+<a id="iter-a9-3"></a>
+#### A9.3 — Ephemeral keys and forward secrecy
+
+**Goal:** compromise of a node's long-term box key does not reveal the content
+of past onion messages that transited through it.
+
+**Problem after A9.1–A9.2:** onion layers are encrypted to long-lived box
+keys. If a key leaks, an attacker with stored traffic can decrypt all layers
+that used that key.
+
+**Design decision: one ephemeral key pair per message (shared across hops),
+not per-hop.** The sender generates one X25519 pair `(e, E)` per onion
+message. For each hop i with long-term public key `H_i`, it computes
+`shared_secret_i = DH(e, H_i)`. From `shared_secret_i` the symmetric
+layer key for hop i is derived. The ephemeral public key `E` is the same
+across all layers of one packet.
+
+The alternative — per-message-per-hop (fresh pair per layer) — provides
+better compartmentalization but doubles overhead (32 bytes per hop extra)
+and complicates reasoning: with N hops the header grows by N×32 bytes.
+With the chosen design, compartmentalization is ensured because
+`shared_secret_i` is unique per hop (different `H_i`), and compromise of
+`H_j` does not reveal `shared_secret_i` for i ≠ j.
+
+**Invariant: `E` is an ephemeral instance key, not a stable identifier.**
+`E` simultaneously serves as: (a) the DH public key for shared secret
+derivation (A9.3); (b) an input to `replay_key` computation (invariant 4);
+(c) the reassembly group key for chunked messages (A9.5). This is
+intentional — all three uses are scoped to a single onion send invocation.
+`E` is **not** a conversation ID, message ID, or stable per-contact key.
+Each call to `buildOnionLayers` generates a fresh `E`; a retry of the
+same application-level message produces a different `E` and therefore a
+different replay_key domain and a separate reassembly group. Code that
+caches or indexes by `E` beyond the scope of a single receive/reassembly
+pipeline is a bug.
+
+**Cryptographic scheme (onion layer, locked before implementation):**
+
+```
+For each hop i (from N-1 to 0, inner-to-outer):
+
+  shared_secret_i = X25519(e, H_i)
+  layer_key_i     = HKDF-SHA256(shared_secret_i, salt="corsa-onion-v1", info=hop_index_bytes)
+  nonce_i         = HKDF-SHA256(shared_secret_i, salt="corsa-onion-nonce-v1", info=hop_index_bytes)[:24]
+
+  plaintext_i = {
+    "next_hop":      identity_fingerprint_or_empty,
+    "hop_index":     i,
+    "total_hops":    N,           // allows hop to verify position
+    "chunk_seq":     0,           // sequence number for chunked messages (A9.5)
+    "chunk_total":   1,           // total chunks (1 = single message)
+    "is_final":      (i == N-1),  // final layer flag
+    "layer":         encrypted_inner_layer_or_dm_envelope
+  }
+
+  AAD_i = E || hop_index_bytes   // authenticated additional data: ephemeral pubkey + hop index
+
+  ciphertext_i = XChaCha20-Poly1305.Seal(layer_key_i, nonce_i, plaintext_i, AAD_i)
+```
+
+**What goes into AEAD Authenticated Data (AAD):** `E || hop_index_bytes`.
+The ephemeral pubkey in AAD ensures the ciphertext is bound to a specific
+DH exchange. Hop index in AAD prevents reordering layers between positions
+in the chain. `next_hop`, `chunk_seq`, `is_final` are protected by the
+ciphertext (not AAD): they must be hidden from an outside observer.
+
+**Post-decrypt validation (mandatory checks after decryption):**
+successful AEAD decryption confirms plaintext integrity but not semantic
+correctness. The hop **must** perform the following checks after decrypt,
+before any forwarding/delivery:
+
+1. `hop_index` — must match the hop's expected position in the chain
+   (if the hop knows its position). Mismatch → DROP.
+2. `total_hops` — must be >= 1 and <= `max_onion_hops`. Out of range →
+   DROP.
+3. `hop_index < total_hops` — hop_index must be strictly less than
+   total_hops. Violation → DROP. (AAD protects hop_index, but total_hops
+   resides inside plaintext and is verified only here.)
+4. `is_final` consistency — `is_final` must be `true` if and only if
+   `hop_index == total_hops - 1`. Mismatch → DROP. This binds two fields
+   that individually may be valid but together are logically inconsistent.
+5. `is_final` ↔ `next_hop` — if `is_final == true`, `next_hop` must be
+   empty. If `is_final == false`, `next_hop` must be a non-empty identity
+   fingerprint. Contradiction → DROP.
+6. `chunk_seq` — must be >= 0 and < `chunk_total`. Out of range → DROP.
+7. `chunk_total` — must be >= 1 and <= `max_chunks_per_message`. Out of
+   range → DROP.
+8. `next_hop` (if non-empty) — must be a valid identity fingerprint
+   (correct length, non-zero). Invalid → DROP.
+9. `layer` (if not `is_final`) — must be non-empty. Empty inner layer
+   on non-final → DROP.
+
+All DROPs are logged (without revealing plaintext content).
+
+**Onion crypto — independent layer, not DM crypto:** current DMs use
+X25519 + AES-256-GCM with random nonce (see
+`internal/core/directmsg/message.go`, `sealForPublicKey`). The onion layer
+uses X25519 + HKDF-SHA256 + XChaCha20-Poly1305 with derived nonce. These
+are **two different cryptographic contracts**, versioned separately:
+
+- DM envelope: `dm-v1` — protects message content (end-to-end).
+- Onion layer: `onion-v1` — protects routing metadata (hop-by-hop).
+
+These contracts do not depend on each other. The DM envelope is encrypted
+before onion wrapping and decrypted after all onion layers are peeled.
+Changing onion crypto (e.g., switching the AEAD algorithm) does not affect
+DM crypto, and vice versa. The capability gate `onion_relay_v1` implies
+`onion-v1` crypto. A future `onion_relay_v2` may change algorithms without
+modifying `dm-v1`.
+
+**Minimum invariants (locked before implementation):**
+
+1. **One ephemeral X25519 pair per onion message (builder-side
+   invariant).** The sender generates a fresh pair `(e, E)`. `E` is the
+   same across all layers of one packet. Batch reuse between messages is
+   prohibited. This is a **builder invariant** (`buildOnionLayers`), not
+   a network-level reject: intermediate hops do not store `E` history and
+   cannot detect reuse. Security is ensured because reusing `E` with
+   different plaintexts produces correlatable ciphertexts and potentially
+   breaks nonce uniqueness (same `shared_secret_i` → same `nonce_i`).
+   Tests verify builder-side enforcement.
+2. **AEAD nonce uniqueness.** The nonce is derived via HKDF from
+   `shared_secret_i` (unique per hop) and hop index. Nonce collision
+   within one message is impossible (different `H_i` → different
+   `shared_secret_i`). Between messages — impossible (different `e`).
+3. **AAD integrity.** `AAD = E || hop_index_bytes`. Prevents layer
+   reordering and ephemeral key substitution.
+4. **Replay detection key.** Each hop computes:
+   `replay_key = SHA-256(E || nonce_i || AEAD_tag_i)[:16]`.
+   This is a unique identifier for a specific layer at a specific hop.
+   `E` binds to the message, `nonce_i` — to the position, `AEAD_tag` —
+   to the ciphertext. The replay cache stores `replay_key` (not raw
+   nonce). For chunked messages (A9.5): each chunk has a separate
+   `chunk_seq` inside plaintext and a separate AEAD tag, so the replay
+   key is unique per chunk.
+**Two-phase replay protection (dedupe_tag vs replay_key):**
+   hop-local `dedupe_tag` (A9.1) and `replay_key` (invariant 4 above) are
+   **not duplicate** mechanisms but two stages of a single pipeline, checked
+   in strict order:
+
+   | Phase | Identifier | Computed | When checked | Protects against |
+   |-------|-----------|----------|--------------|------------------|
+   | 1 — pre-decrypt | `dedupe_tag = HMAC(node_key, layer_ciphertext)[:16]` | before decryption | on frame arrival | network duplicates (identical ciphertext from different neighbors) |
+   | 2 — post-decrypt | `replay_key = SHA-256(E \|\| nonce_i \|\| AEAD_tag_i)[:16]` | after decryption | after AEAD.Open | cryptographic replay (identical plaintext in different ciphertext container) |
+
+   Phase 1 is a cheap hot-path: HMAC over raw bytes without AEAD, cuts
+   >99% of duplicates under normal conditions. Phase 2 is a cold-path
+   for the case where an attacker re-wrapped an onion frame with the same
+   content but different outer ciphertext (e.g., different padding).
+   `dedupe_tag` would pass such a frame (different ciphertext → different
+   HMAC), but `replay_key` catches it (same `E`, `nonce_i`, `AEAD_tag_i`).
+
+   **State isolation:** `dedupe_tag` is stored in `onionCircuitState` (TTL =
+   `max_relay_ttl`), `replay_key` in a separate bounded replay cache
+   (`max_seen_replays`). Both are hop-local, not global.
+
+5. **Replay cache TTL/bounds.** Bounded LRU, TTL = `max_relay_ttl`
+   (180 seconds), `max_seen_replays` = 100,000 entries. On overflow —
+   evict oldest.
+6. **Shared secret destruction.** The hop zeroes `shared_secret_i` from
+   memory immediately after computing `layer_key_i` and `nonce_i`. No
+   exceptions.
+
+- [ ] One ephemeral X25519 pair per message; `E` in the header of each layer
+- [ ] HKDF-SHA256: `shared_secret_i` → `layer_key_i` (salt `corsa-onion-v1`, info = hop_index)
+- [ ] HKDF-SHA256: `shared_secret_i` → `nonce_i` (salt `corsa-onion-nonce-v1`, info = hop_index, truncate to 24 bytes)
+- [ ] XChaCha20-Poly1305: AEAD with `AAD = E || hop_index_bytes`
+- [ ] Layer plaintext: `next_hop`, `hop_index`, `total_hops`, `chunk_seq`, `chunk_total`, `is_final`, `layer`
+- [ ] Post-decrypt validation: implement all 9 mandatory checks (see numbered list above) in exact order; each check is a hard DROP + LOG on failure
+- [ ] Post-decrypt validation: no check may be skipped or reordered — checks 1–5 protect routing semantics, checks 6–7 protect chunking semantics, checks 8–9 protect forwarding integrity
+- [ ] Unit test: post-decrypt validation — `hop_index >= total_hops` → DROP (check 3)
+- [ ] Unit test: post-decrypt validation — `is_final: true` with `hop_index != total_hops - 1` → DROP (check 4)
+- [ ] Unit test: post-decrypt validation — `is_final: true` with non-empty `next_hop` → DROP (check 5)
+- [ ] Unit test: post-decrypt validation — `chunk_seq` >= `chunk_total` → DROP (check 6)
+- [ ] Unit test: post-decrypt validation — `next_hop` invalid fingerprint format → DROP (check 8)
+- [ ] Unit test: post-decrypt validation — non-final layer with empty `layer` → DROP (check 9)
+- [ ] Hop: destroy `shared_secret_i` after computing key and nonce (zero memory)
+- [ ] Replay key: `SHA-256(E || nonce_i || AEAD_tag_i)[:16]`; store in replay cache
+- [ ] Replay cache: bounded LRU, `max_seen_replays=100000`, TTL=`max_relay_ttl`
+- [ ] Reject onion layers with invalid ephemeral public key (not on X25519 curve or zero; guardrail 3)
+- [ ] Onion crypto versioned as `onion-v1`, independent of `dm-v1`
+- [ ] Unit tests: forward secrecy verification (old key cannot decrypt)
+- [ ] Unit test: replayed onion with same replay_key is rejected
+- [ ] Unit test: replay_key cache evicts correctly under pressure
+- [ ] Unit test: `buildOnionLayers` generates unique `E` per invocation (builder-side invariant, not network reject)
+- [ ] Unit test: nonce derivation is unique for different hop indices with same ephemeral key
+- [ ] Unit test: AAD mismatch (substituted E or hop_index) → AEAD fail
+- [ ] Unit test: layer reordering (swap hop_index) → AEAD fail
+- [ ] Unit test: onion crypto and DM crypto use different algorithms/keys
+- [ ] Negative local-state test: node restarts with empty replay cache — replayed onion from before restart may be accepted once (acceptable), but must not corrupt state or cause crash; verify cache rebuilds correctly
+- [ ] Update `docs/protocol/relay.md` (onion layer crypto, ephemeral key lifecycle)
+- [ ] Update `docs/encryption.md` (onion-v1 scheme, difference from dm-v1)
+
+**Release / Compatibility for A9.3:**
+
+- [ ] Mixed-version test: sender with `onion-v1` crypto, all hops with `onion-v1` — full onion round-trip with forward secrecy
+- [ ] Mixed-version test: sender with `onion-v1`, intermediate hop without `onion_relay_v1` — path selection bypasses that hop (not a crypto failure, but capability gate from A9.1)
+- [ ] Mixed-version test: sender legacy → onion-capable hops — onion not engaged, regular relay
+- [ ] `onion-v1` crypto versioned separately from `dm-v1`; changing one does not affect the other
+- [ ] Confirm: A9.3 does not require raising `MinimumProtocolVersion`
+
+<a id="iter-a9-4"></a>
+#### A9.4 — Path selection and circuit diversity
+
+**Goal:** the sender does not always use the same onion path, so a single
+compromised hop cannot build a statistical profile of who talks to whom.
+
+**Problem after A9.1–A9.3:** if the routing table consistently returns the
+same shortest path, every onion message between A and F goes through the same
+nodes. A compromised node on that path sees a repeating pattern.
+
+**Onion path selection ≠ advisory routing (critical difference from relay):**
+for regular relay the routing table is a hint: a false next_hop is harmless
+because gossip fallback delivers the message anyway. For onion a false
+next_hop is a security breach: an attacker who poisons the routing table can
+systematically route traffic through their hop. Therefore onion path
+selection uses **only locally confirmed routes**: routes where the node has
+personally observed successful hop-acks (Iteration 3, `ReliabilityScore`).
+
+**Trust tier for onion path selection:**
+
+| Tier | Definition | Allowed in onion path? |
+|---|---|---|
+| confirmed | `ReliabilityScore >= 0.5` after >= 5 hop-ack observations | Yes |
+| probationary | New route without enough history, or `0.3 <= score < 0.5` | No — until promoted to confirmed |
+| degraded | `score < 0.3` or cooldown after black-hole detection | No |
+| advisory-only | Route from a third-party announcement, no local observations | No |
+
+A route that has been used for mesh relay and accumulated hop-ack history
+can be used for onion. A route known only from an announcement cannot. This
+is consistent with Iteration 2's principle: "the table is a hint, not the
+truth". For relay a "hint" is safe; for onion a "hint" is not enough.
+
+**Bootstrap tradeoff (explicit consequence):** in a new or small network
+onion may remain practically unavailable for an extended period while
+regular relay "warms up" the confirmed route graph. Reaching confirmed
+tier requires >= 5 hop-ack observations per route, which under average
+traffic may take minutes to hours. This is a **deliberate tradeoff**:
+safety (prohibiting unverified routes) is more important than fast onion
+bootstrap. In small networks with < 3 confirmed capable nodes, onion
+activates graceful degradation (below). Operators should not expect
+instant onion availability on first deployment.
+
+**Explicit dependency: onion path selection requires mesh relay history.**
+Onion does not have its own route discovery — it consumes the
+`ReliabilityScore` and hop-ack history accumulated by ordinary mesh relay
+(Iterations 1–3). A network where no regular relay traffic has flowed has
+zero confirmed routes and therefore zero eligible onion paths. This is a
+design dependency, not a side effect: onion intentionally piggybacks on
+relay observations to avoid introducing a separate probing mechanism that
+would be an additional traffic fingerprint. Rollout implication: mesh relay
+must be active and carrying traffic before onion becomes usable.
+
+**How it works:**
+
+- **Minimum path length (3 hops):** even if a direct path to the
+  recipient exists. Additional hops are chosen from confirmed routes
+  through which a **confirmed path onward to the recipient exists**.
+  The sender does not insert a random capable node "into nowhere": each
+  intermediate hop must have a confirmed route to the next hop in the
+  chain. Path construction is a traversal of the confirmed route graph
+  from sender to recipient requiring >= 3 hops. If the confirmed route
+  graph contains no path of length >= 3 — graceful degradation (below).
+- **Privacy-weighted path selection (not raw ReliabilityScore):**
+  for relay routing the goal is delivery, and `RouteScore` = reliability
+  × 100 − hops × 10 optimizes exactly that. For onion the goal is
+  privacy, and raw reliability weighting converges on one "best" path,
+  killing diversity. Onion uses a separate `OnionPathScore`:
+  - eligible: only confirmed routes (tier above);
+  - weighting: `1.0 / (1.0 + RouteScore_delta)` — the closer a score
+    is to the best, the higher the weight, but the gap is dampened; all
+    confirmed paths receive meaningful share;
+  - hard cap: the same **path** (ordered tuple of hop identities) cannot be
+    used for > 30% of all onion messages within a rotation period.
+    **Terminology:** *path* = ordered tuple of hop identities
+    (e.g. `[B, C, D]`); *circuit* = a concrete instantiation of a path with
+    specific ephemeral keys. One path can spawn many circuits. The 30% hard
+    cap counts by **path**, not by circuit: two circuits sharing the same
+    tuple `[B, C, D]` accumulate into a single quota. Metric:
+    `uses_of_path / total_onion_sends` within the current rotation period;
+  - circuit rotation: even if path selection returns the same ordered tuple
+    of hops, the circuit rotates on timer (new ephemeral keys). Circuit
+    rotation **does not reset** the path counter — otherwise the hard cap
+    becomes meaningless.
+  - **Window semantics for the 30% cap:** the counter is a **per-recipient
+    sliding window** of the last `onion_path_reuse_window` sends (default
+    100). Each send records the path tuple used; when the window is full the
+    oldest entry is evicted. The cap is checked as
+    `count(path_tuple, window) / len(window) > 0.30`. Per-recipient scope
+    prevents a high-traffic conversation from consuming another
+    conversation's diversity budget. A global counter would allow a single
+    chatty peer to mask path convergence with other peers. Per-conversation
+    would be equivalent in 1-to-1 DM but is left as a future refinement for
+    group contexts. The window is in-memory only; on restart it is empty and
+    all paths start with equal quota.
+- **Circuit rotation:** the sender changes the onion path every 10
+  minutes or after 50 messages (whichever comes first). On rotation — a
+  new random selection from confirmed paths.
+- **Guard node:** the first hop is kept stable for longer (guard period:
+  30 minutes) to avoid creating a fingerprint through frequent
+  entry-point changes. **Invariant:** the guard is chosen only from
+  confirmed hops with `ReliabilityScore >= 0.7` (above the threshold
+  for regular onion hops). The guard **immediately** loses its status
+  on: (a) session closure (session invalidation from Iteration 2);
+  (b) `ReliabilityScore` dropping below 0.5; (c) black-hole detection
+  cooldown. A stale guard is impossible: route lifetime is tied to
+  session lifetime. A new guard is selected from remaining confirmed
+  hops with score >= 0.7.
+- **Graceful degradation:** if confirmed capable nodes < 3:
+  2 hops — with warning, 1 hop — with warning, 0 hops — behavior
+  determined by privacy mode (`best_effort_onion` → regular relay,
+  `require_onion` → error).
+
+- [ ] Onion path selection: only confirmed routes (`ReliabilityScore >= 0.5`, >= 5 observations)
+- [ ] Prohibit advisory-only and probationary routes in onion paths
+- [ ] Path construction as confirmed route graph traversal (no random hop insertion)
+- [ ] Privacy-weighted scoring: `OnionPathScore` with dampened delta, not raw `RouteScore`
+- [ ] Hard cap 30% on reuse of same ordered tuple of hop identities (path) within rotation period
+- [ ] Minimum path length (3 hops from confirmed routes)
+- [ ] Maximum path length cap (7 hops) to bound latency and resource cost
+- [ ] Circuit rotation timer (10 min or 50 messages)
+- [ ] Guard node: selected from confirmed with score >= 0.7; immediate status loss on session close / score drop / cooldown
+- [ ] Guard period: 30 minutes (longer than normal rotation)
+- [ ] Bounded circuit cache per recipient (guardrail 1); evict stale circuits on rotation
+- [ ] Graceful degradation for small networks (< 3 confirmed capable nodes)
+- [ ] Mode transition test: network grows from 2 → 3 confirmed hops → onion activates; then one hop drops back to 2 → graceful degradation re-engages. Verify: path builder invalidates cached paths on confirmed-count change; conversation privacy mode does not cache stale "onion available" decision beyond one rotation period; no message stuck in "waiting for onion path" after downgrade
+- [ ] Do not penalize hops that fail during circuit rotation; use cooldown, not ban (guardrail 6)
+- [ ] Unit tests: path diversity, rotation, guard stability
+- [ ] Unit test: advisory-only route rejected for onion path
+- [ ] Unit test: probationary route not allowed in onion path
+- [ ] Unit test: guard loses status on session close
+- [ ] Unit test: hard cap on reuse of same path ordered tuple
+- [ ] Unit test: path exceeding max length cap is rejected
+- [ ] Unit test: circuit cache does not grow unbounded
+- [ ] Unit test: padding to 3 hops via confirmed graph — no dead ends
+- [ ] Update `docs/protocol/relay.md` (path selection algorithm, guard node rules, circuit diversity)
+- [ ] Update `docs/encryption.md` (OnionPathScore trust-tier interaction, guard invariants)
+- [ ] Update `docs/protocol/delivery.md` (path selection impact on delivery latency, bootstrap tradeoff)
+
+<a id="iter-a9-5"></a>
+#### A9.5 — Traffic analysis resistance
+
+**Goal:** make it harder to correlate sender and recipient by observing
+message size and timing at intermediate hops.
+
+**Problem after A9.1–A9.4:** an observer sees "node A sent 512 bytes at
+12:00:01, node F received ~512 bytes at 12:00:03" — correlation by size and
+timing is straightforward even though the route is encrypted.
+
+**How it works:**
+
+- **Fixed-size onion cells:** all `onion_relay_message` frames are padded to a
+  uniform size. Short messages are padded up; long messages are split into
+  fixed-size cells.
+- **Cell-count padding (decision rule):** fixed cell size alone is not enough:
+  an observer still sees the **number of cells** in a message, which is a
+  strong correlation signal. To mitigate: before splitting into cells, the
+  payload is padded to one of fixed buckets: 1 cell, 2 cells, 4 cells,
+  8 cells, 16 cells. Messages larger than 16 cells are split into 16-cell
+  chunks (each chunk sent as an independent onion packet with a sequence
+  number inside the encrypted layer). The bucket is rounded up: a 3-cell
+  message is padded to 4. This limits leakage to log2(cells) bits instead
+  of the exact size.
+- **Chunk reassembly contract (receiver):** when a message is split into
+  multiple 16-cell chunks, each chunk is an independent onion packet with
+  `chunk_seq` and `chunk_total` fields inside the encrypted layer. The
+  receiver assembles chunks according to the following rules:
+  - **Reassembly group key = onion message instance:** the chunk group
+    is identified by ephemeral pubkey `E`. Since each invocation of
+    `buildOnionLayers` generates a new `E`, an application-level retry
+    (resending the message) creates a **new** reassembly group. Partial
+    chunks from the previous attempt do not continue assembly — they are
+    cleaned up by the reassembly timeout. This is correct behavior: a
+    retry produces an entirely new set of onion packets with a new `E`.
+  - `chunk_total` is fixed by the first received chunk for a given group
+    (`E`). If a subsequent chunk arrives with a different `chunk_total`,
+    it is rejected.
+  - **Reassembly timeout:** if not all chunks are received within
+    `max_chunk_reassembly_timeout` (default 30 seconds), partial state is
+    deleted. The message is considered undelivered.
+  - **Bounded reassembly state:** at most `max_pending_chunk_groups`
+    (default 100) chunk groups can be in assembly simultaneously. On
+    overflow — evict the oldest incomplete group (LRU).
+  - **Duplicate chunk:** a repeated chunk with the same `chunk_seq` for
+    the same `E` is rejected (idempotent, no error).
+  - **E-reuse is a protocol violation.** If a chunk arrives whose `E`
+    matches a **completed** reassembly group (i.e., the group was already
+    fully assembled and delivered), the receiver drops the chunk and logs
+    the event. If a second reassembly group is opened with the same `E`
+    as an existing in-progress group, the **later** group is dropped
+    wholesale — the first-seen group wins. Rationale: a legitimate sender
+    always generates a fresh `E` per `buildOnionLayers` invocation; reuse
+    of `E` indicates either replay or implementation error. Accepting it
+    would corrupt the replay_key domain and violate the "E = unique
+    instance key" invariant (see A9.3).
+  - **Missing middle chunk:** when the reassembly timeout expires with an
+    incomplete set of chunks, the entire group is deleted. The sender can
+    retry the full message (application-level retry).
+  - **User-visible outcome on partial loss:** an incomplete chunk group
+    **does not** enter `storeIncomingMessage`, **does not** generate a
+    delivered receipt, and **is not** visible in the UI as a partial
+    message. From the receiver's and DM lifecycle perspective the message
+    does not exist. The sender detects loss via missing delivery receipt
+    (timeout) and may retry (new `E` → new reassembly group).
+  - **Ordering:** chunks may arrive in any order; the receiver assembles
+    by `chunk_seq` (0-indexed, up to `chunk_total - 1`).
+  - **Maximum chunks per message:** `chunk_total` cannot exceed
+    `max_chunks_per_message` (default 64). A chunk with `chunk_total` >
+    the limit is rejected.
+  - **Non-persistence invariant:** both the chunk reassembly state and the
+    replay cache (A9.3) are **in-memory only** and explicitly not persisted
+    to disk. On restart both are empty. Consequences: (1) a chunk group
+    that was partially received before restart is lost — the sender detects
+    this via missing delivery receipt and retries with a new `E`; (2) a
+    replayed onion from before restart may pass replay_key check once
+    (acceptable — but the duplicate **must not** create a second visible DM
+    in the UI; the existing `message_id` deduplication in `storeIncomingMessage`
+    catches it, and at most one extra delivery receipt is produced, which is
+    idempotent); (3) the E-reuse defense still applies after
+    restart because a restarted node has no completed-group history for that
+    `E` — the first group wins, which is correct.
+- **Timing jitter:** each hop adds a small random delay (configurable range,
+  default 10–100 ms) before forwarding, breaking timing correlation.
+- **Jitter and reputation scoring (alignment with Iteration 3–4):**
+  onion jitter intentionally increases hop latency. If hop-ack timeout and
+  `ReliabilityScore` from Iteration 3 account for RTT (via Iteration 4c
+  metric: `reliability * 100 − hops * 10 − avg_rtt_ms / 10`), then
+  honest onion paths will appear less reliable simply due to jitter.
+  Solution: **onion relay frames are excluded from RTT/latency metrics.**
+  `avg_rtt_ms` is computed only from regular `relay_message` + hop-ack.
+  `ReliabilityScore` for onion hops accounts only for success/failure
+  (hop-ack received / not received), without penalty for increased RTT.
+  This prevents privacy mode from deprivileging itself.
+- **Cover traffic (optional):** nodes periodically send dummy onion messages
+  to random destinations, making real traffic indistinguishable from noise.
+
+- [ ] Fixed-size onion cell format
+- [ ] Cell-count padding: bucket sizes 1/2/4/8/16 cells; pad payload to nearest bucket up
+- [ ] Chunking: messages > 16 cells → independent 16-cell chunks with sequence number in encrypted layer
+- [ ] Chunk reassembly: receiver assembles chunks by `E` + `chunk_seq`; `chunk_total` fixed by first chunk
+- [ ] Reassembly timeout: `max_chunk_reassembly_timeout` = 30s; incomplete groups deleted
+- [ ] Bounded reassembly state: `max_pending_chunk_groups` = 100; LRU eviction on overflow
+- [ ] `max_chunks_per_message` = 64; chunk with `chunk_total` > limit rejected
+- [ ] Unit test: chunk reassembly — all chunks delivered in random order → correct assembly
+- [ ] Unit test: chunk reassembly timeout — incomplete chunk set → group deleted after timeout
+- [ ] Unit test: duplicate chunk_seq → idempotent rejection without error
+- [ ] Unit test: chunk_total mismatch → chunk rejected
+- [ ] Per-hop timing jitter (default 10–100 ms)
+- [ ] Exclude onion relay from RTT/latency metrics in Iteration 3–4; hop-ack success/failure only
+- [ ] Cover traffic generation (optional, off by default; guardrail 5 — adaptive, not always-on)
+- [ ] Cover traffic budget: bounded bandwidth and CPU per node; auto-disable under overload
+- [ ] Interaction with Iteration 4 overload mode (see priority hierarchy below)
+- [ ] Implement onion relay queue as a separate bounded structure (`max_onion_queue_depth` = 1000); canonical name: **onion relay queue** (not "onion queue") to distinguish from the per-hop retry queue
+- [ ] Unit test: onion relay queue depth reaches `max_onion_queue_depth` → cover traffic disabled, jitter zeroed (threshold 1)
+- [ ] Unit test: onion relay queue still growing after threshold 1 → load shedding with proportional drop probability (threshold 2)
+- [ ] Unit tests: cell size uniformity, bucket padding correctness
+- [ ] Unit test: cell-count leak — two messages in same bucket indistinguishable by cell count
+- [ ] Unit test: cover traffic auto-disables under overload
+- [ ] Unit test: onion jitter does not affect `avg_rtt_ms` in reliability scoring
+- [ ] Unit test: onion jitter does not degrade `ReliabilityScore` of hops — hop-ack arriving within `onion_hop_ack_timeout` counts as success regardless of jitter-inflated RTT; regression guard between Iteration 3 reputation and onion mode
+- [ ] Overload test: `onion_relay_message` flood does not cause unbounded memory/CPU growth (guardrail 7)
+- [ ] Overload test: onion flood degrades gracefully — regular relay/gossip DMs still delivered (guardrail 2)
+- [ ] Negative local-state test: node restarts with incomplete chunk groups in memory — all partial reassembly state is lost; new chunks for the same `E` after restart must start a fresh group (not crash or corrupt)
+- [ ] Update `docs/protocol/relay.md` (cell padding, cover traffic, jitter parameters)
+- [ ] Update `docs/encryption.md` (cell-count bucket padding impact on ciphertext size)
+- [ ] Update `docs/protocol/delivery.md` (cover traffic interaction with delivery pipeline, overload priority)
+
+#### Operational Limits for the Onion subsystem
+
+Following the same pattern as mesh relay (Iteration 1: bounded relay state,
+backpressure, per-peer rate limits), the onion subsystem requires explicit
+limits to prevent self-DoS.
+
+**Onion cell / frame limits:**
+
+| Parameter | Default value | Where checked |
+|---|---|---|
+| `max_onion_cell_size` | 1024 bytes (fixed cell size from A9.5) | Inbound: before decryption |
+| `max_onion_frame_size` | 65536 bytes (before split into cells) | Inbound: before decryption |
+| `max_onion_hops` | 10 | Inbound: after first peel (hop_count) |
+| `max_onion_path_length` | 7 (outbound) | Outbound: path selection (A9.4) |
+| `min_onion_path_length` | 3 (outbound) | Outbound: path selection (A9.4) |
+| `onion_path_reuse_window` | 100 (per recipient) | Sender: sliding window for 30% path reuse cap (A9.4) |
+| `max_chunk_reassembly_timeout` | 30 seconds | Receiver: on first chunk of a group |
+| `max_pending_chunk_groups` | 100 | Receiver: LRU eviction on overflow |
+| `max_chunks_per_message` | 64 | Receiver: before starting reassembly |
+
+**Bounded onion retry queue (per hop):**
+
+| Parameter | Default value | Where checked |
+|---|---|---|
+| `max_onion_retry_queue_size` | 500 frames | Hop: on enqueue of undeliverable frame |
+| `onion_retry_ttl` | 15 seconds | Hop: per-frame TTL, expired items evicted by ticker |
+| `max_onion_retry_per_identity` | 50 frames | Hop: per-next-hop identity cap within the queue |
+
+Eviction policy: when the queue is full, the oldest frame (by `CreatedAt`)
+is evicted first (LRU). Per-identity cap prevents a single unreachable
+next-hop from consuming the entire queue. The retry queue is in-memory only;
+on restart it is empty (all pending frames are lost — the sender detects
+via missing hop-ack and rebuilds).
+
+**Bounded circuit state (per hop):**
+
+```go
+type onionCircuitState struct {
+    DedupeTag    string // HMAC(node_key, layer_ciphertext)[:16], hop-local
+    PreviousHop  string // who sent it (identity fingerprint; delivery via session resolve at send time)
+    ForwardedTo  string // who it was forwarded to (identity fingerprint; delivery via session resolve at send time)
+    RemainingTTL int    // seconds until cleanup (decremented by ticker)
+    CreatedAt    int64  // monotonic timestamp for LRU ordering
+}
+```
+
+`PreviousHop` and `ForwardedTo` store **identity fingerprint**, not
+session address. When actually forwarding a frame, the hop performs
+`identity → active session` resolve (see A9.1, "Addressing in next_hop"),
+analogous to relay forwarding. Circuit state is bound to identity for
+reconnect resilience; transport send uses session resolution at send time.
+
+Limits: `max_onion_circuits_per_peer` (default 1000),
+`max_onion_circuits_total` (default 50,000). On overflow — evict oldest.
+TTL = `max_relay_ttl` (180 seconds).
+
+**Bounded replay cache:**
+
+`max_seen_replays` = 100,000 entries, TTL = 180 seconds. LRU eviction on
+overflow. Cache key is `replay_key = SHA-256(E || nonce_i ||
+AEAD_tag_i)[:16]` (see A9.3, invariant 4). Cache is not persisted — it
+starts empty on restart (acceptable: ephemeral key per message guarantees
+that replay after restart requires knowledge of the new ephemeral secret).
+
+**Cover traffic budget:**
+
+`max_cover_traffic_bandwidth_pct` = 5% of current node throughput.
+`max_cover_traffic_cpu_pct` = 2% of CPU. On exceeding either threshold —
+auto-disable cover traffic until the next evaluation period (60 seconds).
+
+**Overload behavior (alignment with Iteration 4):**
+
+Iteration 4e defines a global overload mode: reduce gossip fan-out, defer
+non-critical sync, prioritize authenticated peers. Onion must fit into this
+model, not conflict with it. Unified priority hierarchy under overload:
+
+| Priority | Traffic category | Action under overload |
+|---|---|---|
+| 1 (highest) | Authenticated relay/gossip DM | Never dropped due to onion load |
+| 2 | Routing announcements / hop-ack | Frequency reduced (Iteration 4e) but not blocked |
+| 3 | Onion delivery receipts | Same load-shedding as level 4 but with higher dequeue priority; receipts are delivery-semantics traffic (confirming message arrival) and losing them triggers unnecessary sender retries |
+| 4 | Onion relay — DM payload | Load shedding with probability proportional to excess |
+| 5 | Onion cover traffic | Disabled first |
+| 6 (lowest) | Non-critical sync / delta announces | Deferred (Iteration 4e) |
+
+Onion subsystem degradation order:
+
+1. Threshold 1: onion relay queue > `max_onion_queue_depth` (1000).
+   → Disable cover traffic, reduce jitter range to 0.
+2. Threshold 2 (queue continues growing): drop new `onion_relay_message`
+   with probability proportional to the excess (load shedding).
+3. Global overload (Iteration 4e active): onion already in load shedding
+   mode; additionally onion relay queue depth is reduced to
+   `max_onion_queue_depth / 2` to yield resources to relay/gossip.
+
+Queues are separate: onion relay queue and relay/gossip queue are independent
+structures. Load shedding in the onion relay queue does not affect relay/gossip,
+and vice versa. Iteration 4e's global overload mode controls the ratio by
+reducing onion relay queue depth, not by directly dropping onion from the relay
+pipeline.
+
+**Inbound processing flow (per hop):**
+
+```mermaid
+flowchart TD
+    RCV["Receive onion_relay_message"]
+    SIZE{"size <= max_onion_frame_size?"}
+    CAP{"sender session has onion_relay_v1?"}
+    RATE{"per-peer rate limit OK?"}
+    TAG["dedupe_tag = HMAC(node_key, layer)[:16]"]
+    DEDUP{"dedupe_tag already in dedup cache?"}
+    DECRYPT["Decrypt own layer"]
+    VALID{"decryption successful?"}
+    REPLAY{"replay_key in replay cache?"}
+    HOPS{"hop_count >= max_onion_hops?"}
+    NEXT{"next_hop empty?"}
+
+    DROP_SIZE["DROP (oversized)"]
+    DROP_CAP["DROP (no capability)"]
+    DROP_RATE["DROP (rate limited)"]
+    DROP_DUP["DROP (duplicate dedupe_tag)"]
+    DROP_INVALID["DROP + LOG (bad ciphertext)"]
+    DROP_REPLAY["DROP (replayed nonce)"]
+    DROP_HOPS["DROP (max hops exceeded)"]
+    DELIVER["Deliver locally (DM pipeline)"]
+    FORWARD["Store circuit state, forward to next_hop"]
+
+    RCV --> SIZE
+    SIZE -->|no| DROP_SIZE
+    SIZE -->|yes| CAP
+    CAP -->|no| DROP_CAP
+    CAP -->|yes| RATE
+    RATE -->|no| DROP_RATE
+    RATE -->|yes| TAG
+    TAG --> DEDUP
+    DEDUP -->|yes| DROP_DUP
+    DEDUP -->|no| DECRYPT
+    DECRYPT --> VALID
+    VALID -->|no| DROP_INVALID
+    VALID -->|yes| REPLAY
+    REPLAY -->|yes| DROP_REPLAY
+    REPLAY -->|no| HOPS
+    HOPS -->|yes| DROP_HOPS
+    HOPS -->|no| NEXT
+    NEXT -->|yes| DELIVER
+    NEXT -->|no| FORWARD
+
+    style DELIVER fill:#c8e6c9,stroke:#2e7d32
+    style FORWARD fill:#e8f5e9,stroke:#2e7d32
+    style DROP_SIZE fill:#ffcdd2,stroke:#c62828
+    style DROP_CAP fill:#ffcdd2,stroke:#c62828
+    style DROP_RATE fill:#ffcdd2,stroke:#c62828
+    style DROP_DUP fill:#ffcdd2,stroke:#c62828
+    style DROP_INVALID fill:#ffcdd2,stroke:#c62828
+    style DROP_REPLAY fill:#ffcdd2,stroke:#c62828
+    style DROP_HOPS fill:#ffcdd2,stroke:#c62828
+```
+*Diagram — Inbound processing flow for onion frame*
+
+#### Integration tests for A9 (cross-sub-iteration)
+
+Following the same pattern as mesh relay integration tests:
+
+- [ ] Mixed network: 6 nodes, 3 onion-capable + 3 legacy; onion DM between capable nodes, legacy unaffected
+- [ ] Hop loss mid-circuit: 5 nodes, hop B goes offline after first message; second message → circuit rebuild → delivery via alternative path
+- [ ] Path rebuild: sender assembles circuit, one hop goes down; verify new circuit uses different nodes
+- [ ] Privacy downgrade policy: `require_onion` + no capable hops → message is **not** sent (no relay fallback)
+- [ ] Full round-trip: onion DM → onion delivery receipt → onion read receipt; verify no intermediate hop sees sender/recipient pair
+- [ ] Overload: flood `onion_relay_message` at one hop; verify regular relay/gossip DMs continue to be delivered
+- [ ] Forward secrecy end-to-end: intercept traffic, leak long-term key of a hop, attempt decryption → fail
+- [ ] Replay: re-send previously intercepted onion frame → dropped on replay check
+
+#### Onion iteration dependency graph
+
+```mermaid
+graph LR
+    O1["A9.1<br/>Onion wrapping"]
+    O2["A9.2<br/>Onion receipts"]
+    O3["A9.3<br/>Forward secrecy"]
+    O4["A9.4<br/>Path diversity"]
+    O5["A9.5<br/>Traffic analysis<br/>resistance"]
+
+    O1 --> O2 --> O3 --> O4 --> O5
+
+    O1 -.- W1["+ DM envelope unchanged<br/>+ onion via pipeline, not envelope flag<br/>+ intermediate hops blind"]
+    O2 -.- W2["+ receipts also onion-routed<br/>+ return path independent"]
+    O3 -.- W3["+ ephemeral DH per message<br/>+ past traffic safe on key leak"]
+    O4 -.- W4["+ random path selection<br/>+ circuit rotation<br/>+ guard nodes"]
+    O5 -.- W5["+ fixed cell size<br/>+ timing jitter<br/>+ cover traffic"]
+
+    style O1 fill:#e3f2fd,stroke:#1565c0
+    style O2 fill:#e3f2fd,stroke:#1565c0
+    style O3 fill:#e3f2fd,stroke:#1565c0
+    style O4 fill:#e3f2fd,stroke:#1565c0
+    style O5 fill:#e3f2fd,stroke:#1565c0
+```
+*Diagram — Onion sub-iterations (A9)*
+
+#### Hostile-Internet Guardrails applied to A9
+
+| Guardrail | Where enforced in A9 |
+|---|---|
+| 1. Bounded resource usage | A9.1: frame size limit, per-peer rate limit, onion dedup TTL, max hops. A9.2: receipt dedup, outbound rate limit. A9.3: replay cache bounded. A9.4: circuit cache bounded. |
+| 2. Soft degradation | A9.1: fallback to regular relay (`best_effort_onion`) or error (`require_onion`). A9.2: receipts via regular relay with warning (`best_effort_onion`) or not sent (`require_onion`). A9.4: graceful degradation for small networks. A9.5: under overload, disable cover traffic and shrink jitter first. |
+| 3. Distrust unauthenticated | A9.1: capability gate, drop invalid layers. A9.3: reject unknown/expired ephemeral keys. |
+| 4. Local observations | A9.4: guard node and path selection based on local routing table and local reputation scores. |
+| 5. Adaptive defenses | A9.5: cover traffic optional, off by default; timing jitter configurable, not mandatory. |
+| 6. No irreversible punishments | A9.4: failed hops get cooldown, not permanent ban. |
+| 7. Overload tests | A9.5: onion flood test (memory/CPU), graceful degradation test (honest traffic survives). |
+| 8. Local-state semantics | A9.1: `arrived_via_onion` provenance bit stored only in local messageStore metadata — never in envelope, frame, or receipt. A9.3: replay cache and chunk reassembly state are in-memory only, not persisted. A9.5: non-persistence invariant documented with restart consequences. Privacy-relevant metadata never leaks through the wire protocol. |
+
+*Table — Guardrail coverage across onion sub-iterations*
+
+**Cross-sub-iteration integration tests:**
+
+These tests exercise the interaction of multiple onion sub-iterations
+simultaneously — the most realistic (and hardest to debug) failure modes:
+
+- [ ] Integration test: mixed network + chunked onion message + receipt path under overload. Scenario: sender sends a chunked message (A9.5) via a 3-hop onion path (A9.4) where the network enters Iteration 4e global overload mid-delivery. Verify: chunks that passed before overload are assembled; chunks dropped by load shedding cause the group to timeout; receipt (A9.2) follows its own independent path; sender detects partial failure via missing delivery receipt and retries with new `E`. This test covers the A9.2 + A9.4 + A9.5 + global overload interaction.
+
+<a id="iter-a10"></a>
+### Iteration A10 — Global names instead of raw identity
+
+**Goal:** introduce a global naming layer so users can find and recognize peers
+without memorizing fingerprints.
+
+**Dependency:** follows A1 because local naming UX should exist first.
+
+**Done when:** a user can publish, resolve, and verify a global name bound to
+an identity with conflict handling and ownership proof.
+
+<a id="iter-a11"></a>
+### Iteration A11 — Gazeta protocol extensions
 
 **Goal:** expand the anonymous/broadcast protocol where it creates clear product
 value beyond direct messaging.
@@ -1090,8 +2377,8 @@ story is sharper.
 **Done when:** the protocol gains clearly specified extensions with documented
 use-cases and compatibility rules.
 
-<a id="iter-a10"></a>
-### Iteration A10 — iOS app
+<a id="iter-a12"></a>
+### Iteration A12 — iOS app
 
 **Goal:** ship the second mobile client on iOS.
 
@@ -1101,45 +2388,650 @@ already validated.
 **Done when:** iOS reaches parity with the scoped Android light-client feature
 set that is practical on the chosen framework.
 
-<a id="iter-a11"></a>
-### Iteration A11 — BLE last mile
-
-**Goal:** add short-range local transport for mobile/offline-adjacent scenarios.
-
-**Dependency:** follows mobile because BLE is most useful once the mobile
-transport abstraction is proven.
-
-**Done when:** nearby devices can exchange the required routing or message data
-over BLE without changing higher-level identity semantics.
-
-<a id="iter-a12"></a>
-### Iteration A12 — Onion delivery for DMs
-
-**Goal:** hide more path metadata in multi-hop DM delivery.
-
-**Dependency:** strictly after stable mesh and intentionally after BLE/mobile
-transport work. Mesh answers “does the message get there?”; onion answers “how
-much can intermediate nodes learn about the path?”.
-
-**Done when:** DM delivery uses layered hop encryption over stable relay/routing
-primitives and no intermediate hop sees the full route.
-
 <a id="iter-a13"></a>
-### Iteration A13 — Meshtastic last mile
+### Iteration A13 — BLE last mile
 
-**Goal:** integrate a radio-based last-mile path for niche field/off-grid use.
+**Goal:** add a short-range local transport so that nearby devices can exchange
+CORSA messages over Bluetooth Low Energy without internet connectivity. BLE
+operates as an additional transport behind the existing transport abstraction —
+identity, encryption, and routing semantics remain unchanged.
 
-**Why later:** strong ecosystem expansion, but should not block the core
-privacy-messenger story.
+**Dependency:** follows mobile (A12) because the mobile transport abstraction
+must be proven before adding a second mobile-specific transport. Also
+benefits from the relay subsystem (Iteration 1) and routing table
+(Iteration 2) for multi-hop BLE mesh paths.
 
-**Done when:** CORSA can bridge message transport through Meshtastic where
-available, while preserving clear boundaries between radio transport and core
-protocol semantics.
+**Done when:** all four sub-iterations below are complete.
+
+#### BLE transport model
+
+A BLE node operates in two roles simultaneously: **Central** (scans for and
+connects to nearby peers) and **Peripheral** (advertises and accepts
+connections from incoming centrals). This dual-role design allows every device
+to both discover peers and be discoverable, forming a symmetric local mesh.
+
+```mermaid
+graph TB
+    subgraph "Device A"
+        CA["Central<br/>(scan + connect)"]
+        PA["Peripheral<br/>(advertise + accept)"]
+    end
+
+    subgraph "Device B"
+        CB["Central"]
+        PB["Peripheral"]
+    end
+
+    subgraph "Device C"
+        CC["Central"]
+        PC["Peripheral"]
+    end
+
+    CA -->|connect| PB
+    CB -->|connect| PA
+    CC -->|connect| PA
+    CA -->|connect| PC
+
+    style CA fill:#e3f2fd,stroke:#1565c0
+    style PA fill:#e8f5e9,stroke:#2e7d32
+    style CB fill:#e3f2fd,stroke:#1565c0
+    style PB fill:#e8f5e9,stroke:#2e7d32
+    style CC fill:#e3f2fd,stroke:#1565c0
+    style PC fill:#e8f5e9,stroke:#2e7d32
+```
+*Diagram — Dual BLE role model: every device is simultaneously Central and Peripheral*
+
+#### BLE topology discovery
+
+Peers discover each other via **ANNOUNCE** messages broadcast over BLE. Each
+ANNOUNCE carries a TLV-encoded neighbor list so that every node builds a local
+view of the BLE mesh topology.
+
+**Neighbor-list TLV format:**
+
+| Field | Size | Description |
+|-------|------|-------------|
+| type | 1 byte | `0x04` — neighbor list |
+| length | 1 byte | total bytes in value field |
+| value | 8 × N bytes | concatenated 8-byte identity fingerprints of known neighbors |
+
+**Edge validation rule:** a link A↔B is considered valid only when both A
+claims B as a neighbor **and** B claims A as a neighbor (bidirectional
+confirmation), and both claims are fresh (within `ble_announce_freshness`,
+default 60 seconds). Unidirectional or stale claims are ignored — this
+prevents topology spoofing.
+
+**Route computation:** BFS over the confirmed bidirectional graph yields the
+shortest multi-hop path. If a valid route exists within `ble_max_hops`
+(default 4), BLE source routing is used; otherwise the message falls back to
+flood relay.
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B
+    participant C as Node C
+
+    A->>B: ANNOUNCE(neighbors=[C])
+    B->>A: ANNOUNCE(neighbors=[A,C])
+    C->>A: ANNOUNCE(neighbors=[B])
+    C->>B: ANNOUNCE(neighbors=[B])
+
+    Note over A: Topo: A↔B (confirmed), B↔C (confirmed)
+    Note over A: Route to C = [B] (BFS)
+
+    A->>B: message(route=[B], dest=C)
+    B->>C: message(dest=C) — next hop from route
+```
+*Diagram — BLE topology discovery and source-routed delivery*
+
+<a id="iter-a13-1"></a>
+#### A13.1 — BLE transport and peer discovery
+
+**Goal:** establish BLE as a working transport: scan, advertise, connect,
+exchange CORSA frames, discover peers via ANNOUNCE.
+
+**How it works:** the BLE transport implements the common transport interface
+(`isPeerConnected()`, `isPeerReachable()`, `send()`). A single maintenance
+timer (default 5 seconds) handles peer connectivity checks, stale topology
+pruning, write queue drains, and relay buffer flushing.
+
+**Peer reachability model:** a BLE peer is reachable if it has an active
+connection **or** recent activity within a freshness window (default 300 s
+for handshake-verified peers, 30 s for unverified). This two-tier freshness
+prevents routing through nodes that disappeared without explicit disconnect.
+
+**ANNOUNCE throttling:** announce interval adapts to mesh density —
+`ble_announce_interval_dense` (default 30 s, when peer count >
+`ble_high_degree_threshold`) vs `ble_announce_interval_sparse` (default 10 s).
+Recent incoming traffic can trigger a shorter nudge interval to accelerate
+topology convergence.
+
+**Signed ANNOUNCE binding:** every ANNOUNCE carries a signature covering
+`identity_fingerprint || noise_public_key || ed25519_public_key || nickname ||
+timestamp`. This binds the announced identity to the cryptographic keys and
+prevents spoofing without the signing key.
+
+**Progress:**
+
+- [ ] Implement dual-role BLE service (Central + Peripheral)
+- [ ] Implement ANNOUNCE broadcast with TLV neighbor list
+- [ ] Implement signed ANNOUNCE binding (Ed25519 signature)
+- [ ] Implement bidirectional edge validation in topology tracker
+- [ ] Implement BFS route computation over confirmed graph
+- [ ] Implement source routing with flood fallback
+- [ ] Implement peer freshness with two-tier reachability (verified/unverified)
+- [ ] Implement adaptive announce throttling (dense vs sparse)
+- [ ] Implement single maintenance timer for pruning/drain/flush
+- [ ] Unit test: unidirectional claim rejected, bidirectional claim accepted
+- [ ] Unit test: stale announce (> freshness threshold) pruned
+- [ ] Unit test: BFS route correct for diamond topology
+- [ ] Unit test: source route with flood fallback when no route
+- [ ] Unit test: signed ANNOUNCE with wrong key rejected
+- [ ] Update `docs/protocol/relay.md` (BLE transport registration, ANNOUNCE TLV format)
+- [ ] Update `docs/encryption.md` (ANNOUNCE binding signature scheme)
+- [ ] Update `docs/protocol/delivery.md` (BLE reachability model, transport selection)
+
+**Release / Compatibility for A13.1:**
+
+BLE transport is additive — nodes without BLE support are unaffected. BLE
+presence is gated behind a capability flag (`ble_transport`). Existing
+WebSocket and relay paths remain the primary transport.
+
+<a id="iter-a13-2"></a>
+#### A13.2 — BLE fragmentation and MTU adaptation
+
+**Goal:** reliably deliver CORSA frames that exceed the BLE link MTU via
+per-link fragmentation and reassembly.
+
+**Problem:** BLE MTU is typically 23–517 bytes depending on negotiated ATT
+MTU. CORSA frames (especially onion-wrapped DMs, file transfers) commonly
+exceed this. Without fragmentation, large messages are silently dropped.
+
+**Fragmentation model:** when a frame exceeds the effective chunk size for a
+given link, it is split into numbered fragments. Each fragment is a
+self-contained BLE packet carrying reassembly metadata.
+
+**Effective chunk size:** `chunk_size = max(ble_min_chunk, link_mtu -
+fragment_overhead)`. Fragment overhead = 13 (header) + 8 (sender) + 8
+(recipient) + 5 (fragment metadata: original_type 1b + total_fragments 2b BE
++ fragment_index 2b BE) = 34 bytes. Default link MTU = 469 bytes, yielding
+chunk_size = 435 bytes. `ble_min_chunk` = 64 bytes — hard floor.
+
+**For broadcasts:** the effective chunk size is `min(link_mtu) - overhead`
+across all connected links, ensuring every peer can receive each fragment.
+
+**Fragment packet structure:**
+
+| Field | Size | Description |
+|-------|------|-------------|
+| original_type | 1 byte | message type of the original packet |
+| total_fragments | 2 bytes BE | total number of fragments |
+| fragment_index | 2 bytes BE | 0-based index of this fragment |
+| chunk_data | variable | fragment payload |
+
+The fragment preserves the original packet's sender, recipient, signature,
+route, and TTL.
+
+**Reassembly algorithm:** fragments are keyed by `(sender, timestamp)`.
+Each key maps to a sparse index → data map. When all indices are present,
+fragments are sorted, concatenated, decoded as the original type, and the
+reassembly slot is cleaned up.
+
+**Resource limits:**
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `ble_max_inflight_assemblies` | 50 | cap on concurrent reassembly slots |
+| `ble_fragment_assembly_timeout` | 30 s | timeout for incomplete assemblies |
+| `ble_per_stream_timeout` | 30 s | per-sender stream timeout |
+| memory estimate per slot | ~10.4 KB | bounded memory consumption |
+
+On overflow: reject new assemblies and garbage-collect the oldest incomplete
+slots. Missing fragments after timeout → drop the entire message.
+
+**Fragment staggering:** fragments are not sent back-to-back. A delay of
+`ble_fragment_stagger_ms` (default 15 ms) between fragments balances
+timeliness against peripheral buffer pressure.
+
+**Error handling:** missing fragments → timeout → drop; out-of-order →
+sparse map handles natively; duplicates → idempotent overwrite; assembly
+exhaustion → reject new + cleanup oldest.
+
+**Progress:**
+
+- [ ] Implement per-link MTU negotiation and chunk size computation
+- [ ] Implement fragment split (respecting min chunk floor)
+- [ ] Implement broadcast chunk size (min across all links)
+- [ ] Implement sparse-index reassembly with (sender, timestamp) keying
+- [ ] Implement assembly timeout and max-inflight-assemblies cap
+- [ ] Implement fragment staggering with configurable delay
+- [ ] Implement route inheritance for v2 fragments
+- [ ] Unit test: frame exactly at MTU → no fragmentation
+- [ ] Unit test: frame at MTU+1 → 2 fragments, correct reassembly
+- [ ] Unit test: out-of-order fragments → correct reassembly
+- [ ] Unit test: duplicate fragment → idempotent (no corruption)
+- [ ] Unit test: assembly timeout → slot cleaned up
+- [ ] Unit test: max-inflight exceeded → oldest evicted
+- [ ] Unit test: broadcast chunk size = min(link_mtu) across links
+- [ ] Overload test: fragment flood does not cause unbounded memory growth
+- [ ] Update `docs/protocol/relay.md` (fragment packet format, reassembly contract)
+- [ ] Update `docs/protocol/delivery.md` (fragment priority, staggering parameters)
+
+<a id="iter-a13-3"></a>
+#### A13.3 — BLE deduplication and relay
+
+**Goal:** prevent message amplification in the BLE mesh while ensuring
+reliable multi-hop delivery.
+
+**Problem:** BLE mesh is inherently dense at short range — the same message
+can arrive from multiple peers via different paths. Without deduplication and
+controlled relay, a single broadcast in a 10-node cluster becomes a flood of
+O(N²) retransmissions.
+
+**Deduplication identity:** composite key
+`"{sender_hex}-{timestamp_ms}-{message_type}"`. This is deterministic — any
+node receiving the same original message computes the same dedup ID.
+
+**Bloom filter cache:** a compact probabilistic cache with bounded memory.
+False positives cause occasional message drops (acceptable for gossip
+semantics); false negatives are impossible (no duplicate amplification).
+The filter is cleared on panic/reset.
+
+**Self-broadcast pre-marking:** before broadcasting a message, the node marks
+its own dedup ID in the filter. This prevents the message from being processed
+a second time if it echoes back through the mesh.
+
+**Ingress suppression:** for each message, the node records which link it
+arrived from (`ingress_by_message[dedup_id] = ingress_link`). When relaying,
+the ingress link is excluded from the relay candidate set — the message is
+never sent back the way it came.
+
+**Deterministic K-of-N fanout:** to prevent storms in dense meshes, broadcast
+messages use a deterministic subset of relay candidates. The dedup ID is used
+as a seed to pick K out of N eligible links. Special cases:
+
+| Message type | Fanout strategy |
+|--------------|-----------------|
+| ANNOUNCE | all links (full flood) |
+| REQUEST_SYNC | all links |
+| broadcast MESSAGE | K-of-N subset (seed = dedup_id) |
+| directed/routed | all relevant links |
+| routed fragments | inherit parent routing behavior |
+
+**Adaptive relay aggressiveness:** nodes with degree > `ble_high_degree_threshold`
+(default 8) reduce K/N ratio to dampen storms. Low-degree nodes relay at
+full aggressiveness to ensure connectivity.
+
+**TTL enforcement:** each relay decrements TTL before forwarding. Packets
+arriving with TTL = 0 are not relayed. Default TTL = `ble_message_ttl`
+(default 3).
+
+**Gossip sync protocol (GCS):** for eventual consistency, nodes periodically
+exchange compact Golomb-Coded Set (GCS) filters representing their seen-message
+sets. A node receiving a GCS filter can determine which messages the peer is
+missing and retransmit them.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `ble_sync_seen_capacity` | 10,000 | max entries in seen-message set |
+| `ble_gcs_max_bytes` | 4,096 | max GCS filter size |
+| `ble_gcs_target_fpr` | 0.01 | target false positive rate |
+| `ble_sync_cadence_text` | 10 s | sync interval for text messages |
+| `ble_sync_cadence_fragment` | 30 s | sync interval for fragments |
+| `ble_sync_cadence_file` | 60 s | sync interval for file transfers |
+
+**Progress:**
+
+- [ ] Implement Bloom filter dedup cache with bounded memory
+- [ ] Implement composite dedup ID generation
+- [ ] Implement self-broadcast pre-marking
+- [ ] Implement ingress suppression (exclude arrival link from relay set)
+- [ ] Implement deterministic K-of-N fanout (seeded by dedup ID)
+- [ ] Implement adaptive relay aggressiveness (density-aware K/N ratio)
+- [ ] Implement TTL enforcement on relay
+- [ ] Implement GCS-based gossip sync protocol
+- [ ] Implement per-type sync cadence (text > fragments > file transfers)
+- [ ] Unit test: self-broadcast pre-marked → echo not re-processed
+- [ ] Unit test: ingress link excluded from relay candidates
+- [ ] Unit test: K-of-N fanout deterministic for same dedup ID
+- [ ] Unit test: high-degree node reduces relay aggressiveness
+- [ ] Unit test: TTL=0 → not relayed
+- [ ] Unit test: GCS round-trip encodes/decodes correctly
+- [ ] Overload test: 20-node cluster broadcast does not amplify beyond O(N·K)
+- [ ] Update `docs/protocol/relay.md` (BLE dedup model, fanout strategy, GCS sync)
+- [ ] Update `docs/encryption.md` (Bloom filter parameterization, dedup ID composition)
+
+<a id="iter-a13-4"></a>
+#### A13.4 — BLE rate limiting and QoS
+
+**Goal:** prevent any single peer, message type, or traffic pattern from
+starving others on the constrained BLE transport.
+
+**Problem:** BLE bandwidth is 1–2 orders of magnitude below WebSocket. Without
+explicit QoS, a single file transfer or fragment flood can block all DM
+delivery for other peers.
+
+**Outbound priority scheduling:** every BLE write is assigned a priority
+class. When the peripheral is busy, writes are enqueued by priority; when the
+peripheral becomes ready, the highest-priority write is dequeued first.
+
+**Priority hierarchy (descending):**
+
+| Priority | Traffic class | Rationale |
+|----------|---------------|-----------|
+| 1 (highest) | control frames (ANNOUNCE, handshake) | topology and session setup |
+| 2 | fragments (by total_fragments ascending) | smaller fragment groups first |
+| 3 | DM / receipt | user-facing latency-sensitive |
+| 4 | file transfer | bulk, latency-tolerant |
+| 5 (lowest) | gossip sync, low-priority | best-effort background |
+
+Within priority 2, fragment groups with fewer total fragments are sent first —
+a 2-fragment message completes ahead of a 16-fragment file.
+
+**Per-peripheral write backpressure:** each connected peripheral has an
+independent write queue. If the peripheral signals "not ready" (buffer full),
+writes accumulate in the priority queue. When the "ready" callback fires, the
+highest-priority pending write is sent. This prevents one slow peripheral from
+blocking writes to others.
+
+**Fragment pacing:** fragments are staggered with
+`ble_fragment_stagger_ms` (default 15 ms) between sends. This balances
+delivery timeliness against peripheral buffer saturation.
+
+**Transfer concurrency limiting:** at most `ble_max_concurrent_transfers`
+(default 3) large fragmented transfers (file transfers) may be in-flight
+simultaneously. Additional transfers are queued and dequeued on completion.
+This prevents bulk transfers from monopolizing the BLE link.
+
+**Announce rate limiting:** subscription-level rate limiting tracks per-peer
+`last_announce_time`, attempt count, and backoff interval. This prevents
+enumeration attacks (an adversary rapidly requesting ANNOUNCEs to map the
+mesh) and limits announce storms in dense networks.
+
+**Adaptive scanning:** the BLE scanner adjusts duty cycle based on mesh
+conditions:
+
+| Condition | Scan behavior |
+|-----------|---------------|
+| isolated (0 peers) | aggressive scan, long windows |
+| sparse (1–3 peers) | normal duty cycle |
+| dense (> threshold) | reduced scan, save battery |
+| recent activity | short nudge scan for convergence |
+| low battery | minimal scan, longest intervals |
+
+**Store-and-forward outbox:** when a peer is not currently reachable over BLE,
+messages are queued in a per-peer outbox. Limits: `ble_outbox_max_per_peer`
+(default 100 messages), `ble_outbox_ttl` (default 24 h), FIFO eviction on
+overflow. When the peer becomes reachable, the outbox is flushed.
+
+**Operational limits summary:**
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `ble_high_degree_threshold` | 8 | above this, reduce relay/announce aggressiveness |
+| `ble_max_concurrent_transfers` | 3 | cap on simultaneous bulk transfers |
+| `ble_outbox_max_per_peer` | 100 | per-peer store-and-forward cap |
+| `ble_outbox_ttl` | 86,400 s | outbox message lifetime |
+| `ble_connection_budget` | 7 | max simultaneous BLE connections |
+| `ble_connect_timeout` | 10 s | connection attempt timeout (with backoff) |
+| `ble_maintenance_interval` | 5 s | periodic maintenance timer |
+| `ble_dynamic_rssi_threshold` | -75 dBm | minimum signal strength for connection |
+
+**Progress:**
+
+- [ ] Implement priority queue with 5-level hierarchy
+- [ ] Implement per-peripheral write backpressure (independent queues)
+- [ ] Implement fragment pacing with configurable stagger delay
+- [ ] Implement transfer concurrency limiter
+- [ ] Implement announce rate limiting (per-peer backoff)
+- [ ] Implement adaptive scanning (density/battery/activity-aware)
+- [ ] Implement store-and-forward outbox with TTL and FIFO eviction
+- [ ] Implement connection budget enforcement
+- [ ] Unit test: priority ordering — control > fragment > DM > file > gossip
+- [ ] Unit test: small fragment group dequeued before large fragment group
+- [ ] Unit test: peripheral not-ready → write queued, ready → dequeued by priority
+- [ ] Unit test: concurrent transfer cap → excess queued, dequeued on completion
+- [ ] Unit test: outbox flush triggered on peer reachability change
+- [ ] Unit test: outbox TTL expiry → stale messages evicted
+- [ ] Unit test: adaptive scan duty cycle adjusts to peer count
+- [ ] Overload test: file transfer flood does not block DM delivery
+- [ ] Overload test: announce storm does not exhaust CPU/memory
+- [ ] Update `docs/protocol/relay.md` (BLE QoS priority hierarchy, backpressure model)
+- [ ] Update `docs/encryption.md` (handshake rate limiting parameters)
+- [ ] Update `docs/protocol/delivery.md` (BLE outbox, transfer concurrency, scan adaptation)
+
+**Panic mode (BLE-specific):** on panic trigger, the BLE subsystem clears all
+pending write queues, relay buffers, dedup state, store-and-forward outboxes,
+fragment assembly slots, and topology state. Noise sessions are wiped. The
+BLE service is rebuilt from scratch with a fresh identity. This ensures no
+local BLE state survives an emergency wipe. What survives: OS-level BLE
+bonding (outside app control), remote peers' cached topology entries (expire
+naturally via freshness TTL).
 
 <a id="iter-a14"></a>
-### Iteration A14 — Custom encryption builder
+### Iteration A14 — Meshtastic last mile
 
-**Goal:** keep any custom “brick-based” encryption workflow strictly isolated as
+**Goal:** integrate a radio-based last-mile path via Meshtastic LoRa hardware,
+enabling CORSA message delivery in off-grid, field, or infrastructure-denied
+environments. Meshtastic operates as a transport bridge — it carries CORSA
+frames over LoRa radio without altering identity, encryption, or routing
+semantics above the transport layer.
+
+**Dependency:** follows BLE (A13) because Meshtastic shares the constrained-
+transport challenges (fragmentation, QoS, dedup) already solved for BLE, and
+the transport abstraction must support both. Radio-specific adaptations build
+on the BLE transport patterns.
+
+**Done when:** all three sub-iterations below are complete.
+
+#### Why Meshtastic
+
+Meshtastic devices form LoRa mesh networks at 868/915 MHz with range of 1–10+
+km depending on terrain and antenna. They communicate via Bluetooth or serial
+with a companion device (phone/laptop). CORSA uses the Meshtastic device as a
+radio modem — the companion device runs the CORSA node and bridges frames to
+the LoRa mesh through the Meshtastic serial/BLE API.
+
+```mermaid
+graph LR
+    subgraph "Device A (CORSA node)"
+        APP_A["CORSA app"]
+        MT_A["Meshtastic<br/>radio"]
+    end
+
+    subgraph "Device B (CORSA node)"
+        APP_B["CORSA app"]
+        MT_B["Meshtastic<br/>radio"]
+    end
+
+    APP_A -->|BLE/Serial| MT_A
+    MT_A -.->|LoRa 868/915 MHz| MT_B
+    MT_B -->|BLE/Serial| APP_B
+
+    style APP_A fill:#e8f5e9,stroke:#2e7d32
+    style APP_B fill:#e8f5e9,stroke:#2e7d32
+    style MT_A fill:#fff3e0,stroke:#e65100
+    style MT_B fill:#fff3e0,stroke:#e65100
+```
+*Diagram — Meshtastic as a radio transport bridge for CORSA*
+
+#### Radio constraints vs BLE
+
+| Property | BLE (A13) | Meshtastic (A14) |
+|----------|-----------|------------------|
+| Range | 10–100 m | 1–10+ km |
+| MTU | 469 bytes (typical) | 237 bytes (max LoRa payload) |
+| Bandwidth | ~1 Mbit/s | ~1–10 kbit/s |
+| Latency | 5–50 ms | 500 ms – 5 s per hop |
+| Duty cycle | unrestricted | regulatory limit (1–10% in EU) |
+| Power | mW range | 100 mW – 1 W |
+| Topology | dense local mesh | sparse long-range mesh |
+
+These constraints mean Meshtastic reuses BLE patterns (fragmentation, QoS,
+dedup) but with tighter limits and different tuning.
+
+<a id="iter-a14-1"></a>
+#### A14.1 — Meshtastic transport bridge
+
+**Goal:** establish the Meshtastic serial/BLE API as a working CORSA
+transport: send frames, receive frames, discover radio-reachable peers.
+
+**How it works:** the Meshtastic transport implements the same transport
+interface as BLE (`isPeerConnected()`, `isPeerReachable()`, `send()`). The
+CORSA node communicates with the local Meshtastic device via its protobuf
+serial API. Outbound CORSA frames are serialized into Meshtastic
+`DATA_APP` packets on a dedicated port number; inbound packets on that port
+are deserialized back into CORSA frames.
+
+**Peer discovery:** Meshtastic provides its own node discovery via
+`NodeInfo` messages. The CORSA transport maps Meshtastic node IDs to CORSA
+identity fingerprints using an ANNOUNCE exchange over the radio channel.
+The mapping is cached with the same freshness model as BLE (two-tier:
+verified / unverified).
+
+**Channel isolation:** CORSA traffic uses a dedicated Meshtastic channel
+(configurable `meshtastic_channel_index`, default 1) separate from the
+default Meshtastic chat channel. This prevents CORSA frames from appearing
+as garbled text in the Meshtastic app and isolates CORSA traffic from
+non-CORSA Meshtastic users.
+
+**Progress:**
+
+- [ ] Implement Meshtastic serial/BLE API client (protobuf)
+- [ ] Implement CORSA frame serialization into `DATA_APP` packets
+- [ ] Implement dedicated channel isolation (`meshtastic_channel_index`)
+- [ ] Implement peer discovery via NodeInfo → ANNOUNCE mapping
+- [ ] Implement transport interface (isPeerConnected, isPeerReachable, send)
+- [ ] Implement Meshtastic node ID → CORSA fingerprint cache
+- [ ] Unit test: CORSA frame round-trips through Meshtastic serialization
+- [ ] Unit test: channel isolation — CORSA frames only on configured channel
+- [ ] Unit test: peer discovery maps Meshtastic nodeID to CORSA fingerprint
+- [ ] Integration test: two CORSA nodes exchange DM via Meshtastic bridge
+- [ ] Update `docs/protocol/relay.md` (Meshtastic transport registration, channel config)
+- [ ] Update `docs/protocol/delivery.md` (Meshtastic reachability model)
+
+<a id="iter-a14-2"></a>
+#### A14.2 — Radio-aware fragmentation and pacing
+
+**Goal:** deliver frames exceeding the LoRa MTU (237 bytes) reliably, with
+pacing that respects regulatory duty cycle limits.
+
+**Problem:** Meshtastic max payload is 237 bytes — roughly half of BLE. A
+typical DM frame (with onion wrapping) easily exceeds this. Additionally,
+LoRa operates under regulatory duty cycle limits (1% in EU 868 MHz, 10% in
+US 915 MHz) — sending too many fragments too fast violates regulations and
+causes packet loss.
+
+**Fragmentation:** reuses the A13.2 fragmentation model with radio-specific
+parameters:
+
+| Parameter | BLE (A13) | Meshtastic (A14) |
+|-----------|-----------|------------------|
+| default MTU | 469 bytes | 237 bytes |
+| min chunk size | 64 bytes | 32 bytes |
+| fragment overhead | 34 bytes | 34 bytes |
+| effective chunk | 435 bytes | 203 bytes |
+| max inflight assemblies | 50 | 20 |
+| assembly timeout | 30 s | 120 s |
+
+**Duty-cycle-aware pacing:** instead of BLE's fixed stagger delay, Meshtastic
+fragments are paced based on the remaining duty cycle budget. The transport
+tracks cumulative airtime and pauses transmission when approaching the duty
+cycle ceiling. Configuration: `meshtastic_duty_cycle_limit` (default 0.1 for
+US, 0.01 for EU), `meshtastic_airtime_window` (default 3600 s).
+
+**Airtime estimation:** each fragment's airtime is estimated from payload
+size, spreading factor, and bandwidth: `airtime_ms ≈ preamble_ms +
+(payload_bytes × 8 / bitrate)`. The transport maintains a sliding window of
+cumulative airtime and blocks sends when `cumulative_airtime /
+airtime_window > duty_cycle_limit`.
+
+**Fragment priority:** same 5-level priority hierarchy as A13.4, but with
+an additional rule: when duty cycle budget is low (< 20% remaining), only
+priority 1–2 (control + fragments for in-progress assemblies) are sent;
+lower priorities are deferred until the budget recovers.
+
+**Progress:**
+
+- [ ] Implement radio MTU detection and chunk size computation
+- [ ] Implement duty-cycle-aware pacing with airtime tracking
+- [ ] Implement airtime estimation (SF/BW-aware)
+- [ ] Implement duty-cycle budget gating (priority cutoff at low budget)
+- [ ] Implement extended assembly timeout for radio latency
+- [ ] Unit test: frame at 237 bytes → no fragmentation
+- [ ] Unit test: frame at 238 bytes → 2 fragments, correct reassembly
+- [ ] Unit test: duty cycle exceeded → send blocked until budget recovers
+- [ ] Unit test: low budget → only priority 1–2 sent
+- [ ] Unit test: assembly timeout 120s honored (not 30s BLE default)
+- [ ] Overload test: fragment flood respects duty cycle limit
+- [ ] Update `docs/protocol/relay.md` (radio fragmentation parameters, duty cycle pacing)
+- [ ] Update `docs/protocol/delivery.md` (Meshtastic QoS, airtime budget)
+
+<a id="iter-a14-3"></a>
+#### A14.3 — Radio mesh relay and deduplication
+
+**Goal:** enable multi-hop message relay over the LoRa mesh while preventing
+amplification in the low-bandwidth radio environment.
+
+**Problem:** LoRa bandwidth is ~1000× lower than BLE. A broadcast storm that
+is merely annoying on BLE becomes fatal on LoRa — a single amplification loop
+can saturate the channel for minutes and violate duty cycle regulations.
+
+**Deduplication:** reuses the A13.3 Bloom filter + ingress suppression model.
+The dedup cache is sized smaller for radio: `meshtastic_dedup_capacity`
+(default 2,000 entries) with TTL = 300 s (longer than BLE, because radio
+messages propagate slower).
+
+**Relay fanout:** in the radio context, K-of-N fanout is more aggressive —
+default K = 1 for broadcasts (single-relay gossip). Only ANNOUNCE and
+directed messages use full fanout. This is necessary because each radio
+retransmission consumes shared airtime.
+
+| Message type | Radio fanout | BLE fanout |
+|--------------|-------------|------------|
+| ANNOUNCE | all | all |
+| directed | all relevant | all relevant |
+| broadcast MESSAGE | K=1 (single relay) | K-of-N subset |
+| gossip sync | suppressed | K-of-N |
+
+**Gossip sync suppression:** GCS-based gossip sync (A13.3) is **disabled** on
+the Meshtastic transport by default. The airtime cost of exchanging GCS
+filters outweighs the benefit at LoRa data rates. Instead, missing messages
+are detected via delivery receipts and retransmitted on demand.
+
+**TTL:** `meshtastic_message_ttl` (default 2). Lower than BLE because each
+radio hop is expensive; messages that need more hops should use the internet-
+connected mesh instead.
+
+**Bridge relay:** when a CORSA node has both BLE and Meshtastic transports
+active, it can bridge between them. A message arriving via LoRa can be
+relayed onto BLE (and vice versa) if the routing table indicates the
+destination is reachable on the other transport. Bridge relay follows the
+standard transport selection logic — no special-case code.
+
+**Progress:**
+
+- [ ] Implement radio-specific Bloom filter dedup (smaller capacity, longer TTL)
+- [ ] Implement K=1 single-relay gossip for radio broadcasts
+- [ ] Implement gossip sync suppression flag for Meshtastic transport
+- [ ] Implement radio TTL enforcement (default 2)
+- [ ] Implement BLE↔Meshtastic bridge relay via transport selection
+- [ ] Unit test: radio dedup prevents amplification on retransmit
+- [ ] Unit test: K=1 fanout — broadcast relayed to exactly 1 peer
+- [ ] Unit test: gossip sync disabled on Meshtastic by default
+- [ ] Unit test: bridge relay — LoRa→BLE and BLE→LoRa paths work
+- [ ] Unit test: radio TTL=0 → not relayed
+- [ ] Overload test: radio broadcast storm bounded by K=1 + TTL=2
+- [ ] Integration test: 3-node chain A(BLE)→B(BLE+LoRa)→C(LoRa) delivers DM
+- [ ] Update `docs/protocol/relay.md` (radio relay rules, bridge relay, gossip suppression)
+- [ ] Update `docs/encryption.md` (Bloom filter sizing for radio)
+- [ ] Update `docs/protocol/delivery.md` (Meshtastic TTL, bridge transport selection)
+
+<a id="iter-a15"></a>
+### Iteration A15 — Custom encryption builder
+
+**Goal:** keep any custom "brick-based" encryption workflow strictly isolated as
 an experimental laboratory feature.
 
 **Constraint:** this must never replace audited cryptography or be marketed as
@@ -1149,38 +3041,79 @@ stronger than reviewed encryption.
 disabled by default, and separated from the main security claims of the
 product.
 
+<a id="iter-a16"></a>
+### Iteration A16 — Voice calls
+
+**Goal:** enable real-time voice communication between identities over the mesh
+network, with end-to-end encryption and onion routing where available.
+
+**Dependency:** requires stable onion delivery (A9) for private call setup and
+signaling. Requires reliable relay (Iterations 1–3) for media transport.
+
+**Transport restriction:** voice calls operate exclusively over TCP/IP mesh
+connections. BLE (A13) and Meshtastic LoRa (A14) transports are explicitly
+excluded — their bandwidth and latency characteristics are incompatible with
+real-time audio requirements.
+
+**Done when:** two identities can establish a voice call with end-to-end
+encryption, the call setup is signaled through onion routes (if available),
+media packets are relayed with bounded latency, and the protocol degrades
+gracefully when network conditions are insufficient.
+
 ### Product iteration dependency graph
 
 ```mermaid
 graph LR
-    A1["A1<br/>Local names"] --> A2["A2<br/>Global names"]
-    A2 --> A3["A3<br/>Message deletion"]
-    A3 --> A4["A4<br/>Android"]
-    A4 --> A5["A5<br/>Second-layer encryption"]
-    A5 --> A6["A6<br/>DPI bypass"]
-    A6 --> A7["A7<br/>Google WSS fallback"]
-    A7 --> A8["A8<br/>SOCKS5 tunnel"]
-    A8 --> A9["A9<br/>Gazeta extensions"]
-    A9 --> A10["A10<br/>iOS"]
-    A10 --> A11["A11<br/>BLE last mile"]
-    A11 --> A12["A12<br/>Onion DM"]
-    A12 --> A13["A13<br/>Meshtastic last mile"]
-    A13 --> A14["A14<br/>Custom encryption builder"]
+    A1["A1<br/>Local names"] --> A2["A2<br/>Message deletion"]
+    A2 --> A3["A3<br/>Android"]
+    A3 --> A4["A4<br/>Second-layer encryption"]
+    A4 --> A5["A5<br/>DPI bypass"]
+    A5 --> A6["A6<br/>Google WSS fallback"]
+    A6 --> A7["A7<br/>SOCKS5 tunnel"]
+    A7 --> A8["A8<br/>Group chats"]
+    A8 --> A9_1["A9.1<br/>Onion wrapping"]
+    A9_1 --> A9_2["A9.2<br/>Onion receipts"]
+    A9_2 --> A9_3["A9.3<br/>Forward secrecy"]
+    A9_3 --> A9_4["A9.4<br/>Path diversity"]
+    A9_4 --> A9_5["A9.5<br/>Traffic analysis"]
+    A9_5 --> A10["A10<br/>Global names"]
+    A10 --> A11["A11<br/>Gazeta extensions"]
+    A11 --> A12["A12<br/>iOS"]
+    A12 --> A13_1["A13.1<br/>BLE transport"]
+    A13_1 --> A13_2["A13.2<br/>BLE fragmentation"]
+    A13_2 --> A13_3["A13.3<br/>BLE dedup/relay"]
+    A13_3 --> A13_4["A13.4<br/>BLE QoS"]
+    A13_4 --> A14_1["A14.1<br/>Meshtastic bridge"]
+    A14_1 --> A14_2["A14.2<br/>Radio fragmentation"]
+    A14_2 --> A14_3["A14.3<br/>Radio relay"]
+    A14_3 --> A15["A15<br/>Custom encryption builder"]
+    A15 --> A16["A16<br/>Voice calls"]
 
     style A1 fill:#e8f5e9,stroke:#2e7d32
+    style A10 fill:#e8f5e9,stroke:#2e7d32
     style A2 fill:#e8f5e9,stroke:#2e7d32
     style A3 fill:#e8f5e9,stroke:#2e7d32
-    style A4 fill:#e8f5e9,stroke:#2e7d32
+    style A4 fill:#fff3e0,stroke:#e65100
     style A5 fill:#fff3e0,stroke:#e65100
     style A6 fill:#fff3e0,stroke:#e65100
     style A7 fill:#fff3e0,stroke:#e65100
-    style A8 fill:#fff3e0,stroke:#e65100
-    style A9 fill:#fff3e0,stroke:#e65100
-    style A10 fill:#f3e5f5,stroke:#7b1fa2
-    style A11 fill:#f3e5f5,stroke:#7b1fa2
+    style A11 fill:#fff3e0,stroke:#e65100
     style A12 fill:#f3e5f5,stroke:#7b1fa2
-    style A13 fill:#f3e5f5,stroke:#7b1fa2
-    style A14 fill:#ffebee,stroke:#c62828
+    style A13_1 fill:#f3e5f5,stroke:#7b1fa2
+    style A13_2 fill:#f3e5f5,stroke:#7b1fa2
+    style A13_3 fill:#f3e5f5,stroke:#7b1fa2
+    style A13_4 fill:#f3e5f5,stroke:#7b1fa2
+    style A9_1 fill:#e3f2fd,stroke:#1565c0
+    style A9_2 fill:#e3f2fd,stroke:#1565c0
+    style A9_3 fill:#e3f2fd,stroke:#1565c0
+    style A9_4 fill:#e3f2fd,stroke:#1565c0
+    style A9_5 fill:#e3f2fd,stroke:#1565c0
+    style A14_1 fill:#fff3e0,stroke:#e65100
+    style A14_2 fill:#fff3e0,stroke:#e65100
+    style A14_3 fill:#fff3e0,stroke:#e65100
+    style A8 fill:#e8f5e9,stroke:#2e7d32
+    style A15 fill:#ffebee,stroke:#c62828
+    style A16 fill:#fff3e0,stroke:#e65100
 ```
 *Diagram — Product iterations after mesh*
 

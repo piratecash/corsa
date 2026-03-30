@@ -21,6 +21,7 @@ Current repository status:
 
 Main docs:
 
+- **roadmap: [docs/roadmap.md](docs/roadmap.md)** — protocol evolution plan: mesh relay, gossip, routing, reputation, onion DM, BLE transport, Meshtastic bridge, and more
 - architecture: [docs/architecture.md](docs/architecture.md)
 - protocol: [docs/protocol.md](docs/protocol.md)
 - encryption: [docs/encryption.md](docs/encryption.md)
@@ -182,6 +183,7 @@ docker run -d -p 64646:64646 \
 
 Основные документы:
 
+- **дорожная карта: [docs/roadmap.ru.md](docs/roadmap.ru.md)** — план развития протокола: mesh relay, gossip, маршрутизация, репутация, onion DM, BLE транспорт, Meshtastic bridge и другое
 - архитектура: [docs/architecture.md](docs/architecture.md)
 - протокол: [docs/protocol.md](docs/protocol.md)
 - шифрование: [docs/encryption.md](docs/encryption.md)
