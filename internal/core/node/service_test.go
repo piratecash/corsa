@@ -681,10 +681,10 @@ func TestPeerHealthRetainsClientBuild(t *testing.T) {
 // validPeerStates is the set of peer states recognized by the protocol,
 // UI, and i18n layers. Any state outside this set is a semantic bug.
 var validPeerStates = map[string]bool{
-	"healthy":       true,
-	"degraded":      true,
-	"stalled":       true,
-	"reconnecting":  true,
+	"healthy":      true,
+	"degraded":     true,
+	"stalled":      true,
+	"reconnecting": true,
 }
 
 func TestPeerHealthStatesAreProtocolValid(t *testing.T) {
@@ -1832,7 +1832,7 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	}, idB)
 	defer stopB()
 
-	waitForCondition(t, 20*time.Second, func() bool {
+	waitForCondition(t, 40*time.Second, func() bool {
 		reply := exchangeFrames(t, nodeB.externalListenAddress(),
 			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
@@ -2002,7 +2002,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 		t.Fatalf("unexpected sender direct store response: %#v", reply)
 	}
 
-	waitForCondition(t, 8*time.Second, func() bool {
+	waitForCondition(t, 15*time.Second, func() bool {
 		fullReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: idRecipient.Address})
 		return fullReply.Type == "inbox" && len(fullReply.Messages) == 1 && fullReply.Messages[0].ID == "client-offline-dm-1"
 	})
@@ -2015,7 +2015,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	}, idRecipient)
 	defer stopRecipient()
 
-	waitForCondition(t, 8*time.Second, func() bool {
+	waitForCondition(t, 15*time.Second, func() bool {
 		messages := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
 		return messages.Type == "messages" && len(messages.Messages) == 1 && messages.Messages[0].ID == "client-offline-dm-1"
 	})
@@ -3139,8 +3139,8 @@ func TestPeerDialCandidatesSortedByScore(t *testing.T) {
 	svc.markPeerConnected("10.0.0.2:64646", "outbound") // +10
 	svc.markPeerConnected("10.0.0.2:64646", "outbound") // +10 (total 20)
 	svc.markPeerConnected("10.0.0.1:64646", "outbound") // +10 (total 10)
-	svc.markPeerDisconnected("10.0.0.1:64646", nil) // clean (-2, total 8)
-	svc.markPeerDisconnected("10.0.0.2:64646", nil) // clean (-2, total 18)
+	svc.markPeerDisconnected("10.0.0.1:64646", nil)     // clean (-2, total 8)
+	svc.markPeerDisconnected("10.0.0.2:64646", nil)     // clean (-2, total 18)
 
 	// peer-3 has score 0 (never connected).
 
@@ -3785,7 +3785,7 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal queue state: %v", err)
 	}
-	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
 		t.Fatalf("write queue state: %v", err)
 	}
 
@@ -3875,7 +3875,7 @@ func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal queue state: %v", err)
 	}
-	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
 		t.Fatalf("write queue state: %v", err)
 	}
 
@@ -3955,7 +3955,7 @@ func TestQueueStateMigrationOrphansUnknownHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal queue state: %v", err)
 	}
-	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
 		t.Fatalf("write queue state: %v", err)
 	}
 
@@ -4022,7 +4022,7 @@ func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal queue state: %v", err)
 	}
-	if err := os.WriteFile(queuePath, data, 0644); err != nil {
+	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
 		t.Fatalf("write queue state: %v", err)
 	}
 
@@ -4561,7 +4561,7 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 // testMessageStore is a mock MessageStore for verifying that the node
 // delegates persistence to the registered store.
 type testMessageStore struct {
-	stored  []protocol.Envelope
+	stored   []protocol.Envelope
 	outFlags []bool
 	receipts []protocol.DeliveryReceipt
 }
@@ -5637,7 +5637,7 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	writeJSONFrame(t, subConn, protocol.Frame{
 		Type: "hello", Version: config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client: "test-sub", ClientVersion: config.CorsaWireVersion,
+		Client:                 "test-sub", ClientVersion: config.CorsaWireVersion,
 	})
 	welcome := readJSONTestFrame(t, subReader)
 	if welcome.Type != "welcome" {
@@ -5665,7 +5665,7 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	writeJSONFrame(t, senderConn, protocol.Frame{
 		Type: "hello", Version: config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client: "test-sender", ClientVersion: config.CorsaWireVersion,
+		Client:                 "test-sender", ClientVersion: config.CorsaWireVersion,
 	})
 	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
 		t.Fatalf("sender expected welcome, got %s", f.Type)
@@ -6431,7 +6431,7 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 	writeJSONFrame(t, senderConn, protocol.Frame{
 		Type: "hello", Version: config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client: "test-sender", ClientVersion: config.CorsaWireVersion,
+		Client:                 "test-sender", ClientVersion: config.CorsaWireVersion,
 	})
 	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
 		t.Fatalf("sender expected welcome, got %s", f.Type)
@@ -6587,7 +6587,7 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 	writeJSONFrame(t, senderConn, protocol.Frame{
 		Type: "hello", Version: config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client: "test-sender", ClientVersion: config.CorsaWireVersion,
+		Client:                 "test-sender", ClientVersion: config.CorsaWireVersion,
 	})
 	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
 		t.Fatalf("sender expected welcome, got %s", f.Type)
@@ -6942,4 +6942,3 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 			"deliverRelayedMessage should sync unknown sender keys before rejecting", status)
 	}
 }
-

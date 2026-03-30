@@ -36,9 +36,11 @@ Messages and receipts are persisted and replayed to subscribers, ensuring no dat
   "type": "subscribe_inbox",
   "topic": "dm",
   "recipient": "<recipient-fingerprint>",
-  "subscriber": "<subscriber-fingerprint>"
+  "subscriber": "<subscriber-route-id>"
 }
 ```
+
+The `subscriber` field is an opaque route identifier used to key the subscription internally. It is **not** validated as a fingerprint. If omitted, the server substitutes the connection's remote address (`conn.RemoteAddr().String()`). For outbound (reverse) subscriptions the node sends its own `AdvertiseAddress` as the subscriber value. Clients should treat this field as an opaque string and must not assume fingerprint format.
 
 **Response:**
 ```json
@@ -46,11 +48,13 @@ Messages and receipts are persisted and replayed to subscribers, ensuring no dat
   "type": "subscribed",
   "topic": "dm",
   "recipient": "<recipient-fingerprint>",
-  "subscriber": "<subscriber-fingerprint>",
+  "subscriber": "<subscriber-route-id>",
   "status": "ok",
   "count": 1
 }
 ```
+
+The response echoes the resolved `subscriber` value (which may differ from the request if the server substituted a default).
 
 **Behavior:**
 - Registers the subscriber as a live listener for future messages
@@ -328,9 +332,11 @@ sequenceDiagram
   "type": "subscribe_inbox",
   "topic": "dm",
   "recipient": "<отпечаток-получателя>",
-  "subscriber": "<отпечаток-подписчика>"
+  "subscriber": "<идентификатор-маршрута>"
 }
 ```
+
+Поле `subscriber` — непрозрачный идентификатор маршрута, используемый для ключевания подписки. Оно **не** валидируется как fingerprint. Если не указано, сервер подставляет адрес соединения (`conn.RemoteAddr().String()`). Для исходящих (обратных) подписок нода отправляет свой `AdvertiseAddress` как значение subscriber. Клиенты должны считать это поле непрозрачной строкой и не рассчитывать на формат fingerprint.
 
 **Ответ:**
 ```json
@@ -338,11 +344,13 @@ sequenceDiagram
   "type": "subscribed",
   "topic": "dm",
   "recipient": "<отпечаток-получателя>",
-  "subscriber": "<отпечаток-подписчика>",
+  "subscriber": "<идентификатор-маршрута>",
   "status": "ok",
   "count": 1
 }
 ```
+
+В ответе возвращается разрешённое значение `subscriber` (которое может отличаться от запроса, если сервер подставил значение по умолчанию).
 
 **Поведение:**
 - Регистрирует подписчика как активного слушателя для будущих сообщений

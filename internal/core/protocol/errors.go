@@ -27,6 +27,7 @@ const (
 	ErrCodeInvalidAuthSignature       = "invalid-auth-signature"
 	ErrCodeBlacklisted                = "blacklisted"
 	ErrCodeInvalidAckDelete           = "invalid-ack-delete"
+	ErrCodeFrameTooLarge              = "frame-too-large"
 )
 
 var (
@@ -54,6 +55,7 @@ var (
 	ErrInvalidAuthSignature       = errors.New(ErrCodeInvalidAuthSignature)
 	ErrBlacklisted                = errors.New(ErrCodeBlacklisted)
 	ErrInvalidAckDelete           = errors.New(ErrCodeInvalidAckDelete)
+	ErrFrameTooLarge              = errors.New(ErrCodeFrameTooLarge)
 )
 
 func ErrorCode(err error) string {
@@ -106,6 +108,8 @@ func ErrorCode(err error) string {
 		return ErrCodeBlacklisted
 	case errors.Is(err, ErrInvalidAckDelete):
 		return ErrCodeInvalidAckDelete
+	case errors.Is(err, ErrFrameTooLarge):
+		return ErrCodeFrameTooLarge
 	default:
 		return ErrCodeProtocol
 	}
@@ -159,6 +163,8 @@ func ErrorFromCode(code string) error {
 		return ErrBlacklisted
 	case ErrCodeInvalidAckDelete:
 		return ErrInvalidAckDelete
+	case ErrCodeFrameTooLarge:
+		return ErrFrameTooLarge
 	default:
 		return ErrProtocol
 	}

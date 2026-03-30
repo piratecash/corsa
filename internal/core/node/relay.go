@@ -39,17 +39,25 @@ type relayForwardState struct {
 // relayStateStore is a concurrency-safe store for relay forwarding state.
 // It is embedded in Service but has its own mutex to avoid contention with
 // the main Service.mu on high-throughput relay paths.
+//
+// Capacity limits: the store enforces maxRelayStates (global) and
+// maxRelayStatesPerPeer (per PreviousHop) to prevent unbounded growth
+// under relay floods. When a limit is hit, new entries are rejected —
+// the relay message is silently dropped (same as dedupe).
 type relayStateStore struct {
-	mu      sync.Mutex
-	states  map[string]*relayForwardState // keyed by message ID
-	stopCh  chan struct{}
-	onEvict func() // called after TTL ticker removes expired entries; set by Service for persistence
+	mu       sync.Mutex
+	states   map[string]*relayForwardState // keyed by message ID
+	perPeer  map[string]int                // PreviousHop → count of active states
+	stopCh   chan struct{}
+	onEvict  func() // called after TTL ticker removes expired entries; set by Service for persistence
+	rejected int64  // counter for monitoring: entries rejected due to capacity
 }
 
 func newRelayStateStore() *relayStateStore {
 	return &relayStateStore{
-		states: make(map[string]*relayForwardState),
-		stopCh: make(chan struct{}),
+		states:  make(map[string]*relayForwardState),
+		perPeer: make(map[string]int),
+		stopCh:  make(chan struct{}),
 	}
 }
 
@@ -88,6 +96,12 @@ func (rs *relayStateStore) decrementTTLs() {
 	for id, state := range rs.states {
 		state.RemainingTTL--
 		if state.RemainingTTL <= 0 {
+			if state.PreviousHop != "" {
+				rs.perPeer[state.PreviousHop]--
+				if rs.perPeer[state.PreviousHop] <= 0 {
+					delete(rs.perPeer, state.PreviousHop)
+				}
+			}
 			delete(rs.states, id)
 		}
 	}
@@ -106,15 +120,38 @@ func (rs *relayStateStore) hasSeen(messageID string) bool {
 // inserts a placeholder entry. Returns true when the caller wins the
 // reservation (first claim). This replaces the racy hasSeen+store pattern
 // by combining both into a single critical section.
-func (rs *relayStateStore) tryReserve(messageID string) bool {
+//
+// previousHop identifies the transport address of the peer that sent the
+// relay. It is used for per-peer quota enforcement. Pass "" for origin
+// entries (the node that created the relay message).
+//
+// Capacity enforcement: returns false (same as dedupe) when the global
+// limit (maxRelayStates) or per-peer limit (maxRelayStatesPerPeer) is
+// reached. The caller treats this identically to a duplicate — the relay
+// message is silently dropped.
+func (rs *relayStateStore) tryReserve(messageID, previousHop string) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if _, ok := rs.states[messageID]; ok {
 		return false
 	}
+	// Enforce global capacity.
+	if len(rs.states) >= maxRelayStates {
+		rs.rejected++
+		return false
+	}
+	// Enforce per-peer capacity.
+	if previousHop != "" && rs.perPeer[previousHop] >= maxRelayStatesPerPeer {
+		rs.rejected++
+		return false
+	}
 	rs.states[messageID] = &relayForwardState{
 		MessageID:    messageID,
+		PreviousHop:  previousHop,
 		RemainingTTL: relayStateTTLSeconds,
+	}
+	if previousHop != "" {
+		rs.perPeer[previousHop]++
 	}
 	return true
 }
@@ -125,7 +162,15 @@ func (rs *relayStateStore) tryReserve(messageID string) bool {
 func (rs *relayStateStore) release(messageID string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	delete(rs.states, messageID)
+	if state, ok := rs.states[messageID]; ok {
+		if state.PreviousHop != "" {
+			rs.perPeer[state.PreviousHop]--
+			if rs.perPeer[state.PreviousHop] <= 0 {
+				delete(rs.perPeer, state.PreviousHop)
+			}
+		}
+		delete(rs.states, messageID)
+	}
 }
 
 // updateState overwrites the placeholder created by tryReserve with a
@@ -137,14 +182,25 @@ func (rs *relayStateStore) updateState(state *relayForwardState) {
 }
 
 // store saves forwarding state for a relayed message. Returns false if the
-// message was already seen (dedupe).
+// message was already seen (dedupe) or the store is at capacity.
 func (rs *relayStateStore) store(state *relayForwardState) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if _, ok := rs.states[state.MessageID]; ok {
 		return false
 	}
+	if len(rs.states) >= maxRelayStates {
+		rs.rejected++
+		return false
+	}
+	if state.PreviousHop != "" && rs.perPeer[state.PreviousHop] >= maxRelayStatesPerPeer {
+		rs.rejected++
+		return false
+	}
 	rs.states[state.MessageID] = state
+	if state.PreviousHop != "" {
+		rs.perPeer[state.PreviousHop]++
+	}
 	return true
 }
 
@@ -171,7 +227,8 @@ func (rs *relayStateStore) snapshot() []relayForwardState {
 	return out
 }
 
-// restore loads relay forward states from persisted data.
+// restore loads relay forward states from persisted data. Rebuilds per-peer
+// counters from the loaded entries.
 func (rs *relayStateStore) restore(states []relayForwardState) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -179,6 +236,9 @@ func (rs *relayStateStore) restore(states []relayForwardState) {
 		s := states[i]
 		if s.RemainingTTL > 0 {
 			rs.states[s.MessageID] = &s
+			if s.PreviousHop != "" {
+				rs.perPeer[s.PreviousHop]++
+			}
 		}
 	}
 }
@@ -200,6 +260,12 @@ func (rs *relayStateStore) decrementTTLsAndReport() bool {
 	for id, state := range rs.states {
 		state.RemainingTTL--
 		if state.RemainingTTL <= 0 {
+			if state.PreviousHop != "" {
+				rs.perPeer[state.PreviousHop]--
+				if rs.perPeer[state.PreviousHop] <= 0 {
+					delete(rs.perPeer, state.PreviousHop)
+				}
+			}
 			delete(rs.states, id)
 			removed = true
 		}
@@ -259,7 +325,7 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 		// Dedupe at final hop: if relay state already exists, this is a
 		// duplicate relay_message. Drop silently — the valid reverse-path
 		// state from the first delivery must not be overwritten or released.
-		if !s.relayStates.tryReserve(messageID) {
+		if !s.relayStates.tryReserve(messageID, senderAddress) {
 			log.Debug().
 				Str("id", messageID).
 				Str("from", originSender).
@@ -297,7 +363,7 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 	// Dedupe: atomically reserve this message_id. If another goroutine
 	// already claimed it, drop silently. tryReserve inserts a placeholder
 	// entry so no concurrent handler can pass this point for the same ID.
-	if !s.relayStates.tryReserve(messageID) {
+	if !s.relayStates.tryReserve(messageID, senderAddress) {
 		log.Debug().
 			Str("id", messageID).
 			Str("from", originSender).
@@ -511,7 +577,9 @@ func (s *Service) tryForwardToDirectPeer(recipient string, frame protocol.Frame)
 
 // relayViaGossip forwards a relay_message to the top-scored peers that
 // have the mesh_relay_v1 capability. The senderAddress is excluded to
-// avoid sending the message back to where it came from.
+// avoid sending the message back to where it came from. Per-peer rate
+// limiting is applied: if a target's token bucket is exhausted, the
+// frame is silently skipped for that target.
 func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress string) string {
 	targets := s.routingTargets()
 	var forwardedTo string
@@ -520,6 +588,9 @@ func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress string) st
 			continue
 		}
 		if !s.sessionHasCapability(address, capMeshRelayV1) {
+			continue
+		}
+		if !s.relayLimiter.allow(address) {
 			continue
 		}
 		frame.PreviousHop = s.identity.Address
@@ -583,6 +654,9 @@ func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []st
 			continue
 		}
 		if s.peerIsClientNode(address) {
+			continue
+		}
+		if !s.relayLimiter.allow(address) {
 			continue
 		}
 		s.sendRelayMessage(address, msg)

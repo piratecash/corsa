@@ -52,6 +52,7 @@ For `incompatible-protocol-version` errors, additional fields are included:
 | `message-timestamp-out-of-range` | created_at is outside allowed clock drift window | 400 Bad Request | Message timestamp differs from current time by more than acceptable drift (typically ±15 minutes); clock skew or replay attack |
 | `incompatible-protocol-version` | Caller protocol version below minimum | 400 Bad Request | Client version too old; includes `version` and `minimum_protocol_version` fields |
 | `read` | TCP read error on the connection | 500 Internal Server Error | Network I/O error reading from socket; connection may be corrupted or closed unexpectedly |
+| `frame-too-large` | Inbound frame line exceeds transport size limit | 413 Payload Too Large | A single inbound JSON command line exceeded `maxCommandLineBytes` (128 KiB) on the server's TCP reader. Connection is closed after this error. Standard protocol commands (including `relay_message` with a 64 KiB body) fit within this limit; oversized frames typically indicate a misbehaving or malicious client. Note: peer-session and handshake reads use a separate, larger limit (`maxResponseLineBytes`, 8 MiB) because response frames can contain multiple messages |
 | `auth-required` | Command requires authenticated v2 session | 401 Unauthorized | Command can only be executed after successful v2 authentication; unauthenticated sessions cannot proceed |
 | `invalid-auth-signature` | auth_session signature verification failed | 401 Unauthorized | Authentication request signature does not verify against known keys; may be invalid credentials or tampering |
 | `blacklisted` | Remote IP has been banned (exceeded 1000 ban points) | 403 Forbidden | Source IP address has accumulated too many violations and is temporarily or permanently blocked |
@@ -78,6 +79,7 @@ These errors indicate the request itself is invalid:
 - `invalid-ack-delete`
 - `message-timestamp-out-of-range`
 - `protocol-error`
+- `frame-too-large`
 
 ### Authentication Errors (401)
 
@@ -257,6 +259,7 @@ graph TB
 | `message-timestamp-out-of-range` | created_at находится вне допустимого окна сдвига часов | 400 Bad Request | Временная метка сообщения отличается от текущего времени более чем на приемлемый сдвиг (обычно ±15 минут); сдвиг часов или атака повтора |
 | `incompatible-protocol-version` | Версия протокола вызывающей стороны ниже минимальной | 400 Bad Request | Версия клиента слишком старая; включает поля `version` и `minimum_protocol_version` |
 | `read` | Ошибка чтения TCP на соединении | 500 Internal Server Error | Ошибка ввода-вывода сети при чтении из сокета; соединение может быть повреждено или неожиданно закрыто |
+| `frame-too-large` | Входящая строка команды превышает транспортный лимит размера | 413 Payload Too Large | Одна входящая строка JSON-команды превысила `maxCommandLineBytes` (128 KiB) на TCP-ридере сервера. Соединение закрывается после этой ошибки. Стандартные команды протокола (включая `relay_message` с телом 64 KiB) укладываются в этот лимит; слишком большие кадры обычно указывают на некорректный или вредоносный клиент. Примечание: peer-session и handshake reads используют отдельный, больший лимит (`maxResponseLineBytes`, 8 MiB), поскольку ответы могут содержать множество сообщений |
 | `auth-required` | Команда требует аутентифицированного сеанса v2 | 401 Unauthorized | Команда может быть выполнена только после успешной аутентификации v2; неаутентифицированные сеансы не могут продолжать |
 | `invalid-auth-signature` | Проверка подписи auth_session не удалась | 401 Unauthorized | Подпись запроса аутентификации не проверяется для известных ключей; может быть неверные учетные данные или подделка |
 | `blacklisted` | IP-адрес удаленного хоста был запрещен (превышены 1000 точек запрета) | 403 Forbidden | IP-адрес источника накопил слишком много нарушений и временно или постоянно заблокирован |
@@ -283,6 +286,7 @@ graph TB
 - `invalid-ack-delete`
 - `message-timestamp-out-of-range`
 - `protocol-error`
+- `frame-too-large`
 
 ### Ошибки аутентификации (401)
 

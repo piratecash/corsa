@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -33,57 +34,58 @@ type MessageStore interface {
 }
 
 type Service struct {
-	identity       *identity.Identity
-	selfBoxSig     string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
-	cfg            config.Node
-	trust          *trustStore
-	mu             sync.RWMutex
-	peers          []transport.Peer
-	known          map[string]struct{}
-	boxKeys        map[string]string
-	pubKeys        map[string]string
-	boxSigs        map[string]string
-	topics         map[string][]protocol.Envelope
-	receipts       map[string][]protocol.DeliveryReceipt
-	notices        map[string]gazeta.Notice
-	seen           map[string]struct{}
-	seenReceipts   map[string]struct{}
-	subs           map[string]map[string]*subscriber
-	sessions       map[string]*peerSession
-	health         map[string]*peerHealth
-	peerTypes      map[string]config.NodeType
-	peerIDs        map[string]string
-	peerVersions   map[string]string
-	peerBuilds     map[string]int
-	pending        map[string][]pendingFrame
-	pendingKeys    map[string]struct{}
-	orphaned       map[string][]pendingFrame // legacy fallback-keyed frames that could not be migrated
-	relayRetry     map[string]relayAttempt
-	outbound       map[string]outboundDelivery
-	upstream       map[string]struct{}
+	identity          *identity.Identity
+	selfBoxSig        string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
+	cfg               config.Node
+	trust             *trustStore
+	mu                sync.RWMutex
+	peers             []transport.Peer
+	known             map[string]struct{}
+	boxKeys           map[string]string
+	pubKeys           map[string]string
+	boxSigs           map[string]string
+	topics            map[string][]protocol.Envelope
+	receipts          map[string][]protocol.DeliveryReceipt
+	notices           map[string]gazeta.Notice
+	seen              map[string]struct{}
+	seenReceipts      map[string]struct{}
+	subs              map[string]map[string]*subscriber
+	sessions          map[string]*peerSession
+	health            map[string]*peerHealth
+	peerTypes         map[string]config.NodeType
+	peerIDs           map[string]string
+	peerVersions      map[string]string
+	peerBuilds        map[string]int
+	pending           map[string][]pendingFrame
+	pendingKeys       map[string]struct{}
+	orphaned          map[string][]pendingFrame // legacy fallback-keyed frames that could not be migrated
+	relayRetry        map[string]relayAttempt
+	outbound          map[string]outboundDelivery
+	upstream          map[string]struct{}
 	inboundConns      map[net.Conn]struct{}
 	inboundMetered    map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
 	inboundHealthRefs map[string]int            // resolved overlay address → active inbound connection count
 	inboundTracked    map[net.Conn]struct{}     // connections promoted via trackInboundConnect (auth complete or auth not required)
 	connWg            sync.WaitGroup            // tracks active handleConn goroutines for graceful shutdown
-	connAuth       map[net.Conn]*connAuthState
-	connPeerInfo   map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
-	connSendCh     map[net.Conn]chan sendItem         // per-connection buffered send channel; decouples callers from socket I/O
-	connWriterDone map[net.Conn]chan struct{}        // closed by connWriter when it exits; used to wait for drain before TCP close
-	bans           map[string]banEntry
-	events         map[chan protocol.LocalChangeEvent]struct{}
-	listener       net.Listener
-	lastSync       time.Time
-	peersStatePath string
-	lastPeerSave    time.Time
-	lastPeerEvict   time.Time
-	dialOrigin      map[string]string     // dial address → primary peer address (for fallback port tracking)
-	persistedMeta   map[string]*peerEntry // stable metadata from peers.json, keyed by address
-	observedAddrs   map[string]string     // peer identity (fingerprint) → observed IP they reported for us
-	reachableGroups map[NetGroup]struct{} // network groups this node can reach (computed at startup)
-	messageStore    MessageStore           // optional: persistence handler registered by desktop layer
-	router          Router                 // routing strategy for outbound message delivery
-	relayStates     *relayStateStore       // hop-by-hop relay forwarding state (Iteration 1)
+	connAuth          map[net.Conn]*connAuthState
+	connPeerInfo      map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
+	connSendCh        map[net.Conn]chan sendItem  // per-connection buffered send channel; decouples callers from socket I/O
+	connWriterDone    map[net.Conn]chan struct{}  // closed by connWriter when it exits; used to wait for drain before TCP close
+	bans              map[string]banEntry
+	events            map[chan protocol.LocalChangeEvent]struct{}
+	listener          net.Listener
+	lastSync          time.Time
+	peersStatePath    string
+	lastPeerSave      time.Time
+	lastPeerEvict     time.Time
+	dialOrigin        map[string]string     // dial address → primary peer address (for fallback port tracking)
+	persistedMeta     map[string]*peerEntry // stable metadata from peers.json, keyed by address
+	observedAddrs     map[string]string     // peer identity (fingerprint) → observed IP they reported for us
+	reachableGroups   map[NetGroup]struct{} // network groups this node can reach (computed at startup)
+	messageStore      MessageStore          // optional: persistence handler registered by desktop layer
+	router            Router                // routing strategy for outbound message delivery
+	relayStates       *relayStateStore      // hop-by-hop relay forwarding state (Iteration 1)
+	relayLimiter      *relayRateLimiter     // per-peer token bucket for relay fan-out
 }
 
 type subscriber struct {
@@ -118,7 +120,7 @@ type peerHealth struct {
 	LastUsefulReceiveAt time.Time
 	ConsecutiveFailures int
 	LastError           string
-	Score               int // peer quality score for persistence priority
+	Score               int   // peer quality score for persistence priority
 	BytesSent           int64 // total bytes sent to this peer across all sessions
 	BytesReceived       int64 // total bytes received from this peer across all sessions
 }
@@ -366,52 +368,53 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	}
 
 	svc := &Service{
-		identity:       id,
-		cfg:            cfg,
-		selfBoxSig:     selfContact.BoxSignature,
-		trust:          trust,
-		peers:          peers,
-		peersStatePath: peersStatePath,
-		persistedMeta:  persistedByAddr,
-		known:          known,
-		boxKeys:        boxKeys,
-		pubKeys:        pubKeys,
-		boxSigs:        boxSigs,
-		topics:         topics,
-		receipts:       receipts,
-		notices:        make(map[string]gazeta.Notice),
-		seen:           seen,
-		seenReceipts:   seenReceipts,
-		subs:           make(map[string]map[string]*subscriber),
-		sessions:       make(map[string]*peerSession),
-		health:         restoredHealth,
-		peerTypes:      make(map[string]config.NodeType),
-		peerIDs:        make(map[string]string),
-		peerVersions:   make(map[string]string),
-		peerBuilds:     make(map[string]int),
-		pending:        queueState.Pending,
-		pendingKeys:    pendingKeys,
-		orphaned:       queueState.Orphaned,
-		relayRetry:     queueState.RelayRetry,
-		outbound:       queueState.OutboundState,
-		upstream:       make(map[string]struct{}),
-		dialOrigin:      make(map[string]string),
-		observedAddrs:   make(map[string]string),
-		reachableGroups: computeReachableGroups(cfg),
+		identity:          id,
+		cfg:               cfg,
+		selfBoxSig:        selfContact.BoxSignature,
+		trust:             trust,
+		peers:             peers,
+		peersStatePath:    peersStatePath,
+		persistedMeta:     persistedByAddr,
+		known:             known,
+		boxKeys:           boxKeys,
+		pubKeys:           pubKeys,
+		boxSigs:           boxSigs,
+		topics:            topics,
+		receipts:          receipts,
+		notices:           make(map[string]gazeta.Notice),
+		seen:              seen,
+		seenReceipts:      seenReceipts,
+		subs:              make(map[string]map[string]*subscriber),
+		sessions:          make(map[string]*peerSession),
+		health:            restoredHealth,
+		peerTypes:         make(map[string]config.NodeType),
+		peerIDs:           make(map[string]string),
+		peerVersions:      make(map[string]string),
+		peerBuilds:        make(map[string]int),
+		pending:           queueState.Pending,
+		pendingKeys:       pendingKeys,
+		orphaned:          queueState.Orphaned,
+		relayRetry:        queueState.RelayRetry,
+		outbound:          queueState.OutboundState,
+		upstream:          make(map[string]struct{}),
+		dialOrigin:        make(map[string]string),
+		observedAddrs:     make(map[string]string),
+		reachableGroups:   computeReachableGroups(cfg),
 		inboundConns:      make(map[net.Conn]struct{}),
 		inboundMetered:    make(map[net.Conn]*MeteredConn),
 		inboundHealthRefs: make(map[string]int),
 		inboundTracked:    make(map[net.Conn]struct{}),
-		connAuth:       make(map[net.Conn]*connAuthState),
-		connPeerInfo:   make(map[net.Conn]*connPeerHello),
-		connSendCh:     make(map[net.Conn]chan sendItem),
-		connWriterDone: make(map[net.Conn]chan struct{}),
-		bans:           make(map[string]banEntry),
-		events:         make(map[chan protocol.LocalChangeEvent]struct{}),
+		connAuth:          make(map[net.Conn]*connAuthState),
+		connPeerInfo:      make(map[net.Conn]*connPeerHello),
+		connSendCh:        make(map[net.Conn]chan sendItem),
+		connWriterDone:    make(map[net.Conn]chan struct{}),
+		bans:              make(map[string]banEntry),
+		events:            make(map[chan protocol.LocalChangeEvent]struct{}),
 	}
 	svc.router = NewGossipRouter(svc)
 	svc.relayStates = newRelayStateStore()
 	svc.relayStates.restore(queueState.RelayForwardStates)
+	svc.relayLimiter = newRelayRateLimiter()
 	return svc
 }
 
@@ -476,7 +479,7 @@ func (s *Service) Run(ctx context.Context) error {
 			default:
 			}
 
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
@@ -598,9 +601,11 @@ func (s *Service) handleConn(conn net.Conn) {
 
 	reader := bufio.NewReader(conn)
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := readFrameLine(reader, maxCommandLineBytes)
 		if err != nil {
-			if err != io.EOF {
+			if errors.Is(err, errFrameTooLarge) {
+				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
+			} else if err != io.EOF {
 				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
 			}
 			return
@@ -843,11 +848,16 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 			return true
 		}
-		// Only promote (move to front + reset cooldown) when the sender is
-		// authenticated. Unauthenticated connections can still learn peers
-		// but must not reprioritize the dial list or clear cooldowns.
+		// Only promote (add + reset cooldown/failures) when the sender is
+		// authenticated. Dial order is never changed. Unauthenticated
+		// connections can still learn new peers but must not reset
+		// cooldowns on existing ones.
 		authenticated := s.isConnAuthenticated(conn)
-		for _, peer := range frame.Peers {
+		peers := frame.Peers
+		if len(peers) > maxAnnouncePeers {
+			peers = peers[:maxAnnouncePeers]
+		}
+		for _, peer := range peers {
 			if peer == "" || classifyAddress(peer) == NetGroupLocal {
 				continue
 			}
@@ -860,16 +870,16 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 		return true
 	case "relay_message":
-		// Relay frames require an authenticated session. Without this gate,
-		// any unauthenticated client could advertise mesh_relay_v1 in its
-		// hello frame and inject relay traffic or spoof previous_hop addresses.
+		// Relay frames require an authenticated session (INV-9). Without
+		// this gate, any unauthenticated client could advertise
+		// mesh_relay_v1 in its hello frame and inject relay traffic.
 		if !s.isConnAuthenticated(conn) {
 			accepted = false
 			return true
 		}
-		if !s.connHasCapability(conn, capMeshRelayV1) {
+		if admit := admitRelayFrame(s.connHasCapability(conn, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
-			return true // silently ignore from non-capable peers
+			return true
 		}
 		senderAddr := s.inboundPeerAddress(conn)
 		if senderAddr == "" {
@@ -881,7 +891,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		// on the inbound connection. This is the only ack the sender
 		// receives — handleRelayMessage itself does not send acks.
 		// Empty status means the message was dropped (dedupe, max hops,
-		// client node); no ack is sent for drops.
+		// client node); no ack is sent for drops (INV-5).
 		if ackStatus != "" {
 			s.writeJSONFrame(conn, protocol.Frame{
 				Type:   "relay_hop_ack",
@@ -895,7 +905,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		if !s.connHasCapability(conn, capMeshRelayV1) {
+		if admit := admitRelayFrame(s.connHasCapability(conn, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
 		}
@@ -2370,6 +2380,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.evictStalePeers()
 			s.ensurePeerSessions(ctx)
 			s.retryRelayDeliveries()
+			s.relayLimiter.cleanup(5 * time.Minute)
 			s.maybeSavePeerState()
 		}
 	}
@@ -2716,19 +2727,19 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 	// peerSessionRequest.  Reusing the session would call syncPeerSession →
 	// peerSessionRequest on the same inboxCh, consuming frames meant for the
 	// outer caller and causing a 12-second stall (peerRequestTimeout).
-	conn, err := s.dialPeer(ctx, address, 1500*time.Millisecond)
+	conn, err := s.dialPeer(ctx, address, syncHandshakeTimeout)
 	if err != nil {
 		return
 	}
 	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}
-	welcomeLine, err := reader.ReadString('\n')
+	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
 	if err != nil {
 		return
 	}
@@ -2748,7 +2759,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		if _, err := io.WriteString(conn, authLine); err != nil {
 			return
 		}
-		authReply, err := reader.ReadString('\n')
+		authReply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
 			return
 		}
@@ -2763,7 +2774,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		if _, err := io.WriteString(conn, line); err != nil {
 			return
 		}
-		reply, err := reader.ReadString('\n')
+		reply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
 			return
 		}
@@ -2781,7 +2792,7 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 		if _, err := io.WriteString(conn, line); err != nil {
 			return
 		}
-		contactsReply, err := reader.ReadString('\n')
+		contactsReply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
 			return
 		}
@@ -2845,7 +2856,7 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 }
 
 func (s *Service) openPeerSession(ctx context.Context, address string) (bool, error) {
-	rawConn, err := s.dialPeer(ctx, address, 2*time.Second)
+	rawConn, err := s.dialPeer(ctx, address, dialTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -2861,7 +2872,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 		_ = conn.Close()
 	}()
 
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	reader := bufio.NewReader(conn)
 	session := &peerSession{
 		address: address,
@@ -2912,7 +2923,6 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	return true, s.servePeerSession(ctx, session)
 }
 
-
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
 	pingTimer := time.NewTimer(nextHeartbeatDuration())
 	defer pingTimer.Stop()
@@ -2945,7 +2955,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				if err != nil {
 					continue
 				}
-				_ = session.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+				_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
 				s.markPeerWrite(session.address, outbound)
 				if _, writeErr := io.WriteString(session.conn, line); writeErr != nil {
 					log.Warn().Str("peer", session.address).Str("type", outbound.Type).Err(writeErr).Msg("fire_and_forget_write_failed")
@@ -3176,7 +3186,6 @@ func (s *Service) closeAllInboundConns() {
 	}
 }
 
-
 // pushToSubscriberSnapshot delivers a message to a pre-captured snapshot of
 // subscribers. The snapshot is taken under s.mu by the caller so that the
 // decision "route exists → push, not gossip" and the actual send targets
@@ -3272,7 +3281,7 @@ func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
 	s.mu.Lock()
 	if existing, ok := s.notices[id]; ok && existing.ExpiresAt.After(time.Now().UTC()) {
 		s.mu.Unlock()
-		return protocol.Frame{Type: "notice_known", ID: string(id), ExpiresAt: existing.ExpiresAt.Unix()}
+		return protocol.Frame{Type: "notice_known", ID: id, ExpiresAt: existing.ExpiresAt.Unix()}
 	}
 
 	s.notices[id] = gazeta.Notice{
@@ -3286,7 +3295,7 @@ func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
 		go s.gossipNotice(ttl, frame.Ciphertext)
 	}
 
-	return protocol.Frame{Type: "notice_stored", ID: string(id), ExpiresAt: expiresAt.Unix()}
+	return protocol.Frame{Type: "notice_stored", ID: id, ExpiresAt: expiresAt.Unix()}
 }
 
 func (s *Service) fetchNoticesFrame() protocol.Frame {
@@ -3296,7 +3305,7 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 	items := make([]protocol.NoticeFrame, 0, len(s.notices))
 	for _, notice := range s.notices {
 		items = append(items, protocol.NoticeFrame{
-			ID:         string(notice.ID),
+			ID:         notice.ID,
 			ExpiresAt:  notice.ExpiresAt.Unix(),
 			Ciphertext: notice.Ciphertext,
 		})
@@ -3353,19 +3362,19 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 		return
 	}
 
-	conn, err := net.DialTimeout("tcp", address, 1500*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", address, syncHandshakeTimeout)
 	if err != nil {
 		return
 	}
 	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}
-	welcomeLine, err := reader.ReadString('\n')
+	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
 	if err != nil {
 		return
 	}
@@ -3385,7 +3394,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 		if _, err := io.WriteString(conn, authLine); err != nil {
 			return
 		}
-		reply, err := reader.ReadString('\n')
+		reply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
 			return
 		}
@@ -3403,7 +3412,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 		return
 	}
 	_, _ = io.WriteString(conn, line)
-	_, _ = reader.ReadString('\n')
+	_, _ = readFrameLine(reader, maxResponseLineBytes)
 }
 
 func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
@@ -3954,7 +3963,7 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		BoxSignature: boxSig,
 		Source:       source,
 	}); err != nil {
-		if err == errTrustConflict {
+		if errors.Is(err, errTrustConflict) {
 			log.Warn().Str("address", address).Str("source", source).Msg("trust conflict")
 		}
 		return
@@ -3971,7 +3980,7 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	defer crashlog.DeferRecover()
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
 			select {
 			case session.errCh <- err:
@@ -3998,7 +4007,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 }
 
 func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
-	_ = session.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
 	if hello {
 		line := s.nodeHelloJSONLine()
 		s.markPeerWrite(session.address, protocol.Frame{Type: "hello"})
@@ -4107,6 +4116,9 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		if frame.Item == nil {
 			return
 		}
+		if len(frame.Item.Body) > maxPeerCommandBodyBytes {
+			return
+		}
 
 		msg, err := incomingMessageFromFrame(protocol.Frame{
 			ID:         frame.Item.ID,
@@ -4162,7 +4174,11 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		if !isKnownNodeType(nodeType) {
 			return
 		}
-		for _, peer := range frame.Peers {
+		peers := frame.Peers
+		if len(peers) > maxAnnouncePeers {
+			peers = peers[:maxAnnouncePeers]
+		}
+		for _, peer := range peers {
 			if peer == "" || classifyAddress(peer) == NetGroupLocal {
 				continue
 			}
@@ -4170,14 +4186,14 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", address).Msg("learned peer from announce")
 		}
 	case "relay_message":
-		if !s.sessionHasCapability(address, capMeshRelayV1) {
+		if admit := admitRelayFrame(s.sessionHasCapability(address, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
 		if ackStatus := s.handleRelayMessage(address, frame); ackStatus != "" {
 			s.sendRelayHopAck(address, frame.ID, ackStatus)
 		}
 	case "relay_hop_ack":
-		if !s.sessionHasCapability(address, capMeshRelayV1) {
+		if admit := admitRelayFrame(s.sessionHasCapability(address, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
 		s.handleRelayHopAck(address, frame)
@@ -4809,6 +4825,17 @@ func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
 		s.persistQueueState(snapshot)
 		return true
 	}
+
+	// Enforce per-peer and global capacity limits.
+	if len(s.pending[primary]) >= maxPendingFramesPerPeer {
+		s.mu.Unlock()
+		return false
+	}
+	if len(s.pendingKeys) >= maxPendingFramesTotal {
+		s.mu.Unlock()
+		return false
+	}
+
 	s.pending[primary] = append(s.pending[primary], pendingFrame{
 		Frame:    frame,
 		QueuedAt: time.Now().UTC(),
@@ -5038,6 +5065,11 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 	key := relayMessageKey(msg.ID)
 	state := s.relayRetry[key]
 	if state.FirstSeen.IsZero() {
+		// Enforce capacity: reject new entries when the retry map is full.
+		if len(s.relayRetry) >= maxRelayRetryEntries {
+			s.mu.Unlock()
+			return
+		}
 		state.FirstSeen = time.Now().UTC()
 		s.relayRetry[key] = state
 		snapshot := s.queueStateSnapshotLocked()
@@ -5054,9 +5086,15 @@ func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
 	state := s.relayRetry[key]
 	dirty := false
 	if state.FirstSeen.IsZero() {
-		state.FirstSeen = time.Now().UTC()
-		s.relayRetry[key] = state
-		dirty = true
+		// Enforce capacity: reject new entries when the retry map is full.
+		// Deletions below (message key cleanup) still proceed.
+		if len(s.relayRetry) >= maxRelayRetryEntries {
+			// Still try to clean up the message key below before returning.
+		} else {
+			state.FirstSeen = time.Now().UTC()
+			s.relayRetry[key] = state
+			dirty = true
+		}
 	}
 	if _, ok := s.relayRetry[relayMessageKey(receipt.MessageID)]; ok {
 		delete(s.relayRetry, relayMessageKey(receipt.MessageID))
@@ -5339,13 +5377,12 @@ func expectedReplyType(requestType string) string {
 // the peer session without waiting for a response. These frames are delivered
 // on a best-effort basis; the remote side may send an ack asynchronously, but
 // the sender must not block the session waiting for it.
+//
+// Currently identical to isRelayFrame — all relay frames are fire-and-forget.
+// If future iterations add non-relay fire-and-forget frames, this function
+// should be extended independently.
 func isFireAndForgetFrame(frameType string) bool {
-	switch frameType {
-	case "relay_message", "relay_hop_ack":
-		return true
-	default:
-		return false
-	}
+	return isRelayFrame(frameType)
 }
 
 func (s *Service) peerSession(address string) *peerSession {
@@ -5367,7 +5404,6 @@ func (s *Service) activePeerSession(address string) (*peerSession, bool) {
 	}
 	return session, true
 }
-
 
 func (s *Service) peerState(address string) string {
 	s.mu.RLock()

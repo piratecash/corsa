@@ -7,8 +7,9 @@ require (
 	github.com/ebitengine/oto/v3 v3.4.0
 	github.com/gofiber/fiber/v3 v3.1.0
 	github.com/hajimehoshi/go-mp3 v0.3.4
-	github.com/rs/zerolog v1.34.0
-	modernc.org/sqlite v1.47.0
+	github.com/rs/zerolog v1.35.0
+	golang.org/x/sys v0.42.0
+	modernc.org/sqlite v1.48.0
 )
 
 require (
@@ -33,7 +34,6 @@ require (
 	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/image v0.26.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	modernc.org/libc v1.70.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

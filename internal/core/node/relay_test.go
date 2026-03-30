@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -51,13 +52,13 @@ func TestRelayStateStoreDedupe(t *testing.T) {
 	rs := newRelayStateStore()
 
 	state1 := &relayForwardState{
-		MessageID:   "msg-1",
-		PreviousHop: "peer-a",
+		MessageID:    "msg-1",
+		PreviousHop:  "peer-a",
 		RemainingTTL: relayStateTTLSeconds,
 	}
 	state2 := &relayForwardState{
-		MessageID:   "msg-1",
-		PreviousHop: "peer-c", // different sender, same message ID
+		MessageID:    "msg-1",
+		PreviousHop:  "peer-c", // different sender, same message ID
 		RemainingTTL: relayStateTTLSeconds,
 	}
 
@@ -1048,17 +1049,17 @@ func TestTryReserveAtomicDedupe(t *testing.T) {
 	rs := newRelayStateStore()
 
 	// First reservation succeeds.
-	if !rs.tryReserve("msg-1") {
+	if !rs.tryReserve("msg-1", "") {
 		t.Fatal("first tryReserve should succeed")
 	}
 
 	// Second reservation for the same ID fails (already reserved).
-	if rs.tryReserve("msg-1") {
+	if rs.tryReserve("msg-1", "") {
 		t.Fatal("second tryReserve should fail — message already reserved")
 	}
 
 	// Different message ID still succeeds.
-	if !rs.tryReserve("msg-2") {
+	if !rs.tryReserve("msg-2", "") {
 		t.Fatal("tryReserve for a different ID should succeed")
 	}
 }
@@ -1079,7 +1080,7 @@ func TestTryReserveUnderConcurrentClaims(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-ready
-			if rs.tryReserve("concurrent-msg") {
+			if rs.tryReserve("concurrent-msg", "") {
 				atomic.AddInt64(&claimed, 1)
 			}
 		}()
@@ -1098,13 +1099,13 @@ func TestReleaseAfterReserve(t *testing.T) {
 	t.Parallel()
 	rs := newRelayStateStore()
 
-	if !rs.tryReserve("release-test") {
+	if !rs.tryReserve("release-test", "") {
 		t.Fatal("initial reserve should succeed")
 	}
 	rs.release("release-test")
 
 	// After release, the same ID can be reserved again.
-	if !rs.tryReserve("release-test") {
+	if !rs.tryReserve("release-test", "") {
 		t.Fatal("reserve after release should succeed")
 	}
 }
@@ -1115,7 +1116,7 @@ func TestUpdateStateOverwritesReservation(t *testing.T) {
 	t.Parallel()
 	rs := newRelayStateStore()
 
-	if !rs.tryReserve("update-test") {
+	if !rs.tryReserve("update-test", "") {
 		t.Fatal("reserve should succeed")
 	}
 
@@ -1535,6 +1536,141 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 	}
 }
 
+// TestFireAndForgetWriteFailureDisconnectsPeer verifies that when a
+// fire-and-forget frame (relay_message or relay_hop_ack) fails to write to the
+// peer's TCP connection, servePeerSession calls markPeerDisconnected and returns
+// an error — tearing down the session. Without this behavior a broken TCP
+// connection would silently swallow relay frames without any recovery.
+//
+// The test creates a minimal peer session backed by a net.Pipe. The remote end
+// is closed before writing, so io.WriteString hits a write-on-closed-pipe error.
+// We then verify that the peer health transitions to disconnected.
+func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+
+	local, remote := net.Pipe()
+	defer func() { _ = local.Close() }()
+
+	peerAddr := "10.0.0.50:64646"
+	sendCh := make(chan protocol.Frame, 1)
+	inboxCh := make(chan protocol.Frame, 1)
+	errCh := make(chan error, 1)
+
+	session := &peerSession{
+		address:      peerAddr,
+		conn:         remote,
+		sendCh:       sendCh,
+		inboxCh:      inboxCh,
+		errCh:        errCh,
+		capabilities: []string{capMeshRelayV1},
+	}
+
+	svc.mu.Lock()
+	svc.sessions[peerAddr] = session
+	svc.health[peerAddr] = &peerHealth{Connected: true}
+	svc.mu.Unlock()
+
+	// Close the remote end so the next write fails with a pipe error.
+	_ = remote.Close()
+
+	// Run servePeerSession in a goroutine. It should return with an error
+	// after the fire-and-forget write fails.
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.servePeerSession(context.Background(), session)
+	}()
+
+	// Enqueue a fire-and-forget relay_message frame.
+	sendCh <- protocol.Frame{
+		Type: "relay_message",
+		ID:   "ff-write-fail-1",
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("servePeerSession should return a non-nil error on write failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("servePeerSession did not return within timeout after write failure")
+	}
+
+	// Verify the peer was marked as disconnected.
+	svc.mu.RLock()
+	health := svc.health[peerAddr]
+	svc.mu.RUnlock()
+
+	if health == nil {
+		t.Fatal("health entry should exist")
+	}
+	if health.Connected {
+		t.Fatal("peer should be marked disconnected after fire-and-forget write failure")
+	}
+	if health.ConsecutiveFailures < 1 {
+		t.Fatal("ConsecutiveFailures should be incremented on write failure")
+	}
+}
+
+// TestFireAndForgetHopAckWriteFailureDisconnects verifies the same disconnect
+// behavior for relay_hop_ack frames (the other fire-and-forget type).
+func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+
+	local, remote := net.Pipe()
+	defer func() { _ = local.Close() }()
+
+	peerAddr := "10.0.0.51:64646"
+	sendCh := make(chan protocol.Frame, 1)
+	inboxCh := make(chan protocol.Frame, 1)
+	errCh := make(chan error, 1)
+
+	session := &peerSession{
+		address:      peerAddr,
+		conn:         remote,
+		sendCh:       sendCh,
+		inboxCh:      inboxCh,
+		errCh:        errCh,
+		capabilities: []string{capMeshRelayV1},
+	}
+
+	svc.mu.Lock()
+	svc.sessions[peerAddr] = session
+	svc.health[peerAddr] = &peerHealth{Connected: true}
+	svc.mu.Unlock()
+
+	_ = remote.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.servePeerSession(context.Background(), session)
+	}()
+
+	sendCh <- protocol.Frame{
+		Type:   "relay_hop_ack",
+		ID:     "ff-ack-fail-1",
+		Status: "forwarded",
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("servePeerSession should return a non-nil error on hop_ack write failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("servePeerSession did not return within timeout")
+	}
+
+	svc.mu.RLock()
+	health := svc.health[peerAddr]
+	svc.mu.RUnlock()
+
+	if health == nil || health.Connected {
+		t.Fatal("peer should be disconnected after relay_hop_ack write failure")
+	}
+}
+
 // TestRetryRelayReceiptTriesRelayChainFirst verifies that retryRelayDeliveries
 // tries handleRelayReceipt (hop-by-hop return path) before falling back to
 // gossipReceipt. Without the fix, receipt retries permanently bypass the relay
@@ -1599,5 +1735,123 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 done:
 	if !found {
 		t.Fatal("retryRelayDeliveries did not try relay chain for receipt — only used gossip")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Relay state store capacity limit tests
+// ---------------------------------------------------------------------------
+
+// TestRelayStateStoreGlobalCapacity verifies that tryReserve rejects new
+// entries once the global maxRelayStates limit is reached.
+func TestRelayStateStoreGlobalCapacity(t *testing.T) {
+	t.Parallel()
+	rs := newRelayStateStore()
+
+	// Fill up to the global limit.
+	for i := 0; i < maxRelayStates; i++ {
+		id := fmt.Sprintf("cap-test-%d", i)
+		if !rs.tryReserve(id, "") {
+			t.Fatalf("tryReserve should succeed for entry %d (under limit)", i)
+		}
+	}
+
+	// One more should be rejected.
+	if rs.tryReserve("over-limit", "") {
+		t.Fatal("tryReserve should reject when global capacity is reached")
+	}
+
+	// Verify the rejected counter was incremented.
+	rs.mu.Lock()
+	rej := rs.rejected
+	rs.mu.Unlock()
+	if rej == 0 {
+		t.Fatal("rejected counter should be > 0")
+	}
+}
+
+// TestRelayStateStorePerPeerCapacity verifies that tryReserve rejects new
+// entries from a single peer once maxRelayStatesPerPeer is reached, while
+// other peers can still reserve.
+func TestRelayStateStorePerPeerCapacity(t *testing.T) {
+	t.Parallel()
+	rs := newRelayStateStore()
+
+	// Fill one peer's quota.
+	for i := 0; i < maxRelayStatesPerPeer; i++ {
+		id := fmt.Sprintf("peer-cap-%d", i)
+		if !rs.tryReserve(id, "10.0.0.1:9000") {
+			t.Fatalf("tryReserve should succeed for entry %d (under per-peer limit)", i)
+		}
+	}
+
+	// Same peer, one more — rejected.
+	if rs.tryReserve("peer-over", "10.0.0.1:9000") {
+		t.Fatal("tryReserve should reject when per-peer capacity is reached")
+	}
+
+	// Different peer — should still succeed.
+	if !rs.tryReserve("other-peer", "10.0.0.2:9000") {
+		t.Fatal("tryReserve should succeed for a different peer")
+	}
+}
+
+// TestRelayStateStoreReleaseFreesPerPeerQuota verifies that releasing a
+// reservation decrements the per-peer counter, allowing new reservations.
+func TestRelayStateStoreReleaseFreesPerPeerQuota(t *testing.T) {
+	t.Parallel()
+	rs := newRelayStateStore()
+
+	// Fill one peer's quota.
+	for i := 0; i < maxRelayStatesPerPeer; i++ {
+		rs.tryReserve(fmt.Sprintf("fill-%d", i), "10.0.0.1:9000")
+	}
+
+	// Release one entry.
+	rs.release("fill-0")
+
+	// Now a new reservation from the same peer should succeed.
+	if !rs.tryReserve("after-release", "10.0.0.1:9000") {
+		t.Fatal("tryReserve should succeed after release freed a slot")
+	}
+}
+
+// TestRelayStateStoreTTLFreesPerPeerQuota verifies that TTL expiration
+// correctly decrements per-peer counters.
+func TestRelayStateStoreTTLFreesPerPeerQuota(t *testing.T) {
+	t.Parallel()
+	rs := newRelayStateStore()
+
+	rs.tryReserve("ttl-test", "10.0.0.1:9000")
+
+	// Set TTL to 1 so next tick expires it.
+	rs.mu.Lock()
+	rs.states["ttl-test"].RemainingTTL = 1
+	rs.mu.Unlock()
+
+	rs.decrementTTLs()
+
+	// Verify the per-peer counter was decremented.
+	rs.mu.Lock()
+	count := rs.perPeer["10.0.0.1:9000"]
+	rs.mu.Unlock()
+
+	if count != 0 {
+		t.Fatalf("per-peer count should be 0 after TTL expiry, got %d", count)
+	}
+}
+
+// TestRelayStateStoreOriginBypassesPerPeerLimit verifies that origin entries
+// (previousHop="") are not subject to per-peer limits.
+func TestRelayStateStoreOriginBypassesPerPeerLimit(t *testing.T) {
+	t.Parallel()
+	rs := newRelayStateStore()
+
+	// Origin entries with empty previousHop should not be per-peer limited.
+	for i := 0; i < maxRelayStatesPerPeer+10; i++ {
+		id := fmt.Sprintf("origin-%d", i)
+		if !rs.tryReserve(id, "") {
+			t.Fatalf("origin entry %d should succeed (no per-peer limit for empty hop)", i)
+		}
 	}
 }

@@ -78,11 +78,12 @@ Announces one or more peer addresses to the network, optionally promoting them i
 ```
 
 **Behavior:**
-- Only valid node_types are accepted; invalid types are rejected with error
-- **Authenticated requesters**: Can promote peers (move to front of peer list, reset cooldown)
-- **Unauthenticated requesters**: Can learn about new peers but cannot promote existing ones
+- Only known `node_type` values (`"full"`, `"client"`) are processed. Unknown types are silently ignored for forward compatibility: on inbound TCP, an `announce_peer_ack` is still sent but no peers are learned; on peer sessions, the frame is silently dropped with no ack
+- **Authenticated requesters**: Can add new peers and reset cooldown/failure counters on existing ones, making them eligible for the next dial cycle. Dial order is not changed — peers are never moved to the front of the list
+- **Unauthenticated requesters** (inbound TCP only): Can learn about new peers but cannot reset cooldowns on existing ones
+- The `peers` list is capped at 64 entries (`maxAnnouncePeers`). Excess entries beyond the cap are silently dropped
 - Local addresses in the peer list are skipped/filtered out
-- Response is sent immediately after validation
+- On inbound TCP, `announce_peer_ack` is sent immediately after processing
 
 ### add_peer
 
@@ -525,11 +526,12 @@ graph TB
 ```
 
 **Поведение:**
-- Принимаются только действительные node_types; недействительные типы отклоняются с ошибкой
-- **Аутентифицированные запрашивающие**: Могут повышать одноранговые узлы (переместить на фронт списка одноранговых узлов, сбросить cooldown)
-- **Неаутентифицированные запрашивающие**: Могут узнавать о новых одноранговых узлах, но не могут повышать существующие
-- Локальные адреса в списке одноранговых узлов пропускаются/фильтруются
-- Ответ отправляется немедленно после валидации
+- Обрабатываются только известные значения `node_type` (`"full"`, `"client"`). Неизвестные типы молча игнорируются для прямой совместимости: на inbound TCP отправляется `announce_peer_ack`, но пиры не запоминаются; на peer-сессиях фрейм молча отбрасывается без ack
+- **Аутентифицированные запрашивающие**: Могут добавлять новых пиров и сбрасывать cooldown/счётчики ошибок у существующих, делая их доступными для следующего цикла подключения. Порядок подключения не меняется — пиры не перемещаются в начало списка
+- **Неаутентифицированные запрашивающие** (только inbound TCP): Могут узнавать о новых пирах, но не могут сбрасывать cooldown у существующих
+- Список `peers` ограничен 64 записями (`maxAnnouncePeers`). Записи сверх лимита молча отбрасываются
+- Локальные адреса в списке пиров пропускаются/фильтруются
+- На inbound TCP `announce_peer_ack` отправляется немедленно после обработки
 
 ### add_peer
 

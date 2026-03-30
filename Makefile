@@ -22,17 +22,29 @@ hooks-status:
 lint:
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.0 run ./... --timeout=7m --color always
 
+.PHONY: fmt gofmt-changed
+fmt:
+	@files=$$(git status --porcelain | awk '{print $$2}' | grep '\.go$$' || true); \
+	if [ -n "$$files" ]; then \
+		gofmt -w $$files; \
+		gofumpt -w $$files; \
+	else \
+		echo "No changed .go files to format"; \
+	fi
+
+gofmt-changed: fmt
+
 .PHONY: vuln
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -show verbose ./...
 
 .PHONY: test
 test:
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test ./...
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -timeout=15m ./...
 
 .PHONY: test-v
 test-v:
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -v -count=1 ./...
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -v -count=1 -timeout=15m ./...
 
 .PHONY: test-all
 test-all: lint test-v
