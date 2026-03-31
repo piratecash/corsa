@@ -32,6 +32,8 @@ type relayForwardState struct {
 	PreviousHop      string // who sent this relay to me
 	ReceiptForwardTo string // = PreviousHop (where to send receipt back)
 	ForwardedTo      string // who I forwarded to (for loop detection)
+	Recipient        string // final recipient identity (for hop_ack route confirmation)
+	RouteOrigin      string // route origin from routing decision (for triple-scoped hop_ack)
 	HopCount         int    // incremented on each hop
 	RemainingTTL     int    // seconds until cleanup (decremented by ticker)
 }
@@ -216,6 +218,34 @@ func (rs *relayStateStore) lookupReceiptForwardTo(messageID string) string {
 	return state.ReceiptForwardTo
 }
 
+// lookupRecipient returns the final recipient identity for a relayed message,
+// or "" if the message ID is unknown. Used by hop_ack processing to confirm
+// the routing table entry for the recipient.
+func (rs *relayStateStore) lookupRecipient(messageID string) string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	state, ok := rs.states[messageID]
+	if !ok {
+		return ""
+	}
+	return state.Recipient
+}
+
+// lookupRouteOrigin returns the route origin for a relayed message, or ""
+// if the message ID is unknown or origin was not recorded. Used by hop_ack
+// processing to scope route confirmation to the exact (Identity, Origin,
+// NextHop) triple that carried the message.
+func (rs *relayStateStore) lookupRouteOrigin(messageID string) string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	state, ok := rs.states[messageID]
+	if !ok {
+		return ""
+	}
+	return state.RouteOrigin
+}
+
+
 // snapshot returns a copy of all relay forward states for persistence.
 func (rs *relayStateStore) snapshot() []relayForwardState {
 	rs.mu.Lock()
@@ -340,6 +370,7 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "",
+			Recipient:        recipient,
 			HopCount:         hopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
@@ -416,7 +447,19 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 	// address changes), so we try all matching sessions until one succeeds.
 	forwardedTo := s.tryForwardToDirectPeer(recipient, forwardFrame)
 
-	// If no direct peer or enqueue failed, gossip to capable peers.
+	// Table-directed relay (Phase 1.2): if no direct peer, consult the
+	// routing table for a next-hop. This enables multi-hop relay chains
+	// A→B→D where B uses the table to find D even though D is not the
+	// final recipient's direct peer on B. Exclude the sender (from
+	// incoming frame.PreviousHop) to prevent sending the message back.
+	var tableRouteOrigin string
+	if forwardedTo == "" {
+		result := s.tryForwardViaRoutingTable(recipient, forwardFrame, frame.PreviousHop)
+		forwardedTo = result.Address
+		tableRouteOrigin = result.RouteOrigin
+	}
+
+	// If no direct peer and no table route, gossip to capable peers.
 	if forwardedTo == "" {
 		forwardedTo = s.relayViaGossip(forwardFrame, senderAddress)
 	}
@@ -444,6 +487,7 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "", // stored locally, not forwarded
+			Recipient:        recipient,
 			HopCount:         newHopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
@@ -465,6 +509,8 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 		PreviousHop:      senderAddress,
 		ReceiptForwardTo: senderAddress,
 		ForwardedTo:      forwardedTo,
+		Recipient:        recipient,
+		RouteOrigin:      tableRouteOrigin,
 		HopCount:         newHopCount,
 		RemainingTTL:     relayStateTTLSeconds,
 	})
@@ -547,6 +593,25 @@ func (s *Service) handleRelayHopAck(senderAddress string, frame protocol.Frame) 
 		Str("from", senderAddress).
 		Str("status", frame.Status).
 		Msg("relay_hop_ack_received")
+
+	// Confirm route via hop_ack: if the ack indicates the message was
+	// delivered or forwarded, promote the route through the peer that
+	// actually sent the ack. We use senderAddress (the transport address
+	// of the ack sender) rather than the stored ForwardedTo, because
+	// gossip fan-out may send relay_message to multiple peers but only
+	// record the first-winner — the ack can arrive from any of them.
+	// The ack sender is the peer that provably carried the message.
+	//
+	// routeOrigin scopes the confirmation to the exact (Identity, Origin,
+	// NextHop) triple that was used for the original send. If empty (gossip
+	// path), the first matching NextHop in Lookup order is promoted.
+	if frame.Status == "delivered" || frame.Status == "forwarded" {
+		recipient := s.relayStates.lookupRecipient(frame.ID)
+		if recipient != "" {
+			routeOrigin := s.relayStates.lookupRouteOrigin(frame.ID)
+			s.confirmRouteViaHopAck(recipient, senderAddress, routeOrigin)
+		}
+	}
 }
 
 // tryForwardToDirectPeer iterates all outbound sessions whose peerIdentity
@@ -763,6 +828,7 @@ func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
 		PreviousHop:      "",
 		ReceiptForwardTo: "",
 		ForwardedTo:      address,
+		Recipient:        msg.Recipient,
 		HopCount:         1,
 		RemainingTTL:     relayStateTTLSeconds,
 	})
@@ -773,5 +839,78 @@ func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
 		Str("peer", address).
 		Str("mode", "session").
 		Msg("relay_message_sent")
+	return true
+}
+
+// sendRelayMessageWithOrigin is the table-directed variant of sendRelayMessage.
+// It stores the route Origin in relayForwardState so that hop_ack confirmation
+// can match the exact (Identity, Origin, NextHop) triple that carried the
+// message. The gossip path (sendRelayMessage) leaves RouteOrigin empty because
+// gossip delivery is not scoped to a specific route triple.
+func (s *Service) sendRelayMessageWithOrigin(address string, msg protocol.Envelope, routeOrigin string) bool {
+	frame := protocol.Frame{
+		Type:        "relay_message",
+		ID:          string(msg.ID),
+		Address:     msg.Sender,
+		Recipient:   msg.Recipient,
+		Topic:       msg.Topic,
+		Flag:        string(msg.Flag),
+		CreatedAt:   msg.CreatedAt.UTC().Format(time.RFC3339),
+		TTLSeconds:  msg.TTLSeconds,
+		Body:        string(msg.Payload),
+		HopCount:    1,
+		MaxHops:     defaultMaxHops,
+		PreviousHop: s.identity.Address,
+	}
+
+	sent := s.enqueuePeerFrame(address, frame)
+	if !sent {
+		sent = s.queuePeerFrame(address, frame)
+		if sent {
+			log.Debug().
+				Str("id", string(msg.ID)).
+				Str("recipient", msg.Recipient).
+				Str("peer", address).
+				Str("mode", "queued").
+				Msg("relay_message_queued")
+		}
+	}
+
+	if !sent {
+		log.Debug().
+			Str("id", string(msg.ID)).
+			Str("recipient", msg.Recipient).
+			Str("peer", address).
+			Str("mode", "dropped").
+			Msg("relay_message_dropped")
+		return false
+	}
+
+	stored := s.relayStates.store(&relayForwardState{
+		MessageID:        string(msg.ID),
+		PreviousHop:      "",
+		ReceiptForwardTo: "",
+		ForwardedTo:      address,
+		Recipient:        msg.Recipient,
+		RouteOrigin:      routeOrigin,
+		HopCount:         1,
+		RemainingTTL:     relayStateTTLSeconds,
+	})
+	if !stored {
+		log.Warn().
+			Str("id", string(msg.ID)).
+			Str("recipient", msg.Recipient).
+			Str("peer", address).
+			Msg("relay_state_store_failed_outbound")
+		return false
+	}
+	s.persistRelayState()
+	log.Debug().
+		Str("id", string(msg.ID)).
+		Str("recipient", msg.Recipient).
+		Str("peer", address).
+		Str("origin", routeOrigin).
+		Str("mode", "session").
+		Msg("relay_message_sent_table_directed")
 	return true
 }

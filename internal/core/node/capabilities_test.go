@@ -9,13 +9,13 @@ import (
 
 func TestLocalCapabilities(t *testing.T) {
 	caps := localCapabilities()
-	expected := []string{"mesh_relay_v1"}
+	expected := []string{"mesh_relay_v1", "mesh_routing_v1"}
 	if len(caps) != len(expected) {
 		t.Fatalf("localCapabilities() = %v, want %v", caps, expected)
 	}
-	for i, cap := range expected {
-		if caps[i] != cap {
-			t.Fatalf("localCapabilities()[%d] = %q, want %q", i, caps[i], cap)
+	for i, c := range expected {
+		if caps[i] != c {
+			t.Fatalf("localCapabilities()[%d] = %q, want %q", i, caps[i], c)
 		}
 	}
 }
@@ -169,10 +169,10 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 		t.Fatal("connPeerInfo should be set after rememberConnPeerAddr")
 	}
 
-	// localCapabilities() returns ["mesh_relay_v1"] in Iteration 1.
+	// localCapabilities() returns ["mesh_relay_v1", "mesh_routing_v1"] (Phase 1.2).
 	// The remote hello advertises ["mesh_relay_v1", "mesh_routing_v1"].
-	// The intersection should contain only "mesh_relay_v1".
-	if len(info.capabilities) != 1 || info.capabilities[0] != "mesh_relay_v1" {
-		t.Fatalf("expected [mesh_relay_v1], got %v", info.capabilities)
+	// The intersection should contain both.
+	if len(info.capabilities) != 2 || info.capabilities[0] != "mesh_relay_v1" || info.capabilities[1] != "mesh_routing_v1" {
+		t.Fatalf("expected [mesh_relay_v1, mesh_routing_v1], got %v", info.capabilities)
 	}
 }

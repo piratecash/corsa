@@ -21,12 +21,29 @@ type RoutingDecision struct {
 	// RelayNextHop is the next-hop peer identity (Ed25519 fingerprint)
 	// from the routing table. nil means no route is known.
 	// Populated starting from Phase 1.2.
-	//
-	// This is a peer identity, NOT a transport address. The caller
-	// (node.Service) must resolve the identity to an active session
-	// before sending. Phase 1.2 requires an identity→session(s) index
-	// in node.Service to avoid ad-hoc scans.
 	RelayNextHop *string
+
+	// RelayNextHopAddress is the transport address (or "inbound:" prefixed
+	// key) of the session that was validated by the router at lookup time.
+	// Using this address directly avoids re-resolution, which could pick a
+	// different session for the same identity — one that lacks the required
+	// capabilities (e.g., a relay-only session instead of a routing-capable
+	// session for a transit next-hop). Empty when RelayNextHop is nil.
+	RelayNextHopAddress string
+
+	// RelayRouteOrigin is the Origin field from the RouteEntry selected by
+	// the router. Stored in relayForwardState so that hop_ack confirmation
+	// can match the exact (Identity, Origin, NextHop) triple that carried
+	// the message, rather than promoting any route with a matching NextHop.
+	// Empty when RelayNextHop is nil.
+	RelayRouteOrigin string
+
+	// RelayNextHopHops is the hop count from the selected RouteEntry.
+	// Used by the retry path in sendTableDirectedRelay to re-resolve the
+	// next-hop address with the correct capability requirements: hops=1
+	// (destination) needs only relay cap; hops>1 (transit) needs both
+	// relay and routing caps. Zero when RelayNextHop is nil.
+	RelayNextHopHops int
 
 	// GossipTargets are the top-N peers selected by score for blind gossip
 	// delivery. Maps to the existing routingTargetsForMessage() path.

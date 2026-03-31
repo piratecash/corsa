@@ -23,6 +23,7 @@ import (
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
+	"corsa/internal/core/routing"
 	"corsa/internal/core/transport"
 )
 
@@ -86,6 +87,10 @@ type Service struct {
 	router            Router                // routing strategy for outbound message delivery
 	relayStates       *relayStateStore      // hop-by-hop relay forwarding state (Iteration 1)
 	relayLimiter      *relayRateLimiter     // per-peer token bucket for relay fan-out
+	routingTable      *routing.Table        // distance-vector routing table (Phase 1.2)
+	announceLoop      *routing.AnnounceLoop // periodic + triggered announce_routes sender (Phase 1.2)
+	identitySessions      map[string]int // peer identity → active session count (multi-session awareness)
+	identityRelaySessions map[string]int // peer identity → relay-capable session count (direct-route lifecycle)
 }
 
 type subscriber struct {
@@ -410,8 +415,21 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		connWriterDone:    make(map[net.Conn]chan struct{}),
 		bans:              make(map[string]banEntry),
 		events:            make(map[chan protocol.LocalChangeEvent]struct{}),
+		identitySessions:      make(map[string]int),
+		identityRelaySessions: make(map[string]int),
 	}
-	svc.router = NewGossipRouter(svc)
+
+	// Initialize distance-vector routing table (Phase 1.2).
+	svc.routingTable = routing.NewTable(
+		routing.WithLocalOrigin(id.Address),
+	)
+	svc.router = NewTableRouter(svc, svc.routingTable)
+	svc.announceLoop = routing.NewAnnounceLoop(
+		svc.routingTable,
+		svc,
+		svc.routingCapablePeers,
+	)
+
 	svc.relayStates = newRelayStateStore()
 	svc.relayStates.restore(queueState.RelayForwardStates)
 	svc.relayLimiter = newRelayRateLimiter()
@@ -432,6 +450,20 @@ func (s *Service) Run(ctx context.Context) error {
 	// Start relay state TTL ticker; stopped on shutdown.
 	s.relayStates.start()
 	defer s.relayStates.stop()
+
+	// Start routing table TTL ticker and announce loop (Phase 1.2).
+	routingCtx, routingCancel := context.WithCancel(ctx)
+	defer routingCancel()
+
+	go func() {
+		defer crashlog.DeferRecover()
+		s.announceLoop.Run(routingCtx)
+	}()
+
+	go func() {
+		defer crashlog.DeferRecover()
+		s.routingTableTTLLoop(routingCtx)
+	}()
 
 	// On shutdown: close all inbound connections so handleConn goroutines
 	// exit, wait for them to finish.
@@ -919,6 +951,26 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		if senderAddr != "" {
 			s.handleRelayHopAck(senderAddr, frame)
 		}
+		return true
+	case "announce_routes":
+		if !s.isConnAuthenticated(conn) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(conn, capMeshRoutingV1) {
+			accepted = false
+			return true
+		}
+		// A routing-only peer (mesh_routing_v1 without mesh_relay_v1) can
+		// advertise routes, but this node can never send relay_message to
+		// it, making every route through it data-plane unusable. Reject
+		// announcements from such peers to avoid storing dead NextHop entries.
+		if !s.connHasCapability(conn, capMeshRelayV1) {
+			accepted = false
+			return true
+		}
+		senderIdentity := s.inboundPeerIdentity(conn)
+		s.handleAnnounceRoutes(senderIdentity, frame)
 		return true
 	default:
 		accepted = false
@@ -1422,6 +1474,20 @@ func (s *Service) trackInboundConnect(conn net.Conn, address string) {
 	if first {
 		s.markPeerConnected(resolved, peerDirectionInbound)
 	}
+
+	// Routing table: register direct peer. The relay capability flag
+	// ensures only peers that can accept relay_message become direct
+	// routes — see onPeerSessionEstablished for the full rationale.
+	s.onPeerSessionEstablished(address, s.connHasCapability(conn, capMeshRelayV1))
+
+	// Send full table sync to the inbound peer (Phase 1.2: full sync on
+	// connect, symmetric with the outbound path).
+	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
+	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
+	// learn routes it cannot deliver on the data plane.
+	if s.connHasCapability(conn, capMeshRoutingV1) && s.connHasCapability(conn, capMeshRelayV1) {
+		s.sendFullTableSyncToInbound(conn, address)
+	}
 }
 
 // trackInboundDisconnect decrements the inbound connection reference count
@@ -1449,6 +1515,13 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address string) {
 
 	if last {
 		s.markPeerDisconnected(resolved, nil)
+	}
+
+	// Routing table: deregister direct peer when the last relay-capable
+	// inbound session closes. The hasRelayCap flag must match what was
+	// passed to onPeerSessionEstablished for balanced accounting.
+	if wasTracked {
+		s.onPeerSessionClosed(address, s.connHasCapability(conn, capMeshRelayV1))
 	}
 }
 
@@ -2107,13 +2180,19 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// clients, and backlog drain. Never skip or filter gossip.
 		go s.executeGossipTargets(envelope, decision.GossipTargets)
 
-		// Relay is an additional optimization for multi-hop DMs.
-		// Fire-and-forget: sends relay_message to full-node peers with
-		// mesh_relay_v1 capability. Receivers dedupe via seen[messageID]
-		// if gossip arrives first; relay provides faster multi-hop
-		// traversal for recipients unreachable by direct gossip.
+		// Table-directed relay (Phase 1.2): when the routing table knows a
+		// next-hop for this recipient, send relay_message directly to that
+		// peer. This is the primary directed delivery path that replaces
+		// blind gossip relay for known routes. Gossip still runs above as
+		// fallback — receivers dedupe via seen[messageID].
 		if msg.Topic == "dm" && msg.Recipient != "" && msg.Recipient != "*" {
-			s.tryRelayToCapableFullNodes(envelope, decision.GossipTargets)
+			if decision.RelayNextHop != nil {
+				s.sendTableDirectedRelay(envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+			} else {
+				// No table route — fall back to blind gossip relay to
+				// capable full nodes (pre-Phase 1.2 behavior).
+				s.tryRelayToCapableFullNodes(envelope, decision.GossipTargets)
+			}
 		}
 	}
 
@@ -2851,8 +2930,17 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 		connected, err := s.openPeerSession(ctx, address)
 		if err != nil {
 			s.mu.Lock()
+			closedSession := s.sessions[address]
 			delete(s.sessions, address)
 			s.mu.Unlock()
+
+			// Routing table: deregister direct peer on session close.
+			// The hasRelayCap flag must match what was passed to
+			// onPeerSessionEstablished for balanced accounting.
+			if closedSession != nil && closedSession.peerIdentity != "" {
+				hadRelay := sessionHasCap(closedSession.capabilities, capMeshRelayV1)
+				s.onPeerSessionClosed(closedSession.peerIdentity, hadRelay)
+			}
 			// servePeerSession calls markPeerDisconnected before
 			// returning its error.  For all other error paths (dial
 			// failure, handshake, subscribe, sync) we must call it here
@@ -2953,6 +3041,28 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	}
 
 	s.flushPendingPeerFrames(address)
+
+	// Routing table: register direct peer. The relay capability flag
+	// ensures only peers that can accept relay_message become direct
+	// routes — see onPeerSessionEstablished for the full rationale.
+	s.onPeerSessionEstablished(session.peerIdentity, s.sessionHasCapability(address, capMeshRelayV1))
+
+	// Send full table sync to the new peer (Phase 1.2: full sync on connect).
+	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
+	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
+	// learn routes it cannot deliver on the data plane.
+	if session.peerIdentity != "" && s.sessionHasCapability(address, capMeshRoutingV1) && s.sessionHasCapability(address, capMeshRelayV1) {
+		routes := s.routingTable.AnnounceTo(session.peerIdentity)
+		if len(routes) > 0 {
+			if !s.SendAnnounceRoutes(address, routes) {
+				log.Warn().
+					Str("peer", session.peerIdentity).
+					Str("address", address).
+					Int("routes", len(routes)).
+					Msg("routing_outbound_full_sync_failed")
+			}
+		}
+	}
 
 	return true, s.servePeerSession(ctx, session)
 }
@@ -4168,14 +4278,19 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			return
 		}
 
-		if stored, _, errCode := s.storeIncomingMessage(msg, true); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+		stored, _, errCode := s.storeIncomingMessage(msg, true)
+		if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 			s.syncPeer(refreshCtx, address)
 			cancel()
-			_, _, _ = s.storeIncomingMessage(msg, true)
+			stored, _, _ = s.storeIncomingMessage(msg, true)
 		}
-		s.sendAckDeleteToPeer(address, "dm", msg.ID, "")
-		log.Info().Str("peer", address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("received pushed message")
+		if stored {
+			s.sendAckDeleteToPeer(address, "dm", msg.ID, "")
+		} else {
+			log.Warn().Str("peer", address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete")
+		}
+		log.Info().Str("peer", address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message")
 	case "push_delivery_receipt":
 		if frame.Receipt == nil {
 			return
@@ -4231,6 +4346,21 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			return
 		}
 		s.handleRelayHopAck(address, frame)
+	case "announce_routes":
+		if !s.sessionHasCapability(address, capMeshRoutingV1) {
+			return
+		}
+		// Routing-only peer (no mesh_relay_v1) — routes through it are
+		// data-plane unusable. See inbound dispatch for full rationale.
+		if !s.sessionHasCapability(address, capMeshRelayV1) {
+			return
+		}
+		s.mu.RLock()
+		session := s.sessions[address]
+		s.mu.RUnlock()
+		if session != nil {
+			s.handleAnnounceRoutes(session.peerIdentity, frame)
+		}
 	}
 }
 
@@ -4259,16 +4389,21 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 
 	peerAddr := s.inboundPeerAddress(conn)
 
-	if stored, _, errCode := s.storeIncomingMessage(msg, true); !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+	stored, _, errCode := s.storeIncomingMessage(msg, true)
+	if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 		if peerAddr != "" {
 			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 			s.syncPeer(refreshCtx, peerAddr)
 			cancel()
-			_, _, _ = s.storeIncomingMessage(msg, true)
+			stored, _, _ = s.storeIncomingMessage(msg, true)
 		}
 	}
-	s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
-	log.Info().Str("peer", peerAddr).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("received pushed message (inbound request_inbox)")
+	if stored {
+		s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
+	} else {
+		log.Warn().Str("peer", peerAddr).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete_inbound")
+	}
+	log.Info().Str("peer", peerAddr).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message (inbound request_inbox)")
 }
 
 // handleInboundPushDeliveryReceipt processes a push_delivery_receipt frame
@@ -4974,7 +5109,14 @@ func (s *Service) retryRelayDeliveries() {
 		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", s.noteRelayAttempt(relayMessageKey(msg.ID), now)).Msg("relay_retry_message")
 		decision := s.router.Route(msg)
 		go s.executeGossipTargets(msg, decision.GossipTargets)
-		s.tryRelayToCapableFullNodes(msg, decision.GossipTargets)
+		// Table-directed relay (Phase 1.2): mirror the logic in
+		// storeIncomingMessage — use the routing table when a next-hop
+		// is known, fall back to blind gossip relay otherwise.
+		if decision.RelayNextHop != nil {
+			s.sendTableDirectedRelay(msg, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+		} else {
+			s.tryRelayToCapableFullNodes(msg, decision.GossipTargets)
+		}
 	}
 	for _, receipt := range s.retryableRelayReceipts(now) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
@@ -5422,7 +5564,7 @@ func expectedReplyType(requestType string) string {
 // If future iterations add non-relay fire-and-forget frames, this function
 // should be extended independently.
 func isFireAndForgetFrame(frameType string) bool {
-	return isRelayFrame(frameType)
+	return isRelayFrame(frameType) || frameType == "announce_routes"
 }
 
 func (s *Service) peerSession(address string) *peerSession {

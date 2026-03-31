@@ -771,44 +771,44 @@ sequenceDiagram
 ```
 *Diagram — Table-directed relay with hop_ack confirmation*
 
-- [ ] Create `routing/table.go` with `Table` struct
-- [ ] Implement `Table.Lookup()` — sort by source priority (direct > hop_ack > announcement), then by hops
-- [ ] Implement `Table.AddDirectPeer()`, `Table.RemoveDirectPeer()`
-- [ ] Implement `Table.UpdateRoute()` using Phase 1.1 invariants
-- [ ] Implement `Table.Snapshot()` — return serializable table state for RPC
-- [ ] Create `routing/announce.go` — periodic announce loop (every 30s)
-- [ ] Implement triggered updates: immediate announce on peer connect/disconnect
-- [ ] Implement triggered withdrawal: immediate `hops=16` on peer disconnect (own-origin only)
-- [ ] Handle incoming `announce_routes` — update table with +1 hop, preserve origin and seq
+- [x] Create `routing/table.go` with `Table` struct
+- [x] Implement `Table.Lookup()` — sort by source priority (direct > hop_ack > announcement), then by hops
+- [x] Implement `Table.AddDirectPeer()`, `Table.RemoveDirectPeer()`
+- [x] Implement `Table.UpdateRoute()` using Phase 1.1 invariants
+- [x] Implement `Table.Snapshot()` — return serializable table state for RPC
+- [x] Create `routing/announce.go` — periodic announce loop (every 30s)
+- [x] Implement triggered updates: immediate announce on peer connect/disconnect
+- [x] Implement triggered withdrawal: immediate `hops=16` on peer disconnect (own-origin only)
+- [x] Handle incoming `announce_routes` — update table with +1 hop, preserve origin and seq
 - [ ] Preserve unknown fields in route entries when re-announcing (forward-compatible relay for onion box keys)
-- [ ] Handle incoming withdrawals (`hops=16`) — invalidate route immediately
-- [ ] Create `node/table_router.go` — `TableRouter` adapter wrapping `routing.Table`
-- [ ] Integrate `routing.Table` into `node.Service`
-- [ ] Integrate `TableRouter` into `Router.Route()` — fill `RelayNextHop` (peer identity, not transport addr)
-- [ ] **Release-blocking: gossip fallback contract.** `TableRouter.Route()` must degrade to gossip immediately (not fail) in every case where the table route is unusable. Specifically:
-  - [ ] `RelayNextHop` identity has no active session → gossip fallback
-  - [ ] `RelayNextHop` peer lacks `mesh_routing_v1` capability → gossip fallback
-  - [ ] Enqueue/send to chosen next-hop fails (session closed between lookup and send) → gossip fallback
-  - [ ] `Lookup()` returns empty (no route known) → gossip fallback
-  - [ ] Write unit tests: each of the 4 fallback triggers produces gossip delivery, not an error
+- [x] Handle incoming withdrawals (`hops=16`) — invalidate route immediately
+- [x] Create `node/table_router.go` — `TableRouter` adapter wrapping `routing.Table`
+- [x] Integrate `routing.Table` into `node.Service`
+- [x] Integrate `TableRouter` into `Router.Route()` — fill `RelayNextHop` (peer identity, not transport addr)
+- [x] **Release-blocking: gossip fallback contract.** `TableRouter.Route()` must degrade to gossip immediately (not fail) in every case where the table route is unusable. Specifically:
+  - [x] `RelayNextHop` identity has no active session → gossip fallback
+  - [x] `RelayNextHop` peer lacks `mesh_routing_v1` capability → gossip fallback
+  - [x] Enqueue/send to chosen next-hop fails (session closed between lookup and send) → gossip fallback
+  - [x] `Lookup()` returns empty (no route known) → gossip fallback
+  - [x] Write unit tests: each of the 4 fallback triggers produces gossip delivery, not an error
   - [ ] Integration test: kill the only table-routed next-hop mid-delivery, verify message arrives via gossip within 5s
-- [ ] Confirm routes via `relay_hop_ack` — `source="hop_ack"` for specific `(identity, origin, nextHop)` triple (origin resolved locally from routing decision, not from wire)
-- [ ] Add direct peer tracking on connect/disconnect events
-- [ ] **Multi-session awareness:** `node.Service` must maintain an identity→active-session-count index. `AddDirectPeer()` is called on transition 0→1 sessions (first connect). `RemoveDirectPeer()` is called only on transition 1→0 sessions (last disconnect). Intermediate session opens/closes for an already-connected identity must NOT trigger route changes. `AddDirectPeer()` is idempotent at the model level (no SeqNo bump if already active), but the session-count gate in `node.Service` is the primary defense.
-  - [ ] Implement identity→session-count tracking in `node.Service`
-  - [ ] Gate `AddDirectPeer()` call on 0→1 transition
-  - [ ] Gate `RemoveDirectPeer()` call on 1→0 transition
-  - [ ] Unit test: 2 sessions to same peer, close one — direct route remains, no withdrawal emitted
-  - [ ] Unit test: close last session — withdrawal emitted
+- [x] Confirm routes via `relay_hop_ack` — `source="hop_ack"` for specific `(identity, origin, nextHop)` triple (origin resolved locally from routing decision, not from wire)
+- [x] Add direct peer tracking on connect/disconnect events
+- [x] **Multi-session awareness:** `node.Service` must maintain an identity→active-session-count index. `AddDirectPeer()` is called on transition 0→1 sessions (first connect). `RemoveDirectPeer()` is called only on transition 1→0 sessions (last disconnect). Intermediate session opens/closes for an already-connected identity must NOT trigger route changes. `AddDirectPeer()` is idempotent at the model level (no SeqNo bump if already active), but the session-count gate in `node.Service` is the primary defense.
+  - [x] Implement identity→session-count tracking in `node.Service`
+  - [x] Gate `AddDirectPeer()` call on 0→1 transition
+  - [x] Gate `RemoveDirectPeer()` call on 1→0 transition
+  - [x] Unit test: 2 sessions to same peer, close one — direct route remains, no withdrawal emitted
+  - [x] Unit test: close last session — withdrawal emitted
   - [ ] Integration test: peer with 2 TCP sessions, kill one — route stays, delivery uninterrupted
-- [ ] Implement route-session binding: on session close, remove direct-peer route (with own withdrawal) + locally invalidate transit routes (no wire withdrawal for transit — only stop advertising)
-- [ ] Verify: triggered withdrawal on session close only for routes where this node is the origin (direct peers)
+- [x] Implement route-session binding: on session close, remove direct-peer route (with own withdrawal) + locally invalidate transit routes (no wire withdrawal for transit — only stop advertising)
+- [x] Verify: triggered withdrawal on session close only for routes where this node is the origin (direct peers)
 - [ ] Handle identity change on reconnect: withdraw old identity, add new
-- [ ] On reconnect: always full table sync (incremental digest sync deferred to iteration 2)
-- [ ] Write unit tests for routing table operations (Lookup, AddDirectPeer, RemoveDirectPeer)
-- [ ] Write unit tests for triggered update generation
-- [ ] Write unit tests for route-session binding (direct routes withdrawn on wire; transit routes locally invalidated, not wire-withdrawn)
-- [ ] Write unit tests for hop_ack scoping (confirming (X, origin=C, via B) does not promote (X, origin=D, via B) or (Y, origin=C, via B))
+- [x] On reconnect: always full table sync (incremental digest sync deferred to iteration 2)
+- [x] Write unit tests for routing table operations (Lookup, AddDirectPeer, RemoveDirectPeer)
+- [x] Write unit tests for triggered update generation
+- [x] Write unit tests for route-session binding (direct routes withdrawn on wire; transit routes locally invalidated, not wire-withdrawn)
+- [x] Write unit tests for hop_ack scoping (confirming (X, origin=C, via B) does not promote (X, origin=D, via B) or (Y, origin=C, via B))
 - [ ] Integration test: 5 nodes, verify shortest path selection
 - [ ] Integration test: disconnect node, verify withdrawal propagation < 5s
 - [ ] Integration test: reconnect with different identity, verify old routes withdrawn

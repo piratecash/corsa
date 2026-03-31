@@ -40,6 +40,18 @@ type Table struct {
 	// clock is used for time-dependent operations, allowing tests to inject
 	// a controllable clock.
 	clock func() time.Time
+
+	// flapState tracks per-peer disconnect frequency to detect link
+	// flapping. When a peer exceeds flapThreshold disconnects within
+	// flapWindow, subsequent reconnections apply penalizedTTL instead
+	// of defaultTTL.
+	flapState map[string]*peerFlapState
+
+	// Flap detection tuning. Set via options; defaults applied in NewTable.
+	flapWindow       time.Duration
+	flapThreshold    int
+	holdDownDuration time.Duration
+	penalizedTTL     time.Duration
 }
 
 // TableOption configures optional Table parameters.
@@ -68,13 +80,49 @@ func WithLocalOrigin(identity string) TableOption {
 	}
 }
 
+// WithFlapWindow overrides the time window for counting disconnect events.
+func WithFlapWindow(d time.Duration) TableOption {
+	return func(t *Table) {
+		t.flapWindow = d
+	}
+}
+
+// WithFlapThreshold overrides the number of disconnects within flapWindow
+// that triggers hold-down.
+func WithFlapThreshold(n int) TableOption {
+	return func(t *Table) {
+		t.flapThreshold = n
+	}
+}
+
+// WithHoldDownDuration overrides how long a peer stays in hold-down after
+// flap detection triggers.
+func WithHoldDownDuration(d time.Duration) TableOption {
+	return func(t *Table) {
+		t.holdDownDuration = d
+	}
+}
+
+// WithPenalizedTTL overrides the shortened TTL applied to routes created
+// during hold-down.
+func WithPenalizedTTL(d time.Duration) TableOption {
+	return func(t *Table) {
+		t.penalizedTTL = d
+	}
+}
+
 // NewTable creates an empty routing table with the given options.
 func NewTable(opts ...TableOption) *Table {
 	t := &Table{
-		routes:      make(map[string][]RouteEntry),
-		seqCounters: make(map[string]uint64),
-		defaultTTL:  DefaultTTL,
-		clock:       time.Now,
+		routes:           make(map[string][]RouteEntry),
+		seqCounters:      make(map[string]uint64),
+		flapState:        make(map[string]*peerFlapState),
+		defaultTTL:       DefaultTTL,
+		clock:            time.Now,
+		flapWindow:       DefaultFlapWindow,
+		flapThreshold:    DefaultFlapThreshold,
+		holdDownDuration: DefaultHoldDownDuration,
+		penalizedTTL:     DefaultPenalizedTTL,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -95,6 +143,13 @@ func NewTable(opts ...TableOption) *Table {
 func (t *Table) UpdateRoute(entry RouteEntry) (bool, error) {
 	if err := entry.Validate(); err != nil {
 		return false, err
+	}
+
+	// Direct routes must originate from this node. A RouteSourceDirect entry
+	// with a foreign Origin would outrank all announcement/hop_ack routes in
+	// Lookup and never be eligible for own-origin withdrawal on disconnect.
+	if entry.Source == RouteSourceDirect && t.localOrigin != "" && entry.Origin != t.localOrigin {
+		return false, ErrDirectForeignOrigin
 	}
 
 	t.mu.Lock()
@@ -163,12 +218,26 @@ func (t *Table) WithdrawRoute(identity, origin, nextHop string, seqNo uint64) bo
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	now := t.clock()
 	existing := t.routes[identity]
 	key := RouteTriple{Identity: identity, Origin: origin, NextHop: nextHop}
 	idx := findByTriple(existing, key)
 
 	if idx < 0 {
-		return false
+		// No active route for this triple — store a tombstone so that a
+		// delayed older announcement with a lower SeqNo cannot resurrect
+		// the withdrawn lineage. The tombstone expires via normal TTL.
+		tombstone := RouteEntry{
+			Identity:  identity,
+			Origin:    origin,
+			NextHop:   nextHop,
+			Hops:      HopsInfinity,
+			SeqNo:     seqNo,
+			Source:     RouteSourceAnnouncement,
+			ExpiresAt: now.Add(t.defaultTTL),
+		}
+		t.routes[identity] = append(existing, tombstone)
+		return true
 	}
 
 	old := &existing[idx]
@@ -178,8 +247,19 @@ func (t *Table) WithdrawRoute(identity, origin, nextHop string, seqNo uint64) bo
 
 	existing[idx].Hops = HopsInfinity
 	existing[idx].SeqNo = seqNo
-	existing[idx].ExpiresAt = t.clock().Add(t.defaultTTL)
+	existing[idx].ExpiresAt = now.Add(t.defaultTTL)
 	return true
+}
+
+// AddDirectPeerResult describes the outcome of AddDirectPeer.
+type AddDirectPeerResult struct {
+	// Entry is the route entry that was created or refreshed.
+	Entry RouteEntry
+
+	// Penalized is true when the peer triggered flap detection and the
+	// route was created with a shortened TTL. The caller can use this
+	// to decide whether to delay or suppress the announcement.
+	Penalized bool
 }
 
 // RemoveDirectPeerResult describes the outcome of RemoveDirectPeer.
@@ -211,19 +291,27 @@ type RemoveDirectPeerResult struct {
 // SeqNo is only incremented when the route is new or was previously
 // withdrawn (reconnect after disconnect).
 //
-// Returns the created/existing RouteEntry and nil error on success.
+// Flap dampening: if the peer is in hold-down (too many recent
+// disconnects), the route is created with penalizedTTL instead of
+// defaultTTL, and Result.Penalized is set. The caller can use this
+// to suppress or delay the triggered announcement.
+//
+// Returns AddDirectPeerResult and nil error on success.
 // Returns ErrNoLocalOrigin if localOrigin was not configured, or
 // ErrEmptyPeerID if peerIdentity is empty.
-func (t *Table) AddDirectPeer(peerIdentity string) (RouteEntry, error) {
+func (t *Table) AddDirectPeer(peerIdentity string) (AddDirectPeerResult, error) {
 	if t.localOrigin == "" {
-		return RouteEntry{}, ErrNoLocalOrigin
+		return AddDirectPeerResult{}, ErrNoLocalOrigin
 	}
 	if peerIdentity == "" {
-		return RouteEntry{}, ErrEmptyPeerID
+		return AddDirectPeerResult{}, ErrEmptyPeerID
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	now := t.clock()
+	penalized := t.isPeerInHoldDownLocked(peerIdentity, now)
 
 	key := RouteTriple{
 		Identity: peerIdentity,
@@ -235,12 +323,21 @@ func (t *Table) AddDirectPeer(peerIdentity string) (RouteEntry, error) {
 
 	// Already active — refresh TTL only, no SeqNo bump.
 	if idx >= 0 && !existing[idx].IsWithdrawn() {
-		existing[idx].ExpiresAt = t.clock().Add(t.defaultTTL)
-		return existing[idx], nil
+		ttl := t.defaultTTL
+		if penalized {
+			ttl = t.penalizedTTL
+		}
+		existing[idx].ExpiresAt = now.Add(ttl)
+		return AddDirectPeerResult{Entry: existing[idx], Penalized: penalized}, nil
 	}
 
 	// New route or re-activation after withdrawal — increment SeqNo.
 	seq := t.nextSeqLocked(peerIdentity)
+
+	ttl := t.defaultTTL
+	if penalized {
+		ttl = t.penalizedTTL
+	}
 
 	entry := RouteEntry{
 		Identity:  peerIdentity,
@@ -249,7 +346,7 @@ func (t *Table) AddDirectPeer(peerIdentity string) (RouteEntry, error) {
 		Hops:      1,
 		SeqNo:     seq,
 		Source:    RouteSourceDirect,
-		ExpiresAt: t.clock().Add(t.defaultTTL),
+		ExpiresAt: now.Add(ttl),
 	}
 
 	if idx < 0 {
@@ -258,7 +355,44 @@ func (t *Table) AddDirectPeer(peerIdentity string) (RouteEntry, error) {
 		existing[idx] = entry
 	}
 
-	return entry, nil
+	return AddDirectPeerResult{Entry: entry, Penalized: penalized}, nil
+}
+
+// isPeerInHoldDownLocked checks if the peer is currently in flap hold-down.
+// Must be called with t.mu held.
+func (t *Table) isPeerInHoldDownLocked(peerIdentity string, now time.Time) bool {
+	fs := t.flapState[peerIdentity]
+	if fs == nil {
+		return false
+	}
+	return now.Before(fs.holdDownUntil)
+}
+
+// recordWithdrawalLocked tracks a disconnect event for flap detection.
+// If the withdrawal count within flapWindow crosses flapThreshold,
+// hold-down is activated. Must be called with t.mu held.
+func (t *Table) recordWithdrawalLocked(peerIdentity string, now time.Time) {
+	fs := t.flapState[peerIdentity]
+	if fs == nil {
+		fs = &peerFlapState{}
+		t.flapState[peerIdentity] = fs
+	}
+
+	fs.withdrawTimes = append(fs.withdrawTimes, now)
+
+	// Trim events outside the window.
+	cutoff := now.Add(-t.flapWindow)
+	trimmed := fs.withdrawTimes[:0]
+	for _, wt := range fs.withdrawTimes {
+		if !wt.Before(cutoff) {
+			trimmed = append(trimmed, wt)
+		}
+	}
+	fs.withdrawTimes = trimmed
+
+	if len(fs.withdrawTimes) >= t.flapThreshold {
+		fs.holdDownUntil = now.Add(t.holdDownDuration)
+	}
 }
 
 // RemoveDirectPeer handles a peer disconnect. It withdraws the direct
@@ -281,6 +415,9 @@ func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, e
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	now := t.clock()
+	t.recordWithdrawalLocked(peerIdentity, now)
 
 	var result RemoveDirectPeerResult
 
@@ -312,6 +449,37 @@ func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, e
 	return result, nil
 }
 
+// InvalidateTransitRoutes sets hops=HopsInfinity on all non-direct routes
+// whose NextHop matches peerIdentity. Unlike RemoveDirectPeer this does
+// NOT generate wire withdrawals and does NOT touch direct routes — it is
+// a defense-in-depth cleanup for peers that had mesh_routing_v1 (could
+// advertise routes) but not mesh_relay_v1 (no direct route was created).
+// Returns the number of transit routes invalidated.
+func (t *Table) InvalidateTransitRoutes(peerIdentity string) int {
+	if peerIdentity == "" {
+		return 0
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	invalidated := 0
+	for _, routes := range t.routes {
+		for i := range routes {
+			r := &routes[i]
+			if r.NextHop != peerIdentity || r.Hops >= HopsInfinity {
+				continue
+			}
+			if r.Source == RouteSourceDirect {
+				continue
+			}
+			r.Hops = HopsInfinity
+			invalidated++
+		}
+	}
+	return invalidated
+}
+
 // nextSeqLocked increments and returns the next SeqNo for a given identity.
 // Must be called with t.mu held.
 func (t *Table) nextSeqLocked(identity string) uint64 {
@@ -319,8 +487,9 @@ func (t *Table) nextSeqLocked(identity string) uint64 {
 	return t.seqCounters[identity]
 }
 
-// TickTTL removes expired routes from the table. Should be called
-// periodically (e.g., every second or every few seconds).
+// TickTTL removes expired routes from the table and cleans up stale
+// flap detection state. Should be called periodically (e.g., every
+// second or every few seconds).
 func (t *Table) TickTTL() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -338,6 +507,27 @@ func (t *Table) TickTTL() {
 			delete(t.routes, identity)
 		} else {
 			t.routes[identity] = routes[:n]
+		}
+	}
+
+	// Clean up flap state where both hold-down has expired and all
+	// withdrawal timestamps are outside the window.
+	cutoff := now.Add(-t.flapWindow)
+	for peer, fs := range t.flapState {
+		if !now.Before(fs.holdDownUntil) {
+			// Trim stale withdrawal events.
+			n := 0
+			for _, wt := range fs.withdrawTimes {
+				if !wt.Before(cutoff) {
+					fs.withdrawTimes[n] = wt
+					n++
+				}
+			}
+			fs.withdrawTimes = fs.withdrawTimes[:n]
+
+			if n == 0 {
+				delete(t.flapState, peer)
+			}
 		}
 	}
 }

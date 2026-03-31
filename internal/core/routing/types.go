@@ -13,14 +13,40 @@ var (
 	ErrInvalidHops     = errors.New("routing: Hops must be between 1 and HopsInfinity (16)")
 	ErrDirectHopsMust1 = errors.New("routing: direct route must have Hops=1")
 	ErrDirectNextHop   = errors.New("routing: direct route NextHop must equal Identity (directly connected)")
-	ErrNoLocalOrigin   = errors.New("routing: Table.localOrigin not set (use WithLocalOrigin)")
-	ErrEmptyPeerID     = errors.New("routing: peerIdentity must not be empty")
+	ErrDirectForeignOrigin = errors.New("routing: direct route Origin must equal localOrigin")
+	ErrNoLocalOrigin       = errors.New("routing: Table.localOrigin not set (use WithLocalOrigin)")
+	ErrEmptyPeerID         = errors.New("routing: peerIdentity must not be empty")
+)
+
+// Flap detection defaults. A peer that disconnects and reconnects more than
+// FlapThreshold times within FlapWindow is considered unstable. Once the
+// threshold is crossed, the peer enters hold-down: reconnections during
+// HoldDownDuration still create routes, but with PenalizedTTL instead of
+// the default — giving the network time to converge before the route
+// expires again if the link flaps once more.
+const (
+	DefaultFlapWindow      = 120 * time.Second
+	DefaultFlapThreshold   = 3
+	DefaultHoldDownDuration = 30 * time.Second
+	DefaultPenalizedTTL    = 30 * time.Second
 )
 
 // HopsInfinity marks a route as withdrawn. Only the origin node may
 // set hops to this value on the wire; transit nodes invalidate locally
 // and stop advertising the route instead.
 const HopsInfinity = 16
+
+// peerFlapState tracks disconnect events for a single peer identity.
+// Used by the Table to detect link flapping and apply hold-down.
+type peerFlapState struct {
+	// withdrawTimes records timestamps of recent RemoveDirectPeer calls.
+	// Only events within the flap window are retained.
+	withdrawTimes []time.Time
+
+	// holdDownUntil is the time until which AddDirectPeer will apply
+	// a penalized (shorter) TTL. Zero means no hold-down active.
+	holdDownUntil time.Time
+}
 
 // RouteSource indicates how a route was learned. The trust hierarchy is:
 // direct > hop_ack > announcement. A route learned through a more trusted

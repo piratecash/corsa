@@ -354,8 +354,13 @@ func TestIntersectCapabilitiesWithRelay(t *testing.T) {
 	remote := []string{"mesh_relay_v1", "mesh_routing_v1"}
 	result := intersectCapabilities(local, remote)
 
-	if len(result) != 1 || result[0] != "mesh_relay_v1" {
-		t.Fatalf("intersection = %v, want [mesh_relay_v1]", result)
+	// localCapabilities() now advertises both mesh_relay_v1 and mesh_routing_v1
+	// (Phase 1.2), so the intersection with a peer offering both should return both.
+	if len(result) != 2 {
+		t.Fatalf("intersection = %v, want [mesh_relay_v1 mesh_routing_v1]", result)
+	}
+	if result[0] != "mesh_relay_v1" || result[1] != "mesh_routing_v1" {
+		t.Fatalf("intersection = %v, want [mesh_relay_v1 mesh_routing_v1]", result)
 	}
 }
 

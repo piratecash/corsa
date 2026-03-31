@@ -23,11 +23,11 @@ func mustUpdate(t *testing.T, tbl *Table, entry RouteEntry) bool {
 // mustAddDirect calls AddDirectPeer and fails the test on error.
 func mustAddDirect(t *testing.T, tbl *Table, peerID string) RouteEntry {
 	t.Helper()
-	entry, err := tbl.AddDirectPeer(peerID)
+	result, err := tbl.AddDirectPeer(peerID)
 	if err != nil {
 		t.Fatalf("AddDirectPeer(%q) unexpected error: %v", peerID, err)
 	}
-	return entry
+	return result.Entry
 }
 
 // mustRemoveDirect calls RemoveDirectPeer and fails the test on error.
@@ -539,12 +539,151 @@ func TestWithdrawRouteStaleSeqNoRejected(t *testing.T) {
 	}
 }
 
-func TestWithdrawRouteNonexistent(t *testing.T) {
+func TestWithdrawRouteNonexistentCreatesTombstone(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 5)
+	if !ok {
+		t.Fatal("withdrawal of unseen route should succeed (tombstone created)")
+	}
+
+	// Tombstone should exist: withdrawn entry with HopsInfinity and SeqNo=5.
+	snap := tbl.Snapshot()
+	routes := snap.Routes["alice"]
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 tombstone entry, got %d", len(routes))
+	}
+	if routes[0].Hops != HopsInfinity {
+		t.Fatalf("tombstone should have hops=%d, got %d", HopsInfinity, routes[0].Hops)
+	}
+	if routes[0].SeqNo != 5 {
+		t.Fatalf("tombstone should preserve SeqNo=5, got %d", routes[0].SeqNo)
+	}
+
+	// Verify Lookup returns nothing (withdrawn routes are filtered).
+	active := tbl.Lookup("alice")
+	if len(active) != 0 {
+		t.Fatal("tombstone should not appear in Lookup")
+	}
+}
+
+func TestWithdrawTombstoneBlocksStaleAnnouncement(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	// Withdrawal arrives first with SeqNo=10 — creates tombstone.
+	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 10)
+	if !ok {
+		t.Fatal("tombstone creation should succeed")
+	}
+
+	// Delayed stale announcement with SeqNo=8 arrives — must be rejected
+	// because the tombstone's SeqNo (10) is higher.
+	accepted := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 8, Source: RouteSourceAnnouncement,
+	})
+	if accepted {
+		t.Fatal("stale announcement (SeqNo=8) should be rejected by tombstone (SeqNo=10)")
+	}
+
+	// Route should still be withdrawn in the table.
+	active := tbl.Lookup("alice")
+	if len(active) != 0 {
+		t.Fatal("no active route should exist after tombstone blocks stale announcement")
+	}
+}
+
+func TestWithdrawTombstoneSupersededByNewerAnnouncement(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	// Tombstone at SeqNo=5.
+	tbl.WithdrawRoute("alice", "bob", "charlie", 5)
+
+	// Newer announcement with SeqNo=7 — should be accepted.
+	accepted := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
+	})
+	if !accepted {
+		t.Fatal("newer announcement (SeqNo=7) should supersede tombstone (SeqNo=5)")
+	}
+
+	routes := tbl.Lookup("alice")
+	if len(routes) != 1 || routes[0].Hops != 2 {
+		t.Fatal("route should be active after tombstone superseded")
+	}
+}
+
+// --- UpdateRoute: direct route origin guard ---
+
+func TestUpdateRouteRejectsDirectWithForeignOrigin(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	_, err := tbl.UpdateRoute(RouteEntry{
+		Identity: "alice", Origin: "foreign-node", NextHop: "alice",
+		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+	})
+	if err != ErrDirectForeignOrigin {
+		t.Fatalf("expected ErrDirectForeignOrigin, got %v", err)
+	}
+
+	// Table should remain empty — the route was rejected.
+	if tbl.Size() != 0 {
+		t.Fatalf("rejected direct route should not be stored, size=%d", tbl.Size())
+	}
+}
+
+func TestUpdateRouteAcceptsDirectWithOwnOrigin(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	accepted := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "me", NextHop: "alice",
+		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+	})
+	if !accepted {
+		t.Fatal("direct route with own origin should be accepted")
+	}
+}
+
+func TestUpdateRouteDirectSkipsCheckWithoutLocalOrigin(t *testing.T) {
+	// When localOrigin is not set, the guard is skipped — backward compat
+	// for tables used without WithLocalOrigin (e.g., pure read-only).
 	tbl := NewTable()
 
-	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 1)
-	if ok {
-		t.Fatal("withdrawal of nonexistent route should return false")
+	accepted := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "any-origin", NextHop: "alice",
+		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+	})
+	if !accepted {
+		t.Fatal("without localOrigin, direct route with any origin should be accepted")
+	}
+}
+
+func TestForeignDirectRouteCannotOutrankAnnouncement(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	// Legitimate announcement route.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "foreign-node", NextHop: "peer-B",
+		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+
+	// Attempt to inject a foreign-origin direct route that would outrank it.
+	_, err := tbl.UpdateRoute(RouteEntry{
+		Identity: "alice", Origin: "foreign-node", NextHop: "alice",
+		Hops: 1, SeqNo: 2, Source: RouteSourceDirect,
+	})
+	if err != ErrDirectForeignOrigin {
+		t.Fatalf("foreign-origin direct injection should be rejected: %v", err)
+	}
+
+	// Only the announcement should remain.
+	routes := tbl.Lookup("alice")
+	if len(routes) != 1 || routes[0].Source != RouteSourceAnnouncement {
+		t.Fatal("announcement should be the only route after rejecting foreign direct")
 	}
 }
 
@@ -553,10 +692,11 @@ func TestWithdrawRouteNonexistent(t *testing.T) {
 func TestAddDirectPeerCreatesRoute(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin("me"))
 
-	entry, err := tbl.AddDirectPeer("peer-A")
+	result, err := tbl.AddDirectPeer("peer-A")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	entry := result.Entry
 	if entry.Identity != "peer-A" || entry.Origin != "me" || entry.NextHop != "peer-A" {
 		t.Fatalf("unexpected entry fields: %+v", entry)
 	}
@@ -568,6 +708,9 @@ func TestAddDirectPeerCreatesRoute(t *testing.T) {
 	}
 	if tbl.Size() != 1 {
 		t.Fatalf("expected 1 route, got %d", tbl.Size())
+	}
+	if result.Penalized {
+		t.Fatal("first connection should not be penalized")
 	}
 }
 
@@ -762,6 +905,71 @@ func TestRemoveDirectPeerWireReadyWithdrawals(t *testing.T) {
 	routes := tbl.Lookup("peer-B")
 	if len(routes) != 1 || routes[0].Hops != 1 {
 		t.Fatal("unrelated peer should be unaffected")
+	}
+}
+
+// --- InvalidateTransitRoutes ---
+
+func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	// Direct route for peer-A (source=direct, origin=me).
+	mustAddDirect(t, tbl, "peer-A")
+
+	// Transit route learned through peer-A (source=announcement).
+	_, err := tbl.UpdateRoute(RouteEntry{
+		Identity: "target-X", Origin: "target-X", NextHop: "peer-A",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(DefaultTTL),
+	})
+	if err != nil {
+		t.Fatalf("UpdateRoute failed: %v", err)
+	}
+
+	invalidated := tbl.InvalidateTransitRoutes("peer-A")
+	if invalidated != 1 {
+		t.Fatalf("expected 1 transit route invalidated, got %d", invalidated)
+	}
+
+	// Direct route should be untouched — Lookup returns active routes.
+	routes := tbl.Lookup("peer-A")
+	if len(routes) != 1 || routes[0].IsWithdrawn() {
+		t.Fatal("direct route should not be invalidated")
+	}
+
+	// Transit route should be withdrawn. Lookup() filters withdrawn entries,
+	// so use Snapshot() to inspect raw table state.
+	snap := tbl.Snapshot()
+	snapRoutes := snap.Routes["target-X"]
+	if len(snapRoutes) != 1 {
+		t.Fatalf("expected 1 route in snapshot for target-X, got %d", len(snapRoutes))
+	}
+	if !snapRoutes[0].IsWithdrawn() {
+		t.Fatal("transit route should be invalidated (hops=infinity)")
+	}
+
+	// Lookup must return empty for withdrawn routes.
+	if len(tbl.Lookup("target-X")) != 0 {
+		t.Fatal("Lookup should return empty for withdrawn transit route")
+	}
+}
+
+func TestInvalidateTransitRoutesNoMatch(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	_, err := tbl.UpdateRoute(RouteEntry{
+		Identity: "target-X", Origin: "target-X", NextHop: "peer-B",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(DefaultTTL),
+	})
+	if err != nil {
+		t.Fatalf("UpdateRoute failed: %v", err)
+	}
+
+	// Invalidate for peer-A — should not touch peer-B's route.
+	invalidated := tbl.InvalidateTransitRoutes("peer-A")
+	if invalidated != 0 {
+		t.Fatalf("expected 0 invalidated, got %d", invalidated)
 	}
 }
 
@@ -1108,5 +1316,198 @@ func TestSizeCountsAllEntries(t *testing.T) {
 	}
 	if tbl.ActiveSize() != 1 {
 		t.Fatal("ActiveSize should exclude withdrawn entries")
+	}
+}
+
+// --- Flap detection and hold-down ---
+
+func TestFlapDetectionTriggersHoldDown(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithLocalOrigin("me"),
+		WithClock(func() time.Time { return current }),
+		WithDefaultTTL(120*time.Second),
+		WithFlapWindow(60*time.Second),
+		WithFlapThreshold(3),
+		WithHoldDownDuration(30*time.Second),
+		WithPenalizedTTL(15*time.Second),
+	)
+
+	// Three rapid connect/disconnect cycles within the flap window.
+	for i := 0; i < 3; i++ {
+		mustAddDirect(t, tbl, "flappy")
+		mustRemoveDirect(t, tbl, "flappy")
+		current = current.Add(5 * time.Second)
+	}
+
+	// Fourth reconnect should be penalized — hold-down is active.
+	result, err := tbl.AddDirectPeer("flappy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Penalized {
+		t.Fatal("peer should be penalized after exceeding flap threshold")
+	}
+
+	// TTL should be the penalized value (15s), not default (120s).
+	expectedExpiry := current.Add(15 * time.Second)
+	if !result.Entry.ExpiresAt.Equal(expectedExpiry) {
+		t.Fatalf("penalized TTL: expected expiry %v, got %v", expectedExpiry, result.Entry.ExpiresAt)
+	}
+}
+
+func TestBelowFlapThresholdNoPenalty(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithLocalOrigin("me"),
+		WithClock(func() time.Time { return current }),
+		WithFlapThreshold(3),
+		WithFlapWindow(60*time.Second),
+		WithPenalizedTTL(15*time.Second),
+	)
+
+	// Two disconnects — below threshold of 3.
+	for i := 0; i < 2; i++ {
+		mustAddDirect(t, tbl, "stable")
+		mustRemoveDirect(t, tbl, "stable")
+		current = current.Add(5 * time.Second)
+	}
+
+	result, err := tbl.AddDirectPeer("stable")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Penalized {
+		t.Fatal("peer should not be penalized when below flap threshold")
+	}
+}
+
+func TestHoldDownExpiresAllowsNormalReconnect(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithLocalOrigin("me"),
+		WithClock(func() time.Time { return current }),
+		WithFlapWindow(60*time.Second),
+		WithFlapThreshold(3),
+		WithHoldDownDuration(30*time.Second),
+		WithPenalizedTTL(15*time.Second),
+	)
+
+	// Trigger hold-down.
+	for i := 0; i < 3; i++ {
+		mustAddDirect(t, tbl, "flappy")
+		mustRemoveDirect(t, tbl, "flappy")
+		current = current.Add(2 * time.Second)
+	}
+
+	// Advance past hold-down duration (30s) AND past flap window (60s)
+	// so previous withdrawal events are stale.
+	current = current.Add(90 * time.Second)
+
+	result, err := tbl.AddDirectPeer("flappy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Penalized {
+		t.Fatal("peer should not be penalized after hold-down expires")
+	}
+}
+
+func TestFlapWindowSlidingExpiry(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithLocalOrigin("me"),
+		WithClock(func() time.Time { return current }),
+		WithFlapWindow(30*time.Second),
+		WithFlapThreshold(3),
+		WithHoldDownDuration(10*time.Second),
+		WithPenalizedTTL(10*time.Second),
+	)
+
+	// Two disconnects early.
+	for i := 0; i < 2; i++ {
+		mustAddDirect(t, tbl, "peer")
+		mustRemoveDirect(t, tbl, "peer")
+		current = current.Add(2 * time.Second)
+	}
+
+	// Wait for first two disconnects to fall outside the 30s window.
+	current = current.Add(35 * time.Second)
+
+	// One more disconnect — only 1 in window, below threshold.
+	mustAddDirect(t, tbl, "peer")
+	mustRemoveDirect(t, tbl, "peer")
+
+	result, err := tbl.AddDirectPeer("peer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Penalized {
+		t.Fatal("old flap events outside window should not contribute to threshold")
+	}
+}
+
+func TestTickTTLCleansFlapState(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithLocalOrigin("me"),
+		WithClock(func() time.Time { return current }),
+		WithFlapWindow(30*time.Second),
+		WithFlapThreshold(3),
+		WithHoldDownDuration(10*time.Second),
+		WithPenalizedTTL(10*time.Second),
+	)
+
+	// Trigger hold-down.
+	for i := 0; i < 3; i++ {
+		mustAddDirect(t, tbl, "peer")
+		mustRemoveDirect(t, tbl, "peer")
+		current = current.Add(1 * time.Second)
+	}
+
+	// Advance past both hold-down (10s) and flap window (30s).
+	current = current.Add(60 * time.Second)
+	tbl.TickTTL()
+
+	// Internal flap state should be cleaned — verify by reconnecting
+	// and checking that it's not penalized (no stale state lingering).
+	result, err := tbl.AddDirectPeer("peer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Penalized {
+		t.Fatal("TickTTL should have cleaned stale flap state")
+	}
+}
+
+func TestFlapDetectionPerPeerIsolation(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithLocalOrigin("me"),
+		WithClock(func() time.Time { return current }),
+		WithFlapThreshold(3),
+		WithFlapWindow(60*time.Second),
+	)
+
+	// Flap peer-A three times.
+	for i := 0; i < 3; i++ {
+		mustAddDirect(t, tbl, "peer-A")
+		mustRemoveDirect(t, tbl, "peer-A")
+		current = current.Add(1 * time.Second)
+	}
+
+	// peer-B connects for the first time — should not be penalized.
+	result, err := tbl.AddDirectPeer("peer-B")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Penalized {
+		t.Fatal("peer-B should not be penalized by peer-A's flapping")
 	}
 }

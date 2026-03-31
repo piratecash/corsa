@@ -7,12 +7,9 @@ import "net"
 // will receive frames gated by that capability.
 //
 //   - mesh_relay_v1: hop-by-hop relay (relay_message frames)
-//
-// mesh_routing_v1 (distance-vector routing via announce_routes frames)
-// is defined but NOT advertised yet — it will be enabled in Phase 1.2
-// when the full send/receive path for announce_routes is implemented.
+//   - mesh_routing_v1: distance-vector routing via announce_routes frames (Phase 1.2)
 func localCapabilities() []string {
-	return []string{"mesh_relay_v1"}
+	return []string{"mesh_relay_v1", "mesh_routing_v1"}
 }
 
 // intersectCapabilities returns the intersection of two capability slices.
