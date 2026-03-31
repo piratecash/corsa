@@ -1288,7 +1288,9 @@ TCP-сокет закрылся бы до того, как writer горутин
 ## Mesh Routing Roadmap
 
 See [roadmap.md](roadmap.md) — iterative migration plan from gossip to real mesh routing.
+See [routing.md](routing.md) — routing table implementation (Phase 1.1+).
 
 ## Дорожная карта маршрутизации Mesh
 
 См. [roadmap.ru.md](roadmap.ru.md) — поэтапный план миграции с gossip на реальную mesh-маршрутизацию.
+См. [routing.md](routing.md) — реализация таблицы маршрутизации (Фаза 1.1+).

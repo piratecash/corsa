@@ -67,6 +67,10 @@ type Frame struct {
 	HopCount    int    `json:"hop_count,omitempty"`
 	MaxHops     int    `json:"max_hops,omitempty"`
 	PreviousHop string `json:"previous_hop,omitempty"`
+
+	// Routing table fields (Iteration 1 — distance vector)
+	// Used with type="announce_routes".
+	AnnounceRoutes []AnnounceRouteFrame `json:"routes,omitempty"`
 }
 
 type ContactFrame struct {
@@ -220,6 +224,16 @@ type ChatPreviewFrame struct {
 	DeliveryStatus string `json:"delivery_status,omitempty"`
 	TTLSeconds     int    `json:"ttl_seconds,omitempty"`
 	Metadata       string `json:"metadata,omitempty"`
+}
+
+// AnnounceRouteFrame is a single route entry inside an announce_routes frame.
+// The wire format carries only the fields needed for distance-vector convergence;
+// RemainingTTL and Source are derived locally by the receiver.
+type AnnounceRouteFrame struct {
+	Identity string `json:"identity"`
+	Origin   string `json:"origin"`
+	Hops     int    `json:"hops"`
+	SeqNo    uint64 `json:"seq"`
 }
 
 type ConversationFrame struct {

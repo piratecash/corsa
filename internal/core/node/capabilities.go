@@ -3,9 +3,14 @@ package node
 import "net"
 
 // localCapabilities returns the set of capability tokens this node advertises
-// during the handshake. Iteration 1 enables hop-by-hop relay via
-// "mesh_relay_v1". Only peers whose negotiated set includes this token
-// will receive relay_message frames.
+// during the handshake. Peers whose negotiated set includes a given token
+// will receive frames gated by that capability.
+//
+//   - mesh_relay_v1: hop-by-hop relay (relay_message frames)
+//
+// mesh_routing_v1 (distance-vector routing via announce_routes frames)
+// is defined but NOT advertised yet — it will be enabled in Phase 1.2
+// when the full send/receive path for announce_routes is implemented.
 func localCapabilities() []string {
 	return []string{"mesh_relay_v1"}
 }
@@ -18,13 +23,13 @@ func intersectCapabilities(local, remote []string) []string {
 		return nil
 	}
 	set := make(map[string]struct{}, len(remote))
-	for _, cap := range remote {
-		set[cap] = struct{}{}
+	for _, capability := range remote {
+		set[capability] = struct{}{}
 	}
 	var result []string
-	for _, cap := range local {
-		if _, ok := set[cap]; ok {
-			result = append(result, cap)
+	for _, capability := range local {
+		if _, ok := set[capability]; ok {
+			result = append(result, capability)
 		}
 	}
 	return result
@@ -32,7 +37,7 @@ func intersectCapabilities(local, remote []string) []string {
 
 // sessionHasCapability returns true when the outbound peer session for the
 // given address has the specified capability in its negotiated set.
-func (s *Service) sessionHasCapability(address, cap string) bool {
+func (s *Service) sessionHasCapability(address, capability string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	session := s.sessions[address]
@@ -40,7 +45,7 @@ func (s *Service) sessionHasCapability(address, cap string) bool {
 		return false
 	}
 	for _, c := range session.capabilities {
-		if c == cap {
+		if c == capability {
 			return true
 		}
 	}
@@ -49,7 +54,7 @@ func (s *Service) sessionHasCapability(address, cap string) bool {
 
 // connHasCapability returns true when the inbound connection has the specified
 // capability in its negotiated set (stored during the hello handshake).
-func (s *Service) connHasCapability(conn net.Conn, cap string) bool {
+func (s *Service) connHasCapability(conn net.Conn, capability string) bool {
 	s.mu.RLock()
 	info := s.connPeerInfo[conn]
 	s.mu.RUnlock()
@@ -57,7 +62,7 @@ func (s *Service) connHasCapability(conn net.Conn, cap string) bool {
 		return false
 	}
 	for _, c := range info.capabilities {
-		if c == cap {
+		if c == capability {
 			return true
 		}
 	}

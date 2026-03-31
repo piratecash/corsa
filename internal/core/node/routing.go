@@ -18,8 +18,14 @@ type RoutingDecision struct {
 	// Empty in Iteration 0 — populated by future routing table lookups.
 	DirectPeers []string
 
-	// RelayNextHop is the next-hop peer address from the routing table.
-	// nil means no route is known. Populated starting from Iteration 1.
+	// RelayNextHop is the next-hop peer identity (Ed25519 fingerprint)
+	// from the routing table. nil means no route is known.
+	// Populated starting from Phase 1.2.
+	//
+	// This is a peer identity, NOT a transport address. The caller
+	// (node.Service) must resolve the identity to an active session
+	// before sending. Phase 1.2 requires an identity→session(s) index
+	// in node.Service to avoid ad-hoc scans.
 	RelayNextHop *string
 
 	// GossipTargets are the top-N peers selected by score for blind gossip

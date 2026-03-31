@@ -185,7 +185,7 @@ fallback всегда доступен.
 
 ```
 internal/core/routing/
-  types.go            — RouteEntry (с полем Origin), RoutingSnapshot (экспортируемые типы)
+  types.go            — RouteEntry (с полем Origin), Snapshot (экспортируемые типы)
   table.go            — Table (хранение маршрутов, lookup, TTL, split horizon)
   announce.go         — протокол announce/withdraw + периодический цикл
 
@@ -294,7 +294,7 @@ func (t *Table) RemoveDirectPeer(identity string)
 func (t *Table) UpdateRoute(entry RouteEntry)
 func (t *Table) WithdrawRoute(identity, nextHop string, seqNo uint64)
 func (t *Table) Announceable(excludeVia string) []RouteEntry
-func (t *Table) Snapshot() RoutingSnapshot   // serializable state for RPC
+func (t *Table) Snapshot() Snapshot   // serializable state for RPC
 func (t *Table) TickTTL()                    // decrement all RemainingTTL, remove entries at 0
 ```
 
@@ -598,6 +598,14 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 переподключении peer заново анонсирует полную таблицу (без
 инкрементальной синхронизации в этой итерации).
 
+**За пределами scope: глобальный discovery.** Distance vector даёт
+каждой ноде знание только через её соседей. Нет механизма найти
+произвольную identity, если ни один сосед не анонсировал маршрут к ней.
+Это фундаментальная граница DV-подхода, а не дефект. Глобальный «найти
+любого пользователя в сети» требует отдельного discovery/query слоя —
+см. [Iteration 4 — Structured overlay (DHT)](#iter-4). Routing table —
+не то место для глобального поиска.
+
 **Progress:**
 
 Реализация разбита на четыре последовательные фазы. Каждая фаза должна
@@ -651,19 +659,19 @@ classDiagram
 ```
 *Диаграмма — Базовые типы фазы 1.1 и их связь*
 
-- [ ] Create `routing/types.go` with exported `RouteEntry` (with `Origin` field), `RoutingSnapshot`
-- [ ] Implement origin-aware `SeqNo` comparison: dedup key is `(identity, origin, nextHop)`; reject older seq only within same lineage
-- [ ] Implement split horizon rule: `Announceable(excludeVia)` omits routes learned from target peer
-- [ ] Implement withdrawal rule: `hops=16` (infinity) only emittable on wire by the origin node; transit nodes locally invalidate + stop advertising
-- [ ] Define `announce_routes` frame type in `protocol/frame.go` (with `origin` and `seq` fields)
-- [ ] Gate `announce_routes` on `sessionHasCapability("mesh_routing_v1")`
-- [ ] Implement `Table.WithdrawRoute()` — set `hops=16` to invalidate
-- [ ] Implement `Table.TickTTL()` — decrement `RemainingTTL` every second, remove entries at 0 (default 120s)
-- [ ] Implement `NextHop` as peer identity (Ed25519 fingerprint), not transport address — verify all struct fields
-- [ ] Write unit tests for origin-aware SeqNo comparison: key is (identity, origin, nextHop); different origins coexist
-- [ ] Write unit tests for split horizon logic (routes learned from A omitted when announcing to A)
-- [ ] Write unit tests for withdrawal propagation (hops=16 only from origin; intermediate nodes do not emit wire withdrawal)
-- [ ] Write unit tests for NextHop as peer identity (not transport address)
+- [x] Create `routing/types.go` with exported `RouteEntry` (with `Origin` field), `Snapshot`
+- [x] Implement origin-aware `SeqNo` comparison: dedup key is `(identity, origin, nextHop)`; reject older seq only within same lineage
+- [x] Implement split horizon rule: `Announceable(excludeVia)` omits routes learned from target peer
+- [x] Implement withdrawal rule: `hops=16` (infinity) only emittable on wire by the origin node; transit nodes locally invalidate + stop advertising
+- [x] Define `announce_routes` frame type in `protocol/frame.go` (with `origin` and `seq` fields)
+- [x] Gate `announce_routes` on `sessionHasCapability("mesh_routing_v1")` — capability defined, not advertised until Phase 1.2
+- [x] Implement `Table.WithdrawRoute()` — set `hops=16` to invalidate; requires strictly `seqNo > old.SeqNo`
+- [x] Implement `Table.TickTTL()` — remove expired entries (default 120s)
+- [x] Implement `NextHop` as peer identity (Ed25519 fingerprint), not transport address — verify all struct fields
+- [x] Write unit tests for origin-aware SeqNo comparison: key is (identity, origin, nextHop); different origins coexist
+- [x] Write unit tests for split horizon logic (routes learned from A omitted when announcing to A)
+- [x] Write unit tests for withdrawal propagation (hops=16 only from origin; intermediate nodes do not emit wire withdrawal)
+- [x] Write unit tests for NextHop as peer identity (not transport address)
 
 <a id="iter-1-2"></a>
 #### Фаза 1.2 — Минимальный вертикальный slice
@@ -734,8 +742,22 @@ sequenceDiagram
 - [ ] Create `node/table_router.go` — `TableRouter` adapter wrapping `routing.Table`
 - [ ] Integrate `routing.Table` into `node.Service`
 - [ ] Integrate `TableRouter` into `Router.Route()` — fill `RelayNextHop` (peer identity, not transport addr)
+- [ ] **Release-blocking: gossip fallback contract.** `TableRouter.Route()` must degrade to gossip immediately (not fail) in every case where the table route is unusable. Specifically:
+  - [ ] `RelayNextHop` identity has no active session → gossip fallback
+  - [ ] `RelayNextHop` peer lacks `mesh_routing_v1` capability → gossip fallback
+  - [ ] Enqueue/send to chosen next-hop fails (session closed between lookup and send) → gossip fallback
+  - [ ] `Lookup()` returns empty (no route known) → gossip fallback
+  - [ ] Write unit tests: each of the 4 fallback triggers produces gossip delivery, not an error
+  - [ ] Integration test: kill the only table-routed next-hop mid-delivery, verify message arrives via gossip within 5s
 - [ ] Confirm routes via `relay_hop_ack` — `source="hop_ack"` for specific `(identity, origin, nextHop)` triple (origin resolved locally from routing decision, not from wire)
 - [ ] Add direct peer tracking on connect/disconnect events
+- [ ] **Multi-session awareness:** `node.Service` must maintain an identity→active-session-count index. `AddDirectPeer()` is called on transition 0→1 sessions (first connect). `RemoveDirectPeer()` is called only on transition 1→0 sessions (last disconnect). Intermediate session opens/closes for an already-connected identity must NOT trigger route changes. `AddDirectPeer()` is idempotent at the model level (no SeqNo bump if already active), but the session-count gate in `node.Service` is the primary defense.
+  - [ ] Implement identity→session-count tracking in `node.Service`
+  - [ ] Gate `AddDirectPeer()` call on 0→1 transition
+  - [ ] Gate `RemoveDirectPeer()` call on 1→0 transition
+  - [ ] Unit test: 2 sessions to same peer, close one — direct route remains, no withdrawal emitted
+  - [ ] Unit test: close last session — withdrawal emitted
+  - [ ] Integration test: peer with 2 TCP sessions, kill one — route stays, delivery uninterrupted
 - [ ] Implement route-session binding: on session close, remove direct-peer route (with own withdrawal) + locally invalidate transit routes (no wire withdrawal for transit — only stop advertising)
 - [ ] Verify: triggered withdrawal on session close only for routes where this node is the origin (direct peers)
 - [ ] Handle identity change on reconnect: withdraw old identity, add new
@@ -750,6 +772,7 @@ sequenceDiagram
 - [ ] Mixed-version test: routing-capable node works alongside legacy node
 - [ ] Triggered withdrawal does not break legacy peers
 - [ ] Integration test: reconnect always triggers full table sync (no stale cached routes)
+- [ ] Integration test: rapid disconnect/reconnect cycle (3 nodes in triangle) — verify no routing loop or count-to-infinity; table converges within 2 announce cycles
 
 <a id="iter-1-3"></a>
 #### Фаза 1.3 — Наблюдаемость и polish

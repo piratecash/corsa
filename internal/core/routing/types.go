@@ -1,0 +1,226 @@
+package routing
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+var (
+	ErrEmptyIdentity   = errors.New("routing: Identity must not be empty")
+	ErrEmptyOrigin     = errors.New("routing: Origin must not be empty")
+	ErrEmptyNextHop    = errors.New("routing: NextHop must not be empty")
+	ErrInvalidHops     = errors.New("routing: Hops must be between 1 and HopsInfinity (16)")
+	ErrDirectHopsMust1 = errors.New("routing: direct route must have Hops=1")
+	ErrDirectNextHop   = errors.New("routing: direct route NextHop must equal Identity (directly connected)")
+	ErrNoLocalOrigin   = errors.New("routing: Table.localOrigin not set (use WithLocalOrigin)")
+	ErrEmptyPeerID     = errors.New("routing: peerIdentity must not be empty")
+)
+
+// HopsInfinity marks a route as withdrawn. Only the origin node may
+// set hops to this value on the wire; transit nodes invalidate locally
+// and stop advertising the route instead.
+const HopsInfinity = 16
+
+// RouteSource indicates how a route was learned. The trust hierarchy is:
+// direct > hop_ack > announcement. A route learned through a more trusted
+// source is preferred over one with the same (identity, origin, nextHop)
+// triple learned through a less trusted source.
+type RouteSource uint8
+
+const (
+	RouteSourceAnnouncement RouteSource = iota // learned via announce_routes frame
+	RouteSourceHopAck                          // confirmed by relay_hop_ack
+	RouteSourceDirect                          // directly connected peer
+)
+
+// String returns a human-readable representation for logging and debugging.
+func (s RouteSource) String() string {
+	switch s {
+	case RouteSourceDirect:
+		return "direct"
+	case RouteSourceHopAck:
+		return "hop_ack"
+	case RouteSourceAnnouncement:
+		return "announcement"
+	default:
+		return fmt.Sprintf("unknown(%d)", s)
+	}
+}
+
+// TrustRank returns a numeric rank for comparison. Higher rank means
+// more trusted. This avoids relying on iota ordering.
+func (s RouteSource) TrustRank() int {
+	switch s {
+	case RouteSourceDirect:
+		return 2
+	case RouteSourceHopAck:
+		return 1
+	case RouteSourceAnnouncement:
+		return 0
+	default:
+		return -1
+	}
+}
+
+// RouteEntry represents a single route in the distance-vector table.
+//
+// Dedup key: (Identity, Origin, NextHop) — this triple uniquely identifies
+// a route lineage. Two entries with the same triple are the same route at
+// different points in time; the one with the higher SeqNo wins.
+type RouteEntry struct {
+	// Identity is the Ed25519 fingerprint of the destination node.
+	Identity string
+
+	// Origin is the peer identity that originally advertised this route.
+	// Only the origin may advance SeqNo or send a withdrawal (hops=16)
+	// on the wire.
+	Origin string
+
+	// NextHop is the peer identity from which we learned this route.
+	// This is a peer identity, not a transport address — a single identity
+	// may have multiple concurrent sessions.
+	NextHop string
+
+	// Hops is the distance to the destination. 1 means directly connected,
+	// HopsInfinity (16) means withdrawn.
+	Hops int
+
+	// SeqNo is a monotonically increasing sequence number scoped to the
+	// Origin. Only the origin may advance it. Comparison is valid only
+	// between entries sharing the same (Identity, Origin) pair.
+	SeqNo uint64
+
+	// Source indicates how this route was learned. Used for trust-based
+	// tie-breaking within the same (Identity, Origin, NextHop) triple.
+	Source RouteSource
+
+	// ExpiresAt is the absolute time when this entry expires. Derived from
+	// RemainingTTL at insertion time. After expiry the route is treated as
+	// withdrawn.
+	ExpiresAt time.Time
+}
+
+// Validate checks structural invariants of the entry. Returns an error
+// if the entry is malformed and must not be inserted into the table.
+//
+// Source-specific rules:
+//   - RouteSourceDirect: Hops must be 1, NextHop must equal Identity
+//     (a direct route means the destination is our immediate neighbor).
+func (e RouteEntry) Validate() error {
+	if e.Identity == "" {
+		return ErrEmptyIdentity
+	}
+	if e.Origin == "" {
+		return ErrEmptyOrigin
+	}
+	if e.NextHop == "" {
+		return ErrEmptyNextHop
+	}
+	if e.Hops < 1 || e.Hops > HopsInfinity {
+		return ErrInvalidHops
+	}
+	if e.Source == RouteSourceDirect {
+		if e.Hops != 1 {
+			return ErrDirectHopsMust1
+		}
+		if e.NextHop != e.Identity {
+			return ErrDirectNextHop
+		}
+	}
+	return nil
+}
+
+// IsWithdrawn returns true if the route has been explicitly withdrawn
+// (hops == HopsInfinity) or has expired.
+func (e RouteEntry) IsWithdrawn() bool {
+	return e.Hops >= HopsInfinity
+}
+
+// IsExpired returns true if the route TTL has elapsed.
+func (e RouteEntry) IsExpired(now time.Time) bool {
+	return !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt)
+}
+
+// DedupKey returns the triple that uniquely identifies a route lineage.
+func (e RouteEntry) DedupKey() RouteTriple {
+	return RouteTriple{
+		Identity: e.Identity,
+		Origin:   e.Origin,
+		NextHop:  e.NextHop,
+	}
+}
+
+// RouteTriple is the deduplication key for route entries.
+type RouteTriple struct {
+	Identity string
+	Origin   string
+	NextHop  string
+}
+
+// Snapshot is an immutable point-in-time view of the routing table.
+// Safe to read concurrently without locks.
+type Snapshot struct {
+	// Routes maps destination identity to all known routes for that identity.
+	Routes map[string][]RouteEntry
+
+	// TakenAt is the timestamp when the snapshot was captured.
+	TakenAt time.Time
+}
+
+// BestRoute returns the best (lowest hop count, highest trust) non-withdrawn
+// route for the given identity, or nil if none exists.
+func (s Snapshot) BestRoute(identity string) *RouteEntry {
+	routes, ok := s.Routes[identity]
+	if !ok {
+		return nil
+	}
+	var best *RouteEntry
+	for i := range routes {
+		r := &routes[i]
+		if r.IsWithdrawn() || r.IsExpired(s.TakenAt) {
+			continue
+		}
+		if best == nil || isBetter(r, best) {
+			best = r
+		}
+	}
+	return best
+}
+
+// AnnounceEntry is the wire-safe projection of a RouteEntry.
+// It contains only the fields transmitted in announce_routes frames.
+// Produced by RouteEntry.ToAnnounceEntry or Table.AnnounceTo.
+type AnnounceEntry struct {
+	Identity string
+	Origin   string
+	Hops     int
+	SeqNo    uint64
+}
+
+// ToAnnounceEntry projects a RouteEntry into the wire format for
+// announce_routes frames. The wire carries the sender's local hop count
+// as-is — the receiver adds +1 when inserting into its own table
+// (Phase 1.2 receive path). This matches the roadmap convention where
+// A sends {X, hops=1} for a direct peer and B stores it as hops=2.
+//
+// Fields not transmitted on the wire (NextHop, Source, ExpiresAt)
+// are stripped — the receiver derives them locally.
+func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
+	return AnnounceEntry{
+		Identity: e.Identity,
+		Origin:   e.Origin,
+		Hops:     e.Hops,
+		SeqNo:    e.SeqNo,
+	}
+}
+
+// isBetter returns true if candidate is a better route than current.
+// Source priority wins first (direct > hop_ack > announcement),
+// then lower hop count breaks the tie.
+func isBetter(candidate, current *RouteEntry) bool {
+	if candidate.Source.TrustRank() != current.Source.TrustRank() {
+		return candidate.Source.TrustRank() > current.Source.TrustRank()
+	}
+	return candidate.Hops < current.Hops
+}
