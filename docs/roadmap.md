@@ -9,7 +9,8 @@ Related documentation:
 
 Source: `internal/core/node/relay.go`, `internal/core/node/ratelimit.go`,
 `internal/core/node/capabilities.go`, `internal/core/node/admission.go`
-Source (planned): `internal/core/node/routing_table.go`, `internal/core/node/route_announce.go`
+Source (planned): `internal/core/routing/` (routing module),
+`internal/core/rpc/routing_commands.go` (routing RPC commands)
 
 Quick links:
 
@@ -17,6 +18,11 @@ Quick links:
 - [Design principles](#design-principles)
 - [Protocol versioning policy](#protocol-versioning-policy)
 - [Iteration 1 — Routing table](#iter-1)
+  - [1.1 — Model invariants](#iter-1-1)
+  - [1.2 — Minimal vertical slice](#iter-1-2)
+  - [1.3 — Observability and polish](#iter-1-3)
+  - [1.4 — Health, probes, RTT, route query](#iter-1-4)
+- [Iteration 1.5 — Route health, probes, and RTT scoring](#iter-1-5)
 - [Iteration 2 — Reliability, reputation, and multi-path](#iter-2)
 - [Iteration 3 — Optimization and scaling](#iter-3)
 - [Iteration 4 — Structured overlay (DHT)](#iter-4)
@@ -48,6 +54,10 @@ Quick links:
   - [18.3 — Radio mesh relay and deduplication](#iter-18-3)
 - [Iteration 19 — Custom encryption builder](#iter-19)
 - [Iteration 20 — Voice calls](#iter-20)
+- [Iteration 21 — File transfer](#iter-21)
+- [Iteration 22 — LAN discovery](#iter-22)
+- [Iteration 23 — NAT traversal and hole punching](#iter-23)
+- [Iteration 24 — Congestion control and QoS](#iter-24)
 - [Key architectural decisions](#key-architectural-decisions-rationale)
 
 ### Current state
@@ -164,48 +174,151 @@ correct one.
 exchanged with peers that have `"mesh_routing_v1"` in their capability
 set (from iteration 0).
 
-**New file:**
+**Routing module** (`internal/core/routing/`):
+
+Routing logic is extracted into a dedicated package, separate from
+`internal/core/node/`. The `node` package is already large (~90 fields
+in `Service`). A standalone routing module provides clean boundaries,
+independent unit testing, and minimizes refactoring when routing
+evolves across iterations 2–4.
 
 ```
+internal/core/routing/
+  types.go            — RouteEntry (with Origin), RoutingSnapshot (exported types)
+  table.go            — Table (route storage, lookup, TTL, split horizon)
+  announce.go         — announce/withdraw protocol + periodic loop
+
 internal/core/node/
-  routing_table.go    — PeerAwarenessTable
-  route_announce.go   — announce/withdraw protocol + periodic loop
+  routing.go          — Router interface + GossipRouter (existing)
+  table_router.go     — TableRouter adapter (delegates to routing.Table)
+```
+
+Files added in [Iteration 1.5](#iter-1-5): `routing/health.go`,
+`routing/probe.go`, `routing/score.go`, `routing/query.go`.
+
+The `routing` package exposes a `Table` type with a clean API:
+`Lookup()`, `UpdateRoute()`, `WithdrawRoute()`, `Announceable()`,
+`Snapshot()`. The `node.Service` holds a `*routing.Table` and passes
+events (peer connect/disconnect, hop_ack, session close) through
+explicit method calls — no hidden coupling.
+
+The `Router` interface remains in the `node` package (it depends on
+`protocol.Envelope`). A new `TableRouter` implementation wraps
+`routing.Table` and implements `Router.Route()` by delegating to
+`Table.Lookup()` and falling back to gossip when no route is found.
+
+**RPC access** (`internal/core/rpc/routing_commands.go`):
+
+Routing data (table state, health, statistics) is exposed via the
+existing `CommandTable` through a `RoutingProvider` interface:
+
+```go
+// RoutingProvider abstracts access to the routing subsystem.
+// Available only when mesh_routing_v1 capability is active.
+type RoutingProvider interface {
+    // FetchRoutes returns routes for a specific identity, or all routes
+    // if identity is empty. Returned as a snapshot — safe to serialize.
+    FetchRoutes(identity string) []RoutingEntry
+
+    // FetchRoutingStats returns aggregate routing statistics:
+    // table size, convergence metrics, announce/withdrawal counters.
+    FetchRoutingStats() RoutingStatsEntry
+
+    // FetchRouteHealth returns health state per (identity, origin, nextHop) triple.
+    // Added in iteration 1.5; returns empty before health tracking is active.
+    FetchRouteHealth() []RouteHealthEntry
+}
+```
+
+RPC commands (category `"routing"`):
+
+| Command | Description | Usage | Since |
+|---|---|---|---|
+| `fetch_routes` | Routes for a specific identity or full table | `[identity]` | Iter 1 |
+| `fetch_routing_stats` | Table size, announce counts, convergence time | — | Iter 1 |
+| `fetch_route_health` | Health states per (identity, origin, nextHop) triple | — | Iter 1.5 |
+
+Registration follows the existing pattern:
+
+```go
+func RegisterRoutingCommands(t *CommandTable, routing RoutingProvider) {
+    if routing == nil {
+        t.RegisterUnavailable(CommandInfo{Name: "fetch_routes", ...})
+        t.RegisterUnavailable(CommandInfo{Name: "fetch_routing_stats", ...})
+        t.RegisterUnavailable(CommandInfo{Name: "fetch_route_health", ...})
+        return
+    }
+    // ... register active handlers
+}
+```
+
+When `mesh_routing_v1` is not active (legacy node), all routing commands
+return 503 (unavailable) — consistent with existing mode-gated commands
+like `fetch_traffic_history`.
+
+`RegisterAllCommands` gains a `RoutingProvider` parameter:
+
+```go
+func RegisterAllCommands(t *CommandTable, node NodeProvider,
+    chatlog ChatlogProvider, dmRouter DMRouterProvider,
+    metricsProvider MetricsProvider, routing RoutingProvider) {
+    // ... existing registrations ...
+    RegisterRoutingCommands(t, routing)
+}
 ```
 
 **Table structure:**
 
 ```go
 type RouteEntry struct {
-    Identity     string // recipient address
-    NextHop      string // through which peer
+    Identity     string // target identity (Ed25519 fingerprint)
+    Origin       string // who originated this route (the node that is directly connected to Identity)
+    NextHop      string // through which peer identity (Ed25519 fingerprint, not transport address)
     Hops         int    // distance (1 = direct peer, 16 = infinity/withdrawn)
-    SeqNo        uint64 // monotonic per-origin, higher = newer
+    SeqNo        uint64 // monotonic per-Origin, only Origin may advance; higher = newer
     RemainingTTL int    // seconds until expiry (default 120, decremented by ticker)
     Source       string // "direct" | "announcement" | "hop_ack"
 }
 
-type PeerAwarenessTable struct {
+type Table struct {
     mu             sync.RWMutex
     routes         map[string][]RouteEntry // identity → possible routes
     defaultTTL     int                     // default TTL in seconds (120)
     flappingTTL    int                     // TTL for flapping peers (30)
 }
 
-func (t *PeerAwarenessTable) Lookup(identity string) []RouteEntry
-func (t *PeerAwarenessTable) AddDirectPeer(identity, peerAddr string)
-func (t *PeerAwarenessTable) RemoveDirectPeer(identity string)
-func (t *PeerAwarenessTable) UpdateRoute(entry RouteEntry)
-func (t *PeerAwarenessTable) WithdrawRoute(identity, nextHop string, seqNo uint64)
-func (t *PeerAwarenessTable) Announceable(excludeVia string) []RouteEntry
-func (t *PeerAwarenessTable) TickTTL()       // decrement all RemainingTTL, remove entries at 0
+func (t *Table) Lookup(identity string) []RouteEntry
+func (t *Table) AddDirectPeer(identity, peerIdentity string)
+func (t *Table) RemoveDirectPeer(identity string)
+func (t *Table) UpdateRoute(entry RouteEntry)
+func (t *Table) WithdrawRoute(identity, nextHop string, seqNo uint64)
+func (t *Table) Announceable(excludeVia string) []RouteEntry
+func (t *Table) Snapshot() RoutingSnapshot   // serializable state for RPC
+func (t *Table) TickTTL()                    // decrement all RemainingTTL, remove entries at 0
 ```
 
-**Key difference from previous version:** route entries have a `SeqNo`
-(monotonically increasing per origin node). This enables:
+**Why NextHop is a peer identity, not a transport address:** a single
+peer identity can have multiple transport sessions (inbound + outbound,
+fallback port, reconnect). Storing a transport address would lose
+working sessions. The routing table operates at identity level; session
+selection for the actual send is delegated to `node.Service`, which
+already iterates sessions by peer identity.
 
-- **Withdrawals** — a node can explicitly withdraw a route by sending a
-  higher `SeqNo` with `hops=infinity` (16). Receivers immediately
-  invalidate the stale entry instead of waiting for TTL expiry.
+**Key difference from previous version:** route entries have an `Origin`
+field and a `SeqNo` that is strictly per-origin. Only the node that
+originally announced the identity (the one directly connected to it)
+may advance the `SeqNo`. Intermediate nodes forward the route with the
+same `(Origin, SeqNo)` — they never increment or fabricate a new seq
+for someone else's route. This prevents seq-space hijacking where an
+intermediate node could override legitimate withdrawals.
+
+This enables:
+
+- **Withdrawals** — the origin node explicitly withdraws a route by
+  sending a higher `SeqNo` with `hops=infinity` (16). Receivers
+  immediately invalidate the stale entry instead of waiting for TTL
+  expiry. Because only the origin controls the seq, no intermediate
+  node can accidentally or maliciously cancel the withdrawal.
 - **Triggered updates** — when a route changes (peer connects/disconnects),
   an immediate announce of just that change is sent, without waiting for
   the 30-second periodic cycle.
@@ -229,46 +342,91 @@ func (t *PeerAwarenessTable) TickTTL()       // decrement all RemainingTTL, remo
 {
   "type": "announce_routes",
   "routes": [
-    {"identity": "alice_addr", "hops": 1, "seq": 42},
-    {"identity": "carol_addr", "hops": 2, "seq": 17},
-    {"identity": "dave_addr",  "hops": 16, "seq": 18}
+    {"identity": "alice_addr", "origin": "charlie_addr", "hops": 1, "seq": 42},
+    {"identity": "carol_addr", "origin": "bob_addr",     "hops": 2, "seq": 17},
+    {"identity": "dave_addr",  "origin": "dave_addr",    "hops": 16, "seq": 18}
   ]
 }
 ```
 
+**Extensibility for onion (Iteration 13.1):** when a node supports
+`onion_relay_v1`, it adds optional fields to each route entry in its
+own announcements (origin == self):
+
+```json
+{
+  "identity": "alice_addr", "origin": "self_addr", "hops": 1, "seq": 42,
+  "box_key": "<base64 X25519 public key>",
+  "box_key_binding_sig": "<base64 ed25519 signature of 'corsa-boxkey-v1|identity|box_key'>"
+}
+```
+
+These fields are **optional** and **ignored** by nodes that do not
+support `onion_relay_v1`. Nodes without onion capability omit them;
+nodes with onion capability use them to build onion paths (see
+Iteration 13.1 trust model for transit box keys). The binding signature
+prevents key substitution by intermediate relayers: each hop in the
+announcement chain can verify that the box key was genuinely published
+by its origin. Nodes that relay an announcement with box-key fields
+preserve them as-is (they are part of the route entry, same as `seq`).
+
 `hops=1` = direct peer, `hops=2` = one intermediate hop, `hops=16` =
-infinity (withdrawal). The table only accepts updates with `seq` higher
-than the currently stored `SeqNo` for the same `(identity, nextHop)` pair.
+infinity (withdrawal). The table deduplicates and compares updates by
+the composite key `(identity, origin, nextHop)`:
+
+- **Same origin, same nextHop:** accept only if `seq` is strictly
+  higher than the stored entry. This is the normal per-origin
+  sequence ordering.
+- **Different origin, same nextHop:** these are independent route
+  lineages. Both entries coexist. If neighbor B first advertises
+  `(F, origin=C, seq=5)` and later `(F, origin=D, seq=1)`, the
+  second is a new lineage, not a stale update — it must not be
+  rejected by comparing against C's seq.
+- **Same origin, different nextHop:** these are alternative paths
+  from the same origin. Both are stored; `Lookup()` ranks them.
 
 Every 30 seconds a node sends the full table to peers (periodic refresh).
 Between cycles, **triggered updates** send only changes immediately.
 
-3. **Hop-ack confirmation** — when a `relay_hop_ack` is received from a
-   next_hop for a specific message, the route through that next_hop is
-   confirmed (`source="hop_ack"`). This is the most reliable source
-   because it proves the **specific next hop** received the message, not
-   just that it arrived somewhere. (Unlike end-to-end delivery receipts,
-   which can travel via gossip and prove nothing about the chosen path.)
+3. **Hop-ack confirmation** — when a `relay_hop_ack` is received for a
+   message to identity X, the node looks up which route triple it used
+   to send that message (tracked locally by `message_id`). Only that
+   specific `(identity, origin, nextHop)` triple is promoted to
+   `source="hop_ack"`. The wire-level `relay_hop_ack` itself carries
+   only `message_id` — origin is resolved locally, not transmitted.
+   This means a hop_ack for `(X, origin=C, via B)` does not promote
+   `(X, origin=D, via B)` even though both go through B, and does not
+   promote `(Y, origin=C, via B)` even for the same origin — each
+   triple is independently confirmed. This is more reliable than
+   end-to-end delivery receipts, which can travel via gossip and prove
+   nothing about the chosen path.
 
 **Trust hierarchy for route sources:** not all route information is
 equally trustworthy. The table enforces a strict priority when multiple
-sources report the same `(identity, nextHop)` pair:
+sources report the same `(identity, origin, nextHop)` triple:
 
 1. **`direct`** — the identity is locally connected. Always wins.
    Cannot be overridden by announcement or hop_ack.
-2. **`hop_ack`** — confirmed by actual message delivery through that
-   next_hop. Stronger than passive announcements because it proves
-   the path works.
+2. **`hop_ack`** — confirmed by actual message delivery for this
+   specific `(identity, origin, nextHop)` triple (origin resolved
+   locally from the message's routing decision). Stronger than passive
+   announcements because it proves this particular path works. Does
+   not extend to other triples through the same next_hop.
 3. **`announcement`** — received via `announce_routes` from a neighbor.
    Lowest trust. Any peer can claim any route; without verification
    the claim is just a hint.
 
 When `UpdateRoute()` receives a new entry, it checks the existing
-entry's `Source`. A lower-trust source cannot override a higher-trust
-one for the same `(identity, nextHop)`. If a peer announces a route
-that was already confirmed by `hop_ack`, the announcement is accepted
-only if its `SeqNo` is strictly higher (indicating a genuine topology
-change).
+entry's `Source` for the same `(identity, origin, nextHop)` triple.
+A lower-trust source cannot override a higher-trust one within the
+same lineage. If a peer announces a route that was already confirmed
+by `hop_ack`, the announcement is accepted only if its `SeqNo` is
+strictly higher (indicating a genuine topology change from the origin).
+
+**Different origins are independent lineages.** If neighbor B reports
+`(F, origin=C, seq=5)` and then `(F, origin=D, seq=1)`, these are
+separate entries. The second is not compared against C's seq — it has
+its own lineage. Both may coexist in the table.
 
 Additionally, routes learned from peers with **unstable sessions**
 (3 or more disconnects within the last 10 minutes) receive a shorter
@@ -276,10 +434,14 @@ numeric TTL: `RemainingTTL=30` instead of the default `120`. This
 prevents flapping peers from polluting the table with routes that
 constantly appear and disappear.
 
-**Poisoned reverse** (loop protection): when node B announces routes to
-node A, it **does not announce** routes that it learned through A. Routes
-learned from A are announced to A with `hops=16` (infinity). This is a
-classic defense from RIP/BGP.
+**Split horizon** (loop protection): when node B announces routes to
+node A, it **omits** routes that it learned through A. These routes are
+simply not included in the announcement — no fake `hops=16` is sent.
+This avoids the seq-space conflict: sending a withdrawal with `hops=16`
+for someone else's route would require fabricating a `SeqNo` that the
+origin node never produced, violating the per-origin seq invariant.
+Split horizon is simpler, safe, and does not create false withdrawal
+entries that could propagate and confuse other nodes.
 
 **Protection against route poisoning:** `announce_routes` remains an
 advisory mechanism, not a source of truth. A neighbor can lie about
@@ -315,19 +477,36 @@ immediately. The table never blocks delivery.
 from a peer (both direct and announced) are invalidated when the
 session to that peer closes. On session close, the node:
 
-1. Removes the direct peer entry for that identity.
-2. Removes all routes where `NextHop == disconnected_peer`.
-3. Sends triggered withdrawals (hops=16) for all removed routes.
+1. Removes the direct peer entry for that identity. Since this node
+   **is** the origin for its own direct-peer routes, it legitimately
+   sends a triggered withdrawal (`hops=16` with its own incremented
+   `SeqNo`) to all neighbors.
+2. Removes all transit routes where `NextHop == disconnected_peer`
+   from the **local table only**. These routes are not withdrawn on
+   the wire — the node is not the origin and must not fabricate
+   a withdrawal with someone else's `SeqNo`.
+3. **Stops announcing** the removed transit routes. Because the node
+   uses split horizon and the routes are no longer in its table,
+   they naturally disappear from subsequent periodic announces.
+   Neighbors detect the absence and let the routes expire via TTL
+   (at most 120 seconds, or faster if the actual origin sends a
+   real withdrawal).
+
+This is the correct behavior under per-origin `SeqNo`: only the
+origin may emit a withdrawal. An intermediate node that loses its
+upstream session can only (a) locally invalidate, (b) stop
+re-advertising, and (c) rely on TTL expiry at downstream peers.
+The practical convergence impact is small: the origin will typically
+detect the same partition and emit its own withdrawal. If the origin
+is unreachable, downstream nodes still converge within one TTL window
+(120s default, 30s for flapping peers).
 
 On reconnect, the peer must re-announce its routes from scratch.
 This prevents stale routes from persisting across identity changes
 or network partitions. If a peer reconnects with a **different
 identity** (different Ed25519 public key), the old identity's direct
-route is withdrawn and the new identity is added as a fresh entry.
-
-This is stricter than waiting for `RemainingTTL` to reach 0 but
-safer: a disconnected peer's routes are immediately invalidated
-rather than lingering for up to 120 seconds.
+route is withdrawn (the node is the origin for that route) and the
+new identity is added as a fresh entry.
 
 **Route selection with the table:**
 
@@ -404,9 +583,9 @@ sequenceDiagram
         A->>B: announce_routes [{X,1,seq=1}, {Y,1,seq=1}]
         B->>B: Store: X via A (2 hops), Y via A (2 hops)
         B->>A: announce_routes [{C,1,seq=1}, {Z,1,seq=1}]
-        Note over B: Poisoned reverse: B sends X,Y<br/>back to A with hops=16 (infinity)
+        Note over B: Split horizon: B omits X,Y<br/>(learned from A) when announcing to A
         B->>C: announce_routes [{A,1,seq=1}, {Z,1,seq=1}, {X,2,seq=1}, {Y,2,seq=1}]
-        Note over B: Poisoned reverse: B sends W<br/>back to C with hops=16 (infinity)
+        Note over B: Split horizon: B omits W<br/>(learned from C) when announcing to C
         C->>B: announce_routes [{W,1,seq=1}]
         A->>A: Store: C via B (2 hops), Z via B (2 hops)
     end
@@ -418,7 +597,7 @@ sequenceDiagram
         Note over A: Table converged:<br/>X=direct(1), Y=direct(1),<br/>C via B (2), Z via B (2),<br/>W via B (3)
     end
 ```
-*Diagram — Route announcement convergence with poisoned reverse*
+*Diagram — Route announcement convergence with split horizon*
 
 **Announcement size limit with fairness rotation:** each
 `announce_routes` frame carries at most 100 route entries to bound
@@ -437,54 +616,261 @@ fair selection strategy:
    This handles edge cases where rotation misses routes during topology
    changes.
 
+**Route selection with hop count (MVP):**
+
+In the core iteration, routes are ranked by hop count and trust source
+only. Composite scoring with RTT, health states, and probes is added in
+Iteration 1.5. The simple metric is sufficient for the first working
+routing table: `direct` routes are preferred, then `hop_ack`-confirmed,
+then lowest-hop-count `announcement`.
+
+```go
+func (t *Table) Lookup(identity string) []RouteEntry {
+    // 1. Filter: exclude withdrawn (hops=16)
+    // 2. Sort: source priority (direct > hop_ack > announcement),
+    //    then by hops ascending
+    // 3. Return sorted slice (caller uses first entry as RelayNextHop)
+}
+```
+
 **Done when:** a message from A to F goes via the shortest path, not
 random nodes. When a node disconnects, withdrawal propagates within
 seconds. Logs show `route_via_table` instead of `route_via_gossip`.
 The table converges within 1-2 announce cycles (30-60 seconds).
+On reconnect, the peer re-announces its full table (no incremental
+sync in this iteration).
 
 **Progress:**
 
-- [ ] Create `routing_table.go` with `PeerAwarenessTable` struct
-- [ ] Implement `Lookup()`, `AddDirectPeer()`, `RemoveDirectPeer()`
-- [ ] Implement `UpdateRoute()` with `SeqNo` comparison (reject older)
-- [ ] Implement `WithdrawRoute()` — set `hops=16` (infinity) to invalidate
-- [ ] Implement `Announceable(excludeVia)` with poisoned reverse
-- [ ] Implement `TickTTL()` — decrement `RemainingTTL` every second, remove entries at 0 (default 120s, flapping peers 30s)
-- [ ] Define `announce_routes` frame type in `protocol/frame.go` (with `seq` field)
+Implementation is split into four sequential phases. Each phase must
+be fully complete (code + tests pass) before starting the next one.
+
+<a id="iter-1-1"></a>
+#### Phase 1.1 — Model invariants
+
+**What changes:** currently the codebase has no routing data model at
+all — messages are delivered via gossip (flood to all peers). This
+phase introduces the foundational types and rules that every subsequent
+phase relies on: `RouteEntry` with the `Origin` field, the
+`(identity, origin, nextHop)` dedup key, split horizon, withdrawal
+semantics, capability gates, and TTL expiry.
+
+**Why first:** every subsequent phase (table, announcements,
+integration) must respect these invariants. Getting them wrong early
+means cascading bugs in Phases 1.2–1.4. By isolating them with full
+test coverage before any networking code, we ensure the foundation is
+solid.
+
+**What was → what becomes:**
+
+| Before (gossip only) | After (Phase 1.1) |
+|---|---|
+| No `RouteEntry` type | `RouteEntry` with Identity, Origin, NextHop (Ed25519), Hops, SeqNo, RemainingTTL, Source |
+| No dedup — relay dedupe by `message_id` only | Origin-aware dedup: key is `(identity, origin, nextHop)` |
+| No withdrawal concept | `hops=16` = withdrawn; wire withdrawal only by origin; transit = local invalidation |
+| No split horizon | `Announceable(excludeVia)` omits routes learned from target peer |
+| No capability gate for routing frames | `announce_routes` gated on `mesh_routing_v1` |
+
+```mermaid
+classDiagram
+    class RouteEntry {
+        +string Identity
+        +string Origin
+        +string NextHop
+        +int Hops
+        +uint64 SeqNo
+        +int RemainingTTL
+        +string Source
+    }
+
+    class Table {
+        +UpdateRoute(entry RouteEntry)
+        +WithdrawRoute(identity, nextHop, seqNo)
+        +Announceable(excludeVia string) []RouteEntry
+        +TickTTL()
+    }
+
+    Table "1" --> "*" RouteEntry : stores
+```
+*Diagram — Phase 1.1 core types and their relationship*
+
+- [ ] Create `routing/types.go` with exported `RouteEntry` (with `Origin` field), `RoutingSnapshot`
+- [ ] Implement origin-aware `SeqNo` comparison: dedup key is `(identity, origin, nextHop)`; reject older seq only within same lineage
+- [ ] Implement split horizon rule: `Announceable(excludeVia)` omits routes learned from target peer
+- [ ] Implement withdrawal rule: `hops=16` (infinity) only emittable on wire by the origin node; transit nodes locally invalidate + stop advertising
+- [ ] Define `announce_routes` frame type in `protocol/frame.go` (with `origin` and `seq` fields)
 - [ ] Gate `announce_routes` on `sessionHasCapability("mesh_routing_v1")`
-- [ ] Create `route_announce.go` — periodic announce loop (every 30s)
+- [ ] Implement `Table.WithdrawRoute()` — set `hops=16` to invalidate
+- [ ] Implement `Table.TickTTL()` — decrement `RemainingTTL` every second, remove entries at 0 (default 120s)
+- [ ] Implement `NextHop` as peer identity (Ed25519 fingerprint), not transport address — verify all struct fields
+- [ ] Write unit tests for origin-aware SeqNo comparison: key is (identity, origin, nextHop); different origins coexist
+- [ ] Write unit tests for split horizon logic (routes learned from A omitted when announcing to A)
+- [ ] Write unit tests for withdrawal propagation (hops=16 only from origin; intermediate nodes do not emit wire withdrawal)
+- [ ] Write unit tests for NextHop as peer identity (not transport address)
+
+<a id="iter-1-2"></a>
+#### Phase 1.2 — Minimal vertical slice
+
+**What changes:** connect the Phase 1.1 data model to the real network.
+After this phase, messages between non-adjacent peers will be relayed
+via the routing table instead of gossip flood. This is the first time
+`route_via_table` appears in logs.
+
+**What it covers:** `Table` struct with `Lookup()`, periodic
+announcements (30s), triggered updates on connect/disconnect, incoming
+announcement handling, `TableRouter` adapter wired into the existing
+`Router.Route()`, session-close invalidation, hop_ack confirmation,
+and mixed-version coexistence with gossip-only peers.
+
+**What was → what becomes:**
+
+| Before (gossip only) | After (Phase 1.2) |
+|---|---|
+| `Router.Route()` returns gossip targets only | `Router.Route()` fills `RelayNextHop` from table, falls back to gossip |
+| No `announce_routes` on wire | Periodic + triggered `announce_routes` to `mesh_routing_v1` peers |
+| Disconnect = just remove session | Disconnect = wire withdrawal (own-origin) + local invalidation (transit) + triggered update |
+| No route confirmation | `relay_hop_ack` promotes route to `source="hop_ack"` for specific triple |
+
+```mermaid
+flowchart LR
+    subgraph Before["Before (gossip)"]
+        A1[Node A] -->|flood| B1[Node B]
+        A1 -->|flood| C1[Node C]
+        B1 -->|flood| D1[Node D]
+        C1 -->|flood| D1
+    end
+
+    subgraph After["After (table routing)"]
+        A2[Node A] -->|relay via table| B2[Node B]
+        B2 -->|relay via table| D2[Node D]
+        A2 -.->|gossip fallback| C2[Node C]
+    end
+```
+*Diagram — Message delivery: gossip flood vs table-directed relay*
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B
+    participant F as Target F
+
+    Note over A: Lookup(F) → RouteEntry{F, via B, hops=2}
+    A->>B: relay_message(to=F, msg_id=99)
+    B->>F: relay_message(to=F, msg_id=99)
+    F->>B: relay_hop_ack(msg_id=99)
+    B->>A: relay_hop_ack(msg_id=99)
+    Note over A: Route (F, origin=F, via B) → source="hop_ack"
+```
+*Diagram — Table-directed relay with hop_ack confirmation*
+
+- [ ] Create `routing/table.go` with `Table` struct
+- [ ] Implement `Table.Lookup()` — sort by source priority (direct > hop_ack > announcement), then by hops
+- [ ] Implement `Table.AddDirectPeer()`, `Table.RemoveDirectPeer()`
+- [ ] Implement `Table.UpdateRoute()` using Phase 1.1 invariants
+- [ ] Implement `Table.Snapshot()` — return serializable table state for RPC
+- [ ] Create `routing/announce.go` — periodic announce loop (every 30s)
 - [ ] Implement triggered updates: immediate announce on peer connect/disconnect
-- [ ] Implement triggered withdrawal: immediate `hops=16` on peer disconnect
-- [ ] Handle incoming `announce_routes` — update table with +1 hop
+- [ ] Implement triggered withdrawal: immediate `hops=16` on peer disconnect (own-origin only)
+- [ ] Handle incoming `announce_routes` — update table with +1 hop, preserve origin and seq
+- [ ] Preserve unknown fields in route entries when re-announcing (forward-compatible relay for onion box keys)
 - [ ] Handle incoming withdrawals (`hops=16`) — invalidate route immediately
-- [ ] Integrate `PeerAwarenessTable` into `Router.Route()` — fill `RelayNextHop`
-- [ ] Confirm routes via `relay_hop_ack` (`source="hop_ack"`)
-- [ ] Limit announcements to max 100 routes per announce frame, with fairness rotation (see below)
+- [ ] Create `node/table_router.go` — `TableRouter` adapter wrapping `routing.Table`
+- [ ] Integrate `routing.Table` into `node.Service`
+- [ ] Integrate `TableRouter` into `Router.Route()` — fill `RelayNextHop` (peer identity, not transport addr)
+- [ ] Confirm routes via `relay_hop_ack` — `source="hop_ack"` for specific `(identity, origin, nextHop)` triple (origin resolved locally from routing decision, not from wire)
 - [ ] Add direct peer tracking on connect/disconnect events
-- [ ] Implement trust hierarchy in `UpdateRoute()`: direct > hop_ack > announcement
-- [ ] Implement shorter TTL (30s) for routes from flapping peers (3+ disconnects in 10 min)
-- [ ] Implement route-session binding: invalidate all routes from peer on session close
-- [ ] Implement triggered withdrawal on session close for all removed routes
+- [ ] Implement route-session binding: on session close, remove direct-peer route (with own withdrawal) + locally invalidate transit routes (no wire withdrawal for transit — only stop advertising)
+- [ ] Verify: triggered withdrawal on session close only for routes where this node is the origin (direct peers)
 - [ ] Handle identity change on reconnect: withdraw old identity, add new
+- [ ] On reconnect: always full table sync (incremental digest sync deferred to iteration 2)
+- [ ] Write unit tests for routing table operations (Lookup, AddDirectPeer, RemoveDirectPeer)
+- [ ] Write unit tests for triggered update generation
+- [ ] Write unit tests for route-session binding (direct routes withdrawn on wire; transit routes locally invalidated, not wire-withdrawn)
+- [ ] Write unit tests for hop_ack scoping (confirming (X, origin=C, via B) does not promote (X, origin=D, via B) or (Y, origin=C, via B))
+- [ ] Integration test: 5 nodes, verify shortest path selection
+- [ ] Integration test: disconnect node, verify withdrawal propagation < 5s
+- [ ] Integration test: reconnect with different identity, verify old routes withdrawn
+- [ ] Mixed-version test: routing-capable node works alongside legacy node
+- [ ] Triggered withdrawal does not break legacy peers
+- [ ] Integration test: reconnect always triggers full table sync (no stale cached routes)
+
+<a id="iter-1-3"></a>
+#### Phase 1.3 — Observability and polish
+
+**What changes:** make the routing table inspectable and hardened. After
+this phase, the desktop UI, CLI, and monitoring can query routes and
+stats via RPC. Announcement fairness rotation ensures distant identities
+propagate. Anti-poisoning rules prevent malicious peers from injecting
+false routes that override verified ones.
+
+**Why separate from 1.2:** Phase 1.2 delivers the minimum working
+routing. Adding RPC, fairness, and anti-poisoning in the same phase
+risks coupling correctness with polish. Keeping them separate means
+Phase 1.2 can ship and be validated before adding complexity.
+
+**What was → what becomes:**
+
+| Before (Phase 1.2 only) | After (Phase 1.3) |
+|---|---|
+| No way to inspect routes at runtime | `fetch_routes`, `fetch_routing_stats` via RPC |
+| Announcement carries full table (up to 100) by hop count only | Fairness rotation: direct always included, offset rotation for rest |
+| Any `announcement` can override `hop_ack` | Trust hierarchy enforced: `direct > hop_ack > announcement` |
+| No protection against route flooding | Rate limits, quotas, jitter on periodic full sync |
+
+```mermaid
+flowchart TD
+    subgraph RPC["RPC Routing Commands"]
+        FR["fetch_routes<br/>(identity filter)"]
+        FS["fetch_routing_stats<br/>(table size, counters)"]
+        FH["fetch_route_health<br/>(Iter 1.5)"]
+    end
+
+    subgraph Provider["RoutingProvider interface"]
+        FetchRoutes["FetchRoutes()"]
+        FetchStats["FetchRoutingStats()"]
+        FetchHealth["FetchRouteHealth()"]
+    end
+
+    FR --> FetchRoutes
+    FS --> FetchStats
+    FH --> FetchHealth
+
+    FetchRoutes --> TABLE["routing.Table"]
+    FetchStats --> TABLE
+    FetchHealth -.-> HEALTH["routing.Health<br/>(Iter 1.5)"]
+
+    style FH fill:#fff3e0,stroke:#e65100
+    style FetchHealth fill:#fff3e0,stroke:#e65100
+    style HEALTH fill:#fff3e0,stroke:#e65100
+```
+*Diagram — RPC routing commands and RoutingProvider interface*
+
+RPC routing commands:
+- [ ] Define `RoutingProvider` interface in `rpc/provider.go`
+- [ ] Create `rpc/routing_commands.go` with `RegisterRoutingCommands`
+- [ ] Implement `fetch_routes` command (identity filter, full table snapshot)
+- [ ] Implement `fetch_routing_stats` command (table size, announce counts, convergence)
+- [ ] Register `RoutingProvider` as unavailable when `mesh_routing_v1` is not active
+- [ ] Add `RoutingProvider` parameter to `RegisterAllCommands`
+- [ ] Write unit tests for `fetch_routes` (empty table, single identity, full table)
+- [ ] Write unit tests for `fetch_routing_stats` (counter increments)
+- [ ] Write unit test: routing commands return 503 when provider is nil
+
+Fairness, anti-poisoning, rate limiting:
+- [ ] Limit announcements to max 100 routes per announce frame, with fairness rotation
 - [ ] Implement fairness rotation for announcement size limit (direct always included, offset rotation)
 - [ ] Implement periodic full sync every 5th cycle (split across multiple frames if needed)
-- [ ] Add anti-poisoning acceptance rules: `announcement` stays advisory-only and cannot override fresher `direct`/`hop_ack` data
+- [ ] Implement trust hierarchy in `UpdateRoute()`: direct > hop_ack > announcement (per identity-origin-nextHop triple)
+- [ ] Implement shorter TTL (30s) for routes from flapping peers (3+ disconnects in 10 min)
+- [ ] Add anti-poisoning acceptance rules: `announcement` advisory-only, cannot override fresher `direct`/`hop_ack`
 - [ ] Reject or deprioritize anomalous route announcements (implausible `hops`, sudden identity spikes, no fresh `SeqNo`)
 - [ ] Rate-limit `announce_routes` / `withdrawal` per peer so triggered updates cannot become a routing flood
 - [ ] Add quotas for how many new identities and route entries one peer may introduce per time window
 - [ ] Add jitter / pacing for periodic full sync so nodes do not synchronize bandwidth spikes
 - [ ] Add `route_via_table` / `route_via_gossip` log markers
-- [ ] Write unit tests for routing table operations
-- [ ] Write unit tests for poisoned reverse logic
-- [ ] Write unit tests for SeqNo ordering and withdrawal
-- [ ] Write unit tests for triggered update generation
-- [ ] Write unit tests for trust hierarchy (direct overrides announcement, hop_ack overrides announcement)
-- [ ] Write unit tests for route-session binding (all routes removed on disconnect)
+- [ ] Write unit tests for trust hierarchy (direct > hop_ack > announcement, per-identity-per-nexthop)
 - [ ] Write unit tests for announcement fairness rotation
 - [ ] Write unit tests for anti-poisoning announcement acceptance rules
-- [ ] Integration test: 5 nodes, verify shortest path selection
-- [ ] Integration test: disconnect node, verify withdrawal propagation < 5s
-- [ ] Integration test: reconnect with different identity, verify old routes withdrawn
 - [ ] Integration test: malicious peer advertises false routes, delivery degrades at most to gossip fallback
 - [ ] Integration test: route-update flood does not evict honest peers or trigger a full-sync storm
 
@@ -492,20 +878,459 @@ The table converges within 1-2 announce cycles (30-60 seconds).
 
 - [ ] `announce_routes` / withdrawal sent only to peers with `mesh_routing_v1`
 - [ ] Without routing table, network continues delivery via gossip fallback
-- [ ] Mixed-version test: routing-capable node works alongside legacy node
-- [ ] Triggered withdrawal does not break legacy peers
-- [ ] Confirmed: iteration 2 remains additive, no protocol bump required
-- [ ] Confirmed: iteration 2 does not require raising `MinimumProtocolVersion`
+- [ ] RPC routing commands return 503 for nodes without `mesh_routing_v1`
+- [ ] Confirmed: routing module has no import dependency on `node` package (one-way: `node` → `routing`)
+- [ ] Confirmed: iteration 1 remains additive, no protocol bump required
+- [ ] Confirmed: iteration 1 does not require raising `MinimumProtocolVersion`
+
+<a id="iter-1-4"></a>
+#### Phase 1.4 — Iteration 1.5 (health, probes, RTT, route query)
+
+**What changes:** replace simple hop-count ranking with a composite
+score that incorporates route health, RTT, and trust. Add active health
+tracking per `(identity, origin, nextHop)` triple with a 4-state machine
+(Good → Questionable → Bad → Dead), lightweight probes for reachability
+verification, and targeted route queries for fast recovery.
+
+**Why separate phase:** health tracking and composite scoring add
+significant complexity. If mixed into Phases 1.1–1.3, a bug in health
+logic could block the core routing table from shipping. By deferring
+to Phase 1.4, the base routing is already working and validated.
+
+**What was → what becomes:**
+
+| Before (Phase 1.3) | After (Phase 1.4) |
+|---|---|
+| Route selection: hop count + trust source only | Composite score: hops + RTT + health + trust |
+| No health state per route | 4-state machine: Good/Questionable/Bad/Dead per triple |
+| No probe mechanism | `route_probe` / `route_probe_ack` (gated by `mesh_route_probe_v1`) |
+| No active route discovery after failure | `route_query` / `route_query_response` (gated by `mesh_route_query_v1`) |
+| RTT unknown | RTT estimated from hop_ack timing and tcp_info (EWMA) |
+
+Only start after phases 1.1–1.3 are complete and all tests pass.
+Health tracking and composite scoring must not block the base routing
+table from being correct and deployed.
+
+<a id="iter-1-5"></a>
+### Iteration 1.5 — Route health, probes, and RTT scoring
+
+**Goal:** improve route selection quality beyond simple hop count.
+Add active health tracking per `(identity, origin, nextHop)` triple, lightweight
+probes to verify reachability, RTT estimation from TCP sessions, and
+a composite route score that combines all signals. Also adds targeted
+route queries for fast recovery after next-hop failure.
+
+**Depends on:** Iteration 1 phases 1.1–1.3 (routing table with
+announcements and withdrawals must be working and all tests passing).
+
+**Capability gate:** `route_probe` and `route_query` are new wire-level
+frame types that Iteration 1 nodes do not understand. A node running
+only Iteration 1 may legitimately advertise `mesh_routing_v1` without
+knowing these frames. Sending them under the same capability breaks
+mixed-version compatibility within the same capability bucket.
+
+New capabilities introduced in this iteration:
+
+- **`mesh_route_probe_v1`** — gates `route_probe` / `route_probe_ack`
+  frame exchange. Only sent to peers that advertise this capability.
+- **`mesh_route_query_v1`** — gates `route_query` / `route_query_response`
+  frame exchange. Only sent to peers that advertise this capability.
+
+Health tracking and composite scoring are internal (no new wire frames)
+and do not require a separate capability. A node with only
+`mesh_routing_v1` continues to work — it receives announcements and
+withdrawals normally, and its routes are ranked by hop count instead
+of composite score.
+
+**New files** (extend routing module):
+
+```
+internal/core/routing/
+  health.go           — RouteHealthState, health state machine transitions
+  probe.go            — route_probe sender/handler
+  score.go            — CompositeScore, RTT estimation (EWMA)
+  query.go            — route_query / route_query_response
+```
+
+#### 1.5a. Next-hop health state machine
+
+Each `(identity, origin, nextHop)` triple is independently tracked with
+an explicit health state — matching the routing table's dedup key. A
+`hop_ack` for message to identity X via next-hop B for origin C only
+affects the health of route `(X, origin=C, via B)` — not all routes
+through B, and not routes to X from a different origin through the same
+B. Transport-level liveness (TCP session alive) is tracked separately
+by `node.Service`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Good: handshake complete
+
+    Good --> Questionable: no hop_ack for 60s
+    Good --> Good: hop_ack received (reset timer)
+
+    Questionable --> Good: hop_ack received
+    Questionable --> Bad: no hop_ack for 122s total
+    Questionable --> Bad: 3 consecutive probe failures
+
+    Bad --> Questionable: probe response received
+    Bad --> Dead: no response for 182s total
+
+    Dead --> [*]: locally invalidated, stop announcing
+    Dead --> Questionable: unexpected response received
+
+    note right of Dead
+        Wire withdrawal only if this node
+        is the origin of this route.
+        Transit routes: local invalidation only.
+    end note
+```
+*Diagram — Route health state machine (per identity-origin-nextHop triple)*
+
+```go
+type RouteHealth uint8
+
+const (
+    HealthGood         RouteHealth = iota // responding, route fully trusted
+    HealthQuestionable                     // no recent confirmation, probing
+    HealthBad                              // unresponsive, route deprioritized
+    HealthDead                             // timed out, locally invalidated (wire withdrawal only if own-origin)
+)
+
+// RouteHealthState tracks health per (identity, origin, nextHop) triple,
+// matching the routing table's dedup key.
+type RouteHealthState struct {
+    Identity        string        // target identity
+    Origin          string        // who originated this route (matches RouteEntry.Origin)
+    NextHop         string        // peer identity of next hop
+    Health          RouteHealth
+    LastHopAck      time.Time     // last hop_ack for THIS identity via THIS next-hop
+    LastProbe       time.Time     // last probe sent for this pair
+    ProbeFailures   int           // consecutive probe failures
+    RTT             time.Duration // estimated RTT (EWMA) for this path
+    TransitionAt    time.Time     // when current health state was entered
+}
+```
+
+| State | Condition | Route behavior |
+|---|---|---|
+| **Good** | `hop_ack` received within 60s for this (identity, origin, nextHop) triple | Route used normally, full TTL |
+| **Questionable** | No `hop_ack` for 60–122s for this triple | Route deprioritized, probes sent every 15s |
+| **Bad** | No response for 122s or 3 probe failures | Route excluded from selection, gossip used instead |
+| **Dead** | No response for 182s | Route locally invalidated, stop announcing. Wire withdrawal sent only if this node is the origin; transit routes are silently dropped and converge via TTL expiry or origin's own withdrawal. |
+
+Routes with `Bad` or `Dead` health are not selected by `Lookup()` unless
+no other route exists (last resort before gossip fallback).
+
+#### 1.5b. Route probe mechanism
+
+A lightweight probe verifies that a specific next-hop can actually
+forward traffic to the claimed identity, without waiting for real
+message traffic to generate a `hop_ack`.
+
+```json
+{
+  "type": "route_probe",
+  "probe_id": 12345678,
+  "target_identity": "alice_addr"
+}
+```
+
+```json
+{
+  "type": "route_probe_ack",
+  "probe_id": 12345678,
+  "reachable": true,
+  "rtt_ms": 45
+}
+```
+
+**Probe rules:**
+
+- Probes are sent for `(identity, origin, nextHop)` triples in `Questionable` state every 15 seconds.
+- A `route_probe_ack` with `reachable=true` transitions the specific triple
+  back to `Good` and updates the RTT estimate for that triple.
+- A `route_probe_ack` with `reachable=false` keeps the triple in
+  `Questionable` (the next-hop is alive but can't reach the target).
+- No response within 5 seconds counts as a probe failure.
+- Probes are also sent when a new announced route is first received
+  from a previously unknown next-hop (verify before trusting).
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Next-hop B
+    participant F as Target F
+
+    Note over A: Route (F, via B) is Questionable<br/>(no hop_ack for F via B for 65s)
+
+    A->>B: route_probe(probe_id=123, target=F)
+    B->>B: Check: do I have route to F?
+    alt Route exists and session active
+        B->>A: route_probe_ack(probe_id=123, reachable=true, rtt=45ms)
+        Note over A: (F, via B) → Good, RTT=45ms<br/>Route to F via B restored
+    else No route to F
+        B->>A: route_probe_ack(probe_id=123, reachable=false)
+        Note over A: (F, via B) stays Questionable<br/>Route to F via B deprioritized
+    end
+```
+*Diagram — Route probe and health recovery*
+
+#### 1.5c. RTT-weighted composite route score
+
+Pure hop-count metrics can choose a 2-hop path through a congested
+transcontinental relay over a 3-hop local mesh path. Adding RTT
+estimation produces better routing decisions.
+
+RTT is estimated per `(identity, origin, nextHop)` triple using an Exponentially
+Weighted Moving Average (EWMA) from transport-layer TCP session timing.
+Since each peer connection uses a TCP session, RTT is available "for
+free" by measuring the time between sending data and receiving the
+`hop_ack` response. On Linux, `tcp_info` from `getsockopt` provides
+kernel-level RTT estimates. The probe mechanism (section 1.5b) also
+contributes RTT samples when probes are answered:
+
+```go
+func (s *RouteHealthState) UpdateRTT(sample time.Duration) {
+    const alpha = 0.3 // smoothing factor — higher = more responsive
+    if s.RTT == 0 {
+        s.RTT = sample
+    } else {
+        s.RTT = time.Duration(float64(s.RTT)*(1-alpha) + float64(sample)*alpha)
+    }
+}
+```
+
+The composite route score combines hops, RTT, and health:
+
+```go
+func (e RouteEntry) CompositeScore(health *RouteHealthState) float64 {
+    // Base score: penalize distance
+    score := 100.0 - float64(e.Hops)*10.0
+
+    // Bonus for low latency (max +30 for RTT < 20ms)
+    if health != nil && health.RTT > 0 {
+        rttMs := float64(health.RTT.Milliseconds())
+        if rttMs < 20 {
+            score += 30.0
+        } else if rttMs < 100 {
+            score += 20.0 * (100.0 - rttMs) / 80.0
+        }
+        // RTT > 100ms: no bonus
+    }
+
+    // Health penalty
+    if health != nil {
+        switch health.Health {
+        case HealthGood:
+            // no penalty
+        case HealthQuestionable:
+            score -= 20.0
+        case HealthBad:
+            score -= 50.0
+        case HealthDead:
+            score = -1.0 // excluded from selection
+        }
+    }
+
+    // Trust bonus
+    switch e.Source {
+    case "direct":
+        score += 20.0
+    case "hop_ack":
+        score += 10.0
+    case "announcement":
+        // no bonus
+    }
+
+    return score
+}
+```
+
+```mermaid
+flowchart TD
+    ROUTES["All routes to identity F"]
+    FILTER{"Filter out<br/>Dead routes"}
+    SCORE["Compute CompositeScore<br/>per (identity, origin, nextHop)"]
+    SORT["Sort by score descending"]
+    BEST{"Best score > 0?"}
+    USE["Use best route<br/>(relay via next-hop)"]
+    GOSSIP["Gossip fallback"]
+
+    ROUTES --> FILTER --> SCORE --> SORT --> BEST
+    BEST -->|yes| USE
+    BEST -->|no| GOSSIP
+
+    style USE fill:#c8e6c9,stroke:#2e7d32
+    style GOSSIP fill:#fff3e0,stroke:#e65100
+```
+*Diagram — Route selection using composite score*
+
+#### 1.5d. Targeted route query
+
+When a route to a target identity is `Bad` or all known routes are
+exhausted, the node can ask its connected peers for better routes using
+a targeted query. This accelerates convergence without waiting for the
+next periodic announce cycle.
+
+**`route_query`** — ask a specific peer if they know a route:
+
+```json
+{
+  "type": "route_query",
+  "query_id": 87654321,
+  "target_identity": "alice_addr"
+}
+```
+
+**`route_query_response`** — peer responds with their best knowledge:
+
+```json
+{
+  "type": "route_query_response",
+  "query_id": 87654321,
+  "routes": [
+    {"identity": "alice_addr", "hops": 1, "seq": 55}
+  ]
+}
+```
+
+**Rules:**
+
+- `route_query` is sent only to directly connected peers.
+- At most 3 queries per target identity per 30 seconds (rate limited).
+- Responses are treated as `source="announcement"` entries (same trust).
+- A node does not forward `route_query` — it is single-hop only (no
+  recursive flood).
+- Primary use case: fast route recovery after a route goes `Bad`.
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Peer B
+    participant C as Peer C
+
+    Note over A: Route to F via B is Bad<br/>No other route known
+
+    par Query peers for F
+        A->>B: route_query(target=F)
+        A->>C: route_query(target=F)
+    end
+
+    B->>A: route_query_response(routes=[])
+    Note over B: B doesn't know F
+
+    C->>A: route_query_response(routes=[{F, hops=2, seq=55}])
+    Note over A: Discovered: F via C (3 hops)<br/>Add to table, try this route
+
+    A->>C: relay_message(to=F, ...)
+    C->>A: relay_hop_ack(msg_id=...)
+    Note over A: Route (F, via C) confirmed by hop_ack
+```
+*Diagram — Targeted route query after route failure*
+
+**Done when:** routes through congested or slow links are deprioritized
+based on RTT. Health state transitions are logged. Route queries
+discover alternative paths within seconds after a route goes Bad.
+Probes verify new announced routes before trusting with high-priority
+traffic.
+
+**Progress:**
+
+- [ ] Create `routing/health.go` with `RouteHealthState` and state machine (per identity-origin-nextHop triple)
+- [ ] Implement health transitions: 60s → Questionable, 122s → Bad, 182s → Dead (per triple)
+- [ ] Implement Dead state: local invalidation + stop announcing; wire withdrawal only if this node is the origin
+- [ ] Implement automatic transition back: hop_ack or probe_ack → Good (scoped to specific triple)
+- [ ] Integrate health tracking into `Table.Lookup()`: exclude Dead, deprioritize Bad
+- [ ] Define `route_probe` / `route_probe_ack` frame types
+- [ ] Create `routing/probe.go` — probe sender: every 15s to Questionable triples
+- [ ] Implement probe handler: check local routes, respond with reachability + RTT
+- [ ] Send probe to new next-hops on first announcement (verify before trust)
+- [ ] Create `routing/score.go` with `UpdateRTT()` EWMA (alpha=0.3) from hop_ack and probe_ack
+- [ ] Implement `CompositeScore()`: hops × 10 + RTT bonus + health penalty + trust bonus
+- [ ] Replace hop-count sort in `Table.Lookup()` with `CompositeScore` ranking
+- [ ] Define `route_query` / `route_query_response` frame types
+- [ ] Create `routing/query.go` — targeted query sender after route failure
+- [ ] Rate-limit queries: max 3 per identity per 30 seconds
+- [ ] Implement query handler: respond with best known routes for queried identity
+- [ ] Add `fetch_route_health` RPC command (health states per identity-origin-nextHop triple)
+- [ ] Write unit tests for health state transitions (Good → Questionable → Bad → Dead → recovery)
+- [ ] Write unit tests for health scoping (hop_ack for (X, origin=C, via B) does not affect (X, origin=D, via B) or (Y, origin=C, via B))
+- [ ] Write unit tests for Dead state: transit route locally invalidated (no wire withdrawal), own-origin route emits wire withdrawal
+- [ ] Write unit tests for probe send/receive cycle and health recovery
+- [ ] Write unit tests for RTT EWMA calculation with varying samples
+- [ ] Write unit tests for CompositeScore ranking (low-RTT 3-hop beats high-RTT 2-hop)
+- [ ] Write unit tests for route_query/response (single-hop, rate-limited)
+- [ ] Integration test: high-RTT direct peer deprioritized vs low-RTT 2-hop route
+- [ ] Integration test: next-hop route goes Bad → node discovers alternative via route_query → recovered
+- [ ] Integration test: probe verifies new announced route before high-priority traffic uses it
+
+**Release / Compatibility:**
+
+- [ ] `route_probe` / `route_probe_ack` sent only to peers with `mesh_route_probe_v1`
+- [ ] `route_query` / `route_query_response` sent only to peers with `mesh_route_query_v1`
+- [ ] Nodes without iteration 1.5 still work — they use hop-count-only routing from iteration 1
+- [ ] CompositeScore gracefully handles nil health state (falls back to hop-count-only)
+- [ ] Mixed-version test: 1.5 node does not send probe/query frames to 1.0-only peer
+- [ ] Confirmed: iteration 1.5 is additive; new capabilities are optional, no protocol bump required
 
 <a id="iter-2"></a>
-### Iteration 2 — Reliability, reputation, and multi-path
+### Iteration 2 — Reliability, reputation, multi-path, and incremental sync
 
 **Goal:** multiple routes per identity, automatic failover based on
 hop-by-hop ack success rate, protection against black-hole nodes.
+Also adds incremental sync via table digest for efficient reconnection.
 
 Note: capability negotiation and announcement size limits are already
-handled in iterations 0 and 2 respectively. This iteration focuses
-purely on reliability.
+handled in iterations 0 and 1 respectively. Health tracking, probes,
+and composite scoring are handled in iteration 1.5. This iteration
+focuses on reliability, multi-path failover, and sync optimization.
+
+**2.0. Incremental sync via table digest:**
+
+When a peer reconnects, both sides can skip the full table dump by
+exchanging a compact table digest first. This requires a **route
+cache** that survives session close — unlike iteration 1 where all
+routes from a peer are invalidated immediately on disconnect.
+
+The route cache stores a read-only snapshot of what the peer last
+announced, with a separate expiry (e.g., 5 minutes). On reconnect
+within the cache window, the digest is compared and only deltas are
+exchanged. If the cache has expired or the digest misses, full sync
+occurs (same as iteration 1).
+
+**`route_sync_digest`** — sent immediately after handshake to a known peer:
+
+```json
+{
+  "type": "route_sync_digest",
+  "table_hash": "sha256_of_sorted_identity_seq_pairs",
+  "entry_count": 47,
+  "max_seq": 142
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B (reconnecting)
+
+    Note over B: Session re-established after disconnect
+
+    B->>A: route_sync_digest(hash=abc123, count=47, max_seq=142)
+    A->>A: Compare: cached state from B<br/>had hash=abc123, max_seq=142
+
+    alt Digest matches (cache still valid)
+        Note over A: No changes needed
+        A->>B: route_sync_digest(hash=def456, count=52, max_seq=198)
+        Note over A,B: Both sides exchange only deltas
+    else Digest mismatch or cache expired
+        A->>B: announce_routes [full table dump]
+        B->>A: announce_routes [full table dump]
+        Note over A,B: Full resync (same as first connect)
+    end
+```
+*Diagram — Incremental sync via table digest on reconnect*
 
 **3a. Multiple routes and failover:**
 
@@ -634,7 +1459,7 @@ after 5 messages.
 
 - [ ] Store multiple routes per identity in `PeerAwarenessTable` (may already exist from iteration 2)
 - [ ] Add `HopAckAttempts`, `HopAckSuccesses`, `ReliabilityScore` to `RouteEntry`
-- [ ] Track hop-ack success/failure per `(identity, nextHop)` pair
+- [ ] Track hop-ack success/failure per `(identity, origin, nextHop)` triple
 - [ ] Implement 10s hop-ack timeout → mark attempt as failed
 - [ ] Implement composite route ranking: `reliability * 100 - hops * 10`
 - [ ] Keep penalties local: do not accept external claims about "bad" peers as input to `ReliabilityScore`
@@ -924,13 +1749,20 @@ but does not hard-depend on it — initial version works over regular relay.
 - **Membership changes are signed.** Adding or removing a member requires a
   membership-change message signed by a member with admin role. Every member
   independently validates the signature before updating local group state.
-- **Per-group symmetric key.** Messages inside a group are encrypted with a
-  shared group key derived via a key-agreement round among current members.
-  On membership change the group key is rotated (forward secrecy for removed
-  members).
-- **Delivery model:** the sender encrypts once with the group key, then
-  fans out via mesh relay (one `relay_message` per member, or gossip to
-  group topic). Receipt semantics: per-member delivery receipts, aggregated
+- **Pairwise encryption, not a group-wide shared key.** Group messages
+  are encrypted per-recipient using the existing pairwise session keys
+  from DM delivery (Iterations 1–2). The sender encrypts the same
+  plaintext N times (once per member) and sends N individual
+  `relay_message` frames. There is **no** group-wide symmetric key and
+  **no** key-agreement round among members. This avoids: (a) synchronous
+  key-agreement in a decentralized mesh; (b) a single compromised member
+  decrypting all traffic with a shared key; (c) complex group-key
+  rotation on every membership change. Forward secrecy for removed members
+  is automatic: once a member is removed, no new pairwise session is
+  established, so it cannot decrypt future messages.
+- **Delivery model:** the sender encrypts once per member using the
+  pairwise session key, then fans out via mesh relay (one `relay_message`
+  per member). Receipt semantics: per-member delivery receipts, aggregated
   in the UI as "delivered to N of M".
 - **Ordering:** causal ordering via vector clocks or Lamport timestamps
   (not total order). Members may see messages in slightly different order
@@ -939,9 +1771,34 @@ but does not hard-depend on it — initial version works over regular relay.
   comes online, it syncs missed messages from any reachable group member
   (same as DM pending delivery). If the member was removed while offline,
   it receives the removal message and stops decrypting new traffic.
+- **Group roles and moderation:** four hierarchical roles — founder
+  (creator, full admin privileges), moderator (promoted by founder, can
+  kick users and set observer role), user (default, can communicate),
+  observer (demoted, can only read). Founder can set peer limits, toggle
+  privacy state, and modify shared group settings. Role changes are signed
+  by the initiator and broadcast to all members; each member validates
+  signatures against the moderator list before applying.
+- **Shared state integrity:** group metadata (name, peer limit, privacy
+  state, voice state, moderator list hash) is signed by the founder using
+  the group signature key. This allows new joiners to verify the shared
+  state cryptographically even when the founder is offline. Version
+  counter prevents rollback to older state.
+- **Group types — public and private:** public groups can be joined by
+  anyone who knows the group ID (discoverable via DHT in the future).
+  Private groups require a friend invite to join. The type is toggleable
+  by the founder.
+- **Pairwise session key rotation:** each pair of peers in a group uses
+  ephemeral session keys (the same mechanism as DM sessions). Session keys
+  are rotated periodically for forward secrecy. This reuses the proven DM
+  key rotation without introducing group-specific crypto.
+- **State sync protocol:** peers piggyback sync metadata (peer count,
+  peer list checksum, shared state version, sanctions version, topic
+  version) onto periodic pings. If versions differ, a targeted sync
+  request is sent to the peer with newer data. This is lightweight and
+  self-repairing.
 
 **Done when:** a group of N identities can exchange messages with consistent
-membership, key rotation on member change, and delivery receipts — all
+membership, pairwise session key rotation, and delivery receipts — all
 operating over the existing mesh relay without a central server.
 
 <a id="iter-13"></a>
@@ -1141,12 +1998,24 @@ receive `onion_relay_message`.
 
 **Key distribution:** nodes publish their box public key via routing
 announcements (Iteration 1) — this is the primary and only mechanism in
-13.1. A separate `onion_key_announce` frame is **not** introduced: it
-would complicate the capability model, increase announce frame size, and
-create desynchronization between routing state and key state. If onion key
-rotation at a different frequency is needed in the future,
-`onion_key_announce` can be added as a separate sub-iteration with its own
-capability gate, coexistence matrix, and migration plan.
+13.1. The `announce_routes` frame carries optional `box_key` and
+`box_key_binding_sig` fields per route entry (defined in Iteration 1,
+see "Extensibility for onion" section). Nodes with `onion_relay_v1`
+populate these fields in their own-origin announcements; nodes without
+the capability omit them. A separate `onion_key_announce` frame is
+**not** introduced: it would complicate the capability model, increase
+announce frame size, and create desynchronization between routing state
+and key state. If onion key rotation at a different frequency is needed
+in the future, `onion_key_announce` can be added as a separate
+sub-iteration with its own capability gate, coexistence matrix, and
+migration plan.
+
+**Implementation dependency:** onion path construction requires that
+Iteration 1 `announce_routes` is deployed with the optional box-key
+fields. An Iteration 1 implementation that does not preserve unknown
+fields during relay will strip box keys from announcements and break
+onion key distribution. The relay rule is: unknown fields in a route
+entry MUST be preserved when re-announcing (forward-compatible relay).
 
 **Trust model for transit box keys (non-contact hops):**
 the current contact trust model (see `docs/encryption.md`, Contact trust
@@ -2091,6 +2960,17 @@ benefits from the relay subsystem (Iteration 1) and routing table
 
 **Done when:** all four sub-iterations below are complete.
 
+**Wire encoding: compact binary, not JSON.** The main TCP transport uses
+JSON-encoded frames (`announce_routes`, `nat_ping_request`, etc.). BLE
+bandwidth is 1–2 orders of magnitude lower — JSON overhead (keys, quotes,
+braces) is unacceptable. All BLE wire frames use a **compact binary TLV
+encoding**: fixed-size fields where possible, varint-encoded lengths, no
+field names on the wire. The TLV schema maps 1:1 to the same logical
+frame types used by the TCP transport (ANNOUNCE, route data, DM relay),
+so the routing and delivery layers see identical semantics — only the
+serialization differs. The same applies to Meshtastic (Iteration 18),
+which inherits BLE's compact encoding with even tighter constraints.
+
 #### BLE transport model
 
 A BLE node operates in two roles simultaneously: **Central** (scans for and
@@ -2513,6 +3393,14 @@ on the BLE transport patterns.
 
 **Done when:** all three sub-iterations below are complete.
 
+**Wire encoding: compact binary (inherited from BLE).** Meshtastic
+bandwidth is 1–10 kbit/s — even more constrained than BLE. All CORSA
+frames bridged over Meshtastic use the same **compact binary TLV
+encoding** defined for BLE (Iteration 17). JSON is never sent over the
+radio link. The Meshtastic transport bridge serializes CORSA frames into
+`DATA_APP` packets using this compact format; the receiving bridge
+deserializes back into standard CORSA frames for the routing layer.
+
 #### Why Meshtastic
 
 Meshtastic devices form LoRa mesh networks at 868/915 MHz with range of 1–10+
@@ -2743,10 +3631,1469 @@ connections. BLE (A13) and Meshtastic LoRa (A14) transports are explicitly
 excluded — their bandwidth and latency characteristics are incompatible with
 real-time audio requirements.
 
+**Signaling protocol (MSI — Media Session Information):**
+
+Call setup and teardown use dedicated capability-gated frame types, not
+ordinary DM payloads. This is critical for mixed-version safety: a peer
+without `voice_call_v1` must never receive signaling frames (it would
+not know how to parse them and might surface them as opaque user content
+or reject the connection).
+
+Signaling frame types (all gated by `voice_call_v1`):
+
+- `call_request` — initiate a call (contains session_id, codec list)
+- `call_accept` — accept an incoming call (contains selected codec)
+- `call_reject` — reject or cancel a call (contains reason code)
+- `call_end` — terminate an active call
+- `call_ringing` — signal that the callee's device is ringing
+- `call_hold` / `call_resume` — hold/resume an active call
+
+These frames are sent through the existing lossless delivery pipeline
+(same transport as DM, but with distinct `type` field), optionally
+wrapped in onion (Iteration 13) for privacy. A peer receiving an
+unknown frame type drops it silently per the existing unknown-frame
+handling rule — but the capability gate ensures this case does not
+arise in normal operation.
+
+The signaling channel carries no media — only session control. Each
+signaling frame includes a `session_id` and monotonic `seq` to prevent
+replay and allow multi-call multiplexing.
+
+**Media transport — lossy channel:**
+
+Audio packets are sent over a lossy channel where timely delivery takes
+priority over reliability. Lost packets are concealed by the codec, not
+retransmitted. The lossy channel uses a separate packet type from
+lossless DM delivery:
+
+- **Priority bypass:** media packets bypass congestion control when the
+  send queue is saturated. This prevents file transfers or bulk messages
+  from starving the audio stream — a caller should never hear silence
+  because a file upload is in progress.
+- **Jitter buffer:** the receiver maintains a jitter buffer (default
+  60–200 ms adaptive) to smooth packet arrival variance. Buffer depth
+  adapts to observed network jitter.
+- **Codec negotiation:** during call setup, peers exchange supported
+  codecs and select the best common option. Initial codec set: Opus
+  (primary, variable bitrate 6–128 kbit/s, 20 ms frames) with fallback
+  to a lower-bitrate mode for constrained links. Codec selection is
+  extensible via capability negotiation.
+
+**Congestion-aware quality adaptation:**
+
+The call monitors RTT and packet loss per media session. When loss exceeds
+a threshold (e.g. 5%), the sender reduces bitrate or switches to a
+lower-quality codec preset. When conditions improve, quality ramps back
+up. This is independent of the general congestion control — it is
+per-call quality management.
+
+**Group voice (future extension):**
+
+Group voice calls relay lossy audio to a reduced set of peers (2 instead
+of all) to contain bandwidth. Each peer re-relays to its own neighbors,
+forming a low-fanout distribution tree. Active speaker detection can
+further reduce traffic by transmitting only the dominant speaker's audio
+at full rate.
+
 **Done when:** two identities can establish a voice call with end-to-end
 encryption, the call setup is signaled through onion routes (if available),
 media packets are relayed with bounded latency, and the protocol degrades
 gracefully when network conditions are insufficient.
+
+**Progress:**
+
+- [ ] Design MSI signaling protocol (call_request/call_accept/call_reject/call_end/call_ringing/call_hold/call_resume)
+- [ ] Define signaling frame types in `protocol/frame.go` (distinct `type` field, not DM payload)
+- [ ] Gate all signaling frames on `voice_call_v1` capability — never send to peers without it
+- [ ] Implement signaling over existing lossless delivery pipeline (same transport, distinct frame types)
+- [ ] Implement lossy packet type for media transport
+- [ ] Implement priority bypass: media packets skip congestion control queue
+- [ ] Implement jitter buffer (adaptive 60–200 ms)
+- [ ] Implement Opus codec integration (variable bitrate, 20 ms frames)
+- [ ] Implement codec negotiation during call setup
+- [ ] Implement congestion-aware quality adaptation (bitrate reduction on loss)
+- [ ] Implement call state machine (idle → ringing → active → ended)
+- [ ] Integrate onion wrapping for signaling (optional, uses privacy mode from 13.1)
+- [ ] Add `voice_call_v1` capability gate
+- [ ] Unit test: signaling frames never sent to peers without `voice_call_v1`
+- [ ] Unit test: peer without `voice_call_v1` never receives call_request (capability gate)
+- [ ] Unit test: call setup and teardown state machine
+- [ ] Unit test: media packet priority over bulk traffic
+- [ ] Unit test: jitter buffer smoothing under variable delay
+- [ ] Unit test: codec negotiation selects best common codec
+- [ ] Unit test: quality adaptation reduces bitrate on packet loss
+- [ ] Integration test: voice call through 3-hop relay path
+- [ ] Integration test: file transfer during active call does not degrade audio
+- [ ] Update `docs/protocol/relay.md` (lossy media channel, priority bypass)
+
+<a id="iter-21"></a>
+### Iteration 21 — File transfer
+
+**Goal:** enable peer-to-peer file transfer between identities with resume
+support, progress tracking, and flow control.
+
+**Dependency:** requires stable DM delivery (Iterations 1–2). Benefits from
+congestion control (Iteration 24) for bandwidth management but works without
+it using a simpler rate-limiting approach.
+
+**Capability gate:** `file_transfer_v1`. Nodes without the capability never
+receive file transfer frames.
+
+**New files:**
+
+```
+internal/core/node/
+  file_transfer.go        — FileTransferManager, transfer state machine
+  file_transfer_state.go  — per-peer transfer registry (256 slots per direction)
+```
+
+#### 21a. Frame types
+
+**`file_send_request`** — initiates a new transfer:
+
+```json
+{
+  "type": "file_send_request",
+  "file_number": 0,
+  "file_type": 0,
+  "file_size": 1048576,
+  "file_id": "base64_32_bytes",
+  "filename": "photo.jpg"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `file_number` | `uint8` | 0–255, chosen by sender, unique per direction per peer |
+| `file_type` | `uint32` | 0 = normal file, 1 = avatar, extensible |
+| `file_size` | `uint64` | Total size in bytes; `UINT64_MAX` = unknown/streaming |
+| `file_id` | `[32]byte` | Content hash for dedup/resume (e.g. SHA-256 of file) |
+| `filename` | `string` | Optional, max 255 bytes UTF-8 |
+
+**`file_control`** — manages an active transfer:
+
+```json
+{
+  "type": "file_control",
+  "send_receive": 0,
+  "file_number": 0,
+  "control_type": 0,
+  "seek_position": 0
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `send_receive` | `uint8` | 0 = targets file being sent, 1 = targets file being received |
+| `file_number` | `uint8` | Identifies the transfer |
+| `control_type` | `uint8` | 0 = accept/unpause, 1 = pause, 2 = kill, 3 = seek |
+| `seek_position` | `uint64` | Only present when `control_type` = 3 (seek); byte offset |
+
+**`file_data`** — carries a chunk of file content:
+
+```json
+{
+  "type": "file_data",
+  "file_number": 0,
+  "data": "base64_chunk"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `file_number` | `uint8` | Identifies the transfer |
+| `data` | `[]byte` | 0–1371 bytes; chunk < max size signals transfer completion for unknown-size files |
+
+#### 21b. Transfer state machine
+
+Each file transfer (identified by `(peer, direction, file_number)`) goes
+through these states:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: file_send_request received
+
+    Pending --> Accepted: file_control(accept)
+    Pending --> Seeking: file_control(seek)
+    Pending --> Cancelled: file_control(kill)
+
+    Seeking --> Accepted: file_control(accept)
+    Seeking --> Cancelled: file_control(kill)
+
+    Accepted --> Transferring: first file_data sent/received
+    Accepted --> PausedLocal: file_control(pause) from local
+    Accepted --> PausedRemote: file_control(pause) from remote
+    Accepted --> Cancelled: file_control(kill)
+
+    Transferring --> PausedLocal: file_control(pause) from local
+    Transferring --> PausedRemote: file_control(pause) from remote
+    Transferring --> Completed: all data received or short final chunk
+    Transferring --> Cancelled: file_control(kill)
+
+    PausedLocal --> PausedBoth: file_control(pause) from remote
+    PausedLocal --> Transferring: file_control(accept) from local
+    PausedLocal --> Cancelled: file_control(kill)
+
+    PausedRemote --> PausedBoth: file_control(pause) from local
+    PausedRemote --> Transferring: file_control(accept) from remote
+    PausedRemote --> Cancelled: file_control(kill)
+
+    PausedBoth --> PausedRemote: file_control(accept) from local
+    PausedBoth --> PausedLocal: file_control(accept) from remote
+    PausedBoth --> Cancelled: file_control(kill)
+
+    Completed --> [*]
+    Cancelled --> [*]
+```
+*Diagram — File transfer state machine with bidirectional pause*
+
+**Key invariant:** when a side pauses, only that side can unpause. If both
+pause, both must unpause before data flows again.
+
+#### 21c. Transfer initiation and resume flow
+
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant R as Receiver
+
+    S->>R: file_send_request(file_number=0, type=0, size=1048576, file_id=SHA256, name="photo.jpg")
+    Note over R: Check local storage by file_id<br/>Found partial: 524288 bytes received
+
+    R->>S: file_control(send_receive=1, file_number=0, control_type=3, seek=524288)
+    Note over S: Seek to byte 524288
+
+    R->>S: file_control(send_receive=1, file_number=0, control_type=0)
+    Note over S: Transfer accepted, start sending from offset 524288
+
+    loop Until all data sent
+        S->>R: file_data(file_number=0, data=[1371 bytes])
+    end
+
+    S->>R: file_data(file_number=0, data=[remaining bytes, < 1371])
+    Note over R: Chunk < max size OR total == file_size<br/>Transfer complete
+
+    Note over S: Transport layer confirms last chunk acked<br/>Transfer complete, file_number=0 free for reuse
+```
+*Diagram — File transfer with seek/resume after partial download*
+
+#### 21d. Concurrent transfers and file number management
+
+```
+Peer A → Peer B (outgoing):  file_numbers 0–255 (chosen by A)
+Peer B → Peer A (outgoing):  file_numbers 0–255 (chosen by B)
+                              ─────────────────────────────────
+                              Total: 512 concurrent transfers per peer pair
+```
+
+The `send_receive` field in `file_control` distinguishes direction. When
+`send_receive=0`, the control targets a file being **sent** by the sender of
+the control. When `send_receive=1`, it targets a file being **received**.
+
+**File number lifecycle:** a file number is occupied from `file_send_request`
+until `Completed` or `Cancelled`. On completion or cancellation, the number
+is immediately freed for reuse. If the peer goes offline, all file numbers
+are freed.
+
+```go
+type FileTransferRegistry struct {
+    mu       sync.RWMutex
+    outgoing [256]*FileTransfer // files we are sending
+    incoming [256]*FileTransfer // files we are receiving
+}
+
+type FileTransfer struct {
+    FileNumber   uint8
+    FileType     uint32
+    FileSize     uint64           // UINT64_MAX = unknown
+    FileID       [32]byte
+    Filename     string
+    State        FileTransferState
+    BytesSent    uint64           // sender tracks
+    BytesRecvd   uint64           // receiver tracks
+    SeekPosition uint64           // from seek control
+    PausedLocal  bool
+    PausedRemote bool
+    CreatedAt    time.Time
+}
+```
+
+#### 21e. Completion detection
+
+Two rules determine when a transfer is complete:
+
+1. **Known size:** `BytesRecvd == FileSize` → transfer complete. Any extra
+   data beyond `FileSize` is discarded.
+2. **Unknown size** (`FileSize == UINT64_MAX`): a `file_data` chunk with
+   `len(data) < max_chunk_size` (1371 bytes) signals completion. A 0-length
+   chunk completes a 0-byte file.
+
+**Critical invariant for unknown-size transfers:** all non-final chunks
+MUST be exactly `max_chunk_size` (1371 bytes). A sender MUST NOT emit a
+shorter chunk for pacing, flow control, or any other reason before the
+final chunk. If the sender needs to throttle throughput, it adjusts the
+inter-chunk delay, not the chunk size. This invariant is what makes
+`len(data) < max_chunk_size` a reliable end-of-stream signal. Violating
+it terminates the transfer prematurely on the receiver side.
+
+```mermaid
+flowchart TD
+    RECV["Receive file_data chunk"]
+    KNOWN{"FileSize known?"}
+    CHECK_SIZE{"BytesRecvd == FileSize?"}
+    CHECK_SHORT{"len(data) < 1371?"}
+    ADD["BytesRecvd += len(data)"]
+    COMPLETE["Transfer COMPLETE<br/>free file_number"]
+    CONTINUE["Continue receiving"]
+
+    RECV --> ADD --> KNOWN
+    KNOWN -->|yes| CHECK_SIZE
+    KNOWN -->|no, UINT64_MAX| CHECK_SHORT
+    CHECK_SIZE -->|yes| COMPLETE
+    CHECK_SIZE -->|no| CONTINUE
+    CHECK_SHORT -->|yes| COMPLETE
+    CHECK_SHORT -->|no| CONTINUE
+
+    style COMPLETE fill:#c8e6c9,stroke:#2e7d32
+```
+*Diagram — Completion detection: known vs unknown file size*
+
+The sender confirms completion when the transport layer acknowledges the
+last `file_data` chunk (using the lossless delivery tracking from
+`net_crypto` / mesh relay).
+
+#### 21f. Avatar transfer optimization
+
+Avatar transfers (file_type=1) use the `file_id` as the content hash
+(SHA-256 of the avatar image). Before sending avatar data:
+
+1. Sender sends `file_send_request` with type=1 and file_id=SHA256(avatar).
+2. Receiver checks local avatar cache by file_id.
+3. If already cached → receiver sends `file_control(kill)` immediately
+   (no data transfer needed).
+4. If not cached → normal accept/transfer flow.
+
+This avoids redundant avatar transfers on every reconnect.
+
+#### 21g. Interaction with message delivery
+
+File data is classified as **bulk** traffic (see Iteration 24). This means:
+
+- When congestion control is active (Iteration 24), file data yields
+  bandwidth to signaling and real-time packets.
+- Without Iteration 24, a simple token bucket rate limiter is used:
+  `max_file_data_rate` (default 100 chunks/sec per peer). This prevents
+  file transfers from monopolizing the connection.
+- DM messages are always sent as lossless priority traffic and are never
+  blocked by file transfers.
+
+```mermaid
+flowchart LR
+    DM["DM messages<br/>(lossless, priority)"]
+    FILE["File data<br/>(bulk, rate-limited)"]
+    VOICE["Voice packets<br/>(lossy, bypass)"]
+    QUEUE["Send queue"]
+    LINK["Network link"]
+
+    DM -->|always sent| QUEUE
+    VOICE -->|bypass queue| LINK
+    FILE -->|rate-limited| QUEUE
+    QUEUE --> LINK
+
+    style DM fill:#e3f2fd,stroke:#1565c0
+    style VOICE fill:#fff3e0,stroke:#e65100
+    style FILE fill:#f5f5f5,stroke:#9e9e9e
+```
+*Diagram — Traffic priority: DM > voice (bypass) > file data (rate-limited)*
+
+#### 21h. Offline behavior and cleanup
+
+When a peer session closes:
+
+1. All active transfers (both incoming and outgoing) are moved to `Cancelled`.
+2. All 256 file numbers per direction are freed.
+3. Partial received data is **retained** on disk, indexed by `file_id`.
+4. On reconnect, the sender re-initiates transfers. The receiver detects
+   partial data via `file_id` and sends a seek to resume.
+
+The protocol does not persist transfer state across restarts. This keeps
+the implementation simple — resume relies entirely on the `file_id` and
+the receiver's local storage.
+
+**Done when:** two identities can send files with progress indication,
+resume interrupted transfers, and manage concurrent transfers without
+starving the message channel.
+
+**Progress:**
+
+- [ ] Define `file_send_request` frame type (file number, type, size, file_id, filename)
+- [ ] Define `file_control` frame type (accept, pause, kill, seek)
+- [ ] Define `file_data` frame type (file number, data chunk)
+- [ ] Implement `FileTransferRegistry` with 256-slot arrays per direction
+- [ ] Implement `FileTransfer` state machine (pending → seeking → accepted → transferring → paused → completed/cancelled)
+- [ ] Implement bidirectional pause (local/remote/both)
+- [ ] Implement seek/resume support using file ID and local partial storage
+- [ ] Implement completion detection (size match or short final chunk)
+- [ ] Implement file number lifecycle (free on complete/cancel/disconnect)
+- [ ] Implement avatar transfer optimization (check file_id hash before accepting)
+- [ ] Implement token bucket rate limiter for file data (`max_file_data_rate` default 100 chunks/sec)
+- [ ] Add `file_transfer_v1` capability gate
+- [ ] Cleanup all transfers on peer disconnect
+- [ ] Retain partial received data on disk indexed by file_id for resume
+- [ ] Unit test: concurrent file transfers (multiple files in parallel, independent file numbers)
+- [ ] Unit test: seek/resume after reconnect (partial data detected by file_id)
+- [ ] Unit test: pause by both sides, unpause by one — transfer stays paused
+- [ ] Unit test: pause by both sides, unpause by both — transfer resumes
+- [ ] Unit test: unknown-size transfer with short final chunk → complete
+- [ ] Unit test: known-size transfer, excess data beyond file_size → discarded
+- [ ] Unit test: 0-byte file transfer (single 0-length chunk)
+- [ ] Unit test: unknown-size transfer — non-final chunks MUST be exactly max_chunk_size (1371); short chunk terminates
+- [ ] Unit test: unknown-size transfer — sender pacing via inter-chunk delay, NOT via shorter chunks
+- [ ] Unit test: transfer cleanup on peer disconnect (all file numbers freed)
+- [ ] Unit test: avatar with matching file_id → immediate kill, no data transfer
+- [ ] Unit test: file_number reuse after completion
+- [ ] Unit test: rate limiter prevents file data from starving DM delivery
+- [ ] Integration test: large file transfer with interruption and resume
+- [ ] Integration test: file transfer does not block DM delivery under load
+- [ ] Integration test: 10 concurrent file transfers between same peer pair
+- [ ] Update `docs/protocol/messaging.md` (file transfer frames, state machine, capability gate)
+
+**Release / Compatibility:**
+
+- [ ] `file_send_request` / `file_control` / `file_data` sent only to peers with `file_transfer_v1`
+- [ ] Legacy peers never receive file transfer frames
+- [ ] Mixed-version test: file-capable node works alongside node without file support
+- [ ] Confirmed: Iteration 21 does not require raising `MinimumProtocolVersion`
+
+<a id="iter-22"></a>
+### Iteration 22 — LAN discovery
+
+**Goal:** automatically discover and connect to peers on the same local
+network without relying on bootstrap nodes or internet connectivity.
+
+**Dependency:** independent of other product iterations. Can be implemented
+at any point after stable peer connection (Iteration 0).
+
+**Why:** this is the cheapest connectivity win — two friends on the same
+WiFi or LAN segment should find each other in seconds. Direct LAN
+connections are also the fastest path, with sub-millisecond RTT, and
+should be prioritized over relay.
+
+**Capability:** `lan_discovery_v1` (informational, not a hard gate — the
+discovery packet itself is pre-auth and does not require capability
+negotiation).
+
+**New file:**
+
+```
+internal/core/node/
+  lan_discovery.go  — LAN discovery sender/listener, address classification
+```
+
+#### 22a. Discovery packet format
+
+The discovery packet is minimal — no encryption, no signature. It is a
+trigger for handshake initiation, not a trust mechanism.
+
+```
+LAN Discovery Packet (UDP broadcast/multicast)
+┌─────────┬────────────────┬──────────────────┐
+│ 1 byte  │ 32 bytes       │ 32 bytes         │
+│ version │ identity       │ box public key   │
+│ (0x01)  │ fingerprint    │                  │
+└─────────┴────────────────┴──────────────────┘
+Total: 65 bytes
+```
+
+| Field | Length | Description |
+|---|---|---|
+| `version` | 1 | Protocol version of discovery packet (0x01) |
+| `identity_fingerprint` | 32 | Ed25519 public key fingerprint of the sender |
+| `box_public_key` | 32 | X25519 box key for handshake initiation |
+
+The version byte allows future extension without breaking older clients.
+
+#### 22b. Discovery flow
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant LAN as LAN (broadcast)
+    participant B as Node B
+
+    loop Every 10 seconds
+        A->>LAN: UDP broadcast (identity + box key)
+    end
+
+    Note over B: Receives broadcast from A's IP
+
+    B->>B: Is A already a connected peer?
+    alt Already connected
+        Note over B: Ignore (no action)
+    else Not connected
+        B->>B: Is A's identity in contact list?
+        alt Unknown identity
+            Note over B: Silently ignore (identity privacy)
+        else Known contact
+            B->>A: Initiate standard handshake (hello)
+            A->>B: welcome + auth_session
+            B->>A: auth_ok
+            Note over A,B: Peer connection established via LAN
+            Note over A,B: Mark connection as LAN transport
+        end
+    end
+```
+*Diagram — LAN discovery: broadcast triggers authenticated handshake*
+
+**Security invariant:** a discovery packet is **never** sufficient to add
+a peer. The full handshake (from `docs/protocol/handshake.md`) must
+complete before any peer state is modified. This prevents spoofed
+broadcast packets from injecting fake peers.
+
+**Identity privacy limitation:** a hostile LAN peer can broadcast a fake
+discovery packet and induce listeners to initiate the standard handshake.
+The handshake reveals the listener's identity to the attacker (even though
+the attacker is ultimately rejected if not in the contact list). This
+means discovery broadcasts **do reveal which identities are present on
+the network** to any LAN observer who can trigger handshake attempts.
+
+**Mitigation policy — LAN handshake allowlist:** a node MUST NOT initiate
+a LAN handshake for every discovery packet it receives. Instead, it only
+initiates a handshake if the `identity_fingerprint` in the discovery
+packet matches a known contact (friend list or pending request). Unknown
+identities are silently ignored. This ensures that a spoofed discovery
+from an unknown identity does not cause the listener to reveal itself.
+
+#### 22c. Address classification and routing priority
+
+```go
+func IsLANAddress(ip net.IP) bool {
+    // RFC1918 private ranges
+    // 10.0.0.0/8
+    // 172.16.0.0/12
+    // 192.168.0.0/16
+    // IPv6 link-local fe80::/10
+    // IPv6 unique local fc00::/7
+    // Loopback 127.0.0.0/8, ::1
+}
+```
+
+When a peer is reachable via multiple paths (LAN direct, WAN relay, mesh
+relay), the routing decision incorporates transport type:
+
+```mermaid
+flowchart TD
+    MSG["Route message to identity X"]
+    LAN{"LAN direct<br/>connection to X?"}
+    DIRECT{"WAN direct<br/>connection to X?"}
+    TABLE{"Routing table<br/>entry for X?"}
+    GOSSIP["Gossip fallback"]
+
+    LAN_SEND["Send via LAN<br/>(lowest latency)"]
+    DIRECT_SEND["Send via WAN direct"]
+    RELAY_SEND["Send via relay"]
+
+    MSG --> LAN
+    LAN -->|yes| LAN_SEND
+    LAN -->|no| DIRECT
+    DIRECT -->|yes| DIRECT_SEND
+    DIRECT -->|no| TABLE
+    TABLE -->|yes| RELAY_SEND
+    TABLE -->|no| GOSSIP
+
+    style LAN_SEND fill:#c8e6c9,stroke:#2e7d32
+    style DIRECT_SEND fill:#e3f2fd,stroke:#1565c0
+    style RELAY_SEND fill:#fff3e0,stroke:#e65100
+    style GOSSIP fill:#f5f5f5,stroke:#9e9e9e
+```
+*Diagram — Routing priority: LAN > WAN direct > relay > gossip*
+
+#### 22d. Broadcast targets
+
+| Protocol | Target address | Scope |
+|---|---|---|
+| IPv4 | Interface broadcast (e.g. `192.168.1.255`) | Local subnet |
+| IPv4 | Global broadcast (`255.255.255.255`) | All local interfaces |
+| IPv6 | Multicast `FF02::1` (all-nodes link-local) | Link-local scope |
+
+The node sends to **all three** targets to maximize coverage across
+different network configurations. The designated port (default 33445) is
+configurable via `lan_discovery_port` in config.
+
+#### 22e. Rate limiting and anti-amplification
+
+- **Inbound:** at most `max_lan_discovery_per_second` (default 10)
+  discovery packets processed per second. Excess packets are silently
+  dropped.
+- **Outbound handshake:** at most `max_lan_handshake_per_minute` (default
+  20) handshake initiations triggered by discovery per minute. Prevents
+  a flood of discovery packets from causing a handshake storm.
+- **Deduplication:** if a handshake to the same identity fingerprint is
+  already in progress or was attempted within the last 30 seconds, the
+  discovery packet is ignored.
+
+**Done when:** two nodes on the same LAN discover each other within 20
+seconds, establish a direct connection, and messages prefer the LAN path
+over relay.
+
+**Progress:**
+
+- [ ] Implement LAN discovery packet format (version + identity fingerprint + box public key, 65 bytes)
+- [ ] Implement periodic broadcast/multicast sender (IPv4 broadcast + IPv6 multicast `FF02::1`)
+- [ ] Implement discovery packet listener on designated port
+- [ ] On receive: check identity against contact list → ignore unknown identities (allowlist policy)
+- [ ] On receive: check if already connected → if not, initiate authenticated handshake
+- [ ] Implement `IsLANAddress()` — classify RFC1918, link-local, unique-local, loopback
+- [ ] Implement LAN address priority in `Router.Route()` — LAN > WAN direct > relay > gossip
+- [ ] Mark connections established via LAN discovery with transport type `lan`
+- [ ] Configurable broadcast interval (`lan_discovery_interval`, default 10 seconds)
+- [ ] Configurable discovery port (`lan_discovery_port`, default 33445)
+- [ ] Add `lan_discovery_v1` capability (informational)
+- [ ] Implement inbound rate limit (`max_lan_discovery_per_second`, default 10)
+- [ ] Implement outbound handshake rate limit (`max_lan_handshake_per_minute`, default 20)
+- [ ] Implement handshake deduplication (ignore if same identity attempted within 30s)
+- [ ] Unit test: discovery packet serialize/deserialize round-trip (65 bytes)
+- [ ] Unit test: `IsLANAddress` correctly classifies RFC1918, fe80::/10, fc00::/7, loopback
+- [ ] Unit test: `IsLANAddress` rejects public IPs
+- [ ] Unit test: discovery from unknown identity → silently ignored (no handshake initiated)
+- [ ] Unit test: discovery from known contact → handshake initiated
+- [ ] Unit test: spoofed discovery packet does not add peer without completed handshake
+- [ ] Unit test: duplicate discovery from same identity within 30s → ignored
+- [ ] Unit test: LAN path preferred over relay in `Router.Route()` for same identity
+- [ ] Unit test: inbound rate limit drops excess discovery packets
+- [ ] Integration test: two nodes on same subnet discover each other < 20s
+- [ ] Integration test: LAN discovery + relay coexistence (LAN preferred, relay fallback)
+- [ ] Integration test: LAN discovery + BLE running simultaneously (no conflict)
+
+**Release / Compatibility:**
+
+- [ ] LAN discovery is additive; nodes without it simply don't broadcast
+- [ ] Discovery packet version byte allows future protocol extension
+- [ ] Mixed-version test: LAN-capable node coexists with node without LAN discovery
+- [ ] Confirmed: Iteration 22 does not require raising `MinimumProtocolVersion`
+
+<a id="iter-23"></a>
+### Iteration 23 — NAT traversal and hole punching
+
+**Goal:** establish direct UDP connections between peers behind NATs,
+reducing relay dependency and improving latency for voice calls and
+real-time communication.
+
+**Dependency:** benefits voice calls (Iteration 20) significantly. Works
+independently at the transport layer.
+
+**Why:** most consumer devices are behind NATs. Without hole punching,
+all traffic must go through relay nodes, adding latency and relay load.
+Direct connections are critical for real-time media quality.
+
+**Capability gate:** `nat_traversal_v1`. Exchange of NAT info and
+coordination frames requires both peers to support this capability.
+
+**New files:**
+
+```
+internal/core/node/
+  nat_discovery.go   — external address collection, NAT type detection
+  hole_punch.go      — hole punch state machine, port prediction
+```
+
+#### 23a. NAT classification
+
+NAT behavior has two independent dimensions (RFC 4787):
+
+- **Mapping behavior** — how the NAT assigns external ports. Observable by
+  comparing the external IP:port reported by different peers.
+- **Filtering behavior** — which inbound packets the NAT forwards. This
+  determines hole-punch difficulty but **cannot be inferred from port
+  observations alone**. It requires active probing (a second source IP
+  sending to the same mapped address).
+
+Port observations tell us the mapping type. The filtering type is
+determined by an active probe during hole-punch coordination (see 23c).
+
+```mermaid
+flowchart TD
+    PEERS["Collect external IP:port<br/>from 4+ relay/DHT peers"]
+    SAME_IP{"All report<br/>same IP?"}
+    SAME_PORT{"All report<br/>same port?"}
+    EIM["Endpoint-Independent Mapping<br/>(stable port)"]
+    EDM["Endpoint-Dependent Mapping<br/>(port changes per dest)"]
+    MULTI["Multiple IPs<br/>Multi-homed or recently changed"]
+
+    PEERS --> SAME_IP
+    SAME_IP -->|no| MULTI
+    SAME_IP -->|yes| SAME_PORT
+    SAME_PORT -->|yes, identical| EIM
+    SAME_PORT -->|no| EDM
+
+    style EIM fill:#c8e6c9,stroke:#2e7d32
+    style EDM fill:#ffcdd2,stroke:#c62828
+```
+*Diagram — NAT mapping classification from external address observations*
+
+The mapping type constrains which hole-punch strategies are viable:
+
+| Mapping type | Filtering type | Hole punch difficulty |
+|---|---|---|
+| Endpoint-Independent (EIM) | Endpoint-Independent (full cone) | Trivial — direct ping to known port |
+| Endpoint-Independent (EIM) | Address-Dependent (restricted cone) | Medium — mutual ping needed |
+| Endpoint-Independent (EIM) | Address+Port-Dependent (port-restricted) | Medium — mutual ping to correct port |
+| Endpoint-Dependent (EDM) | Any (symmetric NAT) | Hard — port prediction |
+
+Filtering type is probed during hole-punch coordination: peer A asks
+relay R to send a packet to A's mapped address from a different relay IP.
+If A receives it, filtering is Endpoint-Independent. If not, filtering
+is at least Address-Dependent. This probe is best-effort — when no
+second relay IP is available, the node assumes Address-Dependent
+filtering (conservative fallback that still allows mutual punch).
+
+#### 23b. External address discovery
+
+Each node collects external address observations from peers it communicates
+with. When a peer receives a packet from a node, the source IP:port visible
+to the peer is the node's external address (as seen from that peer's
+vantage point).
+
+```go
+type ExternalAddressCollector struct {
+    mu           sync.RWMutex
+    observations []AddressObservation  // last 16 observations
+    mapping      NATMapping            // EIM, EDM, unknown
+    filtering    NATFiltering          // EIF, ADF, APDF, unknown (probed)
+    externalAddr net.UDPAddr           // most common observed address
+}
+
+type AddressObservation struct {
+    ExternalIP   net.IP
+    ExternalPort uint16
+    ObservedBy   string    // identity of the peer that reported this
+    ObservedAt   time.Time
+}
+```
+
+The node maintains the last 16 observations from different peers. When
+at least 4 observations are available, **mapping** classification runs:
+
+- All same IP **and identical port** → **Endpoint-Independent Mapping (EIM)**
+- Same IP, any port variation (including small offsets like ±1–3) →
+  **Endpoint-Dependent Mapping (EDM)**. Small offsets do not prove EIM:
+  sequential or port-preserving NATs can produce near-identical ports
+  while still allocating a new mapping per destination.
+- Different IPs → multi-homed, use most common IP
+
+Mapping alone does not determine hole-punch difficulty. The **filtering**
+type is probed separately during hole-punch coordination (see 23c) and
+defaults to Address-Dependent when probing is not possible.
+
+#### 23c. Hole punch coordination protocol
+
+Before hole punching, both peers must confirm they are online, know each
+other's external address, and are actively trying to connect. This
+coordination happens via the existing relay/mesh channel.
+
+**`nat_ping_request`** — sent via relay to check if friend is ready:
+
+```json
+{
+  "type": "nat_ping_request",
+  "ping_id": 12345678,
+  "external_addr": "203.0.113.5:41234",
+  "mapping": "EIM",
+  "filtering": "address_dependent",
+  "observed_ports": [41234, 41236, 41238]
+}
+```
+
+**`nat_ping_response`** — confirms readiness and shares own external info:
+
+```json
+{
+  "type": "nat_ping_response",
+  "ping_id": 12345678,
+  "external_addr": "198.51.100.10:52100",
+  "mapping": "EIM",
+  "filtering": "endpoint_independent",
+  "observed_ports": [52100]
+}
+```
+
+#### 23d. Hole punch flow
+
+```mermaid
+sequenceDiagram
+    participant A as Peer A (EIM + addr-dependent)
+    participant R as Relay
+    participant B as Peer B (EIM + endpoint-independent)
+
+    Note over A: Mapping: EIM, Filtering: addr-dependent<br/>External: 203.0.113.5:41234
+
+    A->>R: nat_ping_request (via relay)
+    R->>B: nat_ping_request (forwarded)
+    Note over B: Mapping: EIM, Filtering: endpoint-independent<br/>External: 198.51.100.10:52100
+
+    B->>R: nat_ping_response (via relay)
+    R->>A: nat_ping_response (forwarded)
+
+    Note over A,B: Both peers have each other's external address<br/>Both start hole punching
+
+    rect rgb(240, 255, 240)
+        Note over A,B: Simultaneous UDP ping exchange
+        A->>B: UDP ping to 198.51.100.10:52100
+        B->>A: UDP ping to 203.0.113.5:41234
+        Note over A: B's packet arrives → NAT mapping created
+        A->>B: UDP pong
+        B->>A: UDP pong
+        Note over A,B: Direct UDP connection established!
+    end
+
+    Note over A,B: Switch traffic from relay to direct UDP
+```
+*Diagram — Hole punch coordination and execution for cone/restricted NATs*
+
+#### 23e. Symmetric NAT port prediction
+
+```mermaid
+flowchart TD
+    PORTS["Observed ports from peers:<br/>41234, 41236, 41238, 41240"]
+    ANALYZE["Detect pattern:<br/>step = 2 (sequential)"]
+    PREDICT["Predicted next port: 41242"]
+    PROBE["Probe ports in expanding radius:<br/>41242, 41244, 41240, 41246, 41238..."]
+    EXTRA["After 5 rounds: also try<br/>ports 1024, 1025, 1026..."]
+    SUCCESS{"Ping response<br/>received?"}
+    DIRECT["Direct connection!"]
+    RELAY["Fallback to relay"]
+
+    PORTS --> ANALYZE --> PREDICT --> PROBE
+    PROBE --> SUCCESS
+    SUCCESS -->|yes| DIRECT
+    SUCCESS -->|no, 48 ports tried| EXTRA
+    EXTRA --> SUCCESS
+    SUCCESS -->|no, timeout 30s| RELAY
+
+    style DIRECT fill:#c8e6c9,stroke:#2e7d32
+    style RELAY fill:#fff3e0,stroke:#e65100
+```
+*Diagram — Symmetric NAT port prediction with expanding probe*
+
+**Port prediction algorithm:**
+
+1. Sort observed external ports by observation time.
+2. Compute differences between consecutive ports.
+3. If differences are consistent (e.g. all +2), predict next port by
+   extrapolating the pattern.
+4. Probe 48 ports per round (every 3 seconds): predicted port ± expanding
+   radius.
+5. After 5 rounds without success, additionally probe ports starting from
+   1024 (48 per round).
+6. Maximum hole punch duration: 30 seconds. Then fall back to relay.
+
+**Rate limiting:** at most 48 probe packets per 3 seconds per hole punch
+attempt. This prevents DoS-ing the NAT with too many mappings.
+
+#### 23f. Connection upgrade from relay to direct
+
+When a direct UDP connection is established via hole punching, the node
+does not immediately drop the relay path. Instead:
+
+1. Direct path is marked as **primary** for this peer.
+2. Relay path remains as **fallback**.
+3. If the direct path fails (3 consecutive keepalive failures), traffic
+   seamlessly falls back to relay.
+4. Hole punching retries every 5 minutes while using relay, in case NAT
+   state changes (e.g. user moves to a different network).
+
+```mermaid
+stateDiagram-v2
+    [*] --> RelayOnly: initial connection
+
+    RelayOnly --> HolePunching: nat_ping exchange successful
+    HolePunching --> DirectPrimary: UDP ping response received
+    HolePunching --> RelayOnly: timeout (30s)
+
+    DirectPrimary --> RelayFallback: 3 keepalive failures
+    RelayFallback --> HolePunching: periodic retry (5 min)
+    DirectPrimary --> DirectPrimary: keepalive OK
+```
+*Diagram — Connection state: relay-only → hole punch → direct with relay fallback*
+
+**Done when:** peers behind EIM NATs (regardless of filtering type)
+establish direct connections via mutual punch. EDM (symmetric) NAT peers
+attempt hole punching with port prediction and fall back to relay
+gracefully.
+
+**Progress:**
+
+- [ ] Implement `ExternalAddressCollector` — collect observations from 16+ peers
+- [ ] Implement NAT mapping detection from observations (EIM / EDM / multi-homed)
+- [ ] Implement filtering probe during hole-punch coordination (send from second relay IP)
+- [ ] Implement `nat_ping_request` and `nat_ping_response` frame types (with mapping + filtering fields)
+- [ ] Implement NAT ping coordination via relay (exchange external addresses)
+- [ ] Implement hole punch for EIM + endpoint-independent filtering (direct ping to known port)
+- [ ] Implement hole punch for EIM + address/port-dependent filtering (mutual simultaneous ping)
+- [ ] Implement symmetric NAT port prediction (sequential pattern detection)
+- [ ] Implement expanding port probe (48 ports per 3s round, ± radius)
+- [ ] Implement port-from-1024 fallback after 5 rounds without success
+- [ ] Implement hole punch timeout (30s) and relay fallback
+- [ ] Implement periodic hole punch retry (every 5 min while on relay)
+- [ ] Implement connection upgrade: direct as primary, relay as fallback
+- [ ] Implement keepalive monitoring on direct path (3 failures → fallback)
+- [ ] Add `nat_traversal_v1` capability gate
+- [ ] Rate-limit hole punch probes: max 48 per 3 seconds
+- [ ] Rate-limit NAT ping: max 1 exchange per peer per 30 seconds
+- [ ] Unit test: external address collection from multiple peers
+- [ ] Unit test: NAT mapping detection — same port → EIM, divergent → EDM
+- [ ] Unit test: filtering probe — response received → EIF, no response → ADF
+- [ ] Unit test: port prediction with step=2 pattern
+- [ ] Unit test: port prediction with no pattern → ports from 1024
+- [ ] Unit test: hole punch state machine (relay → punching → direct → fallback)
+- [ ] Unit test: timeout (30s) → clean fallback to relay
+- [ ] Unit test: keepalive failure on direct → automatic relay fallback
+- [ ] Unit test: rate limit on probe packets
+- [ ] Integration test: two EIM peers establish direct connection (mutual punch)
+- [ ] Integration test: EIM + EDM → direct for EIM side, port prediction for EDM
+- [ ] Integration test: hole punch reduces voice call RTT vs relay-only path
+- [ ] Integration test: direct path fails mid-call → seamless relay fallback
+
+**Release / Compatibility:**
+
+- [ ] NAT traversal is additive; nodes without it use relay as before
+- [ ] `nat_ping_request/response` sent only to peers with `nat_traversal_v1`
+- [ ] Mixed-version test: NAT-capable node works alongside node without NAT traversal
+- [ ] Confirmed: Iteration 23 does not require raising `MinimumProtocolVersion`
+
+<a id="iter-24"></a>
+### Iteration 24 — Congestion control and QoS
+
+**Goal:** adapt sending rate to network capacity, prevent link saturation,
+and prioritize real-time traffic over bulk transfers.
+
+**Dependency:** benefits file transfer (Iteration 21) and voice calls
+(Iteration 20). Works at the transport layer.
+
+**Why:** without congestion control, a large file transfer can saturate the
+link and cause packet loss for all traffic. Voice calls require guaranteed
+minimum bandwidth even when the link is busy.
+
+#### 24a. Per-connection congestion state
+
+Each peer connection maintains independent congestion tracking. A congested
+link to peer A does not throttle traffic to peer B.
+
+```go
+type CongestionState struct {
+    mu sync.RWMutex
+
+    // Send queue tracking
+    SendQueueSize      int       // current number of frames in send queue
+    SendQueueSnapshot  int       // queue size 1.2 seconds ago
+    SnapshotTime       time.Time // when snapshot was taken
+
+    // Rate estimation
+    FramesSentWindow  int       // frames sent in the last 1.2s
+    CurrentSendRate    float64   // estimated frames/sec the link can handle
+    MinSendRate        float64   // floor: never go below this (default 8.0)
+
+    // AIMD state
+    LastCongestionEvent time.Time // when the last congestion event occurred
+    CongestionCooldown  time.Duration // 2 seconds — no increase during cooldown
+
+    // Sliding window
+    WindowDuration     time.Duration // 1.2 seconds
+    WindowStart        time.Time
+
+    // Per-class counters
+    SignalingSent       uint64
+    RealTimeSent        uint64
+    BulkSent            uint64
+    BulkDropped         uint64 // frames held back by congestion control
+}
+
+type CongestionConfig struct {
+    MinSendRate         float64       // default 8.0 frames/sec
+    WindowDuration      time.Duration // default 1.2s
+    CooldownDuration    time.Duration // default 2s
+    IncreaseMultiplier  float64       // default 1.25 (slow increase)
+    DecreaseFactor      float64       // default 0.5 (fast decrease)
+}
+```
+
+Each `PeerConnection` embeds a `CongestionState`. When a new connection is
+established, congestion state is initialized with `MinSendRate` and the
+sliding window starts from the current time.
+
+#### 24b. AIMD rate adaptation algorithm
+
+The algorithm estimates link capacity by observing the send queue over a
+sliding window:
+
+```mermaid
+flowchart TD
+    A[Every tick: sample send queue] --> B{Window elapsed?<br/>1.2 seconds}
+    B -- No --> A
+    B -- Yes --> C[queue_delta = current_queue - snapshot_queue]
+    C --> D[effective_sent = frames_sent_in_window - queue_delta]
+    D --> E[estimated_rate = effective_sent / window_duration]
+    E --> F{estimated_rate < min_rate?}
+    F -- Yes --> G[estimated_rate = min_rate<br/>8 frames/sec]
+    F -- No --> H{Congestion event<br/>in last 2 seconds?}
+    G --> H
+    H -- Yes --> I[send_rate = estimated_rate<br/>FAST DECREASE]
+    H -- No --> J[send_rate = estimated_rate × 1.25<br/>SLOW INCREASE]
+    I --> K[Save snapshot, reset window]
+    J --> K
+    K --> A
+
+    style I fill:#ffcdd2,stroke:#c62828
+    style J fill:#c8e6c9,stroke:#2e7d32
+    style G fill:#fff9c4,stroke:#f57f17
+```
+*Diagram — AIMD rate adaptation cycle*
+
+A **congestion event** is defined as: the TCP send queue size is growing
+between windows (queue_delta > 0), meaning the application is writing
+frames faster than the TCP connection can drain them. When detected, the
+algorithm records the timestamp and switches to decrease mode for the
+next 2 seconds.
+
+```go
+func (cs *CongestionState) UpdateRate(now time.Time) {
+    cs.mu.Lock()
+    defer cs.mu.Unlock()
+
+    elapsed := now.Sub(cs.WindowStart)
+    if elapsed < cs.WindowDuration {
+        return
+    }
+
+    queueDelta := cs.SendQueueSize - cs.SendQueueSnapshot
+    effectiveSent := cs.FramesSentWindow - queueDelta
+    estimatedRate := float64(effectiveSent) / elapsed.Seconds()
+
+    if estimatedRate < cs.MinSendRate {
+        estimatedRate = cs.MinSendRate
+    }
+
+    if now.Sub(cs.LastCongestionEvent) < cs.CongestionCooldown {
+        // Fast decrease: use estimated rate as-is (already lower)
+        cs.CurrentSendRate = estimatedRate
+    } else {
+        // Slow increase: multiply by 1.25
+        cs.CurrentSendRate = estimatedRate * 1.25
+    }
+
+    // Reset window
+    cs.SendQueueSnapshot = cs.SendQueueSize
+    cs.FramesSentWindow = 0
+    cs.WindowStart = now
+}
+
+func (cs *CongestionState) RecordCongestionEvent(now time.Time) {
+    cs.mu.Lock()
+    defer cs.mu.Unlock()
+    cs.LastCongestionEvent = now
+}
+```
+
+#### 24c. Priority classes and packet classification
+
+Three traffic classes determine how packets interact with congestion control:
+
+```mermaid
+flowchart LR
+    subgraph Input["Incoming packets to send"]
+        P1[Handshake]
+        P2[Keepalive]
+        P3[Route update]
+        P4[Call control]
+        P5[Voice frame]
+        P6[Video frame]
+        P7[DM message]
+        P8[File data chunk]
+        P9[Route announcement]
+    end
+
+    subgraph Classify["Classifier"]
+        C1[Priority class?]
+    end
+
+    subgraph Classes["Traffic classes"]
+        S["🔴 Signaling<br/>ALWAYS SENT"]
+        RT["🟡 Real-time<br/>BYPASS QUEUE"]
+        BK["🟢 Bulk<br/>CONGESTION CONTROLLED"]
+    end
+
+    P1 --> C1
+    P2 --> C1
+    P3 --> C1
+    P4 --> C1
+    P5 --> C1
+    P6 --> C1
+    P7 --> C1
+    P8 --> C1
+    P9 --> C1
+
+    C1 --> S
+    C1 --> RT
+    C1 --> BK
+
+    style S fill:#ffcdd2,stroke:#c62828
+    style RT fill:#fff9c4,stroke:#f57f17
+    style BK fill:#c8e6c9,stroke:#2e7d32
+```
+*Diagram — Packet classification into priority classes*
+
+| Priority class | Data IDs | Behavior | Examples |
+|---|---|---|---|
+| **Signaling** (highest) | Handshake, keepalive, routing control, call signaling | Always sent immediately. Never queued or throttled. Not counted toward congestion budget. | `handshake`, `keepalive`, `route_withdrawal`, `call_request`, `call_accept` |
+| **Real-time** (high) | Voice frames, video frames | Bypass congestion queue. Sent even when link is congested. Counted toward congestion metrics but never held back. | `voice_frame`, `video_frame` |
+| **Bulk** (normal) | Messages, file data, route announcements, sync | Subject to congestion control. Queued and rate-limited. Yields bandwidth to higher classes. | `dm_message`, `file_data`, `route_announce`, `group_sync` |
+
+```go
+type PriorityClass uint8
+
+const (
+    PrioritySignaling PriorityClass = iota // 0 — highest
+    PriorityRealTime                        // 1
+    PriorityBulk                            // 2 — lowest
+)
+
+func ClassifyPacket(dataID uint8) PriorityClass {
+    switch {
+    case isSignalingPacket(dataID):
+        return PrioritySignaling
+    case isRealTimePacket(dataID):
+        return PriorityRealTime
+    default:
+        return PriorityBulk
+    }
+}
+```
+
+#### 24d. Priority queue architecture
+
+The send path uses a three-tier queue. Signaling and real-time packets
+bypass the congestion gate entirely:
+
+```mermaid
+flowchart TD
+    PKT[Packet to send] --> CLS{Classify}
+
+    CLS -- Signaling --> SQ[Signaling queue<br/>unbounded, immediate]
+    CLS -- Real-time --> RTQ[Real-time queue<br/>bounded, bypass gate]
+    CLS -- Bulk --> BQ[Bulk queue<br/>bounded, gated]
+
+    SQ --> MUX[Multiplexer]
+    RTQ --> MUX
+    BQ --> GATE{Congestion<br/>gate open?}
+    GATE -- Yes --> MUX
+    GATE -- No --> HOLD[Hold in queue<br/>until next tick]
+    HOLD --> GATE
+
+    MUX --> SEND[TCP session write]
+
+    SEND --> TRACK[Update CongestionState<br/>FramesSentWindow++<br/>per-class counter++]
+
+    style SQ fill:#ffcdd2,stroke:#c62828
+    style RTQ fill:#fff9c4,stroke:#f57f17
+    style BQ fill:#c8e6c9,stroke:#2e7d32
+    style GATE fill:#e1bee7,stroke:#7b1fa2
+```
+*Diagram — Three-tier priority send queue*
+
+```go
+type PrioritySendQueue struct {
+    mu sync.Mutex
+
+    signaling chan []byte // unbounded (use buffered channel with large cap)
+    realtime  chan []byte // bounded, e.g. 64 packets
+    bulk      chan []byte // bounded, e.g. 512 packets
+
+    congestion *CongestionState
+}
+
+func (q *PrioritySendQueue) Enqueue(pkt []byte, class PriorityClass) error {
+    switch class {
+    case PrioritySignaling:
+        q.signaling <- pkt // never blocks in practice
+        return nil
+    case PriorityRealTime:
+        select {
+        case q.realtime <- pkt:
+            return nil
+        default:
+            return ErrRealTimeQueueFull // drop oldest or newest
+        }
+    case PriorityBulk:
+        select {
+        case q.bulk <- pkt:
+            return nil
+        default:
+            return ErrBulkQueueFull
+        }
+    }
+    return nil
+}
+
+// Drain writes frames to the TCP session respecting priority order.
+// Called on each send tick. The session parameter is the peer's
+// TCP connection writer (not a datagram socket — the protocol uses
+// persistent TCP sessions for all frame delivery).
+func (q *PrioritySendQueue) Drain(session FrameWriter) int {
+    sent := 0
+
+    // 1. Always drain signaling first (all of them)
+    for {
+        select {
+        case frame := <-q.signaling:
+            session.WriteFrame(frame)
+            sent++
+        default:
+            goto drainRealtime
+        }
+    }
+
+drainRealtime:
+    // 2. Drain real-time (all of them, bypass congestion)
+    for {
+        select {
+        case frame := <-q.realtime:
+            session.WriteFrame(frame)
+            sent++
+        default:
+            goto drainBulk
+        }
+    }
+
+drainBulk:
+    // 3. Drain bulk only if congestion allows
+    budget := q.congestion.BulkBudget()
+    for i := 0; i < budget; i++ {
+        select {
+        case frame := <-q.bulk:
+            session.WriteFrame(frame)
+            sent++
+        default:
+            return sent
+        }
+    }
+
+    return sent
+}
+```
+
+#### 24e. Congestion detection and RTT estimation
+
+Round-trip time is estimated from the existing TCP session. Two sources
+contribute RTT samples:
+
+1. **`hop_ack` timing** — when a `relay_hop_ack` is received, the RTT is
+   the time between sending the relayed message and receiving the ack.
+   This is already tracked per `(identity, origin, nextHop)` triple
+   (see Iteration 1.5).
+2. **`tcp_info` from `getsockopt`** — on Linux, the kernel exposes
+   smoothed RTT estimates for TCP connections. This is available "for
+   free" without any additional wire-level mechanism.
+
+Note: the protocol uses persistent TCP sessions, not UDP datagrams.
+Congestion control operates at the logical frame level — throttling
+how many frames per second are written to the TCP session. TCP itself
+handles reliability and retransmission; the congestion controller's
+job is to prevent the application-level send queue from growing
+unboundedly and to fairly allocate bandwidth between traffic classes.
+
+```mermaid
+sequenceDiagram
+    participant A as Peer A
+    participant B as Peer B
+
+    A->>B: relay_message(to=F, msg_id=42) (t=0ms)
+    A->>B: file_data(file_number=1, chunk) (t=5ms)
+    A->>B: relay_message(to=G, msg_id=43) (t=10ms)
+
+    B->>A: relay_hop_ack(msg_id=42)
+    Note over A: RTT sample = now - send_time(msg_id=42)
+
+    Note over A: Send queue growing<br/>(TCP write buffer filling)
+    Note over A: Congestion event:<br/>reduce bulk send rate
+
+    A->>A: Throttle file_data to<br/>BulkBudget() per tick
+    Note over A: Signaling + real-time<br/>still bypass throttle
+```
+*Diagram — RTT estimation from hop_ack and congestion response*
+
+```go
+type RTTEstimator struct {
+    mu      sync.RWMutex
+    samples []time.Duration
+    minRTT  time.Duration
+    avgRTT  time.Duration
+}
+
+func (r *RTTEstimator) RecordSample(rtt time.Duration) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+
+    r.samples = append(r.samples, rtt)
+    if len(r.samples) > 64 {
+        r.samples = r.samples[1:] // sliding window of 64 samples
+    }
+
+    r.minRTT = r.samples[0]
+    var sum time.Duration
+    for _, s := range r.samples {
+        sum += s
+        if s < r.minRTT {
+            r.minRTT = s
+        }
+    }
+    r.avgRTT = sum / time.Duration(len(r.samples))
+}
+```
+
+The RTT estimate feeds into rate adaptation: if the send queue is growing
+(TCP write buffer backing up), the congestion controller reduces the bulk
+frame rate. Since TCP handles retransmission at the transport layer, the
+application-level congestion controller focuses on preventing queue
+buildup rather than managing individual frame retransmissions.
+
+#### 24f. Backpressure and relay integration
+
+When a relay node experiences congestion, it signals upstream through
+existing mechanisms (Iteration 3 overload mode):
+
+```mermaid
+stateDiagram-v2
+    [*] --> Normal
+    Normal --> Pressured: queue > 75% capacity
+    Pressured --> Congested: queue > 90% capacity
+    Congested --> Pressured: queue drops < 85%
+    Pressured --> Normal: queue drops < 50%
+    Congested --> Normal: queue drops < 50%
+
+    state Normal {
+        [*] --> FullFanout
+        FullFanout: Gossip fan-out = configured max
+        FullFanout: All sync tasks active
+        FullFanout: Bulk rate = CurrentSendRate
+    }
+
+    state Pressured {
+        [*] --> ReducedFanout
+        ReducedFanout: Gossip fan-out halved
+        ReducedFanout: Defer non-urgent sync
+        ReducedFanout: Bulk rate = CurrentSendRate × 0.75
+    }
+
+    state Congested {
+        [*] --> MinimalFanout
+        MinimalFanout: Gossip fan-out = 1
+        MinimalFanout: All sync deferred
+        MinimalFanout: Bulk rate = MinSendRate
+        MinimalFanout: Real-time still bypasses
+    }
+```
+*Diagram — Relay node congestion state machine*
+
+| State | Queue fill | Gossip fan-out | Sync | Bulk rate |
+|---|---|---|---|---|
+| **Normal** | < 75% | Configured max | Active | `CurrentSendRate` |
+| **Pressured** | 75–90% | Halved | Non-urgent deferred | `CurrentSendRate × 0.75` |
+| **Congested** | > 90% | 1 (minimum) | All deferred | `MinSendRate` |
+
+In all states, signaling and real-time packets are never deferred.
+
+#### 24g. Interaction between congestion control and file transfer
+
+File transfer (Iteration 21) is the primary consumer of bulk bandwidth.
+The congestion controller ensures file data does not starve other traffic:
+
+```mermaid
+flowchart TD
+    FT[File transfer engine<br/>generates file_data chunks] --> BQ[Bulk queue]
+    DM[DM message] --> CLS{Classify}
+    VC[Voice frame] --> CLS
+    KA[Keepalive] --> CLS
+
+    CLS -- Signaling --> SQ[Signaling queue]
+    CLS -- Real-time --> RTQ[Real-time queue]
+    CLS -- Bulk --> BQ
+
+    SQ --> OUT[Network output]
+    RTQ --> OUT
+    BQ --> CG{Congestion<br/>gate}
+    CG -- Open --> OUT
+    CG -- Closed --> WAIT[Backpressure to<br/>file transfer engine]
+
+    WAIT --> PAUSE[file_control: pause<br/>if queue full for > 5s]
+
+    style FT fill:#e3f2fd,stroke:#1565c0
+    style VC fill:#fff9c4,stroke:#f57f17
+    style WAIT fill:#ffcdd2,stroke:#c62828
+```
+*Diagram — File transfer interaction with congestion control*
+
+When the bulk queue is consistently full (for more than 5 seconds), the
+congestion controller sends a backpressure signal to the file transfer
+engine, which may auto-pause lower-priority transfers to allow DM messages
+to flow.
+
+**Done when:** a file transfer saturates available bandwidth without causing
+packet loss for concurrent voice calls. Real-time traffic maintains bounded
+latency even under bulk load.
+
+**Progress:**
+
+- [ ] Define `CongestionState` struct with sliding window tracking
+- [ ] Define `CongestionConfig` with tunable parameters (min rate, window, cooldown, multipliers)
+- [ ] Implement `UpdateRate()` — AIMD rate adaptation per window tick
+- [ ] Implement `RecordCongestionEvent()` — timestamp tracking for decrease mode
+- [ ] Implement `BulkBudget()` — calculate how many bulk frames may be sent this tick
+- [ ] Define `PriorityClass` enum: Signaling, RealTime, Bulk
+- [ ] Implement `ClassifyPacket()` — map data IDs to priority classes
+- [ ] Implement `PrioritySendQueue` with three-tier channel architecture
+- [ ] Implement `Enqueue()` — route frames to correct queue by priority
+- [ ] Implement `Drain()` — send signaling first, then real-time, then bulk within budget
+- [ ] Implement `RTTEstimator` — sliding window min/avg RTT from acknowledgments
+- [ ] Integrate RTT into rate adaptation (use hop_ack timing and tcp_info for RTT samples)
+- [ ] Implement per-connection `CongestionState` initialization on handshake
+- [ ] Implement relay backpressure states: Normal → Pressured → Congested
+- [ ] Implement gossip fan-out reduction under Pressured/Congested states
+- [ ] Implement bulk rate scaling under Pressured (×0.75) and Congested (min)
+- [ ] Implement file transfer backpressure: auto-pause transfers when bulk queue full > 5s
+- [ ] Add `congestion_control_v1` capability (informational — see Release/Compatibility)
+- [ ] Configurable minimum send rate (`min_send_rate`, default 8 frames/sec)
+- [ ] Configurable congestion window (`congestion_window`, default 1.2 seconds)
+- [ ] Configurable cooldown duration (`congestion_cooldown`, default 2 seconds)
+- [ ] Unit test: `UpdateRate()` increases rate by 1.25× when no congestion for > 2s
+- [ ] Unit test: `UpdateRate()` holds rate at estimated when congestion event within 2s
+- [ ] Unit test: `UpdateRate()` never drops below `MinSendRate`
+- [ ] Unit test: `ClassifyPacket()` correctly maps all known data IDs
+- [ ] Unit test: signaling packets always sent regardless of congestion state
+- [ ] Unit test: real-time packets bypass congestion gate
+- [ ] Unit test: bulk packets held when `BulkBudget()` returns 0
+- [ ] Unit test: per-connection independence — peer A congested, peer B unaffected
+- [ ] Unit test: RTT estimator produces stable min/avg from noisy samples
+- [ ] Unit test: relay transitions Normal → Pressured → Congested at correct thresholds
+- [ ] Unit test: relay fan-out reduction under Pressured and Congested states
+- [ ] Unit test: file transfer auto-pause triggered after 5s of full bulk queue
+- [ ] Integration test: file transfer + voice call — voice maintains < 50ms jitter
+- [ ] Integration test: link saturation → AIMD adaptation → rate recovery within 10s
+- [ ] Integration test: three concurrent file transfers + DM — DMs delivered within 2s
+- [ ] Integration test: relay under load — Pressured mode reduces gossip without dropping signaling
+- [ ] Update `docs/protocol/relay.md` (congestion control, priority classes, backpressure)
+- [ ] Update `docs/protocol/messaging.md` (packet classification table)
+
+**Release / Compatibility:**
+
+- [ ] Congestion control is internal to each node; no protocol-level changes required for peers
+- [ ] Priority classification is backward compatible — old nodes treat all packets equally
+- [ ] `congestion_control_v1` capability is **informational only** — it signals that the node
+      implements local congestion control but does not gate any wire behavior. Peers do not
+      change their sending strategy based on this flag. It exists purely for diagnostics
+      (e.g., `fetch_routing_stats` can report whether a peer is congestion-aware) and for
+      future iterations that may introduce cooperative congestion signaling
+- [ ] Mixed-version test: congestion-aware node coexists with node without congestion control
+- [ ] Confirmed: Iteration 24 does not require raising `MinimumProtocolVersion`
 
 ### Product iteration dependency graph
 
@@ -2774,8 +5121,12 @@ graph LR
     A17_4 --> A18_1["18.1<br/>Meshtastic bridge"]
     A18_1 --> A18_2["18.2<br/>Radio fragmentation"]
     A18_2 --> A18_3["18.3<br/>Radio relay"]
-    A14_3 --> A15["A15<br/>Custom encryption builder"]
-    A15 --> A16["A16<br/>Voice calls"]
+    A18_3 --> A15["A15<br/>Custom encryption builder"]
+    A15 --> A20["A20<br/>Congestion + QoS"]
+    A20 --> A16["A16<br/>Voice calls"]
+    A8 --> A17["A17<br/>File transfer"]
+    A3 --> A18["A18<br/>LAN discovery"]
+    A16 --> A19["A19<br/>NAT traversal"]
 
     style A1 fill:#e8f5e9,stroke:#2e7d32
     style A10 fill:#e8f5e9,stroke:#2e7d32
@@ -2787,10 +5138,6 @@ graph LR
     style A7 fill:#fff3e0,stroke:#e65100
     style A11 fill:#fff3e0,stroke:#e65100
     style A12 fill:#f3e5f5,stroke:#7b1fa2
-    style A13_1 fill:#f3e5f5,stroke:#7b1fa2
-    style A13_2 fill:#f3e5f5,stroke:#7b1fa2
-    style A13_3 fill:#f3e5f5,stroke:#7b1fa2
-    style A13_4 fill:#f3e5f5,stroke:#7b1fa2
     style A9_1 fill:#e3f2fd,stroke:#1565c0
     style A9_2 fill:#e3f2fd,stroke:#1565c0
     style A9_3 fill:#e3f2fd,stroke:#1565c0
@@ -2802,8 +5149,12 @@ graph LR
     style A8 fill:#e8f5e9,stroke:#2e7d32
     style A15 fill:#ffebee,stroke:#c62828
     style A16 fill:#fff3e0,stroke:#e65100
+    style A17 fill:#e8f5e9,stroke:#2e7d32
+    style A18 fill:#e8f5e9,stroke:#2e7d32
+    style A19 fill:#fff3e0,stroke:#e65100
+    style A20 fill:#fff3e0,stroke:#e65100
 ```
-*Diagram — Product iterations after mesh*
+*Diagram — Product iterations after mesh (including file transfer, LAN discovery, NAT traversal, and congestion control)*
 
 ### Key architectural decisions (rationale)
 
@@ -2819,8 +5170,28 @@ graph LR
 | Trust hierarchy: direct > hop_ack > announcement | Anyone can announce any route. Direct connection is provable, hop_ack is verified by delivery, announcement is unverified claim. |
 | Route lifetime tied to session lifetime | TTL-only expiry leaves stale routes for up to 2 min after disconnect. Session binding gives immediate invalidation + triggered withdrawal. |
 | Announcement fairness rotation, not just closest-by-hops | Pure closest-by-hops biases toward nearby identities. Rotation ensures distant identities are eventually propagated to all peers. |
-| Withdrawals + triggered updates in iteration 2 | Without them, failover in iteration 3 cannot meet its 10-20s target. Periodic-only announcements leave stale routes for up to 5 minutes. |
+| Withdrawals + triggered updates in iteration 1 | Without them, failover cannot meet its 10-20s target. Periodic-only announcements leave stale routes for up to 5 minutes. |
 | Table as hint, gossip as fallback | The routing table is an optimization. If it's wrong, delivery still works via gossip. No single point of failure. |
+| Pairwise session keys in groups, not group-wide shared key | Group-wide shared key enables MITM and makes private messages impossible. Pairwise keys (per peer pair) prevent any group member from impersonating another. |
+| LAN discovery requires authenticated handshake, not blind trust | A broadcast packet can be spoofed. The discovery packet is only a trigger — actual peer addition requires completing a standard handshake. |
+| Priority bypass for real-time media packets | Without priority bypass, a file transfer or sync burst can starve voice packets. Real-time traffic must never wait in the bulk queue. |
+| NAT traversal as optional overlay, relay as guaranteed fallback | Hole punching improves latency but is not guaranteed (symmetric NATs). The protocol must work without direct connections — relay is always available. |
+| File transfer resume via file ID, not filename | Filenames can change or collide. A 32-byte file ID (typically a hash) uniquely identifies the content for resume and dedup across restarts. |
+| Per-origin SeqNo with `(identity, origin, nextHop)` dedup key | Only the origin may advance SeqNo. Intermediate nodes forward (origin, seq) unchanged. Dedup key includes origin so that different lineages for the same identity coexist — changing origin through the same neighbor is a new lineage, not a stale update. |
+| Split horizon, not poisoned reverse with fake infinity | Sending hops=16 for someone else's route requires fabricating a SeqNo the origin never produced, violating per-origin seq invariant. Split horizon simply omits routes — simpler, safer, no false withdrawals. |
+| On session close: wire withdrawal only for own-origin routes, local-only invalidation for transit | An intermediate node cannot emit a withdrawal for a transit route it doesn't own (would require fabricating origin's SeqNo). Instead it locally drops the route and stops advertising it; downstream peers converge via TTL expiry or origin's own withdrawal. |
+| `hop_ack` scoped to (identity, origin, nextHop) triple, not per-next_hop globally | The wire-level `relay_hop_ack` carries only `message_id`; origin is resolved locally from the routing decision that sent the message. A hop_ack for `(X, origin=C, via B)` does not promote `(X, origin=D, via B)` or `(Y, origin=C, via B)`. Per-triple scoping prevents a single delivery success from inflating trust for unrelated route entries. |
+| NextHop stores peer identity (Ed25519 fingerprint), not transport address | One peer identity can have multiple TCP sessions (inbound, outbound, fallback port). Transport address in the routing table would lose working sessions. Identity-level routing delegates session selection to the existing transport layer. |
+| Iteration 1 always full sync on reconnect, digest sync deferred to iteration 2 | Session close invalidates all routes from that peer. On reconnect the table is empty for that peer — there is nothing to compare a digest against. Digest sync requires a separate route cache with its own lifetime model, which is iteration 2 scope. |
+| Health, probes, RTT, and route_query in iteration 1.5, not in core iteration 1 | Iteration 1 core must be minimal and correct: announce, withdraw, split horizon, simple hop-count ranking. Adding health tracking, probes, and composite scoring to the same iteration risks coupling unverified complexity with the foundational routing model. |
+| Separate capabilities `mesh_route_probe_v1` / `mesh_route_query_v1` for iteration 1.5 frames | `route_probe` and `route_query` are new wire-level frame types. An iteration 1 node advertising `mesh_routing_v1` doesn't know them. Reusing the same capability would break mixed-version peers within the same capability bucket. |
+| Explicit health states (Good/Questionable/Bad/Dead) per (identity, origin, nextHop) triple, not per-next_hop | Binary alive/dead at the next-hop level misses nuance. Per-triple tracking means route (F, origin=C, via B) has independent health from (F, origin=D, via B) — matching the routing table's dedup key. Four states enable graduated response. |
+| Dead state = local invalidation + stop announcing, not wire withdrawal for all routes | Same principle as session close: only the origin may emit a wire withdrawal (requires valid SeqNo). Transit Dead routes are silently dropped; downstream converges via TTL expiry or origin's own withdrawal. |
+| Composite route score (hops + RTT + health + trust), not hop-count only | Pure hop-count picks a 2-hop transcontinental relay over a 3-hop local mesh. Adding RTT and health produces routing decisions that reflect actual network quality. |
+| Route probes verify new routes before trusting them | An announced route is just a claim. A probe forces the next-hop to confirm reachability, preventing the node from routing real traffic through an unverified path. |
+| Single-hop route_query, not recursive flood | Asking all direct peers for a target is safe and bounded. Recursive queries would create exponential flooding. Single-hop queries are sufficient because peers already have multi-hop table knowledge. |
+| Routing in a separate `internal/core/routing/` package, not inside `node` | The `node.Service` already has ~90 fields. Routing table, health tracking, probes, sync, and queries form a cohesive domain. Extraction gives clean boundaries, independent unit tests, and minimal refactoring when routing evolves across iterations 2–4. One-way dependency: `node` → `routing`. |
+| RPC `RoutingProvider` interface for routing data access | Routing data lives in memory and on disk. Exposing it through RPC (same pattern as `MetricsProvider`, `ChatlogProvider`) lets the desktop UI, CLI, and monitoring inspect routes, health states, and convergence stats without coupling to `node` internals. |
 
 ---
 

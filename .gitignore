@@ -3,5 +3,7 @@
 .gomodcache/
 .idea/
 .corsa/
+_refs/
+dist/
 corsa-desktop
 corsa-desktop.exe
