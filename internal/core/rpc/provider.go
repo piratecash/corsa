@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
 	"corsa/internal/core/service"
@@ -44,10 +45,10 @@ type RoutingProvider interface {
 	// separate count/flap methods are not needed.
 	RoutingSnapshot() routing.Snapshot
 
-	// PeerTransport returns the transport address and network type
+	// PeerTransport returns the transport address and network group
 	// for a directly connected peer identified by its Ed25519 fingerprint.
-	// Returns empty strings if the peer is not currently connected.
-	PeerTransport(peerIdentity string) (address string, network string)
+	// Returns zero values if the peer is not currently connected.
+	PeerTransport(peerIdentity domain.PeerIdentity) (address domain.PeerAddress, network domain.NetGroup)
 }
 
 // DiagnosticProvider abstracts access to desktop-level diagnostic commands.

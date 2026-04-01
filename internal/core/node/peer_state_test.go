@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"corsa/internal/core/domain"
 )
 
 func TestLoadPeerStateReturnsEmptyForMissingFile(t *testing.T) {
@@ -50,21 +52,21 @@ func TestSaveAndLoadPeerStateRoundTrip(t *testing.T) {
 		Peers: []peerEntry{
 			{
 				Address:             "198.51.100.1:64646",
-				NodeType:            "full",
+				NodeType:            domain.NodeTypeFull,
 				LastConnectedAt:     &now,
 				LastDisconnectedAt:  &past5,
 				ConsecutiveFailures: 0,
-				Source:              "bootstrap",
+				Source:              domain.PeerSourceBootstrap,
 				AddedAt:             &now,
 				Score:               10,
 			},
 			{
 				Address:             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:64646",
-				NodeType:            "full",
+				NodeType:            domain.NodeTypeFull,
 				LastConnectedAt:     &past10,
 				ConsecutiveFailures: 2,
 				LastError:           "connection refused",
-				Source:              "peer_exchange",
+				Source:              domain.PeerSourcePeerExchange,
 				AddedAt:             &past1h,
 				Score:               -5,
 			},
@@ -133,7 +135,7 @@ func TestLoadPeerStateHandlesNullPeers(t *testing.T) {
 func TestSavePeerStateNoopForEmptyPath(t *testing.T) {
 	t.Parallel()
 
-	err := savePeerState("", peerStateFile{Peers: []peerEntry{{Address: "1.2.3.4:64646"}}})
+	err := savePeerState("", peerStateFile{Peers: []peerEntry{{Address: "1.2.3.4:64646", Source: domain.PeerSourcePeerExchange}}})
 	if err != nil {
 		t.Fatalf("expected nil error for empty path, got: %v", err)
 	}
@@ -208,7 +210,7 @@ func TestTrimPeerEntries(t *testing.T) {
 
 	entries := make([]peerEntry, maxPersistedPeers+50)
 	for i := range entries {
-		entries[i] = peerEntry{Address: fmt.Sprintf("peer-%d", i), Score: maxPersistedPeers + 50 - i}
+		entries[i] = peerEntry{Address: domain.PeerAddress(fmt.Sprintf("peer-%d", i)), Score: maxPersistedPeers + 50 - i}
 	}
 	sortPeerEntries(entries)
 	trimmed := trimPeerEntries(entries)
@@ -238,14 +240,15 @@ func TestPeerSource(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		id, want string
+		id   string
+		want domain.PeerSource
 	}{
-		{"bootstrap-0", "bootstrap"},
-		{"bootstrap-12", "bootstrap"},
-		{"persisted-0", "persisted"},
-		{"persisted-99", "persisted"},
-		{"peer-5", "peer_exchange"},
-		{"", "peer_exchange"},
+		{"bootstrap-0", domain.PeerSourceBootstrap},
+		{"bootstrap-12", domain.PeerSourceBootstrap},
+		{"persisted-0", domain.PeerSourcePersisted},
+		{"persisted-99", domain.PeerSourcePersisted},
+		{"peer-5", domain.PeerSourcePeerExchange},
+		{"", domain.PeerSourcePeerExchange},
 	}
 	for _, tt := range tests {
 		if got := peerSource(tt.id); got != tt.want {
@@ -263,11 +266,11 @@ func TestPeerCooldownDuration(t *testing.T) {
 	}{
 		{0, 0},
 		{-1, 0},
-		{1, peerCooldownBase},                   // 30s
-		{2, peerCooldownBase * 2},               // 60s
-		{3, peerCooldownBase * 4},               // 2m
-		{4, peerCooldownBase * 8},               // 4m
-		{100, peerCooldownMax},                   // capped at 30m
+		{1, peerCooldownBase},     // 30s
+		{2, peerCooldownBase * 2}, // 60s
+		{3, peerCooldownBase * 4}, // 2m
+		{4, peerCooldownBase * 8}, // 4m
+		{100, peerCooldownMax},    // capped at 30m
 	}
 	for _, tt := range tests {
 		got := peerCooldownDuration(tt.failures)

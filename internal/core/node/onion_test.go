@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 )
 
 // validV3Onion is a 56-char base32 string used as a valid Tor v3 .onion host in tests.
@@ -62,11 +63,11 @@ func TestNormalizePeerAddressAcceptsValidOnion(t *testing.T) {
 	}
 
 	onionHost := validV3Onion + ".onion"
-	addr, ok := svc.normalizePeerAddress("1.2.3.4:12345", onionHost+":64646")
+	addr, ok := svc.normalizePeerAddress(domain.PeerAddress("1.2.3.4:12345"), domain.PeerAddress(onionHost+":64646"))
 	if !ok {
 		t.Fatal("expected valid v3 .onion address to be accepted")
 	}
-	if addr != onionHost+":64646" {
+	if addr != domain.PeerAddress(onionHost+":64646") {
 		t.Fatalf("unexpected normalized address: %s", addr)
 	}
 }
@@ -82,7 +83,7 @@ func TestNormalizePeerAddressRejectsInvalidOnion(t *testing.T) {
 	}
 
 	// "short.onion" is not a valid onion address — should fall through to normal IP logic.
-	_, ok := svc.normalizePeerAddress("", "short.onion:64646")
+	_, ok := svc.normalizePeerAddress(domain.PeerAddress(""), domain.PeerAddress("short.onion:64646"))
 	if ok {
 		t.Fatal("expected invalid .onion to be rejected (no observed, non-IP advertised)")
 	}
@@ -99,11 +100,11 @@ func TestNormalizePeerAddressOnionWithCustomPort(t *testing.T) {
 	}
 
 	onionHost := validV3Onion + ".onion"
-	addr, ok := svc.normalizePeerAddress("", onionHost+":9999")
+	addr, ok := svc.normalizePeerAddress(domain.PeerAddress(""), domain.PeerAddress(onionHost+":9999"))
 	if !ok {
 		t.Fatal("expected .onion address to be accepted")
 	}
-	if addr != onionHost+":9999" {
+	if addr != domain.PeerAddress(onionHost+":9999") {
 		t.Fatalf("unexpected normalized address: %s", addr)
 	}
 }
@@ -119,11 +120,11 @@ func TestNormalizePeerAddressOnionWithNoObserved(t *testing.T) {
 	}
 
 	onionHost := validV3Onion + ".onion"
-	addr, ok := svc.normalizePeerAddress("", onionHost+":64646")
+	addr, ok := svc.normalizePeerAddress(domain.PeerAddress(""), domain.PeerAddress(onionHost+":64646"))
 	if !ok {
 		t.Fatal("expected .onion address to be accepted")
 	}
-	if addr != onionHost+":64646" {
+	if addr != domain.PeerAddress(onionHost+":64646") {
 		t.Fatalf("unexpected normalized address: %s", addr)
 	}
 }

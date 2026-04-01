@@ -17,6 +17,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"corsa/internal/core/domain"
+
 	"corsa/internal/core/config"
 	"corsa/internal/core/crashlog"
 	"corsa/internal/core/directmsg"
@@ -26,6 +28,11 @@ import (
 	"corsa/internal/core/routing"
 	"corsa/internal/core/transport"
 )
+
+// errIncompatibleProtocol is returned when a peer's protocol version is
+// below MinimumProtocolVersion. The retry loop treats this as a permanent
+// failure and stops reconnection attempts — the peer must upgrade first.
+var errIncompatibleProtocol = errors.New("incompatible protocol version")
 
 // MessageStore allows the desktop layer to own message persistence, while
 // relay-only nodes (corsa-node) leave this nil to skip local storage.
@@ -40,7 +47,7 @@ type Service struct {
 	cfg                   config.Node
 	trust                 *trustStore
 	mu                    sync.RWMutex
-	peers                 []transport.Peer
+	peers                 []transport.Peer // dial candidates (typed: Address + Source)
 	known                 map[string]struct{}
 	boxKeys               map[string]string
 	pubKeys               map[string]string
@@ -51,27 +58,28 @@ type Service struct {
 	seen                  map[string]struct{}
 	seenReceipts          map[string]struct{}
 	subs                  map[string]map[string]*subscriber
-	sessions              map[string]*peerSession
-	health                map[string]*peerHealth
-	peerTypes             map[string]config.NodeType
-	peerIDs               map[string]string
-	peerVersions          map[string]string
-	peerBuilds            map[string]int
-	pending               map[string][]pendingFrame
+	sessions              map[domain.PeerAddress]*peerSession
+	health                map[domain.PeerAddress]*peerHealth
+	peerTypes             map[domain.PeerAddress]domain.NodeType
+	peerIDs               map[domain.PeerAddress]domain.PeerIdentity
+	peerVersions          map[domain.PeerAddress]string
+	peerBuilds            map[domain.PeerAddress]int
+	pending               map[domain.PeerAddress][]pendingFrame
 	pendingKeys           map[string]struct{}
-	orphaned              map[string][]pendingFrame // legacy fallback-keyed frames that could not be migrated
+	orphaned              map[domain.PeerAddress][]pendingFrame // legacy fallback-keyed frames that could not be migrated
 	relayRetry            map[string]relayAttempt
 	outbound              map[string]outboundDelivery
-	upstream              map[string]struct{}
+	upstream              map[domain.PeerAddress]struct{}
 	inboundConns          map[net.Conn]struct{}
-	inboundMetered        map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
-	inboundHealthRefs     map[string]int            // resolved overlay address → active inbound connection count
-	inboundTracked        map[net.Conn]struct{}     // connections promoted via trackInboundConnect (auth complete or auth not required)
-	connWg                sync.WaitGroup            // tracks active handleConn goroutines for graceful shutdown
+	inboundMetered        map[net.Conn]*MeteredConn  // inbound conn → MeteredConn for live traffic reads
+	inboundHealthRefs     map[domain.PeerAddress]int // resolved overlay address → active inbound connection count
+	inboundTracked        map[net.Conn]struct{}      // connections promoted via trackInboundConnect (auth complete or auth not required)
+	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	connAuth              map[net.Conn]*connAuthState
 	connPeerInfo          map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
 	connSendCh            map[net.Conn]chan sendItem  // per-connection buffered send channel; decouples callers from socket I/O
 	connWriterDone        map[net.Conn]chan struct{}  // closed by connWriter when it exits; used to wait for drain before TCP close
+	connIDCounter         uint64                      // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
 	listener              net.Listener
@@ -79,18 +87,18 @@ type Service struct {
 	peersStatePath        string
 	lastPeerSave          time.Time
 	lastPeerEvict         time.Time
-	dialOrigin            map[string]string     // dial address → primary peer address (for fallback port tracking)
-	persistedMeta         map[string]*peerEntry // stable metadata from peers.json, keyed by address
-	observedAddrs         map[string]string     // peer identity (fingerprint) → observed IP they reported for us
-	reachableGroups       map[NetGroup]struct{} // network groups this node can reach (computed at startup)
-	messageStore          MessageStore          // optional: persistence handler registered by desktop layer
-	router                Router                // routing strategy for outbound message delivery
-	relayStates           *relayStateStore      // hop-by-hop relay forwarding state (Iteration 1)
-	relayLimiter          *relayRateLimiter     // per-peer token bucket for relay fan-out
-	routingTable          *routing.Table        // distance-vector routing table (Phase 1.2)
-	announceLoop          *routing.AnnounceLoop // periodic + triggered announce_routes sender (Phase 1.2)
-	identitySessions      map[string]int        // peer identity → active session count (multi-session awareness)
-	identityRelaySessions map[string]int        // peer identity → relay-capable session count (direct-route lifecycle)
+	dialOrigin            map[domain.PeerAddress]domain.PeerAddress // dial address → primary peer address (for fallback port tracking)
+	persistedMeta         map[domain.PeerAddress]*peerEntry         // stable metadata from peers.json, keyed by address
+	observedAddrs         map[domain.PeerIdentity]string            // peer identity (fingerprint) → observed IP they reported for us
+	reachableGroups       map[domain.NetGroup]struct{}              // network groups this node can reach (computed at startup)
+	messageStore          MessageStore                              // optional: persistence handler registered by desktop layer
+	router                Router                                    // routing strategy for outbound message delivery
+	relayStates           *relayStateStore                          // hop-by-hop relay forwarding state (Iteration 1)
+	relayLimiter          *relayRateLimiter                         // per-peer token bucket for relay fan-out
+	routingTable          *routing.Table                            // distance-vector routing table (Phase 1.2)
+	announceLoop          *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
+	identitySessions      map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
+	identityRelaySessions map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
 }
 
 type subscriber struct {
@@ -100,8 +108,9 @@ type subscriber struct {
 }
 
 type peerSession struct {
-	address      string
-	peerIdentity string // peer's Ed25519 identity fingerprint from welcome.Address
+	address      domain.PeerAddress
+	peerIdentity domain.PeerIdentity // peer's Ed25519 identity fingerprint from welcome.Address
+	connID       uint64              // monotonic connection ID for diagnostics
 	conn         net.Conn
 	metered      *MeteredConn // tracks bytes for this session; nil when conn is not metered
 	sendCh       chan protocol.Frame
@@ -109,13 +118,13 @@ type peerSession struct {
 	errCh        chan error
 	version      int
 	authOK       bool
-	capabilities []string // intersection of local and remote capabilities negotiated during handshake
+	capabilities []domain.Capability // intersection of local and remote capabilities negotiated during handshake
 }
 
 type peerHealth struct {
-	Address             string
+	Address             domain.PeerAddress
 	Connected           bool
-	Direction           string // "outbound", "inbound", or "" (unknown)
+	Direction           domain.PeerDirection // outbound, inbound, or "" (unknown)
 	State               string
 	LastConnectedAt     time.Time
 	LastDisconnectedAt  time.Time
@@ -125,9 +134,10 @@ type peerHealth struct {
 	LastUsefulReceiveAt time.Time
 	ConsecutiveFailures int
 	LastError           string
-	Score               int   // peer quality score for persistence priority
-	BytesSent           int64 // total bytes sent to this peer across all sessions
-	BytesReceived       int64 // total bytes received from this peer across all sessions
+	Score               int       // peer quality score for persistence priority
+	BannedUntil         time.Time // peer is not dialled until this time expires
+	BytesSent           int64     // total bytes sent to this peer across all sessions
+	BytesReceived       int64     // total bytes received from this peer across all sessions
 }
 
 type pendingFrame struct {
@@ -160,9 +170,12 @@ type connAuthState struct {
 
 // connPeerHello caches hello frame info to avoid re-parsing for subsequent frames.
 type connPeerHello struct {
-	address      string
-	networks     map[NetGroup]struct{}
-	capabilities []string // intersection of local and remote capabilities from handshake
+	address      domain.PeerAddress  // listen address (transport) for health tracking
+	identity     domain.PeerIdentity // Ed25519 fingerprint from hello.Address (routing identity)
+	connID       uint64              // monotonic connection ID for diagnostics
+	lastActivity time.Time           // last frame received on this connection (per-conn staleness)
+	networks     map[domain.NetGroup]struct{}
+	capabilities []domain.Capability // intersection of local and remote capabilities from handshake
 }
 
 type banEntry struct {
@@ -171,19 +184,20 @@ type banEntry struct {
 }
 
 const (
-	peerStateHealthy       = "healthy"
-	peerStateDegraded      = "degraded"
-	peerStateStalled       = "stalled"
-	peerStateReconnecting  = "reconnecting"
-	peerDirectionOutbound  = "outbound"
-	peerDirectionInbound   = "inbound"
-	peerRequestTimeout     = 12 * time.Second
-	pendingFrameTTL        = 5 * time.Minute
-	relayRetryTTL          = 3 * time.Minute
-	maxPendingFrameRetries = 5
-	banThreshold           = 1000
-	banIncrementInvalidSig = 100
-	banDuration            = 24 * time.Hour
+	peerStateHealthy                = "healthy"
+	peerStateDegraded               = "degraded"
+	peerStateStalled                = "stalled"
+	peerStateReconnecting           = "reconnecting"
+	peerDirectionOutbound           = domain.PeerDirectionOutbound
+	peerDirectionInbound            = domain.PeerDirectionInbound
+	peerRequestTimeout              = 12 * time.Second
+	pendingFrameTTL                 = 5 * time.Minute
+	relayRetryTTL                   = 3 * time.Minute
+	maxPendingFrameRetries          = 5
+	banThreshold                    = 1000
+	banIncrementInvalidSig          = 100
+	banIncrementIncompatibleVersion = 1000 // immediate blacklist: incompatible protocol wastes resources on every connect
+	banDuration                     = 24 * time.Hour
 	// nodeName and networkName are the protocol-level identifiers included
 	// in handshake, ping/pong and other frames. Defined once here so that
 	// all call-sites stay consistent. When these values become configurable
@@ -215,17 +229,18 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	}
 
 	peers := make([]transport.Peer, 0, len(cfg.BootstrapPeers)+len(peerState.Peers))
-	seenAddrs := make(map[string]struct{})
-	for i, addr := range cfg.BootstrapPeers {
+	seenAddrs := make(map[domain.PeerAddress]struct{})
+	for _, addr := range cfg.BootstrapPeers {
+		pa := domain.PeerAddress(addr)
 		peers = append(peers, transport.Peer{
-			ID:      fmt.Sprintf("bootstrap-%d", i),
-			Address: addr,
+			Address: pa,
+			Source:  domain.PeerSourceBootstrap,
 		})
-		seenAddrs[addr] = struct{}{}
+		seenAddrs[pa] = struct{}{}
 	}
 	sortPeerEntries(peerState.Peers)
 	// Index persisted entries so we can seed health from their metadata.
-	persistedByAddr := make(map[string]*peerEntry, len(peerState.Peers))
+	persistedByAddr := make(map[domain.PeerAddress]*peerEntry, len(peerState.Peers))
 	for i, entry := range peerState.Peers {
 		if _, dup := seenAddrs[entry.Address]; dup {
 			// Even for duplicates (bootstrap overlap) keep the metadata for health seeding.
@@ -235,8 +250,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		seenAddrs[entry.Address] = struct{}{}
 		persistedByAddr[entry.Address] = &peerState.Peers[i]
 		peers = append(peers, transport.Peer{
-			ID:      fmt.Sprintf("persisted-%d", i),
 			Address: entry.Address,
+			Source:  domain.PeerSourcePersisted,
 		})
 	}
 
@@ -281,12 +296,12 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	if queueState.Version < queueStateVersion {
 		hostPrimaries := make(map[string][]string, len(seenAddrs))
 		for addr := range seenAddrs {
-			if h, _, ok := splitHostPort(addr); ok {
-				hostPrimaries[h] = append(hostPrimaries[h], addr)
+			if h, _, ok := splitHostPort(string(addr)); ok {
+				hostPrimaries[h] = append(hostPrimaries[h], string(addr))
 			}
 		}
 		for address := range queueState.Pending {
-			if _, isPrimary := seenAddrs[address]; isPrimary {
+			if _, isPrimary := seenAddrs[domain.PeerAddress(address)]; isPrimary {
 				continue
 			}
 			h, _, ok := splitHostPort(address)
@@ -328,7 +343,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	pendingKeys := make(map[string]struct{})
 	for address, items := range queueState.Pending {
 		for _, item := range items {
-			if key := pendingFrameKey(address, item.Frame); key != "" {
+			if key := pendingFrameKey(domain.PeerAddress(address), item.Frame); key != "" {
 				pendingKeys[key] = struct{}{}
 			}
 		}
@@ -354,7 +369,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	// Seed health map from persisted peer metadata so that scores,
 	// failure counts and timestamps survive a restart+flush cycle
 	// even if the peer hasn't reconnected yet.
-	restoredHealth := make(map[string]*peerHealth, len(persistedByAddr))
+	restoredHealth := make(map[domain.PeerAddress]*peerHealth, len(persistedByAddr))
 	for addr, entry := range persistedByAddr {
 		h := &peerHealth{
 			Address:             addr,
@@ -369,7 +384,26 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		if entry.LastDisconnectedAt != nil {
 			h.LastDisconnectedAt = *entry.LastDisconnectedAt
 		}
+		if entry.BannedUntil != nil && time.Now().UTC().Before(*entry.BannedUntil) {
+			h.BannedUntil = *entry.BannedUntil
+		}
 		restoredHealth[addr] = h
+	}
+
+	// Migrate queueState maps from string-keyed to domain.PeerAddress-keyed.
+	// queueState.Pending and queueState.Orphaned are keyed by string addresses in JSON;
+	// convert to domain.PeerAddress for internal use.
+	pending := make(map[domain.PeerAddress][]pendingFrame)
+	for addr, frames := range queueState.Pending {
+		pending[domain.PeerAddress(addr)] = frames
+	}
+	orphaned := make(map[domain.PeerAddress][]pendingFrame)
+	for addr, frames := range queueState.Orphaned {
+		orphaned[domain.PeerAddress(addr)] = frames
+	}
+	relayRetry := make(map[string]relayAttempt)
+	for addr, attempt := range queueState.RelayRetry {
+		relayRetry[addr] = attempt
 	}
 
 	svc := &Service{
@@ -390,24 +424,24 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		seen:                  seen,
 		seenReceipts:          seenReceipts,
 		subs:                  make(map[string]map[string]*subscriber),
-		sessions:              make(map[string]*peerSession),
+		sessions:              make(map[domain.PeerAddress]*peerSession),
 		health:                restoredHealth,
-		peerTypes:             make(map[string]config.NodeType),
-		peerIDs:               make(map[string]string),
-		peerVersions:          make(map[string]string),
-		peerBuilds:            make(map[string]int),
-		pending:               queueState.Pending,
+		peerTypes:             make(map[domain.PeerAddress]domain.NodeType),
+		peerIDs:               make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerVersions:          make(map[domain.PeerAddress]string),
+		peerBuilds:            make(map[domain.PeerAddress]int),
+		pending:               pending,
 		pendingKeys:           pendingKeys,
-		orphaned:              queueState.Orphaned,
-		relayRetry:            queueState.RelayRetry,
+		orphaned:              orphaned,
+		relayRetry:            relayRetry,
 		outbound:              queueState.OutboundState,
-		upstream:              make(map[string]struct{}),
-		dialOrigin:            make(map[string]string),
-		observedAddrs:         make(map[string]string),
+		upstream:              make(map[domain.PeerAddress]struct{}),
+		dialOrigin:            make(map[domain.PeerAddress]domain.PeerAddress),
+		observedAddrs:         make(map[domain.PeerIdentity]string),
 		reachableGroups:       computeReachableGroups(cfg),
 		inboundConns:          make(map[net.Conn]struct{}),
 		inboundMetered:        make(map[net.Conn]*MeteredConn),
-		inboundHealthRefs:     make(map[string]int),
+		inboundHealthRefs:     make(map[domain.PeerAddress]int),
 		inboundTracked:        make(map[net.Conn]struct{}),
 		connAuth:              make(map[net.Conn]*connAuthState),
 		connPeerInfo:          make(map[net.Conn]*connPeerHello),
@@ -415,13 +449,13 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		connWriterDone:        make(map[net.Conn]chan struct{}),
 		bans:                  make(map[string]banEntry),
 		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
-		identitySessions:      make(map[string]int),
-		identityRelaySessions: make(map[string]int),
+		identitySessions:      make(map[domain.PeerIdentity]int),
+		identityRelaySessions: make(map[domain.PeerIdentity]int),
 	}
 
 	// Initialize distance-vector routing table (Phase 1.2).
 	svc.routingTable = routing.NewTable(
-		routing.WithLocalOrigin(id.Address),
+		routing.WithLocalOrigin(routing.PeerIdentity(id.Address)),
 	)
 	svc.router = NewTableRouter(svc, svc.routingTable)
 	svc.announceLoop = routing.NewAnnounceLoop(
@@ -536,7 +570,7 @@ func (s *Service) AdvertiseAddress() string {
 	return s.cfg.AdvertiseAddress
 }
 
-func (s *Service) NodeType() config.NodeType {
+func (s *Service) NodeType() domain.NodeType {
 	return s.cfg.NormalizedType()
 }
 
@@ -552,7 +586,7 @@ func (s *Service) ClientVersion() string {
 }
 
 func (s *Service) CanForward() bool {
-	return s.NodeType() == config.NodeTypeFull
+	return s.NodeType().IsFull()
 }
 
 func (s *Service) Address() string {
@@ -588,6 +622,12 @@ func (s *Service) Peers() []transport.Peer {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	return s.peersSnapshotLocked()
+}
+
+// peersSnapshotLocked returns a shallow copy of the peers slice.
+// Must be called with s.mu held (read or write).
+func (s *Service) peersSnapshotLocked() []transport.Peer {
 	out := make([]transport.Peer, len(s.peers))
 	copy(out, s.peers)
 	return out
@@ -714,6 +754,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			Msg("protocol_trace")
 	}()
 
+	// Update per-connection last activity timestamp for staleness checks.
+	s.touchConnActivity(conn)
+
 	switch frame.Type {
 	case "ping":
 		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
@@ -733,6 +776,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "hello":
 		if err := validateProtocolHandshake(frame); err != nil {
 			accepted = false
+			log.Warn().Err(err).Str("addr", conn.RemoteAddr().String()).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
 			s.writeJSONFrame(conn, protocol.Frame{
 				Type:                   "error",
 				Code:                   protocol.ErrCodeIncompatibleProtocol,
@@ -740,6 +784,18 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 				Version:                config.ProtocolVersion,
 				MinimumProtocolVersion: config.MinimumProtocolVersion,
 			})
+			// Immediate IP blacklist (transport level): prevents the same
+			// remote IP from opening new TCP connections for 24 hours.
+			s.addBanScore(conn, banIncrementIncompatibleVersion)
+			// Health-level ban (overlay level): if the hello declares a
+			// listen address that matches a known peer, apply the same
+			// BannedUntil + score penalty as the outbound path so that
+			// peerDialCandidates also skips outbound dials to this peer.
+			if peerAddr := strings.TrimSpace(frame.Listen); peerAddr != "" {
+				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr))
+			} else if peerAddr = strings.TrimSpace(frame.Address); peerAddr != "" {
+				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr))
+			}
 			return true
 		}
 		if requiresSessionAuth(frame) {
@@ -764,8 +820,8 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 		}
 		if addr := s.inboundPeerAddress(conn); addr != "" {
-			s.addPeerID(addr, frame.Address)
-			s.trackInboundConnect(conn, addr, frame.Address)
+			s.addPeerID(addr, domain.PeerIdentity(frame.Address))
+			s.trackInboundConnect(conn, addr, domain.PeerIdentity(frame.Address))
 			// Store version/build by the health-tracking address so that
 			// peerHealthFrames can find them. learnPeerFromFrame only
 			// stores these when listenerEnabled, which excludes peers
@@ -897,13 +953,13 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			peers = peers[:maxAnnouncePeers]
 		}
 		for _, peer := range peers {
-			if peer == "" || classifyAddress(peer) == NetGroupLocal {
+			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
 			if authenticated {
-				s.promotePeerAddress(peer, nodeType)
+				s.promotePeerAddress(domain.PeerAddress(peer), nodeType)
 			} else {
-				s.addPeerAddress(peer, nodeType, "")
+				s.addPeerAddress(domain.PeerAddress(peer), nodeType, "")
 			}
 		}
 		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
@@ -916,7 +972,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		if admit := admitRelayFrame(s.connHasCapability(conn, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
 		}
@@ -929,8 +985,8 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		// key sync. This is safe because the relay arrived on an inbound
 		// connection — the outbound session is a separate conn/inboxCh,
 		// so peerSessionRequest won't deadlock.
-		syncSession, _ := s.activePeerSession(senderAddr)
-		ackStatus := s.handleRelayMessage(senderAddr, syncSession, frame)
+		syncSession, _ := s.activePeerSession(domain.PeerAddress(senderAddr))
+		ackStatus := s.handleRelayMessage(domain.PeerAddress(senderAddr), syncSession, frame)
 		// Write a single relay_hop_ack with the semantic status directly
 		// on the inbound connection. This is the only ack the sender
 		// receives — handleRelayMessage itself does not send acks.
@@ -949,13 +1005,13 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		if admit := admitRelayFrame(s.connHasCapability(conn, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
 		}
 		senderAddr := s.inboundPeerAddress(conn)
 		if senderAddr != "" {
-			s.handleRelayHopAck(senderAddr, frame)
+			s.handleRelayHopAck(domain.PeerAddress(senderAddr), frame)
 		}
 		return true
 	case "announce_routes":
@@ -963,7 +1019,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		if !s.connHasCapability(conn, capMeshRoutingV1) {
+		if !s.connHasCapability(conn, domain.CapMeshRoutingV1) {
 			accepted = false
 			return true
 		}
@@ -971,7 +1027,7 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		// advertise routes, but this node can never send relay_message to
 		// it, making every route through it data-plane unusable. Reject
 		// announcements from such peers to avoid storing dead NextHop entries.
-		if !s.connHasCapability(conn, capMeshRelayV1) {
+		if !s.connHasCapability(conn, domain.CapMeshRelayV1) {
 			accepted = false
 			return true
 		}
@@ -1282,7 +1338,7 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		BoxSig:                 s.selfBoxSig,
 		ObservedAddress:        observedAddr,
 		Challenge:              challenge,
-		Capabilities:           localCapabilities(),
+		Capabilities:           localCapabilityStrings(),
 	}
 }
 
@@ -1386,13 +1442,13 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
 	// addresses are excluded to avoid leaking private network topology.
-	if addr := peerListenAddress(state.Hello); addr != "" && classifyAddress(addr) != NetGroupLocal {
+	if addr := peerListenAddress(state.Hello); addr != "" && classifyAddress(domain.PeerAddress(addr)) != domain.NetGroupLocal {
 		go s.announcePeerToSessions(addr, state.Hello.NodeType)
 	}
 
 	if addr := s.inboundPeerAddress(conn); addr != "" {
-		s.addPeerID(addr, state.Hello.Address)
-		s.trackInboundConnect(conn, addr, state.Hello.Address)
+		s.addPeerID(addr, domain.PeerIdentity(state.Hello.Address))
+		s.trackInboundConnect(conn, addr, domain.PeerIdentity(state.Hello.Address))
 		s.addPeerVersion(addr, state.Hello.ClientVersion)
 		s.addPeerBuild(addr, state.Hello.ClientBuild)
 	}
@@ -1420,17 +1476,27 @@ func (s *Service) clearConnAuth(conn net.Conn) {
 // rememberConnPeerAddr stores info from the peer's hello frame so that
 // later frames on this connection can look up the overlay identity and
 // self-declared reachable networks without relying on conn.RemoteAddr().
+//
+// The identity field stores the Ed25519 fingerprint (hello.Address) for
+// routing purposes. The address field stores the listen address for health
+// tracking. These are kept separate because a NATed peer's listen address
+// (e.g. 127.0.0.1:64646) is not a valid identity fingerprint.
 func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 	addr := strings.TrimSpace(hello.Listen)
 	if addr == "" {
 		addr = strings.TrimSpace(hello.Address)
 	}
+	ident := strings.TrimSpace(hello.Address)
+	s.mu.Lock()
+	cid := s.nextConnIDLocked()
 	info := &connPeerHello{
-		address:      addr,
-		networks:     parseNetGroups(hello.Networks),
+		address:      domain.PeerAddress(addr),
+		identity:     domain.PeerIdentity(ident),
+		connID:       cid,
+		lastActivity: time.Now().UTC(),
+		networks:     domain.ParseNetGroups(hello.Networks),
 		capabilities: intersectCapabilities(localCapabilities(), hello.Capabilities),
 	}
-	s.mu.Lock()
 	s.connPeerInfo[conn] = info
 	s.mu.Unlock()
 }
@@ -1438,7 +1504,7 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 // inboundPeerAddress returns the overlay address declared by the
 // remote peer during the hello handshake, or "" if no address is
 // known yet. The returned address is suitable for health tracking.
-func (s *Service) inboundPeerAddress(conn net.Conn) string {
+func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
 	s.mu.RLock()
 	info := s.connPeerInfo[conn]
 	s.mu.RUnlock()
@@ -1455,7 +1521,7 @@ func (s *Service) inboundPeerAddress(conn net.Conn) string {
 // has not been promoted, preventing unauthenticated connections from
 // creating or refreshing health entries — even if another legitimate
 // connection for the same address is already tracked.
-func (s *Service) trackedInboundPeerAddress(conn net.Conn) string {
+func (s *Service) trackedInboundPeerAddress(conn net.Conn) domain.PeerAddress {
 	s.mu.RLock()
 	_, tracked := s.inboundTracked[conn]
 	info := s.connPeerInfo[conn]
@@ -1472,7 +1538,7 @@ func (s *Service) trackedInboundPeerAddress(conn net.Conn) string {
 // connection for that address. peerIdentity is the Ed25519 fingerprint
 // from the hello/auth frame — used for routing table registration instead
 // of the transport address.
-func (s *Service) trackInboundConnect(conn net.Conn, address, peerIdentity string) {
+func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress, peerIdentity domain.PeerIdentity) {
 	s.mu.Lock()
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
@@ -1487,15 +1553,15 @@ func (s *Service) trackInboundConnect(conn net.Conn, address, peerIdentity strin
 	// Routing table: register direct peer using the identity fingerprint,
 	// not the transport address. The relay capability flag ensures only
 	// peers that can accept relay_message become direct routes.
-	s.onPeerSessionEstablished(peerIdentity, s.connHasCapability(conn, capMeshRelayV1))
+	s.onPeerSessionEstablished(peerIdentity, s.connHasCapability(conn, domain.CapMeshRelayV1))
 
 	// Send full table sync to the inbound peer (Phase 1.2: full sync on
 	// connect, symmetric with the outbound path).
 	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
-	if s.connHasCapability(conn, capMeshRoutingV1) && s.connHasCapability(conn, capMeshRelayV1) {
-		s.sendFullTableSyncToInbound(conn, address)
+	if s.connHasCapability(conn, domain.CapMeshRoutingV1) && s.connHasCapability(conn, domain.CapMeshRelayV1) {
+		s.sendFullTableSyncToInbound(conn, peerIdentity)
 	}
 }
 
@@ -1507,7 +1573,7 @@ func (s *Service) trackInboundConnect(conn net.Conn, address, peerIdentity strin
 // If trackInboundConnect was never called for this connection (e.g. auth
 // failed), the disconnect is silently ignored to avoid creating phantom
 // health entries for unauthenticated connections.
-func (s *Service) trackInboundDisconnect(conn net.Conn, address string) {
+func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddress) {
 	s.mu.Lock()
 	_, wasTracked := s.inboundTracked[conn]
 	delete(s.inboundTracked, conn)
@@ -1531,7 +1597,7 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address string) {
 	// inbound session closes. Uses the identity fingerprint, not transport
 	// address, to match what was passed to onPeerSessionEstablished.
 	if wasTracked {
-		s.onPeerSessionClosed(peerIdentity, s.connHasCapability(conn, capMeshRelayV1))
+		s.onPeerSessionClosed(peerIdentity, s.connHasCapability(conn, domain.CapMeshRelayV1))
 	}
 }
 
@@ -1547,7 +1613,7 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address string) {
 //  3. If we have no usable information, return nil (= no filtering, include
 //     all routable addresses).  This is the safe backward-compatible default
 //     for old clients that don't send "networks".
-func (s *Service) connPeerReachableGroups(conn net.Conn) map[NetGroup]struct{} {
+func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]struct{} {
 	s.mu.RLock()
 	info := s.connPeerInfo[conn]
 	s.mu.RUnlock()
@@ -1564,7 +1630,7 @@ func (s *Service) connPeerReachableGroups(conn net.Conn) map[NetGroup]struct{} {
 	// Infer from advertised address if it classifies to a known routable group.
 	if info.address != "" {
 		g := classifyAddress(info.address)
-		if g != NetGroupUnknown && g != NetGroupLocal {
+		if g != domain.NetGroupUnknown && g != domain.NetGroupLocal {
 			return peerReachableGroups(info.address)
 		}
 	}
@@ -1595,7 +1661,7 @@ const observedAddrConsensusThreshold = 2
 // regardless of how many address aliases it has.  When enough distinct peers
 // agree on the same public IP and it differs from our advertise address,
 // the node logs a NAT detection event.
-func (s *Service) recordObservedAddress(peerID, observedIP string) {
+func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP string) {
 	if peerID == "" || observedIP == "" {
 		return
 	}
@@ -1690,7 +1756,7 @@ func (s *Service) addBanScore(conn net.Conn, delta int) {
 // peers non-routable addresses (local, unknown) are always stripped —
 // they must never be relayed.  When remoteGroups is non-nil the result
 // is further narrowed to groups the remote peer can reach.
-func (s *Service) peersFrame(remoteGroups map[NetGroup]struct{}, localCaller bool) protocol.Frame {
+func (s *Service) peersFrame(remoteGroups map[domain.NetGroup]struct{}, localCaller bool) protocol.Frame {
 	peers := s.Peers()
 	addresses := make([]string, 0, len(peers))
 
@@ -1710,7 +1776,7 @@ func (s *Service) peersFrame(remoteGroups map[NetGroup]struct{}, localCaller boo
 				}
 			}
 		}
-		addresses = append(addresses, peer.Address)
+		addresses = append(addresses, string(peer.Address))
 	}
 	return protocol.Frame{
 		Type:  "peers",
@@ -2548,7 +2614,7 @@ func (s *Service) evictStalePeers() {
 			continue
 		}
 		// Never evict bootstrap peers.
-		if peerSource(peer.ID) == "bootstrap" {
+		if peer.Source == domain.PeerSourceBootstrap {
 			kept = append(kept, peer)
 			continue
 		}
@@ -2612,15 +2678,15 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 			}
 			// If runtime has a fresher NodeType (e.g. from a hello/welcome),
 			// prefer it over the persisted value.
-			if rt := string(s.peerTypes[peer.Address]); rt != "" {
+			if rt := s.peerTypes[peer.Address]; rt != "" {
 				entry.NodeType = rt
 			}
 		} else {
 			// New peer discovered at runtime — derive from live state.
 			entry = peerEntry{
 				Address:  peer.Address,
-				NodeType: string(s.peerTypes[peer.Address]),
-				Source:   peerSource(peer.ID),
+				NodeType: s.peerTypes[peer.Address],
+				Source:   peer.Source,
 				AddedAt:  &now,
 			}
 			// Store so that subsequent flushes are stable.
@@ -2639,22 +2705,28 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 			entry.ConsecutiveFailures = health.ConsecutiveFailures
 			entry.LastError = health.LastError
 			entry.Score = health.Score
+			if !health.BannedUntil.IsZero() {
+				t := health.BannedUntil
+				entry.BannedUntil = &t
+			}
 		}
-		entry.Network = classifyAddress(entry.Address).String()
+		entry.Network = classifyAddress(entry.Address)
 		entries = append(entries, entry)
 	}
 	return entries
 }
 
-// peerSource infers the source tag from the peer ID prefix.
-func peerSource(id string) string {
+// peerSource infers the source tag from a legacy peer ID prefix.
+// Kept for backward compatibility with peers.json files written before
+// the typed PeerSource migration. New code should read transport.Peer.Source directly.
+func peerSource(id string) domain.PeerSource {
 	switch {
 	case len(id) >= 9 && id[:9] == "bootstrap":
-		return "bootstrap"
+		return domain.PeerSourceBootstrap
 	case len(id) >= 9 && id[:9] == "persisted":
-		return "persisted"
+		return domain.PeerSourcePersisted
 	default:
-		return "peer_exchange"
+		return domain.PeerSourcePeerExchange
 	}
 }
 
@@ -2703,20 +2775,21 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 
 	// Outbound sessions.
 	for addr := range s.upstream {
-		if host, _, ok := splitHostPort(addr); ok {
+		if host, _, ok := splitHostPort(string(addr)); ok {
 			hosts[host] = struct{}{}
 		}
 	}
 
 	// Inbound connections — use the real transport-level remote IP.
-	// Skip connections whose peer health is stalled: these are zombie TCP
-	// sockets that survived an internet outage. Excluding them allows
-	// peerDialCandidates to attempt a fresh outbound connection to the
-	// same host, which is the fastest path to recovery.
+	// Skip connections that have not received any frame for longer than
+	// the stall threshold. Uses per-connection lastActivity instead of
+	// shared health state to avoid conflating NATed peers that advertise
+	// the same listen address.
+	now := time.Now().UTC()
+	stallThreshold := heartbeatInterval + pongStallTimeout
 	for conn := range s.inboundConns {
 		if info := s.connPeerInfo[conn]; info != nil {
-			resolved := s.resolveHealthAddress(info.address)
-			if h := s.health[resolved]; h != nil && s.computePeerStateLocked(h) == peerStateStalled {
+			if !info.lastActivity.IsZero() && now.Sub(info.lastActivity) >= stallThreshold {
 				continue
 			}
 		}
@@ -2730,8 +2803,8 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 
 // peerDialCandidate is a scored candidate for outgoing connection attempts.
 type peerDialCandidate struct {
-	address string // actual address to dial (may be a fallback port variant)
-	primary string // primary peer address in s.peers (health/score are tracked here)
+	address domain.PeerAddress // actual address to dial (may be a fallback port variant)
+	primary domain.PeerAddress // primary peer address in s.peers (health/score are tracked here)
 	score   int
 	index   int // insertion order for stable tie-breaking (preserves bootstrap-first ordering)
 }
@@ -2750,9 +2823,9 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 
 	now := time.Now()
 	var scored []peerDialCandidate
-	seen := make(map[string]struct{})
+	seen := make(map[domain.PeerAddress]struct{})
 	for _, peer := range s.peers {
-		primaryAddr := strings.TrimSpace(peer.Address)
+		primaryAddr := domain.PeerAddress(strings.TrimSpace(string(peer.Address)))
 
 		// Look up health/score/cooldown from the primary address — the one
 		// stored in s.peers and tracked by markPeerConnected/Disconnected.
@@ -2763,6 +2836,11 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 		peerScore := 0
 		if primaryHealth != nil {
 			peerScore = primaryHealth.Score
+			// Temporary ban: skip the peer entirely until the ban expires.
+			// Applied when a peer runs an incompatible protocol version.
+			if !primaryHealth.BannedUntil.IsZero() && now.Before(primaryHealth.BannedUntil) {
+				continue
+			}
 			// Exponential cooldown: skip ALL dial variants for this peer
 			// while the backoff window is active.  A single failure does
 			// NOT trigger cooldown — the peer gets an immediate retry
@@ -2792,7 +2870,7 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 			// (outbound or inbound). The goal is fault tolerance
 			// across distinct hosts, not accumulating multiple
 			// connections to the same IP.
-			if host, _, ok := splitHostPort(address); ok {
+			if host, _, ok := splitHostPort(string(address)); ok {
 				if _, connected := connectedHosts[host]; connected {
 					continue
 				}
@@ -2840,10 +2918,10 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 // syncPeerSession → peerSessionRequest on the same inboxCh, consuming
 // frames meant for the outer caller and causing a 12-second stall
 // (peerRequestTimeout).
-func (s *Service) syncPeer(ctx context.Context, address string) int {
+func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress) int {
 	conn, err := s.dialPeer(ctx, address, syncHandshakeTimeout)
 	if err != nil {
-		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_dial_failed")
+		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_dial_failed")
 		return 0
 	}
 	defer func() { _ = conn.Close() }()
@@ -2852,17 +2930,17 @@ func (s *Service) syncPeer(ctx context.Context, address string) int {
 	reader := bufio.NewReader(conn)
 
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_hello_write_failed")
+		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_hello_write_failed")
 		return 0
 	}
 	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
 	if err != nil {
-		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_welcome_read_failed")
+		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_read_failed")
 		return 0
 	}
 	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
 	if err != nil {
-		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_welcome_parse_failed")
+		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_parse_failed")
 		return 0
 	}
 	if strings.TrimSpace(welcome.Challenge) != "" {
@@ -2872,11 +2950,11 @@ func (s *Service) syncPeer(ctx context.Context, address string) int {
 			Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
 		})
 		if err != nil {
-			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_marshal_failed")
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_marshal_failed")
 			return 0
 		}
 		if _, err := io.WriteString(conn, authLine); err != nil {
-			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_write_failed")
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_write_failed")
 			return 0
 		}
 		// After auth_session the remote may interleave non-auth frames
@@ -2887,21 +2965,21 @@ func (s *Service) syncPeer(ctx context.Context, address string) int {
 		for skipped := 0; skipped < 5; skipped++ {
 			authReply, err := readFrameLine(reader, maxResponseLineBytes)
 			if err != nil {
-				log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_read_failed")
+				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_read_failed")
 				return 0
 			}
 			frame, err = protocol.ParseFrameLine(strings.TrimSpace(authReply))
 			if err != nil {
-				log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_parse_failed")
+				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_parse_failed")
 				return 0
 			}
 			if frame.Type == "auth_ok" || frame.Type == "error" {
 				break
 			}
-			log.Debug().Str("peer", address).Str("type", frame.Type).Int("skipped", skipped+1).Msg("sync_peer_auth_skip_interleaved_frame")
+			log.Debug().Str("peer", string(address)).Str("type", frame.Type).Int("skipped", skipped+1).Msg("sync_peer_auth_skip_interleaved_frame")
 		}
 		if frame.Type != "auth_ok" {
-			log.Warn().Str("peer", address).Str("type", frame.Type).Str("code", frame.Code).Msg("sync_peer_auth_rejected")
+			log.Warn().Str("peer", string(address)).Str("type", frame.Type).Str("code", frame.Code).Msg("sync_peer_auth_rejected")
 			return 0
 		}
 	}
@@ -2914,18 +2992,18 @@ func (s *Service) syncPeer(ctx context.Context, address string) int {
 
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
 		if _, err := io.WriteString(conn, line); err != nil {
-			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_get_peers_failed")
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_failed")
 			return 0
 		}
 		reply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
-			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_get_peers_read_failed")
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_read_failed")
 			return 0
 		}
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
 		if err == nil {
 			for _, peer := range frame.Peers {
-				s.addPeerAddress(peer, "", "")
+				s.addPeerAddress(domain.PeerAddress(peer), "", "")
 			}
 		}
 	} else {
@@ -2935,17 +3013,17 @@ func (s *Service) syncPeer(ctx context.Context, address string) int {
 	imported := 0
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "fetch_contacts"}); err == nil {
 		if _, err := io.WriteString(conn, line); err != nil {
-			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_fetch_contacts_failed")
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_fetch_contacts_failed")
 			return 0
 		}
 		contactsReply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
-			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_contacts_read_failed")
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_contacts_read_failed")
 			return 0
 		}
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(contactsReply))
 		if err != nil {
-			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_contacts_parse_failed")
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_contacts_parse_failed")
 			return 0
 		}
 		for _, contact := range frame.Contacts {
@@ -2965,14 +3043,14 @@ func (s *Service) syncPeer(ctx context.Context, address string) int {
 	}
 
 	if imported > 0 {
-		log.Info().Str("peer", address).Int("imported", imported).Msg("sync_peer_contacts_imported")
+		log.Info().Str("peer", string(address)).Int("imported", imported).Msg("sync_peer_contacts_imported")
 	} else {
-		log.Warn().Str("peer", address).Msg("sync_peer_no_new_contacts")
+		log.Warn().Str("peer", string(address)).Msg("sync_peer_no_new_contacts")
 	}
 	return imported
 }
 
-func (s *Service) runPeerSession(ctx context.Context, address string) {
+func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress) {
 	defer crashlog.DeferRecover()
 	for {
 		select {
@@ -2992,7 +3070,7 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 			// The hasRelayCap flag must match what was passed to
 			// onPeerSessionEstablished for balanced accounting.
 			if closedSession != nil && closedSession.peerIdentity != "" {
-				hadRelay := sessionHasCap(closedSession.capabilities, capMeshRelayV1)
+				hadRelay := sessionHasCap(closedSession.capabilities, domain.CapMeshRelayV1)
 				s.onPeerSessionClosed(closedSession.peerIdentity, hadRelay)
 			}
 			// servePeerSession calls markPeerDisconnected before
@@ -3010,6 +3088,16 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 			} else {
 				s.markPeerDisconnected(address, err)
 			}
+
+			// Incompatible protocol — no point retrying until the peer
+			// upgrades.  Exit the loop; peerDialCandidates will re-try
+			// this peer after cooldown expires (exponential backoff via
+			// ConsecutiveFailures) so it gets another chance eventually.
+			if errors.Is(err, errIncompatibleProtocol) {
+				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_incompatible_protocol")
+				return
+			}
+
 			select {
 			case <-ctx.Done():
 				return
@@ -3021,7 +3109,7 @@ func (s *Service) runPeerSession(ctx context.Context, address string) {
 	}
 }
 
-func (s *Service) openPeerSession(ctx context.Context, address string) (bool, error) {
+func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddress) (bool, error) {
 	rawConn, err := s.dialPeer(ctx, address, dialTimeout)
 	if err != nil {
 		return false, err
@@ -3040,13 +3128,18 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	reader := bufio.NewReader(conn)
+	s.mu.Lock()
+	cid := s.nextConnIDLocked()
+	s.mu.Unlock()
 	session := &peerSession{
-		address: address,
-		conn:    conn,
-		metered: conn,
-		sendCh:  make(chan protocol.Frame, 64),
-		inboxCh: make(chan protocol.Frame, 64),
-		errCh:   make(chan error, 1),
+		address:      address,
+		peerIdentity: "",
+		connID:       cid,
+		conn:         conn,
+		metered:      conn,
+		sendCh:       make(chan protocol.Frame, 64),
+		inboxCh:      make(chan protocol.Frame, 64),
+		errCh:        make(chan error, 1),
 	}
 	go s.readPeerSession(reader, session)
 
@@ -3054,8 +3147,13 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	if err != nil {
 		return false, err
 	}
+	if err := validateProtocolHandshake(welcome); err != nil {
+		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
+		s.penalizeOldProtocolPeer(address)
+		return false, fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
+	}
 	session.version = welcome.Version
-	session.peerIdentity = welcome.Address
+	session.peerIdentity = domain.PeerIdentity(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
 	s.learnIdentityFromWelcome(welcome)
 	// learnIdentityFromWelcome stores version/build keyed by the normalized
@@ -3073,7 +3171,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	}
 	// Record observed address only after authentication succeeds so that
 	// an unauthenticated responder cannot influence NAT consensus.
-	s.recordObservedAddress(welcome.Address, welcome.ObservedAddress)
+	s.recordObservedAddress(domain.PeerIdentity(welcome.Address), welcome.ObservedAddress)
 	s.mu.Lock()
 	s.sessions[address] = session
 	s.mu.Unlock()
@@ -3088,7 +3186,7 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 		return true, err
 	}
 	_ = conn.SetDeadline(time.Time{})
-	log.Info().Str("peer", address).Str("recipient", s.identity.Address).Msg("upstream subscription established")
+	log.Info().Str("peer", string(address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 
 	if err := s.syncPeerSession(session); err != nil {
 		return true, err
@@ -3099,19 +3197,19 @@ func (s *Service) openPeerSession(ctx context.Context, address string) (bool, er
 	// Routing table: register direct peer. The relay capability flag
 	// ensures only peers that can accept relay_message become direct
 	// routes — see onPeerSessionEstablished for the full rationale.
-	s.onPeerSessionEstablished(session.peerIdentity, s.sessionHasCapability(address, capMeshRelayV1))
+	s.onPeerSessionEstablished(session.peerIdentity, s.sessionHasCapability(address, domain.CapMeshRelayV1))
 
 	// Send full table sync to the new peer (Phase 1.2: full sync on connect).
 	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
-	if session.peerIdentity != "" && s.sessionHasCapability(address, capMeshRoutingV1) && s.sessionHasCapability(address, capMeshRelayV1) {
+	if session.peerIdentity != "" && s.sessionHasCapability(address, domain.CapMeshRoutingV1) && s.sessionHasCapability(address, domain.CapMeshRelayV1) {
 		routes := s.routingTable.AnnounceTo(session.peerIdentity)
 		if len(routes) > 0 {
 			if !s.SendAnnounceRoutes(address, routes) {
 				log.Warn().
-					Str("peer", session.peerIdentity).
-					Str("address", address).
+					Str("peer", string(session.peerIdentity)).
+					Str("address", string(address)).
 					Int("routes", len(routes)).
 					Msg("routing_outbound_full_sync_failed")
 			}
@@ -3130,7 +3228,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		case <-ctx.Done():
 			return nil
 		case err := <-session.errCh:
-			log.Info().Str("peer", session.address).Str("recipient", s.identity.Address).Err(err).Msg("upstream subscription closed")
+			log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("upstream subscription closed")
 			s.markPeerDisconnected(session.address, err)
 			return err
 		case frame := <-session.inboxCh:
@@ -3138,7 +3236,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			s.handlePeerSessionFrame(session.address, frame)
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
-				log.Warn().Str("peer", session.address).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
+				log.Warn().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
 				s.markPeerDisconnected(session.address, err)
 				return err
 			}
@@ -3156,14 +3254,14 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
 				s.markPeerWrite(session.address, outbound)
 				if _, writeErr := io.WriteString(session.conn, line); writeErr != nil {
-					log.Warn().Str("peer", session.address).Str("type", outbound.Type).Err(writeErr).Msg("fire_and_forget_write_failed")
+					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Err(writeErr).Msg("fire_and_forget_write_failed")
 					_ = session.conn.SetWriteDeadline(time.Time{})
 					s.markPeerDisconnected(session.address, writeErr)
 					return writeErr
 				}
 				_ = session.conn.SetWriteDeadline(time.Time{})
 			} else if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
-				log.Error().Str("peer", session.address).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
+				log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
 				s.markPeerDisconnected(session.address, err)
 				return err
 			}
@@ -3198,7 +3296,7 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 // executeGossipTargets sends a message to pre-computed gossip targets from a
 // RoutingDecision. The target list is provided by the Router — targets are not
 // recomputed here.
-func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []string) {
+func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.PeerAddress) {
 	defer crashlog.DeferRecover()
 	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) {
@@ -3208,32 +3306,32 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []string) 
 	}
 }
 
-func (s *Service) routingTargets() []string {
-	return s.routingTargetsFiltered(func(_ string, peerType config.NodeType, _ string) bool {
-		return peerType != config.NodeTypeClient
+func (s *Service) routingTargets() []domain.PeerAddress {
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, _ domain.PeerIdentity) bool {
+		return !peerType.IsClient()
 	})
 }
 
-func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []string {
+func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerAddress {
 	if msg.Topic != "dm" || msg.Recipient == "*" {
 		return s.routingTargets()
 	}
-	return s.routingTargetsFiltered(func(_ string, peerType config.NodeType, peerID string) bool {
-		return peerType != config.NodeTypeClient || peerID == msg.Recipient
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool {
+		return !peerType.IsClient() || string(peerID) == msg.Recipient
 	})
 }
 
-func (s *Service) routingTargetsForRecipient(recipient string) []string {
-	return s.routingTargetsFiltered(func(_ string, peerType config.NodeType, peerID string) bool {
-		return peerType != config.NodeTypeClient || peerID == recipient
+func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddress {
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool {
+		return !peerType.IsClient() || string(peerID) == recipient
 	})
 }
 
-func (s *Service) routingTargetsFiltered(allow func(address string, peerType config.NodeType, peerID string) bool) []string {
+func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool) []domain.PeerAddress {
 	s.mu.RLock()
 	if len(s.sessions) > 0 {
 		type scoredTarget struct {
-			address string
+			address domain.PeerAddress
 			score   int64
 		}
 		scored := make([]scoredTarget, 0, len(s.sessions))
@@ -3263,12 +3361,12 @@ func (s *Service) routingTargetsFiltered(allow func(address string, peerType con
 			s.mu.RUnlock()
 			sort.Slice(scored, func(i, j int) bool {
 				if scored[i].score == scored[j].score {
-					return scored[i].address < scored[j].address
+					return string(scored[i].address) < string(scored[j].address)
 				}
 				return scored[i].score > scored[j].score
 			})
 			limit := min(3, len(scored))
-			targets := make([]string, 0, limit)
+			targets := make([]domain.PeerAddress, 0, limit)
 			for _, item := range scored[:limit] {
 				targets = append(targets, item.address)
 			}
@@ -3277,18 +3375,19 @@ func (s *Service) routingTargetsFiltered(allow func(address string, peerType con
 	}
 	s.mu.RUnlock()
 
-	targets := make([]string, 0, len(s.Peers()))
+	targets := make([]domain.PeerAddress, 0, len(s.Peers()))
 	for _, peer := range s.Peers() {
-		address := peer.Address
-		if address == "" || s.isSelfAddress(address) {
+		if peer.Address == "" || s.isSelfAddress(peer.Address) {
 			continue
 		}
-		if !allow(address, s.peerTypeForAddress(address), s.peerIdentityForAddress(address)) {
+		if !allow(peer.Address, s.peerTypeForAddress(peer.Address), s.peerIdentityForAddress(peer.Address)) {
 			continue
 		}
-		targets = append(targets, address)
+		targets = append(targets, peer.Address)
 	}
-	sort.Strings(targets)
+	sort.Slice(targets, func(i, j int) bool {
+		return string(targets[i]) < string(targets[j])
+	})
 	return targets
 }
 
@@ -3513,7 +3612,7 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 	return protocol.Frame{Type: "notices", Count: len(items), Notices: items}
 }
 
-func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
+func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Envelope) {
 	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
 		Type:       "send_message",
@@ -3528,15 +3627,15 @@ func (s *Service) sendMessageToPeer(address string, msg protocol.Envelope) {
 	}
 	if s.enqueuePeerFrame(address, frame) {
 		s.clearOutboundQueued(frame.ID)
-		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", address).Str("mode", "session").Msg("route_message_attempt")
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "session").Msg("route_message_attempt")
 		return
 	}
 	if s.queuePeerFrame(address, frame) {
-		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", address).Str("mode", "queued").Msg("route_message_attempt")
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "queued").Msg("route_message_attempt")
 		return
 	}
 	s.markOutboundTerminal(frame, "failed", "unable to queue outbound frame")
-	log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", address).Str("mode", "dropped").Msg("route_message_attempt")
+	log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "dropped").Msg("route_message_attempt")
 }
 
 func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
@@ -3549,7 +3648,7 @@ func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
 	}
 }
 
-func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext string) {
+func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration, ciphertext string) {
 	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
 		Type:       "publish_notice",
@@ -3560,7 +3659,7 @@ func (s *Service) sendNoticeToPeer(address string, ttl time.Duration, ciphertext
 		return
 	}
 
-	conn, err := net.DialTimeout("tcp", address, syncHandshakeTimeout)
+	conn, err := net.DialTimeout("tcp", string(address), syncHandshakeTimeout)
 	if err != nil {
 		return
 	}
@@ -3623,7 +3722,7 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 	}
 }
 
-func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryReceipt) bool {
+func (s *Service) sendReceiptToPeer(address domain.PeerAddress, receipt protocol.DeliveryReceipt) bool {
 	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
 		Type:        "send_delivery_receipt",
@@ -3634,14 +3733,14 @@ func (s *Service) sendReceiptToPeer(address string, receipt protocol.DeliveryRec
 		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
 	}
 	if s.enqueuePeerFrame(address, frame) {
-		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "session").Str("status", receipt.Status).Msg("route_receipt_attempt")
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "session").Str("status", receipt.Status).Msg("route_receipt_attempt")
 		return true
 	}
 	if s.queuePeerFrame(address, frame) {
-		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "queued").Str("status", receipt.Status).Msg("route_receipt_attempt")
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "queued").Str("status", receipt.Status).Msg("route_receipt_attempt")
 		return true
 	}
-	log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", address).Str("mode", "dropped").Str("status", receipt.Status).Msg("route_receipt_attempt")
+	log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "dropped").Str("status", receipt.Status).Msg("route_receipt_attempt")
 	return false
 }
 
@@ -3665,7 +3764,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
 		BoxSig:        s.selfBoxSig,
-		Capabilities:  localCapabilities(),
+		Capabilities:  localCapabilityStrings(),
 	})
 	if err != nil {
 		return ""
@@ -3675,15 +3774,15 @@ func (s *Service) nodeHelloJSONLine() string {
 
 func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
-		if normalized, ok := s.normalizePeerAddress(observedAddr, frame.Listen); ok {
+		if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(frame.Listen)); ok {
 			// Use promotePeerAddress: this is a direct hello from the peer
 			// itself, so its self-reported node_type is authoritative and
 			// must overwrite any earlier value (which could have come from
 			// an unauthenticated announce_peer with a wrong type).
-			s.promotePeerAddress(normalized, frame.NodeType)
-			s.addPeerID(normalized, frame.Address)
-			s.addPeerVersion(normalized, frame.ClientVersion)
-			s.addPeerBuild(normalized, frame.ClientBuild)
+			s.promotePeerAddress(normalizedAddr, frame.NodeType)
+			s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
+			s.addPeerVersion(normalizedAddr, frame.ClientVersion)
+			s.addPeerBuild(normalizedAddr, frame.ClientBuild)
 		}
 	}
 	if frame.Address != "" {
@@ -3761,13 +3860,13 @@ func (s *Service) announcePeerToSessions(peerAddress, nodeType string) {
 
 func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
-		if normalized, ok := s.normalizePeerAddress(frame.Listen, frame.Listen); ok {
+		if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(frame.Listen), domain.PeerAddress(frame.Listen)); ok {
 			// Same as learnPeerFromFrame: the welcome is a direct response
 			// from the peer, so its node_type is authoritative.
-			s.promotePeerAddress(normalized, frame.NodeType)
-			s.addPeerID(normalized, frame.Address)
-			s.addPeerVersion(normalized, frame.ClientVersion)
-			s.addPeerBuild(normalized, frame.ClientBuild)
+			s.promotePeerAddress(normalizedAddr, frame.NodeType)
+			s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
+			s.addPeerVersion(normalizedAddr, frame.ClientVersion)
+			s.addPeerBuild(normalizedAddr, frame.ClientBuild)
 		}
 	}
 	if frame.Address != "" {
@@ -3830,14 +3929,15 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	// Apply the same validation as the network peer-exchange path so
 	// that manually added peers cannot bypass forbidden-IP, self-address,
 	// or unreachable-network checks.
-	if s.isSelfAddress(address) {
+	peerAddress := domain.PeerAddress(address)
+	if s.isSelfAddress(peerAddress) {
 		return protocol.Frame{Type: "error", Error: "cannot add self as peer"}
 	}
-	if s.shouldSkipDialAddress(address) {
+	if s.shouldSkipDialAddress(peerAddress) {
 		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in a forbidden IP range", address)}
 	}
-	if !s.canReach(address) {
-		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(address))}
+	if !s.canReach(peerAddress) {
+		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(peerAddress))}
 	}
 
 	s.mu.Lock()
@@ -3847,10 +3947,12 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	// If already known, move to front and update source to manual.
 	found := false
 	for i, peer := range s.peers {
-		if peer.Address == address {
+		if peer.Address == peerAddress {
+			s.peers[i].Source = domain.PeerSourceManual
 			if i > 0 {
 				copy(s.peers[1:i+1], s.peers[:i])
 				s.peers[0] = peer
+				s.peers[0].Source = domain.PeerSourceManual
 			}
 			found = true
 			break
@@ -3861,29 +3963,32 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 		s.peers = append(s.peers, transport.Peer{})
 		copy(s.peers[1:], s.peers[:len(s.peers)-1])
 		s.peers[0] = transport.Peer{
-			ID:      fmt.Sprintf("manual-%d", now.UnixMilli()),
-			Address: address,
+			Address: peerAddress,
+			Source:  domain.PeerSourceManual,
 		}
-		s.peerTypes[address] = config.NodeTypeFull
+		s.peerTypes[peerAddress] = domain.NodeTypeFull
 	}
 
 	// Always stamp source as manual — whether the peer is new or was
 	// previously discovered via bootstrap/peer_exchange.
-	if pm := s.persistedMeta[address]; pm != nil {
-		pm.Source = "manual"
+	if pm := s.persistedMeta[peerAddress]; pm != nil {
+		pm.Source = domain.PeerSourceManual
 	} else {
-		s.persistedMeta[address] = &peerEntry{
-			Address:  address,
-			NodeType: string(config.NodeTypeFull),
-			Source:   "manual",
+		s.persistedMeta[peerAddress] = &peerEntry{
+			Address:  peerAddress,
+			NodeType: domain.NodeTypeFull,
+			Source:   domain.PeerSourceManual,
 			AddedAt:  &now,
 		}
 	}
 
-	// Reset cooldown so the peer is dialled immediately.
-	if h := s.health[address]; h != nil {
+	// Reset cooldown and ban so the peer is dialled immediately.
+	// A manual add_peer is an explicit operator action that overrides
+	// any automated penalty (incompatible protocol, exponential backoff).
+	if h := s.health[peerAddress]; h != nil {
 		h.ConsecutiveFailures = 0
 		h.LastDisconnectedAt = time.Time{}
+		h.BannedUntil = time.Time{}
 	}
 
 	s.mu.Unlock()
@@ -3891,16 +3996,20 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	// Flush immediately so the manual peer survives a crash.
 	s.flushPeerState()
 
-	log.Info().Str("address", address).Str("network", classifyAddress(address).String()).Str("queued", "first").Msg("add_peer")
+	action := "added"
+	if found {
+		action = "already known, moved to front"
+	}
+	log.Info().Str("address", address).Str("network", classifyAddress(peerAddress).String()).Str("action", action).Msg("add_peer")
 
 	return protocol.Frame{
 		Type:   "ok",
 		Peers:  []string{address},
-		Status: fmt.Sprintf("peer %s added (network: %s)", address, classifyAddress(address)),
+		Status: fmt.Sprintf("peer %s %s (network: %s)", address, action, classifyAddress(domain.PeerAddress(address))),
 	}
 }
 
-func (s *Service) addPeerAddress(address string, nodeType string, peerID string) {
+func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, peerID domain.PeerIdentity) {
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return
 	}
@@ -3923,8 +4032,8 @@ func (s *Service) addPeerAddress(address string, nodeType string, peerID string)
 	}
 
 	s.peers = append(s.peers, transport.Peer{
-		ID:      fmt.Sprintf("peer-%d", len(s.peers)),
 		Address: address,
+		Source:  domain.PeerSourcePeerExchange,
 	})
 	s.peerTypes[address] = normalizePeerNodeType(nodeType)
 	if peerID != "" {
@@ -3936,8 +4045,8 @@ func (s *Service) addPeerAddress(address string, nodeType string, peerID string)
 		now := time.Now().UTC()
 		s.persistedMeta[address] = &peerEntry{
 			Address:  address,
-			NodeType: string(normalizePeerNodeType(nodeType)),
-			Source:   "peer_exchange",
+			NodeType: normalizePeerNodeType(nodeType),
+			Source:   domain.PeerSourcePeerExchange,
 			AddedAt:  &now,
 		}
 	}
@@ -3952,7 +4061,7 @@ func (s *Service) addPeerAddress(address string, nodeType string, peerID string)
 // peers control dial priority would allow an attacker to flood the list
 // with fake addresses and push real peers down. The dial order is managed
 // solely by the local bootstrap/health logic.
-func (s *Service) promotePeerAddress(address, nodeType string) {
+func (s *Service) promotePeerAddress(address domain.PeerAddress, nodeType string) {
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return
 	}
@@ -3973,14 +4082,14 @@ func (s *Service) promotePeerAddress(address, nodeType string) {
 	if !found {
 		now := time.Now().UTC()
 		s.peers = append(s.peers, transport.Peer{
-			ID:      fmt.Sprintf("peer-%d", now.UnixMilli()),
 			Address: address,
+			Source:  domain.PeerSourceAnnounce,
 		})
 		if _, ok := s.persistedMeta[address]; !ok {
 			s.persistedMeta[address] = &peerEntry{
 				Address:  address,
-				NodeType: string(peerType),
-				Source:   "announce",
+				NodeType: peerType,
+				Source:   domain.PeerSourceAnnounce,
 				AddedAt:  &now,
 			}
 		}
@@ -3996,6 +4105,7 @@ func (s *Service) promotePeerAddress(address, nodeType string) {
 	if h := s.health[healthAddr]; h != nil {
 		h.ConsecutiveFailures = 0
 		h.LastDisconnectedAt = time.Time{}
+		h.BannedUntil = time.Time{}
 	}
 	// Also reset the direct address entry if it differs from primary
 	// (the announced address itself may have accumulated failures).
@@ -4003,13 +4113,14 @@ func (s *Service) promotePeerAddress(address, nodeType string) {
 		if h := s.health[address]; h != nil {
 			h.ConsecutiveFailures = 0
 			h.LastDisconnectedAt = time.Time{}
+			h.BannedUntil = time.Time{}
 		}
 	}
 }
 
 // addPeerID associates a peer identity (fingerprint) with a dial address.
 // Safe to call multiple times; empty values are ignored.
-func (s *Service) addPeerID(address, peerID string) {
+func (s *Service) addPeerID(address domain.PeerAddress, peerID domain.PeerIdentity) {
 	if address == "" || peerID == "" {
 		return
 	}
@@ -4018,8 +4129,8 @@ func (s *Service) addPeerID(address, peerID string) {
 	s.mu.Unlock()
 }
 
-func (s *Service) addPeerVersion(address, clientVersion string) {
-	address = strings.TrimSpace(address)
+func (s *Service) addPeerVersion(address domain.PeerAddress, clientVersion string) {
+	address = domain.PeerAddress(strings.TrimSpace(string(address)))
 	clientVersion = strings.TrimSpace(clientVersion)
 	if address == "" || clientVersion == "" {
 		return
@@ -4030,8 +4141,8 @@ func (s *Service) addPeerVersion(address, clientVersion string) {
 	s.mu.Unlock()
 }
 
-func (s *Service) addPeerBuild(address string, build int) {
-	address = strings.TrimSpace(address)
+func (s *Service) addPeerBuild(address domain.PeerAddress, build int) {
+	address = domain.PeerAddress(strings.TrimSpace(string(address)))
 	if address == "" || build == 0 {
 		return
 	}
@@ -4041,45 +4152,39 @@ func (s *Service) addPeerBuild(address string, build int) {
 	s.mu.Unlock()
 }
 
-func normalizePeerNodeType(raw string) config.NodeType {
-	switch strings.TrimSpace(raw) {
-	case string(config.NodeTypeClient):
-		return config.NodeTypeClient
-	default:
-		return config.NodeTypeFull
+func normalizePeerNodeType(raw string) domain.NodeType {
+	if t, ok := domain.ParseNodeType(raw); ok {
+		return t
 	}
+	return domain.NodeTypeFull
 }
 
 // isKnownNodeType returns true if the node type is one we recognize and can
 // work with. Unknown types from future protocol versions are rejected so we
 // don't add peers we cannot meaningfully interact with.
 func isKnownNodeType(raw string) bool {
-	switch strings.TrimSpace(raw) {
-	case string(config.NodeTypeFull), string(config.NodeTypeClient):
-		return true
-	default:
-		return false
-	}
+	_, ok := domain.ParseNodeType(raw)
+	return ok
 }
 
-func (s *Service) peerTypeForAddress(address string) config.NodeType {
+func (s *Service) peerTypeForAddress(address domain.PeerAddress) domain.NodeType {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.peerTypeForAddressLocked(address)
 }
 
-func (s *Service) peerTypeForAddressLocked(address string) config.NodeType {
+func (s *Service) peerTypeForAddressLocked(address domain.PeerAddress) domain.NodeType {
 	if peerType, ok := s.peerTypes[address]; ok {
 		return peerType
 	}
-	return config.NodeTypeFull
+	return domain.NodeTypeFull
 }
 
-func (s *Service) peerIsClientNode(address string) bool {
-	return s.peerTypeForAddress(address) == config.NodeTypeClient
+func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
+	return s.peerTypeForAddress(address).IsClient()
 }
 
-func (s *Service) peerIdentityForAddress(address string) string {
+func (s *Service) peerIdentityForAddress(address domain.PeerAddress) domain.PeerIdentity {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.peerIDs[address]
@@ -4281,7 +4386,7 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 		return err
 	}
 	for _, peer := range peersFrame.Peers {
-		s.addPeerAddress(peer, "", "")
+		s.addPeerAddress(domain.PeerAddress(peer), "", "")
 	}
 
 	_, err = s.syncContactsViaSession(session)
@@ -4332,16 +4437,16 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 // session is currently inside a peerSessionRequest read loop (e.g.,
 // handlePeerSessionFrame dispatched during a ping), because the
 // single-reader constraint on inboxCh would cause a deadlock.
-func (s *Service) syncSenderKeys(senderAddress string, syncSession *peerSession) int {
+func (s *Service) syncSenderKeys(senderAddress domain.PeerAddress, syncSession *peerSession) int {
 	if syncSession != nil {
 		imported, err := s.syncContactsViaSession(syncSession)
 		if err == nil {
 			if imported > 0 {
-				log.Info().Str("peer", senderAddress).Int("imported", imported).Msg("sync_sender_keys_via_session")
+				log.Info().Str("peer", string(senderAddress)).Int("imported", imported).Msg("sync_sender_keys_via_session")
 			}
 			return imported
 		}
-		log.Warn().Err(err).Str("peer", senderAddress).Msg("sync_sender_keys_session_failed")
+		log.Warn().Err(err).Str("peer", string(senderAddress)).Msg("sync_sender_keys_session_failed")
 	}
 
 	// Fall back to a fresh TCP connection.
@@ -4350,7 +4455,7 @@ func (s *Service) syncSenderKeys(senderAddress string, syncSession *peerSession)
 	return s.syncPeer(ctx, senderAddress)
 }
 
-func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
+func (s *Service) handlePeerSessionFrame(address domain.PeerAddress, frame protocol.Frame) {
 	s.markPeerUsefulReceive(address)
 	switch frame.Type {
 	case "push_message":
@@ -4387,9 +4492,9 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		if stored {
 			s.sendAckDeleteToPeer(address, "dm", msg.ID, "")
 		} else {
-			log.Warn().Str("peer", address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete")
+			log.Warn().Str("peer", string(address)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete")
 		}
-		log.Info().Str("peer", address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message")
+		log.Info().Str("peer", string(address)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message")
 	case "push_delivery_receipt":
 		if frame.Receipt == nil {
 			return
@@ -4400,7 +4505,7 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		}
 		s.storeDeliveryReceipt(receipt)
 		s.sendAckDeleteToPeer(address, "receipt", receipt.MessageID, receipt.Status)
-		log.Info().Str("peer", address).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
+		log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
 	case "request_inbox":
 		s.mu.RLock()
 		session := s.sessions[address]
@@ -4427,14 +4532,14 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 			peers = peers[:maxAnnouncePeers]
 		}
 		for _, peer := range peers {
-			if peer == "" || classifyAddress(peer) == NetGroupLocal {
+			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
-			s.promotePeerAddress(peer, nodeType)
-			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", address).Msg("learned peer from announce")
+			s.promotePeerAddress(domain.PeerAddress(peer), nodeType)
+			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", string(address)).Msg("learned peer from announce")
 		}
 	case "relay_message":
-		if admit := admitRelayFrame(s.sessionHasCapability(address, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.sessionHasCapability(address, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
 		// Pass nil for syncSession: this handler may be dispatched from
@@ -4442,21 +4547,21 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		// a ping round-trip). Reusing the same session would deadlock on
 		// the single-reader inboxCh. syncSenderKeys falls back to a
 		// fresh TCP connection for key sync.
-		if ackStatus := s.handleRelayMessage(address, nil, frame); ackStatus != "" {
-			s.sendRelayHopAck(address, frame.ID, ackStatus)
+		if ackStatus := s.handleRelayMessage(domain.PeerAddress(address), nil, frame); ackStatus != "" {
+			s.sendRelayHopAck(domain.PeerAddress(address), frame.ID, ackStatus)
 		}
 	case "relay_hop_ack":
-		if admit := admitRelayFrame(s.sessionHasCapability(address, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.sessionHasCapability(address, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
-		s.handleRelayHopAck(address, frame)
+		s.handleRelayHopAck(domain.PeerAddress(address), frame)
 	case "announce_routes":
-		if !s.sessionHasCapability(address, capMeshRoutingV1) {
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
 			return
 		}
 		// Routing-only peer (no mesh_relay_v1) — routes through it are
 		// data-plane unusable. See inbound dispatch for full rationale.
-		if !s.sessionHasCapability(address, capMeshRelayV1) {
+		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
 			return
 		}
 		s.mu.RLock()
@@ -4505,9 +4610,9 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 	if stored {
 		s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
 	} else {
-		log.Warn().Str("peer", peerAddr).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete_inbound")
+		log.Warn().Str("peer", string(peerAddr)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete_inbound")
 	}
-	log.Info().Str("peer", peerAddr).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message (inbound request_inbox)")
+	log.Info().Str("peer", string(peerAddr)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message (inbound request_inbox)")
 }
 
 // handleInboundPushDeliveryReceipt processes a push_delivery_receipt frame
@@ -4524,7 +4629,7 @@ func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol
 	s.storeDeliveryReceipt(receipt)
 	peerAddr := s.inboundPeerAddress(conn)
 	s.sendAckDeleteToPeer(peerAddr, "receipt", receipt.MessageID, receipt.Status)
-	log.Info().Str("peer", peerAddr).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound request_inbox)")
+	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound request_inbox)")
 }
 
 // respondToInboxRequest is called by the outbound session when the remote
@@ -4536,9 +4641,9 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 	if session == nil {
 		return
 	}
-	peerID := session.peerIdentity
+	peerID := string(session.peerIdentity)
 	if peerID == "" {
-		peerID = session.address
+		peerID = string(session.address)
 	}
 
 	inbox := s.fetchInboxFrame("dm", peerID)
@@ -4564,10 +4669,10 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 			Receipt:   &receiptFrame,
 		})
 	}
-	log.Info().Str("peer", session.address).Str("identity", peerID).Int("messages", len(inbox.Messages)).Int("receipts", len(receipts.Receipts)).Msg("responded to request_inbox")
+	log.Info().Str("peer", string(session.address)).Str("identity", peerID).Int("messages", len(inbox.Messages)).Int("receipts", len(receipts.Receipts)).Msg("responded to request_inbox")
 }
 
-func (s *Service) sendAckDeleteToPeer(address, ackType string, id protocol.MessageID, status string) {
+func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string, id protocol.MessageID, status string) {
 	session := s.peerSession(address)
 	if session == nil || !session.authOK {
 		return
@@ -4581,15 +4686,15 @@ func (s *Service) sendAckDeleteToPeer(address, ackType string, id protocol.Messa
 		Signature: identity.SignPayload(s.identity, ackDeletePayload(s.identity.Address, ackType, string(id), status)),
 	}
 	if s.enqueuePeerFrame(address, frame) {
-		log.Debug().Str("peer", address).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session").Msg("ack_delete_send")
+		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session").Msg("ack_delete_send")
 		return
 	}
 	if s.queuePeerFrame(address, frame) {
-		log.Debug().Str("peer", address).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
+		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
 	}
 }
 
-func (s *Service) markPeerConnected(address, direction string) {
+func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -4606,10 +4711,11 @@ func (s *Service) markPeerConnected(address, direction string) {
 	s.updatePeerStateLocked(health, peerStateHealthy)
 	health.LastError = ""
 	health.ConsecutiveFailures = 0
+	health.BannedUntil = time.Time{} // successful handshake proves compatibility
 	health.Score = clampScore(health.Score + peerScoreConnect)
 }
 
-func (s *Service) markPeerDisconnected(address string, err error) {
+func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -4633,10 +4739,27 @@ func (s *Service) markPeerDisconnected(address string, err error) {
 	}
 }
 
-func (s *Service) markPeerWrite(address string, frame protocol.Frame) {
+// penalizeOldProtocolPeer applies a heavy score penalty and a temporary ban
+// to a peer whose protocol version is below MinimumProtocolVersion. The ban
+// prevents the dial loop from retrying the peer for peerBanIncompatible
+// (24 h). After the ban expires the peer is retried — it may have upgraded.
+func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	address = s.resolveHealthAddress(address)
+	health := s.ensurePeerHealthLocked(address)
+	health.Score = clampScore(health.Score + peerScoreOldProtocol)
+	health.ConsecutiveFailures++
+	health.LastError = "protocol version too old"
+	bannedUntil := time.Now().UTC().Add(peerBanIncompatible)
+	health.BannedUntil = bannedUntil
+	log.Info().Str("peer", string(address)).Time("banned_until", bannedUntil).Msg("peer_banned_incompatible_protocol")
+}
+
+func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame) {
 	log.Debug().
 		Str("protocol", "json/tcp").
-		Str("addr", address).
+		Str("addr", string(address)).
 		Str("direction", "send").
 		Str("command", frame.Type).
 		Bool("accepted", true).
@@ -4656,11 +4779,11 @@ func (s *Service) markPeerWrite(address string, frame protocol.Frame) {
 	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
 }
 
-func (s *Service) markPeerRead(address string, frame protocol.Frame) {
+func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame) {
 	accepted := frame.Type != "error"
 	log.Debug().
 		Str("protocol", "json/tcp").
-		Str("addr", address).
+		Str("addr", string(address)).
 		Str("direction", "recv").
 		Str("command", frame.Type).
 		Bool("accepted", accepted).
@@ -4683,7 +4806,7 @@ func (s *Service) markPeerRead(address string, frame protocol.Frame) {
 	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
 }
 
-func (s *Service) markPeerUsefulReceive(address string) {
+func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -4694,7 +4817,7 @@ func (s *Service) markPeerUsefulReceive(address string) {
 
 // accumulateSessionTraffic adds byte counters from an outbound MeteredConn
 // to the peer's cumulative traffic totals. Called when a peer session closes.
-func (s *Service) accumulateSessionTraffic(address string, mc *MeteredConn) {
+func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *MeteredConn) {
 	sent := mc.BytesWritten()
 	received := mc.BytesRead()
 	if sent == 0 && received == 0 {
@@ -4749,7 +4872,27 @@ func (s *Service) accumulateInboundTraffic(mc *MeteredConn) {
 	health.BytesReceived += received
 }
 
-func (s *Service) ensurePeerHealthLocked(address string) *peerHealth {
+// nextConnIDLocked returns a monotonically increasing connection ID.
+// Must be called with s.mu held (write lock).
+func (s *Service) nextConnIDLocked() uint64 {
+	s.connIDCounter++
+	return s.connIDCounter
+}
+
+// inboundConnIDsLocked returns the connection IDs for all active inbound
+// connections that declared the given overlay address in their hello frame.
+// Must be called with s.mu held (read lock).
+func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
+	var ids []uint64
+	for _, info := range s.connPeerInfo {
+		if info != nil && info.address == address {
+			ids = append(ids, info.connID)
+		}
+	}
+	return ids
+}
+
+func (s *Service) ensurePeerHealthLocked(address domain.PeerAddress) *peerHealth {
 	health := s.health[address]
 	if health == nil {
 		health = &peerHealth{
@@ -4766,7 +4909,7 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 		return
 	}
 	if health.State != "" {
-		log.Info().Str("peer", health.Address).Str("from", health.State).Str("to", next).Int("pending", len(s.pending[health.Address])).Int("failures", health.ConsecutiveFailures).Msg("peer_state_change")
+		log.Info().Str("peer", string(health.Address)).Str("from", health.State).Str("to", next).Int("pending", len(s.pending[health.Address])).Int("failures", health.ConsecutiveFailures).Msg("peer_state_change")
 	}
 	health.State = next
 }
@@ -4777,7 +4920,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 
 	live := s.liveTrafficLocked()
 
-	seen := make(map[string]struct{}, len(s.health))
+	seen := make(map[domain.PeerAddress]struct{}, len(s.health))
 	items := make([]protocol.PeerHealthFrame, 0, len(s.health)+len(live))
 	for _, health := range s.health {
 		seen[health.Address] = struct{}{}
@@ -4788,10 +4931,10 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			recv += lv.received
 		}
 		phf := protocol.PeerHealthFrame{
-			Address:             health.Address,
-			PeerID:              s.peerIDs[health.Address],
+			Address:             string(health.Address),
+			PeerID:              string(s.peerIDs[health.Address]),
 			Network:             classifyAddress(health.Address).String(),
-			Direction:           health.Direction,
+			Direction:           string(health.Direction),
 			ClientVersion:       s.peerVersions[health.Address],
 			ClientBuild:         s.peerBuilds[health.Address],
 			State:               s.computePeerStateLocked(health),
@@ -4806,6 +4949,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			ConsecutiveFailures: health.ConsecutiveFailures,
 			LastError:           health.LastError,
 			Score:               health.Score,
+			BannedUntil:         formatTime(health.BannedUntil),
 			BytesSent:           sent,
 			BytesReceived:       recv,
 			TotalTraffic:        sent + recv,
@@ -4813,8 +4957,27 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		}
 		if session, ok := s.sessions[health.Address]; ok {
 			phf.ProtocolVersion = session.version
+			phf.ConnID = session.connID
 		}
-		items = append(items, phf)
+		// For inbound peers: emit a separate row per active TCP connection
+		// so that UI/diagnostics can distinguish multiple sessions to the
+		// same overlay address. Each row copies the shared health fields
+		// and overrides ConnID with the per-connection value.
+		inboundConns := s.inboundConnIDsLocked(health.Address)
+		if len(inboundConns) > 0 {
+			for _, cid := range inboundConns {
+				row := phf
+				row.ConnID = cid
+				row.Direction = string(peerDirectionInbound)
+				items = append(items, row)
+			}
+			// If we also have an outbound session, emit it separately.
+			if phf.ConnID != 0 {
+				items = append(items, phf)
+			}
+		} else {
+			items = append(items, phf)
+		}
 	}
 
 	// Include inbound-only peers that have live traffic but no health entry yet.
@@ -4823,10 +4986,10 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			continue
 		}
 		inboundPHF := protocol.PeerHealthFrame{
-			Address:       addr,
-			PeerID:        s.peerIDs[addr],
+			Address:       string(addr),
+			PeerID:        string(s.peerIDs[addr]),
 			Network:       classifyAddress(addr).String(),
-			Direction:     peerDirectionInbound,
+			Direction:     string(peerDirectionInbound),
 			ClientVersion: s.peerVersions[addr],
 			ClientBuild:   s.peerBuilds[addr],
 			State:         peerStateHealthy,
@@ -4848,20 +5011,17 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	return items
 }
 
-// peerCapabilitiesLocked returns the negotiated capabilities for a peer.
-// Checks outbound sessions first, then falls back to inbound connPeerInfo.
+// peerCapabilitiesLocked returns the negotiated capabilities for a peer
+// as wire-format strings for PeerHealthFrame.  Checks outbound sessions
+// first, then falls back to inbound connPeerInfo.
 // Must be called while holding s.mu at least for read.
-func (s *Service) peerCapabilitiesLocked(address string) []string {
+func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 	if session, ok := s.sessions[address]; ok && len(session.capabilities) > 0 {
-		caps := make([]string, len(session.capabilities))
-		copy(caps, session.capabilities)
-		return caps
+		return domain.CapabilityStrings(session.capabilities)
 	}
 	for _, info := range s.connPeerInfo {
 		if info.address == address && len(info.capabilities) > 0 {
-			caps := make([]string, len(info.capabilities))
-			copy(caps, info.capabilities)
-			return caps
+			return domain.CapabilityStrings(info.capabilities)
 		}
 	}
 	return nil
@@ -4875,8 +5035,8 @@ type liveTraffic struct {
 // liveTrafficLocked collects current byte counters from all active
 // MeteredConn instances (both outbound peer sessions and inbound
 // connections). Must be called while holding s.mu at least for read.
-func (s *Service) liveTrafficLocked() map[string]liveTraffic {
-	result := make(map[string]liveTraffic)
+func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
+	result := make(map[domain.PeerAddress]liveTraffic)
 
 	// outbound peer sessions
 	for addr, session := range s.sessions {
@@ -4922,7 +5082,7 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 
 	// Track which addresses we've already counted from s.health so we can
 	// pick up inbound-only peers that have live traffic but no health entry yet.
-	seen := make(map[string]struct{}, len(s.health))
+	seen := make(map[domain.PeerAddress]struct{}, len(s.health))
 
 	for _, health := range s.health {
 		seen[health.Address] = struct{}{}
@@ -4938,7 +5098,7 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 			connectedCount++
 		}
 		peerTraffic = append(peerTraffic, protocol.PeerTrafficFrame{
-			Address:       health.Address,
+			Address:       string(health.Address),
 			BytesSent:     sent,
 			BytesReceived: recv,
 			TotalTraffic:  sent + recv,
@@ -4955,7 +5115,7 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 		totalReceived += lv.received
 		connectedCount++
 		peerTraffic = append(peerTraffic, protocol.PeerTrafficFrame{
-			Address:       addr,
+			Address:       string(addr),
 			BytesSent:     lv.sent,
 			BytesReceived: lv.received,
 			TotalTraffic:  lv.sent + lv.received,
@@ -4975,14 +5135,14 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 	// that don't appear in s.peers but are actively connected).
 	knownSet := make(map[string]struct{}, len(s.peers)+len(seen))
 	for _, p := range s.peers {
-		knownSet[p.Address] = struct{}{}
+		knownSet[string(p.Address)] = struct{}{}
 	}
 	for addr := range seen {
-		knownSet[addr] = struct{}{}
+		knownSet[string(addr)] = struct{}{}
 	}
 	// live-only peers were appended after the seen loop; add them too.
 	for addr := range live {
-		knownSet[addr] = struct{}{}
+		knownSet[string(addr)] = struct{}{}
 	}
 
 	stats := &protocol.NetworkStatsFrame{
@@ -5067,7 +5227,7 @@ func outboundErrorLocked(items map[string]outboundDelivery, id string) string {
 	return ""
 }
 
-func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
+func (s *Service) enqueuePeerFrame(address domain.PeerAddress, frame protocol.Frame) bool {
 	session, ok := s.activePeerSession(address)
 	if !ok {
 		return false
@@ -5087,7 +5247,7 @@ func (s *Service) enqueuePeerFrame(address string, frame protocol.Frame) bool {
 	}
 }
 
-func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
+func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Frame) bool {
 	s.mu.Lock()
 	primary := s.resolveHealthAddress(address)
 
@@ -5135,28 +5295,28 @@ func (s *Service) queuePeerFrame(address string, frame protocol.Frame) bool {
 	return true
 }
 
-func pendingFrameKey(address string, frame protocol.Frame) string {
+func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) string {
 	switch frame.Type {
 	case "send_message":
-		return address + "|send_message|" + frame.ID + "|" + frame.Recipient
+		return string(address) + "|send_message|" + frame.ID + "|" + frame.Recipient
 	case "send_delivery_receipt":
-		return address + "|send_delivery_receipt|" + frame.ID + "|" + frame.Recipient + "|" + frame.Status
+		return string(address) + "|send_delivery_receipt|" + frame.ID + "|" + frame.Recipient + "|" + frame.Status
 	case "announce_peer":
 		if len(frame.Peers) > 0 {
-			return address + "|announce_peer|" + frame.Peers[0]
+			return string(address) + "|announce_peer|" + frame.Peers[0]
 		}
 		return ""
 	case "relay_message":
 		// relay_message must be queueable so sendRelayMessage's fallback
 		// to queuePeerFrame actually works when the session is unavailable.
 		// Keyed by message ID + recipient to dedupe identical relay attempts.
-		return address + "|relay_message|" + frame.ID + "|" + frame.Recipient
+		return string(address) + "|relay_message|" + frame.ID + "|" + frame.Recipient
 	default:
 		return ""
 	}
 }
 
-func (s *Service) flushPendingPeerFrames(address string) {
+func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	session, ok := s.activePeerSession(address)
 	if !ok || session == nil {
 		return
@@ -5493,7 +5653,7 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 		}
 		frames := make([]pendingFrame, len(items))
 		copy(frames, items)
-		pending[address] = frames
+		pending[string(address)] = frames
 	}
 
 	relayRetry := make(map[string]relayAttempt, len(s.relayRetry))
@@ -5521,7 +5681,7 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 
 	orphaned := make(map[string][]pendingFrame, len(s.orphaned))
 	for addr, items := range s.orphaned {
-		orphaned[addr] = append([]pendingFrame(nil), items...)
+		orphaned[string(addr)] = append([]pendingFrame(nil), items...)
 	}
 
 	return queueStateFile{
@@ -5679,13 +5839,13 @@ func isFireAndForgetFrame(frameType string) bool {
 	return isRelayFrame(frameType) || frameType == "announce_routes"
 }
 
-func (s *Service) peerSession(address string) *peerSession {
+func (s *Service) peerSession(address domain.PeerAddress) *peerSession {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sessions[address]
 }
 
-func (s *Service) activePeerSession(address string) (*peerSession, bool) {
+func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	session := s.sessions[address]
@@ -5699,7 +5859,7 @@ func (s *Service) activePeerSession(address string) (*peerSession, bool) {
 	return session, true
 }
 
-func (s *Service) peerState(address string) string {
+func (s *Service) peerState(address domain.PeerAddress) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	health := s.health[s.resolveHealthAddress(address)]
@@ -5727,7 +5887,7 @@ func nextHeartbeatDuration() time.Duration {
 // liveness. The pong reply is handled by handleCommand which calls markPeerRead.
 // If the peer does not respond within pongStallTimeout after a ping, the
 // connection is closed — same semantics as outbound session heartbeats.
-func (s *Service) inboundHeartbeat(conn net.Conn, address string, stop <-chan struct{}) {
+func (s *Service) inboundHeartbeat(conn net.Conn, address domain.PeerAddress, stop <-chan struct{}) {
 	defer crashlog.DeferRecover()
 	timer := time.NewTimer(nextHeartbeatDuration())
 	defer timer.Stop()
@@ -5762,7 +5922,7 @@ func (s *Service) inboundHeartbeat(conn net.Conn, address string, stop <-chan st
 				return
 			}
 			if !pongReceived {
-				log.Warn().Str("peer", address).Msg("inbound heartbeat failed, peer stalled — closing connection")
+				log.Warn().Str("peer", string(address)).Msg("inbound heartbeat failed, peer stalled — closing connection")
 				_ = conn.Close()
 				return
 			}
@@ -5772,15 +5932,23 @@ func (s *Service) inboundHeartbeat(conn net.Conn, address string, stop <-chan st
 	}
 }
 
-// evictStaleInboundConns force-closes inbound TCP connections whose peer
-// health state is stalled. When internet drops, the heartbeat detects
-// unresponsive peers within ~2:45 and marks them stalled; however the
-// underlying TCP socket may linger in the OS for much longer (TCP
-// retransmission timeouts). These zombie connections occupy a slot in
-// inboundConns and block outbound dial attempts to the same host via
-// connectedHostsLocked. By actively closing them we free the slot so the
-// remote peer's retry loop can re-establish the connection faster.
+// evictStaleInboundConns force-closes inbound TCP connections that have
+// not received any frame for longer than heartbeatInterval + pongStallTimeout.
+// When internet drops, the underlying TCP socket may linger in the OS for
+// much longer than the heartbeat timeout (TCP retransmission timeouts).
+// These zombie connections occupy a slot in inboundConns and block outbound
+// dial attempts to the same host via connectedHostsLocked. By actively
+// closing them we free the slot so the remote peer's retry loop can
+// re-establish the connection faster.
+//
+// Uses per-connection lastActivity (updated on every received frame) instead
+// of shared health state. This prevents NATed peers that advertise the same
+// listen address (e.g. 127.0.0.1:64646) from being evicted due to an
+// unrelated outbound session going stale.
 func (s *Service) evictStaleInboundConns() {
+	now := time.Now().UTC()
+	stallThreshold := heartbeatInterval + pongStallTimeout
+
 	s.mu.RLock()
 	var stale []net.Conn
 	for conn := range s.inboundConns {
@@ -5788,28 +5956,36 @@ func (s *Service) evictStaleInboundConns() {
 		if info == nil {
 			continue
 		}
-		resolved := s.resolveHealthAddress(info.address)
-		health := s.health[resolved]
-		if health == nil {
+		if info.lastActivity.IsZero() {
 			continue
 		}
-		state := s.computePeerStateLocked(health)
-		if state == peerStateStalled {
+		if now.Sub(info.lastActivity) >= stallThreshold {
 			stale = append(stale, conn)
 		}
 	}
 	s.mu.RUnlock()
 
 	for _, conn := range stale {
-		addr := ""
+		var addr domain.PeerAddress
+		var ident domain.PeerIdentity
 		s.mu.RLock()
 		if info := s.connPeerInfo[conn]; info != nil {
 			addr = info.address
+			ident = info.identity
 		}
 		s.mu.RUnlock()
-		log.Warn().Str("peer", addr).Msg("force-closing stale inbound connection")
+		log.Warn().Str("peer", string(addr)).Str("identity", string(ident)).Str("remote", conn.RemoteAddr().String()).Msg("force-closing stale inbound connection")
 		_ = conn.Close()
 	}
+}
+
+// touchConnActivity updates the per-connection last activity timestamp.
+func (s *Service) touchConnActivity(conn net.Conn) {
+	s.mu.Lock()
+	if info := s.connPeerInfo[conn]; info != nil {
+		info.lastActivity = time.Now().UTC()
+	}
+	s.mu.Unlock()
 }
 
 func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
@@ -5885,11 +6061,11 @@ func (s *Service) externalListenAddress() string {
 	return s.cfg.ListenAddress
 }
 
-func (s *Service) isSelfAddress(address string) bool {
-	if address == s.cfg.AdvertiseAddress || address == s.externalListenAddress() || address == s.cfg.ListenAddress {
+func (s *Service) isSelfAddress(address domain.PeerAddress) bool {
+	if address == domain.PeerAddress(s.cfg.AdvertiseAddress) || address == domain.PeerAddress(s.externalListenAddress()) || address == domain.PeerAddress(s.cfg.ListenAddress) {
 		return true
 	}
-	host, _, ok := splitHostPort(address)
+	host, _, ok := splitHostPort(string(address))
 	if !ok {
 		return false
 	}
@@ -5900,9 +6076,9 @@ func (s *Service) isSelfAddress(address string) bool {
 	return s.isSelfDialIP(ip)
 }
 
-func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (string, bool) {
-	observedHost, _, observedOK := splitHostPort(observedAddr)
-	advertisedHost, advertisedPort, advertisedOK := splitHostPort(advertisedAddr)
+func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr domain.PeerAddress) (domain.PeerAddress, bool) {
+	observedHost, _, observedOK := splitHostPort(string(observedAddr))
+	advertisedHost, advertisedPort, advertisedOK := splitHostPort(string(advertisedAddr))
 	if advertisedPort == "" {
 		advertisedPort = config.DefaultPeerPort
 	}
@@ -5910,7 +6086,7 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 	// .onion addresses are accepted as-is from the advertised field;
 	// the observed TCP address is meaningless for Tor connections.
 	if advertisedOK && isOnionAddress(advertisedHost) {
-		return net.JoinHostPort(advertisedHost, advertisedPort), true
+		return domain.PeerAddress(net.JoinHostPort(advertisedHost, advertisedPort)), true
 	}
 	// Reject any .onion-suffixed hostname that failed the strict validator
 	// above (wrong length, invalid base32 chars, etc.) so it cannot leak
@@ -5925,7 +6101,7 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 		advertisedIP := net.ParseIP(advertisedHost)
 
 		if advertisedIP != nil && !isForbiddenAdvertisedIP(advertisedIP) && advertisedHost == observedHost {
-			return net.JoinHostPort(advertisedHost, advertisedPort), true
+			return domain.PeerAddress(net.JoinHostPort(advertisedHost, advertisedPort)), true
 		}
 		if observedIP != nil && !s.isForbiddenDialIP(observedIP) {
 			if advertisedIP != nil && isForbiddenAdvertisedIP(advertisedIP) {
@@ -5935,11 +6111,11 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 				// Only fall back to DefaultPeerPort when the hosts differ,
 				// meaning the advertised IP was likely spoofed.
 				if advertisedHost == observedHost {
-					return net.JoinHostPort(observedHost, advertisedPort), true
+					return domain.PeerAddress(net.JoinHostPort(observedHost, advertisedPort)), true
 				}
-				return net.JoinHostPort(observedHost, config.DefaultPeerPort), true
+				return domain.PeerAddress(net.JoinHostPort(observedHost, config.DefaultPeerPort)), true
 			}
-			return net.JoinHostPort(observedHost, advertisedPort), true
+			return domain.PeerAddress(net.JoinHostPort(observedHost, advertisedPort)), true
 		}
 		return "", false
 	case advertisedOK:
@@ -5947,7 +6123,7 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr string) (str
 		if advertisedIP != nil && (isForbiddenAdvertisedIP(advertisedIP) || s.isForbiddenDialIP(advertisedIP)) {
 			return "", false
 		}
-		return net.JoinHostPort(advertisedHost, advertisedPort), true
+		return domain.PeerAddress(net.JoinHostPort(advertisedHost, advertisedPort)), true
 	case observedOK:
 		// The observed remote port is an ephemeral source port, not a
 		// stable listening endpoint. Without a valid advertised port we
@@ -6066,8 +6242,8 @@ func (s *Service) isSelfDialIP(ip net.IP) bool {
 	return false
 }
 
-func (s *Service) shouldSkipDialAddress(address string) bool {
-	host, _, ok := splitHostPort(address)
+func (s *Service) shouldSkipDialAddress(address domain.PeerAddress) bool {
+	host, _, ok := splitHostPort(string(address))
 	if !ok {
 		return true
 	}
@@ -6075,15 +6251,15 @@ func (s *Service) shouldSkipDialAddress(address string) bool {
 	return s.isForbiddenDialIP(ip)
 }
 
-func (s *Service) dialAttemptAddressesLocked(address string) []string {
-	host, port, ok := splitHostPort(address)
+func (s *Service) dialAttemptAddressesLocked(address domain.PeerAddress) []domain.PeerAddress {
+	host, port, ok := splitHostPort(string(address))
 	if !ok {
 		return nil
 	}
-	addresses := []string{net.JoinHostPort(host, port)}
+	addresses := []domain.PeerAddress{domain.PeerAddress(net.JoinHostPort(host, port))}
 	ip := net.ParseIP(host)
 	if port != config.DefaultPeerPort && ip != nil && !s.isForbiddenDialIP(ip) && !ip.IsLoopback() {
-		addresses = append(addresses, net.JoinHostPort(host, config.DefaultPeerPort))
+		addresses = append(addresses, domain.PeerAddress(net.JoinHostPort(host, config.DefaultPeerPort)))
 	}
 	return addresses
 }
@@ -6103,7 +6279,7 @@ func enableTCPKeepAlive(conn net.Conn) {
 // map translates back to the primary address so that score/cooldown
 // accumulate on a single entry regardless of which port was dialled.
 // Must be called with s.mu held (read lock sufficient).
-func (s *Service) resolveHealthAddress(address string) string {
+func (s *Service) resolveHealthAddress(address domain.PeerAddress) domain.PeerAddress {
 	if origin, ok := s.dialOrigin[address]; ok {
 		return origin
 	}

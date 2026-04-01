@@ -1,6 +1,9 @@
 package node
 
-import "corsa/internal/core/routing"
+import (
+	"corsa/internal/core/domain"
+	"corsa/internal/core/routing"
+)
 
 // RoutingSnapshot returns an immutable point-in-time copy of the routing table.
 // Implements rpc.RoutingProvider.
@@ -9,7 +12,7 @@ func (s *Service) RoutingSnapshot() routing.Snapshot {
 }
 
 // PeerTransport resolves a peer identity to its current transport address
-// and network type. Returns empty strings if the peer is not currently
+// and network group. Returns zero values if the peer is not currently
 // connected. When a peer has multiple sessions, the lexicographically
 // smallest connected address is returned for deterministic output.
 //
@@ -17,11 +20,11 @@ func (s *Service) RoutingSnapshot() routing.Snapshot {
 // connectivity. peerIDs entries alone are not sufficient because normal
 // disconnect paths do not clear them immediately.
 // Implements rpc.RoutingProvider.
-func (s *Service) PeerTransport(peerIdentity string) (address string, network string) {
+func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domain.PeerAddress, network domain.NetGroup) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var bestAddr string
+	var bestAddr domain.PeerAddress
 	for addr, id := range s.peerIDs {
 		if id != peerIdentity {
 			continue
@@ -38,5 +41,5 @@ func (s *Service) PeerTransport(peerIdentity string) (address string, network st
 	if bestAddr == "" {
 		return "", ""
 	}
-	return bestAddr, classifyAddress(bestAddr).String()
+	return bestAddr, classifyAddress(bestAddr)
 }

@@ -7,19 +7,22 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"corsa/internal/core/domain"
 )
 
 type peerEntry struct {
-	Address             string     `json:"address"`
-	NodeType            string     `json:"node_type,omitempty"`
-	Network             string     `json:"network,omitempty"`  // network group: "ipv4", "ipv6", "torv3", "i2p", etc.
-	LastConnectedAt     *time.Time `json:"last_connected_at,omitempty"`
-	LastDisconnectedAt  *time.Time `json:"last_disconnected_at,omitempty"`
-	ConsecutiveFailures int        `json:"consecutive_failures"`
-	LastError           string     `json:"last_error,omitempty"`
-	Source              string     `json:"source"`            // "bootstrap", "peer_exchange", "manual"
-	AddedAt             *time.Time `json:"added_at,omitempty"` // first time this address was seen
-	Score               int        `json:"score"`             // higher = better; decays on failure, grows on success
+	Address             domain.PeerAddress `json:"address"`
+	NodeType            domain.NodeType    `json:"node_type,omitempty"`
+	Network             domain.NetGroup    `json:"network,omitempty"` // network group classification for this address
+	LastConnectedAt     *time.Time         `json:"last_connected_at,omitempty"`
+	LastDisconnectedAt  *time.Time         `json:"last_disconnected_at,omitempty"`
+	ConsecutiveFailures int                `json:"consecutive_failures"`
+	LastError           string             `json:"last_error,omitempty"`
+	Source              domain.PeerSource  `json:"source"`                 // bootstrap, peer_exchange, manual, announce
+	AddedAt             *time.Time         `json:"added_at,omitempty"`     // first time this address was seen
+	Score               int                `json:"score"`                  // higher = better; decays on failure, grows on success
+	BannedUntil         *time.Time         `json:"banned_until,omitempty"` // peer is not dialled until this time expires
 }
 
 type peerStateFile struct {
@@ -30,21 +33,23 @@ type peerStateFile struct {
 
 const (
 	peerStateVersion     = 1
-	peerScoreConnect     = 10 // awarded on successful TCP handshake
-	peerScoreDisconnect  = -2 // applied on clean disconnect
-	peerScoreFailure     = -5 // applied on dial/protocol failure
+	peerScoreConnect     = 10             // awarded on successful TCP handshake
+	peerScoreDisconnect  = -2             // applied on clean disconnect
+	peerScoreFailure     = -5             // applied on dial/protocol failure
+	peerScoreOldProtocol = -50            // applied when peer protocol version is too old; pushes to bottom of dial list
+	peerBanIncompatible  = 24 * time.Hour // ban duration for peers with incompatible protocol version
 	peerScoreMax         = 100
 	peerScoreMin         = -50
 	maxPersistedPeers    = 500
-	peerStateSaveMinutes = 5  // minimum interval between periodic saves
+	peerStateSaveMinutes = 5                // minimum interval between periodic saves
 	peerCooldownBase     = 30 * time.Second // base cooldown after first failure
 	peerCooldownMax      = 30 * time.Minute // cap on exponential backoff
 
 	// Eviction thresholds.
 	// A peer is evictable when its score drops below the threshold AND it has
 	// not been successfully connected for longer than the stale window.
-	peerEvictScoreThreshold = -20           // score at or below this → candidate for eviction
-	peerEvictStaleWindow    = 24 * time.Hour // must also be unseen for this long
+	peerEvictScoreThreshold = -20              // score at or below this → candidate for eviction
+	peerEvictStaleWindow    = 24 * time.Hour   // must also be unseen for this long
 	peerEvictInterval       = 10 * time.Minute // how often the eviction sweep runs
 )
 

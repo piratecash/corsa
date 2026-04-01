@@ -4,15 +4,13 @@ import (
 	"sync"
 	"time"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 
 	"github.com/rs/zerolog/log"
 )
 
 const (
-	// capMeshRelayV1 is the capability token that gates relay_message frames.
-	capMeshRelayV1 = "mesh_relay_v1"
-
 	// defaultMaxHops limits the maximum number of hops a relay message can
 	// traverse. When hop_count >= max_hops, the message is dropped.
 	defaultMaxHops = 10
@@ -28,13 +26,13 @@ const (
 // no single message reveals the full path.
 type relayForwardState struct {
 	MessageID        string
-	PreviousHop      string // who sent this relay to me
-	ReceiptForwardTo string // = PreviousHop (where to send receipt back)
-	ForwardedTo      string // who I forwarded to (for loop detection)
-	Recipient        string // final recipient identity (for hop_ack route confirmation)
-	RouteOrigin      string // route origin from routing decision (for triple-scoped hop_ack)
-	HopCount         int    // incremented on each hop
-	RemainingTTL     int    // seconds until cleanup (decremented by ticker)
+	PreviousHop      domain.PeerAddress  // who sent this relay to me (transport address)
+	ReceiptForwardTo domain.PeerAddress  // = PreviousHop (where to send receipt back)
+	ForwardedTo      domain.PeerAddress  // who I forwarded to (for loop detection)
+	Recipient        domain.PeerIdentity // final recipient identity (for hop_ack route confirmation)
+	RouteOrigin      domain.PeerIdentity // route origin from routing decision (for triple-scoped hop_ack)
+	HopCount         int                 // incremented on each hop
+	RemainingTTL     int                 // seconds until cleanup (decremented by ticker)
 }
 
 // relayStateStore is a concurrency-safe store for relay forwarding state.
@@ -48,7 +46,7 @@ type relayForwardState struct {
 type relayStateStore struct {
 	mu       sync.Mutex
 	states   map[string]*relayForwardState // keyed by message ID
-	perPeer  map[string]int                // PreviousHop → count of active states
+	perPeer  map[domain.PeerAddress]int    // PreviousHop → count of active states
 	stopCh   chan struct{}
 	onEvict  func() // called after TTL ticker removes expired entries; set by Service for persistence
 	rejected int64  // counter for monitoring: entries rejected due to capacity
@@ -57,7 +55,7 @@ type relayStateStore struct {
 func newRelayStateStore() *relayStateStore {
 	return &relayStateStore{
 		states:  make(map[string]*relayForwardState),
-		perPeer: make(map[string]int),
+		perPeer: make(map[domain.PeerAddress]int),
 		stopCh:  make(chan struct{}),
 	}
 }
@@ -130,7 +128,7 @@ func (rs *relayStateStore) hasSeen(messageID string) bool {
 // limit (maxRelayStates) or per-peer limit (maxRelayStatesPerPeer) is
 // reached. The caller treats this identically to a duplicate — the relay
 // message is silently dropped.
-func (rs *relayStateStore) tryReserve(messageID, previousHop string) bool {
+func (rs *relayStateStore) tryReserve(messageID string, previousHop domain.PeerAddress) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if _, ok := rs.states[messageID]; ok {
@@ -207,7 +205,7 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 
 // lookupReceiptForwardTo returns the address to forward a receipt back to
 // for the given message ID, or "" if unknown.
-func (rs *relayStateStore) lookupReceiptForwardTo(messageID string) string {
+func (rs *relayStateStore) lookupReceiptForwardTo(messageID string) domain.PeerAddress {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	state, ok := rs.states[messageID]
@@ -220,7 +218,7 @@ func (rs *relayStateStore) lookupReceiptForwardTo(messageID string) string {
 // lookupRecipient returns the final recipient identity for a relayed message,
 // or "" if the message ID is unknown. Used by hop_ack processing to confirm
 // the routing table entry for the recipient.
-func (rs *relayStateStore) lookupRecipient(messageID string) string {
+func (rs *relayStateStore) lookupRecipient(messageID string) domain.PeerIdentity {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	state, ok := rs.states[messageID]
@@ -234,7 +232,7 @@ func (rs *relayStateStore) lookupRecipient(messageID string) string {
 // if the message ID is unknown or origin was not recorded. Used by hop_ack
 // processing to scope route confirmation to the exact (Identity, Origin,
 // NextHop) triple that carried the message.
-func (rs *relayStateStore) lookupRouteOrigin(messageID string) string {
+func (rs *relayStateStore) lookupRouteOrigin(messageID string) domain.PeerIdentity {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	state, ok := rs.states[messageID]
@@ -336,7 +334,7 @@ func (s *Service) persistRelayState() {
 // relay arrives on an outbound session that may be inside a
 // peerSessionRequest read loop, the caller passes nil to avoid a deadlock
 // on the single-reader inboxCh.
-func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSession, frame protocol.Frame) string {
+func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSession *peerSession, frame protocol.Frame) string {
 	messageID := frame.ID
 	recipient := frame.Recipient
 	hopCount := frame.HopCount
@@ -371,7 +369,7 @@ func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSess
 				Msg("relay_drop_duplicate_final_hop")
 			return ""
 		}
-		log.Info().Str("id", messageID).Str("sender", originSender).Str("sync_from", senderAddress).Msg("relay_final_hop_delivering")
+		log.Info().Str("id", messageID).Str("sender", originSender).Str("sync_from", string(senderAddress)).Msg("relay_final_hop_delivering")
 		// Upgrade the placeholder reservation to full relay state BEFORE
 		// delivery so the receipt reverse path is available when
 		// storeIncomingMessage fires emitDeliveryReceipt in a goroutine.
@@ -380,7 +378,7 @@ func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSess
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "",
-			Recipient:        recipient,
+			Recipient:        domain.PeerIdentity(recipient),
 			HopCount:         hopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
@@ -449,22 +447,22 @@ func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSess
 		TTLSeconds:  frame.TTLSeconds,
 		HopCount:    newHopCount,
 		MaxHops:     maxHops,
-		PreviousHop: s.identity.Address,
+		PreviousHop: string(s.identity.Address),
 	}
 
 	// Try direct peer first — is the recipient directly connected?
 	// A recipient identity may have multiple session addresses (reconnects,
 	// address changes), so we try all matching sessions until one succeeds.
-	forwardedTo := s.tryForwardToDirectPeer(recipient, forwardFrame)
+	forwardedTo := s.tryForwardToDirectPeer(domain.PeerIdentity(recipient), forwardFrame)
 
 	// Table-directed relay (Phase 1.2): if no direct peer, consult the
 	// routing table for a next-hop. This enables multi-hop relay chains
 	// A→B→D where B uses the table to find D even though D is not the
 	// final recipient's direct peer on B. Exclude the sender (from
 	// incoming frame.PreviousHop) to prevent sending the message back.
-	var tableRouteOrigin string
+	var tableRouteOrigin domain.PeerIdentity
 	if forwardedTo == "" {
-		result := s.tryForwardViaRoutingTable(recipient, forwardFrame, frame.PreviousHop)
+		result := s.tryForwardViaRoutingTable(domain.PeerIdentity(recipient), forwardFrame, domain.PeerIdentity(frame.PreviousHop))
 		forwardedTo = result.Address
 		tableRouteOrigin = result.RouteOrigin
 	}
@@ -497,7 +495,7 @@ func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSess
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "", // stored locally, not forwarded
-			Recipient:        recipient,
+			Recipient:        domain.PeerIdentity(recipient),
 			HopCount:         newHopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
@@ -519,7 +517,7 @@ func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSess
 		PreviousHop:      senderAddress,
 		ReceiptForwardTo: senderAddress,
 		ForwardedTo:      forwardedTo,
-		Recipient:        recipient,
+		Recipient:        domain.PeerIdentity(recipient),
 		RouteOrigin:      tableRouteOrigin,
 		HopCount:         newHopCount,
 		RemainingTTL:     relayStateTTLSeconds,
@@ -530,7 +528,7 @@ func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSess
 		Str("id", messageID).
 		Str("from", originSender).
 		Str("to", recipient).
-		Str("forwarded_to", forwardedTo).
+		Str("forwarded_to", string(forwardedTo)).
 		Int("hop_count", newHopCount).
 		Msg("relay_forwarded")
 	return "forwarded"
@@ -558,7 +556,7 @@ func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSess
 // reused for fetch_contacts without opening a new TCP connection. Pass nil
 // when the caller is inside a peerSessionRequest read loop on the same
 // session (single-reader constraint on inboxCh would deadlock).
-func (s *Service) deliverRelayedMessage(senderAddress string, syncSession *peerSession, frame protocol.Frame) bool {
+func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSession *peerSession, frame protocol.Frame) bool {
 	msg, err := incomingMessageFromFrame(protocol.Frame{
 		ID:         frame.ID,
 		Topic:      frame.Topic,
@@ -575,14 +573,14 @@ func (s *Service) deliverRelayedMessage(senderAddress string, syncSession *peerS
 	}
 	stored, _, errCode := s.storeIncomingMessage(msg, false)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey && senderAddress != "" {
-		log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", senderAddress).Msg("relay_key_sync_start")
+		log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_start")
 		imported := s.syncSenderKeys(senderAddress, syncSession)
 		if imported == 0 {
-			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", senderAddress).Msg("relay_key_sync_no_contacts_imported")
+			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_no_contacts_imported")
 		}
 		stored, _, errCode = s.storeIncomingMessage(msg, false)
 		if stored {
-			log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", senderAddress).Int("imported", imported).Msg("relay_deliver_after_key_sync")
+			log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Int("imported", imported).Msg("relay_deliver_after_key_sync")
 		} else {
 			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("code", errCode).Int("imported", imported).Msg("relay_key_sync_retry_failed")
 		}
@@ -596,7 +594,7 @@ func (s *Service) deliverRelayedMessage(senderAddress string, syncSession *peerS
 
 // sendRelayHopAck sends a relay_hop_ack frame back to the peer that forwarded
 // the relay message to us.
-func (s *Service) sendRelayHopAck(peerAddress, messageID, status string) {
+func (s *Service) sendRelayHopAck(peerAddress domain.PeerAddress, messageID, status string) {
 	ackFrame := protocol.Frame{
 		Type:   "relay_hop_ack",
 		ID:     messageID,
@@ -608,10 +606,10 @@ func (s *Service) sendRelayHopAck(peerAddress, messageID, status string) {
 // handleRelayHopAck processes an incoming relay_hop_ack frame. Currently
 // logged for diagnostics; future iterations may use ack data for route
 // reputation scoring.
-func (s *Service) handleRelayHopAck(senderAddress string, frame protocol.Frame) {
+func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, frame protocol.Frame) {
 	log.Debug().
 		Str("id", frame.ID).
-		Str("from", senderAddress).
+		Str("from", string(senderAddress)).
 		Str("status", frame.Status).
 		Msg("relay_hop_ack_received")
 
@@ -640,9 +638,9 @@ func (s *Service) handleRelayHopAck(senderAddress string, frame protocol.Frame) 
 // and tries to enqueue the frame. Returns the address of the first session
 // that accepted the frame, or "" if none did. This avoids the problem where
 // a random non-capable or non-writable session shadows a healthy direct path.
-func (s *Service) tryForwardToDirectPeer(recipient string, frame protocol.Frame) string {
+func (s *Service) tryForwardToDirectPeer(recipient domain.PeerIdentity, frame protocol.Frame) domain.PeerAddress {
 	s.mu.RLock()
-	var candidates []string
+	var candidates []domain.PeerAddress
 	for address, session := range s.sessions {
 		if session.peerIdentity == recipient {
 			candidates = append(candidates, address)
@@ -651,14 +649,14 @@ func (s *Service) tryForwardToDirectPeer(recipient string, frame protocol.Frame)
 	s.mu.RUnlock()
 
 	for _, address := range candidates {
-		if !s.sessionHasCapability(address, capMeshRelayV1) {
+		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
 			continue
 		}
 		if s.enqueuePeerFrame(address, frame) {
 			return address
 		}
 	}
-	return ""
+	return domain.PeerAddress("")
 }
 
 // relayViaGossip forwards a relay_message to the top-scored peers that
@@ -666,14 +664,14 @@ func (s *Service) tryForwardToDirectPeer(recipient string, frame protocol.Frame)
 // avoid sending the message back to where it came from. Per-peer rate
 // limiting is applied: if a target's token bucket is exhausted, the
 // frame is silently skipped for that target.
-func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress string) string {
+func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.PeerAddress) domain.PeerAddress {
 	targets := s.routingTargets()
-	var forwardedTo string
+	var forwardedTo domain.PeerAddress
 	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) || address == excludeAddress {
 			continue
 		}
-		if !s.sessionHasCapability(address, capMeshRelayV1) {
+		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
 			continue
 		}
 		if !s.relayLimiter.allow(address) {
@@ -702,24 +700,24 @@ func (s *Service) handleRelayReceipt(receipt protocol.DeliveryReceipt) bool {
 	}
 
 	// Forward the receipt one hop back toward the original sender.
-	if s.sessionHasCapability(forwardTo, capMeshRelayV1) {
+	if s.sessionHasCapability(forwardTo, domain.CapMeshRelayV1) {
 		if s.sendReceiptToPeer(forwardTo, receipt) {
 			log.Debug().
 				Str("message_id", string(receipt.MessageID)).
-				Str("forward_to", forwardTo).
+				Str("forward_to", string(forwardTo)).
 				Msg("relay_receipt_forwarded")
 			return true
 		}
 		log.Debug().
 			Str("message_id", string(receipt.MessageID)).
-			Str("forward_to", forwardTo).
+			Str("forward_to", string(forwardTo)).
 			Msg("relay_receipt_send_failed")
 		return false
 	}
 
 	log.Debug().
 		Str("message_id", string(receipt.MessageID)).
-		Str("forward_to", forwardTo).
+		Str("forward_to", string(forwardTo)).
 		Msg("relay_receipt_hop_unavailable")
 	return false
 }
@@ -731,12 +729,12 @@ func (s *Service) handleRelayReceipt(receipt protocol.DeliveryReceipt) bool {
 // Only full nodes are targeted because client nodes cannot forward relay
 // messages (handleRelayMessage drops at CanForward check). Receivers
 // dedupe via seen[messageID] if gossip arrives first.
-func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []string) {
+func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []domain.PeerAddress) {
 	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		if !s.sessionHasCapability(address, capMeshRelayV1) {
+		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
 			continue
 		}
 		if s.peerIsClientNode(address) {
@@ -753,7 +751,7 @@ func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []st
 // for the fetch_relay_status RPC command.
 func (s *Service) relayStatusFrame() protocol.Frame {
 	activeStates := s.relayStates.count()
-	capablePeers := s.countCapablePeers(capMeshRelayV1)
+	capablePeers := s.countCapablePeers(domain.CapMeshRelayV1)
 
 	return protocol.Frame{
 		Type:   "relay_status",
@@ -766,28 +764,28 @@ func (s *Service) relayStatusFrame() protocol.Frame {
 // countCapablePeers returns the number of unique connected peers (both
 // outbound sessions and inbound connections) that have the specified
 // capability. A peer that appears in both maps is counted once.
-func (s *Service) countCapablePeers(cap string) int {
+func (s *Service) countCapablePeers(cap domain.Capability) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	seen := make(map[string]struct{})
+	seen := make(map[domain.PeerIdentity]struct{})
 
 	for _, session := range s.sessions {
 		for _, c := range session.capabilities {
 			if c == cap {
-				seen[session.address] = struct{}{}
+				seen[session.peerIdentity] = struct{}{}
 				break
 			}
 		}
 	}
 
 	for _, info := range s.connPeerInfo {
-		if _, dup := seen[info.address]; dup {
+		if _, dup := seen[info.identity]; dup {
 			continue
 		}
 		for _, c := range info.capabilities {
 			if c == cap {
-				seen[info.address] = struct{}{}
+				seen[info.identity] = struct{}{}
 				break
 			}
 		}
@@ -800,7 +798,7 @@ func (s *Service) countCapablePeers(cap string) int {
 // it to the specified peer. Returns true if the frame was enqueued (live
 // session) or queued (persistent fallback). Used when the routing decision
 // indicates a relay-capable next hop.
-func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
+func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Envelope) bool {
 	frame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          string(msg.ID),
@@ -823,7 +821,7 @@ func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
 			log.Debug().
 				Str("id", string(msg.ID)).
 				Str("recipient", msg.Recipient).
-				Str("peer", address).
+				Str("peer", string(address)).
 				Str("mode", "queued").
 				Msg("relay_message_queued")
 		}
@@ -833,7 +831,7 @@ func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
 		log.Debug().
 			Str("id", string(msg.ID)).
 			Str("recipient", msg.Recipient).
-			Str("peer", address).
+			Str("peer", string(address)).
 			Str("mode", "dropped").
 			Msg("relay_message_dropped")
 		return false
@@ -849,7 +847,7 @@ func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
 		PreviousHop:      "",
 		ReceiptForwardTo: "",
 		ForwardedTo:      address,
-		Recipient:        msg.Recipient,
+		Recipient:        domain.PeerIdentity(msg.Recipient),
 		HopCount:         1,
 		RemainingTTL:     relayStateTTLSeconds,
 	})
@@ -857,7 +855,7 @@ func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
 	log.Debug().
 		Str("id", string(msg.ID)).
 		Str("recipient", msg.Recipient).
-		Str("peer", address).
+		Str("peer", string(address)).
 		Str("mode", "session").
 		Msg("relay_message_sent")
 	return true
@@ -868,7 +866,7 @@ func (s *Service) sendRelayMessage(address string, msg protocol.Envelope) bool {
 // can match the exact (Identity, Origin, NextHop) triple that carried the
 // message. The gossip path (sendRelayMessage) leaves RouteOrigin empty because
 // gossip delivery is not scoped to a specific route triple.
-func (s *Service) sendRelayMessageWithOrigin(address string, msg protocol.Envelope, routeOrigin string) bool {
+func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity) bool {
 	frame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          string(msg.ID),
@@ -891,7 +889,7 @@ func (s *Service) sendRelayMessageWithOrigin(address string, msg protocol.Envelo
 			log.Debug().
 				Str("id", string(msg.ID)).
 				Str("recipient", msg.Recipient).
-				Str("peer", address).
+				Str("peer", string(address)).
 				Str("mode", "queued").
 				Msg("relay_message_queued")
 		}
@@ -901,7 +899,7 @@ func (s *Service) sendRelayMessageWithOrigin(address string, msg protocol.Envelo
 		log.Debug().
 			Str("id", string(msg.ID)).
 			Str("recipient", msg.Recipient).
-			Str("peer", address).
+			Str("peer", string(address)).
 			Str("mode", "dropped").
 			Msg("relay_message_dropped")
 		return false
@@ -912,7 +910,7 @@ func (s *Service) sendRelayMessageWithOrigin(address string, msg protocol.Envelo
 		PreviousHop:      "",
 		ReceiptForwardTo: "",
 		ForwardedTo:      address,
-		Recipient:        msg.Recipient,
+		Recipient:        domain.PeerIdentity(msg.Recipient),
 		RouteOrigin:      routeOrigin,
 		HopCount:         1,
 		RemainingTTL:     relayStateTTLSeconds,
@@ -921,7 +919,7 @@ func (s *Service) sendRelayMessageWithOrigin(address string, msg protocol.Envelo
 		log.Warn().
 			Str("id", string(msg.ID)).
 			Str("recipient", msg.Recipient).
-			Str("peer", address).
+			Str("peer", string(address)).
 			Msg("relay_state_store_failed_outbound")
 		return false
 	}
@@ -929,8 +927,8 @@ func (s *Service) sendRelayMessageWithOrigin(address string, msg protocol.Envelo
 	log.Debug().
 		Str("id", string(msg.ID)).
 		Str("recipient", msg.Recipient).
-		Str("peer", address).
-		Str("origin", routeOrigin).
+		Str("peer", string(address)).
+		Str("origin", string(routeOrigin)).
 		Str("mode", "session").
 		Msg("relay_message_sent_table_directed")
 	return true

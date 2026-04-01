@@ -18,7 +18,7 @@ Quick links:
 - [Design principles](#design-principles)
 - [Protocol versioning policy](#protocol-versioning-policy)
 - [Iteration 1 — Routing table](#iter-1)
-  - [Pending work before route health](#pre-1-4-refactoring)
+  - [Pending work before route health](#pending-work-before-route-health)
   - [Route health, probes, and RTT scoring](#route-health-probes-and-rtt-scoring)
 - [Iteration 2 — Reliability, reputation, and multi-path](#iter-2)
 - [Iteration 3 — Optimization and scaling](#iter-3)
@@ -82,7 +82,7 @@ graph LR
 ```
 *Diagram — Table-directed relay with gossip fallback (implemented)*
 
-**What is still missing:** anti-flooding measures for announcements (frame size limits, fairness rotation, pacing/jitter, per-peer rate limiting), full integration tests for multi-node convergence scenarios, and forward-compatible relay for future onion routing. These are tracked in [Pending work before route health](#pre-1-4-refactoring).
+**What is still missing:** anti-flooding measures for announcements (frame size limits, fairness rotation, pacing/jitter, per-peer rate limiting), full integration tests for multi-node convergence scenarios, and forward-compatible relay for future onion routing. These are tracked in [Pending work before route health](#pending-work-before-route-health).
 
 ### Design principles
 
@@ -612,12 +612,18 @@ approach. The routing table is not the place for global search.
 
 **Completed:** model invariants, minimal vertical slice (table routing, announcements, withdrawals, hop_ack, gossip fallback), RPC observability (`fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup`). Full documentation: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md).
 
-<a id="pre-1-4-refactoring"></a>
 #### Pending work before route health
 
 Before starting Phase 1.4, the following refactoring is required to manage complexity:
 
 **High priority:** `node/service.go` (6200+ lines) is a monolith that mixes peer management, routing integration, relay/SOCKS5, metering, and session lifecycle. Extract into focused files: `peer_management.go` (peer lifecycle, health tracking, peerIDs), `routing_integration.go` (already partially extracted), `relay_handler.go` (relay/SOCKS5 logic), `metering.go` (traffic metering). This unblocks concurrent work and reduces merge conflicts.
+
+**Typing discipline for the refactor:** while splitting the monolith, remove
+domain-to-string casts in core paths (for example `string(senderAddress)` when
+the callee should accept `PeerAddress`). Inside `node`, `routing`, `relay`,
+`health`, `queue`, and state-management code, `string(...)` conversions from
+`PeerAddress` / `PeerIdentity` should remain only for logging, protocol
+serialization, config parsing, and UI/RPC formatting boundaries.
 
 **Completed refactoring:** RoutingProvider interface simplified from 5 methods to 2 (`RoutingSnapshot()`, `PeerTransport()`). All RPC handlers now use the atomic snapshot for consistent data. Redundant `RoutingLookup()`, `RoutingTableSize()`, `RoutingFlapSnapshot()` removed.
 
@@ -662,6 +668,12 @@ Before starting Phase 1.4, the following refactoring is required to manage compl
 - [ ] Without routing table, network continues delivery via gossip fallback
 - [ ] Confirmed: iteration 1 remains additive, no protocol bump required
 - [ ] Confirmed: iteration 1 does not require raising `MinimumProtocolVersion`
+
+**Route-health readiness checklist:**
+
+- [ ] split the `node/service.go` monolith into focused files before starting route-health work
+- [ ] rename ambiguous fields like `address` to `listenAddress`, `transportAddress`, or `identity` where semantics are unclear
+- [ ] adopt `KnownPeer`, `PeerSessionRef`, `InboundPeerRef` as embedded types in runtime structs to eliminate field duplication
 
 ---
 

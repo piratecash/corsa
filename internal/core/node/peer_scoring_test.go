@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 )
@@ -26,10 +27,11 @@ func TestMarkPeerConnectedIncrementsScore(t *testing.T) {
 	})
 	defer stop()
 
-	svc.markPeerConnected("10.0.0.1:64646", "outbound")
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
+	svc.markPeerConnected(peerAddr, "outbound")
 
 	svc.mu.RLock()
-	health := svc.health["10.0.0.1:64646"]
+	health := svc.health[peerAddr]
 	svc.mu.RUnlock()
 
 	if health == nil {
@@ -54,11 +56,12 @@ func TestMarkPeerDisconnectedWithErrorDecrementsScore(t *testing.T) {
 	})
 	defer stop()
 
-	svc.markPeerConnected("10.0.0.1:64646", "outbound")
-	svc.markPeerDisconnected("10.0.0.1:64646", errors.New("connection reset"))
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
+	svc.markPeerConnected(peerAddr, "outbound")
+	svc.markPeerDisconnected(peerAddr, errors.New("connection reset"))
 
 	svc.mu.RLock()
-	health := svc.health["10.0.0.1:64646"]
+	health := svc.health[peerAddr]
 	svc.mu.RUnlock()
 
 	expectedScore := peerScoreConnect + peerScoreFailure
@@ -81,11 +84,12 @@ func TestMarkPeerDisconnectedCleanDecrementsLess(t *testing.T) {
 	})
 	defer stop()
 
-	svc.markPeerConnected("10.0.0.1:64646", "outbound")
-	svc.markPeerDisconnected("10.0.0.1:64646", nil)
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
+	svc.markPeerConnected(peerAddr, "outbound")
+	svc.markPeerDisconnected(peerAddr, nil)
 
 	svc.mu.RLock()
-	health := svc.health["10.0.0.1:64646"]
+	health := svc.health[peerAddr]
 	svc.mu.RUnlock()
 
 	expectedScore := peerScoreConnect + peerScoreDisconnect
@@ -109,12 +113,13 @@ func TestScoreClampedOnRepeatedFailures(t *testing.T) {
 	})
 	defer stop()
 
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 	for i := 0; i < 50; i++ {
-		svc.markPeerDisconnected("10.0.0.1:64646", errors.New("timeout"))
+		svc.markPeerDisconnected(peerAddr, errors.New("timeout"))
 	}
 
 	svc.mu.RLock()
-	health := svc.health["10.0.0.1:64646"]
+	health := svc.health[peerAddr]
 	svc.mu.RUnlock()
 
 	if health.Score < peerScoreMin {
@@ -132,9 +137,9 @@ func TestNewServiceMergesPersistedPeersWithBootstrap(t *testing.T) {
 	persisted := peerStateFile{
 		Version: peerStateVersion,
 		Peers: []peerEntry{
-			{Address: "10.0.0.1:64646", Score: 50, Source: "peer_exchange", LastConnectedAt: &now},
-			{Address: "10.0.0.2:64646", Score: 20, Source: "peer_exchange"},
-			{Address: "10.0.0.3:64646", Score: 10, Source: "persisted"},
+			{Address: "10.0.0.1:64646", Score: 50, Source: domain.PeerSourcePeerExchange, LastConnectedAt: &now},
+			{Address: "10.0.0.2:64646", Score: 20, Source: domain.PeerSourcePeerExchange},
+			{Address: "10.0.0.3:64646", Score: 10, Source: domain.PeerSourcePersisted},
 		},
 	}
 	data, _ := json.MarshalIndent(persisted, "", "  ")
@@ -171,20 +176,20 @@ func TestNewServiceMergesPersistedPeersWithBootstrap(t *testing.T) {
 	if svc.peers[0].Address != "10.0.0.1:64646" {
 		t.Fatalf("expected first peer to be bootstrap 10.0.0.1:64646, got %s", svc.peers[0].Address)
 	}
-	if svc.peers[0].ID != "bootstrap-0" {
-		t.Fatalf("expected bootstrap-0 ID, got %s", svc.peers[0].ID)
+	if svc.peers[0].Source != domain.PeerSourceBootstrap {
+		t.Fatalf("expected bootstrap source, got %s", svc.peers[0].Source)
 	}
 	if svc.peers[1].Address != "bootstrap.example.com:64646" {
 		t.Fatalf("expected second peer bootstrap.example.com:64646, got %s", svc.peers[1].Address)
 	}
 
 	// Persisted peers follow, but 10.0.0.1 is a duplicate and should be skipped.
-	// So we expect: bootstrap-0 (10.0.0.1), bootstrap-1 (bootstrap.example.com),
-	// persisted-1 (10.0.0.2), persisted-2 (10.0.0.3).
+	// So we expect: bootstrap (10.0.0.1), bootstrap (bootstrap.example.com),
+	// persisted (10.0.0.2), persisted (10.0.0.3).
 	if len(svc.peers) != 4 {
 		addrs := make([]string, len(svc.peers))
 		for i, p := range svc.peers {
-			addrs[i] = p.Address
+			addrs[i] = string(p.Address)
 		}
 		t.Fatalf("expected 4 peers (2 bootstrap + 2 unique persisted), got %d: %v", len(svc.peers), addrs)
 	}
@@ -198,14 +203,14 @@ func TestNewServiceMergesPersistedPeersWithBootstrap(t *testing.T) {
 	}
 
 	// Health should be seeded from persisted metadata — even for the bootstrap-overlap peer.
-	h1 := svc.health["10.0.0.1:64646"]
+	h1 := svc.health[domain.PeerAddress("10.0.0.1:64646")]
 	if h1 == nil {
 		t.Fatal("expected health entry for 10.0.0.1:64646 (bootstrap+persisted overlap)")
 	}
 	if h1.Score != 50 {
 		t.Fatalf("expected seeded Score=50 for overlap peer, got %d", h1.Score)
 	}
-	h2 := svc.health["10.0.0.2:64646"]
+	h2 := svc.health[domain.PeerAddress("10.0.0.2:64646")]
 	if h2 == nil {
 		t.Fatal("expected health entry for 10.0.0.2:64646")
 	}
@@ -264,8 +269,9 @@ func TestFlushPeerStateWritesFile(t *testing.T) {
 	defer stop()
 
 	// Add a peer and mark it connected so it has health data.
-	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-test")
-	svc.markPeerConnected("10.0.0.2:64646", "outbound")
+	peerAddr := domain.PeerAddress("10.0.0.2:64646")
+	svc.addPeerAddress(peerAddr, "full", "peer-test")
+	svc.markPeerConnected(peerAddr, "outbound")
 
 	svc.flushPeerState()
 
@@ -281,7 +287,7 @@ func TestFlushPeerStateWritesFile(t *testing.T) {
 	// Find the connected peer.
 	found := false
 	for _, p := range state.Peers {
-		if p.Address == "10.0.0.2:64646" {
+		if p.Address == peerAddr {
 			found = true
 			if p.Score != peerScoreConnect {
 				t.Fatalf("expected score %d, got %d", peerScoreConnect, p.Score)
@@ -323,7 +329,7 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 				LastDisconnectedAt:  &discTime,
 				ConsecutiveFailures: 3,
 				LastError:           "read timeout",
-				Source:              "peer_exchange",
+				Source:              domain.PeerSourcePeerExchange,
 				AddedAt:             &addedTime,
 				Score:               42,
 			},
@@ -374,7 +380,7 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 	if found == nil {
 		addrs := make([]string, len(reloaded.Peers))
 		for i, p := range reloaded.Peers {
-			addrs[i] = p.Address
+			addrs[i] = string(p.Address)
 		}
 		t.Fatalf("peer 10.0.0.99:64646 not found in flushed state; got: %v", addrs)
 	}
@@ -398,8 +404,8 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 	if found.NodeType != "full" {
 		t.Fatalf("expected persisted NodeType=%q, got %q", "full", found.NodeType)
 	}
-	if found.Source != "peer_exchange" {
-		t.Fatalf("expected persisted Source=%q, got %q", "peer_exchange", found.Source)
+	if found.Source != domain.PeerSourcePeerExchange {
+		t.Fatalf("expected persisted Source=%q, got %q", domain.PeerSourcePeerExchange, found.Source)
 	}
 	if found.AddedAt == nil || !found.AddedAt.Equal(addedTime) {
 		t.Fatalf("expected persisted AddedAt=%v, got %v", addedTime, found.AddedAt)
@@ -419,24 +425,25 @@ func TestCleanDisconnectResetsConsecutiveFailures(t *testing.T) {
 	})
 	defer stop()
 
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 	// Simulate 3 failed connections.
 	for i := 0; i < 3; i++ {
-		svc.markPeerDisconnected("10.0.0.1:64646", errors.New("timeout"))
+		svc.markPeerDisconnected(peerAddr, errors.New("timeout"))
 	}
 
 	svc.mu.RLock()
-	failsBefore := svc.health["10.0.0.1:64646"].ConsecutiveFailures
+	failsBefore := svc.health[peerAddr].ConsecutiveFailures
 	svc.mu.RUnlock()
 	if failsBefore != 3 {
 		t.Fatalf("expected 3 failures before clean disconnect, got %d", failsBefore)
 	}
 
 	// Clean disconnect should reset the counter.
-	svc.markPeerConnected("10.0.0.1:64646", "outbound")
-	svc.markPeerDisconnected("10.0.0.1:64646", nil)
+	svc.markPeerConnected(peerAddr, "outbound")
+	svc.markPeerDisconnected(peerAddr, nil)
 
 	svc.mu.RLock()
-	health := svc.health["10.0.0.1:64646"]
+	health := svc.health[peerAddr]
 	svc.mu.RUnlock()
 
 	if health.ConsecutiveFailures != 0 {
@@ -492,10 +499,11 @@ func TestMarkPeerConnectedSetsLastUsefulReceiveAt(t *testing.T) {
 	defer stop()
 
 	before := time.Now().UTC().Add(-time.Second)
-	svc.markPeerConnected("10.0.0.1:64646", peerDirectionInbound)
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
+	svc.markPeerConnected(peerAddr, peerDirectionInbound)
 
 	svc.mu.RLock()
-	health := svc.health["10.0.0.1:64646"]
+	health := svc.health[peerAddr]
 	state := svc.computePeerStateLocked(health)
 	svc.mu.RUnlock()
 
@@ -524,14 +532,15 @@ func TestComputePeerStateHealthyAfterInboundConnect(t *testing.T) {
 	})
 	defer stop()
 
-	svc.markPeerConnected("10.0.0.1:64646", peerDirectionInbound)
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
+	svc.markPeerConnected(peerAddr, peerDirectionInbound)
 
 	// Simulate the UI polling fetch_peer_health which calls peerHealthFrames.
 	frames := svc.peerHealthFrames()
 
 	found := false
 	for _, f := range frames {
-		if f.Address == "10.0.0.1:64646" {
+		if f.Address == string(peerAddr) {
 			found = true
 			if f.State != peerStateHealthy {
 				t.Fatalf("expected inbound peer state %q in health frame, got %q", peerStateHealthy, f.State)
@@ -558,7 +567,7 @@ func TestInboundPingUpdatesHealth(t *testing.T) {
 	})
 	defer stop()
 
-	peerAddr := "10.0.0.1:64646"
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 	svc.markPeerConnected(peerAddr, peerDirectionInbound)
 
 	// Simulate receiving a ping from the inbound peer.
@@ -591,7 +600,7 @@ func TestInboundPongUpdatesHealth(t *testing.T) {
 	})
 	defer stop()
 
-	peerAddr := "10.0.0.1:64646"
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 	svc.markPeerConnected(peerAddr, peerDirectionInbound)
 
 	// Simulate our heartbeat sending a ping.
@@ -631,7 +640,7 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	})
 	defer stop()
 
-	peerAddr := "10.0.0.1:64646"
+	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 
 	// Create two fake connections.
 	authConn, authPeer := net.Pipe()
@@ -640,8 +649,8 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	defer func() { _ = spoofPeer.Close() }()
 
 	// Simulate hello on both connections (stores connPeerInfo).
-	svc.rememberConnPeerAddr(authConn, protocol.Frame{Address: peerAddr, Listen: peerAddr})
-	svc.rememberConnPeerAddr(spoofConn, protocol.Frame{Address: peerAddr, Listen: peerAddr})
+	svc.rememberConnPeerAddr(authConn, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)})
+	svc.rememberConnPeerAddr(spoofConn, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)})
 
 	// Only the first connection completes auth and is promoted.
 	svc.trackInboundConnect(authConn, peerAddr, "test-identity")

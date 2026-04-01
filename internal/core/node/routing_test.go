@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 )
 
@@ -15,8 +16,8 @@ func TestRoutingDecisionFieldsExist(t *testing.T) {
 	rd := RoutingDecision{
 		PushSubscribers: []*subscriber{{id: "sub-1", recipient: "alice"}},
 		DirectPeers:     []string{"peer-1"},
-		RelayNextHop:    stringPtr("relay-1"),
-		GossipTargets:   []string{"gossip-1", "gossip-2"},
+		RelayNextHop:    peerIdentityPtr("relay-1"),
+		GossipTargets:   []domain.PeerAddress{"gossip-1", "gossip-2"},
 	}
 
 	if len(rd.PushSubscribers) != 1 || rd.PushSubscribers[0].id != "sub-1" {
@@ -25,7 +26,7 @@ func TestRoutingDecisionFieldsExist(t *testing.T) {
 	if len(rd.DirectPeers) != 1 || rd.DirectPeers[0] != "peer-1" {
 		t.Fatal("DirectPeers field not populated correctly")
 	}
-	if rd.RelayNextHop == nil || *rd.RelayNextHop != "relay-1" {
+	if rd.RelayNextHop == nil || *rd.RelayNextHop != domain.PeerIdentity("relay-1") {
 		t.Fatal("RelayNextHop field not populated correctly")
 	}
 	if len(rd.GossipTargets) != 2 {
@@ -84,7 +85,7 @@ func TestRecordingRouterSatisfiesInterface(t *testing.T) {
 func TestServiceRouterFieldIsUsed(t *testing.T) {
 	rec := &recordingRouter{
 		decision: RoutingDecision{
-			GossipTargets: []string{}, // empty so no sends attempted
+			GossipTargets: []domain.PeerAddress{}, // empty so no sends attempted
 		},
 	}
 
@@ -98,6 +99,7 @@ func TestServiceRouterFieldIsUsed(t *testing.T) {
 	}
 }
 
-func stringPtr(s string) *string {
-	return &s
+func peerIdentityPtr(s string) *domain.PeerIdentity {
+	id := domain.PeerIdentity(s)
+	return &id
 }

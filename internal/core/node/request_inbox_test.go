@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/protocol"
 )
@@ -110,8 +110,8 @@ func TestRespondToInboxRequestPushesMessages(t *testing.T) {
 	defer func() { _ = clientConn.Close() }()
 
 	session := &peerSession{
-		address:      peerIdentity,
-		peerIdentity: peerIdentity,
+		address:      domain.PeerAddress(peerIdentity),
+		peerIdentity: domain.PeerIdentity(peerIdentity),
 		conn:         clientConn,
 	}
 
@@ -174,8 +174,8 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 	// in production where the dial address is an IP:port and the identity
 	// is the Ed25519 fingerprint.
 	session := &peerSession{
-		address:      transportAddr,
-		peerIdentity: peerIdentity,
+		address:      domain.PeerAddress(transportAddr),
+		peerIdentity: domain.PeerIdentity(peerIdentity),
 		conn:         clientConn,
 	}
 
@@ -214,7 +214,7 @@ func (s *Service) initMaps() {
 	s.seen = make(map[string]struct{})
 	s.seenReceipts = make(map[string]struct{})
 	s.known = make(map[string]struct{})
-	s.sessions = make(map[string]*peerSession)
+	s.sessions = make(map[domain.PeerAddress]*peerSession)
 	s.subs = make(map[string]map[string]*subscriber)
 	s.receipts = make(map[string][]protocol.DeliveryReceipt)
 	s.notices = make(map[string]gazeta.Notice)
@@ -222,17 +222,17 @@ func (s *Service) initMaps() {
 	s.connPeerInfo = make(map[net.Conn]*connPeerHello)
 	s.connSendCh = make(map[net.Conn]chan sendItem)
 	s.connWriterDone = make(map[net.Conn]chan struct{})
-	s.pending = make(map[string][]pendingFrame)
+	s.pending = make(map[domain.PeerAddress][]pendingFrame)
 	s.pendingKeys = make(map[string]struct{})
-	s.orphaned = make(map[string][]pendingFrame)
+	s.orphaned = make(map[domain.PeerAddress][]pendingFrame)
 	s.relayRetry = make(map[string]relayAttempt)
 	s.outbound = make(map[string]outboundDelivery)
-	s.upstream = make(map[string]struct{})
-	s.health = make(map[string]*peerHealth)
-	s.peerTypes = make(map[string]config.NodeType)
-	s.peerIDs = make(map[string]string)
-	s.peerVersions = make(map[string]string)
-	s.peerBuilds = make(map[string]int)
+	s.upstream = make(map[domain.PeerAddress]struct{})
+	s.health = make(map[domain.PeerAddress]*peerHealth)
+	s.peerTypes = make(map[domain.PeerAddress]domain.NodeType)
+	s.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
+	s.peerVersions = make(map[domain.PeerAddress]string)
+	s.peerBuilds = make(map[domain.PeerAddress]int)
 	s.pubKeys = make(map[string]string)
 	s.boxKeys = make(map[string]string)
 	s.boxSigs = make(map[string]string)
@@ -240,10 +240,10 @@ func (s *Service) initMaps() {
 	s.events = make(map[chan protocol.LocalChangeEvent]struct{})
 	s.inboundConns = make(map[net.Conn]struct{})
 	s.inboundMetered = make(map[net.Conn]*MeteredConn)
-	s.inboundHealthRefs = make(map[string]int)
+	s.inboundHealthRefs = make(map[domain.PeerAddress]int)
 	s.inboundTracked = make(map[net.Conn]struct{})
-	s.dialOrigin = make(map[string]string)
-	s.persistedMeta = make(map[string]*peerEntry)
-	s.observedAddrs = make(map[string]string)
-	s.reachableGroups = make(map[NetGroup]struct{})
+	s.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
+	s.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
+	s.observedAddrs = make(map[domain.PeerIdentity]string)
+	s.reachableGroups = make(map[domain.NetGroup]struct{})
 }

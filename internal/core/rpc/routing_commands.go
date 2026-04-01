@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"corsa/internal/core/identity"
+	"corsa/internal/core/routing"
 )
 
 // RegisterRoutingCommands registers RPC commands for routing table observability.
@@ -80,16 +81,17 @@ func routeTableHandler(rp RoutingProvider) CommandHandler {
 					ttl = 0
 				}
 
-				nh, ok := nextHopCache[e.NextHop]
+				nhKey := string(e.NextHop)
+				nh, ok := nextHopCache[nhKey]
 				if !ok {
 					addr, net := rp.PeerTransport(e.NextHop)
-					nh = wireNextHop{Identity: e.NextHop, Address: addr, Network: net}
-					nextHopCache[e.NextHop] = nh
+					nh = wireNextHop{Identity: nhKey, Address: string(addr), Network: net.String()}
+					nextHopCache[nhKey] = nh
 				}
 
 				routes = append(routes, wireRoute{
-					Identity:   e.Identity,
-					Origin:     e.Origin,
+					Identity:   string(e.Identity),
+					Origin:     string(e.Origin),
 					NextHop:    nh,
 					Hops:       e.Hops,
 					SeqNo:      e.SeqNo,
@@ -139,9 +141,9 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 				if e.IsWithdrawn() || e.IsExpired(snapTime) {
 					continue
 				}
-				destinations[ident] = struct{}{}
+				destinations[string(ident)] = struct{}{}
 				if e.Source.String() == "direct" {
-					directPeers[ident] = struct{}{}
+					directPeers[string(ident)] = struct{}{}
 				}
 			}
 		}
@@ -157,7 +159,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		var flapState []wireFlapEntry
 		for _, fe := range snap.FlapState {
 			wfe := wireFlapEntry{
-				PeerIdentity:      fe.PeerIdentity,
+				PeerIdentity:      string(fe.PeerIdentity),
 				RecentWithdrawals: fe.RecentWithdrawals,
 				InHoldDown:        fe.InHoldDown,
 			}
@@ -200,7 +202,7 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 
 		snap := rp.RoutingSnapshot()
 		snapTime := snap.TakenAt
-		entries := snap.Routes[identityArg]
+		entries := snap.Routes[routing.PeerIdentity(identityArg)]
 
 		type wireRoute struct {
 			Origin     string  `json:"origin"`
@@ -221,8 +223,8 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 				ttl = 0
 			}
 			result = append(result, wireRoute{
-				Origin:     e.Origin,
-				NextHop:    e.NextHop,
+				Origin:     string(e.Origin),
+				NextHop:    string(e.NextHop),
 				Hops:       e.Hops,
 				SeqNo:      e.SeqNo,
 				Source:     e.Source.String(),

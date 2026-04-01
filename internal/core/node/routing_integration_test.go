@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
@@ -187,6 +188,7 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
+		identity:     idPeerB,
 		capabilities: nil,
 	}
 	svc.mu.Unlock()
@@ -217,7 +219,8 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 	svc.mu.Unlock()
 
@@ -488,7 +491,7 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 	}
 
 	// Confirm with the actual NextHop identity that carried the message.
-	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -518,7 +521,7 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 
 	// hop_ack came for a message forwarded to peer-C (different route).
 	// Should NOT promote the peer-B route.
-	svc.confirmRouteViaHopAck(idTargetX, idPeerC, "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerC), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -546,7 +549,7 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceHopAck {
@@ -560,7 +563,7 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 	// Direct route should not be touched by hop_ack confirmation.
 	svc.onPeerSessionEstablished(idTargetX, true)
 
-	svc.confirmRouteViaHopAck(idTargetX, idTargetX, "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idTargetX), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -576,9 +579,9 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 
 	// Simulate an outbound session: transport address "tcp://1.2.3.4:9000"
 	// maps to peer identity "peer-B".
-	svc.sessions["tcp://1.2.3.4:9000"] = &peerSession{
+	svc.sessions[domain.PeerAddress("tcp://1.2.3.4:9000")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 
 	// Route via peer-B.
@@ -597,7 +600,7 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 
 	// hop_ack arrives from transport address — should resolve to peer-B
 	// and confirm the route.
-	svc.confirmRouteViaHopAck(idTargetX, "tcp://1.2.3.4:9000", "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress("tcp://1.2.3.4:9000"), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -626,7 +629,7 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 	}
 
 	// Empty forwardedTo (stored locally, not forwarded) — should not confirm.
-	svc.confirmRouteViaHopAck(idTargetX, "", "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(""), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceAnnouncement {
@@ -639,13 +642,13 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 func newTestServiceWithRouting(localIdentity string) *Service {
 	svc := &Service{
 		identity:              &identity.Identity{Address: localIdentity},
-		identitySessions:      make(map[string]int),
-		identityRelaySessions: make(map[string]int),
-		sessions:              make(map[string]*peerSession),
+		identitySessions:      make(map[domain.PeerIdentity]int),
+		identityRelaySessions: make(map[domain.PeerIdentity]int),
+		sessions:              make(map[domain.PeerAddress]*peerSession),
 		connPeerInfo:          make(map[net.Conn]*connPeerHello),
 		inboundTracked:        make(map[net.Conn]struct{}),
 	}
-	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(localIdentity))
+	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(routing.PeerIdentity(localIdentity)))
 	svc.announceLoop = routing.NewAnnounceLoop(
 		svc.routingTable,
 		&noopPeerSender{},
@@ -662,9 +665,9 @@ func TestResolveRouteNextHop_DirectPeerRelayOnlySuffices(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has only mesh_relay_v1, no mesh_routing_v1.
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	// Direct destination (hops=1): should resolve, relay cap is enough.
@@ -681,9 +684,9 @@ func TestResolveRouteNextHop_TransitNeedsBothCaps(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has only mesh_relay_v1.
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	// Transit next-hop (hops=3): should NOT resolve, needs routing cap too.
@@ -693,9 +696,9 @@ func TestResolveRouteNextHop_TransitNeedsBothCaps(t *testing.T) {
 	}
 
 	// Now give peer-B both caps.
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 
 	addr = svc.resolveRouteNextHopAddress(idPeerB, 3)
@@ -708,9 +711,9 @@ func TestResolveRouteNextHop_NoCapsRejectsAll(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has no relevant capabilities.
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{},
+		capabilities: []domain.Capability{},
 	}
 
 	if addr := svc.resolveRouteNextHopAddress(idPeerB, 1); addr != "" {
@@ -866,7 +869,7 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 	// hop_ack with specific origin=origin-D — only that triple should
 	// be promoted. origin-C must remain announcement despite sharing
 	// the same NextHop.
-	svc.confirmRouteViaHopAck(idTargetX, idPeerB, idOriginD)
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), domain.PeerIdentity(idOriginD))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
@@ -925,7 +928,7 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 
 	// Gossip path (empty origin) promotes the first matching NextHop in
 	// Lookup order — origin-C with hops=2 wins.
-	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
@@ -984,7 +987,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack for target-X only.
-	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
 
 	// target-X should be promoted.
 	routesX := svc.routingTable.Lookup(idTargetX)
@@ -1036,7 +1039,7 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack from peer-D should only promote the peer-D route.
-	svc.confirmRouteViaHopAck(idTargetX, idPeerD, "")
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerD), "")
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
@@ -1065,7 +1068,8 @@ func TestResolveRelayAddress_InboundPeer(t *testing.T) {
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 	svc.mu.Unlock()
 
@@ -1086,7 +1090,7 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRelayV1}, // only relay, no routing
+		capabilities: []domain.Capability{domain.CapMeshRelayV1}, // only relay, no routing
 	}
 	svc.mu.Unlock()
 
@@ -1100,7 +1104,8 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.mu.Unlock()
 
@@ -1114,9 +1119,9 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Set up both outbound session and inbound connection for same peer.
-	svc.sessions["outbound-addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("outbound-addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
@@ -1124,7 +1129,8 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 	svc.mu.Unlock()
 
@@ -1143,7 +1149,8 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address: idPeerB,
+		address:  idPeerB,
+		identity: idPeerB,
 	}
 	svc.mu.Unlock()
 
@@ -1180,9 +1187,9 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 	tr := &TableRouter{
 		svc:   &Service{},
 		table: table,
-		sessionChecker: func(peerIdentity string, hops int) string {
-			if peerIdentity == idPeerB {
-				return "validated-addr-B"
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
+			if peerIdentity == domain.PeerIdentity(idPeerB) {
+				return domain.PeerAddress("validated-addr-B")
 			}
 			return ""
 		},
@@ -1200,7 +1207,7 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop")
 	}
-	if decision.RelayNextHopAddress != "validated-addr-B" {
+	if decision.RelayNextHopAddress != domain.PeerAddress("validated-addr-B") {
 		t.Fatalf("expected RelayNextHopAddress=validated-addr-B, got %q", decision.RelayNextHopAddress)
 	}
 }
@@ -1348,7 +1355,7 @@ func (c *fakeConn) RemoteAddr() net.Addr { return c.remoteAddr }
 // noopPeerSender does nothing — used in tests where sending is not under test.
 type noopPeerSender struct{}
 
-func (n *noopPeerSender) SendAnnounceRoutes(string, []routing.AnnounceEntry) bool {
+func (n *noopPeerSender) SendAnnounceRoutes(routing.PeerAddress, []routing.AnnounceEntry) bool {
 	return true
 }
 
@@ -1356,9 +1363,9 @@ func (n *noopPeerSender) SendAnnounceRoutes(string, []routing.AnnounceEntry) boo
 // the maps required for trackInboundConnect (health tracking, ref counting).
 func newTestServiceWithRoutingAndHealth(localIdentity string) *Service {
 	svc := newTestServiceWithRouting(localIdentity)
-	svc.health = make(map[string]*peerHealth)
-	svc.inboundHealthRefs = make(map[string]int)
-	svc.dialOrigin = make(map[string]string)
+	svc.health = make(map[domain.PeerAddress]*peerHealth)
+	svc.inboundHealthRefs = make(map[domain.PeerAddress]int)
+	svc.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
 	svc.connSendCh = make(map[net.Conn]chan sendItem)
 	svc.connWriterDone = make(map[net.Conn]chan struct{})
 	return svc
@@ -1524,13 +1531,13 @@ func TestOutboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	}
 
 	// Create a session for peer-B with relay-only capability (no routing).
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	// Verify the capability gate returns false.
-	if svc.sessionHasCapability("addr-B", capMeshRoutingV1) {
+	if svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRoutingV1) {
 		t.Fatal("peer-B should NOT have mesh_routing_v1")
 	}
 
@@ -1554,12 +1561,12 @@ func TestOutboundFullSyncSentWithRoutingCap(t *testing.T) {
 	}
 
 	// Create a session for peer-B with routing capability.
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 
-	if !svc.sessionHasCapability("addr-B", capMeshRoutingV1) {
+	if !svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRoutingV1) {
 		t.Fatal("peer-B should have mesh_routing_v1")
 	}
 
@@ -1591,12 +1598,13 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 	svc.mu.Unlock()
 
 	// connHasCapability should return false.
-	if svc.connHasCapability(conn, capMeshRoutingV1) {
+	if svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
 		t.Fatal("inbound peer should NOT have mesh_routing_v1")
 	}
 
@@ -1655,13 +1663,14 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.connSendCh[conn] = sendCh
 	svc.connWriterDone[conn] = writerDone
 	svc.mu.Unlock()
 
-	if !svc.connHasCapability(conn, capMeshRoutingV1) {
+	if !svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
 		t.Fatal("inbound peer should have mesh_routing_v1")
 	}
 
@@ -1700,16 +1709,16 @@ func TestOutboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 	}
 
 	// Create a session for peer-B with routing-only capability (no relay).
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1},
 	}
 
 	// Peer has routing but not relay.
-	if !svc.sessionHasCapability("addr-B", capMeshRoutingV1) {
+	if !svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRoutingV1) {
 		t.Fatal("peer-B should have mesh_routing_v1")
 	}
-	if svc.sessionHasCapability("addr-B", capMeshRelayV1) {
+	if svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRelayV1) {
 		t.Fatal("peer-B should NOT have mesh_relay_v1")
 	}
 
@@ -1744,14 +1753,15 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRoutingV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1},
 	}
 	svc.mu.Unlock()
 
-	if !svc.connHasCapability(conn, capMeshRoutingV1) {
+	if !svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
 		t.Fatal("inbound peer should have mesh_routing_v1")
 	}
-	if svc.connHasCapability(conn, capMeshRelayV1) {
+	if svc.connHasCapability(conn, domain.CapMeshRelayV1) {
 		t.Fatal("inbound peer should NOT have mesh_relay_v1")
 	}
 
@@ -1779,14 +1789,14 @@ func TestRoutingCapablePeersExcludesRoutingOnlyPeer(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B: routing-only (no relay) — should be excluded.
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1},
 	}
 	// peer-C: both capabilities — should be included.
-	svc.sessions["addr-C"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
 		peerIdentity: idPeerC,
-		capabilities: []string{capMeshRoutingV1, capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1},
 	}
 
 	targets := svc.routingCapablePeers()
@@ -1815,7 +1825,8 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
 		address:      idPeerB,
-		capabilities: []string{capMeshRoutingV1},
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1},
 	}
 	svc.mu.Unlock()
 
@@ -1835,9 +1846,9 @@ func TestRetryResolutionTransitRequiresBothCaps(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has only relay capability — insufficient for transit.
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	// Transit hops (hops=3): should NOT resolve with relay-only cap.
@@ -1852,9 +1863,9 @@ func TestRetryResolutionTransitRequiresBothCaps(t *testing.T) {
 func TestRetryResolutionTransitWithBothCapsResolves(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 
 	addr := svc.resolveRouteNextHopAddress(idPeerB, 3)
@@ -1868,9 +1879,9 @@ func TestRetryResolutionTransitWithBothCapsResolves(t *testing.T) {
 func TestRetryResolutionDestinationRelayOnlySuffices(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	addr := svc.resolveRouteNextHopAddress(idPeerB, 1)
@@ -1892,9 +1903,9 @@ func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateRoute failed: %v", err)
 	}
-	svc.sessions["addr-B"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 
 	router := NewTableRouter(svc, svc.routingTable)
@@ -1930,9 +1941,9 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 
 	// peer-C needs both caps (transit, hops=2) and a functioning send channel.
 	sendCh := make(chan protocol.Frame, 10)
-	svc.sessions["addr-C"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
 		peerIdentity: idPeerC,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 		sendCh:       sendCh,
 	}
 	// activePeerSession requires health entry with Connected=true.
@@ -1969,9 +1980,9 @@ func TestTryForwardViaRoutingTableExcludesSender(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateRoute failed: %v", err)
 	}
-	svc.sessions["addr-A"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		peerIdentity: idPeerA,
-		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 
 	frame := protocol.Frame{
@@ -2018,9 +2029,9 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 
 	svc := &Service{
 		identity:              &identity.Identity{Address: idNodeA},
-		identitySessions:      make(map[string]int),
-		identityRelaySessions: make(map[string]int),
-		sessions:              make(map[string]*peerSession),
+		identitySessions:      make(map[domain.PeerIdentity]int),
+		identityRelaySessions: make(map[domain.PeerIdentity]int),
+		sessions:              make(map[domain.PeerAddress]*peerSession),
 		connPeerInfo:          make(map[net.Conn]*connPeerHello),
 		inboundTracked:        make(map[net.Conn]struct{}),
 	}
@@ -2079,5 +2090,161 @@ func TestHandleAnnounceRoutesDefaultTTLWithoutConfig(t *testing.T) {
 	// ExpiresAt should be set (non-zero) — the table applied its default TTL.
 	if routes[0].ExpiresAt.IsZero() {
 		t.Fatal("route ExpiresAt should not be zero — table should apply defaultTTL")
+	}
+}
+
+// --- address ≠ identity tests (NATed inbound peers) ---
+
+// TestInboundFullSyncUsesIdentityNotAddress verifies that
+// trackInboundConnect passes the peer identity (Ed25519 fingerprint)
+// to sendFullTableSyncToInbound — not the transport/listen address.
+// For NATed peers these differ, and split horizon must filter by
+// identity to avoid sending a peer its own routes.
+func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+
+	// Peer-B advertises a route for target-X. Split horizon should
+	// suppress this route when syncing back to peer-B.
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idPeerB, NextHop: idPeerB,
+		Hops: 1, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("UpdateRoute failed: %v", err)
+	}
+	// Also add a route from peer-C that SHOULD be sent to peer-B.
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
+		t.Fatalf("AddDirectPeer failed: %v", err)
+	}
+
+	pipeLocal, _ := net.Pipe()
+	defer func() { _ = pipeLocal.Close() }()
+
+	conn := &fakeConn{
+		Conn:       pipeLocal,
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.50"), Port: 9999},
+	}
+
+	sendCh := make(chan sendItem, 16)
+	defer close(sendCh)
+	writerDone := make(chan struct{})
+	received := make(chan []byte, 1)
+	go func() {
+		defer close(writerDone)
+		for item := range sendCh {
+			received <- item.data
+			if item.ack != nil {
+				close(item.ack)
+			}
+		}
+	}()
+
+	// NATed peer: address (listen) = "127.0.0.1:64646", identity = idPeerB.
+	natListenAddr := domain.PeerAddress("127.0.0.1:64646")
+	svc.mu.Lock()
+	svc.connPeerInfo[conn] = &connPeerHello{
+		address:      natListenAddr,
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.connSendCh[conn] = sendCh
+	svc.connWriterDone[conn] = writerDone
+	svc.mu.Unlock()
+
+	// trackInboundConnect must pass peerIdentity (idPeerB), not address.
+	svc.trackInboundConnect(conn, natListenAddr, idPeerB)
+
+	select {
+	case data := <-received:
+		line := string(data)
+		// Split horizon: route learned FROM peer-B should be excluded.
+		if strings.Contains(line, idPeerB) && strings.Contains(line, idTargetX) {
+			t.Fatalf("full-sync should not include route learned from peer-B (split horizon broken), got: %s", line)
+		}
+		// Route for peer-C should be present.
+		if !strings.Contains(line, idPeerC) {
+			t.Fatalf("full-sync should include route for peer-C, got: %s", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for full-sync frame")
+	}
+}
+
+// TestRoutingCapablePeersUsesIdentityForInbound verifies that
+// routingCapablePeers uses info.identity (not info.address) to build
+// announce targets and dedup against outbound sessions.
+func TestRoutingCapablePeersUsesIdentityForInbound(t *testing.T) {
+	svc := newTestServiceWithRouting(idNodeA)
+
+	pipeLocal, _ := net.Pipe()
+	defer func() { _ = pipeLocal.Close() }()
+
+	conn := &fakeConn{
+		Conn:       pipeLocal,
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.51"), Port: 9998},
+	}
+
+	// NATed peer: address is a local listen addr, identity is the fingerprint.
+	svc.mu.Lock()
+	svc.inboundTracked[conn] = struct{}{}
+	svc.connPeerInfo[conn] = &connPeerHello{
+		address:      "127.0.0.1:64646",
+		identity:     idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.mu.Unlock()
+
+	targets := svc.routingCapablePeers()
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if targets[0].Identity != idPeerB {
+		t.Fatalf("target identity should be %s (fingerprint), got %s", idPeerB, targets[0].Identity)
+	}
+}
+
+// TestResolveRelayAddressUsesIdentityForInbound verifies that
+// resolveRelayAddress matches on info.identity, not info.address.
+func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
+	svc := newTestServiceWithRouting(idNodeA)
+
+	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.52"), Port: 8080}}
+	svc.mu.Lock()
+	svc.inboundTracked[conn] = struct{}{}
+	svc.connPeerInfo[conn] = &connPeerHello{
+		address:      "127.0.0.1:64646", // NATed listen address
+		identity:     idPeerB,           // real identity
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+	}
+	svc.mu.Unlock()
+
+	// Resolve by identity — should find the inbound connection.
+	addr := svc.resolveRelayAddress(idPeerB)
+	if addr == "" {
+		t.Fatal("resolveRelayAddress should find inbound peer by identity")
+	}
+
+	// Resolve by listen address — should NOT match (identity ≠ address).
+	addr = svc.resolveRelayAddress("127.0.0.1:64646")
+	if addr != "" {
+		t.Fatalf("resolveRelayAddress should not match by listen address, got %s", addr)
+	}
+}
+
+// TestResolvePeerIdentityReturnsIdentityNotAddress verifies that
+// resolvePeerIdentity returns info.identity, not info.address.
+func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
+	svc := newTestServiceWithRouting(idNodeA)
+
+	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.53"), Port: 7777}}
+	svc.mu.Lock()
+	svc.connPeerInfo[conn] = &connPeerHello{
+		address:  "127.0.0.1:64646", // NATed listen
+		identity: idPeerB,           // fingerprint
+	}
+	svc.mu.Unlock()
+
+	id := svc.resolvePeerIdentity("10.0.0.53:7777")
+	if id != idPeerB {
+		t.Fatalf("expected identity %s, got %s", idPeerB, id)
 	}
 }

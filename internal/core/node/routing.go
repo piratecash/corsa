@@ -1,6 +1,7 @@
 package node
 
 import (
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 )
 
@@ -21,7 +22,7 @@ type RoutingDecision struct {
 	// RelayNextHop is the next-hop peer identity (Ed25519 fingerprint)
 	// from the routing table. nil means no route is known.
 	// Populated starting from Phase 1.2.
-	RelayNextHop *string
+	RelayNextHop *domain.PeerIdentity
 
 	// RelayNextHopAddress is the transport address (or "inbound:" prefixed
 	// key) of the session that was validated by the router at lookup time.
@@ -29,14 +30,14 @@ type RoutingDecision struct {
 	// different session for the same identity — one that lacks the required
 	// capabilities (e.g., a relay-only session instead of a routing-capable
 	// session for a transit next-hop). Empty when RelayNextHop is nil.
-	RelayNextHopAddress string
+	RelayNextHopAddress domain.PeerAddress
 
 	// RelayRouteOrigin is the Origin field from the RouteEntry selected by
 	// the router. Stored in relayForwardState so that hop_ack confirmation
 	// can match the exact (Identity, Origin, NextHop) triple that carried
 	// the message, rather than promoting any route with a matching NextHop.
 	// Empty when RelayNextHop is nil.
-	RelayRouteOrigin string
+	RelayRouteOrigin domain.PeerIdentity
 
 	// RelayNextHopHops is the hop count from the selected RouteEntry.
 	// Used by the retry path in sendTableDirectedRelay to re-resolve the
@@ -47,7 +48,7 @@ type RoutingDecision struct {
 
 	// GossipTargets are the top-N peers selected by score for blind gossip
 	// delivery. Maps to the existing routingTargetsForMessage() path.
-	GossipTargets []string
+	GossipTargets []domain.PeerAddress
 }
 
 // Router determines how a message should be delivered across the mesh network.

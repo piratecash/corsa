@@ -75,7 +75,7 @@ func TestSnapshotBestRoute(t *testing.T) {
 
 	snap := Snapshot{
 		TakenAt: now,
-		Routes: map[string][]RouteEntry{
+		Routes: map[PeerIdentity][]RouteEntry{
 			"alice": {
 				{Identity: "alice", Origin: "x", NextHop: "n1", Hops: 3, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)},
 				{Identity: "alice", Origin: "y", NextHop: "n2", Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
@@ -98,7 +98,7 @@ func TestSnapshotBestRoutePrefersTrustOverHops(t *testing.T) {
 
 	snap := Snapshot{
 		TakenAt: now,
-		Routes: map[string][]RouteEntry{
+		Routes: map[PeerIdentity][]RouteEntry{
 			"alice": {
 				{Identity: "alice", Origin: "x", NextHop: "n1", Hops: 1, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)},
 				{Identity: "alice", Origin: "y", NextHop: "alice", Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
@@ -120,7 +120,7 @@ func TestSnapshotBestRouteSkipsExpired(t *testing.T) {
 
 	snap := Snapshot{
 		TakenAt: now,
-		Routes: map[string][]RouteEntry{
+		Routes: map[PeerIdentity][]RouteEntry{
 			"bob": {
 				{Identity: "bob", Hops: 1, ExpiresAt: now.Add(-time.Second)},
 			},
@@ -135,7 +135,7 @@ func TestSnapshotBestRouteSkipsExpired(t *testing.T) {
 func TestSnapshotBestRouteNone(t *testing.T) {
 	snap := Snapshot{
 		TakenAt: time.Now(),
-		Routes:  map[string][]RouteEntry{},
+		Routes:  map[PeerIdentity][]RouteEntry{},
 	}
 	if snap.BestRoute("unknown") != nil {
 		t.Fatal("unknown identity should return nil")

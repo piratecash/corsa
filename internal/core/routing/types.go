@@ -4,6 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"corsa/internal/core/domain"
+)
+
+// PeerIdentity and PeerAddress are re-exported from domain so that
+// callers importing routing do not need a separate domain import.
+type (
+	PeerIdentity = domain.PeerIdentity
+	PeerAddress  = domain.PeerAddress
 )
 
 var (
@@ -96,17 +105,17 @@ func (s RouteSource) TrustRank() int {
 // different points in time; the one with the higher SeqNo wins.
 type RouteEntry struct {
 	// Identity is the Ed25519 fingerprint of the destination node.
-	Identity string
+	Identity PeerIdentity
 
 	// Origin is the peer identity that originally advertised this route.
 	// Only the origin may advance SeqNo or send a withdrawal (hops=16)
 	// on the wire.
-	Origin string
+	Origin PeerIdentity
 
 	// NextHop is the peer identity from which we learned this route.
 	// This is a peer identity, not a transport address — a single identity
 	// may have multiple concurrent sessions.
-	NextHop string
+	NextHop PeerIdentity
 
 	// Hops is the distance to the destination. 1 means directly connected,
 	// HopsInfinity (16) means withdrawn.
@@ -134,13 +143,13 @@ type RouteEntry struct {
 //   - RouteSourceDirect: Hops must be 1, NextHop must equal Identity
 //     (a direct route means the destination is our immediate neighbor).
 func (e RouteEntry) Validate() error {
-	if e.Identity == "" {
+	if string(e.Identity) == "" {
 		return ErrEmptyIdentity
 	}
-	if e.Origin == "" {
+	if string(e.Origin) == "" {
 		return ErrEmptyOrigin
 	}
-	if e.NextHop == "" {
+	if string(e.NextHop) == "" {
 		return ErrEmptyNextHop
 	}
 	if e.Hops < 1 || e.Hops > HopsInfinity {
@@ -181,9 +190,9 @@ func (e RouteEntry) DedupKey() RouteTriple {
 
 // RouteTriple is the deduplication key for route entries.
 type RouteTriple struct {
-	Identity string
-	Origin   string
-	NextHop  string
+	Identity PeerIdentity
+	Origin   PeerIdentity
+	NextHop  PeerIdentity
 }
 
 // Snapshot is an immutable point-in-time view of the routing table.
@@ -191,7 +200,7 @@ type RouteTriple struct {
 // under a single lock acquisition, so they represent a consistent state.
 type Snapshot struct {
 	// Routes maps destination identity to all known routes for that identity.
-	Routes map[string][]RouteEntry
+	Routes map[PeerIdentity][]RouteEntry
 
 	// TakenAt is the timestamp when the snapshot was captured.
 	TakenAt time.Time
@@ -209,7 +218,7 @@ type Snapshot struct {
 
 // BestRoute returns the best (lowest hop count, highest trust) non-withdrawn
 // route for the given identity, or nil if none exists.
-func (s Snapshot) BestRoute(identity string) *RouteEntry {
+func (s Snapshot) BestRoute(identity PeerIdentity) *RouteEntry {
 	routes, ok := s.Routes[identity]
 	if !ok {
 		return nil
@@ -231,8 +240,8 @@ func (s Snapshot) BestRoute(identity string) *RouteEntry {
 // It contains only the fields transmitted in announce_routes frames.
 // Produced by RouteEntry.ToAnnounceEntry or Table.AnnounceTo.
 type AnnounceEntry struct {
-	Identity string
-	Origin   string
+	Identity PeerIdentity
+	Origin   PeerIdentity
 	Hops     int
 	SeqNo    uint64
 }
@@ -258,7 +267,7 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 // Exported for RPC observability — callers should treat this as read-only.
 type FlapEntry struct {
 	// PeerIdentity is the Ed25519 fingerprint of the peer.
-	PeerIdentity string
+	PeerIdentity PeerIdentity
 
 	// RecentWithdrawals is the number of disconnect events within the flap window.
 	RecentWithdrawals int

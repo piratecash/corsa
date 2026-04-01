@@ -3,6 +3,8 @@ package node
 import (
 	"sync"
 	"time"
+
+	"corsa/internal/core/domain"
 )
 
 // relayRateLimiter enforces per-peer relay fan-out rate limits using a
@@ -15,7 +17,7 @@ import (
 // push to any single neighbor per time window.
 type relayRateLimiter struct {
 	mu      sync.Mutex
-	buckets map[string]*tokenBucket
+	buckets map[domain.PeerAddress]*tokenBucket
 }
 
 // tokenBucket tracks per-peer relay allowance.
@@ -34,14 +36,14 @@ const relayRefillRate = 20.0
 
 func newRelayRateLimiter() *relayRateLimiter {
 	return &relayRateLimiter{
-		buckets: make(map[string]*tokenBucket),
+		buckets: make(map[domain.PeerAddress]*tokenBucket),
 	}
 }
 
 // allow checks whether a relay frame to the given peer address should be
 // permitted. Returns true and decrements one token on success. Returns
 // false when the bucket is empty.
-func (rl *relayRateLimiter) allow(address string) bool {
+func (rl *relayRateLimiter) allow(address domain.PeerAddress) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 

@@ -107,6 +107,7 @@ type NoticeFrame struct {
 type PeerHealthFrame struct {
 	Address             string   `json:"address"`
 	PeerID              string   `json:"peer_id,omitempty"`
+	ConnID              uint64   `json:"conn_id,omitempty"`
 	Network             string   `json:"network,omitempty"`
 	Direction           string   `json:"direction,omitempty"`
 	ClientVersion       string   `json:"client_version,omitempty"`
@@ -124,6 +125,7 @@ type PeerHealthFrame struct {
 	ConsecutiveFailures int      `json:"consecutive_failures,omitempty"`
 	LastError           string   `json:"last_error,omitempty"`
 	Score               int      `json:"score"`
+	BannedUntil         string   `json:"banned_until,omitempty"`
 	BytesSent           int64    `json:"bytes_sent"`
 	BytesReceived       int64    `json:"bytes_received"`
 	TotalTraffic        int64    `json:"total_traffic"`

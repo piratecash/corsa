@@ -1,14 +1,12 @@
 package node
 
 import (
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
 
 	"github.com/rs/zerolog/log"
 )
-
-// capMeshRoutingV1 is the capability token that gates announce_routes frames.
-const capMeshRoutingV1 = "mesh_routing_v1"
 
 // TableRouter extends GossipRouter with distance-vector table lookups.
 // If the routing table has a valid next-hop with an active, capable session,
@@ -37,7 +35,7 @@ type TableRouter struct {
 	// requirements: hops=1 (destination) needs only relay cap; hops>1
 	// (transit) needs both relay and routing caps.
 	// Injected for testability; defaults to Service.resolveRouteNextHopAddress.
-	sessionChecker func(peerIdentity string, hops int) string
+	sessionChecker func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress
 }
 
 // NewTableRouter creates a TableRouter that consults the routing table
@@ -69,7 +67,7 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 	}
 
 	// Table lookup for directed relay.
-	routes := r.table.Lookup(msg.Recipient)
+	routes := r.table.Lookup(routing.PeerIdentity(msg.Recipient))
 	if len(routes) == 0 {
 		log.Debug().
 			Str("recipient", msg.Recipient).
@@ -85,15 +83,14 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		if address == "" {
 			continue
 		}
-		nextHop := route.NextHop
-		decision.RelayNextHop = &nextHop
+		decision.RelayNextHop = &route.NextHop
 		decision.RelayNextHopAddress = address
 		decision.RelayRouteOrigin = route.Origin
 		decision.RelayNextHopHops = route.Hops
 		log.Debug().
 			Str("recipient", msg.Recipient).
-			Str("next_hop", route.NextHop).
-			Str("address", address).
+			Str("next_hop", string(route.NextHop)).
+			Str("address", string(address)).
 			Int("hops", route.Hops).
 			Str("source", route.Source.String()).
 			Msg("route_via_table")
@@ -107,4 +104,3 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		Msg("route_via_table_no_session_fallback_gossip")
 	return decision
 }
-

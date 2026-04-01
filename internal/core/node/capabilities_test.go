@@ -4,12 +4,13 @@ import (
 	"net"
 	"testing"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 )
 
 func TestLocalCapabilities(t *testing.T) {
 	caps := localCapabilities()
-	expected := []string{"mesh_relay_v1", "mesh_routing_v1"}
+	expected := []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1}
 	if len(caps) != len(expected) {
 		t.Fatalf("localCapabilities() = %v, want %v", caps, expected)
 	}
@@ -20,12 +21,25 @@ func TestLocalCapabilities(t *testing.T) {
 	}
 }
 
+func TestLocalCapabilityStrings(t *testing.T) {
+	strs := localCapabilityStrings()
+	expected := []string{"mesh_relay_v1", "mesh_routing_v1"}
+	if len(strs) != len(expected) {
+		t.Fatalf("localCapabilityStrings() = %v, want %v", strs, expected)
+	}
+	for i, s := range expected {
+		if strs[i] != s {
+			t.Fatalf("localCapabilityStrings()[%d] = %q, want %q", i, strs[i], s)
+		}
+	}
+}
+
 func TestIntersectCapabilities(t *testing.T) {
 	tests := []struct {
 		name     string
-		local    []string
+		local    []domain.Capability
 		remote   []string
-		expected []string
+		expected []domain.Capability
 	}{
 		{
 			name:     "both empty",
@@ -41,33 +55,33 @@ func TestIntersectCapabilities(t *testing.T) {
 		},
 		{
 			name:     "remote empty",
-			local:    []string{"mesh_relay_v1"},
+			local:    []domain.Capability{domain.CapMeshRelayV1},
 			remote:   nil,
 			expected: nil,
 		},
 		{
 			name:     "no overlap",
-			local:    []string{"mesh_relay_v1"},
+			local:    []domain.Capability{domain.CapMeshRelayV1},
 			remote:   []string{"mesh_routing_v1"},
 			expected: nil,
 		},
 		{
 			name:     "full overlap",
-			local:    []string{"mesh_relay_v1", "mesh_routing_v1"},
+			local:    []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 			remote:   []string{"mesh_routing_v1", "mesh_relay_v1"},
-			expected: []string{"mesh_relay_v1", "mesh_routing_v1"},
+			expected: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 		},
 		{
 			name:     "partial overlap",
-			local:    []string{"mesh_relay_v1", "mesh_routing_v1"},
+			local:    []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 			remote:   []string{"mesh_relay_v1", "mesh_dht_v1"},
-			expected: []string{"mesh_relay_v1"},
+			expected: []domain.Capability{domain.CapMeshRelayV1},
 		},
 		{
 			name:     "single common capability",
-			local:    []string{"mesh_relay_v1"},
+			local:    []domain.Capability{domain.CapMeshRelayV1},
 			remote:   []string{"mesh_relay_v1"},
-			expected: []string{"mesh_relay_v1"},
+			expected: []domain.Capability{domain.CapMeshRelayV1},
 		},
 	}
 
@@ -94,10 +108,10 @@ func TestIntersectCapabilities(t *testing.T) {
 
 func TestSessionHasCapability(t *testing.T) {
 	svc := &Service{
-		sessions: map[string]*peerSession{
+		sessions: map[domain.PeerAddress]*peerSession{
 			"peer-a": {
 				address:      "peer-a",
-				capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
+				capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 			},
 			"peer-b": {
 				address:      "peer-b",
@@ -106,19 +120,19 @@ func TestSessionHasCapability(t *testing.T) {
 		},
 	}
 
-	if !svc.sessionHasCapability("peer-a", "mesh_relay_v1") {
+	if !svc.sessionHasCapability(domain.PeerAddress("peer-a"), domain.CapMeshRelayV1) {
 		t.Fatal("peer-a should have mesh_relay_v1")
 	}
-	if !svc.sessionHasCapability("peer-a", "mesh_routing_v1") {
+	if !svc.sessionHasCapability(domain.PeerAddress("peer-a"), domain.CapMeshRoutingV1) {
 		t.Fatal("peer-a should have mesh_routing_v1")
 	}
-	if svc.sessionHasCapability("peer-a", "mesh_dht_v1") {
+	if svc.sessionHasCapability(domain.PeerAddress("peer-a"), domain.Capability("mesh_dht_v1")) {
 		t.Fatal("peer-a should not have mesh_dht_v1")
 	}
-	if svc.sessionHasCapability("peer-b", "mesh_relay_v1") {
+	if svc.sessionHasCapability(domain.PeerAddress("peer-b"), domain.CapMeshRelayV1) {
 		t.Fatal("peer-b has nil capabilities, should not match")
 	}
-	if svc.sessionHasCapability("unknown-peer", "mesh_relay_v1") {
+	if svc.sessionHasCapability(domain.PeerAddress("unknown-peer"), domain.CapMeshRelayV1) {
 		t.Fatal("unknown peer should not match")
 	}
 }
@@ -132,18 +146,18 @@ func TestConnHasCapability(t *testing.T) {
 		connPeerInfo: map[net.Conn]*connPeerHello{
 			serverConn: {
 				address:      "10.0.0.1:64646",
-				capabilities: []string{"mesh_relay_v1"},
+				capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			},
 		},
 	}
 
-	if !svc.connHasCapability(serverConn, "mesh_relay_v1") {
+	if !svc.connHasCapability(serverConn, domain.CapMeshRelayV1) {
 		t.Fatal("serverConn should have mesh_relay_v1")
 	}
-	if svc.connHasCapability(serverConn, "mesh_routing_v1") {
+	if svc.connHasCapability(serverConn, domain.CapMeshRoutingV1) {
 		t.Fatal("serverConn should not have mesh_routing_v1")
 	}
-	if svc.connHasCapability(clientConn, "mesh_relay_v1") {
+	if svc.connHasCapability(clientConn, domain.CapMeshRelayV1) {
 		t.Fatal("clientConn is not registered, should not match")
 	}
 }
@@ -169,10 +183,10 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 		t.Fatal("connPeerInfo should be set after rememberConnPeerAddr")
 	}
 
-	// localCapabilities() returns ["mesh_relay_v1", "mesh_routing_v1"] (Phase 1.2).
+	// localCapabilities() returns [mesh_relay_v1, mesh_routing_v1] (Phase 1.2).
 	// The remote hello advertises ["mesh_relay_v1", "mesh_routing_v1"].
 	// The intersection should contain both.
-	if len(info.capabilities) != 2 || info.capabilities[0] != "mesh_relay_v1" || info.capabilities[1] != "mesh_routing_v1" {
+	if len(info.capabilities) != 2 || info.capabilities[0] != domain.CapMeshRelayV1 || info.capabilities[1] != domain.CapMeshRoutingV1 {
 		t.Fatalf("expected [mesh_relay_v1, mesh_routing_v1], got %v", info.capabilities)
 	}
 }

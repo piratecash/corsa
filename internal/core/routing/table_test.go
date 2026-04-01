@@ -21,7 +21,7 @@ func mustUpdate(t *testing.T, tbl *Table, entry RouteEntry) bool {
 }
 
 // mustAddDirect calls AddDirectPeer and fails the test on error.
-func mustAddDirect(t *testing.T, tbl *Table, peerID string) RouteEntry {
+func mustAddDirect(t *testing.T, tbl *Table, peerID PeerIdentity) RouteEntry {
 	t.Helper()
 	result, err := tbl.AddDirectPeer(peerID)
 	if err != nil {
@@ -31,7 +31,7 @@ func mustAddDirect(t *testing.T, tbl *Table, peerID string) RouteEntry {
 }
 
 // mustRemoveDirect calls RemoveDirectPeer and fails the test on error.
-func mustRemoveDirect(t *testing.T, tbl *Table, peerID string) RemoveDirectPeerResult {
+func mustRemoveDirect(t *testing.T, tbl *Table, peerID PeerIdentity) RemoveDirectPeerResult {
 	t.Helper()
 	result, err := tbl.RemoveDirectPeer(peerID)
 	if err != nil {
@@ -627,8 +627,8 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	// Withdraw at SeqNo=5 — sets Hops=HopsInfinity.
-	if !tbl.WithdrawRoute("alice", "bob", "charlie", 5) {
+	// Withdraw at SeqNo=6 (strictly greater than active SeqNo=5) — sets Hops=HopsInfinity.
+	if !tbl.WithdrawRoute("alice", "bob", "charlie", 6) {
 		t.Fatal("withdraw should succeed")
 	}
 
@@ -636,7 +636,7 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 	// withdrawn entry. Only a strictly newer SeqNo may do that.
 	accepted := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
-		Hops: 1, SeqNo: 5, Source: RouteSourceHopAck,
+		Hops: 1, SeqNo: 6, Source: RouteSourceHopAck,
 	})
 	if accepted {
 		t.Fatal("same-SeqNo hop_ack must not resurrect a withdrawn route")
@@ -651,10 +651,10 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 	// A strictly newer SeqNo should succeed.
 	accepted = mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
-		Hops: 2, SeqNo: 6, Source: RouteSourceAnnouncement,
+		Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
 	})
 	if !accepted {
-		t.Fatal("newer SeqNo=6 should supersede withdrawn SeqNo=5")
+		t.Fatal("newer SeqNo=7 should supersede withdrawn SeqNo=6")
 	}
 	routes = tbl.Lookup("alice")
 	if len(routes) != 1 || routes[0].Hops != 2 {

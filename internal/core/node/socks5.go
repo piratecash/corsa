@@ -8,12 +8,14 @@ import (
 	"net"
 	"strconv"
 	"time"
+
+	"corsa/internal/core/domain"
 )
 
 // dialPeer connects to the given address, routing overlay addresses (.onion,
 // .b32.i2p) through the SOCKS5 proxy configured in cfg.ProxyAddress.
-func (s *Service) dialPeer(ctx context.Context, address string, timeout time.Duration) (net.Conn, error) {
-	host, _, ok := splitHostPort(address)
+func (s *Service) dialPeer(ctx context.Context, address domain.PeerAddress, timeout time.Duration) (net.Conn, error) {
+	host, _, ok := splitHostPort(string(address))
 	if !ok {
 		return nil, fmt.Errorf("invalid peer address: %s", address)
 	}
@@ -23,11 +25,11 @@ func (s *Service) dialPeer(ctx context.Context, address string, timeout time.Dur
 		if proxy == "" {
 			return nil, fmt.Errorf("no SOCKS5 proxy configured for overlay address %s", address)
 		}
-		return dialSOCKS5(ctx, proxy, address, timeout)
+		return dialSOCKS5(ctx, proxy, string(address), timeout)
 	}
 
 	dialer := net.Dialer{Timeout: timeout}
-	return dialer.DialContext(ctx, "tcp", address)
+	return dialer.DialContext(ctx, "tcp", string(address))
 }
 
 // dialSOCKS5 establishes a TCP connection through a SOCKS5 proxy

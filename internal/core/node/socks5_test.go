@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 )
 
 // testV3Onion is a valid 56-char base32 onion host for use in SOCKS5/dial tests.
@@ -169,7 +170,7 @@ func TestDialPeerRoutesOnionThroughSOCKS5(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	conn, err := svc.dialPeer(ctx, testV3Onion+":64646", 3*time.Second)
+	conn, err := svc.dialPeer(ctx, domain.PeerAddress(testV3Onion+":64646"), 3*time.Second)
 	if err != nil {
 		t.Fatalf("dialPeer .onion: %v", err)
 	}
@@ -186,7 +187,7 @@ func TestDialPeerRejectsOnionWithoutProxy(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, err := svc.dialPeer(ctx, testV3Onion+":64646", 1*time.Second)
+	_, err := svc.dialPeer(ctx, domain.PeerAddress(testV3Onion+":64646"), 1*time.Second)
 	if err == nil {
 		t.Fatal("expected error for .onion without proxy")
 	}
@@ -220,7 +221,7 @@ func TestDialPeerUsesDirectTCPForRegularAddress(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	conn, err := svc.dialPeer(ctx, listener.Addr().String(), 2*time.Second)
+	conn, err := svc.dialPeer(ctx, domain.PeerAddress(listener.Addr().String()), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dialPeer direct: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestDialPeerRejectsInvalidAddress(t *testing.T) {
 	svc := &Service{cfg: config.Node{}}
 
 	ctx := context.Background()
-	_, err := svc.dialPeer(ctx, "no-port-here", 1*time.Second)
+	_, err := svc.dialPeer(ctx, domain.PeerAddress("no-port-here"), 1*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid address")
 	}

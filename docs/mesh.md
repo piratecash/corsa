@@ -263,7 +263,7 @@ sequenceDiagram
   validated against known types (`isKnownNodeType`); frames with an
   unknown or empty `node_type` are silently ignored — the ack is still
   returned but the peer address is not learned. Local/private addresses
-  (`NetGroupLocal`) are filtered in the `announce_peer` handler itself,
+  (`domain.NetGroupLocal`) are filtered in the `announce_peer` handler itself,
   but **not** in `addPeerAddress`/`promotePeerAddress` — those lower-level
   functions accept LAN peers so that dev/LAN meshes can discover 10.x /
   192.168.x nodes via direct hello/welcome and `get_peers`.
@@ -903,7 +903,7 @@ sequenceDiagram
   на принимающей стороне оно валидируется (`isKnownNodeType`); фреймы с
   неизвестным или пустым `node_type` молча игнорируются — ack
   возвращается, но адрес пира не сохраняется. Локальные/приватные адреса
-  (`NetGroupLocal`) фильтруются в самом handler'е `announce_peer`, но
+  (`domain.NetGroupLocal`) фильтруются в самом handler'е `announce_peer`, но
   **не** в `addPeerAddress`/`promotePeerAddress` — эти низкоуровневые
   функции принимают LAN-пиры, чтобы dev/LAN-меши могли обнаруживать
   10.x / 192.168.x узлы через прямые hello/welcome и `get_peers`.

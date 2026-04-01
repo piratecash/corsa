@@ -3,6 +3,7 @@ package node
 import (
 	"testing"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
 )
@@ -36,9 +37,9 @@ func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
 		svc:   &Service{},
 		table: table,
 		// Mock: peer-B has an active session.
-		sessionChecker: func(peerIdentity string, hops int) string {
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
 			if peerIdentity == "peer-B" {
-				return "addr-B"
+				return domain.PeerAddress("addr-B")
 			}
 			return ""
 		},
@@ -56,7 +57,7 @@ func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop to be set")
 	}
-	if *decision.RelayNextHop != "peer-B" {
+	if *decision.RelayNextHop != domain.PeerIdentity("peer-B") {
 		t.Fatalf("expected RelayNextHop=peer-B, got %s", *decision.RelayNextHop)
 	}
 }
@@ -67,8 +68,8 @@ func TestTableRouterNoRouteGossipFallback(t *testing.T) {
 	tr := &TableRouter{
 		svc:   &Service{},
 		table: table,
-		sessionChecker: func(peerIdentity string, hops int) string {
-			return "addr-" + peerIdentity
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
+			return domain.PeerAddress("addr-" + string(peerIdentity))
 		},
 	}
 
@@ -106,7 +107,7 @@ func TestTableRouterNoSessionGossipFallback(t *testing.T) {
 		svc:   &Service{},
 		table: table,
 		// No session for any peer.
-		sessionChecker: func(peerIdentity string, hops int) string {
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
 			return ""
 		},
 	}
@@ -157,8 +158,8 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 	tr := &TableRouter{
 		svc:   &Service{},
 		table: table,
-		sessionChecker: func(peerIdentity string, hops int) string {
-			return "addr-" + peerIdentity
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
+			return domain.PeerAddress("addr-" + string(peerIdentity))
 		},
 	}
 
@@ -175,7 +176,7 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 		t.Fatal("expected RelayNextHop to be set")
 	}
 	// hop_ack peer-B should be preferred over announcement peer-C.
-	if *decision.RelayNextHop != "peer-B" {
+	if *decision.RelayNextHop != domain.PeerIdentity("peer-B") {
 		t.Fatalf("expected RelayNextHop=peer-B (hop_ack), got %s", *decision.RelayNextHop)
 	}
 }
@@ -211,9 +212,9 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 	tr := &TableRouter{
 		svc:   &Service{},
 		table: table,
-		sessionChecker: func(peerIdentity string, hops int) string {
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
 			if peerIdentity == "peer-C" {
-				return "addr-C"
+				return domain.PeerAddress("addr-C")
 			}
 			return "" // peer-B has no session
 		},
@@ -231,7 +232,7 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop to be set via fallback route")
 	}
-	if *decision.RelayNextHop != "peer-C" {
+	if *decision.RelayNextHop != domain.PeerIdentity("peer-C") {
 		t.Fatalf("expected RelayNextHop=peer-C (fallback), got %s", *decision.RelayNextHop)
 	}
 }
@@ -249,9 +250,9 @@ func TestTableRouterDirectPeerRelayOnlyCap(t *testing.T) {
 		table: table,
 		// Simulate: peer-B has only relay cap (no routing cap).
 		// For direct routes (hops=1), relay-only should suffice.
-		sessionChecker: func(peerIdentity string, hops int) string {
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
 			if peerIdentity == "peer-B" && hops <= 1 {
-				return "addr-B"
+				return domain.PeerAddress("addr-B")
 			}
 			// For transit (hops>1), reject relay-only peers.
 			return ""
@@ -270,7 +271,7 @@ func TestTableRouterDirectPeerRelayOnlyCap(t *testing.T) {
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop for direct peer with relay-only cap")
 	}
-	if *decision.RelayNextHop != "peer-B" {
+	if *decision.RelayNextHop != domain.PeerIdentity("peer-B") {
 		t.Fatalf("expected RelayNextHop=peer-B, got %s", *decision.RelayNextHop)
 	}
 }
@@ -295,9 +296,9 @@ func TestTableRouterTransitPeerNeedsBothCaps(t *testing.T) {
 		svc:   &Service{},
 		table: table,
 		// Simulate: peer-B has only relay cap. Transit requires both.
-		sessionChecker: func(peerIdentity string, hops int) string {
+		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
 			if hops <= 1 {
-				return "addr-" + peerIdentity
+				return domain.PeerAddress("addr-" + string(peerIdentity))
 			}
 			// Transit: reject relay-only peers.
 			return ""

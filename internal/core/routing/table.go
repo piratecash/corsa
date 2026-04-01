@@ -23,17 +23,17 @@ const (
 // All public methods are safe for concurrent use.
 type Table struct {
 	mu     sync.RWMutex
-	routes map[string][]RouteEntry // identity -> routes
+	routes map[PeerIdentity][]RouteEntry // identity -> routes
 
 	// localOrigin is this node's Ed25519 fingerprint. Used as Origin for
 	// direct routes created by AddDirectPeer. Required for AddDirectPeer
 	// and RemoveDirectPeer operations.
-	localOrigin string
+	localOrigin PeerIdentity
 
 	// seqCounters tracks the next SeqNo to use for own-origin routes,
 	// keyed by destination identity. Only the owner of localOrigin may
 	// increment these counters.
-	seqCounters map[string]uint64
+	seqCounters map[PeerIdentity]uint64
 
 	defaultTTL time.Duration
 
@@ -45,7 +45,7 @@ type Table struct {
 	// flapping. When a peer exceeds flapThreshold disconnects within
 	// flapWindow, subsequent reconnections apply penalizedTTL instead
 	// of defaultTTL.
-	flapState map[string]*peerFlapState
+	flapState map[PeerIdentity]*peerFlapState
 
 	// Flap detection tuning. Set via options; defaults applied in NewTable.
 	flapWindow       time.Duration
@@ -74,7 +74,7 @@ func WithDefaultTTL(d time.Duration) TableOption {
 // WithLocalOrigin sets this node's identity. Required for AddDirectPeer
 // and RemoveDirectPeer. The localOrigin is used as the Origin field for
 // direct routes and scopes the monotonic SeqNo counter.
-func WithLocalOrigin(identity string) TableOption {
+func WithLocalOrigin(identity PeerIdentity) TableOption {
 	return func(t *Table) {
 		t.localOrigin = identity
 	}
@@ -114,9 +114,9 @@ func WithPenalizedTTL(d time.Duration) TableOption {
 // NewTable creates an empty routing table with the given options.
 func NewTable(opts ...TableOption) *Table {
 	t := &Table{
-		routes:           make(map[string][]RouteEntry),
-		seqCounters:      make(map[string]uint64),
-		flapState:        make(map[string]*peerFlapState),
+		routes:           make(map[PeerIdentity][]RouteEntry),
+		seqCounters:      make(map[PeerIdentity]uint64),
+		flapState:        make(map[PeerIdentity]*peerFlapState),
 		defaultTTL:       DefaultTTL,
 		clock:            time.Now,
 		flapWindow:       DefaultFlapWindow,
@@ -222,7 +222,7 @@ func (t *Table) syncSeqCounterLocked(entry RouteEntry) {
 // use RemoveDirectPeer instead.
 //
 // Returns true if the withdrawal was applied.
-func (t *Table) WithdrawRoute(identity, origin, nextHop string, seqNo uint64) bool {
+func (t *Table) WithdrawRoute(identity, origin, nextHop PeerIdentity, seqNo uint64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -307,7 +307,7 @@ type RemoveDirectPeerResult struct {
 // Returns AddDirectPeerResult and nil error on success.
 // Returns ErrNoLocalOrigin if localOrigin was not configured, or
 // ErrEmptyPeerID if peerIdentity is empty.
-func (t *Table) AddDirectPeer(peerIdentity string) (AddDirectPeerResult, error) {
+func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, error) {
 	if t.localOrigin == "" {
 		return AddDirectPeerResult{}, ErrNoLocalOrigin
 	}
@@ -368,7 +368,7 @@ func (t *Table) AddDirectPeer(peerIdentity string) (AddDirectPeerResult, error) 
 
 // isPeerInHoldDownLocked checks if the peer is currently in flap hold-down.
 // Must be called with t.mu held.
-func (t *Table) isPeerInHoldDownLocked(peerIdentity string, now time.Time) bool {
+func (t *Table) isPeerInHoldDownLocked(peerIdentity PeerIdentity, now time.Time) bool {
 	fs := t.flapState[peerIdentity]
 	if fs == nil {
 		return false
@@ -379,7 +379,7 @@ func (t *Table) isPeerInHoldDownLocked(peerIdentity string, now time.Time) bool 
 // recordWithdrawalLocked tracks a disconnect event for flap detection.
 // If the withdrawal count within flapWindow crosses flapThreshold,
 // hold-down is activated. Must be called with t.mu held.
-func (t *Table) recordWithdrawalLocked(peerIdentity string, now time.Time) {
+func (t *Table) recordWithdrawalLocked(peerIdentity PeerIdentity, now time.Time) {
 	fs := t.flapState[peerIdentity]
 	if fs == nil {
 		fs = &peerFlapState{}
@@ -413,7 +413,7 @@ func (t *Table) recordWithdrawalLocked(peerIdentity string, now time.Time) {
 //
 // Returns ErrNoLocalOrigin if localOrigin was not configured, or
 // ErrEmptyPeerID if peerIdentity is empty.
-func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, error) {
+func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerResult, error) {
 	if t.localOrigin == "" {
 		return RemoveDirectPeerResult{}, ErrNoLocalOrigin
 	}
@@ -465,7 +465,7 @@ func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, e
 // a defense-in-depth cleanup for peers that had mesh_routing_v1 (could
 // advertise routes) but not mesh_relay_v1 (no direct route was created).
 // Returns the number of transit routes invalidated.
-func (t *Table) InvalidateTransitRoutes(peerIdentity string) int {
+func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) int {
 	if peerIdentity == "" {
 		return 0
 	}
@@ -494,7 +494,7 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity string) int {
 
 // nextSeqLocked increments and returns the next SeqNo for a given identity.
 // Must be called with t.mu held.
-func (t *Table) nextSeqLocked(identity string) uint64 {
+func (t *Table) nextSeqLocked(identity PeerIdentity) uint64 {
 	t.seqCounters[identity]++
 	return t.seqCounters[identity]
 }
@@ -558,7 +558,7 @@ func (t *Table) TickTTL() {
 // Split horizon rule: routes where NextHop == excludeVia are not included
 // in the announcement. We do NOT send fake hops=16 withdrawals — that
 // would violate the per-origin SeqNo invariant.
-func (t *Table) Announceable(excludeVia string) []RouteEntry {
+func (t *Table) Announceable(excludeVia PeerIdentity) []RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -583,7 +583,7 @@ func (t *Table) Announceable(excludeVia string) []RouteEntry {
 // a specific peer, applying split horizon and the +1 hop rule. This is
 // the preferred method for building announce_routes frames — it ensures
 // the boundary between model and wire format stays in the routing package.
-func (t *Table) AnnounceTo(excludeVia string) []AnnounceEntry {
+func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -607,7 +607,7 @@ func (t *Table) AnnounceTo(excludeVia string) []AnnounceEntry {
 // Lookup returns all non-withdrawn, non-expired routes for the given identity,
 // sorted by preference: source priority (direct > hop_ack > announcement),
 // then by hops ascending within the same source tier.
-func (t *Table) Lookup(identity string) []RouteEntry {
+func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -633,7 +633,7 @@ func (t *Table) Snapshot() Snapshot {
 
 	now := t.clock()
 	snap := Snapshot{
-		Routes:  make(map[string][]RouteEntry, len(t.routes)),
+		Routes:  make(map[PeerIdentity][]RouteEntry, len(t.routes)),
 		TakenAt: now,
 	}
 
@@ -726,7 +726,7 @@ func (t *Table) FlapSnapshot() []FlapEntry {
 }
 
 // LocalOrigin returns this node's identity string.
-func (t *Table) LocalOrigin() string {
+func (t *Table) LocalOrigin() PeerIdentity {
 	return t.localOrigin
 }
 

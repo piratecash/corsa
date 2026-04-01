@@ -16,6 +16,7 @@ import (
 	"corsa/internal/core/chatlog"
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/node"
@@ -59,6 +60,7 @@ type DeliveryReceipt struct {
 type PeerHealth struct {
 	Address             string
 	PeerID              string
+	ConnID              uint64
 	Direction           string
 	ClientVersion       string
 	ClientBuild         int
@@ -75,6 +77,7 @@ type PeerHealth struct {
 	ConsecutiveFailures int
 	LastError           string
 	Score               int
+	BannedUntil         *time.Time
 	BytesSent           int64
 	BytesReceived       int64
 	TotalTraffic        int64
@@ -117,6 +120,7 @@ type PendingMessage struct {
 
 type ConsolePeerStatus struct {
 	Address       string `json:"address"`
+	ConnID        uint64 `json:"conn_id,omitempty"`
 	Network       string `json:"network,omitempty"`
 	Direction     string `json:"direction,omitempty"`
 	ClientVersion string `json:"client_version"`
@@ -279,10 +283,10 @@ func (c *DesktopClient) Address() string {
 
 func (c *DesktopClient) BootstrapPeers() []transport.Peer {
 	peers := make([]transport.Peer, 0, len(c.nodeCfg.BootstrapPeers))
-	for i, addr := range c.nodeCfg.BootstrapPeers {
+	for _, addr := range c.nodeCfg.BootstrapPeers {
 		peers = append(peers, transport.Peer{
-			ID:      peerID(i),
-			Address: addr,
+			Address: domain.PeerAddress(addr),
+			Source:  domain.PeerSourceBootstrap,
 		})
 	}
 	return peers
@@ -445,6 +449,7 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 		items = append(items, PeerHealth{
 			Address:             item.Address,
 			PeerID:              item.PeerID,
+			ConnID:              item.ConnID,
 			Direction:           item.Direction,
 			ClientVersion:       item.ClientVersion,
 			ClientBuild:         item.ClientBuild,
@@ -461,6 +466,7 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			ConsecutiveFailures: item.ConsecutiveFailures,
 			LastError:           item.LastError,
 			Score:               item.Score,
+			BannedUntil:         parseOptionalTime(item.BannedUntil),
 			BytesSent:           item.BytesSent,
 			BytesReceived:       item.BytesReceived,
 			TotalTraffic:        item.TotalTraffic,
@@ -784,6 +790,7 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 
 		status := ConsolePeerStatus{
 			Address:       address,
+			ConnID:        item.ConnID,
 			Network:       node.ClassifyAddress(address).String(),
 			Direction:     item.Direction,
 			ClientVersion: item.ClientVersion,
@@ -823,6 +830,7 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		item := byAddress[addr]
 		status := ConsolePeerStatus{
 			Address:       addr,
+			ConnID:        item.ConnID,
 			Network:       node.ClassifyAddress(addr).String(),
 			Direction:     item.Direction,
 			ClientVersion: item.ClientVersion,
@@ -1358,10 +1366,6 @@ func (c *DesktopClient) localRequestFrameCtx(ctx context.Context, request protoc
 	defer func() { _ = conn.Close() }()
 
 	return c.requestFrame(conn, reader, request)
-}
-
-func peerID(index int) string {
-	return fmt.Sprintf("bootstrap-%d", index)
 }
 
 func readJSONFrame(reader *bufio.Reader) (protocol.Frame, error) {

@@ -19,6 +19,7 @@ import (
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/gazeta"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
@@ -28,7 +29,7 @@ import (
 func candidateAddresses(candidates []peerDialCandidate) []string {
 	out := make([]string, len(candidates))
 	for i, c := range candidates {
-		out[i] = c.address
+		out[i] = string(c.address)
 	}
 	return out
 }
@@ -83,7 +84,7 @@ func TestClientWithoutListenerAnnouncesIdentityButNotDialAddress(t *testing.T) {
 		ListenAddress:    addressFull,
 		AdvertiseAddress: normalizeAddress(addressFull),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -91,7 +92,7 @@ func TestClientWithoutListenerAnnouncesIdentityButNotDialAddress(t *testing.T) {
 		ListenAddress:    addressClient,
 		AdvertiseAddress: "",
 		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 	})
 	defer stopClient()
 
@@ -140,6 +141,45 @@ func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
 	}
 	if got := frames[0]; got.Type != "error" || got.Code != protocol.ErrCodeIncompatibleProtocol {
 		t.Fatalf("unexpected incompatible protocol reply: %#v", got)
+	}
+}
+
+// TestInboundIncompatibleProtocolBlacklistsIP verifies that a single
+// incompatible hello immediately blacklists the remote IP for 24 hours
+// and closes the connection (return false from handleJSONCommand).
+func TestInboundIncompatibleProtocolBlacklistsIP(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// First connection: incompatible hello → error + blacklist.
+	frames := exchangeFrames(t, svc.externalListenAddress(),
+		protocol.Frame{Type: "hello", Version: 0, Client: "test", ClientVersion: config.CorsaWireVersion},
+	)
+	if len(frames) != 1 || frames[0].Type != "error" {
+		t.Fatalf("expected error frame, got: %#v", frames)
+	}
+
+	// Second connection from the same IP should be rejected immediately
+	// (isBlacklistedConn closes conn before any frame exchange).
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial should succeed at TCP level: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Try to read — the server should close without sending anything.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, readErr := conn.Read(buf)
+	if readErr == nil {
+		t.Fatal("expected connection to be closed by server (blacklisted), but read succeeded")
 	}
 }
 
@@ -278,7 +318,7 @@ func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
 			"10.0.0.8:64646",
 			"10.0.0.9:64646",
 		},
-		Type: config.NodeTypeClient,
+		Type: domain.NodeTypeClient,
 	}, id)
 
 	got := candidateAddresses(svc.peerDialCandidates())
@@ -308,7 +348,7 @@ func TestPeerDialCandidatesUsesDefaultFullOutgoingLimit(t *testing.T) {
 		AdvertiseAddress: "127.0.0.1:64646",
 		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers:   bootstrap,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	got := candidateAddresses(svc.peerDialCandidates())
@@ -328,14 +368,14 @@ func TestNormalizePeerAddressPrefersObservedHostAndDefaultPortForPrivateAdvertis
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
-	got, ok := svc.normalizePeerAddress("198.51.100.2:50702", "127.0.0.1:64647")
+	got, ok := svc.normalizePeerAddress(domain.PeerAddress("198.51.100.2:50702"), domain.PeerAddress("127.0.0.1:64647"))
 	if !ok {
 		t.Fatalf("expected normalized address")
 	}
-	if got != "198.51.100.2:64646" {
+	if got != domain.PeerAddress("198.51.100.2:64646") {
 		t.Fatalf("unexpected normalized address: %s", got)
 	}
 }
@@ -351,14 +391,14 @@ func TestNormalizePeerAddressPrefersObservedHostWhenAdvertisedHostDiffers(t *tes
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
-	got, ok := svc.normalizePeerAddress("198.51.100.2:50702", "198.51.100.3:64647")
+	got, ok := svc.normalizePeerAddress(domain.PeerAddress("198.51.100.2:50702"), domain.PeerAddress("198.51.100.3:64647"))
 	if !ok {
 		t.Fatalf("expected normalized address")
 	}
-	if got != "198.51.100.2:64647" {
+	if got != domain.PeerAddress("198.51.100.2:64647") {
 		t.Fatalf("unexpected normalized address: %s", got)
 	}
 }
@@ -381,7 +421,7 @@ func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t
 			"192.168.1.20:64646",
 			"172.16.3.10:64646",
 		},
-		Type: config.NodeTypeClient,
+		Type: domain.NodeTypeClient,
 	}, id)
 
 	got := candidateAddresses(svc.peerDialCandidates())
@@ -412,7 +452,7 @@ func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
 			"198.51.100.1:64647",
 			"198.51.100.2:64647",
 		},
-		Type: config.NodeTypeClient,
+		Type: domain.NodeTypeClient,
 	}, id)
 
 	got := candidateAddresses(svc.peerDialCandidates())
@@ -437,7 +477,7 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 		ListenAddress:    addressA,
 		AdvertiseAddress: normalizeAddress(addressA),
 		BootstrapPeers:   []string{normalizeAddress(addressB)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 		ListenerEnabled:  true,
 		ListenerSet:      true,
 	})
@@ -447,7 +487,7 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 		ListenAddress:    addressB,
 		AdvertiseAddress: normalizeAddress(addressB),
 		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopB()
 
@@ -624,6 +664,43 @@ func TestFetchPeerHealthShowsEstablishedSession(t *testing.T) {
 	}
 	if reply.PeerHealth[0].State == "" {
 		t.Fatalf("expected peer health state, got %#v", reply.PeerHealth[0])
+	}
+}
+
+// TestPeerHealthIncludesConnID verifies that fetch_peer_health returns
+// a non-zero ConnID for connected peers.
+func TestPeerHealthIncludesConnID(t *testing.T) {
+	t.Parallel()
+
+	addressA := freeAddress(t)
+	addressB := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    addressA,
+		AdvertiseAddress: normalizeAddress(addressA),
+		BootstrapPeers:   []string{normalizeAddress(addressB)},
+	})
+	defer stopA()
+
+	_, stopB := startTestNode(t, config.Node{
+		ListenAddress:    addressB,
+		AdvertiseAddress: normalizeAddress(addressB),
+		BootstrapPeers:   []string{normalizeAddress(addressA)},
+	})
+	defer stopB()
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		return hasConnectedPeer(nodeA)
+	})
+
+	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if reply.Type != "peer_health" || reply.Count == 0 {
+		t.Fatalf("expected peer_health with items, got %#v", reply)
+	}
+	for _, ph := range reply.PeerHealth {
+		if ph.Connected && ph.ConnID == 0 {
+			t.Errorf("connected peer %s has ConnID=0; expected non-zero", ph.Address)
+		}
 	}
 }
 
@@ -1086,25 +1163,26 @@ func TestRoutingTargetsPreferBestHealthySessions(t *testing.T) {
 
 	svc := &Service{
 		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
-		sessions:  map[string]*peerSession{},
-		health:    map[string]*peerHealth{},
-		peerTypes: map[string]config.NodeType{},
-		peerIDs:   map[string]string{},
+		sessions:  map[domain.PeerAddress]*peerSession{},
+		health:    map[domain.PeerAddress]*peerHealth{},
+		peerTypes: map[domain.PeerAddress]domain.NodeType{},
+		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
 	}
 
 	now := time.Now().UTC()
 	addresses := []string{"a:1", "b:1", "c:1", "d:1", "e:1"}
 	for _, address := range addresses {
-		svc.sessions[address] = &peerSession{address: address}
+		addr := domain.PeerAddress(address)
+		svc.sessions[addr] = &peerSession{address: addr}
 	}
-	svc.health["a:1"] = &peerHealth{Address: "a:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-2 * time.Second)}
-	svc.health["b:1"] = &peerHealth{Address: "b:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-1 * time.Second)}
-	svc.health["c:1"] = &peerHealth{Address: "c:1", Connected: true, State: peerStateDegraded, LastUsefulReceiveAt: now.Add(-3 * time.Second)}
-	svc.health["d:1"] = &peerHealth{Address: "d:1", Connected: true, State: peerStateStalled, LastUsefulReceiveAt: now.Add(-120 * time.Second)}
-	svc.health["e:1"] = &peerHealth{Address: "e:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-4 * time.Second)}
+	svc.health[domain.PeerAddress("a:1")] = &peerHealth{Address: domain.PeerAddress("a:1"), Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-2 * time.Second)}
+	svc.health[domain.PeerAddress("b:1")] = &peerHealth{Address: domain.PeerAddress("b:1"), Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-1 * time.Second)}
+	svc.health[domain.PeerAddress("c:1")] = &peerHealth{Address: domain.PeerAddress("c:1"), Connected: true, State: peerStateDegraded, LastUsefulReceiveAt: now.Add(-3 * time.Second)}
+	svc.health[domain.PeerAddress("d:1")] = &peerHealth{Address: domain.PeerAddress("d:1"), Connected: true, State: peerStateStalled, LastUsefulReceiveAt: now.Add(-120 * time.Second)}
+	svc.health[domain.PeerAddress("e:1")] = &peerHealth{Address: domain.PeerAddress("e:1"), Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now.Add(-4 * time.Second)}
 
 	got := svc.routingTargets()
-	want := []string{"b:1", "a:1", "e:1"}
+	want := []domain.PeerAddress{"b:1", "a:1", "e:1"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected target count: got %v want %v", got, want)
 	}
@@ -1120,27 +1198,27 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 
 	svc := &Service{
 		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
-		sessions:  map[string]*peerSession{},
-		health:    map[string]*peerHealth{},
-		peerTypes: map[string]config.NodeType{},
-		peerIDs:   map[string]string{},
+		sessions:  map[domain.PeerAddress]*peerSession{},
+		health:    map[domain.PeerAddress]*peerHealth{},
+		peerTypes: map[domain.PeerAddress]domain.NodeType{},
+		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
 	}
 
 	now := time.Now().UTC()
-	svc.sessions["full:1"] = &peerSession{address: "full:1"}
-	svc.sessions["client:1"] = &peerSession{address: "client:1"}
-	svc.health["full:1"] = &peerHealth{Address: "full:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
-	svc.health["client:1"] = &peerHealth{Address: "client:1", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
-	svc.peerTypes["full:1"] = config.NodeTypeFull
-	svc.peerTypes["client:1"] = config.NodeTypeClient
-	svc.peerIDs["client:1"] = "client-id"
+	svc.sessions[domain.PeerAddress("full:1")] = &peerSession{address: domain.PeerAddress("full:1")}
+	svc.sessions[domain.PeerAddress("client:1")] = &peerSession{address: domain.PeerAddress("client:1")}
+	svc.health[domain.PeerAddress("full:1")] = &peerHealth{Address: domain.PeerAddress("full:1"), Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	svc.health[domain.PeerAddress("client:1")] = &peerHealth{Address: domain.PeerAddress("client:1"), Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	svc.peerTypes[domain.PeerAddress("full:1")] = domain.NodeTypeFull
+	svc.peerTypes[domain.PeerAddress("client:1")] = domain.NodeTypeClient
+	svc.peerIDs[domain.PeerAddress("client:1")] = domain.PeerIdentity("client-id")
 
 	globalTargets := svc.routingTargetsForMessage(protocol.Envelope{
 		Topic:     "global",
 		Sender:    "sender",
 		Recipient: "*",
 	})
-	if len(globalTargets) != 1 || globalTargets[0] != "full:1" {
+	if len(globalTargets) != 1 || globalTargets[0] != domain.PeerAddress("full:1") {
 		t.Fatalf("global traffic should avoid client relay: %#v", globalTargets)
 	}
 
@@ -1152,7 +1230,7 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 	if len(dmTargets) != 2 {
 		t.Fatalf("direct message should allow relay and direct recipient session: %#v", dmTargets)
 	}
-	if dmTargets[0] != "client:1" && dmTargets[1] != "client:1" {
+	if dmTargets[0] != domain.PeerAddress("client:1") && dmTargets[1] != domain.PeerAddress("client:1") {
 		t.Fatalf("recipient client session missing from targets: %#v", dmTargets)
 	}
 }
@@ -1309,7 +1387,7 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 		ListenAddress:    addressA,
 		AdvertiseAddress: normalizeAddress(addressA),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopA()
 
@@ -1317,7 +1395,7 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 		ListenAddress:    addressB,
 		AdvertiseAddress: normalizeAddress(addressB),
 		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 		ListenerEnabled:  true,
 		ListenerSet:      true,
 	})
@@ -1812,7 +1890,7 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 		ListenAddress:    addressA,
 		AdvertiseAddress: normalizeAddress(addressA),
 		BootstrapPeers:   []string{normalizeAddress(addressB)},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopA()
 
@@ -1841,7 +1919,7 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 		ListenAddress:    addressB,
 		AdvertiseAddress: normalizeAddress(addressB),
 		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, idB)
 	defer stopB()
 
@@ -1869,7 +1947,7 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 		ListenAddress:    addressFull,
 		AdvertiseAddress: normalizeAddress(addressFull),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -1896,7 +1974,7 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 		ListenAddress:    addressClient,
 		AdvertiseAddress: "",
 		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 	}, idClient)
 	defer stopClient()
 
@@ -1920,7 +1998,7 @@ func TestV2AckDeleteClearsReceiptBacklog(t *testing.T) {
 	fullNode, stopFull := startTestNode(t, config.Node{
 		ListenAddress:    addressFull,
 		AdvertiseAddress: normalizeAddress(addressFull),
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -1939,7 +2017,7 @@ func TestV2AckDeleteClearsReceiptBacklog(t *testing.T) {
 		ListenAddress:    addressClient,
 		AdvertiseAddress: "",
 		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 	}, idClient)
 	defer stopClient()
 
@@ -1968,7 +2046,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 		ListenAddress:    addressFull,
 		AdvertiseAddress: normalizeAddress(addressFull),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -1976,7 +2054,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 		ListenAddress:    addressSender,
 		AdvertiseAddress: "",
 		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 	})
 	defer stopSender()
 
@@ -2024,7 +2102,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 		ListenAddress:    addressRecipient,
 		AdvertiseAddress: "",
 		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 	}, idRecipient)
 	defer stopRecipient()
 
@@ -2059,7 +2137,7 @@ func TestRelayMessageDoesNotStallGossipDelivery(t *testing.T) {
 		ListenAddress:    addressFull,
 		AdvertiseAddress: normalizeAddress(addressFull),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -2067,7 +2145,7 @@ func TestRelayMessageDoesNotStallGossipDelivery(t *testing.T) {
 		ListenAddress:    addressSender,
 		AdvertiseAddress: "",
 		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             config.NodeTypeClient,
+		Type:             domain.NodeTypeClient,
 	})
 	defer stopSender()
 
@@ -2130,7 +2208,7 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 		AdvertiseAddress: "127.0.0.1:64646",
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	createdAt := time.Now().UTC().Truncate(time.Second)
@@ -2174,7 +2252,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		AdvertiseAddress: "127.0.0.1:64646",
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	frame := protocol.Frame{
@@ -2189,10 +2267,10 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 	}
 
 	svc.mu.Lock()
-	svc.pending["198.51.100.2:64646"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
-	svc.pending["198.51.100.2:64647"] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
-	svc.pendingKeys[pendingFrameKey("198.51.100.2:64646", frame)] = struct{}{}
-	svc.pendingKeys[pendingFrameKey("198.51.100.2:64647", frame)] = struct{}{}
+	svc.pending[domain.PeerAddress("198.51.100.2:64646")] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
+	svc.pending[domain.PeerAddress("198.51.100.2:64647")] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
+	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("198.51.100.2:64646"), frame)] = struct{}{}
+	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("198.51.100.2:64647"), frame)] = struct{}{}
 	receiptFrame := protocol.Frame{
 		Type:        "send_delivery_receipt",
 		ID:          frame.ID,
@@ -2201,8 +2279,8 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		Status:      "delivered",
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	svc.pending["198.51.100.1:64646"] = []pendingFrame{{Frame: receiptFrame, QueuedAt: time.Now().UTC()}}
-	svc.pendingKeys[pendingFrameKey("198.51.100.1:64646", receiptFrame)] = struct{}{}
+	svc.pending[domain.PeerAddress("198.51.100.1:64646")] = []pendingFrame{{Frame: receiptFrame, QueuedAt: time.Now().UTC()}}
+	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("198.51.100.1:64646"), receiptFrame)] = struct{}{}
 	svc.outbound[frame.ID] = outboundDelivery{
 		MessageID: frame.ID,
 		Recipient: frame.Recipient,
@@ -2248,7 +2326,7 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, recipientID)
 
 	senderID, err := identity.Generate()
@@ -2305,7 +2383,7 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	cfg := config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 	}
@@ -2346,7 +2424,7 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	reloaded.mu.RLock()
 	defer reloaded.mu.RUnlock()
 
-	items := reloaded.pending["127.0.0.1:65001"]
+	items := reloaded.pending[domain.PeerAddress("127.0.0.1:65001")]
 	if len(items) != 1 {
 		t.Fatalf("expected 1 pending item after restart, got %d", len(items))
 	}
@@ -2386,7 +2464,7 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 
 	queuedAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
 	lastAttemptAt := queuedAt.Add(30 * time.Second)
-	svc.pending["peer-a"] = []pendingFrame{
+	svc.pending[domain.PeerAddress("peer-a")] = []pendingFrame{
 		{
 			Frame: protocol.Frame{
 				Type:      "send_message",
@@ -2472,7 +2550,7 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 	}, id)
 
-	address := "127.0.0.1:65001"
+	address := domain.PeerAddress("127.0.0.1:65001")
 	svc.mu.Lock()
 	svc.sessions[address] = &peerSession{address: address, sendCh: make(chan protocol.Frame)}
 	svc.health[address] = &peerHealth{Address: address, Connected: true, State: peerStateHealthy}
@@ -2566,7 +2644,7 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 		AdvertiseAddress: "127.0.0.1:64646",
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	receipt := protocol.DeliveryReceipt{
@@ -2759,16 +2837,16 @@ func TestNormalizePeerAddressAcceptsValidV3Onion(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	// 56 base32 chars = valid Tor v3.
 	onion := "2gzyxa5ihm7nsber23gk5eqx3mp4wrymfbhqgk2ycdjp3yzcrllbiqad.onion"
-	got, ok := svc.normalizePeerAddress("1.2.3.4:12345", onion+":64646")
+	got, ok := svc.normalizePeerAddress(domain.PeerAddress("1.2.3.4:12345"), domain.PeerAddress(onion+":64646"))
 	if !ok {
 		t.Fatal("expected valid v3 .onion to be accepted")
 	}
-	if got != onion+":64646" {
+	if got != domain.PeerAddress(onion+":64646") {
 		t.Fatalf("expected %s:64646, got %s", onion, got)
 	}
 }
@@ -2785,11 +2863,11 @@ func TestNormalizePeerAddressRejectsShortOnion(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	// "junk.onion" is not a valid 16/56 base32 host.
-	_, ok := svc.normalizePeerAddress("", "junk.onion:64646")
+	_, ok := svc.normalizePeerAddress(domain.PeerAddress(""), domain.PeerAddress("junk.onion:64646"))
 	if ok {
 		t.Fatal("expected invalid .onion to be rejected")
 	}
@@ -2812,7 +2890,7 @@ func TestTwoNodesPeerExchangePersistedOnShutdown(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(addressA),
 		BootstrapPeers:   []string{normalizeAddress(addressB)},
 		PeersStatePath:   peersPathA,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopA()
 
@@ -2820,15 +2898,16 @@ func TestTwoNodesPeerExchangePersistedOnShutdown(t *testing.T) {
 		ListenAddress:    addressB,
 		AdvertiseAddress: normalizeAddress(addressB),
 		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 
 	// Wait until A discovers B via peer exchange.
 	waitForCondition(t, 5*time.Second, func() bool {
 		nodeA.mu.RLock()
 		defer nodeA.mu.RUnlock()
+		normalizedB := domain.PeerAddress(normalizeAddress(addressB))
 		for _, p := range nodeA.peers {
-			if p.Address == normalizeAddress(addressB) {
+			if p.Address == normalizedB {
 				return true
 			}
 		}
@@ -2844,9 +2923,10 @@ func TestTwoNodesPeerExchangePersistedOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPeerState: %v", err)
 	}
+	normalizedB := domain.PeerAddress(normalizeAddress(addressB))
 	found := false
 	for _, p := range state.Peers {
-		if p.Address == normalizeAddress(addressB) {
+		if p.Address == normalizedB {
 			found = true
 			break
 		}
@@ -2854,9 +2934,9 @@ func TestTwoNodesPeerExchangePersistedOnShutdown(t *testing.T) {
 	if !found {
 		addrs := make([]string, len(state.Peers))
 		for i, p := range state.Peers {
-			addrs[i] = p.Address
+			addrs[i] = string(p.Address)
 		}
-		t.Fatalf("expected node B address %s in persisted peers, got: %v", normalizeAddress(addressB), addrs)
+		t.Fatalf("expected node B address %s in persisted peers, got: %v", normalizedB, addrs)
 	}
 }
 
@@ -2874,7 +2954,7 @@ func TestBootstrapLoopFlushesOnShutdown(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{"10.0.0.1:64646"},
 		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	_ = svc // keep reference
 
@@ -2916,7 +2996,7 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(address1),
 		BootstrapPeers:   []string{},
 		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 
 	// Add peers and mark one as connected.
@@ -2943,13 +3023,13 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(address2),
 		BootstrapPeers:   []string{"10.0.0.99:64646"}, // different bootstrap
 		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop2()
 
 	svc2.mu.RLock()
 	// Should have: bootstrap (10.0.0.99) + persisted (10.0.0.5, 10.0.0.6).
-	peerAddrs := make(map[string]bool)
+	peerAddrs := make(map[domain.PeerAddress]bool)
 	for _, p := range svc2.peers {
 		peerAddrs[p.Address] = true
 	}
@@ -2967,8 +3047,8 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 
 	// Verify health was seeded from persisted state.
 	svc2.mu.RLock()
-	h5 := svc2.health["10.0.0.5:64646"]
-	h6 := svc2.health["10.0.0.6:64646"]
+	h5 := svc2.health[domain.PeerAddress("10.0.0.5:64646")]
+	h6 := svc2.health[domain.PeerAddress("10.0.0.6:64646")]
 	svc2.mu.RUnlock()
 
 	if h5 == nil {
@@ -2997,8 +3077,8 @@ func TestPeerDialCandidatesIncludesPersistedPeers(t *testing.T) {
 	persisted := peerStateFile{
 		Version: peerStateVersion,
 		Peers: []peerEntry{
-			{Address: "10.0.0.50:64646", Score: 30, Source: "peer_exchange", LastConnectedAt: &now},
-			{Address: "10.0.0.51:64646", Score: 10, Source: "peer_exchange"},
+			{Address: "10.0.0.50:64646", Score: 30, Source: domain.PeerSourcePeerExchange, LastConnectedAt: &now},
+			{Address: "10.0.0.51:64646", Score: 10, Source: domain.PeerSourcePeerExchange},
 		},
 	}
 	data, _ := json.MarshalIndent(persisted, "", "  ")
@@ -3014,7 +3094,7 @@ func TestPeerDialCandidatesIncludesPersistedPeers(t *testing.T) {
 		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers:   []string{},
 		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
@@ -3045,7 +3125,7 @@ func TestMaybeSavePeerStateRespectsInterval(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{"10.0.0.1:64646"},
 		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3081,13 +3161,13 @@ func TestOnionPeersSkippedWithoutProxy(t *testing.T) {
 	dir := t.TempDir()
 	peersPath := filepath.Join(dir, "peers.json")
 
-	onionAddr := strings.Repeat("a", 56) + ".onion:64646"
+	onionAddr := domain.PeerAddress(strings.Repeat("a", 56) + ".onion:64646")
 	now := time.Now().UTC()
 	persisted := peerStateFile{
 		Version: peerStateVersion,
 		Peers: []peerEntry{
-			{Address: onionAddr, Score: 80, Source: "peer_exchange", LastConnectedAt: &now},
-			{Address: "10.0.0.1:64646", Score: 50, Source: "peer_exchange"},
+			{Address: onionAddr, Score: 80, Source: domain.PeerSourcePeerExchange, LastConnectedAt: &now},
+			{Address: "10.0.0.1:64646", Score: 50, Source: domain.PeerSourcePeerExchange},
 		},
 	}
 	data, _ := json.MarshalIndent(persisted, "", "  ")
@@ -3104,7 +3184,7 @@ func TestOnionPeersSkippedWithoutProxy(t *testing.T) {
 		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers:   []string{},
 		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
@@ -3134,12 +3214,13 @@ func TestOnionPeersIncludedWithProxy(t *testing.T) {
 	dir := t.TempDir()
 	peersPath := filepath.Join(dir, "peers.json")
 
-	onionAddr := strings.Repeat("a", 56) + ".onion:64646"
+	onionAddrStr := strings.Repeat("a", 56) + ".onion:64646"
+	onionAddr := domain.PeerAddress(onionAddrStr)
 	now := time.Now().UTC()
 	persisted := peerStateFile{
 		Version: peerStateVersion,
 		Peers: []peerEntry{
-			{Address: onionAddr, Score: 80, Source: "peer_exchange", LastConnectedAt: &now},
+			{Address: onionAddr, Score: 80, Source: domain.PeerSourcePeerExchange, LastConnectedAt: &now},
 		},
 	}
 	data, _ := json.MarshalIndent(persisted, "", "  ")
@@ -3156,13 +3237,13 @@ func TestOnionPeersIncludedWithProxy(t *testing.T) {
 		BootstrapPeers:   []string{},
 		PeersStatePath:   peersPath,
 		ProxyAddress:     "127.0.0.1:9050",
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
 	found := false
 	for _, c := range candidates {
-		if c == onionAddr {
+		if c == onionAddrStr {
 			found = true
 		}
 	}
@@ -3181,7 +3262,7 @@ func TestPeerDialCandidatesSortedByScore(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3224,7 +3305,7 @@ func TestPeerDialCandidatesSkipsCooldown(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3266,7 +3347,7 @@ func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3278,7 +3359,7 @@ func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
 
 	// Backdate LastDisconnectedAt to simulate cooldown expiry.
 	svc.mu.Lock()
-	if h := svc.health["10.0.0.1:64646"]; h != nil {
+	if h := svc.health[domain.PeerAddress("10.0.0.1:64646")]; h != nil {
 		h.LastDisconnectedAt = time.Now().Add(-1 * time.Minute)
 	}
 	svc.mu.Unlock()
@@ -3295,6 +3376,137 @@ func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
 	}
 }
 
+// TestPeerDialCandidatesSkipsBannedPeer verifies that a peer with an active
+// BannedUntil timestamp is excluded from dial candidates.
+func TestPeerDialCandidatesSkipsBannedPeer(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             domain.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
+
+	// Ban peer-1 for 24 hours (incompatible protocol).
+	svc.mu.Lock()
+	h := svc.ensurePeerHealthLocked("10.0.0.1:64646")
+	h.BannedUntil = time.Now().UTC().Add(24 * time.Hour)
+	svc.mu.Unlock()
+
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	for _, c := range candidates {
+		if c == "10.0.0.1:64646" {
+			t.Fatalf("banned peer should be excluded from candidates: %v", candidates)
+		}
+	}
+	found := false
+	for _, c := range candidates {
+		if c == "10.0.0.2:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unbanned peer should be in candidates: %v", candidates)
+	}
+}
+
+// TestPeerDialCandidatesBanExpires verifies that a peer becomes a dial
+// candidate again after its BannedUntil timestamp has passed.
+func TestPeerDialCandidatesBanExpires(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             domain.NodeTypeFull,
+	})
+	defer stop()
+
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+
+	// Set an expired ban (1 minute ago).
+	svc.mu.Lock()
+	h := svc.ensurePeerHealthLocked("10.0.0.1:64646")
+	h.BannedUntil = time.Now().UTC().Add(-1 * time.Minute)
+	svc.mu.Unlock()
+
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	found := false
+	for _, c := range candidates {
+		if c == "10.0.0.1:64646" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("peer with expired ban should be in candidates: %v", candidates)
+	}
+}
+
+// TestPromotePeerAddressClearsBannedUntil verifies that promotePeerAddress
+// (called from announce_peer) clears BannedUntil so the peer can be dialled
+// again immediately. Without this, a peer that upgraded its protocol version
+// and was announced by a third party would remain banned until the 24h window
+// expired, even though the announce proves it is reachable and compatible.
+func TestPromotePeerAddressClearsBannedUntil(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             domain.NodeTypeFull,
+	})
+	defer stop()
+
+	peer := domain.PeerAddress("10.0.0.99:64646")
+	svc.addPeerAddress(peer, "full", "peer-99")
+
+	// Set an active ban (23 hours from now).
+	svc.mu.Lock()
+	h := svc.ensurePeerHealthLocked(peer)
+	h.BannedUntil = time.Now().UTC().Add(23 * time.Hour)
+	svc.mu.Unlock()
+
+	// Verify peer is banned — should not appear in candidates.
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	for _, c := range candidates {
+		if c == string(peer) {
+			t.Fatal("banned peer should not be in candidates before promote")
+		}
+	}
+
+	// promotePeerAddress should clear the ban.
+	svc.promotePeerAddress(peer, "full")
+
+	svc.mu.RLock()
+	banned := svc.health[peer].BannedUntil
+	svc.mu.RUnlock()
+	if !banned.IsZero() {
+		t.Fatalf("BannedUntil should be zero after promotePeerAddress, got %v", banned)
+	}
+
+	// Now the peer should appear in candidates.
+	candidates = candidateAddresses(svc.peerDialCandidates())
+	found := false
+	for _, c := range candidates {
+		if c == string(peer) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("peer should be in candidates after promotePeerAddress: %v", candidates)
+	}
+}
+
 // TestEvictStalePeersRemovesBadPeers verifies that peers with score ≤ threshold
 // and no recent connection activity are evicted from in-memory state.
 func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
@@ -3305,7 +3517,7 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3314,16 +3526,16 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 
 	// Make peer-1 terrible: low score, last seen >24h ago.
 	svc.mu.Lock()
-	svc.health["10.0.0.1:64646"] = &peerHealth{
-		Address:             "10.0.0.1:64646",
+	svc.health[domain.PeerAddress("10.0.0.1:64646")] = &peerHealth{
+		Address:             domain.PeerAddress("10.0.0.1:64646"),
 		Score:               -30,
 		ConsecutiveFailures: 10,
 		LastConnectedAt:     time.Now().Add(-48 * time.Hour),
 		LastDisconnectedAt:  time.Now().Add(-47 * time.Hour),
 	}
 	// peer-2 has low score but was recently connected — should survive.
-	svc.health["10.0.0.2:64646"] = &peerHealth{
-		Address:             "10.0.0.2:64646",
+	svc.health[domain.PeerAddress("10.0.0.2:64646")] = &peerHealth{
+		Address:             domain.PeerAddress("10.0.0.2:64646"),
 		Score:               -25,
 		ConsecutiveFailures: 5,
 		LastConnectedAt:     time.Now().Add(-1 * time.Hour),
@@ -3351,7 +3563,7 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 	if !found {
 		t.Fatal("expected peer 10.0.0.2 to survive eviction (recently connected)")
 	}
-	if svc.health["10.0.0.1:64646"] != nil {
+	if svc.health[domain.PeerAddress("10.0.0.1:64646")] != nil {
 		t.Fatal("expected health for 10.0.0.1 to be cleaned up")
 	}
 }
@@ -3366,14 +3578,14 @@ func TestEvictStalePeersKeepsBootstrap(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{"10.0.0.99:64646"},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
 	// Give the bootstrap peer a terrible score.
 	svc.mu.Lock()
-	svc.health["10.0.0.99:64646"] = &peerHealth{
-		Address:             "10.0.0.99:64646",
+	svc.health[domain.PeerAddress("10.0.0.99:64646")] = &peerHealth{
+		Address:             domain.PeerAddress("10.0.0.99:64646"),
 		Score:               peerScoreMin,
 		ConsecutiveFailures: 20,
 		LastConnectedAt:     time.Now().Add(-72 * time.Hour),
@@ -3406,15 +3618,15 @@ func TestEvictStalePeersRespectsInterval(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
 	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
 
 	svc.mu.Lock()
-	svc.health["10.0.0.1:64646"] = &peerHealth{
-		Address:             "10.0.0.1:64646",
+	svc.health[domain.PeerAddress("10.0.0.1:64646")] = &peerHealth{
+		Address:             domain.PeerAddress("10.0.0.1:64646"),
 		Score:               -40,
 		ConsecutiveFailures: 15,
 		LastConnectedAt:     time.Now().Add(-48 * time.Hour),
@@ -3451,7 +3663,7 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3462,8 +3674,8 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 	// Peer has never successfully connected (LastConnectedAt is zero).
 	// LastDisconnectedAt is recent (simulating repeated retries), but
 	// eviction should look at AddedAt, not LastDisconnectedAt.
-	svc.health["10.0.0.1:64646"] = &peerHealth{
-		Address:             "10.0.0.1:64646",
+	svc.health[domain.PeerAddress("10.0.0.1:64646")] = &peerHealth{
+		Address:             domain.PeerAddress("10.0.0.1:64646"),
 		Score:               -30,
 		ConsecutiveFailures: 20,
 		LastDisconnectedAt:  time.Now().Add(-5 * time.Minute), // recent retry!
@@ -3496,7 +3708,7 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3513,8 +3725,8 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 	svc.markPeerDisconnected("10.0.0.1:64646", fmt.Errorf("refused"))
 
 	svc.mu.RLock()
-	primaryHealth := svc.health["10.0.0.1:64647"]
-	fallbackHealth := svc.health["10.0.0.1:64646"]
+	primaryHealth := svc.health[domain.PeerAddress("10.0.0.1:64647")]
+	fallbackHealth := svc.health[domain.PeerAddress("10.0.0.1:64646")]
 	svc.mu.RUnlock()
 
 	if primaryHealth == nil {
@@ -3531,7 +3743,7 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 	svc.markPeerConnected("10.0.0.1:64646", "outbound")
 
 	svc.mu.RLock()
-	primaryHealth = svc.health["10.0.0.1:64647"]
+	primaryHealth = svc.health[domain.PeerAddress("10.0.0.1:64647")]
 	svc.mu.RUnlock()
 
 	if !primaryHealth.Connected {
@@ -3553,7 +3765,7 @@ func TestFallbackCooldownAppliesToAllVariants(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3583,7 +3795,7 @@ func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3591,7 +3803,7 @@ func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
 	svc.addPeerAddress("10.0.0.1:64647", "client", "client-identity-abc")
 
 	// Simulate a fallback session on :64646.
-	fallbackAddr := "10.0.0.1:64646"
+	fallbackAddr := domain.PeerAddress("10.0.0.1:64646")
 	svc.mu.Lock()
 	svc.dialOrigin[fallbackAddr] = "10.0.0.1:64647"
 	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr}
@@ -3631,7 +3843,7 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3647,8 +3859,8 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 		t.Fatal("expected persistedMeta to be populated by addPeerAddress")
 	}
 	// Give the peer a bad score and no successful connections.
-	svc.health["10.0.0.1:64646"] = &peerHealth{
-		Address:             "10.0.0.1:64646",
+	svc.health[domain.PeerAddress("10.0.0.1:64646")] = &peerHealth{
+		Address:             domain.PeerAddress("10.0.0.1:64646"),
 		Score:               -30,
 		ConsecutiveFailures: 10,
 	}
@@ -3685,8 +3897,8 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 	}, id)
 
-	primaryAddr := "10.0.0.1:64647"
-	fallbackAddr := "10.0.0.1:64646"
+	primaryAddr := domain.PeerAddress("10.0.0.1:64647")
+	fallbackAddr := domain.PeerAddress("10.0.0.1:64646")
 
 	// Register fallback→primary mapping as ensurePeerSessions would.
 	svc.mu.Lock()
@@ -3765,7 +3977,7 @@ func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3854,8 +4066,8 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 	}, id)
 
 	svc.mu.RLock()
-	primaryPending := len(svc.pending[primaryAddr])
-	fallbackPending := len(svc.pending[fallbackAddr])
+	primaryPending := len(svc.pending[domain.PeerAddress(primaryAddr)])
+	fallbackPending := len(svc.pending[domain.PeerAddress(fallbackAddr)])
 	svc.mu.RUnlock()
 
 	if primaryPending != 1 {
@@ -3866,7 +4078,7 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 	}
 
 	// Verify pendingKeys were rebuilt with the primary address.
-	expectedKey := pendingFrameKey(primaryAddr, qs.Pending[fallbackAddr][0].Frame)
+	expectedKey := pendingFrameKey(domain.PeerAddress(primaryAddr), qs.Pending[fallbackAddr][0].Frame)
 	svc.mu.RLock()
 	_, hasKey := svc.pendingKeys[expectedKey]
 	svc.mu.RUnlock()
@@ -3875,7 +4087,7 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 	}
 
 	// Old fallback-keyed entry should NOT exist.
-	oldKey := pendingFrameKey(fallbackAddr, qs.Pending[fallbackAddr][0].Frame)
+	oldKey := pendingFrameKey(domain.PeerAddress(fallbackAddr), qs.Pending[fallbackAddr][0].Frame)
 	svc.mu.RLock()
 	_, hasOldKey := svc.pendingKeys[oldKey]
 	orphanedCount := len(svc.orphaned)
@@ -3945,10 +4157,10 @@ func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
 	}, id)
 
 	svc.mu.RLock()
-	fallbackPending := len(svc.pending[fallbackAddr])
-	aPending := len(svc.pending[primaryA])
-	bPending := len(svc.pending[primaryB])
-	orphanedCount := len(svc.orphaned[fallbackAddr])
+	fallbackPending := len(svc.pending[domain.PeerAddress(fallbackAddr)])
+	aPending := len(svc.pending[domain.PeerAddress(primaryA)])
+	bPending := len(svc.pending[domain.PeerAddress(primaryB)])
+	orphanedCount := len(svc.orphaned[domain.PeerAddress(fallbackAddr)])
 	svc.mu.RUnlock()
 
 	// Frames must NOT be in the active pending map (runtime would never flush them).
@@ -3966,8 +4178,8 @@ func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
 	if orphanedCount != 1 {
 		t.Fatalf("expected 1 orphaned frame under %s, got %d", fallbackAddr, orphanedCount)
 	}
-	if svc.orphaned[fallbackAddr][0].Frame.ID != "ambiguous-1" {
-		t.Fatalf("unexpected orphaned frame ID: %s", svc.orphaned[fallbackAddr][0].Frame.ID)
+	if svc.orphaned[domain.PeerAddress(fallbackAddr)][0].Frame.ID != "ambiguous-1" {
+		t.Fatalf("unexpected orphaned frame ID: %s", svc.orphaned[domain.PeerAddress(fallbackAddr)][0].Frame.ID)
 	}
 }
 
@@ -4023,8 +4235,8 @@ func TestQueueStateMigrationOrphansUnknownHost(t *testing.T) {
 	}, id)
 
 	svc.mu.RLock()
-	pendingCount := len(svc.pending[unknownAddr])
-	orphanedCount := len(svc.orphaned[unknownAddr])
+	pendingCount := len(svc.pending[domain.PeerAddress(unknownAddr)])
+	orphanedCount := len(svc.orphaned[domain.PeerAddress(unknownAddr)])
 	svc.mu.RUnlock()
 
 	// Unknown-host entries are orphaned during migration — the runtime
@@ -4090,8 +4302,8 @@ func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
 	}, id)
 
 	svc.mu.RLock()
-	pendingCount := len(svc.pending[runtimeAddr])
-	orphanedCount := len(svc.orphaned[runtimeAddr])
+	pendingCount := len(svc.pending[domain.PeerAddress(runtimeAddr)])
+	orphanedCount := len(svc.orphaned[domain.PeerAddress(runtimeAddr)])
 	svc.mu.RUnlock()
 
 	// Current-version entries stay in pending — no migration runs.
@@ -4250,7 +4462,7 @@ func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	peerID, _ := identity.Generate()
-	peerAddr := "198.51.100.1:64646"
+	peerAddr := domain.PeerAddress("198.51.100.1:64646")
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
@@ -4258,9 +4470,9 @@ func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
 
 	// Simulate what openPeerSession does: record observation keyed by identity,
 	// and register the peerID mapping so markPeerDisconnected can find it.
-	svc.recordObservedAddress(peerID.Address, "203.0.113.50")
+	svc.recordObservedAddress(domain.PeerIdentity(peerID.Address), "203.0.113.50")
 	svc.mu.Lock()
-	svc.peerIDs[peerAddr] = peerID.Address
+	svc.peerIDs[peerAddr] = domain.PeerIdentity(peerID.Address)
 	svc.mu.Unlock()
 
 	svc.mu.RLock()
@@ -4283,21 +4495,21 @@ func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	peerID, _ := identity.Generate()
-	primaryAddr := "198.51.100.1:64647"
-	fallbackAddr := "198.51.100.1:64646"
+	primaryAddr := domain.PeerAddress("198.51.100.1:64647")
+	fallbackAddr := domain.PeerAddress("198.51.100.1:64646")
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
 	}, id)
 
 	// Record observation under peer identity.
-	svc.recordObservedAddress(peerID.Address, "203.0.113.50")
+	svc.recordObservedAddress(domain.PeerIdentity(peerID.Address), "203.0.113.50")
 
 	// Set up dialOrigin (fallback → primary) and peerIDs (primary → fingerprint)
 	// as the real code does when a fallback connection succeeds.
 	svc.mu.Lock()
 	svc.dialOrigin[fallbackAddr] = primaryAddr
-	svc.peerIDs[primaryAddr] = peerID.Address
+	svc.peerIDs[primaryAddr] = domain.PeerIdentity(peerID.Address)
 	svc.mu.Unlock()
 
 	// Disconnect using fallback address — resolveHealthAddress maps to primary,
@@ -4323,7 +4535,7 @@ func TestAddPeerFrameNewPeerPrependedToList(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4350,7 +4562,7 @@ func TestAddPeerFrameExistingPeerMovedToFront(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4386,7 +4598,7 @@ func TestAddPeerFrameResetsCooldown(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4431,7 +4643,7 @@ func TestAddPeerFrameDefaultPort(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4454,7 +4666,7 @@ func TestAddPeerFrameEmptyAddressError(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4472,7 +4684,7 @@ func TestAddPeerFrameSelfAddressError(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4492,7 +4704,7 @@ func TestAddPeerFrameForbiddenIPError(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: "198.51.100.1:64646",
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4516,7 +4728,7 @@ func TestAddPeerFrameUnreachableOverlayError(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 		// No ProxyAddress → Tor/I2P unreachable.
 	})
 	defer stop()
@@ -4541,18 +4753,18 @@ func TestAddPeerFrameUpdatesSourceToManual(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
 	// Peer was added via bootstrap — source is "bootstrap" or similar.
 	svc.mu.RLock()
-	before := ""
+	var before domain.PeerSource
 	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
 		before = pm.Source
 	}
 	svc.mu.RUnlock()
-	if before == "manual" {
+	if before == domain.PeerSourceManual {
 		t.Fatalf("expected non-manual source before add_peer, got %q", before)
 	}
 
@@ -4564,12 +4776,12 @@ func TestAddPeerFrameUpdatesSourceToManual(t *testing.T) {
 	}
 
 	svc.mu.RLock()
-	after := ""
+	var after domain.PeerSource
 	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
 		after = pm.Source
 	}
 	svc.mu.RUnlock()
-	if after != "manual" {
+	if after != domain.PeerSourceManual {
 		t.Fatalf("expected source updated to 'manual' after add_peer, got %q", after)
 	}
 }
@@ -4584,7 +4796,7 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 		AdvertiseAddress: normalizeAddress(address),
 		PeersStatePath:   peersPath,
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4602,7 +4814,7 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 	}
 	found := false
 	for _, p := range state.Peers {
-		if p.Address == "10.0.0.1:64646" && p.Source == "manual" {
+		if p.Address == "10.0.0.1:64646" && p.Source == domain.PeerSourceManual {
 			found = true
 		}
 	}
@@ -4721,7 +4933,7 @@ func TestMessageStoreNotCalledForTransitDM(t *testing.T) {
 		ListenAddress:    addr,
 		AdvertiseAddress: normalizeAddress(addr),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, relayID)
 	defer cleanup()
 
@@ -4795,7 +5007,7 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 		ListenAddress:    addr,
 		AdvertiseAddress: normalizeAddress(addr),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, relayID)
 	defer cleanup()
 
@@ -4883,7 +5095,7 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 		PeersStatePath:   filepath.Join(tempDir, "peers.json"),
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, senderID)
 
 	store := &testMessageStore{}
@@ -5228,7 +5440,7 @@ func TestComputePeerStateThresholds(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		health: map[string]*peerHealth{},
+		health: map[domain.PeerAddress]*peerHealth{},
 	}
 
 	now := time.Now().UTC()
@@ -5291,11 +5503,11 @@ func TestComputePeerStateThresholds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			svc.mu.Lock()
-			svc.health["test:1"] = &tt.health
+			svc.health[domain.PeerAddress("test:1")] = &tt.health
 			svc.mu.Unlock()
 
 			svc.mu.RLock()
-			got := svc.computePeerStateLocked(svc.health["test:1"])
+			got := svc.computePeerStateLocked(svc.health[domain.PeerAddress("test:1")])
 			svc.mu.RUnlock()
 
 			if got != tt.wantState {
@@ -5385,9 +5597,9 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 	svc.addPeerAddress("5.5.5.5:64646", "full", "")
 
 	svc.mu.RLock()
-	before := svc.peerTypes["5.5.5.5:64646"]
+	before := svc.peerTypes[domain.PeerAddress("5.5.5.5:64646")]
 	svc.mu.RUnlock()
-	if before != config.NodeTypeFull {
+	if before != domain.NodeTypeFull {
 		t.Fatalf("expected full, got %s", before)
 	}
 
@@ -5395,9 +5607,9 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 	svc.addPeerAddress("5.5.5.5:64646", "client", "")
 
 	svc.mu.RLock()
-	after := svc.peerTypes["5.5.5.5:64646"]
+	after := svc.peerTypes[domain.PeerAddress("5.5.5.5:64646")]
 	svc.mu.RUnlock()
-	if after != config.NodeTypeFull {
+	if after != domain.NodeTypeFull {
 		t.Fatalf("addPeerAddress must not retag existing peer; expected full, got %s", after)
 	}
 }
@@ -5420,14 +5632,14 @@ func TestAnnouncePeerHelpers(t *testing.T) {
 	// Verify local addresses are filtered by classifyAddress.
 	localAddrs := []string{"127.0.0.1:64646", "192.168.1.1:64646", "10.0.0.1:64646"}
 	for _, addr := range localAddrs {
-		if classifyAddress(addr) != NetGroupLocal {
+		if classifyAddress(domain.PeerAddress(addr)) != domain.NetGroupLocal {
 			t.Errorf("expected %q to be classified as local", addr)
 		}
 	}
 
 	publicAddrs := []string{"83.172.44.178:64646", "65.108.204.190:64646"}
 	for _, addr := range publicAddrs {
-		if classifyAddress(addr) == NetGroupLocal {
+		if classifyAddress(domain.PeerAddress(addr)) == domain.NetGroupLocal {
 			t.Errorf("expected %q to NOT be classified as local", addr)
 		}
 	}
@@ -5453,8 +5665,8 @@ func TestPromotePeerAddress(t *testing.T) {
 
 	// Set cooldown on first peer to simulate failed connections.
 	svc.mu.Lock()
-	svc.health["1.1.1.1:64646"] = &peerHealth{
-		Address:             "1.1.1.1:64646",
+	svc.health[domain.PeerAddress("1.1.1.1:64646")] = &peerHealth{
+		Address:             domain.PeerAddress("1.1.1.1:64646"),
 		ConsecutiveFailures: 5,
 		LastDisconnectedAt:  time.Now(),
 	}
@@ -5482,7 +5694,7 @@ func TestPromotePeerAddress(t *testing.T) {
 	svc.promotePeerAddress("1.1.1.1:64646", "full")
 
 	svc.mu.RLock()
-	h := svc.health["1.1.1.1:64646"]
+	h := svc.health[domain.PeerAddress("1.1.1.1:64646")]
 	if h == nil || h.ConsecutiveFailures != 0 {
 		svc.mu.RUnlock()
 		t.Fatal("expected cooldown reset after promote")
@@ -5492,9 +5704,9 @@ func TestPromotePeerAddress(t *testing.T) {
 	// Promote with different type — authenticated promote updates type.
 	svc.promotePeerAddress("1.1.1.1:64646", "client")
 	svc.mu.RLock()
-	pt := svc.peerTypes["1.1.1.1:64646"]
+	pt := svc.peerTypes[domain.PeerAddress("1.1.1.1:64646")]
 	svc.mu.RUnlock()
-	if pt != config.NodeTypeClient {
+	if pt != domain.NodeTypeClient {
 		t.Errorf("expected type update to client, got %s", pt)
 	}
 
@@ -5503,12 +5715,12 @@ func TestPromotePeerAddress(t *testing.T) {
 	svc.promotePeerAddress("2.2.2.2:12345", "client")
 	svc.mu.RLock()
 	peersAfter := len(svc.peers)
-	newType := svc.peerTypes["2.2.2.2:12345"]
+	newType := svc.peerTypes[domain.PeerAddress("2.2.2.2:12345")]
 	svc.mu.RUnlock()
 	if peersAfter != peersBefore+1 {
 		t.Errorf("different port should create new peer, count went from %d to %d", peersBefore, peersAfter)
 	}
-	if newType != config.NodeTypeClient {
+	if newType != domain.NodeTypeClient {
 		t.Errorf("expected client type for new peer, got %s", newType)
 	}
 }
@@ -5538,20 +5750,20 @@ func TestAnnouncePeerPendingQueue(t *testing.T) {
 
 	// Verify pendingFrameKey returns a valid key for announce_peer.
 	frame := protocol.Frame{Type: "announce_peer", Peers: []string{"5.5.5.5:64646"}}
-	key := pendingFrameKey("1.1.1.1:64646", frame)
+	key := pendingFrameKey(domain.PeerAddress("1.1.1.1:64646"), frame)
 	if key == "" {
 		t.Fatal("expected non-empty pending key for announce_peer")
 	}
 
 	// Verify deduplication: same peer address should produce the same key.
-	key2 := pendingFrameKey("1.1.1.1:64646", frame)
+	key2 := pendingFrameKey(domain.PeerAddress("1.1.1.1:64646"), frame)
 	if key != key2 {
 		t.Errorf("expected identical keys, got %q and %q", key, key2)
 	}
 
 	// Different peer addresses should produce different keys.
 	frame2 := protocol.Frame{Type: "announce_peer", Peers: []string{"6.6.6.6:64646"}}
-	key3 := pendingFrameKey("1.1.1.1:64646", frame2)
+	key3 := pendingFrameKey(domain.PeerAddress("1.1.1.1:64646"), frame2)
 	if key == key3 {
 		t.Error("expected different keys for different peer addresses")
 	}
@@ -5572,13 +5784,13 @@ func TestPendingQueueReplacesStaleFrame(t *testing.T) {
 	})
 	defer stop()
 
-	target := "9.9.9.9:64646"
+	target := domain.PeerAddress("9.9.9.9:64646")
 
 	// Directly populate pending to simulate a full sendCh scenario.
 	frameV1 := protocol.Frame{Type: "announce_peer", Peers: []string{"7.7.7.7:64646"}, NodeType: "full"}
 	svc.mu.Lock()
-	key := pendingFrameKey(target, frameV1)
-	svc.pending[target] = append(svc.pending[target], pendingFrame{
+	key := pendingFrameKey(domain.PeerAddress(target), frameV1)
+	svc.pending[domain.PeerAddress(target)] = append(svc.pending[domain.PeerAddress(target)], pendingFrame{
 		Frame:    frameV1,
 		QueuedAt: time.Now().UTC(),
 	})
@@ -6029,7 +6241,7 @@ func TestMarkPeerConnectedSetsDirection(t *testing.T) {
 	svc.markPeerConnected("10.0.0.1:64646", peerDirectionOutbound)
 
 	svc.mu.RLock()
-	h := svc.health["10.0.0.1:64646"]
+	h := svc.health[domain.PeerAddress("10.0.0.1:64646")]
 	svc.mu.RUnlock()
 
 	if h == nil {
@@ -6043,7 +6255,7 @@ func TestMarkPeerConnectedSetsDirection(t *testing.T) {
 	svc.markPeerConnected("10.0.0.2:64646", peerDirectionInbound)
 
 	svc.mu.RLock()
-	h2 := svc.health["10.0.0.2:64646"]
+	h2 := svc.health[domain.PeerAddress("10.0.0.2:64646")]
 	svc.mu.RUnlock()
 
 	if h2 == nil {
@@ -6071,7 +6283,7 @@ func TestMarkPeerDisconnectedClearsDirection(t *testing.T) {
 	svc.markPeerDisconnected("10.0.0.1:64646", nil)
 
 	svc.mu.RLock()
-	h := svc.health["10.0.0.1:64646"]
+	h := svc.health[domain.PeerAddress("10.0.0.1:64646")]
 	svc.mu.RUnlock()
 
 	if h == nil {
@@ -6230,10 +6442,10 @@ func TestInboundPeerHealthIncludesDirection(t *testing.T) {
 		dirByAddr[f.Address] = f.Direction
 	}
 
-	if dirByAddr["10.0.0.1:64646"] != peerDirectionOutbound {
+	if dirByAddr["10.0.0.1:64646"] != string(peerDirectionOutbound) {
 		t.Errorf("expected outbound direction for 10.0.0.1:64646, got %q", dirByAddr["10.0.0.1:64646"])
 	}
-	if dirByAddr["10.0.0.2:64646"] != peerDirectionInbound {
+	if dirByAddr["10.0.0.2:64646"] != string(peerDirectionInbound) {
 		t.Errorf("expected inbound direction for 10.0.0.2:64646, got %q", dirByAddr["10.0.0.2:64646"])
 	}
 }
@@ -6252,7 +6464,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	})
 	defer stop()
 
-	peer := "10.0.0.5:64646"
+	peer := domain.PeerAddress("10.0.0.5:64646")
 
 	// Create two fake connections to simulate two inbound from the same peer.
 	conn1a, conn1b := net.Pipe()
@@ -6280,7 +6492,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	svc.mu.RLock()
 	h = svc.health[peer]
 	connected := h != nil && h.Connected
-	dir := ""
+	var dir domain.PeerDirection
 	if h != nil {
 		dir = h.Direction
 	}
@@ -6744,7 +6956,7 @@ func TestCapabilityExchangeBetweenTwoNodes(t *testing.T) {
 		ListenAddress:    addressA,
 		AdvertiseAddress: normalizeAddress(addressA),
 		BootstrapPeers:   []string{normalizeAddress(addressB)},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopA()
 
@@ -6752,7 +6964,7 @@ func TestCapabilityExchangeBetweenTwoNodes(t *testing.T) {
 		ListenAddress:    addressB,
 		AdvertiseAddress: normalizeAddress(addressB),
 		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopB()
 
@@ -6794,7 +7006,7 @@ func TestMixedVersionNodeWithoutCapabilitiesField(t *testing.T) {
 		ListenAddress:    address,
 		AdvertiseAddress: normalizeAddress(address),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -6842,7 +7054,7 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 		AdvertiseAddress: addr,
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	}, id)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -6942,7 +7154,7 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 		ListenAddress:    addressA,
 		AdvertiseAddress: normalizeAddress(addressA),
 		BootstrapPeers:   []string{},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopA()
 
@@ -6954,7 +7166,7 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 		ListenAddress:    addressB,
 		AdvertiseAddress: normalizeAddress(addressB),
 		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             config.NodeTypeFull,
+		Type:             domain.NodeTypeFull,
 	})
 	defer stopB()
 
@@ -7017,7 +7229,7 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 		nodeB.Address(), frame.Recipient, nodeB.Address() == frame.Recipient)
 	t.Logf("senderAddress=%s, senderID.Address=%s", normalizeAddress(addressA), senderID.Address)
 
-	status := nodeB.handleRelayMessage(normalizeAddress(addressA), nil, frame)
+	status := nodeB.handleRelayMessage(domain.PeerAddress(normalizeAddress(addressA)), nil, frame)
 	if status != "delivered" {
 		// Dump nodeB state for diagnostics.
 		nodeB.mu.RLock()
@@ -7068,19 +7280,15 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 	server := <-connCh
 	defer func() { _ = server.Close() }()
 
-	peerAddr := "10.0.0.99:64646"
+	peerAddr := domain.PeerAddress("10.0.0.99:64646")
 
-	// Register as inbound connection with peer info.
+	// Register as inbound connection with per-connection lastActivity
+	// old enough to be considered stale.
 	svc.mu.Lock()
 	svc.inboundConns[server] = struct{}{}
-	svc.connPeerInfo[server] = &connPeerHello{address: peerAddr}
-	// Create a stalled health entry: connected but no useful traffic for a long time.
-	svc.health[peerAddr] = &peerHealth{
-		Address:             peerAddr,
-		Connected:           true,
-		Direction:           peerDirectionInbound,
-		State:               peerStateStalled,
-		LastUsefulReceiveAt: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
+	svc.connPeerInfo[server] = &connPeerHello{
+		address:      peerAddr,
+		lastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	}
 	svc.mu.Unlock()
 
@@ -7138,17 +7346,13 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 	server := <-connCh
 	defer func() { _ = server.Close() }()
 
-	peerAddr := "10.0.0.88:64646"
+	peerAddr := domain.PeerAddress("10.0.0.88:64646")
 
 	svc.mu.Lock()
 	svc.inboundConns[server] = struct{}{}
-	svc.connPeerInfo[server] = &connPeerHello{address: peerAddr}
-	svc.health[peerAddr] = &peerHealth{
-		Address:             peerAddr,
-		Connected:           true,
-		Direction:           peerDirectionInbound,
-		State:               peerStateHealthy,
-		LastUsefulReceiveAt: time.Now(),
+	svc.connPeerInfo[server] = &connPeerHello{
+		address:      peerAddr,
+		lastActivity: time.Now(), // recent activity — should not be evicted
 	}
 	svc.mu.Unlock()
 
@@ -7203,7 +7407,7 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	_, server1 := makeConn()
 	defer func() { _ = server1.Close() }()
 
-	stalledPeerAddr := "10.0.0.50:64646"
+	stalledPeerAddr := domain.PeerAddress("10.0.0.50:64646")
 
 	svc.mu.Lock()
 	// Clear any pre-existing inbound connections left over from
@@ -7212,13 +7416,9 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 		delete(svc.inboundConns, c)
 	}
 	svc.inboundConns[server1] = struct{}{}
-	svc.connPeerInfo[server1] = &connPeerHello{address: stalledPeerAddr}
-	svc.health[stalledPeerAddr] = &peerHealth{
-		Address:             stalledPeerAddr,
-		Connected:           true,
-		Direction:           peerDirectionInbound,
-		State:               peerStateStalled,
-		LastUsefulReceiveAt: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
+	svc.connPeerInfo[server1] = &connPeerHello{
+		address:      stalledPeerAddr,
+		lastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	}
 
 	// Also add an outbound session as control.
@@ -7251,7 +7451,7 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 	defer stop()
 
 	// Case 1: direct dial address — no dialOrigin alias.
-	directAddr := "185.223.82.127:64646"
+	directAddr := domain.PeerAddress("185.223.82.127:64646")
 	svc.addPeerVersion(directAddr, "0.22-alpha")
 	svc.addPeerBuild(directAddr, 22)
 
@@ -7270,8 +7470,8 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 	// Case 2: fallback-port dial variant — resolveHealthAddress maps
 	// the dial address to the primary address. Verify version is stored
 	// under the primary key.
-	primaryAddr := "10.0.0.5:12345"
-	fallbackAddr := "10.0.0.5:64646"
+	primaryAddr := domain.PeerAddress("10.0.0.5:12345")
+	fallbackAddr := domain.PeerAddress("10.0.0.5:64646")
 
 	svc.mu.Lock()
 	svc.dialOrigin[fallbackAddr] = primaryAddr
@@ -7303,7 +7503,7 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 
 	// Case 3: inbound peer without listen field — version stored by
 	// inboundPeerAddress (hello.Address fallback).
-	inboundAddr := "abcdef1234567890"
+	inboundAddr := domain.PeerAddress("abcdef1234567890")
 	svc.addPeerVersion(inboundAddr, "0.20-gamma")
 	svc.addPeerBuild(inboundAddr, 20)
 

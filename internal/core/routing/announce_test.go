@@ -14,11 +14,11 @@ type mockPeerSender struct {
 }
 
 type mockSendCall struct {
-	PeerAddress string
+	PeerAddress PeerAddress
 	Routes      []AnnounceEntry
 }
 
-func (m *mockPeerSender) SendAnnounceRoutes(peerAddress string, routes []AnnounceEntry) bool {
+func (m *mockPeerSender) SendAnnounceRoutes(peerAddress PeerAddress, routes []AnnounceEntry) bool {
 	m.mu.Lock()
 	m.calls = append(m.calls, mockSendCall{PeerAddress: peerAddress, Routes: routes})
 	m.mu.Unlock()

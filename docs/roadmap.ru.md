@@ -20,7 +20,7 @@
 - [Принципы проектирования](#принципы-проектирования)
 - [Политика версионирования протокола](#политика-версионирования-протокола)
 - [Итерация 1 — Таблица маршрутов](#iter-1)
-  - [Незавершённые задачи перед здоровьем маршрутов](#pre-1-4-refactoring)
+  - [Незавершённые задачи перед здоровьем маршрутов](#незавершённые-задачи-перед-здоровьем-маршрутов)
   - [Здоровье маршрутов, probe'ы и RTT-скоринг](#здоровье-маршрутов-probeы-и-rtt-скоринг)
 - [Итерация 2 — Надёжность, репутация, multi-path и инкрементальная синхронизация](#iter-2)
 - [Итерация 3 — Оптимизация и масштабирование](#iter-3)
@@ -88,7 +88,7 @@ graph LR
 fairness rotation, pacing/jitter, per-peer rate limiting), полные
 интеграционные тесты для multi-node convergence сценариев и
 forward-compatible relay для будущего onion routing. Отслеживается
-в разделе [Незавершённые задачи перед здоровьем маршрутов](#pre-1-4-refactoring).
+в разделе [Незавершённые задачи перед здоровьем маршрутов](#незавершённые-задачи-перед-здоровьем-маршрутов).
 
 ### Принципы проектирования
 
@@ -575,11 +575,18 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 
 **Выполнено:** инварианты модели, минимальный вертикальный slice (table routing, анонсы, withdrawals, hop_ack, gossip fallback), RPC-наблюдаемость (`fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup`). Полная документация: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md).
 
-#### Незавершённая работа перед route health
+#### Незавершённые задачи перед здоровьем маршрутов
 
 Перед началом Phase 1.4 необходим рефакторинг для управления сложностью:
 
 **Высокий приоритет:** `node/service.go` (6200+ строк) — монолит, смешивающий управление пирами, интеграцию маршрутизации, relay/SOCKS5, метринг и жизненный цикл сессий. Разделить на: `peer_management.go`, `routing_integration.go` (частично выделен), `relay_handler.go`, `metering.go`.
+
+**Дисциплина типизации в этом рефакторе:** при разделении монолита убирать
+cast'ы из доменных типов в `string` на core-path'ах (например,
+`string(senderAddress)` там, где callee должен принимать `PeerAddress`).
+Внутри `node`, `routing`, `relay`, `health`, `queue` и state-management кода
+такие преобразования должны оставаться только для логирования, protocol
+serialization, config parsing и UI/RPC boundary.
 
 **Выполненный рефакторинг:** интерфейс RoutingProvider упрощён с 5 методов до 2 (`RoutingSnapshot()`, `PeerTransport()`). Удалены избыточные методы.
 
@@ -624,6 +631,12 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 - [ ] Без routing table сеть продолжает доставку через gossip fallback
 - [ ] Подтвердить: iteration 1 остаётся аддитивной, protocol bump не нужен
 - [ ] Подтвердить: iteration 1 не требует повышения `MinimumProtocolVersion`
+
+**Чеклист готовности к route health:**
+
+- [ ] разделить монолит `node/service.go` на focused files до начала route-health работ
+- [ ] переименовать неоднозначные поля вроде `address` в `listenAddress`, `transportAddress` или `identity` по фактической семантике
+- [ ] внедрить `KnownPeer`, `PeerSessionRef`, `InboundPeerRef` как embedded типы в runtime-структурах для устранения дублирования полей
 
 ---
 

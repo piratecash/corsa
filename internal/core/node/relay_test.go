@@ -12,6 +12,7 @@ import (
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 )
@@ -87,12 +88,12 @@ func TestRelayStateStoreReceiptLookup(t *testing.T) {
 	})
 
 	addr := rs.lookupReceiptForwardTo("msg-1")
-	if addr != "peer-a" {
+	if addr != domain.PeerAddress("peer-a") {
 		t.Fatalf("expected receipt_forward_to = peer-a, got %q", addr)
 	}
 
 	addr = rs.lookupReceiptForwardTo("msg-unknown")
-	if addr != "" {
+	if addr != domain.PeerAddress("") {
 		t.Fatalf("expected empty for unknown message, got %q", addr)
 	}
 }
@@ -303,8 +304,8 @@ func TestRelayStateTTLValue(t *testing.T) {
 }
 
 func TestCapMeshRelayV1Constant(t *testing.T) {
-	if capMeshRelayV1 != "mesh_relay_v1" {
-		t.Fatalf("capMeshRelayV1 = %q, want mesh_relay_v1", capMeshRelayV1)
+	if domain.CapMeshRelayV1 != "mesh_relay_v1" {
+		t.Fatalf("CapMeshRelayV1 = %q, want mesh_relay_v1", domain.CapMeshRelayV1)
 	}
 }
 
@@ -312,10 +313,10 @@ func TestCapMeshRelayV1Constant(t *testing.T) {
 
 func TestSessionHasCapabilityForRelay(t *testing.T) {
 	svc := &Service{
-		sessions: map[string]*peerSession{
+		sessions: map[domain.PeerAddress]*peerSession{
 			"new-peer": {
 				address:      "new-peer",
-				capabilities: []string{"mesh_relay_v1"},
+				capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			},
 			"legacy-peer": {
 				address:      "legacy-peer",
@@ -324,13 +325,13 @@ func TestSessionHasCapabilityForRelay(t *testing.T) {
 		},
 	}
 
-	if !svc.sessionHasCapability("new-peer", capMeshRelayV1) {
+	if !svc.sessionHasCapability(domain.PeerAddress("new-peer"), domain.CapMeshRelayV1) {
 		t.Fatal("new-peer should have mesh_relay_v1")
 	}
-	if svc.sessionHasCapability("legacy-peer", capMeshRelayV1) {
+	if svc.sessionHasCapability(domain.PeerAddress("legacy-peer"), domain.CapMeshRelayV1) {
 		t.Fatal("legacy-peer should NOT have mesh_relay_v1")
 	}
-	if svc.sessionHasCapability("unknown", capMeshRelayV1) {
+	if svc.sessionHasCapability(domain.PeerAddress("unknown"), domain.CapMeshRelayV1) {
 		t.Fatal("unknown peer should NOT have mesh_relay_v1")
 	}
 }
@@ -339,13 +340,13 @@ func TestLocalCapabilitiesIncludesRelay(t *testing.T) {
 	caps := localCapabilities()
 	found := false
 	for _, c := range caps {
-		if c == capMeshRelayV1 {
+		if c == domain.CapMeshRelayV1 {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("localCapabilities() = %v, should include %q", caps, capMeshRelayV1)
+		t.Fatalf("localCapabilities() = %v, should include %q", caps, domain.CapMeshRelayV1)
 	}
 }
 
@@ -508,7 +509,7 @@ func TestClientNodeDropsTransitRelayMessage(t *testing.T) {
 		PreviousHop: "10.0.0.1:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 	if status != "" {
 		t.Fatalf("client node should drop transit relay_message (got status %q, want empty)", status)
 	}
@@ -536,7 +537,7 @@ func TestClientNodeAcceptsRelayAddressedToSelf(t *testing.T) {
 		PreviousHop: "10.0.0.2:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.2:64646", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.2:64646"), nil, frame)
 	if status != "delivered" {
 		t.Fatalf("client node should accept relay addressed to self (got status %q, want \"delivered\")", status)
 	}
@@ -564,7 +565,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+		status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 		if status != "delivered" {
 			t.Fatalf("expected \"delivered\", got %q", status)
 		}
@@ -591,13 +592,13 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 		}
 
 		// First call stores the relay state and returns "stored" (no peers).
-		first := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+		first := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 		if first != "stored" {
 			t.Fatalf("first call: expected \"stored\", got %q", first)
 		}
 
 		// Second call with same ID should be deduped — empty status, no ack.
-		second := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+		second := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 		if second != "" {
 			t.Fatalf("dedupe: expected empty status, got %q", second)
 		}
@@ -618,7 +619,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+		status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 		if status != "" {
 			t.Fatalf("max hops: expected empty status, got %q", status)
 		}
@@ -639,7 +640,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+		status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 		if status != "" {
 			t.Fatalf("client transit: expected empty status, got %q", status)
 		}
@@ -663,7 +664,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+		status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 		if status != "stored" {
 			t.Fatalf("no peers: expected \"stored\", got %q", status)
 		}
@@ -721,7 +722,7 @@ func TestRelayedDMEmitsDeliveryReceipt(t *testing.T) {
 		PreviousHop: "10.0.0.5:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.5:64646", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.5:64646"), nil, frame)
 	if status != "delivered" {
 		t.Fatalf("expected \"delivered\", got %q", status)
 	}
@@ -758,7 +759,7 @@ func TestPendingFrameKeySupportsRelayMessage(t *testing.T) {
 		Recipient: "some-recipient",
 	}
 
-	key := pendingFrameKey("10.0.0.1:64646", frame)
+	key := pendingFrameKey(domain.PeerAddress("10.0.0.1:64646"), frame)
 	if key == "" {
 		t.Fatal("pendingFrameKey returned empty for relay_message — queuePeerFrame will silently drop it")
 	}
@@ -774,7 +775,7 @@ func TestPendingFrameKeySupportsRelayMessage(t *testing.T) {
 		ID:        "relay-queue-test-2",
 		Recipient: "some-recipient",
 	}
-	key2 := pendingFrameKey("10.0.0.1:64646", frame2)
+	key2 := pendingFrameKey(domain.PeerAddress("10.0.0.1:64646"), frame2)
 	if key == key2 {
 		t.Fatalf("same key for different relay message IDs")
 	}
@@ -817,7 +818,7 @@ func TestSendRelayMessageOriginReceiptForwardTo(t *testing.T) {
 	})
 
 	forwardTo := svc.relayStates.lookupReceiptForwardTo(string(msg.ID))
-	if forwardTo != "" {
+	if forwardTo != domain.PeerAddress("") {
 		t.Fatalf("origin node ReceiptForwardTo should be empty, got %q", forwardTo)
 	}
 
@@ -845,7 +846,7 @@ func TestFinalHopStoresRelayStateForReceipt(t *testing.T) {
 	sender := registerSenderKey(t, svc)
 	body := sealDMBody(t, sender, svc.Address(), identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey))
 
-	senderTransport := "10.0.0.5:64646"
+	senderTransport := domain.PeerAddress("10.0.0.5:64646")
 	frame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          "final-hop-state-1",
@@ -857,7 +858,7 @@ func TestFinalHopStoresRelayStateForReceipt(t *testing.T) {
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 		HopCount:    3,
 		MaxHops:     10,
-		PreviousHop: senderTransport,
+		PreviousHop: string(senderTransport),
 	}
 
 	status := svc.handleRelayMessage(senderTransport, nil, frame)
@@ -867,7 +868,7 @@ func TestFinalHopStoresRelayStateForReceipt(t *testing.T) {
 
 	// Verify relay state was stored with correct ReceiptForwardTo.
 	forwardTo := svc.relayStates.lookupReceiptForwardTo("final-hop-state-1")
-	if forwardTo != senderTransport {
+	if forwardTo != domain.PeerAddress(senderTransport) {
 		t.Fatalf("ReceiptForwardTo = %q, want %q", forwardTo, senderTransport)
 	}
 
@@ -909,7 +910,7 @@ func TestRejectedRelayDMReturnsEmptyStatus(t *testing.T) {
 		PreviousHop: "10.0.0.7:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.7:64646", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.7:64646"), nil, frame)
 	if status != "" {
 		t.Fatalf("rejected DM should return empty status (no ack), got %q", status)
 	}
@@ -948,7 +949,7 @@ func TestRejectedRelayStoredBranchReturnsEmptyStatus(t *testing.T) {
 		PreviousHop: "10.0.0.8:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.8:64646", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.8:64646"), nil, frame)
 	if status != "" {
 		t.Fatalf("rejected stored DM should return empty status, got %q", status)
 	}
@@ -978,7 +979,7 @@ func TestRelayStatePersistenceAfterMutation(t *testing.T) {
 		PreviousHop: "10.0.0.9:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.9:64646", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.9:64646"), nil, frame)
 	if status != "delivered" {
 		t.Fatalf("expected \"delivered\", got %q", status)
 	}
@@ -1136,7 +1137,7 @@ func TestUpdateStateOverwritesReservation(t *testing.T) {
 
 	// Verify the state was updated.
 	forwardTo := rs.lookupReceiptForwardTo("update-test")
-	if forwardTo != "10.0.0.1:64646" {
+	if forwardTo != domain.PeerAddress("10.0.0.1:64646") {
 		t.Fatalf("expected ReceiptForwardTo=10.0.0.1:64646, got %q", forwardTo)
 	}
 }
@@ -1160,7 +1161,7 @@ func TestSendReceiptToPeerReturnsBool(t *testing.T) {
 	// With no active session, enqueuePeerFrame fails. queuePeerFrame
 	// succeeds (receipt frames always have a valid pending key).
 	// sendReceiptToPeer must return true because the receipt was queued.
-	result := svc.sendReceiptToPeer("10.0.0.99:64646", receipt)
+	result := svc.sendReceiptToPeer(domain.PeerAddress("10.0.0.99:64646"), receipt)
 	if !result {
 		t.Fatal("sendReceiptToPeer should return true when receipt is queued")
 	}
@@ -1180,17 +1181,17 @@ func TestHandleRelayReceiptPropagatesSendResult(t *testing.T) {
 	// fail (no health → activePeerSession returns nil), but queuePeerFrame
 	// succeeds, so the overall send returns true.
 	svc.mu.Lock()
-	svc.sessions[peerAddr] = &peerSession{
-		address:      peerAddr,
-		capabilities: []string{capMeshRelayV1},
+	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
+		address:      domain.PeerAddress(peerAddr),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       make(chan protocol.Frame),
 	}
 	svc.mu.Unlock()
 
 	svc.relayStates.store(&relayForwardState{
 		MessageID:        "receipt-prop-test-1",
-		PreviousHop:      peerAddr,
-		ReceiptForwardTo: peerAddr,
+		PreviousHop:      domain.PeerAddress(peerAddr),
+		ReceiptForwardTo: domain.PeerAddress(peerAddr),
 		ForwardedTo:      "",
 		HopCount:         2,
 		RemainingTTL:     relayStateTTLSeconds,
@@ -1235,7 +1236,7 @@ func TestDuplicateFinalHopRelayPreservesState(t *testing.T) {
 		MaxHops:    5,
 		TTLSeconds: 300,
 	}
-	previousHop := "relay-node-A"
+	previousHop := domain.PeerAddress("relay-node-A")
 
 	// First delivery must succeed.
 	status1 := svc.handleRelayMessage(previousHop, nil, relayFrame)
@@ -1245,7 +1246,7 @@ func TestDuplicateFinalHopRelayPreservesState(t *testing.T) {
 
 	// Relay state must exist after first delivery.
 	state := svc.relayStates.lookupReceiptForwardTo("dup-final-hop-1")
-	if state == "" {
+	if state == domain.PeerAddress("") {
 		t.Fatal("relay state missing after first delivery")
 	}
 
@@ -1257,7 +1258,7 @@ func TestDuplicateFinalHopRelayPreservesState(t *testing.T) {
 
 	// The relay state from the first delivery must still be intact.
 	stateAfterDup := svc.relayStates.lookupReceiptForwardTo("dup-final-hop-1")
-	if stateAfterDup == "" {
+	if stateAfterDup == domain.PeerAddress("") {
 		t.Fatal("relay state was erased by duplicate final-hop delivery — receipt routing broken")
 	}
 	if stateAfterDup != previousHop {
@@ -1302,7 +1303,7 @@ func TestRelayMessageRejectsNonDMTopic(t *testing.T) {
 				TTLSeconds: 300,
 			}
 
-			status := svc.handleRelayMessage("relay-peer", nil, frame)
+			status := svc.handleRelayMessage(domain.PeerAddress("relay-peer"), nil, frame)
 			if status != "" {
 				t.Fatalf("topic %q: got status %q, want \"\" (drop non-DM)", topic, status)
 			}
@@ -1338,11 +1339,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.mu.Lock()
 		svc.connPeerInfo[c1] = &connPeerHello{
 			address:      "inbound-peer-1",
-			capabilities: []string{capMeshRelayV1},
+			identity:     "inbound-peer-1",
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		}
 		svc.mu.Unlock()
 
-		got := svc.countCapablePeers(capMeshRelayV1)
+		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 1 {
 			t.Fatalf("countCapablePeers = %d, want 1 (inbound peer not counted)", got)
 		}
@@ -1356,30 +1358,33 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 	t.Run("dedup_outbound_and_inbound", func(t *testing.T) {
 		// Same peer appears in both sessions (outbound) and connPeerInfo (inbound).
 		peerAddr := "duplex-peer-1"
+		peerID := "duplex-id-1"
 		c1, c2 := net.Pipe()
 		defer func() { _ = c1.Close() }()
 		defer func() { _ = c2.Close() }()
 
 		svc.mu.Lock()
-		svc.sessions[peerAddr] = &peerSession{
-			address:      peerAddr,
-			capabilities: []string{capMeshRelayV1},
+		svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
+			address:      domain.PeerAddress(peerAddr),
+			peerIdentity: domain.PeerIdentity(peerID),
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
 		svc.connPeerInfo[c1] = &connPeerHello{
-			address:      peerAddr,
-			capabilities: []string{capMeshRelayV1},
+			address:      domain.PeerAddress(peerAddr),
+			identity:     domain.PeerIdentity(peerID),
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		}
 		svc.mu.Unlock()
 
-		got := svc.countCapablePeers(capMeshRelayV1)
+		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 1 {
 			t.Fatalf("countCapablePeers = %d, want 1 (duplex peer double-counted)", got)
 		}
 
 		// Cleanup.
 		svc.mu.Lock()
-		delete(svc.sessions, peerAddr)
+		delete(svc.sessions, domain.PeerAddress(peerAddr))
 		delete(svc.connPeerInfo, c1)
 		svc.mu.Unlock()
 	})
@@ -1391,25 +1396,62 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c2.Close() }()
 
 		svc.mu.Lock()
-		svc.sessions["outbound-peer"] = &peerSession{
+		svc.sessions[domain.PeerAddress("outbound-peer")] = &peerSession{
 			address:      "outbound-peer",
-			capabilities: []string{capMeshRelayV1},
+			peerIdentity: "outbound-id",
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
 		svc.connPeerInfo[c1] = &connPeerHello{
 			address:      "inbound-peer-2",
-			capabilities: []string{capMeshRelayV1},
+			identity:     "inbound-id-2",
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		}
 		svc.mu.Unlock()
 
-		got := svc.countCapablePeers(capMeshRelayV1)
+		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 2 {
 			t.Fatalf("countCapablePeers = %d, want 2 (one outbound + one inbound)", got)
 		}
 
 		// Cleanup.
 		svc.mu.Lock()
-		delete(svc.sessions, "outbound-peer")
+		delete(svc.sessions, domain.PeerAddress("outbound-peer"))
+		delete(svc.connPeerInfo, c1)
+		svc.mu.Unlock()
+	})
+
+	t.Run("dedup_by_identity_not_address", func(t *testing.T) {
+		// Same peer identity appears via outbound (transport address) and
+		// inbound (NATed listen address). Different addresses, same identity
+		// — should be counted once.
+		c1, c2 := net.Pipe()
+		defer func() { _ = c1.Close() }()
+		defer func() { _ = c2.Close() }()
+
+		sharedID := "shared-identity-1"
+		svc.mu.Lock()
+		svc.sessions[domain.PeerAddress("outbound-addr-X")] = &peerSession{
+			address:      "outbound-addr-X",
+			peerIdentity: domain.PeerIdentity(sharedID),
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
+			sendCh:       make(chan protocol.Frame),
+		}
+		svc.connPeerInfo[c1] = &connPeerHello{
+			address:      "127.0.0.1:64646", // NATed listen address
+			identity:     domain.PeerIdentity(sharedID),
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		}
+		svc.mu.Unlock()
+
+		got := svc.countCapablePeers(domain.CapMeshRelayV1)
+		if got != 1 {
+			t.Fatalf("countCapablePeers = %d, want 1 (same identity via different addresses)", got)
+		}
+
+		// Cleanup.
+		svc.mu.Lock()
+		delete(svc.sessions, domain.PeerAddress("outbound-addr-X"))
 		delete(svc.connPeerInfo, c1)
 		svc.mu.Unlock()
 	})
@@ -1450,12 +1492,12 @@ func TestRetryRelayDeliveriesCallsTryRelay(t *testing.T) {
 	peerAddr := "relay-full-node-1"
 	sendCh := make(chan protocol.Frame, 10)
 	svc.mu.Lock()
-	svc.sessions[peerAddr] = &peerSession{
-		address:      peerAddr,
-		capabilities: []string{capMeshRelayV1},
+	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
+		address:      domain.PeerAddress(peerAddr),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
-	svc.health[peerAddr] = &peerHealth{Connected: true}
+	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
 	svc.mu.Unlock()
 
 	svc.retryRelayDeliveries()
@@ -1499,20 +1541,20 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 	capableCh := make(chan protocol.Frame, 100)
 
 	svc.mu.Lock()
-	svc.sessions["addr-A"] = &peerSession{
+	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		address:      "addr-A",
-		peerIdentity: recipientID.Address,
-		capabilities: []string{}, // no relay capability
+		peerIdentity: domain.PeerIdentity(recipientID.Address),
+		capabilities: []domain.Capability{}, // no relay capability
 		sendCh:       make(chan protocol.Frame, 10),
 	}
-	svc.health["addr-A"] = &peerHealth{Connected: true}
-	svc.sessions["addr-B"] = &peerSession{
+	svc.health[domain.PeerAddress("addr-A")] = &peerHealth{Connected: true}
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      "addr-B",
-		peerIdentity: recipientID.Address,
-		capabilities: []string{capMeshRelayV1},
+		peerIdentity: domain.PeerIdentity(recipientID.Address),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       capableCh,
 	}
-	svc.health["addr-B"] = &peerHealth{Connected: true}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{Connected: true}
 	svc.mu.Unlock()
 
 	frame := protocol.Frame{
@@ -1534,7 +1576,7 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 	// make flaky passes statistically negligible (~0.5^20 ≈ 1e-6).
 	for i := 0; i < 20; i++ {
 		frame.ID = fmt.Sprintf("direct-path-multi-%d", i)
-		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+		status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 		if status != "forwarded" {
 			t.Fatalf("iteration %d: expected \"forwarded\", got %q", i, status)
 		}
@@ -1563,17 +1605,17 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	session := &peerSession{
-		address:      peerAddr,
+		address:      domain.PeerAddress(peerAddr),
 		conn:         remote,
 		sendCh:       sendCh,
 		inboxCh:      inboxCh,
 		errCh:        errCh,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	svc.mu.Lock()
-	svc.sessions[peerAddr] = session
-	svc.health[peerAddr] = &peerHealth{Connected: true}
+	svc.sessions[domain.PeerAddress(peerAddr)] = session
+	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
 	svc.mu.Unlock()
 
 	// Close the remote end so the next write fails with a pipe error.
@@ -1603,7 +1645,7 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 
 	// Verify the peer was marked as disconnected.
 	svc.mu.RLock()
-	health := svc.health[peerAddr]
+	health := svc.health[domain.PeerAddress(peerAddr)]
 	svc.mu.RUnlock()
 
 	if health == nil {
@@ -1632,17 +1674,17 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	session := &peerSession{
-		address:      peerAddr,
+		address:      domain.PeerAddress(peerAddr),
 		conn:         remote,
 		sendCh:       sendCh,
 		inboxCh:      inboxCh,
 		errCh:        errCh,
-		capabilities: []string{capMeshRelayV1},
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 
 	svc.mu.Lock()
-	svc.sessions[peerAddr] = session
-	svc.health[peerAddr] = &peerHealth{Connected: true}
+	svc.sessions[domain.PeerAddress(peerAddr)] = session
+	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
 	svc.mu.Unlock()
 
 	_ = remote.Close()
@@ -1668,7 +1710,7 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 	}
 
 	svc.mu.RLock()
-	health := svc.health[peerAddr]
+	health := svc.health[domain.PeerAddress(peerAddr)]
 	svc.mu.RUnlock()
 
 	if health == nil || health.Connected {
@@ -1686,19 +1728,19 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 	peerAddr := "relay-hop-back"
 	sendCh := make(chan protocol.Frame, 10)
 	svc.mu.Lock()
-	svc.sessions[peerAddr] = &peerSession{
-		address:      peerAddr,
-		capabilities: []string{capMeshRelayV1},
+	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
+		address:      domain.PeerAddress(peerAddr),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
-	svc.health[peerAddr] = &peerHealth{Connected: true}
+	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
 	svc.mu.Unlock()
 
 	// Store relay forward state so handleRelayReceipt can find the return path.
 	svc.relayStates.store(&relayForwardState{
 		MessageID:        "receipt-retry-1",
-		PreviousHop:      peerAddr,
-		ReceiptForwardTo: peerAddr,
+		PreviousHop:      domain.PeerAddress(peerAddr),
+		ReceiptForwardTo: domain.PeerAddress(peerAddr),
 		ForwardedTo:      "",
 		HopCount:         2,
 		RemainingTTL:     relayStateTTLSeconds,

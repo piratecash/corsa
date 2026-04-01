@@ -27,7 +27,7 @@ type PeerSender interface {
 	// node.Service to locate the session.
 	//
 	// Returns true if the frame was enqueued successfully.
-	SendAnnounceRoutes(peerAddress string, routes []AnnounceEntry) bool
+	SendAnnounceRoutes(peerAddress PeerAddress, routes []AnnounceEntry) bool
 }
 
 // AnnounceLoop runs periodic and triggered routing announcements. It
@@ -57,9 +57,9 @@ type AnnounceLoop struct {
 // AnnounceTarget identifies a peer for announcement purposes.
 type AnnounceTarget struct {
 	// Address is the transport address used to enqueue frames.
-	Address string
+	Address PeerAddress
 	// Identity is the peer's Ed25519 fingerprint — used for split horizon.
-	Identity string
+	Identity PeerIdentity
 }
 
 // AnnounceLoopOption configures the AnnounceLoop.
@@ -166,7 +166,7 @@ func (a *AnnounceLoop) announceToAllPeers() {
 		}
 		if !a.sender.SendAnnounceRoutes(peer.Address, routes) {
 			log.Debug().
-				Str("peer", peer.Address).
+				Str("peer", string(peer.Address)).
 				Int("routes", len(routes)).
 				Msg("announce_routes_send_failed")
 		}

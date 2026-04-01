@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 )
 
@@ -20,11 +21,13 @@ type App struct {
 	Version  string
 }
 
-type NodeType string
+// NodeType is an alias for domain.NodeType kept for backward compatibility
+// with existing config consumers. New code should use domain.NodeType directly.
+type NodeType = domain.NodeType
 
 const (
-	NodeTypeFull   NodeType = "full"
-	NodeTypeClient NodeType = "client"
+	NodeTypeFull   = domain.NodeTypeFull
+	NodeTypeClient = domain.NodeTypeClient
 )
 
 type Node struct {
@@ -256,12 +259,10 @@ func bootstrapPeersFromEnv(listenAddress string) []string {
 }
 
 func nodeTypeFromEnv() NodeType {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_NODE_TYPE"))) {
-	case string(NodeTypeClient):
-		return NodeTypeClient
-	default:
-		return NodeTypeFull
+	if t, ok := domain.ParseNodeType(os.Getenv("CORSA_NODE_TYPE")); ok {
+		return t
 	}
+	return NodeTypeFull
 }
 
 func listenerFromEnv() (bool, bool) {

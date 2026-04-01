@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 )
@@ -141,7 +142,7 @@ func TestINV4_ClientNodeTransitDrop(t *testing.T) {
 		PreviousHop: "10.0.0.1:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
 	if status != "" {
 		t.Fatalf("INV-4 violated: client node returned status %q for transit relay", status)
 	}
@@ -187,13 +188,13 @@ func TestINV6_ReceiptUsesTransportAddress(t *testing.T) {
 		PreviousHop: transportAddr,
 	}
 
-	status := svc.handleRelayMessage(transportAddr, nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress(transportAddr), nil, frame)
 	if status != "delivered" {
 		t.Fatalf("expected delivered, got %q", status)
 	}
 
 	forwardTo := svc.relayStates.lookupReceiptForwardTo("inv6-test")
-	if forwardTo != transportAddr {
+	if forwardTo != domain.PeerAddress(transportAddr) {
 		t.Fatalf("INV-6 violated: ReceiptForwardTo = %q, want transport address %q", forwardTo, transportAddr)
 	}
 }
@@ -214,7 +215,7 @@ func TestINV11_OriginReceiptForwardToEmpty(t *testing.T) {
 	})
 
 	forwardTo := svc.relayStates.lookupReceiptForwardTo("inv7-test")
-	if forwardTo != "" {
+	if forwardTo != domain.PeerAddress("") {
 		t.Fatalf("INV-11 violated: origin ReceiptForwardTo = %q, want empty", forwardTo)
 	}
 
@@ -471,7 +472,7 @@ func TestHandlePeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
 	peers := make([]string, totalPeers)
 	for i := range peers {
 		// Use routable public IPs — private ranges (10.x, 192.168.x, etc.)
-		// are classified as NetGroupLocal and filtered by announce_peer.
+		// are classified as domain.NetGroupLocal and filtered by announce_peer.
 		peers[i] = fmt.Sprintf("44.%d.%d.1:9000", i/256, i%256)
 	}
 
@@ -485,7 +486,7 @@ func TestHandlePeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
 
 	svc.mu.RLock()
 	// newTestService starts with zero peers (no bootstrap).
-	// Public IPs (44.x.x.x) are used to avoid NetGroupLocal filtering
+	// Public IPs (44.x.x.x) are used to avoid domain.NetGroupLocal filtering
 	// that drops private ranges (10.x, 192.168.x, etc.).
 	learnedCount := len(svc.peers)
 	svc.mu.RUnlock()

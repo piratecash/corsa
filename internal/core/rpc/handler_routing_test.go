@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/routing"
 	"corsa/internal/core/rpc"
 )
@@ -12,19 +13,19 @@ import (
 // mockRoutingProvider implements rpc.RoutingProvider for tests.
 type mockRoutingProvider struct {
 	snapshot       routing.Snapshot
-	peerTransports map[string][2]string // identity → [address, network]
+	peerTransports map[domain.PeerIdentity][2]string // identity → [address, network]
 }
 
 func (m *mockRoutingProvider) RoutingSnapshot() routing.Snapshot {
 	return m.snapshot
 }
 
-func (m *mockRoutingProvider) PeerTransport(peerIdentity string) (string, string) {
+func (m *mockRoutingProvider) PeerTransport(peerIdentity domain.PeerIdentity) (domain.PeerAddress, domain.NetGroup) {
 	if m.peerTransports == nil {
 		return "", ""
 	}
 	t := m.peerTransports[peerIdentity]
-	return t[0], t[1]
+	return domain.PeerAddress(t[0]), domain.NetGroup(t[1])
 }
 
 // --- Tests ---
@@ -53,7 +54,7 @@ func TestRoutingCommandsUnavailableWhenProviderNil(t *testing.T) {
 func TestRoutingCommandsVisibleWhenProviderSet(t *testing.T) {
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes:  make(map[string][]routing.RouteEntry),
+			Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
 			TakenAt: time.Now(),
 		},
 	}
@@ -87,7 +88,7 @@ func TestFetchRouteTable(t *testing.T) {
 	now := time.Now()
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				"peer-A": {
 					{
 						Identity:  "peer-A",
@@ -150,7 +151,7 @@ func TestFetchRouteTableNextHopObject(t *testing.T) {
 	now := time.Now()
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				"peer-A": {
 					{
 						Identity:  "peer-A",
@@ -167,7 +168,7 @@ func TestFetchRouteTableNextHopObject(t *testing.T) {
 			TotalEntries:  1,
 			ActiveEntries: 1,
 		},
-		peerTransports: map[string][2]string{
+		peerTransports: map[domain.PeerIdentity][2]string{
 			"peer-A": {"65.108.204.190:64646", "ipv4"},
 		},
 	}
@@ -210,7 +211,7 @@ func TestFetchRouteTableNextHopDisconnected(t *testing.T) {
 	now := time.Now()
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				"peer-A": {
 					{
 						Identity:  "peer-A",
@@ -269,7 +270,7 @@ func TestFetchRouteSummary(t *testing.T) {
 	now := time.Now()
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				"peer-A": {
 					{
 						Identity:  "peer-A",
@@ -346,7 +347,7 @@ func TestFetchRouteLookup(t *testing.T) {
 	now := time.Now()
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				"aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44": {
 					{
 						Identity:  "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
@@ -404,7 +405,7 @@ func TestFetchRouteLookup(t *testing.T) {
 func TestFetchRouteLookupRequiresIdentity(t *testing.T) {
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes:  make(map[string][]routing.RouteEntry),
+			Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
 			TakenAt: time.Now(),
 		},
 	}
@@ -423,7 +424,7 @@ func TestFetchRouteLookupRequiresIdentity(t *testing.T) {
 func TestFetchRouteLookupRejectsMalformedIdentity(t *testing.T) {
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes:  make(map[string][]routing.RouteEntry),
+			Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
 			TakenAt: time.Now(),
 		},
 	}
@@ -452,7 +453,7 @@ func TestFetchRouteLookupRejectsMalformedIdentity(t *testing.T) {
 func TestFetchRouteLookupNoRoutes(t *testing.T) {
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes:  map[string][]routing.RouteEntry{},
+			Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
 			TakenAt: time.Now(),
 		},
 	}
@@ -483,7 +484,7 @@ func TestFetchRouteTableUsesSnapshotTime(t *testing.T) {
 	snapTime := time.Now().Add(-10 * time.Second)
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				"peer-A": {
 					{
 						Identity:  "peer-A",
@@ -538,7 +539,7 @@ func TestFetchRouteSummaryUsesSnapshotTime(t *testing.T) {
 	snapTime := time.Now().Add(-10 * time.Second)
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				"peer-A": {
 					{
 						Identity:  "peer-A",
@@ -581,10 +582,10 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 	// Snapshot taken 10s ago with a route expiring 50s after snapshot time.
 	// TTL should be ~50s (from snapshot), not ~40s (from wall clock).
 	snapTime := time.Now().Add(-10 * time.Second)
-	targetID := "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"
+	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				targetID: {
 					{
 						Identity:  targetID,
@@ -606,7 +607,7 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetch_route_lookup",
-		Args: map[string]interface{}{"identity": targetID},
+		Args: map[string]interface{}{"identity": string(targetID)},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -631,10 +632,10 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 
 func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 	now := time.Now()
-	targetID := "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"
+	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				targetID: {
 					{
 						Identity:  targetID,
@@ -665,7 +666,7 @@ func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetch_route_lookup",
-		Args: map[string]interface{}{"identity": targetID},
+		Args: map[string]interface{}{"identity": string(targetID)},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -690,10 +691,10 @@ func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 
 func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 	now := time.Now()
-	targetID := "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"
+	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := &mockRoutingProvider{
 		snapshot: routing.Snapshot{
-			Routes: map[string][]routing.RouteEntry{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 				targetID: {
 					{
 						Identity:  targetID,
@@ -733,7 +734,7 @@ func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetch_route_lookup",
-		Args: map[string]interface{}{"identity": targetID},
+		Args: map[string]interface{}{"identity": string(targetID)},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)

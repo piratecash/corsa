@@ -9,6 +9,7 @@ import (
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 )
@@ -185,14 +186,14 @@ func TestRelayDedupeFromTwoNeighbors(t *testing.T) {
 	}
 
 	// First relay from neighbor A — should succeed.
-	status1 := svc.handleRelayMessage("10.0.0.1:9000", nil, frame)
+	status1 := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:9000"), nil, frame)
 	if status1 != "delivered" {
 		t.Fatalf("first relay should deliver, got %q", status1)
 	}
 
 	// Same message_id from neighbor B — should be deduped (empty status).
 	frame.PreviousHop = "10.0.0.2:9000"
-	status2 := svc.handleRelayMessage("10.0.0.2:9000", nil, frame)
+	status2 := svc.handleRelayMessage(domain.PeerAddress("10.0.0.2:9000"), nil, frame)
 	if status2 != "" {
 		t.Fatalf("duplicate relay should be dropped, got %q", status2)
 	}
@@ -412,7 +413,7 @@ func TestRelayFloodDoesNotCauseUnboundedGrowth(t *testing.T) {
 
 	svc := newTestService(t, config.NodeTypeFull)
 
-	floodPeer := "10.0.0.1:9000"
+	floodPeer := domain.PeerAddress("10.0.0.1:9000")
 
 	// Pre-fill the store to the per-peer limit (instant, no pipeline).
 	for i := 0; i < maxRelayStatesPerPeer; i++ {
@@ -437,7 +438,7 @@ func TestRelayFloodDoesNotCauseUnboundedGrowth(t *testing.T) {
 			CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 			HopCount:    2,
 			MaxHops:     10,
-			PreviousHop: floodPeer,
+			PreviousHop: string(floodPeer),
 		}
 		svc.handleRelayMessage(floodPeer, nil, frame)
 	}
@@ -467,7 +468,7 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 
 	// Saturate peer1's quota (instant, no pipeline overhead).
-	floodPeer := "10.0.0.1:9000"
+	floodPeer := domain.PeerAddress("10.0.0.1:9000")
 	for i := 0; i < maxRelayStatesPerPeer; i++ {
 		svc.relayStates.tryReserve(fmt.Sprintf("flood-peer1-%d", i), floodPeer)
 	}
@@ -497,7 +498,7 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 		PreviousHop: "10.0.0.2:9000",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.2:9000", nil, frame)
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.2:9000"), nil, frame)
 	if status != "delivered" {
 		t.Fatalf("peer2 relay should succeed despite peer1 flood, got %q", status)
 	}

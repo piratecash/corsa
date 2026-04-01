@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
@@ -20,17 +21,19 @@ import (
 const announceWriteDeadline = 5 * time.Second
 
 // inboundPeerIdentity returns the peer identity (Ed25519 fingerprint)
-// for an inbound connection, derived from the hello frame. For routing
-// purposes this is the same as connPeerHello.address — in the CORSA
-// protocol, the hello Address field is the peer's identity fingerprint.
-func (s *Service) inboundPeerIdentity(conn net.Conn) string {
+// for an inbound connection, derived from the hello frame's Address field.
+// This is distinct from connPeerHello.address which stores the listen
+// address (transport) for health tracking. NATed peers advertise a
+// non-routable listen address (e.g. 127.0.0.1:64646) that must never
+// be used as a routing identity.
+func (s *Service) inboundPeerIdentity(conn net.Conn) domain.PeerIdentity {
 	s.mu.RLock()
 	info := s.connPeerInfo[conn]
 	s.mu.RUnlock()
 	if info == nil {
 		return ""
 	}
-	return info.address
+	return info.identity
 }
 
 // routingTableTTLLoop runs periodic TTL cleanup on the routing table.
@@ -53,12 +56,12 @@ func (s *Service) routingTableTTLLoop(ctx context.Context) {
 type tableForwardResult struct {
 	// Address is the transport address the frame was sent to. Empty if no
 	// table route could be used.
-	Address string
+	Address domain.PeerAddress
 
 	// RouteOrigin is the Origin field from the RouteEntry that was selected.
 	// Stored in relayForwardState so that hop_ack confirmation at this
 	// intermediate node can match the exact (Identity, Origin, NextHop) triple.
-	RouteOrigin string
+	RouteOrigin domain.PeerIdentity
 }
 
 // tryForwardViaRoutingTable consults the routing table for a next-hop to
@@ -69,7 +72,7 @@ type tableForwardResult struct {
 //
 // excludeIdentity is the identity of the peer that sent the relay to us —
 // we must not send back to them (split horizon on relay path).
-func (s *Service) tryForwardViaRoutingTable(recipient string, frame protocol.Frame, excludeIdentity string) tableForwardResult {
+func (s *Service) tryForwardViaRoutingTable(recipient domain.PeerIdentity, frame protocol.Frame, excludeIdentity domain.PeerIdentity) tableForwardResult {
 	routes := s.routingTable.Lookup(recipient)
 	if len(routes) == 0 {
 		return tableForwardResult{}
@@ -88,10 +91,10 @@ func (s *Service) tryForwardViaRoutingTable(recipient string, frame protocol.Fra
 		if s.sendFrameToAddress(address, frame) {
 			log.Debug().
 				Str("id", frame.ID).
-				Str("recipient", recipient).
-				Str("next_hop", route.NextHop).
-				Str("address", address).
-				Str("origin", route.Origin).
+				Str("recipient", string(recipient)).
+				Str("next_hop", string(route.NextHop)).
+				Str("address", string(address)).
+				Str("origin", string(route.Origin)).
 				Int("hops", route.Hops).
 				Msg("relay_forward_via_routing_table")
 			return tableForwardResult{Address: address, RouteOrigin: route.Origin}
@@ -105,7 +108,7 @@ func (s *Service) tryForwardViaRoutingTable(recipient string, frame protocol.Fra
 // announce_routes frame and sends it to the peer. Supports both outbound
 // sessions (by session address) and inbound connections (by "inbound:"
 // prefixed address from inboundConnKey).
-func (s *Service) SendAnnounceRoutes(peerAddress string, routes []routing.AnnounceEntry) bool {
+func (s *Service) SendAnnounceRoutes(peerAddress domain.PeerAddress, routes []routing.AnnounceEntry) bool {
 	if len(routes) == 0 {
 		return true
 	}
@@ -113,8 +116,8 @@ func (s *Service) SendAnnounceRoutes(peerAddress string, routes []routing.Announ
 	wireRoutes := make([]protocol.AnnounceRouteFrame, len(routes))
 	for i, r := range routes {
 		wireRoutes[i] = protocol.AnnounceRouteFrame{
-			Identity: r.Identity,
-			Origin:   r.Origin,
+			Identity: string(r.Identity),
+			Origin:   string(r.Origin),
 			Hops:     r.Hops,
 			SeqNo:    r.SeqNo,
 		}
@@ -126,8 +129,8 @@ func (s *Service) SendAnnounceRoutes(peerAddress string, routes []routing.Announ
 	}
 
 	// Inbound connections use synchronous write; outbound use enqueue.
-	if strings.HasPrefix(peerAddress, "inbound:") {
-		return s.sendAnnounceRoutesToInbound(peerAddress, frame)
+	if strings.HasPrefix(string(peerAddress), "inbound:") {
+		return s.sendAnnounceRoutesToInbound(string(peerAddress), frame)
 	}
 	return s.enqueuePeerFrame(peerAddress, frame)
 }
@@ -137,7 +140,7 @@ func (s *Service) SendAnnounceRoutes(peerAddress string, routes []routing.Announ
 // false if the connection is gone or the write fails, so the announce
 // loop can log the failure.
 func (s *Service) sendAnnounceRoutesToInbound(key string, frame protocol.Frame) bool {
-	return s.writeFrameToInbound(key, frame)
+	return s.writeFrameToInbound(domain.PeerAddress(key), frame)
 }
 
 // writeFrameToInbound writes a marshaled frame to an inbound connection
@@ -147,8 +150,8 @@ func (s *Service) sendAnnounceRoutesToInbound(key string, frame protocol.Frame) 
 //
 // This is the inbound equivalent of enqueuePeerFrame for outbound sessions.
 // Used by both announce_routes and relay_message paths.
-func (s *Service) writeFrameToInbound(key string, frame protocol.Frame) bool {
-	remoteAddr := strings.TrimPrefix(key, "inbound:")
+func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol.Frame) bool {
+	remoteAddr := strings.TrimPrefix(string(address), "inbound:")
 
 	s.mu.RLock()
 	var target net.Conn
@@ -196,8 +199,8 @@ func (s *Service) writeFrameToInbound(key string, frame protocol.Frame) bool {
 // both outbound sessions (plain address) and inbound connections ("inbound:"
 // prefixed key). This is the unified send dispatch for all table-directed
 // relay and forwarding paths.
-func (s *Service) sendFrameToAddress(address string, frame protocol.Frame) bool {
-	if strings.HasPrefix(address, "inbound:") {
+func (s *Service) sendFrameToAddress(address domain.PeerAddress, frame protocol.Frame) bool {
+	if strings.HasPrefix(string(address), "inbound:") {
 		return s.writeFrameToInbound(address, frame)
 	}
 	return s.enqueuePeerFrame(address, frame)
@@ -215,7 +218,7 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	seen := make(map[string]struct{})
+	seen := make(map[domain.PeerIdentity]struct{})
 	var targets []routing.AnnounceTarget
 
 	// Outbound sessions — one announce per identity, even if multiple
@@ -227,10 +230,10 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 		if _, dup := seen[session.peerIdentity]; dup {
 			continue
 		}
-		if sessionHasBothCaps(session.capabilities, capMeshRoutingV1, capMeshRelayV1) {
+		if sessionHasBothCaps(session.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			seen[session.peerIdentity] = struct{}{}
 			targets = append(targets, routing.AnnounceTarget{
-				Address:  address,
+				Address:  domain.PeerAddress(address),
 				Identity: session.peerIdentity,
 			})
 		}
@@ -240,17 +243,17 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	// outbound session above (dedup by identity).
 	for conn := range s.inboundTracked {
 		info := s.connPeerInfo[conn]
-		if info == nil || info.address == "" {
+		if info == nil || info.identity == "" {
 			continue
 		}
-		if _, dup := seen[info.address]; dup {
+		if _, dup := seen[info.identity]; dup {
 			continue
 		}
-		if sessionHasBothCaps(info.capabilities, capMeshRoutingV1, capMeshRelayV1) {
-			seen[info.address] = struct{}{}
+		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
+			seen[info.identity] = struct{}{}
 			targets = append(targets, routing.AnnounceTarget{
 				Address:  inboundConnKey(conn),
-				Identity: info.address,
+				Identity: info.identity,
 			})
 		}
 	}
@@ -261,8 +264,8 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 // inboundConnKey returns a unique key for an inbound connection that can be
 // used as an AnnounceTarget address. Prefixed with "inbound:" to distinguish
 // from outbound session addresses.
-func inboundConnKey(conn net.Conn) string {
-	return "inbound:" + conn.RemoteAddr().String()
+func inboundConnKey(conn net.Conn) domain.PeerAddress {
+	return domain.PeerAddress("inbound:" + conn.RemoteAddr().String())
 }
 
 // sendFullTableSyncToInbound sends the current routing table to a newly
@@ -270,7 +273,7 @@ func inboundConnKey(conn net.Conn) string {
 // outbound full-table sync (Phase 1.2: always full sync on connect).
 // Without this, inbound-only peers would wait until the next periodic
 // or triggered announce cycle before learning the current table.
-func (s *Service) sendFullTableSyncToInbound(conn net.Conn, peerIdentity string) {
+func (s *Service) sendFullTableSyncToInbound(conn net.Conn, peerIdentity domain.PeerIdentity) {
 	if peerIdentity == "" {
 		return
 	}
@@ -283,8 +286,8 @@ func (s *Service) sendFullTableSyncToInbound(conn net.Conn, peerIdentity string)
 	sendAddr := inboundConnKey(conn)
 	if !s.SendAnnounceRoutes(sendAddr, routes) {
 		log.Warn().
-			Str("peer", peerIdentity).
-			Str("address", sendAddr).
+			Str("peer", string(peerIdentity)).
+			Str("address", string(sendAddr)).
 			Int("routes", len(routes)).
 			Msg("routing_inbound_full_sync_failed")
 	}
@@ -296,13 +299,13 @@ func (s *Service) sendFullTableSyncToInbound(conn net.Conn, peerIdentity string)
 //
 // Withdrawals (hops=16) are applied directly via Table.WithdrawRoute.
 // Normal routes are inserted via Table.UpdateRoute with source=announcement.
-func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Frame) {
+func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame protocol.Frame) {
 	if senderIdentity == "" {
 		log.Warn().Msg("announce_routes_no_sender_identity")
 		return
 	}
-	if !identity.IsValidAddress(senderIdentity) {
-		log.Warn().Str("sender", senderIdentity).Msg("announce_routes_malformed_sender")
+	if !identity.IsValidAddress(string(senderIdentity)) {
+		log.Warn().Str("sender", string(senderIdentity)).Msg("announce_routes_malformed_sender")
 		return
 	}
 
@@ -323,7 +326,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 			log.Warn().
 				Str("identity", wireRoute.Identity).
 				Str("origin", wireRoute.Origin).
-				Str("from", senderIdentity).
+				Str("from", string(senderIdentity)).
 				Msg("announce_rejected_malformed_address")
 			continue
 		}
@@ -343,7 +346,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 			log.Warn().
 				Str("identity", wireRoute.Identity).
 				Str("origin", wireRoute.Origin).
-				Str("from", senderIdentity).
+				Str("from", string(senderIdentity)).
 				Msg("announce_rejected_forged_own_origin")
 			continue
 		}
@@ -354,19 +357,19 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 			// stop advertising — they must not forward hops=16 on the wire.
 			// Accepting a withdrawal from a non-origin sender would let an
 			// intermediate neighbor unilaterally kill a route it does not own.
-			if wireRoute.Origin != senderIdentity {
+			if wireRoute.Origin != string(senderIdentity) {
 				rejected++
 				log.Warn().
 					Str("identity", wireRoute.Identity).
 					Str("origin", wireRoute.Origin).
-					Str("from", senderIdentity).
+					Str("from", string(senderIdentity)).
 					Msg("announce_rejected_transit_withdrawal")
 				continue
 			}
 
 			if s.routingTable.WithdrawRoute(
-				wireRoute.Identity,
-				wireRoute.Origin,
+				domain.PeerIdentity(wireRoute.Identity),
+				domain.PeerIdentity(wireRoute.Origin),
 				senderIdentity,
 				wireRoute.SeqNo,
 			) {
@@ -375,7 +378,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 					Str("identity", wireRoute.Identity).
 					Str("origin", wireRoute.Origin).
 					Uint64("seq", wireRoute.SeqNo).
-					Str("from", senderIdentity).
+					Str("from", string(senderIdentity)).
 					Msg("route_withdrawal_applied")
 			} else {
 				rejected++
@@ -393,8 +396,8 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 		// own defaultTTL and clock, ensuring consistent TTL policy between
 		// local (AddDirectPeer) and learned (announcement) routes.
 		entry := routing.RouteEntry{
-			Identity: wireRoute.Identity,
-			Origin:   wireRoute.Origin,
+			Identity: domain.PeerIdentity(wireRoute.Identity),
+			Origin:   domain.PeerIdentity(wireRoute.Origin),
 			NextHop:  senderIdentity,
 			Hops:     receivedHops,
 			SeqNo:    wireRoute.SeqNo,
@@ -407,7 +410,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 				Err(err).
 				Str("identity", wireRoute.Identity).
 				Str("origin", wireRoute.Origin).
-				Str("from", senderIdentity).
+				Str("from", string(senderIdentity)).
 				Msg("route_update_rejected_invalid")
 			rejected++
 			continue
@@ -420,7 +423,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 	}
 
 	log.Debug().
-		Str("from", senderIdentity).
+		Str("from", string(senderIdentity)).
 		Int("total", len(frame.AnnounceRoutes)).
 		Int("accepted", accepted).
 		Int("rejected", rejected).
@@ -446,7 +449,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 // the same identity increment the session count but do not touch the
 // routing table — AddDirectPeer is idempotent at the model level, but
 // the session-count gate here is the primary defense against churn.
-func (s *Service) onPeerSessionEstablished(peerIdentity string, hasRelayCap bool) {
+func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, hasRelayCap bool) {
 	if peerIdentity == "" {
 		return
 	}
@@ -462,26 +465,26 @@ func (s *Service) onPeerSessionEstablished(peerIdentity string, hasRelayCap bool
 
 	if !hasRelayCap {
 		log.Debug().
-			Str("peer", peerIdentity).
+			Str("peer", string(peerIdentity)).
 			Msg("routing_peer_no_relay_cap_skip_direct_route")
 		return
 	}
 
 	if !firstRelay {
 		log.Debug().
-			Str("peer", peerIdentity).
+			Str("peer", string(peerIdentity)).
 			Msg("routing_additional_session_no_table_update")
 		return
 	}
 
 	result, err := s.routingTable.AddDirectPeer(peerIdentity)
 	if err != nil {
-		log.Error().Err(err).Str("peer", peerIdentity).Msg("routing_add_direct_peer_failed")
+		log.Error().Err(err).Str("peer", string(peerIdentity)).Msg("routing_add_direct_peer_failed")
 		return
 	}
 
 	log.Info().
-		Str("peer", peerIdentity).
+		Str("peer", string(peerIdentity)).
 		Uint64("seq", result.Entry.SeqNo).
 		Bool("penalized", result.Penalized).
 		Msg("routing_direct_peer_added")
@@ -491,7 +494,7 @@ func (s *Service) onPeerSessionEstablished(peerIdentity string, hasRelayCap bool
 	// giving the link time to stabilize.
 	if result.Penalized {
 		log.Warn().
-			Str("peer", peerIdentity).
+			Str("peer", string(peerIdentity)).
 			Msg("routing_peer_in_holddown_skipping_announce")
 		return
 	}
@@ -510,7 +513,7 @@ func (s *Service) onPeerSessionEstablished(peerIdentity string, hasRelayCap bool
 // On disconnect, own-origin direct routes are withdrawn on the wire
 // (returned as wire-ready AnnounceEntry items) and transit routes
 // learned through this peer are silently invalidated locally.
-func (s *Service) onPeerSessionClosed(peerIdentity string, hasRelayCap bool) {
+func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelayCap bool) {
 	if peerIdentity == "" {
 		return
 	}
@@ -551,7 +554,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity string, hasRelayCap bool) {
 			invalidated := s.routingTable.InvalidateTransitRoutes(peerIdentity)
 			if invalidated > 0 {
 				log.Info().
-					Str("peer", peerIdentity).
+					Str("peer", string(peerIdentity)).
 					Int("transit_invalidated", invalidated).
 					Msg("routing_transit_routes_invalidated_on_disconnect")
 				// Trigger an immediate announce cycle so neighbors learn the
@@ -561,7 +564,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity string, hasRelayCap bool) {
 			}
 		} else {
 			log.Debug().
-				Str("peer", peerIdentity).
+				Str("peer", string(peerIdentity)).
 				Int("remaining", count-1).
 				Msg("routing_session_closed_others_remain")
 		}
@@ -570,7 +573,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity string, hasRelayCap bool) {
 
 	result, err := s.routingTable.RemoveDirectPeer(peerIdentity)
 	if err != nil {
-		log.Error().Err(err).Str("peer", peerIdentity).Msg("routing_remove_direct_peer_failed")
+		log.Error().Err(err).Str("peer", string(peerIdentity)).Msg("routing_remove_direct_peer_failed")
 		return
 	}
 
@@ -583,7 +586,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity string, hasRelayCap bool) {
 	}
 
 	log.Info().
-		Str("peer", peerIdentity).
+		Str("peer", string(peerIdentity)).
 		Int("withdrawals", len(result.Withdrawals)).
 		Int("transit_invalidated", result.TransitInvalidated).
 		Msg("routing_direct_peer_removed")
@@ -609,7 +612,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity string, hasRelayCap bool) {
 // falls back to resolveRouteNextHopAddress with the original hop role.
 //
 // Handles both outbound sessions and inbound connections ("inbound:" prefix).
-func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity string, validatedAddress string, routeOrigin string, nextHopHops int) {
+func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, routeOrigin domain.PeerIdentity, nextHopHops int) {
 	address := validatedAddress
 	if address == "" {
 		// Retry path or caller without cached address — re-resolve with
@@ -621,7 +624,7 @@ func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity 
 		// Session gone — gossip fallback.
 		log.Debug().
 			Str("recipient", msg.Recipient).
-			Str("next_hop", nextHopIdentity).
+			Str("next_hop", string(nextHopIdentity)).
 			Msg("table_relay_no_session_fallback_gossip")
 		targets := s.routingTargetsForMessage(msg)
 		s.tryRelayToCapableFullNodes(msg, targets)
@@ -632,8 +635,8 @@ func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity 
 		// Send failed — gossip fallback.
 		log.Debug().
 			Str("recipient", msg.Recipient).
-			Str("next_hop", nextHopIdentity).
-			Str("address", address).
+			Str("next_hop", string(nextHopIdentity)).
+			Str("address", string(address)).
 			Msg("table_relay_send_failed_fallback_gossip")
 		targets := s.routingTargetsForMessage(msg)
 		s.tryRelayToCapableFullNodes(msg, targets)
@@ -642,8 +645,8 @@ func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity 
 
 	log.Info().
 		Str("recipient", msg.Recipient).
-		Str("next_hop", nextHopIdentity).
-		Str("address", address).
+		Str("next_hop", string(nextHopIdentity)).
+		Str("address", string(address)).
 		Msg("table_relay_sent")
 }
 
@@ -656,8 +659,8 @@ func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity 
 //
 // routeOrigin is the Origin field from the routing decision. Stored in
 // relayForwardState for triple-scoped hop_ack confirmation.
-func (s *Service) sendRelayToAddress(address string, msg protocol.Envelope, routeOrigin string) bool {
-	if strings.HasPrefix(address, "inbound:") {
+func (s *Service) sendRelayToAddress(address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity) bool {
+	if strings.HasPrefix(string(address), "inbound:") {
 		frame := protocol.Frame{
 			Type:        "relay_message",
 			ID:          string(msg.ID),
@@ -681,7 +684,7 @@ func (s *Service) sendRelayToAddress(address string, msg protocol.Envelope, rout
 			PreviousHop:      "",
 			ReceiptForwardTo: "",
 			ForwardedTo:      address,
-			Recipient:        msg.Recipient,
+			Recipient:        domain.PeerIdentity(msg.Recipient),
 			RouteOrigin:      routeOrigin,
 			HopCount:         1,
 			RemainingTTL:     relayStateTTLSeconds,
@@ -690,7 +693,7 @@ func (s *Service) sendRelayToAddress(address string, msg protocol.Envelope, rout
 			log.Warn().
 				Str("id", string(msg.ID)).
 				Str("recipient", msg.Recipient).
-				Str("address", address).
+				Str("address", string(address)).
 				Msg("relay_state_store_failed_inbound")
 			return false
 		}
@@ -713,7 +716,7 @@ func (s *Service) sendRelayToAddress(address string, msg protocol.Envelope, rout
 // Checks both outbound sessions and inbound connections. For inbound-only
 // peers, the returned address is an "inbound:" prefixed key that must be
 // handled by sendFrameToAddress (not enqueuePeerFrame directly).
-func (s *Service) resolveRoutableAddress(peerIdentity string) string {
+func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domain.PeerAddress {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -722,18 +725,18 @@ func (s *Service) resolveRoutableAddress(peerIdentity string) string {
 		if session.peerIdentity != peerIdentity {
 			continue
 		}
-		if sessionHasBothCaps(session.capabilities, capMeshRoutingV1, capMeshRelayV1) {
-			return address
+		if sessionHasBothCaps(session.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
+			return domain.PeerAddress(address)
 		}
 	}
 
 	// Inbound connections — synchronous write path.
 	for conn := range s.inboundTracked {
 		info := s.connPeerInfo[conn]
-		if info == nil || info.address != peerIdentity {
+		if info == nil || info.identity != peerIdentity {
 			continue
 		}
-		if sessionHasBothCaps(info.capabilities, capMeshRoutingV1, capMeshRelayV1) {
+		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			return inboundConnKey(conn)
 		}
 	}
@@ -749,7 +752,7 @@ func (s *Service) resolveRoutableAddress(peerIdentity string) string {
 //
 // Checks both outbound sessions and inbound connections. For inbound-only
 // peers, the returned address is an "inbound:" prefixed key.
-func (s *Service) resolveRelayAddress(peerIdentity string) string {
+func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.PeerAddress {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -758,18 +761,18 @@ func (s *Service) resolveRelayAddress(peerIdentity string) string {
 		if session.peerIdentity != peerIdentity {
 			continue
 		}
-		if sessionHasCap(session.capabilities, capMeshRelayV1) {
-			return address
+		if sessionHasCap(session.capabilities, domain.CapMeshRelayV1) {
+			return domain.PeerAddress(address)
 		}
 	}
 
 	// Inbound connections.
 	for conn := range s.inboundTracked {
 		info := s.connPeerInfo[conn]
-		if info == nil || info.address != peerIdentity {
+		if info == nil || info.identity != peerIdentity {
 			continue
 		}
-		if sessionHasCap(info.capabilities, capMeshRelayV1) {
+		if sessionHasCap(info.capabilities, domain.CapMeshRelayV1) {
 			return inboundConnKey(conn)
 		}
 	}
@@ -784,7 +787,7 @@ func (s *Service) resolveRelayAddress(peerIdentity string) string {
 //
 // This is the unified resolver used by TableRouter and tryForwardViaRoutingTable.
 // Returns outbound session address or "inbound:" prefixed key.
-func (s *Service) resolveRouteNextHopAddress(peerIdentity string, hops int) string {
+func (s *Service) resolveRouteNextHopAddress(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
 	if hops <= 1 {
 		return s.resolveRelayAddress(peerIdentity)
 	}
@@ -792,7 +795,7 @@ func (s *Service) resolveRouteNextHopAddress(peerIdentity string, hops int) stri
 }
 
 // sessionHasCap returns true if the capability slice contains the given capability.
-func sessionHasCap(caps []string, cap string) bool {
+func sessionHasCap(caps []domain.Capability, cap domain.Capability) bool {
 	for _, c := range caps {
 		if c == cap {
 			return true
@@ -802,7 +805,7 @@ func sessionHasCap(caps []string, cap string) bool {
 }
 
 // sessionHasBothCaps returns true if the capability slice contains both a and b.
-func sessionHasBothCaps(caps []string, a, b string) bool {
+func sessionHasBothCaps(caps []domain.Capability, a, b domain.Capability) bool {
 	var hasA, hasB bool
 	for _, c := range caps {
 		if c == a {
@@ -833,7 +836,7 @@ func sessionHasBothCaps(caps []string, a, b string) bool {
 //
 // If ackSenderAddress is empty, no route can be confirmed (message was
 // stored locally without forwarding).
-func (s *Service) confirmRouteViaHopAck(recipientIdentity string, ackSenderAddress string, routeOrigin string) {
+func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, ackSenderAddress domain.PeerAddress, routeOrigin domain.PeerIdentity) {
 	if ackSenderAddress == "" {
 		return
 	}
@@ -843,7 +846,7 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity string, ackSenderAddre
 	nextHopIdentity := s.resolvePeerIdentity(ackSenderAddress)
 	if nextHopIdentity == "" {
 		// Session may have closed. Try using ackSenderAddress as identity directly.
-		nextHopIdentity = ackSenderAddress
+		nextHopIdentity = domain.PeerIdentity(ackSenderAddress)
 	}
 
 	routes := s.routingTable.Lookup(recipientIdentity)
@@ -877,26 +880,26 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity string, ackSenderAddre
 		ok, err := s.routingTable.UpdateRoute(confirmed)
 		if err != nil {
 			log.Warn().Err(err).
-				Str("identity", recipientIdentity).
-				Str("next_hop", nextHopIdentity).
-				Str("origin", route.Origin).
+				Str("identity", string(recipientIdentity)).
+				Str("next_hop", string(nextHopIdentity)).
+				Str("origin", string(route.Origin)).
 				Msg("route_hop_ack_confirm_failed")
 			return
 		}
 		if ok {
 			log.Debug().
-				Str("identity", recipientIdentity).
-				Str("origin", route.Origin).
-				Str("next_hop", route.NextHop).
+				Str("identity", string(recipientIdentity)).
+				Str("origin", string(route.Origin)).
+				Str("next_hop", string(route.NextHop)).
 				Msg("route_confirmed_via_hop_ack")
 		}
 		return
 	}
 
 	log.Debug().
-		Str("identity", recipientIdentity).
-		Str("ack_sender", ackSenderAddress).
-		Str("route_origin", routeOrigin).
+		Str("identity", string(recipientIdentity)).
+		Str("ack_sender", string(ackSenderAddress)).
+		Str("route_origin", string(routeOrigin)).
 		Msg("route_hop_ack_no_matching_route")
 }
 
@@ -907,7 +910,7 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity string, ackSenderAddre
 // For inbound connections, the address is the connection's remote address
 // (conn.RemoteAddr().String()). The returned value is the peer's Ed25519
 // identity fingerprint.
-func (s *Service) resolvePeerIdentity(address string) string {
+func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIdentity {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -918,8 +921,8 @@ func (s *Service) resolvePeerIdentity(address string) string {
 
 	// Inbound connection: match on the connection's transport address.
 	for conn, info := range s.connPeerInfo {
-		if info != nil && conn.RemoteAddr().String() == address {
-			return info.address
+		if info != nil && conn.RemoteAddr().String() == string(address) {
+			return info.identity
 		}
 	}
 
