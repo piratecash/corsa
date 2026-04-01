@@ -4347,6 +4347,14 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 			if incoming.Type == "error" {
 				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
 			}
+			if incoming.Type == "ping" {
+				_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
+				pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
+				s.writeJSONFrame(session.conn, pongFrame)
+				_ = session.conn.SetWriteDeadline(time.Time{})
+				s.markPeerWrite(session.address, pongFrame)
+				continue
+			}
 			if incoming.Type == "push_message" {
 				s.handlePeerSessionFrame(session.address, incoming)
 				continue
@@ -4456,6 +4464,24 @@ func (s *Service) syncSenderKeys(senderAddress domain.PeerAddress, syncSession *
 }
 
 func (s *Service) handlePeerSessionFrame(address domain.PeerAddress, frame protocol.Frame) {
+	// Respond to inbound pings on outbound sessions so the remote
+	// heartbeat monitor receives a timely pong. Without this the
+	// remote side closes the connection after pongStallTimeout.
+	// Pings are not "useful" application traffic, only keep-alive.
+	if frame.Type == "ping" {
+		s.mu.RLock()
+		session := s.sessions[address]
+		s.mu.RUnlock()
+		if session != nil {
+			_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
+			pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
+			s.writeJSONFrame(session.conn, pongFrame)
+			_ = session.conn.SetWriteDeadline(time.Time{})
+			s.markPeerWrite(address, pongFrame)
+		}
+		return
+	}
+
 	s.markPeerUsefulReceive(address)
 	switch frame.Type {
 	case "push_message":
