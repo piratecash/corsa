@@ -62,6 +62,7 @@ type PeerHealth struct {
 	Direction           string
 	ClientVersion       string
 	ClientBuild         int
+	ProtocolVersion     int
 	State               string
 	Connected           bool
 	PendingCount        int
@@ -447,6 +448,7 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			Direction:           item.Direction,
 			ClientVersion:       item.ClientVersion,
 			ClientBuild:         item.ClientBuild,
+			ProtocolVersion:     item.ProtocolVersion,
 			State:               item.State,
 			Connected:           item.Connected,
 			PendingCount:        item.PendingCount,

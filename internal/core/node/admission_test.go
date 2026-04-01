@@ -141,7 +141,7 @@ func TestINV4_ClientNodeTransitDrop(t *testing.T) {
 		PreviousHop: "10.0.0.1:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.1:64646", frame)
+	status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 	if status != "" {
 		t.Fatalf("INV-4 violated: client node returned status %q for transit relay", status)
 	}
@@ -187,7 +187,7 @@ func TestINV6_ReceiptUsesTransportAddress(t *testing.T) {
 		PreviousHop: transportAddr,
 	}
 
-	status := svc.handleRelayMessage(transportAddr, frame)
+	status := svc.handleRelayMessage(transportAddr, nil, frame)
 	if status != "delivered" {
 		t.Fatalf("expected delivered, got %q", status)
 	}

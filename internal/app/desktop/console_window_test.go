@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"corsa/internal/core/rpc"
 )
@@ -44,6 +45,30 @@ func testTable() *rpc.CommandTable {
 		rpc.CommandInfo{Name: "fetch_traffic_history", Description: "Traffic history", Category: "metrics"},
 		func(req rpc.CommandRequest) rpc.CommandResponse {
 			data, _ := json.Marshal(map[string]string{"status": "ok"})
+			return rpc.CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(
+		rpc.CommandInfo{Name: "fetch_route_table", Description: "Full routing table snapshot", Category: "routing"},
+		func(req rpc.CommandRequest) rpc.CommandResponse {
+			data, _ := json.Marshal(map[string]string{"status": "ok"})
+			return rpc.CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(
+		rpc.CommandInfo{Name: "fetch_route_summary", Description: "Routing table summary", Category: "routing"},
+		func(req rpc.CommandRequest) rpc.CommandResponse {
+			data, _ := json.Marshal(map[string]string{"status": "ok"})
+			return rpc.CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(
+		rpc.CommandInfo{Name: "fetch_route_lookup", Description: "Lookup routes for identity", Category: "routing", Usage: "<identity>"},
+		func(req rpc.CommandRequest) rpc.CommandResponse {
+			data, _ := json.Marshal(req.Args)
 			return rpc.CommandResponse{Data: data}
 		},
 	)
@@ -229,6 +254,20 @@ func TestConsoleHelpTextGroupsByCategory(t *testing.T) {
 	if !strings.Contains(text, "fetch_traffic_history") {
 		t.Error("expected fetch_traffic_history in console help")
 	}
+
+	// Routing category must be present with its commands.
+	if !strings.Contains(text, "== Routing ==") {
+		t.Error("expected '== Routing ==' section in console help")
+	}
+	if !strings.Contains(text, "fetch_route_table") {
+		t.Error("expected fetch_route_table in console help")
+	}
+	if !strings.Contains(text, "fetch_route_summary") {
+		t.Error("expected fetch_route_summary in console help")
+	}
+	if !strings.Contains(text, "fetch_route_lookup") {
+		t.Error("expected fetch_route_lookup in console help")
+	}
 }
 
 func TestCommandInfoToSuggestionsUsage(t *testing.T) {
@@ -277,4 +316,31 @@ func TestCommandInfoToSuggestionsPrefill(t *testing.T) {
 		}
 	}
 	t.Error("fetch_chatlog suggestion not found")
+}
+
+func TestFormatUptime(t *testing.T) {
+	tests := []struct {
+		duration time.Duration
+		want     string
+	}{
+		{0, "0s"},
+		{5 * time.Second, "5s"},
+		{59 * time.Second, "59s"},
+		{60 * time.Second, "1m0s"},
+		{90 * time.Second, "1m30s"},
+		{3599 * time.Second, "59m59s"},
+		{3600 * time.Second, "1h0m"},
+		{3661 * time.Second, "1h1m"},
+		{86400 * time.Second, "1d0h"},
+		{90061 * time.Second, "1d1h"},  // 25h1m1s → 1d1h
+		{172800 * time.Second, "2d0h"}, // 48h
+		{-5 * time.Second, "0s"},       // negative clamped
+	}
+
+	for _, tc := range tests {
+		got := formatUptime(tc.duration)
+		if got != tc.want {
+			t.Errorf("formatUptime(%v) = %q, want %q", tc.duration, got, tc.want)
+		}
+	}
 }

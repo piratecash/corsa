@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
 
@@ -300,6 +301,10 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 		log.Warn().Msg("announce_routes_no_sender_identity")
 		return
 	}
+	if !identity.IsValidAddress(senderIdentity) {
+		log.Warn().Str("sender", senderIdentity).Msg("announce_routes_malformed_sender")
+		return
+	}
 
 	accepted := 0
 	rejected := 0
@@ -307,6 +312,19 @@ func (s *Service) handleAnnounceRoutes(senderIdentity string, frame protocol.Fra
 	for _, wireRoute := range frame.AnnounceRoutes {
 		if wireRoute.Identity == "" || wireRoute.Origin == "" {
 			rejected++
+			continue
+		}
+
+		// Reject malformed identity fingerprints early — before any table
+		// operations. Valid addresses are exactly 40 lowercase hex chars
+		// (SHA-256 of Ed25519 public key, truncated to 20 bytes).
+		if !identity.IsValidAddress(wireRoute.Identity) || !identity.IsValidAddress(wireRoute.Origin) {
+			rejected++
+			log.Warn().
+				Str("identity", wireRoute.Identity).
+				Str("origin", wireRoute.Origin).
+				Str("from", senderIdentity).
+				Msg("announce_rejected_malformed_address")
 			continue
 		}
 

@@ -1,15 +1,16 @@
 package rpc_test
 
 import (
-	"corsa/internal/core/config"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/rpc"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"corsa/internal/core/config"
+	"corsa/internal/core/protocol"
+	"corsa/internal/core/rpc"
 )
 
 // newAuthServer creates a Server with auth config and system commands registered.
@@ -706,7 +707,7 @@ func TestFrameEndpointChatlogDispatch(t *testing.T) {
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, chatlog, nil, nil)
+	rpc.RegisterAllCommands(table, node, chatlog, nil, nil, nil)
 	server, err := rpc.NewServer(cfg, table, node)
 	if err != nil {
 		t.Fatalf("create server: %v", err)
@@ -740,7 +741,7 @@ func TestFrameEndpointUnavailableChatlog(t *testing.T) {
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil, nil) // chatlog=nil
+	rpc.RegisterAllCommands(table, node, nil, nil, nil, nil) // chatlog=nil
 	server, err := rpc.NewServer(cfg, table, node)
 	if err != nil {
 		t.Fatalf("create server: %v", err)

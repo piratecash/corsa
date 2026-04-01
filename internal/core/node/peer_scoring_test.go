@@ -644,7 +644,7 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	svc.rememberConnPeerAddr(spoofConn, protocol.Frame{Address: peerAddr, Listen: peerAddr})
 
 	// Only the first connection completes auth and is promoted.
-	svc.trackInboundConnect(authConn, peerAddr)
+	svc.trackInboundConnect(authConn, peerAddr, "test-identity")
 
 	// The authenticated connection should return the address.
 	if got := svc.trackedInboundPeerAddress(authConn); got != peerAddr {

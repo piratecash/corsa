@@ -607,9 +607,12 @@ func TestFetchPeerHealthShowsEstablishedSession(t *testing.T) {
 	})
 	defer stopB()
 
+	// Wait for an established (Connected==true) session, not just any
+	// peer_health entry. A peer_health entry can appear in "reconnecting"
+	// before the outbound session is fully up, making the assertion phase
+	// timing-sensitive if we only check Count > 0.
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
-		return reply.Type == "peer_health" && reply.Count > 0
+		return hasConnectedPeer(nodeA)
 	})
 
 	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
@@ -707,9 +710,11 @@ func TestPeerHealthStatesAreProtocolValid(t *testing.T) {
 	})
 	defer stopB()
 
+	// Wait for a connected peer, not just any peer_health entry.
+	// Pre-connection snapshots may contain early states (e.g., "reconnecting")
+	// that do not reflect the steady-state session this test validates.
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
-		return reply.Type == "peer_health" && reply.Count > 0
+		return hasConnectedPeer(nodeA)
 	})
 
 	reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
@@ -1669,8 +1674,16 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 	})
 	defer stopB()
 
-	waitForCondition(t, 5*time.Second, func() bool {
-		return len(nodeA.Peers()) >= 1 && len(nodeB.Peers()) >= 1
+	// gossipNotice → routingTargets() iterates s.sessions (outbound only)
+	// and checks health.Connected. A peer reachable only via inbound
+	// connection (Direction=="inbound") is invisible to routingTargets().
+	// nodeA publishes the notice and must gossip it to nodeB, so nodeA
+	// needs an outbound session to nodeB. nodeA starts first and its
+	// initial bootstrap dial to nodeB fails (nodeB not yet listening);
+	// the retry fires after a 2-second backoff. We must wait for that
+	// retry to establish the outbound session before publishing.
+	waitForCondition(t, 10*time.Second, func() bool {
+		return hasOutboundSession(nodeA) && hasConnectedPeer(nodeB)
 	})
 
 	ciphertext, err := gazeta.EncryptForRecipient(
@@ -2619,6 +2632,43 @@ func waitForConditionMsg(t *testing.T, timeout time.Duration, msg string, fn fun
 	}
 
 	t.Fatalf("%s (waited %s)", msg, timeout)
+}
+
+// hasConnectedPeer returns true when at least one entry in the node's
+// peer_health list has Connected==true. routingTargets() uses
+// health.Connected to filter gossip/relay targets, so tests that depend
+// on notice propagation or syncPeer reachability must wait for this
+// predicate, not just Peers()>=1 (which only checks the bootstrap list).
+func hasConnectedPeer(node *Service) bool {
+	reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if reply.Type != "peer_health" {
+		return false
+	}
+	for _, ph := range reply.PeerHealth {
+		if ph.Connected {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOutboundSession returns true when at least one peer_health entry
+// has Connected==true and Direction=="outbound". routingTargetsFiltered
+// first iterates s.sessions (outbound sessions only) and checks
+// health.Connected; a peer reachable only via inbound connection does
+// NOT appear in routingTargets(). Tests that depend on gossip or notice
+// propagation must wait for an outbound session, not just hasConnectedPeer.
+func hasOutboundSession(node *Service) bool {
+	reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+	if reply.Type != "peer_health" {
+		return false
+	}
+	for _, ph := range reply.PeerHealth {
+		if ph.Connected && ph.Direction == "outbound" {
+			return true
+		}
+	}
+	return false
 }
 
 func freeAddress(t *testing.T) string {
@@ -6211,8 +6261,8 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	defer func() { _ = conn2b.Close() }()
 
 	// Two inbound connections to the same peer.
-	svc.trackInboundConnect(conn1a, peer)
-	svc.trackInboundConnect(conn2a, peer)
+	svc.trackInboundConnect(conn1a, peer, "test-peer-identity")
+	svc.trackInboundConnect(conn2a, peer, "test-peer-identity")
 
 	// Peer should be connected.
 	svc.mu.RLock()
@@ -6908,9 +6958,13 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	})
 	defer stopB()
 
-	// Wait for nodeB to connect to nodeA.
+	// Wait until nodeB has a fully connected peer (Connected==true).
+	// syncPeer opens a fresh TCP connection to the previous hop and runs
+	// the full handshake + fetch_contacts exchange; the peer session must
+	// be healthy first so nodeA's listener is proven reachable and the
+	// initial contact sync has completed without learning sender keys.
 	waitForCondition(t, 5*time.Second, func() bool {
-		return len(nodeB.Peers()) >= 1
+		return hasConnectedPeer(nodeB)
 	})
 
 	// Now register sender keys on nodeA — after the initial peer sync,
@@ -6959,8 +7013,18 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 		PreviousHop: normalizeAddress(addressA),
 	}
 
-	status := nodeB.handleRelayMessage(normalizeAddress(addressA), frame)
+	t.Logf("nodeB.Address=%s, frame.Recipient=%s, match=%v",
+		nodeB.Address(), frame.Recipient, nodeB.Address() == frame.Recipient)
+	t.Logf("senderAddress=%s, senderID.Address=%s", normalizeAddress(addressA), senderID.Address)
+
+	status := nodeB.handleRelayMessage(normalizeAddress(addressA), nil, frame)
 	if status != "delivered" {
+		// Dump nodeB state for diagnostics.
+		nodeB.mu.RLock()
+		hasPub := nodeB.pubKeys[senderID.Address] != ""
+		hasBox := nodeB.boxKeys[senderID.Address] != ""
+		nodeB.mu.RUnlock()
+		t.Logf("post-relay nodeB state: hasPubKey=%v, hasBoxKey=%v", hasPub, hasBox)
 		t.Fatalf("expected \"delivered\" after key sync from previous hop, got %q — "+
 			"deliverRelayedMessage should sync unknown sender keys before rejecting", status)
 	}

@@ -54,7 +54,7 @@ func Run() error {
 	// Build command table — single source of truth for all RPC commands.
 	// Desktop UI calls this directly (no HTTP), HTTP server wraps it for external clients.
 	cmdTable := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector)
+	rpc.RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector, nodeService)
 	rpc.RegisterDesktopOverrides(cmdTable, client, nodeService)
 
 	// Start HTTP RPC server for external access (corsa-cli, third-party tools)

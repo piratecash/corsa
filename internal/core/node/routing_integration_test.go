@@ -11,19 +11,33 @@ import (
 	"corsa/internal/core/routing"
 )
 
+// Valid 40-char hex identity constants for tests.
+const (
+	idNodeA   = "aa00000000000000000000000000000000000001"
+	idNodeB   = "aa00000000000000000000000000000000000002"
+	idPeerA   = "bb00000000000000000000000000000000000001"
+	idPeerB   = "bb00000000000000000000000000000000000002"
+	idPeerC   = "bb00000000000000000000000000000000000003"
+	idPeerD   = "bb00000000000000000000000000000000000004"
+	idOriginC = "cc00000000000000000000000000000000000003"
+	idOriginD = "cc00000000000000000000000000000000000004"
+	idTargetX = "dd00000000000000000000000000000000000001"
+	idTargetY = "dd00000000000000000000000000000000000002"
+)
+
 func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "peer-B", Hops: 1, SeqNo: 1},
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("expected route to be added")
 	}
@@ -31,7 +45,7 @@ func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
 	if routes[0].Hops != 2 {
 		t.Fatalf("expected hops=2 (1+1), got %d", routes[0].Hops)
 	}
-	if routes[0].NextHop != "peer-B" {
+	if routes[0].NextHop != idPeerB {
 		t.Fatalf("expected NextHop=peer-B, got %s", routes[0].NextHop)
 	}
 	if routes[0].Source != routing.RouteSourceAnnouncement {
@@ -40,18 +54,18 @@ func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// First, add a route.
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "peer-B", Hops: 1, SeqNo: 1},
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
@@ -60,41 +74,41 @@ func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
 	withdrawal := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "peer-B", Hops: 16, SeqNo: 2},
+			{Identity: idTargetX, Origin: idPeerB, Hops: 16, SeqNo: 2},
 		},
 	}
-	svc.handleAnnounceRoutes("peer-B", withdrawal)
+	svc.handleAnnounceRoutes(idPeerB, withdrawal)
 
-	routes = svc.routingTable.Lookup("target-X")
+	routes = svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 0 {
 		t.Fatalf("expected 0 routes after withdrawal, got %d", len(routes))
 	}
 }
 
 func TestHandleAnnounceRoutesSkipsSelf(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Route about ourselves should be skipped.
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "node-A", Origin: "peer-B", Hops: 1, SeqNo: 1},
+			{Identity: idNodeA, Origin: idPeerB, Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
-	routes := svc.routingTable.Lookup("node-A")
+	routes := svc.routingTable.Lookup(idNodeA)
 	if len(routes) != 0 {
 		t.Fatal("route about self should not be added")
 	}
 }
 
 func TestMultiSessionAwareness_FirstConnect(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", true)
+	svc.onPeerSessionEstablished(idPeerB, true)
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 direct route after connect, got %d", len(routes))
 	}
@@ -104,14 +118,14 @@ func TestMultiSessionAwareness_FirstConnect(t *testing.T) {
 }
 
 func TestMultiSessionAwareness_SecondSessionNoChurn(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", true)
-	routes1 := svc.routingTable.Lookup("peer-B")
+	svc.onPeerSessionEstablished(idPeerB, true)
+	routes1 := svc.routingTable.Lookup(idPeerB)
 	seq1 := routes1[0].SeqNo
 
-	svc.onPeerSessionEstablished("peer-B", true)
-	routes2 := svc.routingTable.Lookup("peer-B")
+	svc.onPeerSessionEstablished(idPeerB, true)
+	routes2 := svc.routingTable.Lookup(idPeerB)
 
 	if len(routes2) != 1 {
 		t.Fatal("expected exactly 1 route after second session")
@@ -123,14 +137,14 @@ func TestMultiSessionAwareness_SecondSessionNoChurn(t *testing.T) {
 }
 
 func TestMultiSessionAwareness_CloseOneSessionRouteRemains(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", true)
-	svc.onPeerSessionEstablished("peer-B", true) // 2 sessions
+	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, true) // 2 sessions
 
-	svc.onPeerSessionClosed("peer-B", true) // close 1, 1 remains
+	svc.onPeerSessionClosed(idPeerB, true) // close 1, 1 remains
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
 		t.Fatalf("expected route to remain with 1 session active, got %d routes", len(routes))
 	}
@@ -140,12 +154,12 @@ func TestMultiSessionAwareness_CloseOneSessionRouteRemains(t *testing.T) {
 }
 
 func TestMultiSessionAwareness_CloseLastSessionWithdrawsRoute(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", true)
-	svc.onPeerSessionClosed("peer-B", true) // last session
+	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionClosed(idPeerB, true) // last session
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
 		t.Fatal("expected no active routes after last session closed")
 	}
@@ -158,7 +172,7 @@ func TestMultiSessionAwareness_CloseLastSessionWithdrawsRoute(t *testing.T) {
 // routing table. A non-relay peer cannot accept relay_message frames, so
 // advertising it as a direct destination would create a non-deliverable path.
 func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
 	pipeLocal, pipeRemote := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -172,14 +186,14 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 	// Register inbound peer info with NO capabilities (legacy peer).
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: nil,
 	}
 	svc.mu.Unlock()
 
-	svc.trackInboundConnect(conn, "peer-B")
+	svc.trackInboundConnect(conn, idPeerB, idPeerB)
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
 		t.Fatalf("expected no direct route for non-relay peer, got %d routes", len(routes))
 	}
@@ -188,7 +202,7 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 // TestTrackInboundConnectCreatesDirectRouteWithRelayCap verifies that an
 // inbound peer WITH mesh_relay_v1 gets a direct route as expected.
 func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
 	pipeLocal, pipeRemote := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -202,14 +216,14 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 	// Register inbound peer info WITH mesh_relay_v1.
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 	svc.mu.Unlock()
 
-	svc.trackInboundConnect(conn, "peer-B")
+	svc.trackInboundConnect(conn, idPeerB, idPeerB)
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 direct route for relay-capable peer, got %d", len(routes))
 	}
@@ -223,18 +237,18 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 // direct route in the routing table. The session counter is still
 // incremented so that onPeerSessionClosed can safely decrement.
 func TestOnPeerSessionEstablishedSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", false)
+	svc.onPeerSessionEstablished(idPeerB, false)
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
 		t.Fatalf("expected no direct route when hasRelayCap=false, got %d routes", len(routes))
 	}
 
 	// Verify session counter was incremented despite no route.
 	svc.mu.Lock()
-	count := svc.identitySessions["peer-B"]
+	count := svc.identitySessions[idPeerB]
 	svc.mu.Unlock()
 	if count != 1 {
 		t.Fatalf("expected identitySessions[peer-B]=1, got %d", count)
@@ -248,20 +262,20 @@ func TestOnPeerSessionEstablishedSuppressesDirectRouteWithoutRelayCap(t *testing
 // session WITH mesh_relay_v1 creates the direct route on its 0→1 relay
 // transition.
 func TestMixedCap_LegacyFirstThenRelayCreatesRoute(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// First session: legacy, no relay cap → no direct route.
-	svc.onPeerSessionEstablished("peer-B", false)
+	svc.onPeerSessionEstablished(idPeerB, false)
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
 		t.Fatal("expected no route after legacy-only session")
 	}
 
 	// Second session: relay-capable → direct route should appear.
-	svc.onPeerSessionEstablished("peer-B", true)
+	svc.onPeerSessionEstablished(idPeerB, true)
 
-	routes = svc.routingTable.Lookup("peer-B")
+	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 direct route after relay session, got %d", len(routes))
 	}
@@ -275,29 +289,29 @@ func TestMixedCap_LegacyFirstThenRelayCreatesRoute(t *testing.T) {
 // direct route is withdrawn. The legacy session cannot accept relay_message,
 // so the route must not survive.
 func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Two sessions: one relay-capable, one legacy.
-	svc.onPeerSessionEstablished("peer-B", true)  // creates direct route
-	svc.onPeerSessionEstablished("peer-B", false)  // legacy, no route change
+	svc.onPeerSessionEstablished(idPeerB, true)  // creates direct route
+	svc.onPeerSessionEstablished(idPeerB, false) // legacy, no route change
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
 		t.Fatal("expected direct route while relay session is active")
 	}
 
 	// Close the relay-capable session — route should be withdrawn.
-	svc.onPeerSessionClosed("peer-B", true)
+	svc.onPeerSessionClosed(idPeerB, true)
 
-	routes = svc.routingTable.Lookup("peer-B")
+	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
 		t.Fatalf("expected route withdrawn after last relay session closed, got %d routes", len(routes))
 	}
 
 	// The legacy session is still tracked.
 	svc.mu.Lock()
-	totalCount := svc.identitySessions["peer-B"]
-	relayCount := svc.identityRelaySessions["peer-B"]
+	totalCount := svc.identitySessions[idPeerB]
+	relayCount := svc.identityRelaySessions[idPeerB]
 	svc.mu.Unlock()
 	if totalCount != 1 {
 		t.Fatalf("expected identitySessions=1, got %d", totalCount)
@@ -311,14 +325,14 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 // two relay-capable sessions exist and one closes, the direct route remains
 // because one relay session is still active.
 func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", true)
-	svc.onPeerSessionEstablished("peer-B", true)
+	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, true)
 
-	svc.onPeerSessionClosed("peer-B", true) // one relay remains
+	svc.onPeerSessionClosed(idPeerB, true) // one relay remains
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
 		t.Fatalf("expected route to remain with 1 relay session, got %d routes", len(routes))
 	}
@@ -331,15 +345,15 @@ func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
 // a non-relay session does not withdraw the direct route created by an
 // active relay session.
 func TestMixedCap_LegacyCloseDoesNotWithdrawRelayRoute(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", true)   // creates direct route
-	svc.onPeerSessionEstablished("peer-B", false)   // legacy session
+	svc.onPeerSessionEstablished(idPeerB, true)  // creates direct route
+	svc.onPeerSessionEstablished(idPeerB, false) // legacy session
 
 	// Close the legacy session.
-	svc.onPeerSessionClosed("peer-B", false)
+	svc.onPeerSessionClosed(idPeerB, false)
 
-	routes := svc.routingTable.Lookup("peer-B")
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
 		t.Fatal("direct route should survive when relay session is still active")
 	}
@@ -353,22 +367,22 @@ func TestMixedCap_LegacyCloseDoesNotWithdrawRelayRoute(t *testing.T) {
 // receive-path gate now blocks announcements from such peers, this is
 // defense-in-depth for routes that may have been accepted before the gate.
 func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Simulate a routing-only peer connecting (no relay cap).
-	svc.onPeerSessionEstablished("peer-B", false)
+	svc.onPeerSessionEstablished(idPeerB, false)
 
 	// Manually insert a transit route through peer-B (simulates a route
 	// that was accepted before the relay gate existed).
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X", Origin: "target-X", NextHop: "peer-B",
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerB,
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	}); err != nil {
 		t.Fatalf("UpdateRoute failed: %v", err)
 	}
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 || routes[0].IsWithdrawn() {
 		t.Fatal("transit route should exist before disconnect")
 	}
@@ -378,12 +392,12 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 	_ = svc.announceLoop.PendingTrigger()
 
 	// Close the routing-only peer's session.
-	svc.onPeerSessionClosed("peer-B", false)
+	svc.onPeerSessionClosed(idPeerB, false)
 
 	// Transit route should be invalidated. Lookup() filters withdrawn entries,
 	// so use Snapshot() to inspect the raw table state.
 	snap := svc.routingTable.Snapshot()
-	snapRoutes := snap.Routes["target-X"]
+	snapRoutes := snap.Routes[idTargetX]
 	if len(snapRoutes) != 1 {
 		t.Fatalf("expected 1 route in snapshot, got %d", len(snapRoutes))
 	}
@@ -392,7 +406,7 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 	}
 
 	// Lookup must return empty — withdrawn routes are not usable.
-	if len(svc.routingTable.Lookup("target-X")) != 0 {
+	if len(svc.routingTable.Lookup(idTargetX)) != 0 {
 		t.Fatal("Lookup should return empty for withdrawn routes")
 	}
 
@@ -406,13 +420,13 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 // of multiple sessions for a routing-only peer does NOT invalidate transit
 // routes — only the last session closure triggers invalidation.
 func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
-	svc.onPeerSessionEstablished("peer-B", false)
-	svc.onPeerSessionEstablished("peer-B", false) // 2 sessions
+	svc.onPeerSessionEstablished(idPeerB, false)
+	svc.onPeerSessionEstablished(idPeerB, false) // 2 sessions
 
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X", Origin: "target-X", NextHop: "peer-B",
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerB,
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	}); err != nil {
@@ -423,9 +437,9 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	_ = svc.announceLoop.PendingTrigger()
 
 	// Close one session — transit route should remain, no trigger.
-	svc.onPeerSessionClosed("peer-B", false)
+	svc.onPeerSessionClosed(idPeerB, false)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 || routes[0].IsWithdrawn() {
 		t.Fatal("transit route should remain while a session is still active")
 	}
@@ -434,11 +448,11 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	}
 
 	// Close last session — now transit route should be invalidated with trigger.
-	svc.onPeerSessionClosed("peer-B", false)
+	svc.onPeerSessionClosed(idPeerB, false)
 
 	// Lookup() filters withdrawn entries — use Snapshot() for raw state.
 	snap := svc.routingTable.Snapshot()
-	snapRoutes := snap.Routes["target-X"]
+	snapRoutes := snap.Routes[idTargetX]
 	if len(snapRoutes) != 1 {
 		t.Fatalf("expected 1 route in snapshot after last close, got %d", len(snapRoutes))
 	}
@@ -447,7 +461,7 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	}
 
 	// Lookup must return empty — withdrawn routes are not usable.
-	if len(svc.routingTable.Lookup("target-X")) != 0 {
+	if len(svc.routingTable.Lookup(idTargetX)) != 0 {
 		t.Fatal("Lookup should return empty for withdrawn routes")
 	}
 
@@ -457,13 +471,13 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Add an announcement route via peer-B.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "target-X",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -474,9 +488,9 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 	}
 
 	// Confirm with the actual NextHop identity that carried the message.
-	svc.confirmRouteViaHopAck("target-X", "peer-B", "")
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("expected route to exist")
 	}
@@ -486,13 +500,13 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Route via peer-B.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "target-X",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -504,9 +518,9 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 
 	// hop_ack came for a message forwarded to peer-C (different route).
 	// Should NOT promote the peer-B route.
-	svc.confirmRouteViaHopAck("target-X", "peer-C", "")
+	svc.confirmRouteViaHopAck(idTargetX, idPeerC, "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("expected route to exist")
 	}
@@ -516,13 +530,13 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Route already at hop_ack — should not change.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "target-X",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceHopAck,
@@ -532,23 +546,23 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck("target-X", "peer-B", "")
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceHopAck {
 		t.Fatal("source should remain hop_ack")
 	}
 }
 
 func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Direct route should not be touched by hop_ack confirmation.
-	svc.onPeerSessionEstablished("target-X", true)
+	svc.onPeerSessionEstablished(idTargetX, true)
 
-	svc.confirmRouteViaHopAck("target-X", "target-X", "")
+	svc.confirmRouteViaHopAck(idTargetX, idTargetX, "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("expected route to exist")
 	}
@@ -558,20 +572,20 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Simulate an outbound session: transport address "tcp://1.2.3.4:9000"
 	// maps to peer identity "peer-B".
 	svc.sessions["tcp://1.2.3.4:9000"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
 	}
 
 	// Route via peer-B.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "target-X",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -583,9 +597,9 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 
 	// hop_ack arrives from transport address — should resolve to peer-B
 	// and confirm the route.
-	svc.confirmRouteViaHopAck("target-X", "tcp://1.2.3.4:9000", "")
+	svc.confirmRouteViaHopAck(idTargetX, "tcp://1.2.3.4:9000", "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("expected route to exist")
 	}
@@ -595,13 +609,13 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Add a route.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "target-X",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -612,9 +626,9 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 	}
 
 	// Empty forwardedTo (stored locally, not forwarded) — should not confirm.
-	svc.confirmRouteViaHopAck("target-X", "", "")
+	svc.confirmRouteViaHopAck(idTargetX, "", "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceAnnouncement {
 		t.Fatal("empty forwardedTo should not confirm any route")
 	}
@@ -645,16 +659,16 @@ func newTestServiceWithRouting(localIdentity string) *Service {
 // (hops=1) and both caps for transit next-hops (hops>1).
 
 func TestResolveRouteNextHop_DirectPeerRelayOnlySuffices(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has only mesh_relay_v1, no mesh_routing_v1.
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 
 	// Direct destination (hops=1): should resolve, relay cap is enough.
-	addr := svc.resolveRouteNextHopAddress("peer-B", 1)
+	addr := svc.resolveRouteNextHopAddress(idPeerB, 1)
 	if addr == "" {
 		t.Fatal("direct destination with relay-only cap should resolve")
 	}
@@ -664,45 +678,45 @@ func TestResolveRouteNextHop_DirectPeerRelayOnlySuffices(t *testing.T) {
 }
 
 func TestResolveRouteNextHop_TransitNeedsBothCaps(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has only mesh_relay_v1.
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 
 	// Transit next-hop (hops=3): should NOT resolve, needs routing cap too.
-	addr := svc.resolveRouteNextHopAddress("peer-B", 3)
+	addr := svc.resolveRouteNextHopAddress(idPeerB, 3)
 	if addr != "" {
 		t.Fatalf("transit next-hop with relay-only cap should not resolve, got %s", addr)
 	}
 
 	// Now give peer-B both caps.
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 	}
 
-	addr = svc.resolveRouteNextHopAddress("peer-B", 3)
+	addr = svc.resolveRouteNextHopAddress(idPeerB, 3)
 	if addr == "" {
 		t.Fatal("transit next-hop with both caps should resolve")
 	}
 }
 
 func TestResolveRouteNextHop_NoCapsRejectsAll(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has no relevant capabilities.
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{},
 	}
 
-	if addr := svc.resolveRouteNextHopAddress("peer-B", 1); addr != "" {
+	if addr := svc.resolveRouteNextHopAddress(idPeerB, 1); addr != "" {
 		t.Fatalf("peer without relay cap should not resolve for direct, got %s", addr)
 	}
-	if addr := svc.resolveRouteNextHopAddress("peer-B", 3); addr != "" {
+	if addr := svc.resolveRouteNextHopAddress(idPeerB, 3); addr != "" {
 		t.Fatalf("peer without caps should not resolve for transit, got %s", addr)
 	}
 }
@@ -712,26 +726,26 @@ func TestResolveRouteNextHop_NoCapsRejectsAll(t *testing.T) {
 // (learned via announcement) are silently invalidated locally.
 
 func TestRouteSessionBinding_DirectRouteWithdrawnOnWire(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Connect peer-B → creates direct route.
-	svc.onPeerSessionEstablished("peer-B", true)
-	routes := svc.routingTable.Lookup("peer-B")
+	svc.onPeerSessionEstablished(idPeerB, true)
+	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
 		t.Fatal("expected 1 direct route after connect")
 	}
 
 	// Disconnect peer-B → should produce wire withdrawal.
-	svc.onPeerSessionClosed("peer-B", true)
+	svc.onPeerSessionClosed(idPeerB, true)
 
-	routes = svc.routingTable.Lookup("peer-B")
+	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
 		t.Fatalf("expected 0 active routes after disconnect, got %d", len(routes))
 	}
 
 	// Verify the withdrawal exists in the table as a withdrawn entry.
 	snap := svc.routingTable.Snapshot()
-	peerRoutes := snap.Routes["peer-B"]
+	peerRoutes := snap.Routes[idPeerB]
 	if len(peerRoutes) == 0 {
 		t.Fatal("expected withdrawn entry to exist in snapshot")
 	}
@@ -741,16 +755,16 @@ func TestRouteSessionBinding_DirectRouteWithdrawnOnWire(t *testing.T) {
 }
 
 func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Connect peer-B so we have a session.
-	svc.onPeerSessionEstablished("peer-B", true)
+	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Announce transit route: target-X reachable via peer-B, originated by peer-C.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "peer-C",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idPeerC,
+		NextHop:   idPeerB,
 		Hops:      3,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -761,10 +775,10 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 	}
 
 	// Disconnect peer-B → transit route should be locally invalidated.
-	svc.onPeerSessionClosed("peer-B", true)
+	svc.onPeerSessionClosed(idPeerB, true)
 
 	// Transit route should no longer be active.
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 0 {
 		t.Fatalf("expected 0 active transit routes after peer disconnect, got %d", len(routes))
 	}
@@ -773,26 +787,26 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 	// bump — only the originator (peer-C) can do that. Verify via snapshot
 	// that the entry's Origin is still peer-C (not node-A).
 	snap := svc.routingTable.Snapshot()
-	transitRoutes := snap.Routes["target-X"]
+	transitRoutes := snap.Routes[idTargetX]
 	if len(transitRoutes) == 0 {
 		t.Fatal("expected invalidated transit entry in snapshot")
 	}
-	if transitRoutes[0].Origin != "peer-C" {
+	if transitRoutes[0].Origin != idPeerC {
 		t.Fatalf("transit route origin should remain peer-C, got %s", transitRoutes[0].Origin)
 	}
 }
 
 func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Connect peer-B.
-	svc.onPeerSessionEstablished("peer-B", true)
+	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Add a transit route through peer-B.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-Y",
-		Origin:    "target-Y",
-		NextHop:   "peer-B",
+		Identity:  idTargetY,
+		Origin:    idTargetY,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -803,14 +817,14 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 	}
 
 	// Disconnect peer-B.
-	svc.onPeerSessionClosed("peer-B", true)
+	svc.onPeerSessionClosed(idPeerB, true)
 
 	// Both the direct route to peer-B and the transit route via peer-B
 	// should be gone from active lookups.
-	if routes := svc.routingTable.Lookup("peer-B"); len(routes) != 0 {
+	if routes := svc.routingTable.Lookup(idPeerB); len(routes) != 0 {
 		t.Fatal("direct route should be withdrawn")
 	}
-	if routes := svc.routingTable.Lookup("target-Y"); len(routes) != 0 {
+	if routes := svc.routingTable.Lookup(idTargetY); len(routes) != 0 {
 		t.Fatal("transit route should be invalidated")
 	}
 }
@@ -820,13 +834,13 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 // entry that matches. Different origin or different identity must not be affected.
 
 func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Two routes to target-X via peer-B, but different origins.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "origin-C",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idOriginC,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -837,9 +851,9 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 	}
 
 	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "origin-D",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idOriginD,
+		NextHop:   idPeerB,
 		Hops:      3,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -852,22 +866,22 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 	// hop_ack with specific origin=origin-D — only that triple should
 	// be promoted. origin-C must remain announcement despite sharing
 	// the same NextHop.
-	svc.confirmRouteViaHopAck("target-X", "peer-B", "origin-D")
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB, idOriginD)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
 		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
 
 	var foundC, foundD bool
 	for _, r := range routes {
-		if r.Origin == "origin-C" {
+		if r.Origin == idOriginC {
 			foundC = true
 			if r.Source != routing.RouteSourceAnnouncement {
 				t.Fatalf("origin-C route must remain announcement (not part of confirmed triple), got %s", r.Source)
 			}
 		}
-		if r.Origin == "origin-D" {
+		if r.Origin == idOriginD {
 			foundD = true
 			if r.Source != routing.RouteSourceHopAck {
 				t.Fatalf("origin-D route should be promoted to hop_ack, got %s", r.Source)
@@ -880,13 +894,13 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 }
 
 func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Two routes to target-X via peer-B, different origins.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "origin-C",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idOriginC,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -897,9 +911,9 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 	}
 
 	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "origin-D",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idOriginD,
+		NextHop:   idPeerB,
 		Hops:      3,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -911,22 +925,22 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 
 	// Gossip path (empty origin) promotes the first matching NextHop in
 	// Lookup order — origin-C with hops=2 wins.
-	svc.confirmRouteViaHopAck("target-X", "peer-B", "")
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
 		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
 
 	var foundC, foundD bool
 	for _, r := range routes {
-		if r.Origin == "origin-C" {
+		if r.Origin == idOriginC {
 			foundC = true
 			if r.Source != routing.RouteSourceHopAck {
 				t.Fatalf("gossip fallback: origin-C (first in Lookup order) should be promoted, got %s", r.Source)
 			}
 		}
-		if r.Origin == "origin-D" {
+		if r.Origin == idOriginD {
 			foundD = true
 			if r.Source != routing.RouteSourceAnnouncement {
 				t.Fatalf("origin-D should remain announcement, got %s", r.Source)
@@ -939,13 +953,13 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 }
 
 func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Route to target-X via peer-B.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "origin-C",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idOriginC,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -957,9 +971,9 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 
 	// Route to target-Y via peer-B, same origin.
 	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-Y",
-		Origin:    "origin-C",
-		NextHop:   "peer-B",
+		Identity:  idTargetY,
+		Origin:    idOriginC,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -970,10 +984,10 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack for target-X only.
-	svc.confirmRouteViaHopAck("target-X", "peer-B", "")
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB, "")
 
 	// target-X should be promoted.
-	routesX := svc.routingTable.Lookup("target-X")
+	routesX := svc.routingTable.Lookup(idTargetX)
 	if len(routesX) == 0 {
 		t.Fatal("expected route to target-X")
 	}
@@ -982,7 +996,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	}
 
 	// target-Y should NOT be promoted (different identity).
-	routesY := svc.routingTable.Lookup("target-Y")
+	routesY := svc.routingTable.Lookup(idTargetY)
 	if len(routesY) == 0 {
 		t.Fatal("expected route to target-Y")
 	}
@@ -992,13 +1006,13 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 }
 
 func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Two routes to target-X from same origin, different next-hops.
 	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "origin-C",
-		NextHop:   "peer-B",
+		Identity:  idTargetX,
+		Origin:    idOriginC,
+		NextHop:   idPeerB,
 		Hops:      2,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -1009,9 +1023,9 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 	}
 
 	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "origin-C",
-		NextHop:   "peer-D",
+		Identity:  idTargetX,
+		Origin:    idOriginC,
+		NextHop:   idPeerD,
 		Hops:      3,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -1022,18 +1036,18 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack from peer-D should only promote the peer-D route.
-	svc.confirmRouteViaHopAck("target-X", "peer-D", "")
+	svc.confirmRouteViaHopAck(idTargetX, idPeerD, "")
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
 		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
 
 	for _, r := range routes {
-		if r.NextHop == "peer-B" && r.Source != routing.RouteSourceAnnouncement {
+		if r.NextHop == idPeerB && r.Source != routing.RouteSourceAnnouncement {
 			t.Fatalf("peer-B route should remain announcement, got %s", r.Source)
 		}
-		if r.NextHop == "peer-D" && r.Source != routing.RouteSourceHopAck {
+		if r.NextHop == idPeerD && r.Source != routing.RouteSourceHopAck {
 			t.Fatalf("peer-D route should be promoted to hop_ack, got %s", r.Source)
 		}
 	}
@@ -1043,19 +1057,19 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 // Resolvers must find inbound-only peers and return "inbound:" prefixed keys.
 
 func TestResolveRelayAddress_InboundPeer(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Set up an inbound connection with relay capability.
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 	svc.mu.Unlock()
 
-	addr := svc.resolveRelayAddress("peer-B")
+	addr := svc.resolveRelayAddress(idPeerB)
 	if addr == "" {
 		t.Fatal("inbound peer with relay cap should be resolvable")
 	}
@@ -1065,19 +1079,19 @@ func TestResolveRelayAddress_InboundPeer(t *testing.T) {
 }
 
 func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRelayV1}, // only relay, no routing
 	}
 	svc.mu.Unlock()
 
 	// Should NOT resolve — transit requires both caps.
-	addr := svc.resolveRoutableAddress("peer-B")
+	addr := svc.resolveRoutableAddress(idPeerB)
 	if addr != "" {
 		t.Fatalf("inbound peer with relay-only cap should not resolve for transit, got %s", addr)
 	}
@@ -1085,23 +1099,23 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 	// Now add routing cap.
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 	}
 	svc.mu.Unlock()
 
-	addr = svc.resolveRoutableAddress("peer-B")
+	addr = svc.resolveRoutableAddress(idPeerB)
 	if addr == "" {
 		t.Fatal("inbound peer with both caps should resolve")
 	}
 }
 
 func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Set up both outbound session and inbound connection for same peer.
 	svc.sessions["outbound-addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 
@@ -1109,13 +1123,13 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 	svc.mu.Lock()
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 	svc.mu.Unlock()
 
 	// Should prefer outbound session (has async send queue).
-	addr := svc.resolveRelayAddress("peer-B")
+	addr := svc.resolveRelayAddress(idPeerB)
 	if addr != "outbound-addr-B" {
 		t.Fatalf("expected outbound address, got %s", addr)
 	}
@@ -1124,23 +1138,23 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 // --- resolvePeerIdentity inbound contract test ---
 
 func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address: "peer-B",
+		address: idPeerB,
 	}
 	svc.mu.Unlock()
 
 	// Pass the transport address — should resolve to identity.
 	id := svc.resolvePeerIdentity("10.0.0.5:8080")
-	if id != "peer-B" {
+	if id != idPeerB {
 		t.Fatalf("expected peer-B, got %q", id)
 	}
 
 	// Pass the identity — should NOT match (identity != transport address).
-	id = svc.resolvePeerIdentity("peer-B")
+	id = svc.resolvePeerIdentity(idPeerB)
 	if id != "" {
 		t.Fatalf("identity-as-address should not match inbound conn, got %q", id)
 	}
@@ -1149,12 +1163,12 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 // --- TableRouter RelayNextHopAddress test ---
 
 func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(idNodeA))
 
 	ok, err := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "peer-B",
-		NextHop:  "peer-B",
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -1167,7 +1181,7 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 		svc:   &Service{},
 		table: table,
 		sessionChecker: func(peerIdentity string, hops int) string {
-			if peerIdentity == "peer-B" {
+			if peerIdentity == idPeerB {
 				return "validated-addr-B"
 			}
 			return ""
@@ -1177,8 +1191,8 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 	msg := protocol.Envelope{
 		ID:        "msg-1",
 		Topic:     "dm",
-		Sender:    "node-A",
-		Recipient: "target-X",
+		Sender:    idNodeA,
+		Recipient: idTargetX,
 	}
 
 	decision := tr.Route(msg)
@@ -1196,7 +1210,7 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 // the per-origin SeqNo and withdrawal-only-by-origin invariants.
 
 func TestHandleAnnounceRoutesRejectsForgedOwnOrigin(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// A foreign sender (peer-B) advertises a route with Origin == node-A.
 	// This must be rejected: only node-A may originate routes under its
@@ -1204,19 +1218,19 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOrigin(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "node-A", Hops: 1, SeqNo: 100},
+			{Identity: idTargetX, Origin: idNodeA, Hops: 1, SeqNo: 100},
 		},
 	}
 
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 0 {
 		t.Fatalf("forged own-origin route must be rejected, but %d routes found", len(routes))
 	}
 
 	// Verify the SeqNo counter was NOT poisoned.
-	result, err := svc.routingTable.AddDirectPeer("target-X")
+	result, err := svc.routingTable.AddDirectPeer(idTargetX)
 	if err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
@@ -1226,10 +1240,10 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOrigin(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// First, add a legitimate direct peer route.
-	if _, err := svc.routingTable.AddDirectPeer("target-X"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idTargetX); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
@@ -1237,14 +1251,14 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "node-A", Hops: 16, SeqNo: 999},
+			{Identity: idTargetX, Origin: idNodeA, Hops: 16, SeqNo: 999},
 		},
 	}
 
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
 	// The direct route must still be alive.
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("own-origin route must survive forged withdrawal attempt")
 	}
@@ -1254,18 +1268,18 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Add a route originated by origin-C, learned via peer-B.
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "origin-C", Hops: 2, SeqNo: 1},
+			{Identity: idTargetX, Origin: idOriginC, Hops: 2, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
@@ -1276,13 +1290,13 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 	withdrawal := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "origin-C", Hops: 16, SeqNo: 2},
+			{Identity: idTargetX, Origin: idOriginC, Hops: 16, SeqNo: 2},
 		},
 	}
-	svc.handleAnnounceRoutes("peer-B", withdrawal)
+	svc.handleAnnounceRoutes(idPeerB, withdrawal)
 
 	// Route must survive — only origin-C may withdraw it.
-	routes = svc.routingTable.Lookup("target-X")
+	routes = svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("transit withdrawal must be rejected — route should survive")
 	}
@@ -1292,18 +1306,18 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesAcceptsOriginWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Add a route where origin == sender (origin-C sends its own route).
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "origin-C", Hops: 1, SeqNo: 1},
+			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes("origin-C", frame)
+	svc.handleAnnounceRoutes(idOriginC, frame)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
@@ -1312,12 +1326,12 @@ func TestHandleAnnounceRoutesAcceptsOriginWithdrawal(t *testing.T) {
 	withdrawal := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "origin-C", Hops: 16, SeqNo: 2},
+			{Identity: idTargetX, Origin: idOriginC, Hops: 16, SeqNo: 2},
 		},
 	}
-	svc.handleAnnounceRoutes("origin-C", withdrawal)
+	svc.handleAnnounceRoutes(idOriginC, withdrawal)
 
-	routes = svc.routingTable.Lookup("target-X")
+	routes = svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 0 {
 		t.Fatalf("origin withdrawal should be accepted, but %d routes remain", len(routes))
 	}
@@ -1354,11 +1368,11 @@ func newTestServiceWithRoutingAndHealth(localIdentity string) *Service {
 // peer receives an immediate full-table sync — symmetric with the outbound
 // connect path.
 func TestSendFullTableSyncToInbound(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
 	// Populate the routing table with a route that the inbound peer
 	// should learn about on connect.
-	if _, err := svc.routingTable.AddDirectPeer("peer-C"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
@@ -1394,7 +1408,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 	svc.mu.Unlock()
 
 	// Call the function under test.
-	svc.sendFullTableSyncToInbound(conn, "peer-B")
+	svc.sendFullTableSyncToInbound(conn, idPeerB)
 
 	// Read the frame from the drain goroutine.
 	select {
@@ -1403,7 +1417,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 		if len(line) == 0 {
 			t.Fatal("expected announce_routes frame, got empty data")
 		}
-		if !strings.Contains(line, "peer-C") {
+		if !strings.Contains(line, idPeerC) {
 			t.Fatalf("full-sync frame should contain route for peer-C, got: %s", line)
 		}
 		if !strings.Contains(line, "announce_routes") {
@@ -1418,11 +1432,11 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 // sync to an inbound peer applies split horizon — routes learned from that
 // peer are not sent back to it.
 func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
 	// Add a route that was learned FROM peer-B (the connecting inbound peer).
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X", Origin: "peer-B", NextHop: "peer-B",
+		Identity: idTargetX, Origin: idPeerB, NextHop: idPeerB,
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute failed: %v", err)
@@ -1443,7 +1457,7 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 
 	// Call the function — with only peer-B's own route in the table,
 	// split horizon should filter it out, resulting in no send.
-	svc.sendFullTableSyncToInbound(conn, "peer-B")
+	svc.sendFullTableSyncToInbound(conn, idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1464,7 +1478,7 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 // TestSendFullTableSyncToInboundEmptyTable verifies that no frame is sent
 // when the routing table is empty.
 func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
 	pipeLocal, pipeRemote := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -1479,7 +1493,7 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 	svc.inboundTracked[conn] = struct{}{}
 	svc.mu.Unlock()
 
-	svc.sendFullTableSyncToInbound(conn, "peer-B")
+	svc.sendFullTableSyncToInbound(conn, idPeerB)
 
 	readDone := make(chan int, 1)
 	go func() {
@@ -1502,16 +1516,16 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 // connect path does NOT send announce_routes when the peer lacks
 // mesh_routing_v1 capability.
 func TestOutboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
 	// Populate the routing table so there ARE routes to announce.
-	if _, err := svc.routingTable.AddDirectPeer("peer-C"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
 	// Create a session for peer-B with relay-only capability (no routing).
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 
@@ -1524,7 +1538,7 @@ func TestOutboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	// lacks mesh_routing_v1. We verify by checking that AnnounceTo would
 	// have produced routes (the table is non-empty) but sessionHasCapability
 	// blocks the send path.
-	routes := svc.routingTable.AnnounceTo("peer-B")
+	routes := svc.routingTable.AnnounceTo(idPeerB)
 	if len(routes) == 0 {
 		t.Fatal("routing table should have routes to announce")
 	}
@@ -1533,15 +1547,15 @@ func TestOutboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 // TestOutboundFullSyncSentWithRoutingCap verifies that the outbound connect
 // path DOES send announce_routes when the peer has mesh_routing_v1.
 func TestOutboundFullSyncSentWithRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
-	if _, err := svc.routingTable.AddDirectPeer("peer-C"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
 	// Create a session for peer-B with routing capability.
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 	}
 
@@ -1549,7 +1563,7 @@ func TestOutboundFullSyncSentWithRoutingCap(t *testing.T) {
 		t.Fatal("peer-B should have mesh_routing_v1")
 	}
 
-	routes := svc.routingTable.AnnounceTo("peer-B")
+	routes := svc.routingTable.AnnounceTo(idPeerB)
 	if len(routes) == 0 {
 		t.Fatal("routing table should have routes to announce to routing-capable peer")
 	}
@@ -1558,9 +1572,9 @@ func TestOutboundFullSyncSentWithRoutingCap(t *testing.T) {
 // TestInboundFullSyncSkippedWithoutRoutingCap verifies that inbound full-table
 // sync is NOT sent when the inbound peer lacks mesh_routing_v1.
 func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
-	if _, err := svc.routingTable.AddDirectPeer("peer-C"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
@@ -1576,7 +1590,7 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	// Register inbound peer info WITHOUT mesh_routing_v1 (relay-only).
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 	svc.mu.Unlock()
@@ -1587,7 +1601,7 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	}
 
 	// trackInboundConnect should NOT send anything because the gate blocks it.
-	svc.trackInboundConnect(conn, "peer-B")
+	svc.trackInboundConnect(conn, idPeerB, idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1608,9 +1622,9 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 // TestInboundFullSyncSentWithRoutingCap verifies that inbound full-table sync
 // IS sent when the inbound peer has both mesh_routing_v1 and mesh_relay_v1.
 func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
-	if _, err := svc.routingTable.AddDirectPeer("peer-C"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
@@ -1640,7 +1654,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 	}
 	svc.connSendCh[conn] = sendCh
@@ -1652,7 +1666,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	}
 
 	// trackInboundConnect should call sendFullTableSyncToInbound.
-	svc.trackInboundConnect(conn, "peer-B")
+	svc.trackInboundConnect(conn, idPeerB, idPeerB)
 
 	// Read the frame from the drain goroutine.
 	select {
@@ -1661,7 +1675,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 		if len(line) == 0 {
 			t.Fatal("expected announce_routes frame, got empty data")
 		}
-		if !strings.Contains(line, "peer-C") {
+		if !strings.Contains(line, idPeerC) {
 			t.Fatalf("full-sync frame should contain route for peer-C, got: %s", line)
 		}
 		if !strings.Contains(line, "announce_routes") {
@@ -1679,15 +1693,15 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 // but lacks mesh_relay_v1 (routing-only peer). Such a peer cannot carry relay
 // traffic, so sending routes to it creates non-deliverable paths.
 func TestOutboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
-	if _, err := svc.routingTable.AddDirectPeer("peer-C"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
 	// Create a session for peer-B with routing-only capability (no relay).
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRoutingV1},
 	}
 
@@ -1701,7 +1715,7 @@ func TestOutboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 
 	// AnnounceTo would produce routes, but the full-sync gate requires both
 	// capabilities, so the send path should be skipped.
-	routes := svc.routingTable.AnnounceTo("peer-B")
+	routes := svc.routingTable.AnnounceTo(idPeerB)
 	if len(routes) == 0 {
 		t.Fatal("routing table should have routes to announce")
 	}
@@ -1711,9 +1725,9 @@ func TestOutboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 // full-table sync is NOT sent when the inbound peer has mesh_routing_v1
 // but lacks mesh_relay_v1 (routing-only peer).
 func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-A")
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
 
-	if _, err := svc.routingTable.AddDirectPeer("peer-C"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
@@ -1729,7 +1743,7 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 	// Register inbound peer info with routing cap but WITHOUT relay cap.
 	svc.mu.Lock()
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRoutingV1},
 	}
 	svc.mu.Unlock()
@@ -1741,7 +1755,7 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 		t.Fatal("inbound peer should NOT have mesh_relay_v1")
 	}
 
-	svc.trackInboundConnect(conn, "peer-B")
+	svc.trackInboundConnect(conn, idPeerB, idPeerB)
 
 	readDone := make(chan int, 1)
 	go func() {
@@ -1762,16 +1776,16 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 // routingCapablePeers() excludes peers with mesh_routing_v1 but without
 // mesh_relay_v1. The announce loop must not target routing-only peers.
 func TestRoutingCapablePeersExcludesRoutingOnlyPeer(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B: routing-only (no relay) — should be excluded.
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRoutingV1},
 	}
 	// peer-C: both capabilities — should be included.
 	svc.sessions["addr-C"] = &peerSession{
-		peerIdentity: "peer-C",
+		peerIdentity: idPeerC,
 		capabilities: []string{capMeshRoutingV1, capMeshRelayV1},
 	}
 
@@ -1779,7 +1793,7 @@ func TestRoutingCapablePeersExcludesRoutingOnlyPeer(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("expected 1 target (peer-C only), got %d", len(targets))
 	}
-	if targets[0].Identity != "peer-C" {
+	if targets[0].Identity != idPeerC {
 		t.Fatalf("expected peer-C, got %s", targets[0].Identity)
 	}
 }
@@ -1787,7 +1801,7 @@ func TestRoutingCapablePeersExcludesRoutingOnlyPeer(t *testing.T) {
 // TestRoutingCapablePeersExcludesRoutingOnlyInbound verifies that an inbound
 // routing-only peer is also excluded from routingCapablePeers().
 func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	pipeLocal, _ := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -1800,7 +1814,7 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 	svc.mu.Lock()
 	svc.inboundTracked[conn] = struct{}{}
 	svc.connPeerInfo[conn] = &connPeerHello{
-		address:      "peer-B",
+		address:      idPeerB,
 		capabilities: []string{capMeshRoutingV1},
 	}
 	svc.mu.Unlock()
@@ -1818,16 +1832,16 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 // resolution: a transit next-hop (hops > 1) must have both mesh_relay_v1
 // and mesh_routing_v1. A relay-only session should NOT be selected.
 func TestRetryResolutionTransitRequiresBothCaps(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// peer-B has only relay capability — insufficient for transit.
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 
 	// Transit hops (hops=3): should NOT resolve with relay-only cap.
-	addr := svc.resolveRouteNextHopAddress("peer-B", 3)
+	addr := svc.resolveRouteNextHopAddress(idPeerB, 3)
 	if addr != "" {
 		t.Fatalf("transit next-hop with relay-only cap should not resolve, got %s", addr)
 	}
@@ -1836,14 +1850,14 @@ func TestRetryResolutionTransitRequiresBothCaps(t *testing.T) {
 // TestRetryResolutionTransitWithBothCapsResolves verifies that a peer with
 // both capabilities is resolved for transit next-hops.
 func TestRetryResolutionTransitWithBothCapsResolves(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 	}
 
-	addr := svc.resolveRouteNextHopAddress("peer-B", 3)
+	addr := svc.resolveRouteNextHopAddress(idPeerB, 3)
 	if addr != "addr-B" {
 		t.Fatalf("transit next-hop with both caps should resolve to addr-B, got %s", addr)
 	}
@@ -1852,14 +1866,14 @@ func TestRetryResolutionTransitWithBothCapsResolves(t *testing.T) {
 // TestRetryResolutionDestinationRelayOnlySuffices verifies that a destination
 // next-hop (hops=1) can resolve with relay-only capability.
 func TestRetryResolutionDestinationRelayOnlySuffices(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1},
 	}
 
-	addr := svc.resolveRouteNextHopAddress("peer-B", 1)
+	addr := svc.resolveRouteNextHopAddress(idPeerB, 1)
 	if addr != "addr-B" {
 		t.Fatalf("destination next-hop with relay-only cap should resolve, got %s", addr)
 	}
@@ -1869,23 +1883,23 @@ func TestRetryResolutionDestinationRelayOnlySuffices(t *testing.T) {
 // sets RelayNextHopHops from the selected RouteEntry so that the retry path
 // in sendTableDirectedRelay has the correct hop role for re-resolution.
 func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	// Set up a transit route (3 hops) and a session with both caps.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X", Origin: "peer-C", NextHop: "peer-B",
+		Identity: idTargetX, Origin: idPeerC, NextHop: idPeerB,
 		Hops: 3, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute failed: %v", err)
 	}
 	svc.sessions["addr-B"] = &peerSession{
-		peerIdentity: "peer-B",
+		peerIdentity: idPeerB,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 	}
 
 	router := NewTableRouter(svc, svc.routingTable)
 	decision := router.Route(protocol.Envelope{
-		Recipient: "target-X",
+		Recipient: idTargetX,
 		Topic:     "dm",
 	})
 
@@ -1904,11 +1918,11 @@ func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
 // so that the intermediate relay hop can persist it in relayForwardState
 // for triple-scoped hop_ack confirmation.
 func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth("node-B")
+	svc := newTestServiceWithRoutingAndHealth(idNodeB)
 
 	// Add a route to target-X via peer-C with origin "origin-D".
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X", Origin: "origin-D", NextHop: "peer-C",
+		Identity: idTargetX, Origin: idOriginD, NextHop: idPeerC,
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute failed: %v", err)
@@ -1917,7 +1931,7 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 	// peer-C needs both caps (transit, hops=2) and a functioning send channel.
 	sendCh := make(chan protocol.Frame, 10)
 	svc.sessions["addr-C"] = &peerSession{
-		peerIdentity: "peer-C",
+		peerIdentity: idPeerC,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 		sendCh:       sendCh,
 	}
@@ -1930,15 +1944,15 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 	frame := protocol.Frame{
 		Type:      "relay_message",
 		ID:        "msg-1",
-		Recipient: "target-X",
+		Recipient: idTargetX,
 	}
 
-	result := svc.tryForwardViaRoutingTable("target-X", frame, "peer-A")
+	result := svc.tryForwardViaRoutingTable(idTargetX, frame, idPeerA)
 
 	if result.Address == "" {
 		t.Fatal("expected table-directed forward to succeed")
 	}
-	if result.RouteOrigin != "origin-D" {
+	if result.RouteOrigin != idOriginD {
 		t.Fatalf("expected RouteOrigin='origin-D', got %q", result.RouteOrigin)
 	}
 }
@@ -1946,27 +1960,27 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 // TestTryForwardViaRoutingTableExcludesSender verifies split horizon on
 // the relay path — the sender's identity is excluded from next-hop selection.
 func TestTryForwardViaRoutingTableExcludesSender(t *testing.T) {
-	svc := newTestServiceWithRouting("node-B")
+	svc := newTestServiceWithRouting(idNodeB)
 
 	// Only route is via peer-A (the sender).
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X", Origin: "peer-A", NextHop: "peer-A",
+		Identity: idTargetX, Origin: idPeerA, NextHop: idPeerA,
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute failed: %v", err)
 	}
 	svc.sessions["addr-A"] = &peerSession{
-		peerIdentity: "peer-A",
+		peerIdentity: idPeerA,
 		capabilities: []string{capMeshRelayV1, capMeshRoutingV1},
 	}
 
 	frame := protocol.Frame{
 		Type:      "relay_message",
 		ID:        "msg-2",
-		Recipient: "target-X",
+		Recipient: idTargetX,
 	}
 
-	result := svc.tryForwardViaRoutingTable("target-X", frame, "peer-A")
+	result := svc.tryForwardViaRoutingTable(idTargetX, frame, idPeerA)
 
 	if result.Address != "" {
 		t.Fatalf("should not forward back to sender, got address=%s", result.Address)
@@ -1975,7 +1989,7 @@ func TestTryForwardViaRoutingTableExcludesSender(t *testing.T) {
 
 // TestTryForwardViaRoutingTableNoRoute verifies empty result when no route exists.
 func TestTryForwardViaRoutingTableNoRoute(t *testing.T) {
-	svc := newTestServiceWithRouting("node-B")
+	svc := newTestServiceWithRouting(idNodeB)
 
 	frame := protocol.Frame{
 		Type:      "relay_message",
@@ -1983,7 +1997,7 @@ func TestTryForwardViaRoutingTableNoRoute(t *testing.T) {
 		Recipient: "unknown",
 	}
 
-	result := svc.tryForwardViaRoutingTable("unknown", frame, "peer-A")
+	result := svc.tryForwardViaRoutingTable("unknown", frame, idPeerA)
 
 	if result.Address != "" {
 		t.Fatalf("expected empty address for unknown recipient, got %s", result.Address)
@@ -2003,7 +2017,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 	customTTL := 45 * time.Second
 
 	svc := &Service{
-		identity:              &identity.Identity{Address: "node-A"},
+		identity:              &identity.Identity{Address: idNodeA},
 		identitySessions:      make(map[string]int),
 		identityRelaySessions: make(map[string]int),
 		sessions:              make(map[string]*peerSession),
@@ -2011,7 +2025,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 		inboundTracked:        make(map[net.Conn]struct{}),
 	}
 	svc.routingTable = routing.NewTable(
-		routing.WithLocalOrigin("node-A"),
+		routing.WithLocalOrigin(idNodeA),
 		routing.WithClock(func() time.Time { return now }),
 		routing.WithDefaultTTL(customTTL),
 	)
@@ -2024,13 +2038,13 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "peer-B", Hops: 1, SeqNo: 1},
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
@@ -2046,18 +2060,18 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 // custom TTL is configured, the table's default (routing.DefaultTTL) is
 // still applied consistently via the table's own UpdateRoute path.
 func TestHandleAnnounceRoutesDefaultTTLWithoutConfig(t *testing.T) {
-	svc := newTestServiceWithRouting("node-A")
+	svc := newTestServiceWithRouting(idNodeA)
 
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: "target-X", Origin: "peer-B", Hops: 1, SeqNo: 1},
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleAnnounceRoutes("peer-B", frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
-	routes := svc.routingTable.Lookup("target-X")
+	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
@@ -2067,4 +2081,3 @@ func TestHandleAnnounceRoutesDefaultTTLWithoutConfig(t *testing.T) {
 		t.Fatal("route ExpiresAt should not be zero — table should apply defaultTTL")
 	}
 }
-

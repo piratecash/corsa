@@ -175,6 +175,7 @@ graph TD
     REG_NTC["RegisterNoticeCommands<br/>fetch_notices"]
     REG_MSH["RegisterMeshCommands<br/>fetch_relay_status"]
     REG_MET["RegisterMetricsCommands<br/>fetch_traffic_history"]
+    REG_RTE["RegisterRoutingCommands<br/>fetch_route_table · fetch_route_summary · fetch_route_lookup*"]
 
     REG_SYS -->|"Register()"| TABLE
     REG_NET -->|"Register()"| TABLE
@@ -184,16 +185,18 @@ graph TD
     REG_NTC -->|"Register()"| TABLE
     REG_MSH -->|"Register()"| TABLE
     REG_MET -->|"Register()"| TABLE
+    REG_RTE -->|"Register()"| TABLE
 
     TABLE --> SERVER["Fiber HTTP Server<br/>(wraps CommandTable)"]
     TABLE --> WINDOW["Desktop Window<br/>(direct access)"]
 
     style REG_CHT fill:#555,stroke:#888
     style REG_MSG fill:#555,stroke:#888
+    style REG_RTE fill:#555,stroke:#888
 ```
 *Diagram 4 — Command registration.*
 
-Commands marked with `*` are mode-gated: when their provider is nil (standalone node), they are registered as unavailable via `RegisterUnavailable()` — returning 503 and hidden from help. `send_dm` requires DMRouterProvider; chatlog commands require ChatlogProvider; `fetch_traffic_history` requires MetricsProvider.
+Commands marked with `*` are mode-gated: when their provider is nil (standalone node), they are registered as unavailable via `RegisterUnavailable()` — returning 503 and hidden from help. `send_dm` requires DMRouterProvider; chatlog commands require ChatlogProvider; `fetch_traffic_history` requires MetricsProvider; routing commands require RoutingProvider.
 
 ### Configuration
 
@@ -222,7 +225,7 @@ The architecture separates command execution from transport:
 // CommandTable — single source of truth for all commands.
 // RegisterAllCommands is the single registration point — both bootstrap and tests use it.
 table := rpc.NewCommandTable()
-rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector)
+rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector, routingProvider)
 
 // Desktop: replace base ping/get_peers with diagnostic-enriched versions,
 // and hello with desktop identity (Client: "desktop").
@@ -250,6 +253,7 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | **notice** | fetch_notices | Always registered |
 | **mesh** | fetch_relay_status | Always registered |
 | **metrics** | fetch_traffic_history | Always registered; unavailable (503, hidden from help) when MetricsProvider is nil |
+| **routing** | fetch_route_table, fetch_route_summary, fetch_route_lookup | Always registered; unavailable (503, hidden from help) when RoutingProvider is nil |
 
 #### Dependency Injection
 
@@ -302,6 +306,7 @@ Per-command documentation is in the [rpc/](rpc/) folder. See [rpc/README.md](rpc
 | [Notice](rpc/notice.md) | `fetch_notices` | [rpc/notice.md](rpc/notice.md) |
 | [Mesh](rpc/mesh.md) | `fetch_relay_status` | [rpc/mesh.md](rpc/mesh.md) |
 | [Metrics](rpc/metrics.md) | `fetch_traffic_history` | [rpc/metrics.md](rpc/metrics.md) |
+| [Routing](rpc/routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [rpc/routing.md](rpc/routing.md) |
 
 ### corsa-cli
 
@@ -597,6 +602,7 @@ graph TD
     REG_NTC["RegisterNoticeCommands<br/>fetch_notices"]
     REG_MSH["RegisterMeshCommands<br/>fetch_relay_status"]
     REG_MET["RegisterMetricsCommands<br/>fetch_traffic_history"]
+    REG_RTE["RegisterRoutingCommands<br/>fetch_route_table · fetch_route_summary · fetch_route_lookup*"]
 
     REG_SYS -->|"Register()"| TABLE
     REG_NET -->|"Register()"| TABLE
@@ -606,16 +612,18 @@ graph TD
     REG_NTC -->|"Register()"| TABLE
     REG_MSH -->|"Register()"| TABLE
     REG_MET -->|"Register()"| TABLE
+    REG_RTE -->|"Register()"| TABLE
 
     TABLE --> SERVER["Fiber HTTP сервер<br/>(обёртка над CommandTable)"]
     TABLE --> WINDOW["Desktop Window<br/>(прямой доступ)"]
 
     style REG_CHT fill:#555,stroke:#888
     style REG_MSG fill:#555,stroke:#888
+    style REG_RTE fill:#555,stroke:#888
 ```
 *Диаграмма 4 — Регистрация команд.*
 
-Команды с `*` являются mode-gated: при nil-провайдере (standalone нода) они регистрируются как недоступные через `RegisterUnavailable()` — возвращают 503 и скрыты из help. `send_dm` требует DMRouterProvider; chatlog-команды требуют ChatlogProvider; `fetch_traffic_history` требует MetricsProvider.
+Команды с `*` являются mode-gated: при nil-провайдере (standalone нода) они регистрируются как недоступные через `RegisterUnavailable()` — возвращают 503 и скрыты из help. `send_dm` требует DMRouterProvider; chatlog-команды требуют ChatlogProvider; `fetch_traffic_history` требует MetricsProvider; routing-команды требуют RoutingProvider.
 
 ### Конфигурация
 
@@ -644,7 +652,7 @@ graph TD
 // CommandTable — единственный источник истины для всех команд.
 // RegisterAllCommands — единая точка регистрации, используемая и bootstrap, и тестами.
 table := rpc.NewCommandTable()
-rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector)
+rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector, routingProvider)
 
 // Desktop: замена базовых ping/get_peers на диагностически обогащённые версии,
 // а также hello на desktop-идентификацию (Client: "desktop").
@@ -672,6 +680,7 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | **notice** | fetch_notices | Всегда зарегистрированы |
 | **mesh** | fetch_relay_status | Всегда зарегистрированы |
 | **metrics** | fetch_traffic_history | Всегда зарегистрирована; недоступна (503, скрыта из help) при MetricsProvider = nil |
+| **routing** | fetch_route_table, fetch_route_summary, fetch_route_lookup | Всегда зарегистрированы; недоступны (503, скрыты из help) при RoutingProvider = nil |
 
 #### Внедрение зависимостей
 
@@ -724,6 +733,7 @@ Mode-gated команды регистрируются через `RegisterUnava
 | [Уведомления](rpc/notice.md) | `fetch_notices` | [rpc/notice.md](rpc/notice.md) |
 | [Mesh](rpc/mesh.md) | `fetch_relay_status` | [rpc/mesh.md](rpc/mesh.md) |
 | [Метрики](rpc/metrics.md) | `fetch_traffic_history` | [rpc/metrics.md](rpc/metrics.md) |
+| [Маршрутизация](rpc/routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [rpc/routing.md](rpc/routing.md) |
 
 ### corsa-cli
 

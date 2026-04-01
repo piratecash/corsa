@@ -7,12 +7,12 @@ import (
 )
 
 var (
-	ErrEmptyIdentity   = errors.New("routing: Identity must not be empty")
-	ErrEmptyOrigin     = errors.New("routing: Origin must not be empty")
-	ErrEmptyNextHop    = errors.New("routing: NextHop must not be empty")
-	ErrInvalidHops     = errors.New("routing: Hops must be between 1 and HopsInfinity (16)")
-	ErrDirectHopsMust1 = errors.New("routing: direct route must have Hops=1")
-	ErrDirectNextHop   = errors.New("routing: direct route NextHop must equal Identity (directly connected)")
+	ErrEmptyIdentity       = errors.New("routing: Identity must not be empty")
+	ErrEmptyOrigin         = errors.New("routing: Origin must not be empty")
+	ErrEmptyNextHop        = errors.New("routing: NextHop must not be empty")
+	ErrInvalidHops         = errors.New("routing: Hops must be between 1 and HopsInfinity (16)")
+	ErrDirectHopsMust1     = errors.New("routing: direct route must have Hops=1")
+	ErrDirectNextHop       = errors.New("routing: direct route NextHop must equal Identity (directly connected)")
 	ErrDirectForeignOrigin = errors.New("routing: direct route Origin must equal localOrigin")
 	ErrNoLocalOrigin       = errors.New("routing: Table.localOrigin not set (use WithLocalOrigin)")
 	ErrEmptyPeerID         = errors.New("routing: peerIdentity must not be empty")
@@ -25,10 +25,10 @@ var (
 // the default — giving the network time to converge before the route
 // expires again if the link flaps once more.
 const (
-	DefaultFlapWindow      = 120 * time.Second
-	DefaultFlapThreshold   = 3
+	DefaultFlapWindow       = 120 * time.Second
+	DefaultFlapThreshold    = 3
 	DefaultHoldDownDuration = 30 * time.Second
-	DefaultPenalizedTTL    = 30 * time.Second
+	DefaultPenalizedTTL     = 30 * time.Second
 )
 
 // HopsInfinity marks a route as withdrawn. Only the origin node may
@@ -163,9 +163,11 @@ func (e RouteEntry) IsWithdrawn() bool {
 	return e.Hops >= HopsInfinity
 }
 
-// IsExpired returns true if the route TTL has elapsed.
+// IsExpired returns true if the route TTL has elapsed. The check is
+// inclusive: a route whose ExpiresAt equals now is considered expired.
+// This keeps ttl_seconds=0 and expired=true consistent in RPC output.
 func (e RouteEntry) IsExpired(now time.Time) bool {
-	return !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt)
+	return !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt)
 }
 
 // DedupKey returns the triple that uniquely identifies a route lineage.
@@ -185,13 +187,24 @@ type RouteTriple struct {
 }
 
 // Snapshot is an immutable point-in-time view of the routing table.
-// Safe to read concurrently without locks.
+// Safe to read concurrently without locks. All fields are captured
+// under a single lock acquisition, so they represent a consistent state.
 type Snapshot struct {
 	// Routes maps destination identity to all known routes for that identity.
 	Routes map[string][]RouteEntry
 
 	// TakenAt is the timestamp when the snapshot was captured.
 	TakenAt time.Time
+
+	// TotalEntries is the count of all route entries (including withdrawn/expired).
+	TotalEntries int
+
+	// ActiveEntries is the count of non-withdrawn, non-expired entries.
+	ActiveEntries int
+
+	// FlapState contains the flap detection state captured at the same instant
+	// as the routes, avoiding inconsistency between separate reads.
+	FlapState []FlapEntry
 }
 
 // BestRoute returns the best (lowest hop count, highest trust) non-withdrawn
@@ -239,6 +252,22 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 		Hops:     e.Hops,
 		SeqNo:    e.SeqNo,
 	}
+}
+
+// FlapEntry describes the flap detection state for a single peer.
+// Exported for RPC observability — callers should treat this as read-only.
+type FlapEntry struct {
+	// PeerIdentity is the Ed25519 fingerprint of the peer.
+	PeerIdentity string
+
+	// RecentWithdrawals is the number of disconnect events within the flap window.
+	RecentWithdrawals int
+
+	// InHoldDown is true if the peer is currently in hold-down.
+	InHoldDown bool
+
+	// HoldDownUntil is the time when hold-down expires. Zero if not in hold-down.
+	HoldDownUntil time.Time
 }
 
 // isBetter returns true if candidate is a better route than current.

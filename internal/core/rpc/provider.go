@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"corsa/internal/core/protocol"
+	"corsa/internal/core/routing"
 	"corsa/internal/core/service"
 )
 
@@ -31,6 +32,22 @@ type DMRouterProvider interface {
 // Returns traffic history snapshots for RPC consumption.
 type MetricsProvider interface {
 	TrafficSnapshot() protocol.Frame
+}
+
+// RoutingProvider abstracts access to the distance-vector routing table.
+// Exposes read-only snapshot and lookup operations for RPC observability.
+// When nil (routing not enabled), commands are registered as unavailable.
+type RoutingProvider interface {
+	// RoutingSnapshot returns an immutable point-in-time copy of the full
+	// routing table, safe to read without locks. The snapshot includes
+	// entry counts (TotalEntries, ActiveEntries) and FlapState, so
+	// separate count/flap methods are not needed.
+	RoutingSnapshot() routing.Snapshot
+
+	// PeerTransport returns the transport address and network type
+	// for a directly connected peer identified by its Ed25519 fingerprint.
+	// Returns empty strings if the peer is not currently connected.
+	PeerTransport(peerIdentity string) (address string, network string)
 }
 
 // DiagnosticProvider abstracts access to desktop-level diagnostic commands.

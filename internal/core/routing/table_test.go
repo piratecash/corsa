@@ -617,6 +617,51 @@ func TestWithdrawTombstoneSupersededByNewerAnnouncement(t *testing.T) {
 	}
 }
 
+func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	// Active announcement route at SeqNo=5.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	})
+
+	// Withdraw at SeqNo=5 — sets Hops=HopsInfinity.
+	if !tbl.WithdrawRoute("alice", "bob", "charlie", 5) {
+		t.Fatal("withdraw should succeed")
+	}
+
+	// Same-SeqNo hop_ack (higher trust rank) must NOT resurrect the
+	// withdrawn entry. Only a strictly newer SeqNo may do that.
+	accepted := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 1, SeqNo: 5, Source: RouteSourceHopAck,
+	})
+	if accepted {
+		t.Fatal("same-SeqNo hop_ack must not resurrect a withdrawn route")
+	}
+
+	// Verify the route is still withdrawn.
+	routes := tbl.Lookup("alice")
+	if len(routes) != 0 {
+		t.Fatal("withdrawn route should not appear in Lookup")
+	}
+
+	// A strictly newer SeqNo should succeed.
+	accepted = mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 6, Source: RouteSourceAnnouncement,
+	})
+	if !accepted {
+		t.Fatal("newer SeqNo=6 should supersede withdrawn SeqNo=5")
+	}
+	routes = tbl.Lookup("alice")
+	if len(routes) != 1 || routes[0].Hops != 2 {
+		t.Fatal("route should be active after superseding withdrawal")
+	}
+}
+
 // --- UpdateRoute: direct route origin guard ---
 
 func TestUpdateRouteRejectsDirectWithForeignOrigin(t *testing.T) {
@@ -1012,6 +1057,78 @@ func TestTickTTLCleansUpEmptyIdentities(t *testing.T) {
 	snap := tbl.Snapshot()
 	if _, exists := snap.Routes["alice"]; exists {
 		t.Fatal("identity with no routes should be removed from map")
+	}
+}
+
+func TestTickTTLRemovesWithdrawnRoutes(t *testing.T) {
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := start
+	tbl := NewTable(
+		WithClock(func() time.Time { return now }),
+		WithLocalOrigin("me"),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	// Add a direct route and a transit route through "alice", plus
+	// a healthy announcement through "carol".
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "me", NextHop: "alice",
+		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+		ExpiresAt: start.Add(2 * time.Hour),
+	})
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "bob", Origin: "alice", NextHop: "alice",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: start.Add(2 * time.Hour),
+	})
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "carol", Origin: "x", NextHop: "carol",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: start.Add(2 * time.Hour),
+	})
+
+	if tbl.Size() != 3 {
+		t.Fatalf("expected 3 routes before withdraw, got %d", tbl.Size())
+	}
+
+	// Simulate peer "alice" disconnecting. RemoveDirectPeer sets
+	// Hops=HopsInfinity and ExpiresAt=now+defaultTTL on both the
+	// direct and transit routes.
+	result, err := tbl.RemoveDirectPeer("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Withdrawals) != 1 {
+		t.Fatalf("expected 1 withdrawal, got %d", len(result.Withdrawals))
+	}
+	if result.TransitInvalidated != 1 {
+		t.Fatalf("expected 1 transit invalidated, got %d", result.TransitInvalidated)
+	}
+
+	// Immediately after withdraw: routes are still in the table (tombstones
+	// protect against delayed lower-SeqNo announcements).
+	tbl.TickTTL()
+	if tbl.Size() != 3 {
+		t.Fatalf("expected 3 entries immediately after withdraw (tombstones alive), got %d", tbl.Size())
+	}
+
+	// Advance clock past defaultTTL — tombstones expire.
+	now = start.Add(121 * time.Second)
+	tbl.TickTTL()
+
+	// After TTL expiry: withdrawn routes are removed, carol survives.
+	if tbl.Size() != 1 {
+		t.Fatalf("expected 1 route after TTL expiry (withdrawn cleaned), got %d", tbl.Size())
+	}
+	snap := tbl.Snapshot()
+	if _, exists := snap.Routes["carol"]; !exists {
+		t.Fatal("carol's route should survive tick")
+	}
+	if _, exists := snap.Routes["alice"]; exists {
+		t.Fatal("alice's withdrawn direct route should be removed after TTL")
+	}
+	if _, exists := snap.Routes["bob"]; exists {
+		t.Fatal("bob's invalidated transit route should be removed after TTL")
 	}
 }
 
@@ -1509,5 +1626,61 @@ func TestFlapDetectionPerPeerIsolation(t *testing.T) {
 	}
 	if result.Penalized {
 		t.Fatal("peer-B should not be penalized by peer-A's flapping")
+	}
+}
+
+func TestFlapSnapshotFiltersStaleEntries(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithLocalOrigin("me"),
+		WithClock(func() time.Time { return current }),
+		WithFlapThreshold(3),
+		WithFlapWindow(60*time.Second),
+		WithHoldDownDuration(30*time.Second),
+	)
+
+	// Flap peer-A three times to trigger hold-down.
+	for i := 0; i < 3; i++ {
+		mustAddDirect(t, tbl, "peer-A")
+		mustRemoveDirect(t, tbl, "peer-A")
+		current = current.Add(5 * time.Second)
+	}
+
+	// Immediately after flapping: should appear in snapshot.
+	snap := tbl.FlapSnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("expected 1 flap entry, got %d", len(snap))
+	}
+	if snap[0].PeerIdentity != "peer-A" {
+		t.Errorf("expected peer-A, got %s", snap[0].PeerIdentity)
+	}
+	if snap[0].RecentWithdrawals != 3 {
+		t.Errorf("expected 3 recent withdrawals, got %d", snap[0].RecentWithdrawals)
+	}
+	if !snap[0].InHoldDown {
+		t.Error("expected peer-A to be in hold-down")
+	}
+
+	// Advance past hold-down (30s) but within flap window (60s).
+	current = current.Add(35 * time.Second)
+
+	snap = tbl.FlapSnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("expected 1 flap entry (withdrawals still in window), got %d", len(snap))
+	}
+	if snap[0].InHoldDown {
+		t.Error("hold-down should have expired")
+	}
+	if snap[0].RecentWithdrawals != 3 {
+		t.Errorf("expected 3 recent withdrawals still in window, got %d", snap[0].RecentWithdrawals)
+	}
+
+	// Advance past flap window — all withdrawals are stale.
+	current = current.Add(60 * time.Second)
+
+	snap = tbl.FlapSnapshot()
+	if len(snap) != 0 {
+		t.Errorf("expected 0 flap entries after window expiry, got %d", len(snap))
 	}
 }

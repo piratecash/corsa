@@ -16,6 +16,7 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | [Notice](notice.md) | `fetch_notices` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
 | [Metrics](metrics.md) | `fetch_traffic_history` | [metrics.md](metrics.md) |
+| [Routing](routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [routing.md](routing.md) |
 
 ### Universal Dispatch
 
@@ -65,6 +66,7 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | [Уведомления](notice.md) | `fetch_notices` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
 | [Метрики](metrics.md) | `fetch_traffic_history` | [metrics.md](metrics.md) |
+| [Маршрутизация](routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [routing.md](routing.md) |
 
 ### Универсальная диспетчеризация
 

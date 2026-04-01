@@ -1,16 +1,17 @@
 package rpc_test
 
 import (
-	"corsa/internal/core/config"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/rpc"
-	"corsa/internal/core/service"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"corsa/internal/core/config"
+	"corsa/internal/core/protocol"
+	"corsa/internal/core/rpc"
+	"corsa/internal/core/service"
 )
 
 // mockNodeProvider is a test double for NodeProvider.
@@ -48,12 +49,12 @@ func (m *mockNodeProvider) ClientVersion() string {
 // mockChatlogProvider is a test double for ChatlogProvider.
 // It allows configurable responses for testing different scenarios.
 type mockChatlogProvider struct {
-	chatlogResult      string
-	chatlogErr         error
-	chatlogTopic       string
-	chatlogPeerAddress string
-	previewsResult     string
-	previewsErr        error
+	chatlogResult       string
+	chatlogErr          error
+	chatlogTopic        string
+	chatlogPeerAddress  string
+	previewsResult      string
+	previewsErr         error
 	conversationsResult string
 	conversationsErr    error
 }
@@ -97,7 +98,7 @@ func (m *mockDMRouterProvider) SendMessage(to, body string) {
 // (503, hidden from help).
 func buildTestTable(nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider, dmRouter rpc.DMRouterProvider, metricsProvider rpc.MetricsProvider) *rpc.CommandTable {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter, metricsProvider)
+	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter, metricsProvider, nil)
 	return table
 }
 

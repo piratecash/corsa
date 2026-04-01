@@ -18,11 +18,8 @@ Quick links:
 - [Design principles](#design-principles)
 - [Protocol versioning policy](#protocol-versioning-policy)
 - [Iteration 1 — Routing table](#iter-1)
-  - [1.1 — Model invariants](#iter-1-1)
-  - [1.2 — Minimal vertical slice](#iter-1-2)
-  - [1.3 — Observability and polish](#iter-1-3)
-  - [1.4 — Health, probes, RTT, route query](#iter-1-4)
-- [Iteration 1.5 — Route health, probes, and RTT scoring](#iter-1-5)
+  - [Pending work before route health](#pre-1-4-refactoring)
+  - [Route health, probes, and RTT scoring](#route-health-probes-and-rtt-scoring)
 - [Iteration 2 — Reliability, reputation, and multi-path](#iter-2)
 - [Iteration 3 — Optimization and scaling](#iter-3)
 - [Iteration 4 — Structured overlay (DHT)](#iter-4)
@@ -62,31 +59,30 @@ Quick links:
 
 ### Current state
 
-Hop-by-hop relay is implemented and stable (`mesh_relay_v1` capability).
-A message from node A can now traverse intermediate nodes
-(A→B→C→D→E→F) to reach a recipient that none of A's direct peers
-know. Capacity limits, per-peer rate limiting, dedupe, and delivery
-receipts via the relay return path are all in place. Protocol details:
-[`relay.md`](protocol/relay.md).
+Three delivery mechanisms are implemented and work together:
+
+**Hop-by-hop relay** (`mesh_relay_v1` capability). A message from node A can traverse intermediate nodes (A→B→C→D→E→F) to reach a recipient that none of A's direct peers know. Capacity limits, per-peer rate limiting, dedupe, and delivery receipts via the relay return path are all in place. Protocol details: [`relay.md`](protocol/relay.md).
+
+**Distance-vector routing table** (`mesh_routing_v1` capability). Each node maintains a table of which identities are reachable through which neighbors. When a route is known, relay forwards messages along the shortest table-directed path instead of broadcasting. Route announcements, withdrawals, flap dampening, trust hierarchy (direct > hop_ack > announcement), and split horizon are all in place. RPC observability commands (`fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup`) expose routing state for monitoring and debugging. Full details: [`routing.md`](routing.md).
+
+**Gossip fallback**. When no table route is known for a recipient, the node falls back to gossip broadcast — forwarding the message to all connected peers. This ensures delivery even when routing information is incomplete or during convergence after topology changes.
 
 ```mermaid
 graph LR
-    A["Node A<br/>(sender)"] -->|relay| B["Node B"]
-    B -->|relay| C["Node C"]
-    C -->|relay| F["Node F<br/>(recipient)"]
-    F -.->|receipt| C -.->|receipt| B -.->|receipt| A
+    A["Node A<br/>(sender)"] -->|table-directed relay| D["Node D<br/>(routing table)"]
+    D -->|"route → B (best path)"| B["Node B"]
+    D -.->|"route → C (alt path)"| C["Node C"]
+    B -->|table-directed relay| F["Node F<br/>(recipient)"]
+    F -.->|hop_ack + receipt| B -.->|hop_ack + receipt| A
+    A -.->|gossip fallback| E["Node E"]
 
     style A fill:#e3f2fd,stroke:#1565c0
+    style D fill:#fff9c4,stroke:#f9a825
     style F fill:#c8e6c9,stroke:#2e7d32
 ```
-*Diagram — Hop-by-hop relay with receipt return path (implemented)*
+*Diagram — Table-directed relay with gossip fallback (implemented)*
 
-**What is still missing:** relay works, but the node does not know
-**where** to relay. Forwarding is blind — gossip fan-out goes to the
-top-scored peers without knowing which direction leads to the
-recipient. The next step (Iteration 1) adds a routing table so that
-each node knows which identities are reachable through which neighbors,
-turning blind gossip into directed forwarding.
+**What is still missing:** anti-flooding measures for announcements (frame size limits, fairness rotation, pacing/jitter, per-peer rate limiting), full integration tests for multi-node convergence scenarios, and forward-compatible relay for future onion routing. These are tracked in [Pending work before route health](#pre-1-4-refactoring).
 
 ### Design principles
 
@@ -209,92 +205,58 @@ The `Router` interface remains in the `node` package (it depends on
 
 **RPC access** (`internal/core/rpc/routing_commands.go`):
 
-Routing data (table state, health, statistics) is exposed via the
-existing `CommandTable` through a `RoutingProvider` interface:
-
-```go
-// RoutingProvider abstracts access to the routing subsystem.
-// Available only when mesh_routing_v1 capability is active.
-type RoutingProvider interface {
-    // FetchRoutes returns routes for a specific identity, or all routes
-    // if identity is empty. Returned as a snapshot — safe to serialize.
-    FetchRoutes(identity string) []RoutingEntry
-
-    // FetchRoutingStats returns aggregate routing statistics:
-    // table size, convergence metrics, announce/withdrawal counters.
-    FetchRoutingStats() RoutingStatsEntry
-
-    // FetchRouteHealth returns health state per (identity, origin, nextHop) triple.
-    // Added in iteration 1.5; returns empty before health tracking is active.
-    FetchRouteHealth() []RouteHealthEntry
-}
-```
+Routing data is exposed via the existing `CommandTable` through a `RoutingProvider` interface with two methods: `RoutingSnapshot()` (immutable point-in-time table copy) and `PeerTransport(peerIdentity)` (live transport address resolution). When the provider is nil (legacy node without routing), all routing commands return 503 and are hidden from help.
 
 RPC commands (category `"routing"`):
 
-| Command | Description | Usage | Since |
-|---|---|---|---|
-| `fetch_routes` | Routes for a specific identity or full table | `[identity]` | Iter 1 |
-| `fetch_routing_stats` | Table size, announce counts, convergence time | — | Iter 1 |
-| `fetch_route_health` | Health states per (identity, origin, nextHop) triple | — | Iter 1.5 |
+| Command | Description | Usage |
+|---|---|---|
+| `fetch_route_table` | Full table snapshot with structured `next_hop` object | — |
+| `fetch_route_summary` | Entry counts, reachable identities, flap state | — |
+| `fetch_route_lookup` | Active routes for a destination, sorted by preference | `<identity>` |
+| `fetch_route_health` | Health states per (identity, origin, nextHop) triple | — (Iter 1.5) |
 
-Registration follows the existing pattern:
-
-```go
-func RegisterRoutingCommands(t *CommandTable, routing RoutingProvider) {
-    if routing == nil {
-        t.RegisterUnavailable(CommandInfo{Name: "fetch_routes", ...})
-        t.RegisterUnavailable(CommandInfo{Name: "fetch_routing_stats", ...})
-        t.RegisterUnavailable(CommandInfo{Name: "fetch_route_health", ...})
-        return
-    }
-    // ... register active handlers
-}
-```
-
-When `mesh_routing_v1` is not active (legacy node), all routing commands
-return 503 (unavailable) — consistent with existing mode-gated commands
-like `fetch_traffic_history`.
-
-`RegisterAllCommands` gains a `RoutingProvider` parameter:
-
-```go
-func RegisterAllCommands(t *CommandTable, node NodeProvider,
-    chatlog ChatlogProvider, dmRouter DMRouterProvider,
-    metricsProvider MetricsProvider, routing RoutingProvider) {
-    // ... existing registrations ...
-    RegisterRoutingCommands(t, routing)
-}
-```
+Full field-level specification: [`rpc/routing.md`](rpc/routing.md). Implementation details: [`routing.md`](routing.md).
 
 **Table structure:**
 
 ```go
 type RouteEntry struct {
-    Identity     string // target identity (Ed25519 fingerprint)
-    Origin       string // who originated this route (the node that is directly connected to Identity)
-    NextHop      string // through which peer identity (Ed25519 fingerprint, not transport address)
-    Hops         int    // distance (1 = direct peer, 16 = infinity/withdrawn)
-    SeqNo        uint64 // monotonic per-Origin, only Origin may advance; higher = newer
-    RemainingTTL int    // seconds until expiry (default 120, decremented by ticker)
-    Source       string // "direct" | "announcement" | "hop_ack"
+    Identity  string      // target identity (Ed25519 fingerprint)
+    Origin    string      // who originated this route (directly connected to Identity)
+    NextHop   string      // peer identity we learned this from (not transport address)
+    Hops      int         // distance (1 = direct peer, 16 = HopsInfinity/withdrawn)
+    SeqNo     uint64      // monotonic per-Origin, only Origin may advance
+    Source    RouteSource // RouteSourceDirect | RouteSourceAnnouncement | RouteSourceHopAck
+    ExpiresAt time.Time   // absolute expiry; derived from defaultTTL at insert time
 }
 
 type Table struct {
-    mu             sync.RWMutex
-    routes         map[string][]RouteEntry // identity → possible routes
-    defaultTTL     int                     // default TTL in seconds (120)
-    flappingTTL    int                     // TTL for flapping peers (30)
+    mu               sync.RWMutex
+    routes           map[string][]RouteEntry // identity → routes
+    localOrigin      string                  // this node's Ed25519 fingerprint
+    seqCounters      map[string]uint64       // next SeqNo per destination
+    defaultTTL       time.Duration           // default route lifetime (120s)
+    penalizedTTL     time.Duration           // TTL for flapping peers (30s)
+    flapState        map[string]*peerFlapState
+    flapWindow       time.Duration           // disconnect counting window (120s)
+    flapThreshold    int                     // disconnects before hold-down (3)
+    holdDownDuration time.Duration           // hold-down period (30s)
 }
 
 func (t *Table) Lookup(identity string) []RouteEntry
-func (t *Table) AddDirectPeer(identity, peerIdentity string)
-func (t *Table) RemoveDirectPeer(identity string)
-func (t *Table) UpdateRoute(entry RouteEntry)
-func (t *Table) WithdrawRoute(identity, nextHop string, seqNo uint64)
+func (t *Table) AddDirectPeer(peerIdentity string) (AddDirectPeerResult, error)
+func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, error)
+func (t *Table) InvalidateTransitRoutes(peerIdentity string) int
+func (t *Table) UpdateRoute(entry RouteEntry) (bool, error)
+func (t *Table) WithdrawRoute(identity, origin, nextHop string, seqNo uint64) bool
 func (t *Table) Announceable(excludeVia string) []RouteEntry
-func (t *Table) Snapshot() Snapshot   // serializable state for RPC
-func (t *Table) TickTTL()                    // decrement all RemainingTTL, remove entries at 0
+func (t *Table) AnnounceTo(excludeVia string) []AnnounceEntry
+func (t *Table) Snapshot() Snapshot
+func (t *Table) TickTTL()      // removes expired (ExpiresAt elapsed) and withdrawn (Hops >= 16) entries
+func (t *Table) Size() int     // total entries including withdrawn
+func (t *Table) ActiveSize() int // non-withdrawn, non-expired entries only
+func (t *Table) FlapSnapshot() []FlapEntry
 ```
 
 **Why NextHop is a peer identity, not a transport address:** a single
@@ -648,167 +610,25 @@ network" requires a separate discovery/query layer — see
 [Iteration 4 — Structured overlay (DHT)](#iter-4) for the planned
 approach. The routing table is not the place for global search.
 
-**Progress:**
+**Completed:** model invariants, minimal vertical slice (table routing, announcements, withdrawals, hop_ack, gossip fallback), RPC observability (`fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup`). Full documentation: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md).
 
-Implementation is split into four sequential phases. Each phase must
-be fully complete (code + tests pass) before starting the next one.
+<a id="pre-1-4-refactoring"></a>
+#### Pending work before route health
 
-<a id="iter-1-1"></a>
-#### Phase 1.1 — Model invariants
+Before starting Phase 1.4, the following refactoring is required to manage complexity:
 
-**What changes:** currently the codebase has no routing data model at
-all — messages are delivered via gossip (flood to all peers). This
-phase introduces the foundational types and rules that every subsequent
-phase relies on: `RouteEntry` with the `Origin` field, the
-`(identity, origin, nextHop)` dedup key, split horizon, withdrawal
-semantics, capability gates, and TTL expiry.
+**High priority:** `node/service.go` (6200+ lines) is a monolith that mixes peer management, routing integration, relay/SOCKS5, metering, and session lifecycle. Extract into focused files: `peer_management.go` (peer lifecycle, health tracking, peerIDs), `routing_integration.go` (already partially extracted), `relay_handler.go` (relay/SOCKS5 logic), `metering.go` (traffic metering). This unblocks concurrent work and reduces merge conflicts.
 
-**Why first:** every subsequent phase (table, announcements,
-integration) must respect these invariants. Getting them wrong early
-means cascading bugs in Phases 1.2–1.4. By isolating them with full
-test coverage before any networking code, we ensure the foundation is
-solid.
+**Completed refactoring:** RoutingProvider interface simplified from 5 methods to 2 (`RoutingSnapshot()`, `PeerTransport()`). All RPC handlers now use the atomic snapshot for consistent data. Redundant `RoutingLookup()`, `RoutingTableSize()`, `RoutingFlapSnapshot()` removed.
 
-**What was → what becomes:**
+**Bug fixed:** inbound peers were registered in the routing table with transport address instead of identity fingerprint. `trackInboundConnect` now receives and forwards the Ed25519 identity from the hello/auth frame.
 
-| Before (gossip only) | After (Phase 1.1) |
-|---|---|
-| No `RouteEntry` type | `RouteEntry` with Identity, Origin, NextHop (Ed25519), Hops, SeqNo, RemainingTTL, Source |
-| No dedup — relay dedupe by `message_id` only | Origin-aware dedup: key is `(identity, origin, nextHop)` |
-| No withdrawal concept | `hops=16` = withdrawn; wire withdrawal only by origin; transit = local invalidation |
-| No split horizon | `Announceable(excludeVia)` omits routes learned from target peer |
-| No capability gate for routing frames | `announce_routes` gated on `mesh_routing_v1` |
+**From base routing (Phase 1.2):**
 
-```mermaid
-classDiagram
-    class RouteEntry {
-        +string Identity
-        +string Origin
-        +string NextHop
-        +int Hops
-        +uint64 SeqNo
-        +int RemainingTTL
-        +string Source
-    }
-
-    class Table {
-        +UpdateRoute(entry RouteEntry)
-        +WithdrawRoute(identity, nextHop, seqNo)
-        +Announceable(excludeVia string) []RouteEntry
-        +TickTTL()
-    }
-
-    Table "1" --> "*" RouteEntry : stores
-```
-*Diagram — Phase 1.1 core types and their relationship*
-
-- [x] Create `routing/types.go` with exported `RouteEntry` (with `Origin` field), `Snapshot`
-- [x] Implement origin-aware `SeqNo` comparison: dedup key is `(identity, origin, nextHop)`; reject older seq only within same lineage
-- [x] Implement split horizon rule: `Announceable(excludeVia)` omits routes learned from target peer
-- [x] Implement withdrawal rule: `hops=16` (infinity) only emittable on wire by the origin node; transit nodes locally invalidate + stop advertising
-- [x] Define `announce_routes` frame type in `protocol/frame.go` (with `origin` and `seq` fields)
-- [x] Gate `announce_routes` on `sessionHasCapability("mesh_routing_v1")` — capability defined, not advertised until Phase 1.2
-- [x] Implement `Table.WithdrawRoute()` — set `hops=16` to invalidate; requires strictly `seqNo > old.SeqNo`
-- [x] Implement `Table.TickTTL()` — remove expired entries (default 120s)
-- [x] Implement `NextHop` as peer identity (Ed25519 fingerprint), not transport address — verify all struct fields
-- [x] Write unit tests for origin-aware SeqNo comparison: key is (identity, origin, nextHop); different origins coexist
-- [x] Write unit tests for split horizon logic (routes learned from A omitted when announcing to A)
-- [x] Write unit tests for withdrawal propagation (hops=16 only from origin; intermediate nodes do not emit wire withdrawal)
-- [x] Write unit tests for NextHop as peer identity (not transport address)
-
-<a id="iter-1-2"></a>
-#### Phase 1.2 — Minimal vertical slice
-
-**What changes:** connect the Phase 1.1 data model to the real network.
-After this phase, messages between non-adjacent peers will be relayed
-via the routing table instead of gossip flood. This is the first time
-`route_via_table` appears in logs.
-
-**What it covers:** `Table` struct with `Lookup()`, periodic
-announcements (30s), triggered updates on connect/disconnect, incoming
-announcement handling, `TableRouter` adapter wired into the existing
-`Router.Route()`, session-close invalidation, hop_ack confirmation,
-and mixed-version coexistence with gossip-only peers.
-
-**What was → what becomes:**
-
-| Before (gossip only) | After (Phase 1.2) |
-|---|---|
-| `Router.Route()` returns gossip targets only | `Router.Route()` fills `RelayNextHop` from table, falls back to gossip |
-| No `announce_routes` on wire | Periodic + triggered `announce_routes` to `mesh_routing_v1` peers |
-| Disconnect = just remove session | Disconnect = wire withdrawal (own-origin) + local invalidation (transit) + triggered update |
-| No route confirmation | `relay_hop_ack` promotes route to `source="hop_ack"` for specific triple |
-
-```mermaid
-flowchart LR
-    subgraph Before["Before (gossip)"]
-        A1[Node A] -->|flood| B1[Node B]
-        A1 -->|flood| C1[Node C]
-        B1 -->|flood| D1[Node D]
-        C1 -->|flood| D1
-    end
-
-    subgraph After["After (table routing)"]
-        A2[Node A] -->|relay via table| B2[Node B]
-        B2 -->|relay via table| D2[Node D]
-        A2 -.->|gossip fallback| C2[Node C]
-    end
-```
-*Diagram — Message delivery: gossip flood vs table-directed relay*
-
-```mermaid
-sequenceDiagram
-    participant A as Node A
-    participant B as Node B
-    participant F as Target F
-
-    Note over A: Lookup(F) → RouteEntry{F, via B, hops=2}
-    A->>B: relay_message(to=F, msg_id=99)
-    B->>F: relay_message(to=F, msg_id=99)
-    F->>B: relay_hop_ack(msg_id=99)
-    B->>A: relay_hop_ack(msg_id=99)
-    Note over A: Route (F, origin=F, via B) → source="hop_ack"
-```
-*Diagram — Table-directed relay with hop_ack confirmation*
-
-- [x] Create `routing/table.go` with `Table` struct
-- [x] Implement `Table.Lookup()` — sort by source priority (direct > hop_ack > announcement), then by hops
-- [x] Implement `Table.AddDirectPeer()`, `Table.RemoveDirectPeer()`
-- [x] Implement `Table.UpdateRoute()` using Phase 1.1 invariants
-- [x] Implement `Table.Snapshot()` — return serializable table state for RPC
-- [x] Create `routing/announce.go` — periodic announce loop (every 30s)
-- [x] Implement triggered updates: immediate announce on peer connect/disconnect
-- [x] Implement triggered withdrawal: immediate `hops=16` on peer disconnect (own-origin only)
-- [x] Handle incoming `announce_routes` — update table with +1 hop, preserve origin and seq
 - [ ] Preserve unknown fields in route entries when re-announcing (forward-compatible relay for onion box keys)
-- [x] Handle incoming withdrawals (`hops=16`) — invalidate route immediately
-- [x] Create `node/table_router.go` — `TableRouter` adapter wrapping `routing.Table`
-- [x] Integrate `routing.Table` into `node.Service`
-- [x] Integrate `TableRouter` into `Router.Route()` — fill `RelayNextHop` (peer identity, not transport addr)
-- [x] **Release-blocking: gossip fallback contract.** `TableRouter.Route()` must degrade to gossip immediately (not fail) in every case where the table route is unusable. Specifically:
-  - [x] `RelayNextHop` identity has no active session → gossip fallback
-  - [x] `RelayNextHop` peer lacks `mesh_routing_v1` capability → gossip fallback
-  - [x] Enqueue/send to chosen next-hop fails (session closed between lookup and send) → gossip fallback
-  - [x] `Lookup()` returns empty (no route known) → gossip fallback
-  - [x] Write unit tests: each of the 4 fallback triggers produces gossip delivery, not an error
-  - [ ] Integration test: kill the only table-routed next-hop mid-delivery, verify message arrives via gossip within 5s
-- [x] Confirm routes via `relay_hop_ack` — `source="hop_ack"` for specific `(identity, origin, nextHop)` triple (origin resolved locally from routing decision, not from wire)
-- [x] Add direct peer tracking on connect/disconnect events
-- [x] **Multi-session awareness:** `node.Service` must maintain an identity→active-session-count index. `AddDirectPeer()` is called on transition 0→1 sessions (first connect). `RemoveDirectPeer()` is called only on transition 1→0 sessions (last disconnect). Intermediate session opens/closes for an already-connected identity must NOT trigger route changes. `AddDirectPeer()` is idempotent at the model level (no SeqNo bump if already active), but the session-count gate in `node.Service` is the primary defense.
-  - [x] Implement identity→session-count tracking in `node.Service`
-  - [x] Gate `AddDirectPeer()` call on 0→1 transition
-  - [x] Gate `RemoveDirectPeer()` call on 1→0 transition
-  - [x] Unit test: 2 sessions to same peer, close one — direct route remains, no withdrawal emitted
-  - [x] Unit test: close last session — withdrawal emitted
-  - [ ] Integration test: peer with 2 TCP sessions, kill one — route stays, delivery uninterrupted
-- [x] Implement route-session binding: on session close, remove direct-peer route (with own withdrawal) + locally invalidate transit routes (no wire withdrawal for transit — only stop advertising)
-- [x] Verify: triggered withdrawal on session close only for routes where this node is the origin (direct peers)
 - [ ] Handle identity change on reconnect: withdraw old identity, add new
-- [x] On reconnect: always full table sync (incremental digest sync deferred to iteration 2)
-- [x] Write unit tests for routing table operations (Lookup, AddDirectPeer, RemoveDirectPeer)
-- [x] Write unit tests for triggered update generation
-- [x] Write unit tests for route-session binding (direct routes withdrawn on wire; transit routes locally invalidated, not wire-withdrawn)
-- [x] Write unit tests for hop_ack scoping (confirming (X, origin=C, via B) does not promote (X, origin=D, via B) or (Y, origin=C, via B))
+- [ ] Integration test: kill the only table-routed next-hop mid-delivery, verify message arrives via gossip within 5s
+- [ ] Integration test: peer with 2 TCP sessions, kill one — route stays, delivery uninterrupted
 - [ ] Integration test: 5 nodes, verify shortest path selection
 - [ ] Integration test: disconnect node, verify withdrawal propagation < 5s
 - [ ] Integration test: reconnect with different identity, verify old routes withdrawn
@@ -817,69 +637,8 @@ sequenceDiagram
 - [ ] Integration test: reconnect always triggers full table sync (no stale cached routes)
 - [ ] Integration test: rapid disconnect/reconnect cycle (3 nodes in triangle) — verify no routing loop or count-to-infinity; table converges within 2 announce cycles
 
-<a id="iter-1-3"></a>
-#### Phase 1.3 — Observability and polish
+**Fairness, anti-poisoning, rate limiting:**
 
-**What changes:** make the routing table inspectable and hardened. After
-this phase, the desktop UI, CLI, and monitoring can query routes and
-stats via RPC. Announcement fairness rotation ensures distant identities
-propagate. Anti-poisoning rules prevent malicious peers from injecting
-false routes that override verified ones.
-
-**Why separate from 1.2:** Phase 1.2 delivers the minimum working
-routing. Adding RPC, fairness, and anti-poisoning in the same phase
-risks coupling correctness with polish. Keeping them separate means
-Phase 1.2 can ship and be validated before adding complexity.
-
-**What was → what becomes:**
-
-| Before (Phase 1.2 only) | After (Phase 1.3) |
-|---|---|
-| No way to inspect routes at runtime | `fetch_routes`, `fetch_routing_stats` via RPC |
-| Announcement carries full table (up to 100) by hop count only | Fairness rotation: direct always included, offset rotation for rest |
-| Any `announcement` can override `hop_ack` | Trust hierarchy enforced: `direct > hop_ack > announcement` |
-| No protection against route flooding | Rate limits, quotas, jitter on periodic full sync |
-
-```mermaid
-flowchart TD
-    subgraph RPC["RPC Routing Commands"]
-        FR["fetch_routes<br/>(identity filter)"]
-        FS["fetch_routing_stats<br/>(table size, counters)"]
-        FH["fetch_route_health<br/>(Iter 1.5)"]
-    end
-
-    subgraph Provider["RoutingProvider interface"]
-        FetchRoutes["FetchRoutes()"]
-        FetchStats["FetchRoutingStats()"]
-        FetchHealth["FetchRouteHealth()"]
-    end
-
-    FR --> FetchRoutes
-    FS --> FetchStats
-    FH --> FetchHealth
-
-    FetchRoutes --> TABLE["routing.Table"]
-    FetchStats --> TABLE
-    FetchHealth -.-> HEALTH["routing.Health<br/>(Iter 1.5)"]
-
-    style FH fill:#fff3e0,stroke:#e65100
-    style FetchHealth fill:#fff3e0,stroke:#e65100
-    style HEALTH fill:#fff3e0,stroke:#e65100
-```
-*Diagram — RPC routing commands and RoutingProvider interface*
-
-RPC routing commands:
-- [ ] Define `RoutingProvider` interface in `rpc/provider.go`
-- [ ] Create `rpc/routing_commands.go` with `RegisterRoutingCommands`
-- [ ] Implement `fetch_routes` command (identity filter, full table snapshot)
-- [ ] Implement `fetch_routing_stats` command (table size, announce counts, convergence)
-- [ ] Register `RoutingProvider` as unavailable when `mesh_routing_v1` is not active
-- [ ] Add `RoutingProvider` parameter to `RegisterAllCommands`
-- [ ] Write unit tests for `fetch_routes` (empty table, single identity, full table)
-- [ ] Write unit tests for `fetch_routing_stats` (counter increments)
-- [ ] Write unit test: routing commands return 503 when provider is nil
-
-Fairness, anti-poisoning, rate limiting:
 - [ ] Limit announcements to max 100 routes per announce frame, with fairness rotation
 - [ ] Implement fairness rotation for announcement size limit (direct always included, offset rotation)
 - [ ] Implement periodic full sync every 5th cycle (split across multiple frames if needed)
@@ -897,45 +656,17 @@ Fairness, anti-poisoning, rate limiting:
 - [ ] Integration test: malicious peer advertises false routes, delivery degrades at most to gossip fallback
 - [ ] Integration test: route-update flood does not evict honest peers or trigger a full-sync storm
 
-**Release / Compatibility:**
+**Release / compatibility:**
 
 - [ ] `announce_routes` / withdrawal sent only to peers with `mesh_routing_v1`
 - [ ] Without routing table, network continues delivery via gossip fallback
-- [ ] RPC routing commands return 503 for nodes without `mesh_routing_v1`
-- [ ] Confirmed: routing module has no import dependency on `node` package (one-way: `node` → `routing`)
 - [ ] Confirmed: iteration 1 remains additive, no protocol bump required
 - [ ] Confirmed: iteration 1 does not require raising `MinimumProtocolVersion`
 
-<a id="iter-1-4"></a>
-#### Phase 1.4 — Iteration 1.5 (health, probes, RTT, route query)
-
-**What changes:** replace simple hop-count ranking with a composite
-score that incorporates route health, RTT, and trust. Add active health
-tracking per `(identity, origin, nextHop)` triple with a 4-state machine
-(Good → Questionable → Bad → Dead), lightweight probes for reachability
-verification, and targeted route queries for fast recovery.
-
-**Why separate phase:** health tracking and composite scoring add
-significant complexity. If mixed into Phases 1.1–1.3, a bug in health
-logic could block the core routing table from shipping. By deferring
-to Phase 1.4, the base routing is already working and validated.
-
-**What was → what becomes:**
-
-| Before (Phase 1.3) | After (Phase 1.4) |
-|---|---|
-| Route selection: hop count + trust source only | Composite score: hops + RTT + health + trust |
-| No health state per route | 4-state machine: Good/Questionable/Bad/Dead per triple |
-| No probe mechanism | `route_probe` / `route_probe_ack` (gated by `mesh_route_probe_v1`) |
-| No active route discovery after failure | `route_query` / `route_query_response` (gated by `mesh_route_query_v1`) |
-| RTT unknown | RTT estimated from hop_ack timing and tcp_info (EWMA) |
-
-Only start after phases 1.1–1.3 are complete and all tests pass.
-Health tracking and composite scoring must not block the base routing
-table from being correct and deployed.
+---
 
 <a id="iter-1-5"></a>
-### Iteration 1.5 — Route health, probes, and RTT scoring
+#### Route health, probes, and RTT scoring
 
 **Goal:** improve route selection quality beyond simple hop count.
 Add active health tracking per `(identity, origin, nextHop)` triple, lightweight
@@ -943,8 +674,7 @@ probes to verify reachability, RTT estimation from TCP sessions, and
 a composite route score that combines all signals. Also adds targeted
 route queries for fast recovery after next-hop failure.
 
-**Depends on:** Iteration 1 phases 1.1–1.3 (routing table with
-announcements and withdrawals must be working and all tests passing).
+**Depends on:** base routing table (announcements, withdrawals, RPC observability — all implemented and tested).
 
 **Capability gate:** `route_probe` and `route_query` are new wire-level
 frame types that Iteration 1 nodes do not understand. A node running
@@ -975,7 +705,7 @@ internal/core/routing/
   query.go            — route_query / route_query_response
 ```
 
-#### 1.5a. Next-hop health state machine
+##### 1.5a. Next-hop health state machine
 
 Each `(identity, origin, nextHop)` triple is independently tracked with
 an explicit health state — matching the routing table's dedup key. A
@@ -1045,7 +775,7 @@ type RouteHealthState struct {
 Routes with `Bad` or `Dead` health are not selected by `Lookup()` unless
 no other route exists (last resort before gossip fallback).
 
-#### 1.5b. Route probe mechanism
+##### 1.5b. Route probe mechanism
 
 A lightweight probe verifies that a specific next-hop can actually
 forward traffic to the claimed identity, without waiting for real
@@ -1099,7 +829,7 @@ sequenceDiagram
 ```
 *Diagram — Route probe and health recovery*
 
-#### 1.5c. RTT-weighted composite route score
+##### 1.5c. RTT-weighted composite route score
 
 Pure hop-count metrics can choose a 2-hop path through a congested
 transcontinental relay over a 3-hop local mesh path. Adding RTT
@@ -1189,7 +919,7 @@ flowchart TD
 ```
 *Diagram — Route selection using composite score*
 
-#### 1.5d. Targeted route query
+##### 1.5d. Targeted route query
 
 When a route to a target identity is `Bad` or all known routes are
 exhausted, the node can ask its connected peers for better routes using

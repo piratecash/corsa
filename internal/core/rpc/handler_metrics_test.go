@@ -1,9 +1,10 @@
 package rpc_test
 
 import (
+	"testing"
+
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/rpc"
-	"testing"
 
 	"corsa/internal/core/config"
 )
@@ -77,7 +78,7 @@ func TestMetricsTrafficHistoryNilProvider(t *testing.T) {
 
 func TestMetricsCommandHiddenWhenProviderNil(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil)
+	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil, nil)
 
 	for _, cmd := range table.Commands() {
 		if cmd.Name == "fetch_traffic_history" {
@@ -97,7 +98,7 @@ func TestMetricsCommandVisibleWhenProviderSet(t *testing.T) {
 	metrics := &mockMetricsProvider{
 		snapshot: protocol.Frame{Type: "traffic_history", TrafficHistory: &protocol.TrafficHistoryFrame{}},
 	}
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, metrics)
+	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, metrics, nil)
 
 	found := false
 	for _, cmd := range table.Commands() {

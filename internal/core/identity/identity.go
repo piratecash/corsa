@@ -11,7 +11,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
+
+// AddressLength is the fixed length of an identity address in hex characters.
+// Derived from SHA-256(Ed25519 public key), truncated to 20 bytes = 40 hex chars.
+const AddressLength = 40
+
+// validAddressRe matches exactly 40 lowercase hex characters.
+var validAddressRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// ValidateAddress checks that addr is a well-formed identity address:
+// exactly 40 lowercase hexadecimal characters. Returns nil if valid.
+func ValidateAddress(addr string) error {
+	if len(addr) != AddressLength {
+		return fmt.Errorf("identity address must be %d hex chars, got %d", AddressLength, len(addr))
+	}
+	if !validAddressRe.MatchString(addr) {
+		return fmt.Errorf("identity address must be lowercase hex, got %q", addr)
+	}
+	return nil
+}
+
+// IsValidAddress returns true if addr is a well-formed identity address.
+func IsValidAddress(addr string) bool {
+	return ValidateAddress(addr) == nil
+}
 
 type Identity struct {
 	PrivateKey    ed25519.PrivateKey

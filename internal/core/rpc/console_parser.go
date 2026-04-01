@@ -128,9 +128,13 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		"fetch_identities": true, "fetch_contacts": true, "fetch_trusted_contacts": true,
 		"fetch_notices": true, "fetch_chatlog_previews": true, "fetch_conversations": true,
 		"fetch_dm_headers": true, "fetch_relay_status": true,
+		"fetch_route_table": true, "fetch_route_summary": true,
 	}
 
 	if noArgCommands[command] {
+		if len(args) > 0 {
+			return nil, fmt.Errorf("%s takes no arguments", command)
+		}
 		return nil, nil
 	}
 
@@ -187,6 +191,15 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 			return nil, fmt.Errorf("send_dm requires to and body arguments")
 		}
 		return map[string]interface{}{"to": args[0], "body": strings.Join(args[1:], " ")}, nil
+
+	case "fetch_route_lookup":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("fetch_route_lookup requires identity argument")
+		}
+		if len(args) > 1 {
+			return nil, fmt.Errorf("fetch_route_lookup takes exactly one argument")
+		}
+		return map[string]interface{}{"identity": args[0]}, nil
 	}
 
 	// Unknown command — pass through with no args, let CommandTable handle the error

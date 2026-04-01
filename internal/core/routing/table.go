@@ -175,7 +175,15 @@ func (t *Table) UpdateRoute(entry RouteEntry) (bool, error) {
 			existing[idx] = entry
 			accepted = true
 		} else if entry.SeqNo == old.SeqNo {
-			if entry.Source.TrustRank() > old.Source.TrustRank() {
+			// A withdrawal tombstone (Hops >= HopsInfinity) must not be
+			// replaced by a same-SeqNo update, even if the update has
+			// higher trust or fewer hops. Only a strictly newer SeqNo
+			// from the origin may supersede a withdrawal. Without this
+			// guard, a delayed hop_ack (higher trust rank) could
+			// resurrect a withdrawn lineage.
+			if old.Hops >= HopsInfinity {
+				// Already withdrawn — reject same-seq replacement.
+			} else if entry.Source.TrustRank() > old.Source.TrustRank() {
 				existing[idx] = entry
 				accepted = true
 			} else if entry.Source == old.Source && entry.Hops < old.Hops {
@@ -233,7 +241,7 @@ func (t *Table) WithdrawRoute(identity, origin, nextHop string, seqNo uint64) bo
 			NextHop:   nextHop,
 			Hops:      HopsInfinity,
 			SeqNo:     seqNo,
-			Source:     RouteSourceAnnouncement,
+			Source:    RouteSourceAnnouncement,
 			ExpiresAt: now.Add(t.defaultTTL),
 		}
 		t.routes[identity] = append(existing, tombstone)
@@ -432,6 +440,7 @@ func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, e
 				seq := t.nextSeqLocked(r.Identity)
 				r.Hops = HopsInfinity
 				r.SeqNo = seq
+				r.ExpiresAt = now.Add(t.defaultTTL)
 
 				result.Withdrawals = append(result.Withdrawals, AnnounceEntry{
 					Identity: r.Identity,
@@ -442,6 +451,7 @@ func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, e
 			} else {
 				result.TransitInvalidated++
 				r.Hops = HopsInfinity
+				r.ExpiresAt = now.Add(t.defaultTTL)
 			}
 		}
 	}
@@ -463,6 +473,7 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	now := t.clock()
 	invalidated := 0
 	for _, routes := range t.routes {
 		for i := range routes {
@@ -474,6 +485,7 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity string) int {
 				continue
 			}
 			r.Hops = HopsInfinity
+			r.ExpiresAt = now.Add(t.defaultTTL)
 			invalidated++
 		}
 	}
@@ -490,6 +502,13 @@ func (t *Table) nextSeqLocked(identity string) uint64 {
 // TickTTL removes expired routes from the table and cleans up stale
 // flap detection state. Should be called periodically (e.g., every
 // second or every few seconds).
+//
+// Only ExpiresAt is checked — withdrawn (Hops >= HopsInfinity) entries
+// are kept until their ExpiresAt elapses. This preserves tombstones
+// created by WithdrawRoute that guard against resurrection from delayed
+// lower-SeqNo announcements. RemoveDirectPeer and InvalidateTransitRoutes
+// set a short ExpiresAt on withdrawn entries so they are cleaned up
+// promptly without breaking tombstone semantics.
 func (t *Table) TickTTL() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -606,7 +625,8 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 }
 
 // Snapshot returns an immutable point-in-time view of the entire table.
-// The returned Snapshot is safe to read without locks.
+// All fields (routes, counts, flap state) are captured under a single
+// lock acquisition, ensuring a self-consistent response for RPC consumers.
 func (t *Table) Snapshot() Snapshot {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -617,11 +637,43 @@ func (t *Table) Snapshot() Snapshot {
 		TakenAt: now,
 	}
 
-	for identity, routes := range t.routes {
+	totalEntries := 0
+	activeEntries := 0
+	for ident, routes := range t.routes {
 		copied := make([]RouteEntry, len(routes))
 		copy(copied, routes)
-		snap.Routes[identity] = copied
+		snap.Routes[ident] = copied
+		totalEntries += len(routes)
+		for _, r := range routes {
+			if !r.IsWithdrawn() && !r.IsExpired(now) {
+				activeEntries++
+			}
+		}
 	}
+	snap.TotalEntries = totalEntries
+	snap.ActiveEntries = activeEntries
+
+	// Capture flap state atomically with routes.
+	cutoff := now.Add(-t.flapWindow)
+	for peer, fs := range t.flapState {
+		recentCount := 0
+		for _, wt := range fs.withdrawTimes {
+			if !wt.Before(cutoff) {
+				recentCount++
+			}
+		}
+		inHoldDown := now.Before(fs.holdDownUntil)
+		if recentCount == 0 && !inHoldDown {
+			continue
+		}
+		snap.FlapState = append(snap.FlapState, FlapEntry{
+			PeerIdentity:      peer,
+			RecentWithdrawals: recentCount,
+			InHoldDown:        inHoldDown,
+			HoldDownUntil:     fs.holdDownUntil,
+		})
+	}
+
 	return snap
 }
 
@@ -635,6 +687,47 @@ func (t *Table) Size() int {
 		total += len(routes)
 	}
 	return total
+}
+
+// FlapSnapshot returns the current flap detection state for all tracked peers.
+// Stale entries are filtered: withdrawals outside the flap window are trimmed,
+// and peers with no recent withdrawals and no active hold-down are excluded.
+// This avoids reporting false positives between TickTTL cleanup cycles.
+func (t *Table) FlapSnapshot() []FlapEntry {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	now := t.clock()
+	cutoff := now.Add(-t.flapWindow)
+	var entries []FlapEntry
+	for peer, fs := range t.flapState {
+		// Count only withdrawals within the current flap window.
+		recentCount := 0
+		for _, wt := range fs.withdrawTimes {
+			if !wt.Before(cutoff) {
+				recentCount++
+			}
+		}
+		inHoldDown := now.Before(fs.holdDownUntil)
+
+		// Skip peers with no recent withdrawals and no active hold-down.
+		if recentCount == 0 && !inHoldDown {
+			continue
+		}
+
+		entries = append(entries, FlapEntry{
+			PeerIdentity:      peer,
+			RecentWithdrawals: recentCount,
+			InHoldDown:        inHoldDown,
+			HoldDownUntil:     fs.holdDownUntil,
+		})
+	}
+	return entries
+}
+
+// LocalOrigin returns this node's identity string.
+func (t *Table) LocalOrigin() string {
+	return t.localOrigin
 }
 
 // ActiveSize returns the number of non-withdrawn, non-expired entries.

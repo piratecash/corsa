@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -245,7 +244,6 @@ func (rs *relayStateStore) lookupRouteOrigin(messageID string) string {
 	return state.RouteOrigin
 }
 
-
 // snapshot returns a copy of all relay forward states for persistence.
 func (rs *relayStateStore) snapshot() []relayForwardState {
 	rs.mu.Lock()
@@ -327,7 +325,18 @@ func (s *Service) persistRelayState() {
 //   - "stored"    — no capable next hop, message stored locally for later delivery
 //   - ""          — message was dropped (dedupe, max hops, client node, rejected by
 //     storeIncomingMessage); no ack needed
-func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame) string {
+//
+// handleRelayMessage processes an incoming relay_message frame.
+//
+// syncSession is an optional outbound peer session that can be reused for
+// on-demand sender-key sync (fetch_contacts). When the relay arrives on an
+// inbound connection, the caller looks up the outbound session to the same
+// peer and passes it here — this avoids opening a new TCP connection and
+// handles NATed peers whose transport address is not redialable. When the
+// relay arrives on an outbound session that may be inside a
+// peerSessionRequest read loop, the caller passes nil to avoid a deadlock
+// on the single-reader inboxCh.
+func (s *Service) handleRelayMessage(senderAddress string, syncSession *peerSession, frame protocol.Frame) string {
 	messageID := frame.ID
 	recipient := frame.Recipient
 	hopCount := frame.HopCount
@@ -356,12 +365,13 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 		// duplicate relay_message. Drop silently — the valid reverse-path
 		// state from the first delivery must not be overwritten or released.
 		if !s.relayStates.tryReserve(messageID, senderAddress) {
-			log.Debug().
+			log.Info().
 				Str("id", messageID).
 				Str("from", originSender).
 				Msg("relay_drop_duplicate_final_hop")
 			return ""
 		}
+		log.Info().Str("id", messageID).Str("sender", originSender).Str("sync_from", senderAddress).Msg("relay_final_hop_delivering")
 		// Upgrade the placeholder reservation to full relay state BEFORE
 		// delivery so the receipt reverse path is available when
 		// storeIncomingMessage fires emitDeliveryReceipt in a goroutine.
@@ -374,7 +384,7 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 			HopCount:         hopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
-		if !s.deliverRelayedMessage(senderAddress, frame) {
+		if !s.deliverRelayedMessage(senderAddress, syncSession, frame) {
 			s.relayStates.release(messageID)
 			log.Warn().
 				Str("id", messageID).
@@ -472,7 +482,7 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 		// reach the recipient through non-relay peers. The "stored"
 		// status tells the previous hop that relay forwarding did not
 		// happen, but the message is not stuck — gossip handles it.
-		if !s.deliverRelayedMessage(senderAddress, frame) {
+		if !s.deliverRelayedMessage(senderAddress, syncSession, frame) {
 			s.relayStates.release(messageID)
 			log.Warn().
 				Str("id", messageID).
@@ -540,7 +550,15 @@ func (s *Service) handleRelayMessage(senderAddress string, frame protocol.Frame)
 // rejected (parse error, invalid signature, unknown key after sync, etc.).
 // The caller uses this to decide the hop-ack status: a rejected message must
 // NOT be reported as "delivered" or "stored" to the previous hop.
-func (s *Service) deliverRelayedMessage(senderAddress string, frame protocol.Frame) bool {
+// deliverRelayedMessage stores a relayed message locally. When the message
+// sender's keys are unknown, it attempts on-demand key sync from the
+// previous hop.
+//
+// syncSession is an optional outbound session to the relay peer that can be
+// reused for fetch_contacts without opening a new TCP connection. Pass nil
+// when the caller is inside a peerSessionRequest read loop on the same
+// session (single-reader constraint on inboxCh would deadlock).
+func (s *Service) deliverRelayedMessage(senderAddress string, syncSession *peerSession, frame protocol.Frame) bool {
 	msg, err := incomingMessageFromFrame(protocol.Frame{
 		ID:         frame.ID,
 		Topic:      frame.Topic,
@@ -557,17 +575,20 @@ func (s *Service) deliverRelayedMessage(senderAddress string, frame protocol.Fra
 	}
 	stored, _, errCode := s.storeIncomingMessage(msg, false)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey && senderAddress != "" {
-		// The previous hop likely has the sender's keys — sync and retry.
-		refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-		s.syncPeer(refreshCtx, senderAddress)
-		cancel()
+		log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", senderAddress).Msg("relay_key_sync_start")
+		imported := s.syncSenderKeys(senderAddress, syncSession)
+		if imported == 0 {
+			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", senderAddress).Msg("relay_key_sync_no_contacts_imported")
+		}
 		stored, _, errCode = s.storeIncomingMessage(msg, false)
 		if stored {
-			log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", senderAddress).Msg("relay_deliver_after_key_sync")
+			log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", senderAddress).Int("imported", imported).Msg("relay_deliver_after_key_sync")
+		} else {
+			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("code", errCode).Int("imported", imported).Msg("relay_key_sync_retry_failed")
 		}
 	}
 	if !stored && errCode != "" {
-		log.Debug().Str("id", frame.ID).Str("code", errCode).Msg("relay_deliver_rejected")
+		log.Warn().Str("id", frame.ID).Str("code", errCode).Msg("relay_deliver_rejected")
 		return false
 	}
 	return stored

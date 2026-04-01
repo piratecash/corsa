@@ -43,7 +43,7 @@ func (a *App) Run(ctx context.Context) error {
 	// Build command table — node-only mode: no chatlog, no dm_router.
 	// Pass nil for chatlog and dmRouter — those commands are registered as unavailable (503).
 	cmdTable := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(cmdTable, a.service, nil, nil, metricsCollector)
+	rpc.RegisterAllCommands(cmdTable, a.service, nil, nil, metricsCollector, a.service)
 
 	// Start HTTP RPC server for external access (corsa-cli)
 	rpcServer, err := rpc.NewServer(a.cfg.RPC, cmdTable, a.service)

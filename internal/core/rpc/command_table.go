@@ -177,7 +177,7 @@ func (t *CommandTable) AllNames() []string {
 // and by tests that need a fully populated CommandTable.
 // Pass nil for chatlog, dmRouter, or metricsProvider to simulate standalone
 // node mode — those commands are registered as unavailable (503, hidden from help).
-func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider) {
+func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider, routingProvider RoutingProvider) {
 	RegisterSystemCommands(t, node)
 	RegisterNetworkCommands(t, node)
 	RegisterMeshCommands(t, node)
@@ -186,6 +186,7 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 	RegisterChatlogCommands(t, chatlog)
 	RegisterNoticeCommands(t, node)
 	RegisterMetricsCommands(t, metricsProvider)
+	RegisterRoutingCommands(t, routingProvider)
 }
 
 // --- Helper constructors for building responses ---

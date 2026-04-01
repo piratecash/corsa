@@ -35,62 +35,62 @@ type MessageStore interface {
 }
 
 type Service struct {
-	identity          *identity.Identity
-	selfBoxSig        string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
-	cfg               config.Node
-	trust             *trustStore
-	mu                sync.RWMutex
-	peers             []transport.Peer
-	known             map[string]struct{}
-	boxKeys           map[string]string
-	pubKeys           map[string]string
-	boxSigs           map[string]string
-	topics            map[string][]protocol.Envelope
-	receipts          map[string][]protocol.DeliveryReceipt
-	notices           map[string]gazeta.Notice
-	seen              map[string]struct{}
-	seenReceipts      map[string]struct{}
-	subs              map[string]map[string]*subscriber
-	sessions          map[string]*peerSession
-	health            map[string]*peerHealth
-	peerTypes         map[string]config.NodeType
-	peerIDs           map[string]string
-	peerVersions      map[string]string
-	peerBuilds        map[string]int
-	pending           map[string][]pendingFrame
-	pendingKeys       map[string]struct{}
-	orphaned          map[string][]pendingFrame // legacy fallback-keyed frames that could not be migrated
-	relayRetry        map[string]relayAttempt
-	outbound          map[string]outboundDelivery
-	upstream          map[string]struct{}
-	inboundConns      map[net.Conn]struct{}
-	inboundMetered    map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
-	inboundHealthRefs map[string]int            // resolved overlay address → active inbound connection count
-	inboundTracked    map[net.Conn]struct{}     // connections promoted via trackInboundConnect (auth complete or auth not required)
-	connWg            sync.WaitGroup            // tracks active handleConn goroutines for graceful shutdown
-	connAuth          map[net.Conn]*connAuthState
-	connPeerInfo      map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
-	connSendCh        map[net.Conn]chan sendItem  // per-connection buffered send channel; decouples callers from socket I/O
-	connWriterDone    map[net.Conn]chan struct{}  // closed by connWriter when it exits; used to wait for drain before TCP close
-	bans              map[string]banEntry
-	events            map[chan protocol.LocalChangeEvent]struct{}
-	listener          net.Listener
-	lastSync          time.Time
-	peersStatePath    string
-	lastPeerSave      time.Time
-	lastPeerEvict     time.Time
-	dialOrigin        map[string]string     // dial address → primary peer address (for fallback port tracking)
-	persistedMeta     map[string]*peerEntry // stable metadata from peers.json, keyed by address
-	observedAddrs     map[string]string     // peer identity (fingerprint) → observed IP they reported for us
-	reachableGroups   map[NetGroup]struct{} // network groups this node can reach (computed at startup)
-	messageStore      MessageStore          // optional: persistence handler registered by desktop layer
-	router            Router                // routing strategy for outbound message delivery
-	relayStates       *relayStateStore      // hop-by-hop relay forwarding state (Iteration 1)
-	relayLimiter      *relayRateLimiter     // per-peer token bucket for relay fan-out
-	routingTable      *routing.Table        // distance-vector routing table (Phase 1.2)
-	announceLoop      *routing.AnnounceLoop // periodic + triggered announce_routes sender (Phase 1.2)
-	identitySessions      map[string]int // peer identity → active session count (multi-session awareness)
-	identityRelaySessions map[string]int // peer identity → relay-capable session count (direct-route lifecycle)
+	identity              *identity.Identity
+	selfBoxSig            string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
+	cfg                   config.Node
+	trust                 *trustStore
+	mu                    sync.RWMutex
+	peers                 []transport.Peer
+	known                 map[string]struct{}
+	boxKeys               map[string]string
+	pubKeys               map[string]string
+	boxSigs               map[string]string
+	topics                map[string][]protocol.Envelope
+	receipts              map[string][]protocol.DeliveryReceipt
+	notices               map[string]gazeta.Notice
+	seen                  map[string]struct{}
+	seenReceipts          map[string]struct{}
+	subs                  map[string]map[string]*subscriber
+	sessions              map[string]*peerSession
+	health                map[string]*peerHealth
+	peerTypes             map[string]config.NodeType
+	peerIDs               map[string]string
+	peerVersions          map[string]string
+	peerBuilds            map[string]int
+	pending               map[string][]pendingFrame
+	pendingKeys           map[string]struct{}
+	orphaned              map[string][]pendingFrame // legacy fallback-keyed frames that could not be migrated
+	relayRetry            map[string]relayAttempt
+	outbound              map[string]outboundDelivery
+	upstream              map[string]struct{}
+	inboundConns          map[net.Conn]struct{}
+	inboundMetered        map[net.Conn]*MeteredConn // inbound conn → MeteredConn for live traffic reads
+	inboundHealthRefs     map[string]int            // resolved overlay address → active inbound connection count
+	inboundTracked        map[net.Conn]struct{}     // connections promoted via trackInboundConnect (auth complete or auth not required)
+	connWg                sync.WaitGroup            // tracks active handleConn goroutines for graceful shutdown
+	connAuth              map[net.Conn]*connAuthState
+	connPeerInfo          map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
+	connSendCh            map[net.Conn]chan sendItem  // per-connection buffered send channel; decouples callers from socket I/O
+	connWriterDone        map[net.Conn]chan struct{}  // closed by connWriter when it exits; used to wait for drain before TCP close
+	bans                  map[string]banEntry
+	events                map[chan protocol.LocalChangeEvent]struct{}
+	listener              net.Listener
+	lastSync              time.Time
+	peersStatePath        string
+	lastPeerSave          time.Time
+	lastPeerEvict         time.Time
+	dialOrigin            map[string]string     // dial address → primary peer address (for fallback port tracking)
+	persistedMeta         map[string]*peerEntry // stable metadata from peers.json, keyed by address
+	observedAddrs         map[string]string     // peer identity (fingerprint) → observed IP they reported for us
+	reachableGroups       map[NetGroup]struct{} // network groups this node can reach (computed at startup)
+	messageStore          MessageStore          // optional: persistence handler registered by desktop layer
+	router                Router                // routing strategy for outbound message delivery
+	relayStates           *relayStateStore      // hop-by-hop relay forwarding state (Iteration 1)
+	relayLimiter          *relayRateLimiter     // per-peer token bucket for relay fan-out
+	routingTable          *routing.Table        // distance-vector routing table (Phase 1.2)
+	announceLoop          *routing.AnnounceLoop // periodic + triggered announce_routes sender (Phase 1.2)
+	identitySessions      map[string]int        // peer identity → active session count (multi-session awareness)
+	identityRelaySessions map[string]int        // peer identity → relay-capable session count (direct-route lifecycle)
 }
 
 type subscriber struct {
@@ -373,48 +373,48 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	}
 
 	svc := &Service{
-		identity:          id,
-		cfg:               cfg,
-		selfBoxSig:        selfContact.BoxSignature,
-		trust:             trust,
-		peers:             peers,
-		peersStatePath:    peersStatePath,
-		persistedMeta:     persistedByAddr,
-		known:             known,
-		boxKeys:           boxKeys,
-		pubKeys:           pubKeys,
-		boxSigs:           boxSigs,
-		topics:            topics,
-		receipts:          receipts,
-		notices:           make(map[string]gazeta.Notice),
-		seen:              seen,
-		seenReceipts:      seenReceipts,
-		subs:              make(map[string]map[string]*subscriber),
-		sessions:          make(map[string]*peerSession),
-		health:            restoredHealth,
-		peerTypes:         make(map[string]config.NodeType),
-		peerIDs:           make(map[string]string),
-		peerVersions:      make(map[string]string),
-		peerBuilds:        make(map[string]int),
-		pending:           queueState.Pending,
-		pendingKeys:       pendingKeys,
-		orphaned:          queueState.Orphaned,
-		relayRetry:        queueState.RelayRetry,
-		outbound:          queueState.OutboundState,
-		upstream:          make(map[string]struct{}),
-		dialOrigin:        make(map[string]string),
-		observedAddrs:     make(map[string]string),
-		reachableGroups:   computeReachableGroups(cfg),
-		inboundConns:      make(map[net.Conn]struct{}),
-		inboundMetered:    make(map[net.Conn]*MeteredConn),
-		inboundHealthRefs: make(map[string]int),
-		inboundTracked:    make(map[net.Conn]struct{}),
-		connAuth:          make(map[net.Conn]*connAuthState),
-		connPeerInfo:      make(map[net.Conn]*connPeerHello),
-		connSendCh:        make(map[net.Conn]chan sendItem),
-		connWriterDone:    make(map[net.Conn]chan struct{}),
-		bans:              make(map[string]banEntry),
-		events:            make(map[chan protocol.LocalChangeEvent]struct{}),
+		identity:              id,
+		cfg:                   cfg,
+		selfBoxSig:            selfContact.BoxSignature,
+		trust:                 trust,
+		peers:                 peers,
+		peersStatePath:        peersStatePath,
+		persistedMeta:         persistedByAddr,
+		known:                 known,
+		boxKeys:               boxKeys,
+		pubKeys:               pubKeys,
+		boxSigs:               boxSigs,
+		topics:                topics,
+		receipts:              receipts,
+		notices:               make(map[string]gazeta.Notice),
+		seen:                  seen,
+		seenReceipts:          seenReceipts,
+		subs:                  make(map[string]map[string]*subscriber),
+		sessions:              make(map[string]*peerSession),
+		health:                restoredHealth,
+		peerTypes:             make(map[string]config.NodeType),
+		peerIDs:               make(map[string]string),
+		peerVersions:          make(map[string]string),
+		peerBuilds:            make(map[string]int),
+		pending:               queueState.Pending,
+		pendingKeys:           pendingKeys,
+		orphaned:              queueState.Orphaned,
+		relayRetry:            queueState.RelayRetry,
+		outbound:              queueState.OutboundState,
+		upstream:              make(map[string]struct{}),
+		dialOrigin:            make(map[string]string),
+		observedAddrs:         make(map[string]string),
+		reachableGroups:       computeReachableGroups(cfg),
+		inboundConns:          make(map[net.Conn]struct{}),
+		inboundMetered:        make(map[net.Conn]*MeteredConn),
+		inboundHealthRefs:     make(map[string]int),
+		inboundTracked:        make(map[net.Conn]struct{}),
+		connAuth:              make(map[net.Conn]*connAuthState),
+		connPeerInfo:          make(map[net.Conn]*connPeerHello),
+		connSendCh:            make(map[net.Conn]chan sendItem),
+		connWriterDone:        make(map[net.Conn]chan struct{}),
+		bans:                  make(map[string]banEntry),
+		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:      make(map[string]int),
 		identityRelaySessions: make(map[string]int),
 	}
@@ -764,7 +764,8 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 		}
 		if addr := s.inboundPeerAddress(conn); addr != "" {
-			s.trackInboundConnect(conn, addr)
+			s.addPeerID(addr, frame.Address)
+			s.trackInboundConnect(conn, addr, frame.Address)
 			// Store version/build by the health-tracking address so that
 			// peerHealthFrames can find them. learnPeerFromFrame only
 			// stores these when listenerEnabled, which excludes peers
@@ -924,7 +925,12 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		ackStatus := s.handleRelayMessage(senderAddr, frame)
+		// Look up an outbound session to the relay peer for on-demand
+		// key sync. This is safe because the relay arrived on an inbound
+		// connection — the outbound session is a separate conn/inboxCh,
+		// so peerSessionRequest won't deadlock.
+		syncSession, _ := s.activePeerSession(senderAddr)
+		ackStatus := s.handleRelayMessage(senderAddr, syncSession, frame)
 		// Write a single relay_hop_ack with the semantic status directly
 		// on the inbound connection. This is the only ack the sender
 		// receives — handleRelayMessage itself does not send acks.
@@ -1385,7 +1391,8 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 	}
 
 	if addr := s.inboundPeerAddress(conn); addr != "" {
-		s.trackInboundConnect(conn, addr)
+		s.addPeerID(addr, state.Hello.Address)
+		s.trackInboundConnect(conn, addr, state.Hello.Address)
 		s.addPeerVersion(addr, state.Hello.ClientVersion)
 		s.addPeerBuild(addr, state.Hello.ClientBuild)
 	}
@@ -1462,8 +1469,10 @@ func (s *Service) trackedInboundPeerAddress(conn net.Conn) string {
 // trackInboundConnect increments the inbound connection reference count
 // for the given overlay address, marks the concrete connection as promoted,
 // and marks the peer as connected when this is the first active inbound
-// connection for that address.
-func (s *Service) trackInboundConnect(conn net.Conn, address string) {
+// connection for that address. peerIdentity is the Ed25519 fingerprint
+// from the hello/auth frame — used for routing table registration instead
+// of the transport address.
+func (s *Service) trackInboundConnect(conn net.Conn, address, peerIdentity string) {
 	s.mu.Lock()
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
@@ -1475,10 +1484,10 @@ func (s *Service) trackInboundConnect(conn net.Conn, address string) {
 		s.markPeerConnected(resolved, peerDirectionInbound)
 	}
 
-	// Routing table: register direct peer. The relay capability flag
-	// ensures only peers that can accept relay_message become direct
-	// routes — see onPeerSessionEstablished for the full rationale.
-	s.onPeerSessionEstablished(address, s.connHasCapability(conn, capMeshRelayV1))
+	// Routing table: register direct peer using the identity fingerprint,
+	// not the transport address. The relay capability flag ensures only
+	// peers that can accept relay_message become direct routes.
+	s.onPeerSessionEstablished(peerIdentity, s.connHasCapability(conn, capMeshRelayV1))
 
 	// Send full table sync to the inbound peer (Phase 1.2: full sync on
 	// connect, symmetric with the outbound path).
@@ -1503,6 +1512,7 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address string) {
 	_, wasTracked := s.inboundTracked[conn]
 	delete(s.inboundTracked, conn)
 	resolved := s.resolveHealthAddress(address)
+	peerIdentity := s.peerIDs[resolved]
 	var last bool
 	if wasTracked && s.inboundHealthRefs[resolved] > 0 {
 		s.inboundHealthRefs[resolved]--
@@ -1518,10 +1528,10 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address string) {
 	}
 
 	// Routing table: deregister direct peer when the last relay-capable
-	// inbound session closes. The hasRelayCap flag must match what was
-	// passed to onPeerSessionEstablished for balanced accounting.
+	// inbound session closes. Uses the identity fingerprint, not transport
+	// address, to match what was passed to onPeerSessionEstablished.
 	if wasTracked {
-		s.onPeerSessionClosed(address, s.connHasCapability(conn, capMeshRelayV1))
+		s.onPeerSessionClosed(peerIdentity, s.connHasCapability(conn, capMeshRelayV1))
 	}
 }
 
@@ -2818,16 +2828,23 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 	return scored
 }
 
-func (s *Service) syncPeer(ctx context.Context, address string) {
-	// Always open a fresh connection instead of reusing the active session.
-	// syncPeer is called from handlePeerSessionFrame when a push_message
-	// fails with ErrCodeUnknownSenderKey.  That handler runs inline inside
-	// peerSessionRequest.  Reusing the session would call syncPeerSession →
-	// peerSessionRequest on the same inboxCh, consuming frames meant for the
-	// outer caller and causing a 12-second stall (peerRequestTimeout).
+// syncPeer opens a fresh TCP connection to the given address, performs
+// a full handshake (hello → welcome → auth if required), fetches peer
+// addresses and contacts, and imports any verified contacts into local
+// state. Returns the number of contacts successfully imported.
+//
+// A fresh connection is used instead of reusing the active session
+// because syncPeer is called from handlePeerSessionFrame when a
+// push_message fails with ErrCodeUnknownSenderKey. That handler runs
+// inline inside peerSessionRequest. Reusing the session would call
+// syncPeerSession → peerSessionRequest on the same inboxCh, consuming
+// frames meant for the outer caller and causing a 12-second stall
+// (peerRequestTimeout).
+func (s *Service) syncPeer(ctx context.Context, address string) int {
 	conn, err := s.dialPeer(ctx, address, syncHandshakeTimeout)
 	if err != nil {
-		return
+		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_dial_failed")
+		return 0
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -2835,15 +2852,18 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 	reader := bufio.NewReader(conn)
 
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		return
+		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_hello_write_failed")
+		return 0
 	}
 	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
 	if err != nil {
-		return
+		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_welcome_read_failed")
+		return 0
 	}
 	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
 	if err != nil {
-		return
+		log.Warn().Err(err).Str("peer", address).Msg("sync_peer_welcome_parse_failed")
+		return 0
 	}
 	if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
@@ -2852,18 +2872,37 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 			Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
 		})
 		if err != nil {
-			return
+			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_marshal_failed")
+			return 0
 		}
 		if _, err := io.WriteString(conn, authLine); err != nil {
-			return
+			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_write_failed")
+			return 0
 		}
-		authReply, err := readFrameLine(reader, maxResponseLineBytes)
-		if err != nil {
-			return
+		// After auth_session the remote may interleave non-auth frames
+		// (e.g., announce_routes triggered by trackInboundConnect) before
+		// the auth_ok reply. Skip up to 5 unexpected frames to tolerate
+		// this race without breaking the handshake.
+		var frame protocol.Frame
+		for skipped := 0; skipped < 5; skipped++ {
+			authReply, err := readFrameLine(reader, maxResponseLineBytes)
+			if err != nil {
+				log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_read_failed")
+				return 0
+			}
+			frame, err = protocol.ParseFrameLine(strings.TrimSpace(authReply))
+			if err != nil {
+				log.Warn().Err(err).Str("peer", address).Msg("sync_peer_auth_parse_failed")
+				return 0
+			}
+			if frame.Type == "auth_ok" || frame.Type == "error" {
+				break
+			}
+			log.Debug().Str("peer", address).Str("type", frame.Type).Int("skipped", skipped+1).Msg("sync_peer_auth_skip_interleaved_frame")
 		}
-		frame, err := protocol.ParseFrameLine(strings.TrimSpace(authReply))
-		if err != nil || frame.Type != "auth_ok" {
-			return
+		if frame.Type != "auth_ok" {
+			log.Warn().Str("peer", address).Str("type", frame.Type).Str("code", frame.Code).Msg("sync_peer_auth_rejected")
+			return 0
 		}
 	}
 	s.learnIdentityFromWelcome(welcome)
@@ -2875,11 +2914,13 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
 		if _, err := io.WriteString(conn, line); err != nil {
-			return
+			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_get_peers_failed")
+			return 0
 		}
 		reply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
-			return
+			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_get_peers_read_failed")
+			return 0
 		}
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
 		if err == nil {
@@ -2888,34 +2929,47 @@ func (s *Service) syncPeer(ctx context.Context, address string) {
 			}
 		}
 	} else {
-		return
+		return 0
 	}
 
+	imported := 0
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "fetch_contacts"}); err == nil {
 		if _, err := io.WriteString(conn, line); err != nil {
-			return
+			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_fetch_contacts_failed")
+			return 0
 		}
 		contactsReply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
-			return
+			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_contacts_read_failed")
+			return 0
 		}
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(contactsReply))
-		if err == nil {
-			for _, contact := range frame.Contacts {
-				// Verify box key binding before accepting peer-advertised contacts.
-				if contact.Address == "" || contact.PubKey == "" || contact.BoxKey == "" || contact.BoxSig == "" {
-					continue
-				}
-				if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
-					continue
-				}
-				s.addKnownIdentity(contact.Address)
-				s.addKnownBoxKey(contact.Address, contact.BoxKey)
-				s.addKnownPubKey(contact.Address, contact.PubKey)
-				s.addKnownBoxSig(contact.Address, contact.BoxSig)
+		if err != nil {
+			log.Warn().Err(err).Str("peer", address).Msg("sync_peer_contacts_parse_failed")
+			return 0
+		}
+		for _, contact := range frame.Contacts {
+			// Verify box key binding before accepting peer-advertised contacts.
+			if contact.Address == "" || contact.PubKey == "" || contact.BoxKey == "" || contact.BoxSig == "" {
+				continue
 			}
+			if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
+				continue
+			}
+			s.addKnownIdentity(contact.Address)
+			s.addKnownBoxKey(contact.Address, contact.BoxKey)
+			s.addKnownPubKey(contact.Address, contact.PubKey)
+			s.addKnownBoxSig(contact.Address, contact.BoxSig)
+			imported++
 		}
 	}
+
+	if imported > 0 {
+		log.Info().Str("peer", address).Int("imported", imported).Msg("sync_peer_contacts_imported")
+	} else {
+		log.Warn().Str("peer", address).Msg("sync_peer_no_new_contacts")
+	}
+	return imported
 }
 
 func (s *Service) runPeerSession(ctx context.Context, address string) {
@@ -4230,10 +4284,24 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 		s.addPeerAddress(peer, "", "")
 	}
 
+	_, err = s.syncContactsViaSession(session)
+	return err
+}
+
+// syncContactsViaSession fetches and imports contacts over an existing
+// authenticated peer session. Returns the number of newly imported contacts.
+// Unlike syncPeer (which opens a fresh TCP connection), this reuses the
+// session's connection and avoids a full handshake — critical for NATed or
+// inbound-only peers whose transport address is not redialable.
+//
+// Caller must ensure the session is not currently busy with another
+// peerSessionRequest (single-reader constraint on inboxCh).
+func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 	contactsFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "fetch_contacts"}, "contacts", false)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	imported := 0
 	for _, contact := range contactsFrame.Contacts {
 		// Verify box key binding before accepting keys from third-party contacts
 		// advertised by peers (encryption.md: signed box-key advertisement).
@@ -4249,8 +4317,37 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 		s.addKnownBoxKey(contact.Address, contact.BoxKey)
 		s.addKnownPubKey(contact.Address, contact.PubKey)
 		s.addKnownBoxSig(contact.Address, contact.BoxSig)
+		imported++
 	}
-	return nil
+	return imported, nil
+}
+
+// syncSenderKeys imports unknown sender keys from the peer at senderAddress.
+// It prefers syncing over an existing authenticated outbound session (no new
+// TCP connection, works for NATed/inbound-only peers) and falls back to a
+// fresh dial only when no reusable session is available.
+//
+// The syncSession parameter, when non-nil, is used directly instead of
+// looking up a session by address. Callers pass nil when the only candidate
+// session is currently inside a peerSessionRequest read loop (e.g.,
+// handlePeerSessionFrame dispatched during a ping), because the
+// single-reader constraint on inboxCh would cause a deadlock.
+func (s *Service) syncSenderKeys(senderAddress string, syncSession *peerSession) int {
+	if syncSession != nil {
+		imported, err := s.syncContactsViaSession(syncSession)
+		if err == nil {
+			if imported > 0 {
+				log.Info().Str("peer", senderAddress).Int("imported", imported).Msg("sync_sender_keys_via_session")
+			}
+			return imported
+		}
+		log.Warn().Err(err).Str("peer", senderAddress).Msg("sync_sender_keys_session_failed")
+	}
+
+	// Fall back to a fresh TCP connection.
+	ctx, cancel := context.WithTimeout(context.Background(), syncHandshakeTimeout)
+	defer cancel()
+	return s.syncPeer(ctx, senderAddress)
 }
 
 func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
@@ -4280,9 +4377,11 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 
 		stored, _, errCode := s.storeIncomingMessage(msg, true)
 		if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-			s.syncPeer(refreshCtx, address)
-			cancel()
+			// Pass nil for syncSession: this handler runs on the outbound
+			// session event loop and may be inside peerSessionRequest
+			// (single-reader constraint). syncSenderKeys falls back to a
+			// fresh TCP dial.
+			s.syncSenderKeys(address, nil)
 			stored, _, _ = s.storeIncomingMessage(msg, true)
 		}
 		if stored {
@@ -4338,7 +4437,12 @@ func (s *Service) handlePeerSessionFrame(address string, frame protocol.Frame) {
 		if admit := admitRelayFrame(s.sessionHasCapability(address, capMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
-		if ackStatus := s.handleRelayMessage(address, frame); ackStatus != "" {
+		// Pass nil for syncSession: this handler may be dispatched from
+		// inside peerSessionRequest (e.g., relay_message arriving during
+		// a ping round-trip). Reusing the same session would deadlock on
+		// the single-reader inboxCh. syncSenderKeys falls back to a
+		// fresh TCP connection for key sync.
+		if ackStatus := s.handleRelayMessage(address, nil, frame); ackStatus != "" {
 			s.sendRelayHopAck(address, frame.ID, ackStatus)
 		}
 	case "relay_hop_ack":
@@ -4683,7 +4787,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			sent += lv.sent
 			recv += lv.received
 		}
-		items = append(items, protocol.PeerHealthFrame{
+		phf := protocol.PeerHealthFrame{
 			Address:             health.Address,
 			PeerID:              s.peerIDs[health.Address],
 			Network:             classifyAddress(health.Address).String(),
@@ -4706,7 +4810,11 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			BytesReceived:       recv,
 			TotalTraffic:        sent + recv,
 			Capabilities:        s.peerCapabilitiesLocked(health.Address),
-		})
+		}
+		if session, ok := s.sessions[health.Address]; ok {
+			phf.ProtocolVersion = session.version
+		}
+		items = append(items, phf)
 	}
 
 	// Include inbound-only peers that have live traffic but no health entry yet.
@@ -4714,7 +4822,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		if _, ok := seen[addr]; ok {
 			continue
 		}
-		items = append(items, protocol.PeerHealthFrame{
+		inboundPHF := protocol.PeerHealthFrame{
 			Address:       addr,
 			PeerID:        s.peerIDs[addr],
 			Network:       classifyAddress(addr).String(),
@@ -4727,7 +4835,11 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			BytesReceived: lv.received,
 			TotalTraffic:  lv.sent + lv.received,
 			Capabilities:  s.peerCapabilitiesLocked(addr),
-		})
+		}
+		if session, ok := s.sessions[addr]; ok {
+			inboundPHF.ProtocolVersion = session.version
+		}
+		items = append(items, inboundPHF)
 	}
 
 	sort.Slice(items, func(i, j int) bool {

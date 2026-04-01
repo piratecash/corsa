@@ -62,39 +62,39 @@ type consoleSuggestion struct {
 }
 
 type ConsoleWindow struct {
-	parent           *Window
-	theme            *material.Theme
-	ops              op.Ops
-	onClose          func()
-	window           *app.Window
-	closed           chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
-	peerList         widget.List
-	peerSectionList  widget.List
-	historyList      widget.List
-	suggestList      widget.List
-	consoleEditor    widget.Editor
-	runButton        widget.Clickable
+	parent            *Window
+	theme             *material.Theme
+	ops               op.Ops
+	onClose           func()
+	window            *app.Window
+	closed            chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
+	peerList          widget.List
+	peerSectionList   widget.List
+	historyList       widget.List
+	suggestList       widget.List
+	consoleEditor     widget.Editor
+	runButton         widget.Clickable
 	consoleTabButton  widget.Clickable
 	peersTabButton    widget.Clickable
 	trafficTabButton  widget.Clickable
 	infoTabButton     widget.Clickable
-	activeTab         int32 // consoleTab value; accessed atomically (UI writes, ticker reads)
-	trafficSamplesIn  []float32    // per-second received bytes/s (newest last)
-	trafficSamplesOut []float32    // per-second sent bytes/s (newest last)
-	trafficTotalSent  int64        // cumulative sent (for totals display)
-	trafficTotalRecv  int64        // cumulative received (for totals display)
-	trafficLoaded     bool         // true after initial history load
+	activeTab         int32     // consoleTab value; accessed atomically (UI writes, ticker reads)
+	trafficSamplesIn  []float32 // per-second received bytes/s (newest last)
+	trafficSamplesOut []float32 // per-second sent bytes/s (newest last)
+	trafficTotalSent  int64     // cumulative sent (for totals display)
+	trafficTotalRecv  int64     // cumulative received (for totals display)
+	trafficLoaded     bool      // true after initial history load
 	trafficTicker     *time.Ticker
-	mu               sync.RWMutex
-	consoleEntries   []consoleEntry
-	consoleBusy      bool
-	suggestButtons   map[string]*widget.Clickable
-	lastSuggestQuery string
-	hideSuggestions  bool
-	selectedSuggest  int
-	suggestBaseQuery string
-	suggestSnapshot  []consoleSuggestion
-	cachedCommands   []consoleSuggestion // loaded from CommandTable at init
+	mu                sync.RWMutex
+	consoleEntries    []consoleEntry
+	consoleBusy       bool
+	suggestButtons    map[string]*widget.Clickable
+	lastSuggestQuery  string
+	hideSuggestions   bool
+	selectedSuggest   int
+	suggestBaseQuery  string
+	suggestSnapshot   []consoleSuggestion
+	cachedCommands    []consoleSuggestion // loaded from CommandTable at init
 }
 
 func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
@@ -1094,10 +1094,11 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 	commands := table.Commands()
 
 	// Group by category, preserving display order.
-	categoryOrder := []string{"system", "network", "metrics", "identity", "message", "chatlog", "notice"}
+	categoryOrder := []string{"system", "network", "routing", "metrics", "identity", "message", "chatlog", "notice"}
 	categoryLabels := map[string]string{
 		"system":   "Control",
 		"network":  "Network",
+		"routing":  "Routing",
 		"metrics":  "Metrics",
 		"identity": "Identity & Contacts",
 		"message":  "Messages",
@@ -1318,7 +1319,11 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 						return layout.Dimensions{}
 					}
 					return layout.Inset{Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						label := material.Caption(c.theme, item.ClientVersion)
+						versionText := item.ClientVersion
+						if item.ProtocolVersion > 0 {
+							versionText = fmt.Sprintf("%s (proto v%d)", item.ClientVersion, item.ProtocolVersion)
+						}
+						label := material.Caption(c.theme, versionText)
 						label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
 						return label.Layout(gtx)
 					})
@@ -1379,11 +1384,15 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 	if item.Direction != "" {
 		dirLabel = " " + item.Direction
 	}
+	uptime := "-"
+	if item.Connected && item.LastConnectedAt != nil {
+		uptime = formatUptime(time.Since(*item.LastConnectedAt))
+	}
 	text := c.parent.t("node.peer_health.meta", connected+dirLabel, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
 	if text == "node.peer_health.meta" {
-		return fmt.Sprintf("%s%s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s", connected, dirLabel, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
+		return fmt.Sprintf("%s%s | uptime %s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s", connected, dirLabel, uptime, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
 	}
-	return text
+	return text + " | uptime " + uptime
 }
 
 // formatBytes formats a byte count into a human-readable string (B, KB, MB, GB, TB).
@@ -1400,18 +1409,45 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTP"[exp])
 }
 
+// formatUptime formats a duration as a human-readable uptime string.
+// Uses the largest applicable unit: "42s", "15m32s", "3h10m", "2d5h".
+func formatUptime(d time.Duration) string {
+	if d < 0 {
+		return "0s"
+	}
+	totalSeconds := int(d.Seconds())
+	if totalSeconds < 60 {
+		return fmt.Sprintf("%ds", totalSeconds)
+	}
+	totalMinutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	if totalMinutes < 60 {
+		return fmt.Sprintf("%dm%ds", totalMinutes, seconds)
+	}
+	hours := totalMinutes / 60
+	minutes := totalMinutes % 60
+	if hours < 24 {
+		return fmt.Sprintf("%dh%dm", hours, minutes)
+	}
+	days := hours / 24
+	hours = hours % 24
+	return fmt.Sprintf("%dd%dh", days, hours)
+}
+
 // --- Traffic tab ---
 
-const trafficGraphVisiblePoints = 600  // visible data points (10 min at 1 sample/sec)
-const trafficMaxSamples         = 3600 // hard cap matching metrics.Collector ring buffer
+const (
+	trafficGraphVisiblePoints = 600  // visible data points (10 min at 1 sample/sec)
+	trafficMaxSamples         = 3600 // hard cap matching metrics.Collector ring buffer
+)
 
 // Shared palette for traffic visualization (bars, line, legend, badges).
 var (
-	trafficInColor    = color.NRGBA{R: 59, G: 186, B: 130, A: 200}  // green bars
-	trafficOutColor   = color.NRGBA{R: 86, G: 156, B: 231, A: 200}  // blue bars
-	trafficTotalColor = color.NRGBA{R: 230, G: 180, B: 60, A: 255}  // yellow line
-	trafficInSolid    = color.NRGBA{R: 59, G: 186, B: 130, A: 255}  // green solid (legend/badges)
-	trafficOutSolid   = color.NRGBA{R: 86, G: 156, B: 231, A: 255}  // blue solid (legend/badges)
+	trafficInColor    = color.NRGBA{R: 59, G: 186, B: 130, A: 200} // green bars
+	trafficOutColor   = color.NRGBA{R: 86, G: 156, B: 231, A: 200} // blue bars
+	trafficTotalColor = color.NRGBA{R: 230, G: 180, B: 60, A: 255} // yellow line
+	trafficInSolid    = color.NRGBA{R: 59, G: 186, B: 130, A: 255} // green solid (legend/badges)
+	trafficOutSolid   = color.NRGBA{R: 86, G: 156, B: 231, A: 255} // blue solid (legend/badges)
 )
 
 // loadTrafficHistory fetches the full history from the metrics collector

@@ -185,14 +185,14 @@ func TestRelayDedupeFromTwoNeighbors(t *testing.T) {
 	}
 
 	// First relay from neighbor A — should succeed.
-	status1 := svc.handleRelayMessage("10.0.0.1:9000", frame)
+	status1 := svc.handleRelayMessage("10.0.0.1:9000", nil, frame)
 	if status1 != "delivered" {
 		t.Fatalf("first relay should deliver, got %q", status1)
 	}
 
 	// Same message_id from neighbor B — should be deduped (empty status).
 	frame.PreviousHop = "10.0.0.2:9000"
-	status2 := svc.handleRelayMessage("10.0.0.2:9000", frame)
+	status2 := svc.handleRelayMessage("10.0.0.2:9000", nil, frame)
 	if status2 != "" {
 		t.Fatalf("duplicate relay should be dropped, got %q", status2)
 	}
@@ -439,7 +439,7 @@ func TestRelayFloodDoesNotCauseUnboundedGrowth(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: floodPeer,
 		}
-		svc.handleRelayMessage(floodPeer, frame)
+		svc.handleRelayMessage(floodPeer, nil, frame)
 	}
 
 	svc.relayStates.mu.Lock()
@@ -497,7 +497,7 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 		PreviousHop: "10.0.0.2:9000",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.2:9000", frame)
+	status := svc.handleRelayMessage("10.0.0.2:9000", nil, frame)
 	if status != "delivered" {
 		t.Fatalf("peer2 relay should succeed despite peer1 flood, got %q", status)
 	}

@@ -111,6 +111,7 @@ type PeerHealthFrame struct {
 	Direction           string   `json:"direction,omitempty"`
 	ClientVersion       string   `json:"client_version,omitempty"`
 	ClientBuild         int      `json:"client_build,omitempty"`
+	ProtocolVersion     int      `json:"protocol_version,omitempty"`
 	State               string   `json:"state"`
 	Connected           bool     `json:"connected"`
 	PendingCount        int      `json:"pending_count,omitempty"`

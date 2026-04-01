@@ -508,7 +508,7 @@ func TestClientNodeDropsTransitRelayMessage(t *testing.T) {
 		PreviousHop: "10.0.0.1:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.1:64646", frame)
+	status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 	if status != "" {
 		t.Fatalf("client node should drop transit relay_message (got status %q, want empty)", status)
 	}
@@ -536,7 +536,7 @@ func TestClientNodeAcceptsRelayAddressedToSelf(t *testing.T) {
 		PreviousHop: "10.0.0.2:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.2:64646", frame)
+	status := svc.handleRelayMessage("10.0.0.2:64646", nil, frame)
 	if status != "delivered" {
 		t.Fatalf("client node should accept relay addressed to self (got status %q, want \"delivered\")", status)
 	}
@@ -564,7 +564,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", frame)
+		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 		if status != "delivered" {
 			t.Fatalf("expected \"delivered\", got %q", status)
 		}
@@ -591,13 +591,13 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 		}
 
 		// First call stores the relay state and returns "stored" (no peers).
-		first := svc.handleRelayMessage("10.0.0.1:64646", frame)
+		first := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 		if first != "stored" {
 			t.Fatalf("first call: expected \"stored\", got %q", first)
 		}
 
 		// Second call with same ID should be deduped — empty status, no ack.
-		second := svc.handleRelayMessage("10.0.0.1:64646", frame)
+		second := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 		if second != "" {
 			t.Fatalf("dedupe: expected empty status, got %q", second)
 		}
@@ -618,7 +618,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", frame)
+		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 		if status != "" {
 			t.Fatalf("max hops: expected empty status, got %q", status)
 		}
@@ -639,7 +639,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", frame)
+		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 		if status != "" {
 			t.Fatalf("client transit: expected empty status, got %q", status)
 		}
@@ -663,7 +663,7 @@ func TestHandleRelayMessageStatusSemantics(t *testing.T) {
 			MaxHops:     10,
 			PreviousHop: "10.0.0.1:64646",
 		}
-		status := svc.handleRelayMessage("10.0.0.1:64646", frame)
+		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 		if status != "stored" {
 			t.Fatalf("no peers: expected \"stored\", got %q", status)
 		}
@@ -721,7 +721,7 @@ func TestRelayedDMEmitsDeliveryReceipt(t *testing.T) {
 		PreviousHop: "10.0.0.5:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.5:64646", frame)
+	status := svc.handleRelayMessage("10.0.0.5:64646", nil, frame)
 	if status != "delivered" {
 		t.Fatalf("expected \"delivered\", got %q", status)
 	}
@@ -860,7 +860,7 @@ func TestFinalHopStoresRelayStateForReceipt(t *testing.T) {
 		PreviousHop: senderTransport,
 	}
 
-	status := svc.handleRelayMessage(senderTransport, frame)
+	status := svc.handleRelayMessage(senderTransport, nil, frame)
 	if status != "delivered" {
 		t.Fatalf("expected \"delivered\", got %q", status)
 	}
@@ -909,7 +909,7 @@ func TestRejectedRelayDMReturnsEmptyStatus(t *testing.T) {
 		PreviousHop: "10.0.0.7:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.7:64646", frame)
+	status := svc.handleRelayMessage("10.0.0.7:64646", nil, frame)
 	if status != "" {
 		t.Fatalf("rejected DM should return empty status (no ack), got %q", status)
 	}
@@ -948,7 +948,7 @@ func TestRejectedRelayStoredBranchReturnsEmptyStatus(t *testing.T) {
 		PreviousHop: "10.0.0.8:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.8:64646", frame)
+	status := svc.handleRelayMessage("10.0.0.8:64646", nil, frame)
 	if status != "" {
 		t.Fatalf("rejected stored DM should return empty status, got %q", status)
 	}
@@ -978,7 +978,7 @@ func TestRelayStatePersistenceAfterMutation(t *testing.T) {
 		PreviousHop: "10.0.0.9:64646",
 	}
 
-	status := svc.handleRelayMessage("10.0.0.9:64646", frame)
+	status := svc.handleRelayMessage("10.0.0.9:64646", nil, frame)
 	if status != "delivered" {
 		t.Fatalf("expected \"delivered\", got %q", status)
 	}
@@ -1238,7 +1238,7 @@ func TestDuplicateFinalHopRelayPreservesState(t *testing.T) {
 	previousHop := "relay-node-A"
 
 	// First delivery must succeed.
-	status1 := svc.handleRelayMessage(previousHop, relayFrame)
+	status1 := svc.handleRelayMessage(previousHop, nil, relayFrame)
 	if status1 != "delivered" {
 		t.Fatalf("first relay: got status %q, want \"delivered\"", status1)
 	}
@@ -1250,7 +1250,7 @@ func TestDuplicateFinalHopRelayPreservesState(t *testing.T) {
 	}
 
 	// Duplicate relay_message with the same ID arrives.
-	status2 := svc.handleRelayMessage(previousHop, relayFrame)
+	status2 := svc.handleRelayMessage(previousHop, nil, relayFrame)
 	if status2 != "" {
 		t.Fatalf("duplicate relay: got status %q, want \"\" (silent drop)", status2)
 	}
@@ -1302,7 +1302,7 @@ func TestRelayMessageRejectsNonDMTopic(t *testing.T) {
 				TTLSeconds: 300,
 			}
 
-			status := svc.handleRelayMessage("relay-peer", frame)
+			status := svc.handleRelayMessage("relay-peer", nil, frame)
 			if status != "" {
 				t.Fatalf("topic %q: got status %q, want \"\" (drop non-DM)", topic, status)
 			}
@@ -1534,7 +1534,7 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 	// make flaky passes statistically negligible (~0.5^20 ≈ 1e-6).
 	for i := 0; i < 20; i++ {
 		frame.ID = fmt.Sprintf("direct-path-multi-%d", i)
-		status := svc.handleRelayMessage("10.0.0.1:64646", frame)
+		status := svc.handleRelayMessage("10.0.0.1:64646", nil, frame)
 		if status != "forwarded" {
 			t.Fatalf("iteration %d: expected \"forwarded\", got %q", i, status)
 		}
