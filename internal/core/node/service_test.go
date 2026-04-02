@@ -7607,10 +7607,12 @@ func TestHasOutboundSessionForInboundResolvesDialOrigin(t *testing.T) {
 	}
 }
 
-// TestDuplicateInboundConnectionRejected verifies that the hello handler
-// rejects an inbound connection when an outbound session already exists
-// for the same peer address.
-func TestDuplicateInboundConnectionRejected(t *testing.T) {
+// TestDuplicateInboundConnectionAllowed verifies that the hello handler
+// allows an inbound connection even when an outbound session already
+// exists for the same peer address. Rejecting it would prevent the
+// inbound peer from gossiping to us when it has no outbound session —
+// a race that occurs when both sides dial simultaneously.
+func TestDuplicateInboundConnectionAllowed(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
@@ -7651,12 +7653,12 @@ func TestDuplicateInboundConnectionRejected(t *testing.T) {
 	reader := bufio.NewReader(conn)
 	reply := readJSONTestFrame(t, reader)
 
-	// The node should reject the duplicate inbound with an error frame.
-	if reply.Type != "error" {
-		t.Fatalf("expected error frame, got %q", reply.Type)
+	// The node should accept the duplicate inbound with a welcome frame.
+	if reply.Type == "error" {
+		t.Fatalf("expected welcome frame, got error: code=%s msg=%s", reply.Code, reply.Error)
 	}
-	if reply.Code != "duplicate-connection" {
-		t.Fatalf("expected error code %q, got %q", "duplicate-connection", reply.Code)
+	if reply.Type != "welcome" {
+		t.Fatalf("expected welcome frame, got %q", reply.Type)
 	}
 }
 

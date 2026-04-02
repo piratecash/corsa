@@ -99,6 +99,8 @@ type Service struct {
 	announceLoop          *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
 	identitySessions      map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
 	identityRelaySessions map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
+	drainDone             func()                                    // test hook: called after drainPendingForIdentities completes; nil in production
+	done                  chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
 }
 
 type subscriber struct {
@@ -451,6 +453,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
+		done:                  make(chan struct{}),
 	}
 
 	// Initialize distance-vector routing table (Phase 1.2).
@@ -478,6 +481,12 @@ func (s *Service) RegisterMessageStore(store MessageStore) {
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	// Signal drain goroutines to stop when Run exits. Drain goroutines
+	// launched by onPeerSessionEstablished and handleAnnounceRoutes check
+	// this channel before doing any work — prevents them from running
+	// against a half-torn-down Service during shutdown.
+	defer close(s.done)
+
 	// Wire relay state persistence: when the TTL ticker evicts expired
 	// entries, persist the updated state so disk stays in sync with memory.
 	s.relayStates.onEvict = func() { s.persistRelayState() }
@@ -805,17 +814,13 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 		}
 		if addr := s.inboundPeerAddress(conn); addr != "" {
-			// Reject duplicate: if we already have an outbound session
-			// to this peer, close the inbound connection to avoid
-			// parallel TCP connections between the same pair of nodes.
+			// Log duplicate but allow: when both sides dial each other
+			// simultaneously, the loser of the race has no outbound
+			// session and cannot forward gossip to this peer. Allowing
+			// both connections ensures bidirectional message flow; the
+			// routing and health layers already deduplicate by identity.
 			if s.hasOutboundSessionForInbound(addr) {
-				log.Info().Str("peer", string(addr)).Msg("reject_duplicate_inbound_connection")
-				s.writeJSONFrameSync(conn, protocol.Frame{
-					Type:  "error",
-					Code:  protocol.ErrCodeDuplicateConnection,
-					Error: "duplicate connection: outbound session already exists",
-				})
-				return false
+				log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_connection_allowed")
 			}
 			s.addPeerID(addr, domain.PeerIdentity(frame.Address))
 			s.trackInboundConnect(conn, addr, domain.PeerIdentity(frame.Address))
@@ -1449,16 +1454,11 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 	}
 
 	if addr := s.inboundPeerAddress(conn); addr != "" {
-		// Reject duplicate: if we already have an outbound session
-		// to this peer, close the inbound connection to avoid
-		// parallel TCP connections between the same pair of nodes.
+		// Log duplicate but allow: see the hello-path comment for the
+		// full rationale — rejecting breaks one-way gossip when both
+		// sides dial simultaneously.
 		if s.hasOutboundSessionForInbound(addr) {
-			log.Info().Str("peer", string(addr)).Msg("reject_duplicate_inbound_auth_session")
-			return protocol.Frame{
-				Type:  "error",
-				Code:  protocol.ErrCodeDuplicateConnection,
-				Error: "duplicate connection: outbound session already exists",
-			}, false
+			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
 		s.addPeerID(addr, domain.PeerIdentity(state.Hello.Address))
 		s.trackInboundConnect(conn, addr, domain.PeerIdentity(state.Hello.Address))

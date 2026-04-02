@@ -1,8 +1,10 @@
 package node
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,6 +127,57 @@ func TestSaveAndLoadQueueStateRoundTrip(t *testing.T) {
 	}
 	if len(got.RelayReceipts) != 1 || got.RelayReceipts[0].MessageID != protocol.MessageID("msg-2") {
 		t.Fatalf("unexpected relay receipts: %#v", got.RelayReceipts)
+	}
+}
+
+// TestConcurrentSaveQueueStateProducesValidJSON verifies that overlapping
+// saveQueueState calls to the same path never produce corrupted JSON.
+// Before the atomic-rename fix, concurrent os.WriteFile calls could
+// interleave, producing malformed output like two concatenated JSON objects.
+func TestConcurrentSaveQueueStateProducesValidJSON(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "queue.json")
+	const goroutines = 10
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				state := queueStateFile{
+					Version: queueStateVersion,
+					Pending: map[string][]pendingFrame{
+						fmt.Sprintf("10.0.0.%d:%d", id, i): {
+							{
+								Frame: protocol.Frame{
+									Type: "send_message",
+									ID:   fmt.Sprintf("msg-%d-%d", id, i),
+								},
+							},
+						},
+					},
+					RelayRetry:    map[string]relayAttempt{},
+					OutboundState: map[string]outboundDelivery{},
+				}
+				if err := saveQueueState(path, state); err != nil {
+					t.Errorf("saveQueueState goroutine %d iter %d: %v", id, i, err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// After all writes complete, the file must contain valid JSON.
+	state, err := loadQueueState(path)
+	if err != nil {
+		t.Fatalf("loadQueueState after concurrent writes: %v", err)
+	}
+	if state.Version != queueStateVersion {
+		t.Fatalf("expected version %d, got %d", queueStateVersion, state.Version)
 	}
 }
 

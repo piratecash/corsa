@@ -738,6 +738,21 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 }
 
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
+	// Event-driven pending queue drain: a direct route was added by
+	// onPeerSessionEstablished before we entered the main loop. Now that
+	// inboxCh is actively read (preventing overflow), drain any pending
+	// send_message frames that target this peer's identity.
+	if session.peerIdentity != "" {
+		s.mu.RLock()
+		hasPending := len(s.pending) > 0
+		s.mu.RUnlock()
+		if hasPending {
+			go s.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{
+				session.peerIdentity: {},
+			})
+		}
+	}
+
 	pingTimer := time.NewTimer(nextHeartbeatDuration())
 	defer pingTimer.Stop()
 
@@ -1796,9 +1811,8 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			}
 		}
 		// When an outbound session exists, emit a single row with the
-		// outbound ConnID — even if stale inbound connections still
-		// linger (they will be cleaned up by the duplicate-connection
-		// rejection logic in the hello handler). For inbound-only
+		// outbound ConnID — even if inbound connections coexist (both
+		// directions are now allowed for simultaneous dials). For inbound-only
 		// peers, emit one row per active TCP connection so that
 		// UI/diagnostics can distinguish multiple sessions to the same
 		// overlay address.

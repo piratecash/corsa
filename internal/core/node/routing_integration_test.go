@@ -3,6 +3,7 @@ package node
 import (
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -477,7 +478,7 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Add an announcement route via peer-B.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
 		NextHop:   idPeerB,
@@ -486,7 +487,7 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
@@ -506,7 +507,7 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Route via peer-B.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
 		NextHop:   idPeerB,
@@ -515,7 +516,7 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
@@ -536,7 +537,7 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Route already at hop_ack — should not change.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
 		NextHop:   idPeerB,
@@ -545,7 +546,7 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 		Source:    routing.RouteSourceHopAck,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
@@ -585,7 +586,7 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 	}
 
 	// Route via peer-B.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
 		NextHop:   idPeerB,
@@ -594,7 +595,7 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
@@ -615,7 +616,7 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Add a route.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
 		NextHop:   idPeerB,
@@ -624,7 +625,7 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
@@ -647,6 +648,7 @@ func newTestServiceWithRouting(localIdentity string) *Service {
 		sessions:              make(map[domain.PeerAddress]*peerSession),
 		connPeerInfo:          make(map[net.Conn]*connPeerHello),
 		inboundTracked:        make(map[net.Conn]struct{}),
+		done:                  make(chan struct{}),
 	}
 	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(routing.PeerIdentity(localIdentity)))
 	svc.announceLoop = routing.NewAnnounceLoop(
@@ -764,7 +766,7 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Announce transit route: target-X reachable via peer-B, originated by peer-C.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idPeerC,
 		NextHop:   idPeerB,
@@ -773,7 +775,7 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("transit route should be accepted")
 	}
 
@@ -806,7 +808,7 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Add a transit route through peer-B.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetY,
 		Origin:    idTargetY,
 		NextHop:   idPeerB,
@@ -815,7 +817,7 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("transit route should be accepted")
 	}
 
@@ -840,7 +842,7 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Two routes to target-X via peer-B, but different origins.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginC,
 		NextHop:   idPeerB,
@@ -849,11 +851,11 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route 1 should be accepted")
 	}
 
-	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginD,
 		NextHop:   idPeerB,
@@ -862,7 +864,7 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route 2 should be accepted")
 	}
 
@@ -900,7 +902,7 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Two routes to target-X via peer-B, different origins.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginC,
 		NextHop:   idPeerB,
@@ -909,11 +911,11 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route 1 should be accepted")
 	}
 
-	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginD,
 		NextHop:   idPeerB,
@@ -922,7 +924,7 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route 2 should be accepted")
 	}
 
@@ -959,7 +961,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Route to target-X via peer-B.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginC,
 		NextHop:   idPeerB,
@@ -968,12 +970,12 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route X should be accepted")
 	}
 
 	// Route to target-Y via peer-B, same origin.
-	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetY,
 		Origin:    idOriginC,
 		NextHop:   idPeerB,
@@ -982,7 +984,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route Y should be accepted")
 	}
 
@@ -1012,7 +1014,7 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 	svc := newTestServiceWithRouting(idNodeA)
 
 	// Two routes to target-X from same origin, different next-hops.
-	ok, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginC,
 		NextHop:   idPeerB,
@@ -1021,11 +1023,11 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route via peer-B should be accepted")
 	}
 
-	ok, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
+	status, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginC,
 		NextHop:   idPeerD,
@@ -1034,7 +1036,7 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 		Source:    routing.RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("route via peer-D should be accepted")
 	}
 
@@ -1172,7 +1174,7 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin(idNodeA))
 
-	ok, err := table.UpdateRoute(routing.RouteEntry{
+	status, err := table.UpdateRoute(routing.RouteEntry{
 		Identity: idTargetX,
 		Origin:   idPeerB,
 		NextHop:  idPeerB,
@@ -1180,7 +1182,7 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("UpdateRoute failed")
 	}
 
@@ -2246,5 +2248,1428 @@ func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
 	id := svc.resolvePeerIdentity("10.0.0.53:7777")
 	if id != idPeerB {
 		t.Fatalf("expected identity %s, got %s", idPeerB, id)
+	}
+}
+
+// --- Event-driven pending queue drain tests ---
+
+// newTestServiceWithPendingDrain creates a Service with all fields required
+// by drainPendingForIdentities: pending queue, routing table, relay states,
+// and a TableRouter that performs real route lookups.
+func newTestServiceWithPendingDrain(localIdentity string) *Service {
+	svc := newTestServiceWithRouting(localIdentity)
+	svc.pending = make(map[domain.PeerAddress][]pendingFrame)
+	svc.pendingKeys = make(map[string]struct{})
+	svc.outbound = make(map[string]outboundDelivery)
+	svc.relayRetry = make(map[string]relayAttempt)
+	svc.topics = make(map[string][]protocol.Envelope)
+	svc.receipts = make(map[string][]protocol.DeliveryReceipt)
+	svc.orphaned = make(map[domain.PeerAddress][]pendingFrame)
+	svc.health = make(map[domain.PeerAddress]*peerHealth)
+	svc.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
+	svc.relayStates = newRelayStateStore()
+	svc.router = NewTableRouter(svc, svc.routingTable)
+	return svc
+}
+
+func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with a relay-capable session so the router can find it.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	sendCh := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       sendCh,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+
+	// Add a direct route to idTargetX via peer-B.
+	svc.onPeerSessionEstablished(idPeerB, true)
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
+		Hops:      2,
+		SeqNo:     1,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(routing.DefaultTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Queue a send_message frame on a DIFFERENT peer address (peer-A offline).
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-001",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "hello",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	key := pendingFrameKey(addrA, frame)
+	svc.pendingKeys[key] = struct{}{}
+	svc.mu.Unlock()
+
+	// Drain for idTargetX — the frame should be routed via peer-B.
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	// Verify the pending queue is empty.
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	_, keyExists := svc.pendingKeys[key]
+	svc.mu.RUnlock()
+
+	if remaining != 0 {
+		t.Fatalf("expected pending queue to be drained, got %d frames", remaining)
+	}
+	if keyExists {
+		t.Fatal("expected pending key to be removed")
+	}
+
+	// Verify a relay_message was sent to peer-B.
+	select {
+	case relayed := <-sendCh:
+		if relayed.Type != "relay_message" {
+			t.Fatalf("expected relay_message, got %s", relayed.Type)
+		}
+		if relayed.Recipient != idTargetX {
+			t.Fatalf("expected recipient %s, got %s", idTargetX, relayed.Recipient)
+		}
+	default:
+		t.Fatal("expected relay_message frame on peer-B sendCh")
+	}
+}
+
+func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with route to idTargetX.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       make(chan protocol.Frame, 10),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+
+	// Queue a relay_message (someone else's traffic) on peer-A.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	relayFrame := protocol.Frame{
+		Type:      "relay_message",
+		ID:        "msg-relay-001",
+		Address:   idPeerC,
+		Recipient: idTargetX,
+		Topic:     "dm",
+		Body:      "relayed",
+		CreatedAt: now.Format(time.RFC3339),
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: relayFrame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, relayFrame)] = struct{}{}
+	svc.mu.Unlock()
+
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	// relay_message should NOT be drained — it stays in the queue.
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected relay_message to remain in pending, got %d frames", remaining)
+	}
+}
+
+func TestDrainPendingForIdentities_SkipsNonMatchingRecipient(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-002",
+		Address:    idNodeA,
+		Recipient:  idTargetY, // different identity
+		Topic:      "dm",
+		Body:       "hello",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Drain for idTargetX — but our frame is for idTargetY.
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected frame for non-matching recipient to stay, got %d", remaining)
+	}
+}
+
+func TestDrainPendingForIdentities_EmptyIdentitiesNoop(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-003",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "hello",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Empty identities — should be a no-op.
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{})
+
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected frame to stay on empty identities, got %d", remaining)
+	}
+}
+
+func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with route.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       make(chan protocol.Frame, 10),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
+		Hops:      2,
+		SeqNo:     1,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(routing.DefaultTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Queue an expired send_message frame.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	expired := time.Now().UTC().Add(-10 * time.Minute)
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-expired",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "old",
+		CreatedAt:  expired.Format(time.RFC3339),
+		TTLSeconds: 60, // TTL = 60s, but CreatedAt is 10 min ago → expired
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: expired}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	// Expired frame should be removed from pending (marked terminal).
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 0 {
+		t.Fatalf("expected expired frame to be removed, got %d", remaining)
+	}
+}
+
+func TestDrainPendingForIdentities_NoRouteFrameStays(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// No routes configured — router will return no RelayNextHop.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-noroute",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "hello",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	// No route available — frame should stay in pending with zero retries.
+	// No real delivery attempt was made, so the retry counter must not grow.
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	var retries int
+	if remaining > 0 {
+		retries = svc.pending[addrA][0].Retries
+	}
+	svc.mu.RUnlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected frame to stay when no route exists, got %d", remaining)
+	}
+	if retries != 0 {
+		t.Fatalf("expected zero retries when no route exists, got %d", retries)
+	}
+}
+
+// TestDrainPendingForIdentities_NoRoutePreservesOutboundState verifies that
+// when no usable route exists, the outbound delivery state stays "queued" —
+// no false "retrying" transition, no LastAttemptAt update. Route churn events
+// must not pollute outbound state when no real send was attempted.
+func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// No routes configured — drain will return attempted=false.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-outbound-state",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "hello",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+
+	// Set initial outbound state to "queued" (as noteOutboundQueuedLocked would).
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.outbound[frame.ID] = outboundDelivery{
+		MessageID: frame.ID,
+		Recipient: frame.Recipient,
+		Status:    "queued",
+		QueuedAt:  now,
+	}
+	svc.mu.Unlock()
+
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	svc.mu.RLock()
+	state := svc.outbound[frame.ID]
+	svc.mu.RUnlock()
+
+	if state.Status != "queued" {
+		t.Fatalf("expected outbound status to stay 'queued' after no-route drain, got %q", state.Status)
+	}
+	if !state.LastAttemptAt.IsZero() {
+		t.Fatalf("expected LastAttemptAt to remain zero after no-route drain, got %v", state.LastAttemptAt)
+	}
+}
+
+func TestDrainPendingForIdentities_SendFailureReturnsFrame(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Add a route to idTargetX via peer-B.
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
+		Hops:      2,
+		SeqNo:     1,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(routing.DefaultTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override sessionChecker to return an inbound-style address.
+	// This makes Route() succeed with RelayNextHop populated, but
+	// sendRelayToAddress enters the inbound path where writeFrameToInbound
+	// fails because no tracked connection exists for this address.
+	fakeInboundAddr := domain.PeerAddress("inbound:10.0.0.99:9999")
+	svc.router.(*TableRouter).sessionChecker = func(id domain.PeerIdentity, hops int) domain.PeerAddress {
+		if id == idPeerB {
+			return fakeInboundAddr
+		}
+		return ""
+	}
+
+	// Queue a send_message on offline peer-A.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-fail",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "hello",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Drain: Route() returns RelayNextHop (peer-B via fake inbound address),
+	// but sendRelayToAddress → writeFrameToInbound fails (no tracked conn).
+	// Frame must be returned to pending queue.
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	_, keyExists := svc.pendingKeys[pendingFrameKey(addrA, frame)]
+	var retries int
+	if remaining > 0 {
+		retries = svc.pending[addrA][0].Retries
+	}
+	svc.mu.RUnlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected frame to return to pending on send failure, got %d", remaining)
+	}
+	if !keyExists {
+		t.Fatal("expected pending key to be restored after send failure")
+	}
+	// Real send failure — retry counter must have been incremented.
+	if retries != 1 {
+		t.Fatalf("expected 1 retry after real send failure, got %d", retries)
+	}
+}
+
+// TestDrainPendingForIdentities_NoRouteDrainDoesNotExhaustRetries verifies
+// that repeated drain cycles with no usable route never exhaust the retry
+// budget. This is the regression test for the P1 where route churn events
+// triggered drains that burned maxPendingFrameRetries without any real
+// delivery attempt.
+func TestDrainPendingForIdentities_NoRouteDrainDoesNotExhaustRetries(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-noroute-budget",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "hello",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Run drain cycles more times than maxPendingFrameRetries. Without the
+	// fix, each cycle would increment Retries and eventually mark the frame
+	// as terminal "failed". With the fix, no-route returns don't touch the
+	// counter and the frame stays pending indefinitely.
+	ids := map[domain.PeerIdentity]struct{}{idTargetX: {}}
+	for i := 0; i < maxPendingFrameRetries+5; i++ {
+		svc.drainPendingForIdentities(ids)
+	}
+
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	var retries int
+	if remaining > 0 {
+		retries = svc.pending[addrA][0].Retries
+	}
+	svc.mu.RUnlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected frame to survive %d no-route drain cycles, got %d remaining", maxPendingFrameRetries+5, remaining)
+	}
+	if retries != 0 {
+		t.Fatalf("expected zero retries after no-route drains, got %d", retries)
+	}
+}
+
+// TestDrainPendingForIdentities_FailedFramesPreserveOrder verifies that when
+// extracted frames fail delivery and return to the pending queue, they are
+// merged back into their original positions — preserving exact interleaved
+// order across recipients sharing the same peer address.
+// Regression test for P2 where drain reordered DM delivery after route churn.
+func TestDrainPendingForIdentities_FailedFramesPreserveOrder(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// No routes configured — all drain attempts will return false/not-attempted,
+	// so extracted frames must come back to the queue.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+
+	// Queue: [msg-1(X), msg-2(Y), msg-3(X)] — two recipients, interleaved.
+	frames := []pendingFrame{
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "first", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Address: idNodeA, Recipient: "other-recipient", Topic: "dm", Body: "second", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "third", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+	}
+
+	svc.mu.Lock()
+	svc.pending[addrA] = append([]pendingFrame(nil), frames...)
+	for _, f := range frames {
+		svc.pendingKeys[pendingFrameKey(addrA, f.Frame)] = struct{}{}
+	}
+	svc.mu.Unlock()
+
+	// Drain for idTargetX: extracts msg-1 and msg-3, keeps msg-2.
+	// Both fail (no route), so they return to pending.
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	svc.mu.RLock()
+	result := svc.pending[addrA]
+	ids := make([]string, len(result))
+	for i, f := range result {
+		ids[i] = f.Frame.ID
+	}
+	svc.mu.RUnlock()
+
+	// Expected: exact original order [msg-1, msg-2, msg-3].
+	// msg-1(X) and msg-3(X) were extracted and returned; msg-2(Y) was kept.
+	// The merge must interleave them back at their original positions.
+	expected := []string{"msg-1", "msg-2", "msg-3"}
+	if len(ids) != len(expected) {
+		t.Fatalf("expected %d frames, got %d: %v", len(expected), len(ids), ids)
+	}
+	for i, want := range expected {
+		if ids[i] != want {
+			t.Fatalf("position %d: expected %s, got %s (full order: %v)", i, want, ids[i], ids)
+		}
+	}
+}
+
+// TestDrainPendingForIdentities_PartialDeliveryPreservesOrder verifies
+// ordering when some extracted frames are delivered and others fail.
+// The gaps left by delivered frames must not shift kept frames.
+func TestDrainPendingForIdentities_PartialDeliveryPreservesOrder(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up a route to idTargetX via peer-B so that drain actually
+	// attempts delivery.
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
+		Hops:      2,
+		SeqNo:     1,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(routing.DefaultTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use an inbound address so sendRelayToAddress fails (no tracked conn).
+	fakeInboundAddr := domain.PeerAddress("inbound:10.0.0.99:9999")
+	svc.router.(*TableRouter).sessionChecker = func(id domain.PeerIdentity, hops int) domain.PeerAddress {
+		if id == idPeerB {
+			return fakeInboundAddr
+		}
+		return ""
+	}
+
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+
+	// Queue: [msg-1(X), msg-2(Y), msg-3(Z), msg-4(X), msg-5(Y)]
+	// Drain for X extracts msg-1 and msg-4. Both fail (send failure).
+	// Result must be [msg-1, msg-2, msg-3, msg-4, msg-5].
+	frames := []pendingFrame{
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "a", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Address: idNodeA, Recipient: "other-Y", Topic: "dm", Body: "b", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Address: idNodeA, Recipient: "other-Z", Topic: "dm", Body: "c", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-4", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "d", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-5", Address: idNodeA, Recipient: "other-Y", Topic: "dm", Body: "e", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+	}
+
+	svc.mu.Lock()
+	svc.pending[addrA] = append([]pendingFrame(nil), frames...)
+	for _, f := range frames {
+		svc.pendingKeys[pendingFrameKey(addrA, f.Frame)] = struct{}{}
+	}
+	svc.mu.Unlock()
+
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	svc.mu.RLock()
+	result := svc.pending[addrA]
+	ids := make([]string, len(result))
+	for i, f := range result {
+		ids[i] = f.Frame.ID
+	}
+	svc.mu.RUnlock()
+
+	expected := []string{"msg-1", "msg-2", "msg-3", "msg-4", "msg-5"}
+	if len(ids) != len(expected) {
+		t.Fatalf("expected %d frames, got %d: %v", len(expected), len(ids), ids)
+	}
+	for i, want := range expected {
+		if ids[i] != want {
+			t.Fatalf("position %d: expected %s, got %s (full order: %v)", i, want, ids[i], ids)
+		}
+	}
+}
+
+func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with a session and route.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	sendCh := make(chan protocol.Frame, 20)
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       sendCh,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
+		Hops:      2,
+		SeqNo:     1,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(routing.DefaultTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Queue a single send_message.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-concurrent",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "once",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Run two drains concurrently for the same identity.
+	ids := map[domain.PeerIdentity]struct{}{idTargetX: {}}
+	done := make(chan struct{}, 2)
+	go func() { svc.drainPendingForIdentities(ids); done <- struct{}{} }()
+	go func() { svc.drainPendingForIdentities(ids); done <- struct{}{} }()
+	<-done
+	<-done
+
+	// Count relay_message frames on peer-B's sendCh — must be exactly 1.
+	close(sendCh)
+	var count int
+	for f := range sendCh {
+		if f.Type == "relay_message" && f.ID == "msg-concurrent" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 relay_message, got %d (concurrent double-send)", count)
+	}
+}
+
+func TestDrainPendingForIdentities_SkipsReceipt(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Queue a send_delivery_receipt targeting idTargetX.
+	// Receipts are not route-recoverable — they use relayStates hop chain,
+	// not the routing table. Drain must leave them untouched.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:        "send_delivery_receipt",
+		ID:          "msg-receipt-skip",
+		Address:     idNodeA,
+		Recipient:   idTargetX,
+		Status:      "delivered",
+		DeliveredAt: now.Format(time.RFC3339),
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected receipt to stay in pending (not route-recoverable), got %d", remaining)
+	}
+}
+
+func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with relay session.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	sendCh := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       sendCh,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+
+	// Queue a send_message for idTargetX on offline peer-A.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-announce",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "waiting",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Announce a route to idTargetX via peer-B.
+	announceFrame := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+		},
+	}
+	// Install drainDone hook to synchronize with the async goroutine
+	// spawned by handleAnnounceRoutes without polling or sleep.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	svc.drainDone = wg.Done
+
+	svc.handleAnnounceRoutes(idPeerB, announceFrame)
+	wg.Wait()
+
+	// Pending queue should be drained.
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 0 {
+		t.Fatalf("expected pending to be drained after announce, got %d", remaining)
+	}
+}
+
+// TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain verifies that
+// when the best route to an identity is withdrawn but a backup route exists
+// in the routing table, the event-driven drain fires so pending send_message
+// frames can be delivered via the backup route immediately.
+func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-C with a relay session (the backup route goes through C).
+	addrC := domain.PeerAddress("10.0.0.3:9000")
+	sendChC := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrC] = &peerSession{
+		address:      addrC,
+		peerIdentity: idPeerC,
+		sendCh:       sendChC,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerC, true)
+
+	// Two routes to idTargetX from different origins:
+	//   primary: Origin=idOriginC, NextHop=idOriginC (hops=1, seqNo=1)
+	//     — announced by idOriginC, will be withdrawn by idOriginC
+	//   backup:  Origin=idPeerC, NextHop=idPeerC (hops=1, seqNo=1)
+	//     — announced by idPeerC, survives after withdrawal
+	//
+	// The primary route is added first via handleAnnounceRoutes so that
+	// both origin and nextHop match the sender (origin withdrawal rule).
+
+	// We don't need a session for idOriginC — just add routes directly.
+	primaryAnnounce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idOriginC, primaryAnnounce)
+
+	backupAnnounce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerC, Hops: 1, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
+
+	// Verify two routes exist.
+	routes := svc.routingTable.Lookup(idTargetX)
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes to %s, got %d", idTargetX, len(routes))
+	}
+
+	// Queue a send_message for idTargetX on offline peer-A.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-withdraw-backup",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "waiting for backup route",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// idOriginC withdraws its route (seqNo=2 > 1). Origin == sender.
+	// After withdrawal, only the backup route via peer-C remains.
+	withdrawalFrame := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idOriginC, Hops: 16, SeqNo: 2},
+		},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	svc.drainDone = wg.Done
+
+	svc.handleAnnounceRoutes(idOriginC, withdrawalFrame)
+	wg.Wait()
+
+	// Pending queue should be drained via the backup route through peer-C.
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 0 {
+		t.Fatalf("expected pending to be drained via backup route after withdrawal, got %d remaining", remaining)
+	}
+
+	// Verify the frame was sent to peer-C's sendCh (the backup route).
+	select {
+	case sent := <-sendChC:
+		if sent.ID != "msg-withdraw-backup" {
+			t.Fatalf("expected msg-withdraw-backup on peer-C sendCh, got %s", sent.ID)
+		}
+	default:
+		t.Fatal("expected frame on peer-C sendCh but channel was empty")
+	}
+}
+
+// TestTTLExpiryExposesBackupAndTriggersDrain verifies the full path that
+// routingTableTTLLoop follows: when a route expires and a backup survives,
+// TickTTL returns the exposed identity, and the drain delivers the pending
+// frame via the backup route.
+func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+
+	// Build service with a routing table whose clock we control.
+	svc := &Service{
+		identity:              &identity.Identity{Address: idNodeA},
+		identitySessions:      make(map[domain.PeerIdentity]int),
+		identityRelaySessions: make(map[domain.PeerIdentity]int),
+		sessions:              make(map[domain.PeerAddress]*peerSession),
+		connPeerInfo:          make(map[net.Conn]*connPeerHello),
+		inboundTracked:        make(map[net.Conn]struct{}),
+		done:                  make(chan struct{}),
+		pending:               make(map[domain.PeerAddress][]pendingFrame),
+		pendingKeys:           make(map[string]struct{}),
+		outbound:              make(map[string]outboundDelivery),
+		relayRetry:            make(map[string]relayAttempt),
+		topics:                make(map[string][]protocol.Envelope),
+		receipts:              make(map[string][]protocol.DeliveryReceipt),
+		orphaned:              make(map[domain.PeerAddress][]pendingFrame),
+		health:                make(map[domain.PeerAddress]*peerHealth),
+		dialOrigin:            make(map[domain.PeerAddress]domain.PeerAddress),
+		relayStates:           newRelayStateStore(),
+	}
+	svc.routingTable = routing.NewTable(
+		routing.WithLocalOrigin(routing.PeerIdentity(idNodeA)),
+		routing.WithClock(func() time.Time { return current }),
+	)
+	svc.announceLoop = routing.NewAnnounceLoop(
+		svc.routingTable,
+		&noopPeerSender{},
+		func() []routing.AnnounceTarget { return nil },
+	)
+	svc.router = NewTableRouter(svc, svc.routingTable)
+
+	// Set up peer-C with a relay session (backup route goes through C).
+	addrC := domain.PeerAddress("10.0.0.3:9000")
+	sendChC := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrC] = &peerSession{
+		address:      addrC,
+		peerIdentity: idPeerC,
+		sendCh:       sendChC,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerC, true)
+
+	// Two routes to idTargetX:
+	//   primary: via origin-A, short TTL (10s) — will expire
+	//   backup:  via peer-C, long TTL — survives
+	primaryAnnounce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idOriginC, primaryAnnounce)
+
+	backupAnnounce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerC, Hops: 2, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
+
+	// Both routes should be present.
+	routes := svc.routingTable.Lookup(idTargetX)
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes to %s, got %d", idTargetX, len(routes))
+	}
+
+	// Override ExpiresAt on the primary route so it expires when we advance
+	// the clock. We need to manipulate the route's ExpiresAt directly — the
+	// routing table created entries with DefaultTTL. We re-insert the primary
+	// with a short expiry to override.
+	//
+	// Withdraw the primary by bumping SeqNo and re-announce with same Origin
+	// so the table replaces it. But simpler: just insert it again with a
+	// short ExpiresAt via UpdateRoute.
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    routing.PeerIdentity(idOriginC),
+		NextHop:   routing.PeerIdentity(idOriginC),
+		Hops:      1,
+		SeqNo:     2,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: now.Add(10 * time.Second),
+	}); err != nil {
+		t.Fatalf("UpdateRoute: %v", err)
+	}
+
+	// Queue a pending send_message for idTargetX. Use real wall-clock time
+	// for CreatedAt and QueuedAt because drainPendingForIdentities checks
+	// frame TTL expiry against time.Now(), not the routing table's clock.
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	realNow := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-ttl-backup",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "waiting for TTL expiry",
+		CreatedAt:  realNow.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: realNow}}
+	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Advance clock past the primary's TTL.
+	current = now.Add(11 * time.Second)
+
+	// Simulate what routingTableTTLLoop does:
+	//   1. Call TickTTL() — expires primary, returns exposed identity
+	//   2. Build identities map
+	//   3. Trigger drain
+	exposed := svc.routingTable.TickTTL()
+	if len(exposed) != 1 || string(exposed[0]) != idTargetX {
+		t.Fatalf("expected TickTTL to expose [%s], got %v", idTargetX, exposed)
+	}
+
+	identities := make(map[domain.PeerIdentity]struct{}, len(exposed))
+	for _, id := range exposed {
+		identities[domain.PeerIdentity(id)] = struct{}{}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	svc.drainDone = wg.Done
+
+	go svc.drainPendingForIdentities(identities)
+	wg.Wait()
+
+	// Verify pending queue was drained.
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+
+	if remaining != 0 {
+		t.Fatalf("expected pending drained after TTL expiry, got %d remaining", remaining)
+	}
+
+	// Verify the frame was delivered via peer-C.
+	select {
+	case sent := <-sendChC:
+		if sent.ID != "msg-ttl-backup" {
+			t.Fatalf("expected msg-ttl-backup on peer-C sendCh, got %s", sent.ID)
+		}
+	default:
+		t.Fatal("expected frame on peer-C sendCh after TTL-expiry drain")
+	}
+}
+
+// TestTTLExpiryNoBackup_NoDrain verifies that when all routes for an identity
+// expire (no surviving backup), TickTTL does NOT return the identity and no
+// drain is triggered.
+func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+
+	svc := &Service{
+		identity:              &identity.Identity{Address: idNodeA},
+		identitySessions:      make(map[domain.PeerIdentity]int),
+		identityRelaySessions: make(map[domain.PeerIdentity]int),
+		sessions:              make(map[domain.PeerAddress]*peerSession),
+		connPeerInfo:          make(map[net.Conn]*connPeerHello),
+		inboundTracked:        make(map[net.Conn]struct{}),
+		done:                  make(chan struct{}),
+		pending:               make(map[domain.PeerAddress][]pendingFrame),
+		pendingKeys:           make(map[string]struct{}),
+		outbound:              make(map[string]outboundDelivery),
+	}
+	svc.routingTable = routing.NewTable(
+		routing.WithLocalOrigin(routing.PeerIdentity(idNodeA)),
+		routing.WithClock(func() time.Time { return current }),
+	)
+
+	// Single route — will expire.
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    routing.PeerIdentity(idOriginC),
+		NextHop:   routing.PeerIdentity(idOriginC),
+		Hops:      1,
+		SeqNo:     1,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: now.Add(10 * time.Second),
+	}); err != nil {
+		t.Fatalf("UpdateRoute: %v", err)
+	}
+
+	// Queue a pending message. Use real wall-clock time for QueuedAt
+	// because drainPendingForIdentities checks frame TTL against time.Now().
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-ttl-no-backup",
+		Recipient:  idTargetX,
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
+	svc.mu.Unlock()
+
+	// Advance past TTL.
+	current = now.Add(11 * time.Second)
+
+	exposed := svc.routingTable.TickTTL()
+	if len(exposed) != 0 {
+		t.Fatalf("no backup routes survive — expected no exposed identities, got %v", exposed)
+	}
+
+	// Pending should be untouched (no drain triggered).
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrA])
+	svc.mu.RUnlock()
+	if remaining != 1 {
+		t.Fatalf("expected pending untouched (no drain), got %d", remaining)
+	}
+}
+
+// TestDisconnectWithBackupTriggersDrain verifies that when a relay-capable
+// peer disconnects and RemoveDirectPeer exposes a backup route for an
+// identity, drainPendingForIdentities fires and delivers the pending frame
+// via the surviving backup route.
+func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with a relay session (primary route goes through B).
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	sendChB := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       sendChB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+
+	// Set up peer-C with a relay session (backup route goes through C).
+	addrC := domain.PeerAddress("10.0.0.3:9000")
+	sendChC := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrC] = &peerSession{
+		address:      addrC,
+		peerIdentity: idPeerC,
+		sendCh:       sendChC,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerC, true)
+
+	// Transit route to idTargetX via peer-B (will be invalidated on disconnect).
+	primaryAnnounce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idPeerB, primaryAnnounce)
+
+	// Backup route to idTargetX via peer-C.
+	backupAnnounce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerC, Hops: 2, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
+
+	// Verify both routes present.
+	routes := svc.routingTable.Lookup(idTargetX)
+	if len(routes) < 2 {
+		t.Fatalf("expected at least 2 routes to %s, got %d", idTargetX, len(routes))
+	}
+
+	// Queue a pending send_message for idTargetX.
+	addrStale := domain.PeerAddress("10.0.0.99:9000")
+	realNow := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-disconnect-backup",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "waiting for disconnect drain",
+		CreatedAt:  realNow.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: realNow}}
+	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Disconnect peer-B (last relay session). This triggers RemoveDirectPeer
+	// which now returns ExposedBackups, and onPeerSessionClosed calls
+	// triggerDrainForExposed → drainPendingForIdentities.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	svc.drainDone = wg.Done
+
+	svc.onPeerSessionClosed(idPeerB, true)
+	wg.Wait()
+
+	// Pending queue should be drained.
+	svc.mu.RLock()
+	pendingRemaining := len(svc.pending[addrStale])
+	svc.mu.RUnlock()
+	if pendingRemaining != 0 {
+		t.Fatalf("expected pending drained after disconnect, got %d remaining", pendingRemaining)
+	}
+
+	// Frame should have been delivered via peer-C (the backup route).
+	// Note: onPeerSessionClosed also sends withdrawal announce_routes to all
+	// routing-capable peers (including C), so we drain those first.
+	found := false
+	for len(sendChC) > 0 {
+		sent := <-sendChC
+		if sent.Type == "relay_message" && sent.ID == "msg-disconnect-backup" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected relay_message msg-disconnect-backup on peer-C sendCh after disconnect drain")
+	}
+}
+
+// TestDisconnectNoBackupNoDrain verifies that when a peer disconnects and
+// no backup route survives, no drain is triggered.
+func TestDisconnectNoBackupNoDrain(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with a relay session.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	sendChB := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       sendChB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+
+	// Only one route to idTargetX — through peer-B (no backup).
+	announce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idPeerB, announce)
+
+	// Queue a pending send_message.
+	addrStale := domain.PeerAddress("10.0.0.99:9000")
+	realNow := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-disconnect-no-backup",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "no backup available",
+		CreatedAt:  realNow.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: realNow}}
+	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Disconnect peer-B. No backup → no drain should fire.
+	// Don't set drainDone — if drain fires unexpectedly it won't block.
+	svc.onPeerSessionClosed(idPeerB, true)
+
+	// Pending should be untouched.
+	svc.mu.RLock()
+	pendingRemaining := len(svc.pending[addrStale])
+	svc.mu.RUnlock()
+	if pendingRemaining != 1 {
+		t.Fatalf("expected pending untouched (no backup, no drain), got %d", pendingRemaining)
+	}
+}
+
+// TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain verifies that when a
+// reconnected peer re-announces the same routing table (unchanged full-table
+// sync), the drain fires for pending frames. Before this fix, only accepted
+// (new/improved) routes triggered drain; unchanged reconfirmations were
+// silently counted as rejected and never reached the drain path.
+func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with relay session.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	sendChB := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       sendChB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+
+	// First announce: route to idTargetX via peer-B — accepted.
+	firstAnnounce := protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+		},
+	}
+	svc.handleAnnounceRoutes(idPeerB, firstAnnounce)
+
+	// Queue a pending send_message for idTargetX on a stale address
+	// (simulates a frame that arrived while no route was available).
+	addrStale := domain.PeerAddress("10.0.0.99:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-unchanged-drain",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "waiting-for-resync",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Second announce: identical route (same SeqNo, same hops) — unchanged.
+	// Before the fix this would NOT trigger drain because UpdateRoute returned
+	// ok=false and the identity was never added to drainIdentities.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	svc.drainDone = wg.Done
+
+	svc.handleAnnounceRoutes(idPeerB, firstAnnounce)
+	wg.Wait()
+
+	// Pending queue should be drained.
+	svc.mu.RLock()
+	remaining := len(svc.pending[addrStale])
+	svc.mu.RUnlock()
+
+	if remaining != 0 {
+		t.Fatalf("expected pending drained after unchanged re-announce, got %d", remaining)
+	}
+
+	// Verify the drained frame was sent via peer-B's sendCh.
+	found := false
+	for len(sendChB) > 0 {
+		sent := <-sendChB
+		if sent.Type == "relay_message" && sent.ID == "msg-unchanged-drain" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected relay_message for msg-unchanged-drain on peer-B sendCh")
+	}
+}
+
+// TestHandleAnnounceRoutes_RejectedRouteNoDrain verifies that truly rejected
+// routes (stale SeqNo, tombstone-blocked) do NOT trigger drain.
+func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(idNodeA)
+
+	// Set up peer-B with relay session.
+	addrB := domain.PeerAddress("10.0.0.2:9000")
+	sendChB := make(chan protocol.Frame, 10)
+	svc.mu.Lock()
+	svc.sessions[addrB] = &peerSession{
+		address:      addrB,
+		peerIdentity: idPeerB,
+		sendCh:       sendChB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
+	svc.mu.Unlock()
+	svc.onPeerSessionEstablished(idPeerB, true)
+
+	// First announce: route with SeqNo=5.
+	svc.handleAnnounceRoutes(idPeerB, protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 5},
+		},
+	})
+
+	// Queue a pending frame.
+	addrStale := domain.PeerAddress("10.0.0.99:9000")
+	now := time.Now().UTC()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		ID:         "msg-stale-reject",
+		Address:    idNodeA,
+		Recipient:  idTargetX,
+		Topic:      "dm",
+		Body:       "should-not-drain",
+		CreatedAt:  now.Format(time.RFC3339),
+		TTLSeconds: 300,
+	}
+	svc.mu.Lock()
+	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: now}}
+	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
+	svc.mu.Unlock()
+
+	// Install a drainDone trap: if drain fires unexpectedly, fail the test.
+	// The drain goroutine is only launched when drainIdentities is non-empty,
+	// and handleAnnounceRoutes makes that decision synchronously before
+	// returning — so if drainDone is ever called, the rejected route
+	// incorrectly entered the drain set.
+	svc.drainDone = func() {
+		t.Error("drainDone called unexpectedly — rejected route should not trigger drain")
+	}
+
+	// Stale announce: lower SeqNo=3 — rejected, not unchanged.
+	svc.handleAnnounceRoutes(idPeerB, protocol.Frame{
+		Type: "announce_routes",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 3},
+		},
+	})
+
+	// handleAnnounceRoutes is synchronous: by the time it returns, the
+	// drain/no-drain decision is already made. When all routes are rejected,
+	// drainIdentities is empty and the goroutine launch is skipped entirely.
+	// No sleep needed — just verify pending is untouched.
+	svc.mu.RLock()
+	pendingRemaining := len(svc.pending[addrStale])
+	svc.mu.RUnlock()
+	if pendingRemaining != 1 {
+		t.Fatalf("expected pending untouched after rejected (stale) announce, got %d", pendingRemaining)
 	}
 }

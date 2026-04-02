@@ -10,14 +10,14 @@ func fixedClock(t time.Time) func() time.Time {
 	return func() time.Time { return t }
 }
 
-// mustUpdate calls UpdateRoute and fails the test on error, returns accepted.
-func mustUpdate(t *testing.T, tbl *Table, entry RouteEntry) bool {
+// mustUpdate calls UpdateRoute and fails the test on error, returns status.
+func mustUpdate(t *testing.T, tbl *Table, entry RouteEntry) RouteUpdateStatus {
 	t.Helper()
-	accepted, err := tbl.UpdateRoute(entry)
+	status, err := tbl.UpdateRoute(entry)
 	if err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
 	}
-	return accepted
+	return status
 }
 
 // mustAddDirect calls AddDirectPeer and fails the test on error.
@@ -45,12 +45,12 @@ func mustRemoveDirect(t *testing.T, tbl *Table, peerID PeerIdentity) RemoveDirec
 func TestUpdateRouteInsertsNew(t *testing.T) {
 	tbl := NewTable()
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("new route should be accepted")
 	}
 	if tbl.Size() != 1 {
@@ -152,11 +152,11 @@ func TestUpdateRouteRejectsHopsAboveInfinity(t *testing.T) {
 
 func TestUpdateRouteAcceptsHopsInfinity(t *testing.T) {
 	tbl := NewTable()
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: HopsInfinity, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("hops=16 (infinity/withdrawal) should be accepted")
 	}
 }
@@ -209,11 +209,11 @@ func TestDirectRouteRequiresNextHopEqualsIdentity(t *testing.T) {
 
 func TestDirectRouteValidForm(t *testing.T) {
 	tbl := NewTable()
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "me", NextHop: "alice",
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("well-formed direct route should be accepted")
 	}
 }
@@ -228,12 +228,12 @@ func TestOriginAwareSeqNoHigherWins(t *testing.T) {
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("higher SeqNo should be accepted even with worse hops")
 	}
 
@@ -251,12 +251,12 @@ func TestOriginAwareSeqNoLowerRejected(t *testing.T) {
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 1, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	if accepted {
+	if status == RouteAccepted {
 		t.Fatal("lower SeqNo should be rejected")
 	}
 
@@ -274,12 +274,12 @@ func TestSeqNoComparisonScopedToOrigin(t *testing.T) {
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "dave", NextHop: "charlie",
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("different origin should have independent SeqNo space")
 	}
 	if tbl.Size() != 2 {
@@ -295,12 +295,12 @@ func TestSameSeqNoHigherTrustWins(t *testing.T) {
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 2, SeqNo: 5, Source: RouteSourceHopAck,
 	})
 
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("same SeqNo but higher trust should be accepted")
 	}
 
@@ -319,12 +319,12 @@ func TestSameSeqNoLowerTrustRejected(t *testing.T) {
 		Hops: 1, SeqNo: 5, Source: RouteSourceDirect,
 	})
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "me", NextHop: "alice",
 		Hops: 1, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	if accepted {
+	if status == RouteAccepted {
 		t.Fatal("same SeqNo but lower trust should be rejected")
 	}
 }
@@ -337,13 +337,64 @@ func TestSameSeqNoSameTrustFewerHopsWins(t *testing.T) {
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("same SeqNo and trust, fewer hops should be accepted")
+	}
+}
+
+// --- RouteUnchanged status ---
+
+func TestUpdateRouteUnchangedForAliveReconfirmation(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	// Insert initial route.
+	status := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	})
+	if status != RouteAccepted {
+		t.Fatal("initial route should be accepted")
+	}
+
+	// Re-announce the same route (same SeqNo, same trust, same hops).
+	status = mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	})
+	if status != RouteUnchanged {
+		t.Fatalf("same alive route re-announced should return RouteUnchanged, got %d", status)
+	}
+}
+
+func TestUpdateRouteUnchangedNotReturnedForExpired(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)), WithDefaultTTL(10*time.Second))
+
+	// Insert route with short TTL.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	})
+
+	// Advance clock past expiry.
+	expired := now.Add(20 * time.Second)
+	tbl.mu.Lock()
+	tbl.clock = fixedClock(expired)
+	tbl.mu.Unlock()
+
+	// Same route re-announced after expiry — rejected (not unchanged).
+	status := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	})
+	if status != RouteRejected {
+		t.Fatalf("expired route same-SeqNo reannounce should be RouteRejected, got %d", status)
 	}
 }
 
@@ -580,11 +631,11 @@ func TestWithdrawTombstoneBlocksStaleAnnouncement(t *testing.T) {
 
 	// Delayed stale announcement with SeqNo=8 arrives — must be rejected
 	// because the tombstone's SeqNo (10) is higher.
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 2, SeqNo: 8, Source: RouteSourceAnnouncement,
 	})
-	if accepted {
+	if status == RouteAccepted {
 		t.Fatal("stale announcement (SeqNo=8) should be rejected by tombstone (SeqNo=10)")
 	}
 
@@ -603,11 +654,11 @@ func TestWithdrawTombstoneSupersededByNewerAnnouncement(t *testing.T) {
 	tbl.WithdrawRoute("alice", "bob", "charlie", 5)
 
 	// Newer announcement with SeqNo=7 — should be accepted.
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
 	})
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("newer announcement (SeqNo=7) should supersede tombstone (SeqNo=5)")
 	}
 
@@ -634,11 +685,11 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 
 	// Same-SeqNo hop_ack (higher trust rank) must NOT resurrect the
 	// withdrawn entry. Only a strictly newer SeqNo may do that.
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 1, SeqNo: 6, Source: RouteSourceHopAck,
 	})
-	if accepted {
+	if status == RouteAccepted {
 		t.Fatal("same-SeqNo hop_ack must not resurrect a withdrawn route")
 	}
 
@@ -649,11 +700,11 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 	}
 
 	// A strictly newer SeqNo should succeed.
-	accepted = mustUpdate(t, tbl, RouteEntry{
+	status = mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
 	})
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("newer SeqNo=7 should supersede withdrawn SeqNo=6")
 	}
 	routes = tbl.Lookup("alice")
@@ -684,11 +735,11 @@ func TestUpdateRouteRejectsDirectWithForeignOrigin(t *testing.T) {
 func TestUpdateRouteAcceptsDirectWithOwnOrigin(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin("me"))
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "me", NextHop: "alice",
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("direct route with own origin should be accepted")
 	}
 }
@@ -698,11 +749,11 @@ func TestUpdateRouteDirectSkipsCheckWithoutLocalOrigin(t *testing.T) {
 	// for tables used without WithLocalOrigin (e.g., pure read-only).
 	tbl := NewTable()
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "any-origin", NextHop: "alice",
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("without localOrigin, direct route with any origin should be accepted")
 	}
 }
@@ -971,9 +1022,14 @@ func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
 		t.Fatalf("UpdateRoute failed: %v", err)
 	}
 
-	invalidated := tbl.InvalidateTransitRoutes("peer-A")
+	invalidated, exposed := tbl.InvalidateTransitRoutes("peer-A")
 	if invalidated != 1 {
 		t.Fatalf("expected 1 transit route invalidated, got %d", invalidated)
+	}
+
+	// No backup route exists for target-X, so nothing should be exposed.
+	if len(exposed) != 0 {
+		t.Fatalf("expected no exposed backups (no alternative route), got %v", exposed)
 	}
 
 	// Direct route should be untouched — Lookup returns active routes.
@@ -1012,9 +1068,100 @@ func TestInvalidateTransitRoutesNoMatch(t *testing.T) {
 	}
 
 	// Invalidate for peer-A — should not touch peer-B's route.
-	invalidated := tbl.InvalidateTransitRoutes("peer-A")
+	invalidated, exposed := tbl.InvalidateTransitRoutes("peer-A")
 	if invalidated != 0 {
 		t.Fatalf("expected 0 invalidated, got %d", invalidated)
+	}
+	if len(exposed) != 0 {
+		t.Fatalf("expected no exposed backups, got %v", exposed)
+	}
+}
+
+// --- Disconnect exposed backups ---
+
+func TestRemoveDirectPeerExposesBackupRoute(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	// Direct route to peer-A (will be withdrawn on disconnect).
+	mustAddDirect(t, tbl, "peer-A")
+
+	// peer-A also serves as next-hop for a transit route to target-X.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "target-X", Origin: "target-X", NextHop: "peer-A",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(2 * time.Hour),
+	})
+
+	// Backup route to target-X via peer-B (survives disconnect).
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "target-X", Origin: "peer-B", NextHop: "peer-B",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(2 * time.Hour),
+	})
+
+	result, err := tbl.RemoveDirectPeer("peer-A")
+	if err != nil {
+		t.Fatalf("RemoveDirectPeer failed: %v", err)
+	}
+
+	// target-X should be exposed because the backup via peer-B survives.
+	if len(result.ExposedBackups) != 1 || result.ExposedBackups[0] != "target-X" {
+		t.Fatalf("expected [target-X] exposed, got %v", result.ExposedBackups)
+	}
+}
+
+func TestRemoveDirectPeerNoBackupNoExposed(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	mustAddDirect(t, tbl, "peer-A")
+
+	// Only route to target-X goes through peer-A — no backup.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "target-X", Origin: "target-X", NextHop: "peer-A",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(2 * time.Hour),
+	})
+
+	result, err := tbl.RemoveDirectPeer("peer-A")
+	if err != nil {
+		t.Fatalf("RemoveDirectPeer failed: %v", err)
+	}
+
+	// No backup survives — nothing exposed.
+	if len(result.ExposedBackups) != 0 {
+		t.Fatalf("expected no exposed backups, got %v", result.ExposedBackups)
+	}
+}
+
+func TestInvalidateTransitRoutesExposesBackupRoute(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("me"))
+
+	// Transit route to target-X via peer-A (will be invalidated).
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "target-X", Origin: "origin-A", NextHop: "peer-A",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(2 * time.Hour),
+	})
+
+	// Backup route to target-X via peer-B (survives invalidation).
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "target-X", Origin: "origin-B", NextHop: "peer-B",
+		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(2 * time.Hour),
+	})
+
+	invalidated, exposed := tbl.InvalidateTransitRoutes("peer-A")
+	if invalidated != 1 {
+		t.Fatalf("expected 1 invalidated, got %d", invalidated)
+	}
+	if len(exposed) != 1 || exposed[0] != "target-X" {
+		t.Fatalf("expected [target-X] exposed, got %v", exposed)
+	}
+
+	// Backup via peer-B should still be reachable.
+	routes := tbl.Lookup("target-X")
+	if len(routes) != 1 || routes[0].NextHop != "peer-B" {
+		t.Fatalf("expected backup via peer-B, got %v", routes)
 	}
 }
 
@@ -1326,12 +1473,12 @@ func TestSnapshotIsImmutable(t *testing.T) {
 func TestNextHopIsPeerIdentity(t *testing.T) {
 	tbl := NewTable()
 
-	accepted := mustUpdate(t, tbl, RouteEntry{
+	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "ed25519:abc123", Origin: "me", NextHop: "ed25519:abc123",
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 
-	if !accepted {
+	if status != RouteAccepted {
 		t.Fatal("route with identity-style NextHop should be accepted")
 	}
 
@@ -1809,5 +1956,120 @@ func TestDirectRouteExpiresWithoutRefresh(t *testing.T) {
 	tbl.TickTTL()
 	if tbl.Size() != 0 {
 		t.Fatalf("expired route should be removed by TickTTL, size=%d", tbl.Size())
+	}
+}
+
+// --- TickTTL exposed identities ---
+
+func TestTickTTLReturnsExposedIdentities(t *testing.T) {
+	// Scenario: identity "alice" has two routes — a primary (expires soon) and
+	// a backup (long TTL, non-withdrawn). When the primary expires, TickTTL
+	// should return "alice" because a usable backup route was exposed.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(WithClock(func() time.Time { return current }))
+
+	// Primary route — about to expire.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "origin-A", NextHop: "peer-A",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: now.Add(10 * time.Second),
+	})
+	// Backup route — lives much longer.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "origin-B", NextHop: "peer-B",
+		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: now.Add(2 * time.Hour),
+	})
+
+	// Before expiry: nothing exposed.
+	exposed := tbl.TickTTL()
+	if len(exposed) != 0 {
+		t.Fatalf("expected no exposed identities before expiry, got %v", exposed)
+	}
+
+	// Advance past primary's TTL.
+	current = now.Add(11 * time.Second)
+	exposed = tbl.TickTTL()
+
+	if len(exposed) != 1 || exposed[0] != "alice" {
+		t.Fatalf("expected [alice] exposed, got %v", exposed)
+	}
+	// Backup route still alive.
+	if tbl.Size() != 1 {
+		t.Fatalf("expected 1 surviving route, got %d", tbl.Size())
+	}
+}
+
+func TestTickTTLNoExposedWhenAllSurvivorsWithdrawn(t *testing.T) {
+	// If the only survivors after expiry are withdrawn (tombstones), the
+	// identity should NOT appear in exposed — there's no usable route.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithClock(func() time.Time { return current }),
+		WithLocalOrigin("me"),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	// Non-withdrawn route — will expire.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "bob", Origin: "origin-A", NextHop: "peer-A",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: now.Add(10 * time.Second),
+	})
+	// Withdrawn tombstone — survives longer but is not usable.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "bob", Origin: "origin-B", NextHop: "peer-B",
+		Hops: HopsInfinity, SeqNo: 5, Source: RouteSourceAnnouncement,
+		ExpiresAt: now.Add(2 * time.Hour),
+	})
+
+	current = now.Add(11 * time.Second)
+	exposed := tbl.TickTTL()
+
+	if len(exposed) != 0 {
+		t.Fatalf("withdrawn-only survivors should not be exposed, got %v", exposed)
+	}
+}
+
+func TestTickTTLNoExposedWhenNothingRemoved(t *testing.T) {
+	// If no routes expired, nothing is exposed.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "carol", Origin: "x", NextHop: "peer-C",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: now.Add(time.Hour),
+	})
+
+	exposed := tbl.TickTTL()
+	if len(exposed) != 0 {
+		t.Fatalf("no expiry means no exposed, got %v", exposed)
+	}
+}
+
+func TestTickTTLNoExposedWhenAllRoutesExpire(t *testing.T) {
+	// If ALL routes for an identity expire (identity deleted), it should NOT
+	// appear in exposed — there's nothing to drain to.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(WithClock(func() time.Time { return current }))
+
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "dave", Origin: "origin-A", NextHop: "peer-A",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: now.Add(10 * time.Second),
+	})
+
+	current = now.Add(11 * time.Second)
+	exposed := tbl.TickTTL()
+
+	if len(exposed) != 0 {
+		t.Fatalf("all-expired identity should not be exposed, got %v", exposed)
+	}
+	if tbl.Size() != 0 {
+		t.Fatalf("expected empty table, got %d", tbl.Size())
 	}
 }

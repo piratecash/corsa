@@ -12,8 +12,8 @@ import (
 // queueStateVersion tracks the queue-state file schema.  Bump this when the
 // on-disk format changes in a way that requires a one-time migration on load.
 //
-//   0 — implicit; pre-canonicalisation era (pending keyed by dial address)
-//   1 — pending keyed by primary peer address; orphaned section added
+//	0 — implicit; pre-canonicalisation era (pending keyed by dial address)
+//	1 — pending keyed by primary peer address; orphaned section added
 const queueStateVersion = 1
 
 type queueStateFile struct {
@@ -64,12 +64,20 @@ func loadQueueState(path string) (queueStateFile, error) {
 	return state, nil
 }
 
+// saveQueueState atomically writes the queue state to disk. It marshals the
+// state to a temporary file in the same directory, then renames it over the
+// target path. Rename on the same filesystem is atomic on POSIX, guaranteeing
+// that concurrent readers (or a crash mid-write) never observe a partial or
+// corrupted JSON file. Without atomic writes, overlapping persistQueueState
+// calls (e.g. persistRelayState + emitDeliveryReceipt) can interleave
+// os.WriteFile truncate-and-write operations, producing malformed JSON.
 func saveQueueState(path string, state queueStateFile) error {
 	if path == "" {
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create queue state directory: %w", err)
 	}
 
@@ -77,8 +85,25 @@ func saveQueueState(path string, state queueStateFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal queue state: %w", err)
 	}
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
-		return fmt.Errorf("write queue state: %w", err)
+
+	tmp, err := os.CreateTemp(dir, ".queue-state-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp queue state file: %w", err)
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write temp queue state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp queue state: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename queue state: %w", err)
 	}
 	return nil
 }

@@ -5,6 +5,23 @@ import (
 	"time"
 )
 
+// RouteUpdateStatus describes the outcome of UpdateRoute.
+type RouteUpdateStatus int
+
+const (
+	// RouteAccepted means the route was new or improved (inserted/updated).
+	RouteAccepted RouteUpdateStatus = iota
+	// RouteUnchanged means an existing alive (non-withdrawn, non-expired)
+	// route with this triple was found but the incoming entry did not improve
+	// it (same or worse SeqNo/trust/hops). The route is usable through
+	// this next-hop — callers can treat this as a reconfirmation.
+	RouteUnchanged
+	// RouteRejected means the route was rejected: tombstone protection
+	// blocked a same-SeqNo update on a withdrawn entry, or the incoming
+	// SeqNo was strictly lower than the existing one.
+	RouteRejected
+)
+
 const (
 	// DefaultTTL is the default route lifetime.
 	DefaultTTL = 120 * time.Second
@@ -138,18 +155,20 @@ func NewTable(opts ...TableOption) *Table {
 //     source has a higher trust rank or fewer hops.
 //   - If incoming SeqNo < existing SeqNo: reject (stale announcement).
 //
-// Returns (true, nil) if the route was accepted, (false, nil) if rejected
-// by SeqNo/trust rules, or (false, err) if the entry is malformed.
-func (t *Table) UpdateRoute(entry RouteEntry) (bool, error) {
+// Returns (RouteAccepted, nil) if the route was new or improved,
+// (RouteUnchanged, nil) if an existing alive route was found but not
+// improved, (RouteRejected, nil) if rejected by tombstone/SeqNo rules,
+// or (RouteRejected, err) if the entry is malformed.
+func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	if err := entry.Validate(); err != nil {
-		return false, err
+		return RouteRejected, err
 	}
 
 	// Direct routes must originate from this node. A RouteSourceDirect entry
 	// with a foreign Origin would outrank all announcement/hop_ack routes in
 	// Lookup and never be eligible for own-origin withdrawal on disconnect.
 	if entry.Source == RouteSourceDirect && t.localOrigin != "" && entry.Origin != t.localOrigin {
-		return false, ErrDirectForeignOrigin
+		return RouteRejected, ErrDirectForeignOrigin
 	}
 
 	t.mu.Lock()
@@ -163,41 +182,49 @@ func (t *Table) UpdateRoute(entry RouteEntry) (bool, error) {
 	existing := t.routes[entry.Identity]
 	idx := findByTriple(existing, entry.DedupKey())
 
-	accepted := false
-
 	if idx < 0 {
 		t.routes[entry.Identity] = append(existing, entry)
-		accepted = true
-	} else {
-		old := &existing[idx]
+		t.syncSeqCounterLocked(entry)
+		return RouteAccepted, nil
+	}
 
-		if entry.SeqNo > old.SeqNo {
+	old := &existing[idx]
+
+	if entry.SeqNo > old.SeqNo {
+		existing[idx] = entry
+		t.syncSeqCounterLocked(entry)
+		return RouteAccepted, nil
+	}
+
+	if entry.SeqNo == old.SeqNo {
+		// A withdrawal tombstone (Hops >= HopsInfinity) must not be
+		// replaced by a same-SeqNo update, even if the update has
+		// higher trust or fewer hops. Only a strictly newer SeqNo
+		// from the origin may supersede a withdrawal. Without this
+		// guard, a delayed hop_ack (higher trust rank) could
+		// resurrect a withdrawn lineage.
+		if old.Hops >= HopsInfinity {
+			return RouteRejected, nil
+		}
+		if entry.Source.TrustRank() > old.Source.TrustRank() {
 			existing[idx] = entry
-			accepted = true
-		} else if entry.SeqNo == old.SeqNo {
-			// A withdrawal tombstone (Hops >= HopsInfinity) must not be
-			// replaced by a same-SeqNo update, even if the update has
-			// higher trust or fewer hops. Only a strictly newer SeqNo
-			// from the origin may supersede a withdrawal. Without this
-			// guard, a delayed hop_ack (higher trust rank) could
-			// resurrect a withdrawn lineage.
-			if old.Hops >= HopsInfinity {
-				// Already withdrawn — reject same-seq replacement.
-			} else if entry.Source.TrustRank() > old.Source.TrustRank() {
-				existing[idx] = entry
-				accepted = true
-			} else if entry.Source == old.Source && entry.Hops < old.Hops {
-				existing[idx] = entry
-				accepted = true
-			}
+			t.syncSeqCounterLocked(entry)
+			return RouteAccepted, nil
+		}
+		if entry.Source == old.Source && entry.Hops < old.Hops {
+			existing[idx] = entry
+			t.syncSeqCounterLocked(entry)
+			return RouteAccepted, nil
+		}
+		// Same SeqNo, same or worse trust/hops. The existing route is
+		// alive and unchanged — this is a reconfirmation, not a rejection.
+		if !old.IsExpired(now) {
+			return RouteUnchanged, nil
 		}
 	}
 
-	if accepted {
-		t.syncSeqCounterLocked(entry)
-	}
-
-	return accepted, nil
+	// Stale SeqNo (entry.SeqNo < old.SeqNo) or expired unchanged entry.
+	return RouteRejected, nil
 }
 
 // syncSeqCounterLocked ensures the monotonic SeqNo counter stays ahead of
@@ -283,6 +310,13 @@ type RemoveDirectPeerResult struct {
 	// locally. No wire withdrawal is emitted for these — the originating
 	// node is responsible for its own withdrawals.
 	TransitInvalidated int
+
+	// ExposedBackups lists identities where the withdrawal/invalidation of
+	// routes through the disconnected peer exposed a surviving non-withdrawn,
+	// non-expired backup route via a different next-hop. The caller can use
+	// this to trigger event-driven pending queue drains — same semantics as
+	// TickTTL's exposed return value.
+	ExposedBackups []PeerIdentity
 }
 
 // AddDirectPeer registers a directly connected peer in the routing table.
@@ -429,12 +463,18 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 
 	var result RemoveDirectPeerResult
 
+	// Track which identities had routes invalidated so we can check for
+	// surviving backup routes after the invalidation pass.
+	affectedIdentities := make(map[PeerIdentity]struct{})
+
 	for _, routes := range t.routes {
 		for i := range routes {
 			r := &routes[i]
 			if r.NextHop != peerIdentity || r.Hops >= HopsInfinity {
 				continue
 			}
+
+			affectedIdentities[r.Identity] = struct{}{}
 
 			if r.Source == RouteSourceDirect && r.Origin == t.localOrigin {
 				seq := t.nextSeqLocked(r.Identity)
@@ -456,6 +496,17 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 		}
 	}
 
+	// For each affected identity, check if a non-withdrawn, non-expired
+	// backup route survives via a different next-hop.
+	for identity := range affectedIdentities {
+		for _, r := range t.routes[identity] {
+			if !r.IsWithdrawn() && !r.IsExpired(now) {
+				result.ExposedBackups = append(result.ExposedBackups, identity)
+				break
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -464,10 +515,12 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 // NOT generate wire withdrawals and does NOT touch direct routes — it is
 // a defense-in-depth cleanup for peers that had mesh_routing_v1 (could
 // advertise routes) but not mesh_relay_v1 (no direct route was created).
-// Returns the number of transit routes invalidated.
-func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) int {
+// Returns the number of transit routes invalidated and a slice of identities
+// where the invalidation exposed a surviving non-withdrawn backup route via
+// a different next-hop (same semantics as TickTTL's exposed return value).
+func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerIdentity) {
 	if peerIdentity == "" {
-		return 0
+		return 0, nil
 	}
 
 	t.mu.Lock()
@@ -475,6 +528,7 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) int {
 
 	now := t.clock()
 	invalidated := 0
+	affectedIdentities := make(map[PeerIdentity]struct{})
 	for _, routes := range t.routes {
 		for i := range routes {
 			r := &routes[i]
@@ -484,12 +538,24 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) int {
 			if r.Source == RouteSourceDirect {
 				continue
 			}
+			affectedIdentities[r.Identity] = struct{}{}
 			r.Hops = HopsInfinity
 			r.ExpiresAt = now.Add(t.defaultTTL)
 			invalidated++
 		}
 	}
-	return invalidated
+
+	var exposed []PeerIdentity
+	for identity := range affectedIdentities {
+		for _, r := range t.routes[identity] {
+			if !r.IsWithdrawn() && !r.IsExpired(now) {
+				exposed = append(exposed, identity)
+				break
+			}
+		}
+	}
+
+	return invalidated, exposed
 }
 
 // nextSeqLocked increments and returns the next SeqNo for a given identity.
@@ -503,18 +569,25 @@ func (t *Table) nextSeqLocked(identity PeerIdentity) uint64 {
 // flap detection state. Should be called periodically (e.g., every
 // second or every few seconds).
 //
+// Returns identities where at least one entry expired AND at least one
+// non-withdrawn, non-expired route survives — indicating that a backup
+// route has been exposed by the expiry. The caller can use this to
+// trigger event-driven pending queue drains.
+//
 // Only ExpiresAt is checked — withdrawn (Hops >= HopsInfinity) entries
 // are kept until their ExpiresAt elapses. This preserves tombstones
 // created by WithdrawRoute that guard against resurrection from delayed
 // lower-SeqNo announcements. RemoveDirectPeer and InvalidateTransitRoutes
 // set a short ExpiresAt on withdrawn entries so they are cleaned up
 // promptly without breaking tombstone semantics.
-func (t *Table) TickTTL() {
+func (t *Table) TickTTL() []PeerIdentity {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := t.clock()
+	var exposed []PeerIdentity
 	for identity, routes := range t.routes {
+		origLen := len(routes)
 		n := 0
 		for i := range routes {
 			if !routes[i].IsExpired(now) {
@@ -522,10 +595,22 @@ func (t *Table) TickTTL() {
 				n++
 			}
 		}
+		removed := origLen - n
 		if n == 0 {
 			delete(t.routes, identity)
 		} else {
 			t.routes[identity] = routes[:n]
+			// Some entries expired but survivors remain. Check if any
+			// survivor is non-withdrawn — that means a usable backup
+			// route was exposed by the expiry.
+			if removed > 0 {
+				for j := 0; j < n; j++ {
+					if !routes[j].IsWithdrawn() {
+						exposed = append(exposed, identity)
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -549,6 +634,7 @@ func (t *Table) TickTTL() {
 			}
 		}
 	}
+	return exposed
 }
 
 // RefreshDirectPeers extends the TTL of all active (non-withdrawn, non-expired)

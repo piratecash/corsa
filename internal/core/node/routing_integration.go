@@ -40,7 +40,10 @@ func (s *Service) inboundPeerIdentity(conn net.Conn) domain.PeerIdentity {
 }
 
 // routingTableTTLLoop runs periodic TTL cleanup on the routing table.
-// Expired entries are removed every 10 seconds.
+// Expired entries are removed every 10 seconds. When an expiry exposes
+// a surviving backup route for an identity, the event-driven drain is
+// triggered so pending send_message frames can be delivered immediately
+// instead of waiting for the normal retry loop.
 func (s *Service) routingTableTTLLoop(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -50,7 +53,8 @@ func (s *Service) routingTableTTLLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.routingTable.TickTTL()
+			exposed := s.routingTable.TickTTL()
+			s.triggerDrainForExposed(exposed)
 		}
 	}
 }
@@ -313,7 +317,9 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 	}
 
 	accepted := 0
+	unchanged := 0
 	rejected := 0
+	drainIdentities := make(map[domain.PeerIdentity]struct{})
 
 	for _, wireRoute := range frame.AnnounceRoutes {
 		if wireRoute.Identity == "" || wireRoute.Origin == "" {
@@ -370,13 +376,22 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 				continue
 			}
 
+			withdrawnID := domain.PeerIdentity(wireRoute.Identity)
 			if s.routingTable.WithdrawRoute(
-				domain.PeerIdentity(wireRoute.Identity),
+				withdrawnID,
 				domain.PeerIdentity(wireRoute.Origin),
 				senderIdentity,
 				wireRoute.SeqNo,
 			) {
 				accepted++
+				// After withdrawing the best triple, a less-preferred backup
+				// route may now be the active path. If Lookup still returns
+				// reachable entries for this identity, trigger a drain so
+				// pending send_message frames can be delivered via the backup
+				// route immediately instead of waiting for the retry loop.
+				if remaining := s.routingTable.Lookup(withdrawnID); len(remaining) > 0 {
+					drainIdentities[withdrawnID] = struct{}{}
+				}
 				log.Debug().
 					Str("identity", wireRoute.Identity).
 					Str("origin", wireRoute.Origin).
@@ -407,7 +422,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 			Source:   routing.RouteSourceAnnouncement,
 		}
 
-		ok, err := s.routingTable.UpdateRoute(entry)
+		status, err := s.routingTable.UpdateRoute(entry)
 		if err != nil {
 			log.Warn().
 				Err(err).
@@ -418,9 +433,14 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 			rejected++
 			continue
 		}
-		if ok {
+		switch status {
+		case routing.RouteAccepted:
 			accepted++
-		} else {
+			drainIdentities[domain.PeerIdentity(wireRoute.Identity)] = struct{}{}
+		case routing.RouteUnchanged:
+			unchanged++
+			drainIdentities[domain.PeerIdentity(wireRoute.Identity)] = struct{}{}
+		case routing.RouteRejected:
 			rejected++
 		}
 	}
@@ -429,8 +449,29 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		Str("from", string(senderIdentity)).
 		Int("total", len(frame.AnnounceRoutes)).
 		Int("accepted", accepted).
+		Int("unchanged", unchanged).
 		Int("rejected", rejected).
 		Msg("announce_routes_processed")
+
+	// Event-driven pending queue drain: new or reconfirmed transit routes
+	// mean that own outbound frames waiting for these recipients can be
+	// delivered via the learned next-hop. Both accepted (new/improved) and
+	// unchanged (reconfirmed alive) routes qualify — a reconnected peer
+	// re-announcing the same table still proves the path is alive.
+	// Batched after the entire announce is processed to avoid per-entry
+	// scans during high-volume table syncs.
+	//
+	// Fast-path: skip goroutine launch when the pending queue is empty.
+	// This avoids unnecessary Lock contention on every announce_routes,
+	// which was causing inter-test timing regressions in full package runs.
+	if len(drainIdentities) > 0 {
+		s.mu.RLock()
+		hasPending := len(s.pending) > 0
+		s.mu.RUnlock()
+		if hasPending {
+			go s.drainPendingForIdentities(drainIdentities)
+		}
+	}
 }
 
 // onPeerSessionEstablished is called when a session is fully established,
@@ -554,7 +595,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 		// announcements, but defense-in-depth ensures stale lineages are
 		// cleaned up on disconnect.
 		if isLastTotal {
-			invalidated := s.routingTable.InvalidateTransitRoutes(peerIdentity)
+			invalidated, exposed := s.routingTable.InvalidateTransitRoutes(peerIdentity)
 			if invalidated > 0 {
 				log.Info().
 					Str("peer", string(peerIdentity)).
@@ -565,6 +606,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 				// persist until the next periodic cycle (up to 30s).
 				s.announceLoop.TriggerUpdate()
 			}
+			s.triggerDrainForExposed(exposed)
 		} else {
 			log.Debug().
 				Str("peer", string(peerIdentity)).
@@ -595,6 +637,29 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 		Msg("routing_direct_peer_removed")
 
 	s.announceLoop.TriggerUpdate()
+	s.triggerDrainForExposed(result.ExposedBackups)
+}
+
+// triggerDrainForExposed converts a slice of routing.PeerIdentity (identities
+// with newly exposed backup routes) into the identities map format and launches
+// drainPendingForIdentities if the pending queue is non-empty. Used by
+// onPeerSessionClosed (disconnect-triggered drain), routingTableTTLLoop
+// (TTL-expiry drain), and handleAnnounceRoutes (withdrawal drain) to share
+// the drain-trigger logic.
+func (s *Service) triggerDrainForExposed(exposed []routing.PeerIdentity) {
+	if len(exposed) == 0 {
+		return
+	}
+	identities := make(map[domain.PeerIdentity]struct{}, len(exposed))
+	for _, id := range exposed {
+		identities[domain.PeerIdentity(id)] = struct{}{}
+	}
+	s.mu.RLock()
+	hasPending := len(s.pending) > 0
+	s.mu.RUnlock()
+	if hasPending {
+		go s.drainPendingForIdentities(identities)
+	}
 }
 
 // sendTableDirectedRelay sends a relay_message to the table-selected next-hop.
@@ -880,7 +945,7 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 			ExpiresAt: route.ExpiresAt,
 		}
 
-		ok, err := s.routingTable.UpdateRoute(confirmed)
+		status, err := s.routingTable.UpdateRoute(confirmed)
 		if err != nil {
 			log.Warn().Err(err).
 				Str("identity", string(recipientIdentity)).
@@ -889,7 +954,7 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 				Msg("route_hop_ack_confirm_failed")
 			return
 		}
-		if ok {
+		if status == routing.RouteAccepted {
 			log.Debug().
 				Str("identity", string(recipientIdentity)).
 				Str("origin", string(route.Origin)).
@@ -931,7 +996,6 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 
 	return ""
 }
-
 
 // executeGossipTargets sends a message to pre-computed gossip targets from a
 // RoutingDecision. The target list is provided by the Router — targets are not
@@ -1129,4 +1193,388 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	}
 	_, _ = io.WriteString(conn, line)
 	_, _ = readFrameLine(reader, maxResponseLineBytes)
+}
+
+// drainPendingForIdentities scans the pending queue for own outbound
+// send_message frames whose Recipient matches one of the given identities
+// and attempts to deliver them via the routing table.
+//
+// Only send_message is drained — other frame types are not route-recoverable:
+//   - relay_message, announce_peer: other peers' traffic, handled by relay
+//     retry loop and peer session flush respectively.
+//   - send_delivery_receipt: delivered via relayStates hop chain
+//     (lookupReceiptForwardTo), not via the routing table. A new route to
+//     the receipt's Recipient does not create a delivery path for the receipt.
+//     Receipts are retried through flushPendingPeerFrames (peer reconnect)
+//     and the relay retry loop, both of which already handle them correctly.
+//
+// This is an event-driven optimization: instead of waiting for the original
+// target peer to reconnect (flushPendingPeerFrames) or for the 2-second
+// relay retry loop to fire, we react immediately when a new route appears.
+//
+// Concurrency safety: matched frames are atomically removed from pending
+// under the lock before delivery is attempted. This prevents concurrent
+// drain goroutines (servePeerSession + handleAnnounceRoutes) from
+// sending the same frame twice. Frames that fail delivery are returned to
+// pending so the normal retry mechanisms can pick them up.
+//
+// Crash safety: all outbound state changes (markOutboundTerminalLocked,
+// markOutboundRetryingLocked, clearOutboundQueuedLocked) are collected as
+// deferred actions during the delivery loop and applied under the lock
+// together with the pending queue return in a single persist. No
+// intermediate writes to queue-*.json occur while extracted frames are
+// absent from s.pending.
+//
+// Called from servePeerSession (direct peer connect, inboxCh is actively
+// read so Lock contention cannot cause overflow) and handleAnnounceRoutes
+// (transit route learned) to minimize delivery latency.
+func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]struct{}) {
+	defer crashlog.DeferRecover()
+
+	if len(identities) == 0 {
+		return
+	}
+
+	// Bail out if the service is shutting down. Drain goroutines are
+	// fire-and-forget; without this check they could run against a
+	// half-torn-down Service (closed connections, cancelled contexts),
+	// causing write-deadline timeouts that serialize on s.mu and stall
+	// other goroutines sharing the same lock.
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+
+	type pendingMatch struct {
+		peerAddr domain.PeerAddress
+		item     pendingFrame
+		origIdx  int // position in original s.pending[peerAddr] before extraction
+	}
+
+	// Per-address extraction metadata. Stored during the extract phase so
+	// the return phase can merge failed frames back into their original
+	// positions — preserving queue order across recipients sharing the
+	// same peer address.
+	type addrExtractMeta struct {
+		origLen      int   // length of s.pending[addr] before extraction
+		extractedPos []int // original indices of extracted frames (ascending)
+	}
+
+	// Atomically extract matching frames from the pending queue.
+	// Removing them under the lock prevents concurrent drain goroutines
+	// from processing the same frame (double-send prevention).
+	//
+	// No persist happens here — the on-disk state still contains the
+	// extracted frames. If the process crashes before we persist below,
+	// frames survive in queue-*.json and will be retried on restart.
+	s.mu.Lock()
+	var extracted []pendingMatch
+	extractMeta := make(map[domain.PeerAddress]*addrExtractMeta)
+	for addr, frames := range s.pending {
+		var kept []pendingFrame
+		var meta *addrExtractMeta
+		for i, item := range frames {
+			if item.Frame.Type != "send_message" {
+				kept = append(kept, item)
+				continue
+			}
+			if _, ok := identities[domain.PeerIdentity(item.Frame.Recipient)]; !ok {
+				kept = append(kept, item)
+				continue
+			}
+			if meta == nil {
+				meta = &addrExtractMeta{origLen: len(frames)}
+			}
+			meta.extractedPos = append(meta.extractedPos, i)
+			extracted = append(extracted, pendingMatch{peerAddr: addr, item: item, origIdx: i})
+			delete(s.pendingKeys, pendingFrameKey(addr, item.Frame))
+		}
+		if meta != nil {
+			extractMeta[addr] = meta
+		}
+		if len(kept) == 0 {
+			delete(s.pending, addr)
+		} else {
+			s.pending[addr] = kept
+		}
+	}
+	s.mu.Unlock()
+
+	if len(extracted) == 0 {
+		return
+	}
+
+	// Attempt delivery for each extracted frame. Track failures
+	// so they can be returned to the pending queue.
+	//
+	// Outbound state changes (terminal, retrying, cleared) are collected
+	// as deferred actions and applied under the lock in a single batch
+	// at the end. This eliminates intermediate persists that would
+	// snapshot s.pending without the extracted frames, creating a
+	// crash-loss window.
+	type deferredOutbound struct {
+		action string // "terminal", "retrying", "clear"
+		frame  protocol.Frame
+		// Fields for "retrying":
+		queuedAt time.Time
+		retries  int
+		errText  string
+		// Fields for "terminal":
+		status string
+	}
+
+	now := time.Now().UTC()
+	var failed []pendingMatch
+	var deferred []deferredOutbound
+
+	for i, m := range extracted {
+		// Re-check shutdown before each delivery attempt. If the service
+		// is shutting down, return all remaining extracted frames to
+		// pending without attempting delivery — the next startup will
+		// retry them from the persisted queue state.
+		select {
+		case <-s.done:
+			failed = append(failed, extracted[i:]...)
+			goto returnFrames
+		default:
+		}
+
+		if s.pendingFrameExpired(m.item.Frame, m.item.QueuedAt, now) {
+			deferred = append(deferred, deferredOutbound{
+				action:  "terminal",
+				frame:   m.item.Frame,
+				status:  "expired",
+				errText: "message delivery expired",
+			})
+			continue
+		}
+
+		delivered, attempted := s.drainSendMessage(m.item.Frame, m.peerAddr)
+		if !delivered {
+			// Only increment retry counter when a real delivery attempt was
+			// made (route existed, address resolved, send was tried). When
+			// no usable route exists the frame goes back to pending without
+			// burning retry budget — a future routing event will trigger
+			// another drain cycle.
+			if attempted {
+				m.item.Retries++
+			}
+			if m.item.Retries >= maxPendingFrameRetries {
+				deferred = append(deferred, deferredOutbound{
+					action:  "terminal",
+					frame:   m.item.Frame,
+					status:  "failed",
+					errText: "max retries exceeded",
+				})
+				continue
+			}
+			// Only emit a "retrying" outbound state change when a real
+			// delivery attempt was made. When no usable route exists, the
+			// frame goes back to pending silently — no Status flip to
+			// "retrying", no LastAttemptAt update. This preserves the
+			// semantic that "retrying" in outbound state means a real
+			// network handoff was tried and failed, matching the behavior
+			// of flushPendingPeerFrames where retrying only fires on
+			// sendCh backpressure.
+			if attempted {
+				deferred = append(deferred, deferredOutbound{
+					action:   "retrying",
+					frame:    m.item.Frame,
+					queuedAt: m.item.QueuedAt,
+					retries:  m.item.Retries,
+					errText:  "drain delivery failed",
+				})
+			}
+			failed = append(failed, m)
+		} else {
+			deferred = append(deferred, deferredOutbound{
+				action: "clear",
+				frame:  m.item.Frame,
+			})
+		}
+	}
+
+returnFrames:
+	// Apply all state changes in a single lock+persist. This is the
+	// only persist in the entire drain cycle — no intermediate writes
+	// that could snapshot s.pending without extracted frames.
+	s.mu.Lock()
+
+	// Merge failed frames back into their original positions in the
+	// per-address pending queue. The extraction phase recorded each
+	// frame's origIdx and per-addr metadata (origLen, extractedPos).
+	// We walk through the original position range 0..origLen-1: at
+	// extracted positions, emit the returning frame (if any); at kept
+	// positions, consume the next frame from the current queue. Frames
+	// added by other goroutines during the unlocked delivery window
+	// (beyond the kept portion) are appended at the end. This preserves
+	// exact original ordering across recipients sharing the same peer
+	// address — flushPendingPeerFrames delivers in slice order, so any
+	// reordering would change DM delivery sequence after route churn.
+	type returningEntry struct {
+		origIdx int
+		item    pendingFrame
+	}
+	returningByAddr := make(map[domain.PeerAddress][]returningEntry, len(failed))
+	for _, m := range failed {
+		key := pendingFrameKey(m.peerAddr, m.item.Frame)
+		if _, dup := s.pendingKeys[key]; dup {
+			continue
+		}
+		returningByAddr[m.peerAddr] = append(returningByAddr[m.peerAddr], returningEntry{
+			origIdx: m.origIdx,
+			item:    m.item,
+		})
+		s.pendingKeys[key] = struct{}{}
+	}
+	for addr, rets := range returningByAddr {
+		meta := extractMeta[addr]
+		if meta == nil {
+			// No metadata (defensive) — prepend as fallback.
+			fallback := make([]pendingFrame, 0, len(rets)+len(s.pending[addr]))
+			for _, r := range rets {
+				fallback = append(fallback, r.item)
+			}
+			s.pending[addr] = append(fallback, s.pending[addr]...)
+			continue
+		}
+
+		current := s.pending[addr]
+
+		// current = [kept frames in order] + [new frames from other goroutines].
+		// keptCount is the number of original non-extracted frames.
+		keptCount := meta.origLen - len(meta.extractedPos)
+		var keptPortion, newFrames []pendingFrame
+		if keptCount <= len(current) {
+			keptPortion = current[:keptCount]
+			newFrames = current[keptCount:]
+		} else {
+			// Some kept frames were removed by a concurrent flush — use
+			// whatever is left; merge degrades gracefully.
+			keptPortion = current
+		}
+
+		merged := make([]pendingFrame, 0, len(rets)+len(current))
+		ki := 0 // index into keptPortion
+		ri := 0 // index into rets (sorted ascending by origIdx via extraction order)
+		ei := 0 // index into meta.extractedPos
+
+		for pos := 0; pos < meta.origLen; pos++ {
+			if ei < len(meta.extractedPos) && meta.extractedPos[ei] == pos {
+				// This position was extracted.
+				if ri < len(rets) && rets[ri].origIdx == pos {
+					merged = append(merged, rets[ri].item)
+					ri++
+				}
+				// else: delivered, expired, or terminal — gap is correct.
+				ei++
+			} else {
+				// This position was kept.
+				if ki < len(keptPortion) {
+					merged = append(merged, keptPortion[ki])
+					ki++
+				}
+			}
+		}
+		// Defensive: drain any remaining kept or returning frames.
+		for ; ki < len(keptPortion); ki++ {
+			merged = append(merged, keptPortion[ki])
+		}
+		for ; ri < len(rets); ri++ {
+			merged = append(merged, rets[ri].item)
+		}
+		// Append frames queued by other goroutines during the unlock window.
+		merged = append(merged, newFrames...)
+
+		if len(merged) == 0 {
+			delete(s.pending, addr)
+		} else {
+			s.pending[addr] = merged
+		}
+	}
+	for _, d := range deferred {
+		switch d.action {
+		case "terminal":
+			s.markOutboundTerminalLocked(d.frame, d.status, d.errText)
+		case "retrying":
+			s.markOutboundRetryingLocked(d.frame, d.queuedAt, d.retries, d.errText)
+		case "clear":
+			s.clearOutboundQueuedLocked(d.frame.ID)
+		}
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	drainDone := s.drainDone
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+	if drainDone != nil {
+		drainDone()
+	}
+}
+
+// drainSendMessage attempts to deliver a single send_message frame via the
+// routing table. Uses sendRelayToAddress directly (not sendTableDirectedRelay)
+// to get a definitive success/failure signal.
+//
+// Returns two booleans:
+//   - delivered: true when the frame was durably handed off to a relay session.
+//   - attempted: true when a real send was attempted (route existed, address
+//     resolved). When attempted is false the caller should NOT increment the
+//     retry counter — no network resources were consumed, the route simply
+//     does not exist yet and a future routing event may provide one.
+//
+// On success, the caller is responsible for clearing outbound state —
+// this function does not call clearOutboundQueued to avoid intermediate
+// persists during the drain cycle.
+func (s *Service) drainSendMessage(frame protocol.Frame, originalPeer domain.PeerAddress) (delivered, attempted bool) {
+	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(frame.CreatedAt))
+	if err != nil {
+		// Parse error is a data problem, not a routing problem.
+		// Treat as attempted — the frame is malformed and retries won't help.
+		return false, true
+	}
+	envelope := protocol.Envelope{
+		ID:         protocol.MessageID(frame.ID),
+		Topic:      frame.Topic,
+		Sender:     frame.Address,
+		Recipient:  frame.Recipient,
+		Flag:       protocol.MessageFlag(frame.Flag),
+		TTLSeconds: frame.TTLSeconds,
+		Payload:    []byte(frame.Body),
+		CreatedAt:  createdAt,
+	}
+
+	decision := s.router.Route(envelope)
+	if decision.RelayNextHop == nil {
+		// No route — not a real delivery attempt, don't burn retry budget.
+		return false, false
+	}
+
+	// Resolve the next-hop address. Use the validated address from the
+	// routing decision when available, otherwise re-resolve.
+	address := decision.RelayNextHopAddress
+	if address == "" {
+		address = s.resolveRouteNextHopAddress(*decision.RelayNextHop, decision.RelayNextHopHops)
+	}
+	if address == "" {
+		// Route exists but address unresolvable — transient, don't burn retry budget.
+		return false, false
+	}
+
+	// sendRelayToAddress returns true only when the frame is durably
+	// enqueued in a session or persistent peer queue, with relayForwardState
+	// stored. No silent gossip fallback — if this fails, the frame goes
+	// back to pending for the normal retry loop.
+	if !s.sendRelayToAddress(address, envelope, decision.RelayRouteOrigin) {
+		// Real send attempt failed — this is a genuine delivery failure.
+		return false, true
+	}
+
+	log.Info().
+		Str("id", frame.ID).
+		Str("recipient", frame.Recipient).
+		Str("next_hop", string(*decision.RelayNextHop)).
+		Str("original_peer", string(originalPeer)).
+		Msg("pending_drained_via_new_route")
+	return true, true
 }

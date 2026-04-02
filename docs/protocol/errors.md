@@ -57,7 +57,7 @@ For `incompatible-protocol-version` errors, additional fields are included:
 | `invalid-auth-signature` | auth_session signature verification failed | 401 Unauthorized | Authentication request signature does not verify against known keys; may be invalid credentials or tampering |
 | `blacklisted` | Remote IP has been banned (exceeded 1000 ban points) | 403 Forbidden | Source IP address has accumulated too many violations and is temporarily or permanently blocked |
 | `invalid-ack-delete` | Invalid ack_delete frame or signature | 400 Bad Request | Acknowledgment deletion frame is malformed, missing fields, or signature verification failed |
-| `duplicate-connection` | Inbound hello rejected because outbound session already exists | 409 Conflict | Two nodes dialed each other simultaneously. The responder already holds an outbound session to the same overlay address, so the inbound connection is redundant. The initiator should not retry — the existing outbound session already covers this peer pair |
+| `duplicate-connection` | (Deprecated — no longer emitted) Inbound hello was previously rejected when an outbound session existed | 409 Conflict | Removed: rejecting the inbound side of a simultaneous dial prevented the initiator from gossiping to the responder, breaking one-way message propagation. Both connections now coexist; the routing layer deduplicates by identity |
 
 ## Error Code Categories
 
@@ -107,7 +107,7 @@ These errors indicate the request is blocked:
 
 These errors indicate duplicate or conflicting connections:
 
-- `duplicate-connection` - Inbound rejected because outbound session already exists
+- `duplicate-connection` - (Deprecated) Previously rejected inbound when outbound existed; now allowed
 
 ### Version Errors
 
@@ -172,13 +172,15 @@ Server returns: unknown-message-id
 Action: Verify message was previously stored; may have expired or been deleted
 ```
 
-**Scenario 6: Simultaneous connection (duplicate)**
+**Scenario 6: Simultaneous connection (duplicate — now allowed)**
 ```
 Node A dials Node B (outbound A→B established)
 Node B dials Node A (inbound to A with hello declaring B's address)
 Node A detects outbound session to B already exists
-Server returns: duplicate-connection
-Action: No retry needed — the existing outbound session covers this peer pair
+Server returns: welcome (both connections coexist)
+Note: Previously returned duplicate-connection error, but that broke
+one-way gossip — the rejected side had no outbound and could not
+forward messages. Both connections now coexist; routing deduplicates.
 ```
 
 ## Mermaid Diagram: Error Classification
@@ -220,7 +222,7 @@ graph TB
 
 6. **Signature Verification**: Always verify signatures before processing message content; prefer failing early with `invalid-direct-message-signature`
 
-7. **Duplicate Connection**: When receiving `duplicate-connection`, the initiator should not retry — the existing outbound session already covers this peer. This error is expected during simultaneous connection establishment and is not a failure condition
+7. **Duplicate Connection**: The `duplicate-connection` error is deprecated and no longer emitted. Both sides of a simultaneous dial are now accepted; the routing and health layers deduplicate by peer identity. Legacy clients that still handle this error should treat it as a no-op
 
 ---
 
@@ -283,7 +285,7 @@ graph TB
 | `invalid-auth-signature` | Проверка подписи auth_session не удалась | 401 Unauthorized | Подпись запроса аутентификации не проверяется для известных ключей; может быть неверные учетные данные или подделка |
 | `blacklisted` | IP-адрес удаленного хоста был запрещен (превышены 1000 точек запрета) | 403 Forbidden | IP-адрес источника накопил слишком много нарушений и временно или постоянно заблокирован |
 | `invalid-ack-delete` | Недействительный кадр ack_delete или подпись | 400 Bad Request | Кадр удаления подтверждения неправильно сформирован, отсутствуют поля или проверка подписи не удалась |
-| `duplicate-connection` | Входящий hello отклонён, так как исходящая сессия к этому пиру уже существует | 409 Conflict | Два узла одновременно подключились друг к другу. Ответчик уже держит outbound-сессию к тому же overlay-адресу, поэтому входящее соединение избыточно. Инициатору не нужно повторять попытку — существующая outbound-сессия уже покрывает эту пару пиров |
+| `duplicate-connection` | (Устарел — больше не отправляется) Ранее входящий hello отклонялся при наличии outbound-сессии | 409 Conflict | Удалено: отклонение входящей стороны при одновременном подключении не позволяло инициатору передавать gossip-сообщения респондеру, нарушая однонаправленную доставку. Теперь оба соединения сосуществуют; маршрутизация дедуплицирует по identity |
 
 ## Категории кодов ошибок
 
@@ -333,7 +335,7 @@ graph TB
 
 Эти ошибки указывают на дублирующие или конфликтующие соединения:
 
-- `duplicate-connection` - Входящее соединение отклонено, так как outbound-сессия уже существует
+- `duplicate-connection` - (Устарел) Ранее отклонял входящее соединение при наличии outbound-сессии; теперь разрешено
 
 ### Ошибки версии
 
@@ -398,13 +400,16 @@ IP-адрес клиента делает много неверных запро
 Действие: Проверьте, было ли сообщение ранее сохранено; может быть истекло или удалено
 ```
 
-**Сценарий 6: Одновременное подключение (дубликат)**
+**Сценарий 6: Одновременное подключение (дубликат — теперь разрешено)**
 ```
 Нода A подключается к ноде B (outbound A→B установлен)
 Нода B подключается к ноде A (inbound к A с hello, объявляющим адрес B)
 Нода A обнаруживает, что outbound-сессия к B уже существует
-Сервер возвращает: duplicate-connection
-Действие: Повторная попытка не требуется — существующая outbound-сессия уже покрывает эту пару пиров
+Сервер возвращает: welcome (оба соединения сосуществуют)
+Примечание: Ранее возвращался duplicate-connection, но это
+ломало одностороннюю доставку gossip — отклонённая сторона не
+имела outbound-сессии и не могла пересылать сообщения.
+Теперь оба соединения разрешены; маршрутизация дедуплицирует.
 ```
 
 ## Диаграмма Mermaid: Классификация ошибок
@@ -446,4 +451,4 @@ graph TB
 
 6. **Проверка подписи**: Всегда проверяйте подписи перед обработкой содержимого сообщения; предпочитайте ранний отказ с `invalid-direct-message-signature`
 
-7. **Дублирующее соединение**: При получении `duplicate-connection` инициатор не должен повторять попытку — существующая outbound-сессия уже покрывает этого пира. Эта ошибка ожидаема при одновременном установлении соединения и не является условием сбоя
+7. **Дублирующее соединение**: Ошибка `duplicate-connection` устарела и больше не отправляется. Обе стороны одновременного подключения теперь принимаются; уровень маршрутизации и здоровья дедуплицирует по identity пира. Устаревшие клиенты, обрабатывающие эту ошибку, должны трактовать её как no-op

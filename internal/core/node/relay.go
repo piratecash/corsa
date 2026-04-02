@@ -937,7 +937,6 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 	return true
 }
 
-
 func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 	defer crashlog.DeferRecover()
 	for _, address := range s.routingTargetsForRecipient(receipt.Recipient) {
@@ -1337,6 +1336,20 @@ func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time,
 		return
 	}
 	s.mu.Lock()
+	s.markOutboundRetryingLocked(frame, queuedAt, retries, errText)
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+// markOutboundRetryingLocked updates outbound state to "retrying" without
+// persisting. Caller must hold s.mu and is responsible for persisting
+// afterwards. Used by drainPendingForIdentities to batch all state changes
+// into a single persist at the end of the drain cycle.
+func (s *Service) markOutboundRetryingLocked(frame protocol.Frame, queuedAt time.Time, retries int, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
 	state := s.outbound[frame.ID]
 	if state.MessageID == "" {
 		state.MessageID = frame.ID
@@ -1350,9 +1363,6 @@ func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time,
 	state.LastAttemptAt = time.Now().UTC()
 	state.Error = errText
 	s.outbound[frame.ID] = state
-	snapshot := s.queueStateSnapshotLocked()
-	s.mu.Unlock()
-	s.persistQueueState(snapshot)
 }
 
 func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText string) {
@@ -1360,6 +1370,20 @@ func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText str
 		return
 	}
 	s.mu.Lock()
+	s.markOutboundTerminalLocked(frame, status, errText)
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+// markOutboundTerminalLocked updates outbound state to a terminal status
+// without persisting. Caller must hold s.mu and is responsible for
+// persisting afterwards. Used by drainPendingForIdentities to batch all
+// state changes into a single persist at the end of the drain cycle.
+func (s *Service) markOutboundTerminalLocked(frame protocol.Frame, status, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
 	state := s.outbound[frame.ID]
 	if state.MessageID == "" {
 		state.MessageID = frame.ID
@@ -1373,9 +1397,6 @@ func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText str
 	}
 	state.Error = errText
 	s.outbound[frame.ID] = state
-	snapshot := s.queueStateSnapshotLocked()
-	s.mu.Unlock()
-	s.persistQueueState(snapshot)
 }
 
 func (s *Service) clearOutboundQueued(messageID string) {
@@ -1391,6 +1412,17 @@ func (s *Service) clearOutboundQueued(messageID string) {
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
+}
+
+// clearOutboundQueuedLocked removes outbound delivery state for a message
+// without persisting. Caller must hold s.mu and is responsible for
+// persisting afterwards. Used by drainPendingForIdentities to batch all
+// state changes into a single persist at the end of the drain cycle.
+func (s *Service) clearOutboundQueuedLocked(messageID string) {
+	if strings.TrimSpace(messageID) == "" {
+		return
+	}
+	delete(s.outbound, messageID)
 }
 
 func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {

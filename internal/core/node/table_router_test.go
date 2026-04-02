@@ -21,7 +21,7 @@ func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
 	}
 
 	// Add a route to "target-X" via "peer-B".
-	ok, err := table.UpdateRoute(routing.RouteEntry{
+	status, err := table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "peer-B",
 		NextHop:  "peer-B",
@@ -29,8 +29,8 @@ func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
 	})
-	if err != nil || !ok {
-		t.Fatalf("UpdateRoute failed: ok=%v, err=%v", ok, err)
+	if err != nil || status != routing.RouteAccepted {
+		t.Fatalf("UpdateRoute failed: status=%v, err=%v", status, err)
 	}
 
 	tr := &TableRouter{
@@ -91,7 +91,7 @@ func TestTableRouterNoSessionGossipFallback(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 
 	// Route exists but no session available.
-	ok, err := table.UpdateRoute(routing.RouteEntry{
+	status, err := table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "peer-B",
 		NextHop:  "peer-B",
@@ -99,8 +99,8 @@ func TestTableRouterNoSessionGossipFallback(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
 	})
-	if err != nil || !ok {
-		t.Fatalf("UpdateRoute failed: ok=%v, err=%v", ok, err)
+	if err != nil || status != routing.RouteAccepted {
+		t.Fatalf("UpdateRoute failed: status=%v, err=%v", status, err)
 	}
 
 	tr := &TableRouter{
@@ -131,7 +131,7 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 
 	// Two routes: hop_ack via peer-B (2 hops) and announcement via peer-C (1 hop).
 	// hop_ack should be preferred (higher trust).
-	ok, _ := table.UpdateRoute(routing.RouteEntry{
+	status, _ := table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "target-X",
 		NextHop:  "peer-C",
@@ -139,11 +139,11 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
 	})
-	if !ok {
+	if status != routing.RouteAccepted {
 		t.Fatal("first UpdateRoute should accept")
 	}
 
-	ok, _ = table.UpdateRoute(routing.RouteEntry{
+	status, _ = table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "target-X",
 		NextHop:  "peer-B",
@@ -151,7 +151,7 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceHopAck,
 	})
-	if !ok {
+	if status != routing.RouteAccepted {
 		t.Fatal("second UpdateRoute should accept")
 	}
 
@@ -185,7 +185,7 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 
 	// Two routes: best via peer-B (no session), secondary via peer-C (has session).
-	ok, _ := table.UpdateRoute(routing.RouteEntry{
+	status, _ := table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "target-X",
 		NextHop:  "peer-B",
@@ -193,11 +193,11 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceHopAck,
 	})
-	if !ok {
+	if status != routing.RouteAccepted {
 		t.Fatal("first UpdateRoute should accept")
 	}
 
-	ok, _ = table.UpdateRoute(routing.RouteEntry{
+	status, _ = table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "target-X",
 		NextHop:  "peer-C",
@@ -205,7 +205,7 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
 	})
-	if !ok {
+	if status != routing.RouteAccepted {
 		t.Fatal("second UpdateRoute should accept")
 	}
 
@@ -280,7 +280,7 @@ func TestTableRouterTransitPeerNeedsBothCaps(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 
 	// Route to target-X via peer-B (hops=2, transit).
-	ok, err := table.UpdateRoute(routing.RouteEntry{
+	status, err := table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "peer-B",
 		NextHop:  "peer-B",
@@ -288,7 +288,7 @@ func TestTableRouterTransitPeerNeedsBothCaps(t *testing.T) {
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
 	})
-	if err != nil || !ok {
+	if err != nil || status != routing.RouteAccepted {
 		t.Fatal("UpdateRoute failed")
 	}
 

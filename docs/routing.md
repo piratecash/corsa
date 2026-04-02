@@ -30,7 +30,11 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 `AddDirectPeerResult` describes the outcome of a peer connect: the `RouteEntry` created or refreshed, and a `Penalized` flag indicating whether flap detection applied a shortened TTL.
 
-`RemoveDirectPeerResult` describes the outcome of a peer disconnect: wire-ready `[]AnnounceEntry` withdrawals (SeqNo already incremented, Hops=16) for own-origin direct routes, plus a count of transit routes silently invalidated locally.
+`RemoveDirectPeerResult` describes the outcome of a peer disconnect: wire-ready `[]AnnounceEntry` withdrawals (SeqNo already incremented, Hops=16) for own-origin direct routes, plus a count of transit routes silently invalidated locally, plus `ExposedBackups []PeerIdentity` — identities where invalidation revealed a surviving non-withdrawn backup route (used by `onPeerSessionClosed` to trigger drain).
+
+`RouteUpdateStatus` is the three-valued outcome of `UpdateRoute`: `RouteAccepted` (new or improved route inserted), `RouteUnchanged` (existing alive route reconfirmed — same SeqNo, same or worse trust/hops, not expired), `RouteRejected` (tombstone block, stale SeqNo, or expired unchanged). Callers use this to distinguish new routing events from benign reconfirmations: `handleAnnounceRoutes` drains pending on both `RouteAccepted` and `RouteUnchanged`, and logs three separate counters (accepted, unchanged, rejected) instead of the previous two (accepted, rejected).
+
+`RouteUpdateStatus` — трёхзначный результат `UpdateRoute`: `RouteAccepted` (новый или улучшенный маршрут вставлен), `RouteUnchanged` (существующий живой маршрут подтверждён — тот же SeqNo, те же или худшие trust/hops, не истёкший), `RouteRejected` (блокировка tombstone, устаревший SeqNo, или истёкший unchanged). Вызывающий код использует это для разделения новых routing-событий и штатных подтверждений: `handleAnnounceRoutes` дрейнит pending и при `RouteAccepted`, и при `RouteUnchanged`, и логирует три отдельных счётчика (accepted, unchanged, rejected) вместо прежних двух (accepted, rejected).
 
 ### Key invariants
 
@@ -46,7 +50,7 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 **Route selection order.** `Lookup()` sorts by source priority first (direct > hop_ack > announcement), then by hops ascending within the same source tier. This means a 3-hop direct route is preferred over a 1-hop announcement — source trust outweighs hop count.
 
-**TTL expiry.** Each entry carries an `ExpiresAt` timestamp (default 120s from insertion). `TickTTL()` removes expired entries. Flapping peers receive a shortened TTL — see flap dampening below. Own-origin direct routes are refreshed by `RefreshDirectPeers()` on every announce cycle (every 30s), preventing them from expiring while the peer session is still alive. Learned routes are refreshed naturally when the neighbor re-announces them.
+**TTL expiry.** Each entry carries an `ExpiresAt` timestamp (default 120s from insertion). `TickTTL()` removes expired entries and returns a slice of identities where the expiry exposed a surviving non-withdrawn backup route — `routingTableTTLLoop` uses this to trigger `drainPendingForIdentities` for immediate delivery via the backup. Flapping peers receive a shortened TTL — see flap dampening below. Own-origin direct routes are refreshed by `RefreshDirectPeers()` on every announce cycle (every 30s), preventing them from expiring while the peer session is still alive. Learned routes are refreshed naturally when the neighbor re-announces them.
 
 **NextHop is peer identity.** Routing operates at identity level, not transport addresses. A single peer identity may have multiple concurrent TCP sessions; session selection happens later in `node.Service` via the identity-to-session(s) index that resolves identities to active connections.
 
@@ -149,6 +153,41 @@ flowchart TD
 *Diagram — Intermediate relay hop: direct peer → table route → gossip*
 
 **Gossip fallback contract (release-blocking).** `TableRouter` in `node/table_router.go` implements the `Router` interface. It consults the routing table for a directed next-hop; if no usable route or session exists, delivery degrades to gossip transparently. Fallback triggers: `Lookup()` returns empty, `RelayNextHop` identity has no active session, `RelayNextHop` peer lacks required capabilities (relay-only for destinations, both relay+routing for transit hops). `GossipTargets` are always populated in every `RoutingDecision`. The same fallback applies at every level: origin node (`sendTableDirectedRelay`), intermediate hop (`tryForwardViaRoutingTable`), and `TableRouter.Route()`.
+
+**Event-driven pending queue drain.** When a route to a destination identity becomes usable — either a direct peer connecting (`servePeerSession` startup), a transit route learned via `announce_routes` (`handleAnnounceRoutes`), a reconnected peer re-announcing the same unchanged routing table (`handleAnnounceRoutes` with `RouteUnchanged` status), a route withdrawal that exposes a surviving backup route (`WithdrawRoute` followed by a `Lookup` check), a TTL expiry that removes a higher-priority route and exposes a surviving backup (`TickTTL` returning exposed identities in `routingTableTTLLoop`), or a local peer disconnect that invalidates routes through the departing next-hop but exposes a backup via a different next-hop (`RemoveDirectPeer` / `InvalidateTransitRoutes` returning `ExposedBackups` in `onPeerSessionClosed`) — the node immediately scans its pending queue for own outbound `send_message` frames targeting that identity and attempts to deliver them via the newly available route. This is an event-driven optimization that eliminates two latency sources: waiting for the original target peer to reconnect (`flushPendingPeerFrames`), and waiting for the 2-second relay retry loop to fire. The drain goroutine is launched from `servePeerSession` (not `onPeerSessionEstablished`) to ensure `inboxCh` is actively being read — launching it earlier creates `s.mu.Lock()` contention that delays session establishment and can cause `inboxCh` overflow under concurrent load. Only `send_message` is drained — other frame types are not route-recoverable: `relay_message` and `announce_peer` are other peers' traffic handled by the relay retry loop and peer session flush; `send_delivery_receipt` is delivered via the `relayStates` hop chain (`lookupReceiptForwardTo`), not via the routing table, so a new route to the receipt's Recipient does not create a delivery path for it. The `drainPendingForIdentities` function in `routing_integration.go` uses an extract-attempt-return pattern: matching frames are atomically removed from the pending queue under the lock (preventing concurrent drain goroutines from processing the same frame twice), delivery is attempted outside the lock via `sendRelayToAddress` (which returns a definitive success/failure signal), and frames that fail delivery are merged back into their original positions in the pending queue using index-based reconstruction — the extraction phase records each frame's `origIdx` and per-address metadata (`origLen`, `extractedPos`), and the return phase walks through the original position range interleaving kept and returning frames so that `flushPendingPeerFrames` — which delivers in slice order — maintains exact DM delivery ordering across recipients sharing the same peer address after route churn. Frames added by other goroutines during the unlocked delivery window are appended at the end. The retry counter is only incremented when a real delivery attempt was made (route existed, address resolved, `sendRelayToAddress` was called) — when no usable route exists (`RelayNextHop == nil` or address unresolvable), the frame is returned to the pending queue without burning retry budget and without any outbound state transition — the `Status` stays `"queued"` and `LastAttemptAt` is not updated, preserving the semantic that `"retrying"` in outbound state means a real network handoff was attempted. The frame waits for future drain cycles triggered by subsequent routing events. When `maxPendingFrameRetries` is reached after real failures, the frame is marked terminal instead of being returned — matching the retry contract of `flushPendingPeerFrames`. Expired frames are detected and marked terminal during the scan. All outbound state changes (terminal, retrying, cleared) are collected as deferred actions during the delivery loop and applied under the lock together with the pending queue return in a single persist — no intermediate writes to `queue-*.json` occur during the drain. This eliminates the crash-loss window that would exist if `markOutboundTerminal`, `markOutboundRetrying`, or `clearOutboundQueued` persisted mid-loop while extracted frames are absent from `s.pending`. When `handleAnnounceRoutes` processes a single announce, both accepted (new/improved) and unchanged (reconfirmed alive) identities are batched into a single drain set. Rejected routes (stale SeqNo, tombstone-blocked) do not participate in drain. The `announce_routes_processed` log emits three counters — `accepted`, `unchanged`, `rejected` — so operators can distinguish new routing events from benign reconfirmations. This three-state classification uses `RouteUpdateStatus` (`RouteAccepted`, `RouteUnchanged`, `RouteRejected`) returned by `UpdateRoute`.
+
+```mermaid
+flowchart TD
+    A[Route event: identity reachable] --> B{Event source}
+    B -- "servePeerSession startup<br/>(direct peer connected)" --> C[Trigger drain]
+    B -- "handleAnnounceRoutes<br/>(transit route learned or reconfirmed)" --> D[Collect drain identities]
+    B -- "WithdrawRoute<br/>(backup route exposed)" --> W{"Lookup: backup exists?"}
+    W -- Yes --> D
+    W -- No --> Z[No drain needed]
+    B -- "routingTableTTLLoop<br/>(TTL expiry exposes backup)" --> T{"TickTTL: exposed identities?"}
+    T -- Yes --> D
+    T -- No --> Z
+    B -- "onPeerSessionClosed<br/>(local disconnect)" --> P2{"ExposedBackups?"}
+    P2 -- Yes --> D
+    P2 -- No --> Z
+    D --> C
+    C --> E["drainPendingForIdentities(identities)"]
+    E --> F["Lock: extract send_message frames from s.pending"]
+    F --> G{Frame expired?}
+    G -- Yes --> H["deferred: markOutboundTerminalLocked"]
+    G -- No --> I["router.Route(envelope)"]
+    I --> J{RelayNextHop + address resolved?}
+    J -- Yes --> K["sendRelayToAddress(address, envelope)"]
+    K --> M{Delivery confirmed?}
+    M -- Yes --> N["deferred: clearOutboundQueuedLocked"]
+    M -- No --> P["Retries++ (real attempt)"]
+    P --> PA{Retries >= max?}
+    PA -- Yes --> Q["deferred: markOutboundTerminalLocked"]
+    PA -- No --> R["deferred: markOutboundRetryingLocked + return to pending"]
+    J -- "No (no route)" --> NR["Return to pending without incrementing Retries"]
+    H & N & Q & R & NR --> S["Lock: merge failed at original positions + apply deferred → single persist"]
+```
+*Diagram — Event-driven pending queue drain on route discovery*
 
 **Route confirmation via hop_ack.** When a `relay_hop_ack` with status "delivered" or "forwarded" is received, the routing table promotes the route through the ack sender to `source=hop_ack` via `confirmRouteViaHopAck`. The ack sender's transport address (`senderAddress` in `handleRelayHopAck`) is the provably correct next-hop — even under gossip fan-out where multiple peers received the relay_message but only one actually delivered it. The peer identity is resolved from the transport address and matched against routing table entries. For table-directed relays, the `RouteOrigin` stored in `relayForwardState` scopes the confirmation to the exact `(Identity, Origin, NextHop)` triple that carried the message — different origins sharing the same NextHop are not affected. `RouteOrigin` is persisted at every hop in the relay chain: at the origin node (via `sendRelayMessageWithOrigin` / `sendRelayToAddress`), and at intermediate hops (via `tryForwardViaRoutingTable` returning `tableForwardResult` with `RouteOrigin`). For gossip-originated relays where no specific triple was chosen (`RouteOrigin` is empty), the first matching NextHop in Lookup order is promoted. Both outbound and inbound relay paths persist `relayForwardState`, ensuring behavioral equivalence regardless of connection direction.
 
@@ -269,7 +308,7 @@ internal/core/rpc/
 
 `AddDirectPeerResult` — результат подключения peer'а: `RouteEntry`, созданный или обновлённый, и флаг `Penalized`, указывающий, что flap detection применил укороченный TTL.
 
-`RemoveDirectPeerResult` — результат отключения peer'а: wire-ready `[]AnnounceEntry` withdrawals (SeqNo уже инкрементирован, Hops=16) для own-origin direct-маршрутов, плюс количество transit-маршрутов, молча инвалидированных локально.
+`RemoveDirectPeerResult` — результат отключения peer'а: wire-ready `[]AnnounceEntry` withdrawals (SeqNo уже инкрементирован, Hops=16) для own-origin direct-маршрутов, плюс количество transit-маршрутов, молча инвалидированных локально, плюс `ExposedBackups []PeerIdentity` — identity, у которых инвалидация обнажила выживший не-withdrawn backup route (используется `onPeerSessionClosed` для запуска дрейна).
 
 ### Ключевые инварианты
 
@@ -285,7 +324,7 @@ internal/core/rpc/
 
 **Порядок выбора маршрута.** `Lookup()` сортирует по приоритету source (direct > hop_ack > announcement), затем по hops ascending в пределах одного уровня source. Direct-маршрут с 3 хопами предпочитается announcement с 1 хопом — доверие к источнику важнее количества хопов.
 
-**Истечение TTL.** Каждая запись имеет `ExpiresAt` (по умолчанию 120с с момента вставки). `TickTTL()` удаляет истёкшие записи. Нестабильные peer'ы получают укороченный TTL — см. демпфирование flap'ов ниже. Own-origin direct-маршруты обновляются через `RefreshDirectPeers()` на каждом цикле анонсов (каждые 30с), предотвращая их истечение пока сессия с peer'ом жива. Learned-маршруты обновляются естественным образом при переанонсировании соседом.
+**Истечение TTL.** Каждая запись имеет `ExpiresAt` (по умолчанию 120с с момента вставки). `TickTTL()` удаляет истёкшие записи и возвращает слайс identity, у которых истечение обнажило выживший не-withdrawn backup route — `routingTableTTLLoop` использует это для запуска `drainPendingForIdentities` и немедленной доставки через backup. Нестабильные peer'ы получают укороченный TTL — см. демпфирование flap'ов ниже. Own-origin direct-маршруты обновляются через `RefreshDirectPeers()` на каждом цикле анонсов (каждые 30с), предотвращая их истечение пока сессия с peer'ом жива. Learned-маршруты обновляются естественным образом при переанонсировании соседом.
 
 **NextHop — это identity peer'a.** Маршрутизация работает на уровне identity, а не транспортных адресов. Один peer identity может иметь несколько параллельных TCP-сессий; выбор сессии происходит позже в `node.Service` через индекс identity→session(s) для резолва identity в активные соединения.
 
@@ -388,6 +427,41 @@ flowchart TD
 *Диаграмма — Промежуточный relay hop: прямой peer → table route → gossip*
 
 **Контракт gossip fallback (release-blocking).** `TableRouter` в `node/table_router.go` реализует интерфейс `Router`. Он обращается к routing table за направленным next-hop; если нет пригодного маршрута или сессии — доставка деградирует в gossip прозрачно. Триггеры fallback: `Lookup()` возвращает пустой результат, identity `RelayNextHop` не имеет активной сессии, peer `RelayNextHop` не имеет требуемых capability (relay-only для destinations, оба relay+routing для transit hops). `GossipTargets` всегда заполняются в каждом `RoutingDecision`. Тот же fallback работает на каждом уровне: origin-нода (`sendTableDirectedRelay`), промежуточный hop (`tryForwardViaRoutingTable`) и `TableRouter.Route()`.
+
+**Event-driven дрейн pending queue.** Когда маршрут до целевого identity становится доступным — будь то подключение прямого peer'а (старт `servePeerSession`), изучение транзитного маршрута через `announce_routes` (`handleAnnounceRoutes`), переподключившийся peer переанонсирующий ту же неизменённую routing table (`handleAnnounceRoutes` со статусом `RouteUnchanged`), withdrawal маршрута, обнажающий выживший backup route (`WithdrawRoute` с последующей проверкой `Lookup`), истечение TTL маршрута, обнажающее выживший backup (`TickTTL` возвращает exposed identities в `routingTableTTLLoop`), или локальный disconnect peer'а, инвалидирующий маршруты через ушедший next-hop, но обнажающий backup через другой next-hop (`RemoveDirectPeer` / `InvalidateTransitRoutes` возвращают `ExposedBackups` в `onPeerSessionClosed`) — нода немедленно сканирует свою pending queue на наличие собственных исходящих `send_message` фреймов, адресованных этому identity, и пытается доставить их через вновь доступный маршрут. Это event-driven оптимизация, которая устраняет два источника задержки: ожидание переподключения исходного peer'а (`flushPendingPeerFrames`) и ожидание срабатывания relay retry loop (каждые 2 секунды). Drain goroutine запускается из `servePeerSession` (не из `onPeerSessionEstablished`), чтобы `inboxCh` уже активно читался — запуск раньше создаёт `s.mu.Lock()` contention, который задерживает установление сессии и может вызвать overflow `inboxCh` под конкурентной нагрузкой. Дрейнится только `send_message` — остальные типы фреймов не восстанавливаются через routing table: `relay_message` и `announce_peer` — чужой трафик, обрабатываемый relay retry loop и peer session flush; `send_delivery_receipt` доставляется через hop-цепочку `relayStates` (`lookupReceiptForwardTo`), а не через routing table, поэтому новый маршрут до Recipient receipt'а не создаёт для него путь доставки. Функция `drainPendingForIdentities` в `routing_integration.go` использует паттерн extract-attempt-return: matching-фреймы атомарно извлекаются из pending queue под блокировкой (что исключает повторную обработку одного фрейма конкурентными goroutine), доставка выполняется вне блокировки через `sendRelayToAddress` (возвращающий определённый сигнал успеха/неудачи), а фреймы с неудавшейся доставкой возвращаются на свои исходные позиции в pending queue с помощью index-based реконструкции — фаза извлечения записывает `origIdx` каждого фрейма и метаданные per-address (`origLen`, `extractedPos`), а фаза возврата проходит по диапазону исходных позиций, чередуя kept- и returning-фреймы, чтобы `flushPendingPeerFrames` — доставляющий в порядке слайса — сохранял точный порядок доставки DM между recipient'ами, разделяющими один peer address, после route churn. Фреймы, добавленные другими goroutine во время разблокированного окна доставки, дописываются в конец. Счётчик retry инкрементируется только когда была реальная попытка доставки (маршрут существовал, адрес разрешён, `sendRelayToAddress` был вызван) — когда пригодного маршрута нет (`RelayNextHop == nil` или адрес неразрешим), фрейм возвращается в pending queue без траты retry-бюджета и без перехода outbound-состояния — `Status` остаётся `"queued"`, а `LastAttemptAt` не обновляется, сохраняя семантику, что `"retrying"` в outbound-состоянии означает реальную попытку сетевого handoff. Фрейм ожидает будущих drain-циклов, запускаемых последующими routing-событиями. При достижении `maxPendingFrameRetries` после реальных неудач фрейм помечается терминальным вместо возврата — соответствуя retry-контракту `flushPendingPeerFrames`. Истёкшие фреймы обнаруживаются и помечаются терминальными во время сканирования. Все изменения outbound-состояния (terminal, retrying, cleared) собираются как отложенные действия в цикле доставки и применяются под блокировкой вместе с возвратом в pending queue одним persist'ом — ни одной промежуточной записи в `queue-*.json` не происходит во время дрейна. Это устраняет crash-loss window, которое возникло бы, если бы `markOutboundTerminal`, `markOutboundRetrying` или `clearOutboundQueued` persist'или посреди цикла, когда извлечённые фреймы отсутствуют в `s.pending`. Когда `handleAnnounceRoutes` обрабатывает один announce, и принятые (новые/улучшенные), и неизменённые (подтверждённые живые) identity батчируются в один drain-набор. Отклонённые маршруты (устаревший SeqNo, заблокированные tombstone) не участвуют в дрейне. Лог `announce_routes_processed` выдаёт три счётчика — `accepted`, `unchanged`, `rejected` — чтобы операторы могли отличить новые routing-события от штатных подтверждений. Эта трёхстатусная классификация использует `RouteUpdateStatus` (`RouteAccepted`, `RouteUnchanged`, `RouteRejected`), возвращаемый `UpdateRoute`.
+
+```mermaid
+flowchart TD
+    A["Событие маршрута: identity достижим"] --> B{Источник события}
+    B -- "servePeerSession startup<br/>(подключился прямой peer)" --> C[Запуск дрейна]
+    B -- "handleAnnounceRoutes<br/>(изучен или подтверждён транзитный маршрут)" --> D[Собрать drain identity]
+    B -- "WithdrawRoute<br/>(обнажён backup route)" --> W{"Lookup: backup существует?"}
+    W -- Да --> D
+    W -- Нет --> Z[Дрейн не нужен]
+    B -- "routingTableTTLLoop<br/>(TTL-expiry обнажает backup)" --> T{"TickTTL: exposed identities?"}
+    T -- Да --> D
+    T -- Нет --> Z
+    B -- "onPeerSessionClosed<br/>(локальный disconnect)" --> P2{"ExposedBackups?"}
+    P2 -- Да --> D
+    P2 -- Нет --> Z
+    D --> C
+    C --> E["drainPendingForIdentities(identities)"]
+    E --> F["Lock: извлечь send_message фреймы из s.pending"]
+    F --> G{Фрейм истёк?}
+    G -- Да --> H["deferred: markOutboundTerminalLocked"]
+    G -- Нет --> I["router.Route(envelope)"]
+    I --> J{"RelayNextHop + address разрешён?"}
+    J -- Да --> K["sendRelayToAddress(address, envelope)"]
+    K --> M{Доставка подтверждена?}
+    M -- Да --> N["deferred: clearOutboundQueuedLocked"]
+    M -- Нет --> P["Retries++ (реальная попытка)"]
+    P --> PA{"Retries >= max?"}
+    PA -- Да --> Q["deferred: markOutboundTerminalLocked"]
+    PA -- Нет --> R["deferred: markOutboundRetryingLocked + вернуть в pending"]
+    J -- "Нет (нет маршрута)" --> NR["Вернуть в pending без инкремента Retries"]
+    H & N & Q & R & NR --> S["Lock: merge failed на исходные позиции + применить deferred → один persist"]
+```
+*Диаграмма — Event-driven дрейн pending queue при обнаружении маршрута*
 
 **Подтверждение маршрута через hop_ack.** При получении `relay_hop_ack` со статусом "delivered" или "forwarded", routing table промоутит маршрут через отправителя ack в `source=hop_ack` через `confirmRouteViaHopAck`. Транспортный адрес отправителя ack (`senderAddress` в `handleRelayHopAck`) — это достоверно правильный next-hop, даже при gossip fan-out, когда несколько peer'ов получили relay_message, но только один реально доставил. Identity peer'а резолвится из транспортного адреса и сопоставляется с записями routing table. Для table-directed relay `RouteOrigin`, сохранённый в `relayForwardState`, ограничивает подтверждение точной тройкой `(Identity, Origin, NextHop)`, которая доставляла сообщение — другие origin'ы с тем же NextHop не затрагиваются. `RouteOrigin` сохраняется на каждом хопе relay-цепочки: на origin-ноде (через `sendRelayMessageWithOrigin` / `sendRelayToAddress`) и на промежуточных хопах (через `tryForwardViaRoutingTable`, возвращающий `tableForwardResult` с `RouteOrigin`). Для gossip-originated relay (без конкретной тройки, `RouteOrigin` пуст) промоутится первый matching NextHop в порядке Lookup. Оба пути relay (outbound и inbound) сохраняют `relayForwardState`, обеспечивая поведенческую эквивалентность независимо от направления соединения.
 
