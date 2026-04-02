@@ -704,6 +704,40 @@ func TestBuildConsolePeersPayloadIncludesClientBuild(t *testing.T) {
 	}
 }
 
+func TestBuildConsolePeersPayloadIncludesPeerIdentity(t *testing.T) {
+	t.Parallel()
+
+	payload := buildConsolePeersPayload(
+		[]string{"a:1", "b:2"},
+		[]PeerHealth{
+			{Address: "a:1", PeerID: "abc123", State: "healthy", Connected: true},
+			{Address: "b:2", PeerID: "", State: "healthy", Connected: true},
+		},
+	)
+
+	type peersPayload struct {
+		Peers []ConsolePeerStatus `json:"peers"`
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	var result peersPayload
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+
+	if len(result.Peers) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(result.Peers))
+	}
+	if result.Peers[0].Identity != "abc123" {
+		t.Errorf("peers[0]: expected identity='abc123', got %q", result.Peers[0].Identity)
+	}
+	if result.Peers[1].Identity != "" {
+		t.Errorf("peers[1]: expected empty identity, got %q", result.Peers[1].Identity)
+	}
+}
+
 func TestConsolePingPayloadShape(t *testing.T) {
 	t.Parallel()
 

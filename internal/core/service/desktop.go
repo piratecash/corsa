@@ -120,6 +120,7 @@ type PendingMessage struct {
 
 type ConsolePeerStatus struct {
 	Address       string `json:"address"`
+	Identity      string `json:"identity,omitempty"`
 	ConnID        uint64 `json:"conn_id,omitempty"`
 	Network       string `json:"network,omitempty"`
 	Direction     string `json:"direction,omitempty"`
@@ -809,6 +810,7 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 
 		status := ConsolePeerStatus{
 			Address:       address,
+			Identity:      item.PeerID,
 			ConnID:        item.ConnID,
 			Network:       node.ClassifyAddress(address).String(),
 			Direction:     item.Direction,
@@ -849,6 +851,7 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		item := byAddress[addr]
 		status := ConsolePeerStatus{
 			Address:       addr,
+			Identity:      item.PeerID,
 			ConnID:        item.ConnID,
 			Network:       node.ClassifyAddress(addr).String(),
 			Direction:     item.Direction,

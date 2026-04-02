@@ -682,6 +682,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	s.mu.RLock()
 	healthKey := s.resolveHealthAddress(address)
 	s.mu.RUnlock()
+	s.addPeerID(healthKey, session.peerIdentity)
 	s.addPeerVersion(healthKey, welcome.ClientVersion)
 	s.addPeerBuild(healthKey, welcome.ClientBuild)
 	if err := s.authenticatePeerSession(session, welcome); err != nil {
