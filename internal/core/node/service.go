@@ -858,6 +858,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 	case "fetch_trusted_contacts":
 		s.writeJSONFrame(conn, s.trustedContactsFrame())
 		return true
+	case "delete_trusted_contact":
+		s.writeJSONFrame(conn, s.deleteTrustedContactFrame(domain.PeerIdentity(frame.Address)))
+		return true
 	case "fetch_peer_health":
 		s.writeJSONFrame(conn, s.peerHealthFrame())
 		return true
@@ -1074,6 +1077,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.contactsFrame()
 	case "fetch_trusted_contacts":
 		return s.trustedContactsFrame()
+	case "delete_trusted_contact":
+		return s.deleteTrustedContactFrame(domain.PeerIdentity(frame.Address))
 	case "fetch_peer_health":
 		return s.peerHealthFrame()
 	case "fetch_network_stats":
@@ -1859,6 +1864,23 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 		Count:    len(contacts),
 		Contacts: contacts,
 	}
+}
+
+func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protocol.Frame {
+	identity = domain.PeerIdentity(strings.TrimSpace(string(identity)))
+	if identity == "" {
+		return protocol.Frame{Type: "error", Error: "address is required"}
+	}
+
+	_, err := s.trust.forget(identity)
+	if err != nil {
+		return protocol.Frame{Type: "error", Error: err.Error()}
+	}
+
+	// If the contact was not in the trust store, that is not an error —
+	// it may have originated from network discovery rather than the
+	// trusted contacts list.
+	return protocol.Frame{Type: "ok", Address: string(identity)}
 }
 
 func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {

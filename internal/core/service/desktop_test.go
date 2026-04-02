@@ -13,6 +13,7 @@ import (
 	"corsa/internal/core/chatlog"
 	"corsa/internal/core/config"
 	"corsa/internal/core/directmsg"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/node"
 	"corsa/internal/core/protocol"
@@ -861,7 +862,7 @@ func newTestDesktopClientWithChatlog(t *testing.T) *DesktopClient {
 	if err != nil {
 		t.Fatalf("generate identity: %v", err)
 	}
-	store := chatlog.NewStore(dir, id.Address, ":0")
+	store := chatlog.NewStore(dir, domain.PeerIdentity(id.Address), domain.ListenAddress(":0"))
 	return &DesktopClient{
 		id:      id,
 		appCfg:  config.App{Version: "test"},
@@ -1134,7 +1135,7 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 	}
 
 	svc := node.NewService(cfg, id)
-	store := chatlog.NewStore(dir, id.Address, ":0")
+	store := chatlog.NewStore(dir, domain.PeerIdentity(id.Address), domain.ListenAddress(":0"))
 
 	c := &DesktopClient{
 		id:        id,

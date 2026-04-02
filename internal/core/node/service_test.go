@@ -7717,3 +7717,119 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 		t.Fatalf("expected exactly 1 row for %s, got %d", peerAddr, count)
 	}
 }
+
+// TestDeleteTrustedContactViaLocalFrame verifies that the delete_trusted_contact
+// command removes a contact from the trust store and that the contact no longer
+// appears in a subsequent fetch_trusted_contacts reply.
+func TestDeleteTrustedContactViaLocalFrame(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	address := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+	})
+	defer stopA()
+
+	// Import a contact so the trust store has something to delete.
+	peerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate peer identity: %v", err)
+	}
+	peerBoxSig := identity.SignBoxKeyBinding(peerID)
+	importReply := nodeA.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{
+			{
+				Address: peerID.Address,
+				PubKey:  identity.PublicKeyBase64(peerID.PublicKey),
+				BoxKey:  identity.BoxPublicKeyBase64(peerID.BoxPublicKey),
+				BoxSig:  peerBoxSig,
+			},
+		},
+	})
+	if importReply.Type != "contacts_imported" || importReply.Count != 1 {
+		t.Fatalf("import_contacts failed: type=%s error=%s count=%d", importReply.Type, importReply.Error, importReply.Count)
+	}
+
+	// Verify the contact exists.
+	before := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	foundBefore := false
+	for _, c := range before.Contacts {
+		if c.Address == peerID.Address {
+			foundBefore = true
+			break
+		}
+	}
+	if !foundBefore {
+		t.Fatal("expected peer in trusted contacts before deletion")
+	}
+
+	// Delete the contact.
+	deleteReply := nodeA.HandleLocalFrame(protocol.Frame{
+		Type:    "delete_trusted_contact",
+		Address: peerID.Address,
+	})
+	if deleteReply.Type != "ok" {
+		t.Fatalf("delete_trusted_contact should return ok, got %s: %s", deleteReply.Type, deleteReply.Error)
+	}
+
+	// Verify the contact is gone.
+	after := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	for _, c := range after.Contacts {
+		if c.Address == peerID.Address {
+			t.Fatal("peer should not appear in trusted contacts after deletion")
+		}
+	}
+}
+
+// TestDeleteTrustedContactMissingAddress verifies that delete_trusted_contact
+// returns an error when no address is provided.
+func TestDeleteTrustedContactMissingAddress(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	address := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+	})
+	defer stopA()
+
+	reply := nodeA.HandleLocalFrame(protocol.Frame{
+		Type:    "delete_trusted_contact",
+		Address: "",
+	})
+	if reply.Type != "error" {
+		t.Fatalf("expected error for empty address, got %s", reply.Type)
+	}
+}
+
+// TestDeleteTrustedContactNotFound verifies that delete_trusted_contact returns
+// ok even when the address is not in the trust store (idempotent behavior).
+func TestDeleteTrustedContactNotFound(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	address := freeAddress(t)
+
+	nodeA, stopA := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+	})
+	defer stopA()
+
+	reply := nodeA.HandleLocalFrame(protocol.Frame{
+		Type:    "delete_trusted_contact",
+		Address: "nonexistent1234567890abcdef12345678901234",
+	})
+	if reply.Type != "ok" {
+		t.Fatalf("expected ok for unknown address (idempotent), got %s: %s", reply.Type, reply.Error)
+	}
+}

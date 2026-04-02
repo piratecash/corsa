@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -57,23 +58,23 @@ type RouterSnapshot struct {
 type DMRouter struct {
 	client *DesktopClient
 
-	mu             sync.RWMutex
-	activePeer     string
-	peerClicked    bool
-	peers          map[string]*RouterPeerState
-	peerOrder      []string
-	activeMessages []DirectMessage
-	cache          *ConversationCache
-	nodeStatus     NodeStatus
-	sendStatus     string
-	seenMessageIDs      map[string]struct{}
-	initialSynced       bool
-	previewsSeeded      bool // true after seedPreviews() successfully set unread counts from SQL
-	replayingStartup    bool // true during buffered-event replay; suppresses Unread++ in updateSidebarFromEvent
+	mu               sync.RWMutex
+	activePeer       string
+	peerClicked      bool
+	peers            map[string]*RouterPeerState
+	peerOrder        []string
+	activeMessages   []DirectMessage
+	cache            *ConversationCache
+	nodeStatus       NodeStatus
+	sendStatus       string
+	seenMessageIDs   map[string]struct{}
+	initialSynced    bool
+	previewsSeeded   bool // true after seedPreviews() successfully set unread counts from SQL
+	replayingStartup bool // true during buffered-event replay; suppresses Unread++ in updateSidebarFromEvent
 
-	uiEvents    chan UIEvent
-	uiOverflowCount atomic.Int64 // number of active retry goroutines in notify()
-	startupDone chan struct{} // closed after initializeFromDB completes; gates event listener
+	uiEvents        chan UIEvent
+	uiOverflowCount atomic.Int64  // number of active retry goroutines in notify()
+	startupDone     chan struct{} // closed after initializeFromDB completes; gates event listener
 
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
 	pendingScrollToEnd   bool
@@ -272,15 +273,36 @@ func (r *DMRouter) SetSendStatus(s string) {
 	r.setSendStatus(s)
 }
 
-// RemovePeer deletes an identity from the sidebar, clears its conversation
-// cache, and removes all chat history from the local database. If the removed
-// identity was active, the selection is cleared so the UI shows the placeholder.
-// RemovePeer deletes an identity from the sidebar, clears its conversation
-// cache, and removes all chat history from the local database. If the removed
-// identity was active, the selection is cleared. Returns true if the removed
-// identity was the active one (so the caller can decide what to select next).
-func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) bool {
+// RemovePeer deletes an identity from the sidebar, the node's trust store,
+// the conversation cache, and all chat history from the local database.
+// If the removed identity was active, the selection is cleared so the UI
+// shows the placeholder.
+//
+// Chat history is deleted first; if that fails, the in-memory state remains
+// unchanged and the error is returned so the caller can display it.
+// Trust store deletion is best-effort: it goes through an RPC to the local
+// node, which may be unavailable. A failure is logged but does not prevent
+// removal — the sidebar is built from in-memory peers, not from the trust
+// store, so the identity will not reappear.
+//
+// The first return value is true when the removed identity was the active
+// one (so the caller can decide what to select next).
+func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	id := string(identity)
+
+	// Delete chat history from the local database.
+	if _, err := r.client.DeletePeerHistory(identity); err != nil {
+		log.Error().Str("identity", id).Err(err).Msg("failed to delete identity chat history")
+		return false, fmt.Errorf("delete identity %s: %w", id, err)
+	}
+
+	// Best-effort: remove from the node trust store. The RPC requires a
+	// live connection to the local node, which may be absent (e.g. during
+	// shutdown or reconnect). Log the error but proceed with in-memory
+	// cleanup — the sidebar no longer depends on the trust store.
+	if err := r.client.DeleteContact(identity); err != nil {
+		log.Warn().Str("identity", id).Err(err).Msg("trust store cleanup failed (best-effort)")
+	}
 
 	r.mu.Lock()
 
@@ -297,19 +319,12 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) bool {
 
 	r.mu.Unlock()
 
-	// Delete chat history in background — SQLite I/O should not block the UI.
-	go func() {
-		if _, err := r.client.DeletePeerHistory(identity); err != nil {
-			log.Error().Str("identity", id).Err(err).Msg("failed to delete identity chat history")
-		}
-	}()
-
 	r.notify(UIEventSidebarUpdated)
 	if wasActive {
 		r.notify(UIEventMessagesUpdated)
 	}
 
-	return wasActive
+	return wasActive, nil
 }
 
 // Start launches three background goroutines:

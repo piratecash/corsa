@@ -63,8 +63,8 @@ type Window struct {
 	consoleOpen          bool
 
 	// Global cursor tracking for context menu positioning.
-	cursorTracker        int // tag for window-level pointer events
-	lastCursorPos        image.Point
+	cursorTracker int // tag for window-level pointer events
+	lastCursorPos image.Point
 
 	// Context menu state for right-click on recipient buttons.
 	contextMenuPeer      string // fingerprint of the peer whose context menu is open
@@ -116,19 +116,19 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 	}
 
 	w := &Window{
-		router:             router,
-		client:             client,
-		cmdTable:           cmdTable,
-		runtime:            runtime,
-		prefs:              prefs,
-		theme:              theme,
-		language:           language,
-		languageOptions:    make(map[string]*widget.Clickable),
-		recipientButtons:   make(map[string]*widget.Clickable),
+		router:              router,
+		client:              client,
+		cmdTable:            cmdTable,
+		runtime:             runtime,
+		prefs:               prefs,
+		theme:               theme,
+		language:            language,
+		languageOptions:     make(map[string]*widget.Clickable),
+		recipientButtons:    make(map[string]*widget.Clickable),
 		recipientRightClick: make(map[string]*rightClickState),
-		messageSelectables: make(map[string]*widget.Selectable),
-		contactsList:       widget.List{List: layout.List{Axis: layout.Vertical}},
-		chatList:           widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
+		messageSelectables:  make(map[string]*widget.Selectable),
+		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
+		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 	}
 	w.aliasEditor.SingleLine = true
 	w.aliasEditor.Submit = true
@@ -352,7 +352,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 
 		// Capture the ordered recipient list before deletion so we can
 		// pick the nearest neighbor for auto-selection in the UI layer.
-		recipients := w.snapRecipients(w.snap.NodeStatus)
+		recipients := w.snapRecipients()
 		removedIdx := -1
 		for i, r := range recipients {
 			if r == peer {
@@ -361,13 +361,20 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 			}
 		}
 
+		wasActive, err := w.router.RemovePeer(domain.PeerIdentity(peer))
+		if err != nil {
+			w.router.SetSendStatus(w.t("status.delete_failed", err))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+
 		// Remove saved alias together with the identity.
 		if w.prefs != nil {
 			w.prefs.SetAlias(domain.PeerIdentity(peer), "")
 			_ = w.prefs.Save()
 		}
-
-		wasActive := w.router.RemovePeer(domain.PeerIdentity(peer))
 
 		if wasActive && removedIdx >= 0 && len(recipients) > 1 {
 			remaining := make([]string, 0, len(recipients)-1)
@@ -458,7 +465,7 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 
 func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	status := w.snap.NodeStatus
-	recipients := w.snapRecipients(status)
+	recipients := w.snapRecipients()
 	w.ensureSelectedRecipient(recipients)
 
 	return layout.Flex{
@@ -1000,12 +1007,18 @@ func (w *Window) snapPreview(recipient string) string {
 	return ""
 }
 
-func (w *Window) snapRecipients(status service.NodeStatus) []string {
-	discovered := make(map[string]struct{}, len(w.snap.Peers))
+// snapRecipients builds the sidebar recipient list from the router's peer
+// state. Contacts are managed exclusively by the router: loaded from
+// chatlog at startup, added on incoming messages, removed via RemovePeer.
+// No polling or external contact source is involved.
+func (w *Window) snapRecipients() []string {
+	recipients := make([]string, 0, len(w.snap.Peers))
 	for id := range w.snap.Peers {
-		discovered[id] = struct{}{}
+		if id != w.snap.MyAddress && id != "" {
+			recipients = append(recipients, id)
+		}
 	}
-	recipients := knownRecipients(status.Contacts, discovered, w.snap.MyAddress)
+	sort.Strings(recipients)
 	return mergeRecipientOrder(recipients, w.snap.PeerOrder)
 }
 
@@ -1282,31 +1295,6 @@ func (w *Window) messageSelectable(id string) *widget.Selectable {
 		w.messageSelectables[id] = sel
 	}
 	return sel
-}
-
-func knownRecipients(contacts map[string]service.Contact, discovered map[string]struct{}, self string) []string {
-	known := make(map[string]struct{}, len(contacts)+len(discovered))
-	for id := range contacts {
-		id = strings.TrimSpace(id)
-		if id == "" || id == self {
-			continue
-		}
-		known[id] = struct{}{}
-	}
-	for id := range discovered {
-		id = strings.TrimSpace(id)
-		if id == "" || id == self {
-			continue
-		}
-		known[id] = struct{}{}
-	}
-
-	recipients := make([]string, 0, len(known))
-	for id := range known {
-		recipients = append(recipients, id)
-	}
-	sort.Strings(recipients)
-	return recipients
 }
 
 func searchKnownIdentities(knownIDs, recipients []string, self, query string) []string {

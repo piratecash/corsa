@@ -7,49 +7,6 @@ import (
 	"corsa/internal/core/service"
 )
 
-func TestKnownRecipientsIncludesDiscovered(t *testing.T) {
-	contacts := map[string]service.Contact{
-		"trusted-peer": {BoxKey: "box1", PubKey: "pub1"},
-	}
-	discovered := map[string]struct{}{
-		"chatlog-peer": {},
-	}
-
-	recipients := knownRecipients(contacts, discovered, "self-addr")
-
-	found := make(map[string]bool)
-	for _, r := range recipients {
-		found[r] = true
-	}
-
-	if !found["trusted-peer"] {
-		t.Fatal("expected trusted-peer in recipients")
-	}
-	if !found["chatlog-peer"] {
-		t.Fatal("expected chatlog-peer (from discovered/chatlog) in recipients")
-	}
-	if found["self-addr"] {
-		t.Fatal("self-addr should be excluded from recipients")
-	}
-}
-
-func TestKnownRecipientsDeduplicates(t *testing.T) {
-	contacts := map[string]service.Contact{
-		"peer-1": {BoxKey: "box1", PubKey: "pub1"},
-	}
-	// Same peer also in discovered — should not duplicate.
-	discovered := map[string]struct{}{
-		"peer-1": {},
-		"peer-2": {},
-	}
-
-	recipients := knownRecipients(contacts, discovered, "self")
-
-	if len(recipients) != 2 {
-		t.Fatalf("expected 2 unique recipients, got %d: %v", len(recipients), recipients)
-	}
-}
-
 func TestMergeRecipientOrder(t *testing.T) {
 	recipients := []string{"a", "b", "c", "d"}
 	order := []string{"c", "a"}

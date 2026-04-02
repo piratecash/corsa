@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"corsa/internal/core/domain"
 )
 
 var errTrustConflict = errors.New("trusted contact conflict")
@@ -107,6 +109,27 @@ func (s *trustStore) remember(contact trustedContact) error {
 	contacts, conflicts := s.snapshotLocked()
 	s.mu.Unlock()
 	return s.saveSnapshot(contacts, conflicts)
+}
+
+// forget removes a contact from the trust store and persists the change.
+// Returns true if the contact existed and was removed.
+func (s *trustStore) forget(identity domain.PeerIdentity) (bool, error) {
+	address := string(identity)
+
+	s.mu.Lock()
+	if _, ok := s.contacts[address]; !ok {
+		s.mu.Unlock()
+		return false, nil
+	}
+	delete(s.contacts, address)
+	delete(s.conflicts, address)
+	contacts, conflicts := s.snapshotLocked()
+	s.mu.Unlock()
+
+	if err := s.saveSnapshot(contacts, conflicts); err != nil {
+		return false, fmt.Errorf("persist trust store after forget %s: %w", address, err)
+	}
+	return true, nil
 }
 
 func (s *trustStore) trustedContacts() map[string]trustedContact {

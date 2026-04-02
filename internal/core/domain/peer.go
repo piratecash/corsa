@@ -16,10 +16,15 @@ import "time"
 // and identity-level deduplication.
 type PeerIdentity string
 
-// PeerAddress is a transport or listen address (host:port).
+// PeerAddress is a remote peer's transport address (host:port).
 // Used for health tracking, dial candidates, TCP connections,
 // and session map keys.
 type PeerAddress string
+
+// ListenAddress is the local node's bind address (e.g. ":64646").
+// Kept separate from PeerAddress to prevent mixing local binding
+// with remote transport addresses at compile time.
+type ListenAddress string
 
 // PeerSource describes how a peer address was discovered.
 type PeerSource string

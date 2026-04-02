@@ -240,16 +240,23 @@ func TestNewServiceWithEmptyPeersFile(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	svc := NewService(cfg, id)
-	go func() { _ = svc.Run(ctx) }()
+	done := make(chan struct{})
+	go func() {
+		_ = svc.Run(ctx)
+		close(done)
+	}()
 
 	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	count := len(svc.peers)
+	svc.mu.RUnlock()
 
-	if len(svc.peers) != 1 {
-		t.Fatalf("expected 1 bootstrap peer, got %d", len(svc.peers))
+	cancel()
+	<-done
+
+	if count != 1 {
+		t.Fatalf("expected 1 bootstrap peer, got %d", count)
 	}
 }
 

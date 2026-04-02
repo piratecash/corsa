@@ -575,6 +575,22 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 
 **Выполнено:** инварианты модели, минимальный вертикальный slice (table routing, анонсы, withdrawals, hop_ack, gossip fallback), RPC-наблюдаемость (`fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup`). Полная документация: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md).
 
+#### Перевод UI и DMRouter слоя на `domain.PeerIdentity`
+
+Sidebar и связанные функции (`snapRecipients`, `mergeRecipientOrder`, `ensureSelectedRecipient`, `layoutContactsCard`, `searchKnownIdentities`, `recipientsToChildren`) передают адреса identity как `[]string`. Ключ `recipientButtons` и текст `recipientEditor` тоже используют сырой `string`. То же касается ключа `DMRouter.peers` и `RouterSnapshot.Peers` / `PeerOrder`.
+
+Необходимо использовать `domain.PeerIdentity` для compile-time защиты от смешивания адресов identity с другими строковыми значениями (транспортные адреса, пользовательский ввод, алиасы и т.д.).
+
+- [ ] Ключ `DMRouter.peers`: `map[string]*RouterPeerState` → `map[domain.PeerIdentity]*RouterPeerState`
+- [ ] `RouterSnapshot.Peers`: `map[string]*RouterPeerState` → `map[domain.PeerIdentity]*RouterPeerState`
+- [ ] `RouterSnapshot.PeerOrder`: `[]string` → `[]domain.PeerIdentity`
+- [ ] `snapRecipients() []string` → `[]domain.PeerIdentity`
+- [ ] Типы параметров `mergeRecipientOrder`, `ensureSelectedRecipient`, `searchKnownIdentities`, `recipientsToChildren`
+- [ ] `recipientButtons map[string]*widget.Clickable` → `map[domain.PeerIdentity]*widget.Clickable`
+- [ ] Типы параметров `layoutRecipientButton`, `layoutContactsCard`
+- [ ] Обновить все места, которые итерируют или индексируют эти структуры
+- [ ] Обновить dm_router_test.go и window_test.go
+
 #### Незавершённые задачи перед здоровьем маршрутов
 
 **Дисциплина типизации:** убирать cast'ы из доменных типов в `string` на core-path'ах (например, `string(senderAddress)` там, где callee должен принимать `PeerAddress`). Внутри `node`, `routing`, `relay`, `health`, `queue` и state-management кода такие преобразования должны оставаться только для логирования, protocol serialization, config parsing и UI/RPC boundary.

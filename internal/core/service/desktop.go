@@ -173,7 +173,7 @@ type NodeStatus struct {
 }
 
 func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service) *DesktopClient {
-	store := chatlog.NewStore(nodeCfg.EffectiveChatLogDir(), id.Address, nodeCfg.ListenAddress)
+	store := chatlog.NewStore(nodeCfg.EffectiveChatLogDir(), domain.PeerIdentity(id.Address), domain.ListenAddress(nodeCfg.ListenAddress))
 
 	// Register DesktopClient as the node's MessageStore so the node
 	// delegates message persistence to the desktop layer instead of
@@ -288,6 +288,16 @@ func (c *DesktopClient) DeletePeerHistory(identity domain.PeerIdentity) (int64, 
 		return 0, nil
 	}
 	return c.chatLog.DeleteByPeer(identity)
+}
+
+// DeleteContact removes a trusted contact from the node's trust store.
+// The contact will no longer appear in Contacts on the next ProbeNode cycle.
+func (c *DesktopClient) DeleteContact(identity domain.PeerIdentity) error {
+	_, err := c.localRequestFrame(protocol.Frame{
+		Type:    "delete_trusted_contact",
+		Address: string(identity),
+	})
+	return err
 }
 
 func (c *DesktopClient) BootstrapPeers() []transport.Peer {
@@ -1362,6 +1372,9 @@ func (c *DesktopClient) localRequestFrameCtx(ctx context.Context, request protoc
 		if frame.Type == "error" {
 			if frame.Code != "" {
 				return protocol.Frame{}, protocol.ErrorFromCode(frame.Code)
+			}
+			if frame.Error != "" {
+				return protocol.Frame{}, fmt.Errorf("%s", frame.Error)
 			}
 			return protocol.Frame{}, protocol.ErrProtocol
 		}

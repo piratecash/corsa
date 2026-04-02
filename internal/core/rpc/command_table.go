@@ -377,6 +377,18 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 			return frameResponse(reply)
 		},
 	)
+
+	t.Register(
+		CommandInfo{Name: "delete_trusted_contact", Description: "Remove a trusted contact by address", Category: "identity", Usage: "<address>"},
+		func(req CommandRequest) CommandResponse {
+			address, _ := req.Args["address"].(string)
+			if strings.TrimSpace(address) == "" {
+				return validationError(fmt.Errorf("address is required"))
+			}
+			reply := node.HandleLocalFrame(protocol.Frame{Type: "delete_trusted_contact", Address: address})
+			return frameResponse(reply)
+		},
+	)
 }
 
 // RegisterMessageCommands registers message-related commands.

@@ -18,7 +18,7 @@ import (
 
 func TestNewStore(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "abcdef0123456789abcdef0123456789abcdef01", ":64646")
+	s := NewStore(dir, domain.PeerIdentity("abcdef0123456789abcdef0123456789abcdef01"), domain.ListenAddress(":64646"))
 	defer func() { _ = s.Close() }()
 
 	if s.db == nil {
@@ -37,7 +37,7 @@ func TestNewStore(t *testing.T) {
 
 func TestAppendAndRead(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -76,7 +76,7 @@ func TestAppendAndRead(t *testing.T) {
 
 func TestAppendMultipleMessages(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -106,7 +106,7 @@ func TestAppendMultipleMessages(t *testing.T) {
 
 func TestReadLastN(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -142,7 +142,7 @@ func TestReadLastN(t *testing.T) {
 
 func TestSeparateConversationsPerPeer(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -165,7 +165,7 @@ func TestSeparateConversationsPerPeer(t *testing.T) {
 
 func TestGlobalMessages(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -183,7 +183,7 @@ func TestGlobalMessages(t *testing.T) {
 
 func TestListConversations(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -215,7 +215,7 @@ func TestListConversations(t *testing.T) {
 
 func TestHasEntryID(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -233,7 +233,7 @@ func TestHasEntryID(t *testing.T) {
 
 func TestReadEmptyStore(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	entries, err := s.Read("dm", "1111111111111111111111111111111111111111")
@@ -247,9 +247,9 @@ func TestReadEmptyStore(t *testing.T) {
 
 func TestPortIsolation(t *testing.T) {
 	dir := t.TempDir()
-	s1 := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s1 := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s1.Close() }()
-	s2 := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":8888")
+	s2 := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":8888"))
 	defer func() { _ = s2.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -273,7 +273,7 @@ func TestAppendCreatesDirectory(t *testing.T) {
 	base := t.TempDir()
 	dir := filepath.Join(base, "deep", "nested", "chatlog")
 
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	if s.db == nil {
@@ -306,7 +306,7 @@ func TestAppendCreatesDirectory(t *testing.T) {
 
 func TestDuplicateInsertIgnored(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -343,7 +343,7 @@ func TestDuplicateInsertIgnored(t *testing.T) {
 
 func TestAppendSetsDeliveryStatus(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -368,7 +368,7 @@ func TestAppendSetsDeliveryStatus(t *testing.T) {
 
 func TestAppendDefaultsToSentStatus(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -391,7 +391,7 @@ func TestAppendDefaultsToSentStatus(t *testing.T) {
 
 func TestUpdateStatus(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -432,7 +432,7 @@ func TestUpdateStatus(t *testing.T) {
 
 func TestUpdateStatusNotFoundReturnsFalse(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -454,7 +454,7 @@ func TestUpdateStatusNotFoundReturnsFalse(t *testing.T) {
 
 func TestUpdateStatusToSeen(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -478,7 +478,7 @@ func TestUpdateStatusToSeen(t *testing.T) {
 
 func TestUpdateStatusMonotonic(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -529,7 +529,7 @@ func TestUpdateStatusMonotonic(t *testing.T) {
 
 func TestUpdateStatusDeliveredCannotRegressToSent(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -554,7 +554,7 @@ func TestUpdateStatusDeliveredCannotRegressToSent(t *testing.T) {
 func TestListConversationsIncludesUnreadCount(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peerA := "1111111111111111111111111111111111111111"
@@ -591,7 +591,7 @@ func TestListConversationsIncludesUnreadCount(t *testing.T) {
 func TestListConversationsSortsUnreadFirst(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peerOld := "1111111111111111111111111111111111111111"
@@ -612,7 +612,7 @@ func TestListConversationsSortsUnreadFirst(t *testing.T) {
 
 func TestReadLastEntry(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -635,7 +635,7 @@ func TestReadLastEntry(t *testing.T) {
 
 func TestReadLastEntryEmpty(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	entry, err := s.ReadLastEntry("dm", "1111111111111111111111111111111111111111")
@@ -650,7 +650,7 @@ func TestReadLastEntryEmpty(t *testing.T) {
 func TestReadLastEntryPerPeer(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer1 := "1111111111111111111111111111111111111111"
@@ -681,7 +681,7 @@ func TestReadLastEntryPerPeer(t *testing.T) {
 func TestReadLastEntryPerPeerDeterministicOnEqualTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer := "1111111111111111111111111111111111111111"
@@ -715,7 +715,7 @@ func TestReadLastEntryPerPeerDeterministicOnEqualTimestamp(t *testing.T) {
 func TestReadLastEntryDeterministicOnEqualTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer := "1111111111111111111111111111111111111111"
@@ -749,7 +749,7 @@ func TestIntegrityCheckRecovery(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 
 	// Create a valid store and write some data.
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	_ = s.Append("dm", selfAddr, Entry{
 		ID: "m1", Sender: "1111111111111111111111111111111111111111",
 		Recipient: selfAddr, Body: "test", CreatedAt: "2026-01-01T00:00:00Z",
@@ -758,12 +758,12 @@ func TestIntegrityCheckRecovery(t *testing.T) {
 
 	// Corrupt the database file.
 	dbPath := filepath.Join(dir, "chatlog-aabbccdd-9999.db")
-	if err := os.WriteFile(dbPath, []byte("this is not a valid sqlite file"), 0600); err != nil {
+	if err := os.WriteFile(dbPath, []byte("this is not a valid sqlite file"), 0o600); err != nil {
 		t.Fatalf("write corrupt file: %v", err)
 	}
 
 	// NewStore should detect corruption, rename and create fresh DB.
-	s2 := NewStore(dir, selfAddr, ":9999")
+	s2 := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s2.Close() }()
 
 	if s2.db == nil {
@@ -784,7 +784,7 @@ func TestIntegrityCheckRecovery(t *testing.T) {
 
 func TestFlagCheckConstraint(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -818,7 +818,7 @@ func TestFlagCheckConstraint(t *testing.T) {
 
 func TestDeliveryStatusCheckConstraint(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -844,7 +844,7 @@ func TestDeliveryStatusCheckConstraint(t *testing.T) {
 
 func TestTTLSecondsStored(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -873,7 +873,7 @@ func TestTTLSecondsStored(t *testing.T) {
 
 func TestMetadataStored(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "aabbccdd11223344aabbccdd11223344aabbccdd", ":9999")
+	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
@@ -898,7 +898,7 @@ func TestMetadataStored(t *testing.T) {
 func TestDeleteExpired(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer := "1111111111111111111111111111111111111111"
@@ -951,7 +951,7 @@ func TestDeleteExpired(t *testing.T) {
 func TestDeleteByID(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer := "1111111111111111111111111111111111111111"
@@ -988,7 +988,7 @@ func TestDeleteByID(t *testing.T) {
 func TestDeleteByPeer(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	identityA := domain.PeerIdentity("1111111111111111111111111111111111111111")
@@ -1055,7 +1055,7 @@ func TestDeleteByPeer(t *testing.T) {
 func TestReceiptFlowSentToDeliveredToSeen(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer := "1122334455667788112233445566778811223344"
@@ -1120,7 +1120,7 @@ func TestStatusSurvivesStoreReopen(t *testing.T) {
 	peer := "1122334455667788112233445566778811223344"
 
 	// Open store, write message, update status, close.
-	s1 := NewStore(dir, selfAddr, ":9999")
+	s1 := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	_ = s1.Append("dm", selfAddr, Entry{
 		ID: "persist-1", Sender: selfAddr, Recipient: peer,
 		Body: "encrypted", CreatedAt: "2026-01-01T00:00:00Z",
@@ -1130,7 +1130,7 @@ func TestStatusSurvivesStoreReopen(t *testing.T) {
 	_ = s1.Close()
 
 	// Reopen store — status should survive.
-	s2 := NewStore(dir, selfAddr, ":9999")
+	s2 := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s2.Close() }()
 
 	entries, err := s2.Read("dm", peer)
@@ -1150,7 +1150,7 @@ func TestStatusSurvivesStoreReopen(t *testing.T) {
 func TestUnreadCountReflectsStatusUpdates(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer := "1122334455667788112233445566778811223344"
@@ -1203,7 +1203,7 @@ func TestUnreadCountReflectsStatusUpdates(t *testing.T) {
 func TestMessageBodyStoredAsIs(t *testing.T) {
 	dir := t.TempDir()
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
-	s := NewStore(dir, selfAddr, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	peer := "1122334455667788112233445566778811223344"
@@ -1246,7 +1246,7 @@ func TestOutgoingMessageStoredEncrypted(t *testing.T) {
 		t.Fatalf("generate recipient identity: %v", err)
 	}
 
-	s := NewStore(dir, sender.Address, ":9999")
+	s := NewStore(dir, domain.PeerIdentity(sender.Address), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
 	plaintext := "this is a secret message that must never appear in cleartext"
@@ -1386,7 +1386,7 @@ func TestNilDBOperationsAreSafe(t *testing.T) {
 // cancelled, rather than proceeding with the SQLite query.
 func TestCtxReadersRespectCancellation(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "abcdef0123456789abcdef0123456789abcdef01", ":64646")
+	s := NewStore(dir, domain.PeerIdentity("abcdef0123456789abcdef0123456789abcdef01"), domain.ListenAddress(":64646"))
 	defer func() { _ = s.Close() }()
 
 	// Insert a message so queries have data to return if they ignore ctx.

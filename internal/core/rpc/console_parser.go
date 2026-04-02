@@ -145,6 +145,12 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		}
 		return map[string]interface{}{"address": args[0]}, nil
 
+	case "delete_trusted_contact":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("delete_trusted_contact requires address argument")
+		}
+		return map[string]interface{}{"address": args[0]}, nil
+
 	case "fetch_messages":
 		topic := stringArgOrDefault(args, 0, "global")
 		return map[string]interface{}{"topic": topic}, nil

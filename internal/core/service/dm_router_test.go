@@ -1,13 +1,17 @@
 package service
 
 import (
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
 
+	"corsa/internal/core/chatlog"
 	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
+
+	_ "modernc.org/sqlite"
 )
 
 // ── Exported helpers for testing ──
@@ -303,8 +307,10 @@ func TestOnReceiptUpdateActiveConversation(t *testing.T) {
 
 	now := time.Now()
 	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1",
-			ReceiptStatus: "sent", Timestamp: now},
+		{
+			ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1",
+			ReceiptStatus: "sent", Timestamp: now,
+		},
 	})
 
 	r.mu.Lock()
@@ -1330,8 +1336,8 @@ func TestRepairUnreadSkipsCountOnFirstSyncAfterSeedPreviews(t *testing.T) {
 
 	// Simulate normal startup: seedPreviews ran and set unread from SQL.
 	r.mu.Lock()
-	r.initialSynced = false   // first poll hasn't happened yet
-	r.previewsSeeded = true   // seedPreviews ran
+	r.initialSynced = false // first poll hasn't happened yet
+	r.previewsSeeded = true // seedPreviews ran
 	r.ensurePeerLocked("peer-1")
 	r.peers["peer-1"].Unread = 2 // set by seedPreviews from SQL
 	r.mu.Unlock()
@@ -1428,9 +1434,9 @@ func TestRepairUnreadFirstSyncDoesNotDoubleCount(t *testing.T) {
 	r.mu.Lock()
 	r.ensurePeerLocked("peer-1")
 	r.peers["peer-1"].Unread = 2
-	r.activePeer = "peer-2"    // different from peer-1
-	r.initialSynced = false     // first sync
-	r.previewsSeeded = true     // seedPreviews ran and loaded SQL counts
+	r.activePeer = "peer-2" // different from peer-1
+	r.initialSynced = false // first sync
+	r.previewsSeeded = true // seedPreviews ran and loaded SQL counts
 	r.mu.Unlock()
 
 	status := NodeStatus{
@@ -1698,7 +1704,7 @@ func TestOnNewMessageOutgoingDoesNotBeep(t *testing.T) {
 		Type:      protocol.LocalChangeNewMessage,
 		Topic:     "dm",
 		MessageID: "msg-out-1",
-		Sender:    "me",       // outgoing — we are the sender
+		Sender:    "me", // outgoing — we are the sender
 		Recipient: "peer-1",
 	}
 
@@ -1767,7 +1773,7 @@ func TestOnNewMessageActivePeerOutgoingNoBeep(t *testing.T) {
 		Type:      protocol.LocalChangeNewMessage,
 		Topic:     "dm",
 		MessageID: "msg-active-out-1",
-		Sender:    "me",       // outgoing
+		Sender:    "me", // outgoing
 		Recipient: "peer-1",
 	}
 
@@ -2482,7 +2488,7 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 // comparison ensuring identical unread behavior for both selection methods.
 func TestAutoSelectAndSelectPeerBothClearUnread(t *testing.T) {
 	cases := []struct {
-		name   string
+		name     string
 		selectFn func(r *DMRouter, addr string)
 	}{
 		{"SelectPeer", func(r *DMRouter, addr string) { r.SelectPeer(addr) }},
@@ -2552,7 +2558,10 @@ func TestRemovePeer(t *testing.T) {
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
 	r.cache.Load("a", []DirectMessage{{ID: "msg-1"}})
 
-	wasActive := r.RemovePeer(domain.PeerIdentity("a"))
+	wasActive, err := r.RemovePeer(domain.PeerIdentity("a"))
+	if err != nil {
+		t.Fatalf("RemovePeer returned unexpected error: %v", err)
+	}
 
 	// Drain UI events.
 	for len(r.uiEvents) > 0 {
@@ -2597,7 +2606,10 @@ func TestRemovePeerClearsActiveWhenTailRemoved(t *testing.T) {
 	r.peerOrder = []string{"a", "b", "c"}
 	r.activePeer = "c"
 
-	wasActive := r.RemovePeer(domain.PeerIdentity("c"))
+	wasActive, err := r.RemovePeer(domain.PeerIdentity("c"))
+	if err != nil {
+		t.Fatalf("RemovePeer returned unexpected error: %v", err)
+	}
 
 	for len(r.uiEvents) > 0 {
 		<-r.uiEvents
@@ -2623,7 +2635,10 @@ func TestRemovePeerEmptyList(t *testing.T) {
 	r.peerOrder = []string{"a"}
 	r.activePeer = "a"
 
-	wasActive := r.RemovePeer(domain.PeerIdentity("a"))
+	wasActive, err := r.RemovePeer(domain.PeerIdentity("a"))
+	if err != nil {
+		t.Fatalf("RemovePeer returned unexpected error: %v", err)
+	}
 
 	for len(r.uiEvents) > 0 {
 		<-r.uiEvents
@@ -2651,7 +2666,10 @@ func TestRemovePeerNonActive(t *testing.T) {
 	r.activePeer = "a"
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
 
-	wasActive := r.RemovePeer(domain.PeerIdentity("b"))
+	wasActive, err := r.RemovePeer(domain.PeerIdentity("b"))
+	if err != nil {
+		t.Fatalf("RemovePeer returned unexpected error: %v", err)
+	}
 
 	// Drain UI events.
 	for len(r.uiEvents) > 0 {
@@ -2673,6 +2691,69 @@ func TestRemovePeerNonActive(t *testing.T) {
 	}
 	if _, ok := r.peers["b"]; ok {
 		t.Fatal("peer 'b' should be removed")
+	}
+}
+
+// TestRemovePeerErrorPreservesState verifies that when DeletePeerHistory
+// fails, RemovePeer returns an error and does not modify in-memory state:
+// peers, peerOrder, activePeer, cache all remain unchanged.
+// Note: DeleteContact errors are best-effort (logged, not blocking) because
+// the RPC may be unavailable. Only chatlog failures block removal.
+func TestRemovePeerErrorPreservesState(t *testing.T) {
+	// Open a SQLite database and immediately close it so all queries fail.
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	_ = db.Close()
+
+	r := newTestRouter()
+	r.client.chatLog = chatlog.NewStoreFromDB(db, domain.PeerIdentity("me"))
+
+	r.peers["a"] = &RouterPeerState{Unread: 2}
+	r.peers["b"] = &RouterPeerState{Unread: 1}
+	r.peerOrder = []string{"a", "b"}
+	r.activePeer = "a"
+	r.peerClicked = true
+	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
+	r.cache.Load("a", []DirectMessage{{ID: "msg-1"}})
+
+	wasActive, rmErr := r.RemovePeer(domain.PeerIdentity("a"))
+	if rmErr == nil {
+		t.Fatal("RemovePeer should return an error when DeletePeerHistory fails")
+	}
+	if wasActive {
+		t.Fatal("wasActive should be false when RemovePeer fails")
+	}
+
+	// No UI events should be emitted on failure.
+	if len(r.uiEvents) != 0 {
+		t.Fatalf("expected no UI events on error, got %d", len(r.uiEvents))
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if _, ok := r.peers["a"]; !ok {
+		t.Fatal("peer 'a' should still exist after failed deletion")
+	}
+	if r.peers["a"].Unread != 2 {
+		t.Fatalf("peer 'a' unread count should be preserved, got %d", r.peers["a"].Unread)
+	}
+	if r.activePeer != "a" {
+		t.Fatalf("activePeer should remain 'a' after failed deletion, got %q", r.activePeer)
+	}
+	if !r.peerClicked {
+		t.Fatal("peerClicked should remain true after failed deletion")
+	}
+	if len(r.activeMessages) != 1 {
+		t.Fatalf("activeMessages should be preserved, got %d", len(r.activeMessages))
+	}
+	if !r.cache.MatchesPeer("a") {
+		t.Fatal("cache for peer 'a' should be preserved after failed deletion")
+	}
+	if len(r.peerOrder) != 2 {
+		t.Fatalf("peerOrder should be unchanged, got %d", len(r.peerOrder))
 	}
 }
 

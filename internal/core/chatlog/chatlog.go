@@ -34,11 +34,11 @@ const (
 
 // Message flags.
 const (
-	FlagNone           = ""               // default — no special behavior
-	FlagImmutable      = "immutable"      // nobody may delete the message
-	FlagSenderDelete   = "sender-delete"  // only the sender may delete it
-	FlagAnyDelete      = "any-delete"     // any participant may delete it
-	FlagAutoDeleteTTL  = "auto-delete-ttl" // auto-deleted after ttl_seconds
+	FlagNone          = ""                // default — no special behavior
+	FlagImmutable     = "immutable"       // nobody may delete the message
+	FlagSenderDelete  = "sender-delete"   // only the sender may delete it
+	FlagAnyDelete     = "any-delete"      // any participant may delete it
+	FlagAutoDeleteTTL = "auto-delete-ttl" // auto-deleted after ttl_seconds
 )
 
 // Entry is a single chatlog record.
@@ -68,6 +68,12 @@ type Store struct {
 	identityAddr string // full 40-char identity address
 }
 
+// NewStoreFromDB wraps an existing *sql.DB (may be nil) into a Store.
+// Intended for tests that need a Store without filesystem side-effects.
+func NewStoreFromDB(db *sql.DB, identity domain.PeerIdentity) *Store {
+	return &Store{db: db, identityAddr: string(identity)}
+}
+
 // NewStore creates a chatlog store backed by SQLite.
 //   - dir:           base directory for the database file (e.g. ".corsa")
 //   - identityAddr:  full 40-char hex identity address
@@ -76,14 +82,15 @@ type Store struct {
 // On startup the database file is checked with PRAGMA integrity_check.
 // If corruption is detected the file is renamed to *.corrupt and a fresh
 // database is created so the node can keep running.
-func NewStore(dir string, identityAddr string, listenAddress string) *Store {
+func NewStore(dir string, identity domain.PeerIdentity, listenAddress domain.ListenAddress) *Store {
+	identityAddr := string(identity)
 	short := identityAddr
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	port := portSuffix(listenAddress)
+	port := portSuffix(string(listenAddress))
 
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		// Best effort — the database open will fail with a clear error.
 		_ = err
 	}
