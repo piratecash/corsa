@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"corsa/internal/core/domain"
+
 	"github.com/rs/zerolog/log"
 	_ "modernc.org/sqlite"
 )
@@ -511,6 +513,30 @@ func (s *Store) DeleteExpired() (int64, error) {
 		  AND datetime(created_at) < datetime('now', '-' || ttl_seconds || ' seconds')`)
 	if err != nil {
 		return 0, fmt.Errorf("chatlog: delete expired: %w", err)
+	}
+
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// DeleteByPeer removes all messages for a conversation with the given identity.
+// Returns the number of deleted rows.
+func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
+	if s.db == nil {
+		return 0, fmt.Errorf("chatlog: database not available")
+	}
+	id := string(identity)
+	if strings.TrimSpace(id) == "" {
+		return 0, fmt.Errorf("chatlog: empty identity")
+	}
+
+	res, err := s.db.Exec(`
+		DELETE FROM messages
+		WHERE topic = 'dm'
+		  AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`,
+		s.identityAddr, id, id, s.identityAddr)
+	if err != nil {
+		return 0, fmt.Errorf("chatlog: delete identity %s: %w", id, err)
 	}
 
 	n, _ := res.RowsAffected()

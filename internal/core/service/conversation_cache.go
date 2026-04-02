@@ -3,6 +3,8 @@ package service
 import (
 	"sync"
 	"time"
+
+	"corsa/internal/core/domain"
 )
 
 // ConversationCache holds the decrypted messages for the currently active
@@ -113,6 +115,17 @@ func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt *
 		msg.DeliveredAt = deliveredAt
 	}
 	return true
+}
+
+// Evict clears the cache if it currently holds the given identity's conversation.
+func (c *ConversationCache) Evict(identity domain.PeerIdentity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.peerAddress == string(identity) {
+		c.peerAddress = ""
+		c.messages = nil
+		c.index = make(map[string]int)
+	}
 }
 
 func (c *ConversationCache) MatchesPeer(peerAddress string) bool {

@@ -14,13 +14,16 @@ import (
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/crashlog"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/rpc"
 	"corsa/internal/core/service"
 
 	"gioui.org/app"
 	"gioui.org/font"
 	"gioui.org/io/clipboard"
+	"gioui.org/io/event"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -52,11 +55,30 @@ type Window struct {
 	languageToggle       widget.Clickable
 	languageOptions      map[string]*widget.Clickable
 	recipientButtons     map[string]*widget.Clickable
+	recipientRightClick  map[string]*rightClickState
 	messageSelectables   map[string]*widget.Selectable
 	lastChatPeer         string
 	language             string
 	showLanguageMenu     bool
 	consoleOpen          bool
+
+	// Global cursor tracking for context menu positioning.
+	cursorTracker        int // tag for window-level pointer events
+	lastCursorPos        image.Point
+
+	// Context menu state for right-click on recipient buttons.
+	contextMenuPeer      string // fingerprint of the peer whose context menu is open
+	contextMenuPos       image.Point
+	ctxMenuCopy          widget.Clickable
+	ctxMenuDelete        widget.Clickable
+	ctxMenuDeleteConfirm widget.Clickable
+	ctxMenuDeleteCancel  widget.Clickable
+	ctxMenuAlias         widget.Clickable
+	ctxMenuAliasSave     widget.Clickable
+	ctxMenuAliasCancel   widget.Clickable
+	showDeleteConfirm    bool // true when confirmation step is shown
+	showAliasEditor      bool // true when alias input is shown
+	aliasEditor          widget.Editor
 
 	snap service.RouterSnapshot
 
@@ -93,7 +115,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 		language = normalizeLanguage(prefs.Language)
 	}
 
-	return &Window{
+	w := &Window{
 		router:             router,
 		client:             client,
 		cmdTable:           cmdTable,
@@ -103,10 +125,14 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 		language:           language,
 		languageOptions:    make(map[string]*widget.Clickable),
 		recipientButtons:   make(map[string]*widget.Clickable),
+		recipientRightClick: make(map[string]*rightClickState),
 		messageSelectables: make(map[string]*widget.Selectable),
 		contactsList:       widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:           widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 	}
+	w.aliasEditor.SingleLine = true
+	w.aliasEditor.Submit = true
+	return w
 }
 
 func (w *Window) Run() error {
@@ -166,6 +192,22 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.handleActions(gtx)
 	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
 
+	// Track cursor position at window level for accurate context menu placement.
+	defer clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops).Pop()
+	event.Op(gtx.Ops, &w.cursorTracker)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target: &w.cursorTracker,
+			Kinds:  pointer.Move | pointer.Press | pointer.Drag,
+		})
+		if !ok {
+			break
+		}
+		if pe, ok := ev.(pointer.Event); ok {
+			w.lastCursorPos = pe.Position.Round()
+		}
+	}
+
 	inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
@@ -184,6 +226,12 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 				return layout.Dimensions{}
 			}
 			return w.layoutLanguageOverlay(gtx)
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if w.contextMenuPeer == "" {
+				return layout.Dimensions{}
+			}
+			return w.layoutContextMenuOverlay(gtx)
 		}),
 	)
 }
@@ -228,6 +276,119 @@ func (w *Window) handleActions(gtx layout.Context) {
 			Data: io.NopCloser(strings.NewReader(w.snap.MyAddress)),
 		})
 		w.router.SetSendStatus(w.t("status.identity_copied"))
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}
+
+	w.handleContextMenuActions(gtx)
+}
+
+func (w *Window) handleContextMenuActions(gtx layout.Context) {
+	if w.contextMenuPeer == "" {
+		return
+	}
+
+	if w.ctxMenuCopy.Clicked(gtx) {
+		gtx.Execute(clipboard.WriteCmd{
+			Type: "text/plain",
+			Data: io.NopCloser(strings.NewReader(w.contextMenuPeer)),
+		})
+		w.router.SetSendStatus(w.t("status.identity_copied"))
+		w.contextMenuPeer = ""
+		w.showDeleteConfirm = false
+		w.showAliasEditor = false
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+		return
+	}
+
+	for w.ctxMenuAlias.Clicked(gtx) {
+		w.showAliasEditor = true
+		existing := ""
+		if w.prefs != nil {
+			existing = w.prefs.Alias(domain.PeerIdentity(w.contextMenuPeer))
+		}
+		w.aliasEditor.SetText(existing)
+		gtx.Execute(key.FocusCmd{Tag: &w.aliasEditor})
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}
+
+	if w.ctxMenuAliasSave.Clicked(gtx) {
+		alias := strings.TrimSpace(w.aliasEditor.Text())
+		if w.prefs != nil {
+			w.prefs.SetAlias(domain.PeerIdentity(w.contextMenuPeer), alias)
+			_ = w.prefs.Save()
+		}
+		w.contextMenuPeer = ""
+		w.showAliasEditor = false
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+		return
+	}
+
+	for w.ctxMenuAliasCancel.Clicked(gtx) {
+		w.showAliasEditor = false
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}
+
+	for w.ctxMenuDelete.Clicked(gtx) {
+		w.showDeleteConfirm = true
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}
+
+	if w.ctxMenuDeleteConfirm.Clicked(gtx) {
+		peer := w.contextMenuPeer
+		w.contextMenuPeer = ""
+		w.showDeleteConfirm = false
+
+		// Capture the ordered recipient list before deletion so we can
+		// pick the nearest neighbor for auto-selection in the UI layer.
+		recipients := w.snapRecipients(w.snap.NodeStatus)
+		removedIdx := -1
+		for i, r := range recipients {
+			if r == peer {
+				removedIdx = i
+				break
+			}
+		}
+
+		// Remove saved alias together with the identity.
+		if w.prefs != nil {
+			w.prefs.SetAlias(domain.PeerIdentity(peer), "")
+			_ = w.prefs.Save()
+		}
+
+		wasActive := w.router.RemovePeer(domain.PeerIdentity(peer))
+
+		if wasActive && removedIdx >= 0 && len(recipients) > 1 {
+			remaining := make([]string, 0, len(recipients)-1)
+			remaining = append(remaining, recipients[:removedIdx]...)
+			remaining = append(remaining, recipients[removedIdx+1:]...)
+			nextIdx := removedIdx
+			if nextIdx >= len(remaining) {
+				nextIdx = len(remaining) - 1
+			}
+			w.router.SelectPeer(remaining[nextIdx])
+			w.recipientEditor.SetText(remaining[nextIdx])
+		}
+
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+		return
+	}
+
+	for w.ctxMenuDeleteCancel.Clicked(gtx) {
+		w.showDeleteConfirm = false
 		if w.window != nil {
 			w.window.Invalidate()
 		}
@@ -328,7 +489,7 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 					if recipient == "" {
 						return layout.Dimensions{}
 					}
-					lbl := material.Label(w.theme, unit.Sp(15), w.t("chat.with", shortFingerprint(recipient)))
+					lbl := material.Label(w.theme, unit.Sp(15), w.t("chat.with", w.peerDisplayName(recipient)))
 					lbl.Color = color.NRGBA{R: 200, G: 212, B: 228, A: 255}
 					lbl.Font.Weight = 600
 					return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, lbl.Layout)
@@ -438,11 +599,44 @@ func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatu
 
 func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeStatus, fingerprint string, showUnread bool) layout.Dimensions {
 	btn := w.recipientButton(fingerprint)
+	rc := w.recipientRightClickState(fingerprint)
+
 	return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		for btn.Clicked(gtx) {
 			w.recipientEditor.SetText(fingerprint)
 			w.router.SetSendStatus(w.t("status.chat_selected"))
 			w.router.SelectPeer(fingerprint)
+		}
+
+		// Detect right-click (secondary button) for context menu.
+		// Position comes from the window-level cursor tracker (lastCursorPos)
+		// because card-local coordinates don't account for scroll offset
+		// and nested layout transforms.
+		for {
+			ev, ok := gtx.Event(pointer.Filter{
+				Target: rc,
+				Kinds:  pointer.Press | pointer.Release,
+			})
+			if !ok {
+				break
+			}
+			pe, ok := ev.(pointer.Event)
+			if !ok {
+				continue
+			}
+			if pe.Kind == pointer.Press && pe.Buttons.Contain(pointer.ButtonSecondary) {
+				rc.pressed = true
+			}
+			if pe.Kind == pointer.Release && rc.pressed {
+				rc.pressed = false
+				w.contextMenuPeer = fingerprint
+				w.contextMenuPos = w.lastCursorPos
+				w.showDeleteConfirm = false
+				w.showAliasEditor = false
+				// Auto-select this identity so the user sees the chat.
+				w.recipientEditor.SetText(fingerprint)
+				w.router.SelectPeer(fingerprint)
+			}
 		}
 
 		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
@@ -451,6 +645,11 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 		}
 
 		return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
+			// Register right-click tag inside the Clickable's clip area.
+			// Clickable only handles ButtonPrimary, so ButtonSecondary
+			// events propagate to our tag without conflict.
+			event.Op(gtx.Ops, rc)
+
 			fill(gtx, bg)
 			return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -461,7 +660,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 							Alignment: layout.Middle,
 						}.Layout(gtx,
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								title := material.Body1(w.theme, fingerprint)
+								title := material.Body1(w.theme, w.peerDisplayName(fingerprint))
 								title.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 								title.Font.Weight = 600
 								return title.Layout(gtx)
@@ -820,6 +1019,22 @@ func (w *Window) recipientButton(id string) *widget.Clickable {
 	return btn
 }
 
+// rightClickState is a tag for receiving secondary-button pointer events
+// on a recipient card. Each recipient gets its own tag so Gio routes
+// events correctly.
+type rightClickState struct {
+	pressed bool
+}
+
+func (w *Window) recipientRightClickState(id string) *rightClickState {
+	if s, ok := w.recipientRightClick[id]; ok {
+		return s
+	}
+	s := new(rightClickState)
+	w.recipientRightClick[id] = s
+	return s
+}
+
 func (w *Window) ensureSelectedRecipient(recipients []string) {
 	selected := w.snap.ActivePeer
 
@@ -949,7 +1164,7 @@ func (w *Window) layoutChatBubble(gtx layout.Context, recipient string, message 
 			})
 		}
 		return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return w.chatBubbleCard(gtx, message, false, shortFingerprint(recipient))
+			return w.chatBubbleCard(gtx, message, false, w.peerDisplayName(recipient))
 		})
 	})
 }
@@ -1161,6 +1376,17 @@ func fallback(value, alt string) string {
 	return value
 }
 
+// peerDisplayName returns the user-assigned alias for the identity,
+// falling back to shortFingerprint when no alias is set.
+func (w *Window) peerDisplayName(identity string) string {
+	if w.prefs != nil {
+		if alias := w.prefs.Alias(domain.PeerIdentity(identity)); alias != "" {
+			return alias
+		}
+	}
+	return shortFingerprint(identity)
+}
+
 func (w *Window) t(key string, args ...any) string {
 	return translate(w.language, key, args...)
 }
@@ -1303,6 +1529,269 @@ func (w *Window) layoutLanguageOverlay(gtx layout.Context) layout.Dimensions {
 	_ = w.languageMenuCard(menuGTX)
 
 	return layout.Dimensions{}
+}
+
+// layoutContextMenuOverlay renders the right-click context menu for a recipient identity.
+// It shows "Copy identity" and "Delete identity" options. Delete requires a confirmation step.
+func (w *Window) layoutContextMenuOverlay(gtx layout.Context) layout.Dimensions {
+	// Dismiss context menu on click outside.
+	// We draw a full-screen transparent clickable area behind the menu.
+	dismissArea := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
+	event.Op(gtx.Ops, &w.contextMenuPeer)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: &w.contextMenuPeer, Kinds: pointer.Press})
+		if !ok {
+			break
+		}
+		if _, ok := ev.(pointer.Event); ok {
+			w.contextMenuPeer = ""
+			w.showDeleteConfirm = false
+			w.showAliasEditor = false
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+		}
+	}
+	dismissArea.Pop()
+
+	menuWidth := gtx.Dp(unit.Dp(220))
+	windowW := gtx.Constraints.Max.X
+	windowH := gtx.Constraints.Max.Y
+
+	// Measure menu height first so we can flip upward when near the bottom.
+	measureGTX := gtx
+	measureGTX.Constraints.Min.X = menuWidth
+	measureGTX.Constraints.Max.X = menuWidth
+	measureGTX.Constraints.Min.Y = 0
+	measureGTX.Constraints.Max.Y = windowH
+	macro := op.Record(measureGTX.Ops)
+	dims := w.contextMenuCard(measureGTX)
+	menuCall := macro.Stop()
+
+	x := w.contextMenuPos.X
+	y := w.contextMenuPos.Y
+
+	// Flip horizontally if overflows right edge.
+	if x+menuWidth > windowW {
+		x = windowW - menuWidth
+	}
+	if x < 0 {
+		x = 0
+	}
+
+	// Flip vertically if overflows bottom edge.
+	if y+dims.Size.Y > windowH {
+		y = y - dims.Size.Y
+		if y < 0 {
+			y = 0
+		}
+	}
+
+	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
+	menuCall.Add(gtx.Ops)
+	stack.Pop()
+
+	return layout.Dimensions{}
+}
+
+func (w *Window) contextMenuCard(gtx layout.Context) layout.Dimensions {
+	borderColor := color.NRGBA{R: 72, G: 85, B: 106, A: 255}
+	bgColor := color.NRGBA{R: 28, G: 34, B: 44, A: 255}
+	rr := gtx.Dp(unit.Dp(8))
+	borderWidth := gtx.Dp(unit.Dp(1))
+
+	// Measure content to know the total size.
+	macro := op.Record(gtx.Ops)
+	dims := layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			if w.showDeleteConfirm {
+				return w.layoutDeleteConfirmMenu(gtx)
+			}
+			if w.showAliasEditor {
+				return w.layoutAliasEditorMenu(gtx)
+			}
+			return w.layoutContextMenuItems(gtx)
+		})
+	})
+	contentCall := macro.Stop()
+
+	bounds := image.Rectangle{Max: dims.Size}
+
+	// Clip everything to the rounded rectangle so corners are clean.
+	defer clip.UniformRRect(bounds, rr).Push(gtx.Ops).Pop()
+
+	// 1. Border fill (covers the full rounded rect).
+	paint.ColorOp{Color: borderColor}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	// 2. Background fill inset by border width.
+	innerBounds := image.Rectangle{
+		Min: image.Pt(borderWidth, borderWidth),
+		Max: image.Pt(dims.Size.X-borderWidth, dims.Size.Y-borderWidth),
+	}
+	innerRR := rr - borderWidth
+	if innerRR < 0 {
+		innerRR = 0
+	}
+	defer clip.UniformRRect(innerBounds, innerRR).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: bgColor}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	// 3. Replay content on top.
+	contentCall.Add(gtx.Ops)
+
+	return dims
+}
+
+func (w *Window) layoutContextMenuItems(gtx layout.Context) layout.Dimensions {
+	aliasLabel := w.t("context.set_alias")
+	if w.prefs != nil && w.prefs.Alias(domain.PeerIdentity(w.contextMenuPeer)) != "" {
+		aliasLabel = w.t("context.edit_alias")
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuHeader(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuSeparator(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuAlias, aliasLabel,
+				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuCopy, w.t("context.copy_identity"),
+				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuDelete, w.t("context.delete_identity"),
+				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
+		}),
+	)
+}
+
+func (w *Window) contextMenuHeader(gtx layout.Context) layout.Dimensions {
+	return layout.Inset{
+		Left: unit.Dp(12), Right: unit.Dp(12),
+		Top: unit.Dp(8), Bottom: unit.Dp(4),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		label := material.Caption(w.theme, w.peerDisplayName(w.contextMenuPeer))
+		label.Color = color.NRGBA{R: 140, G: 155, B: 178, A: 255}
+		return label.Layout(gtx)
+	})
+}
+
+func (w *Window) contextMenuSeparator(gtx layout.Context) layout.Dimensions {
+	return layout.Inset{
+		Left: unit.Dp(8), Right: unit.Dp(8),
+		Top: unit.Dp(2), Bottom: unit.Dp(4),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		height := gtx.Dp(unit.Dp(1))
+		sz := image.Pt(gtx.Constraints.Max.X, height)
+		defer clip.Rect(image.Rectangle{Max: sz}).Push(gtx.Ops).Pop()
+		paint.ColorOp{Color: color.NRGBA{R: 55, G: 65, B: 82, A: 255}}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		return layout.Dimensions{Size: sz}
+	})
+}
+
+func (w *Window) layoutDeleteConfirmMenu(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuHeader(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuSeparator(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			label := material.Caption(w.theme, w.t("context.delete_confirm"))
+			label.Color = color.NRGBA{R: 230, G: 200, B: 140, A: 255}
+			return layout.Inset{Left: unit.Dp(12), Right: unit.Dp(12), Top: unit.Dp(2), Bottom: unit.Dp(6)}.Layout(gtx, label.Layout)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuDeleteConfirm, w.t("context.delete_yes"),
+				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuDeleteCancel, w.t("context.delete_no"),
+				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+	)
+}
+
+func (w *Window) layoutAliasEditorMenu(gtx layout.Context) layout.Dimensions {
+	// Handle Enter key as save shortcut.
+	for {
+		ev, ok := w.aliasEditor.Update(gtx)
+		if !ok {
+			break
+		}
+		if submit, ok := ev.(widget.SubmitEvent); ok {
+			alias := strings.TrimSpace(submit.Text)
+			if w.prefs != nil {
+				w.prefs.SetAlias(domain.PeerIdentity(w.contextMenuPeer), alias)
+				_ = w.prefs.Save()
+			}
+			w.contextMenuPeer = ""
+			w.showAliasEditor = false
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return layout.Dimensions{}
+		}
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuHeader(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuSeparator(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Left: unit.Dp(12), Right: unit.Dp(12),
+				Top: unit.Dp(4), Bottom: unit.Dp(6),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				ed := material.Editor(w.theme, &w.aliasEditor, w.t("context.alias_placeholder"))
+				ed.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+				ed.HintColor = color.NRGBA{R: 120, G: 135, B: 158, A: 255}
+				gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+				return ed.Layout(gtx)
+			})
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuAliasSave, w.t("context.alias_save"),
+				color.NRGBA{R: 130, G: 200, B: 130, A: 255})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuAliasCancel, w.t("context.alias_cancel"),
+				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+	)
+}
+
+func (w *Window) contextMenuItem(gtx layout.Context, btn *widget.Clickable, label string, fg color.NRGBA) layout.Dimensions {
+	hoverBg := color.NRGBA{R: 42, G: 52, B: 68, A: 255}
+
+	return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
+		if btn.Hovered() {
+			fill(gtx, hoverBg)
+		}
+		return layout.Inset{
+			Top: unit.Dp(8), Bottom: unit.Dp(8),
+			Left: unit.Dp(12), Right: unit.Dp(12),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Body2(w.theme, label)
+			lbl.Color = fg
+			return lbl.Layout(gtx)
+		})
+	})
 }
 
 func (w *Window) languageMenuCard(gtx layout.Context) layout.Dimensions {

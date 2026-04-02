@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"corsa/internal/core/directmsg"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 )
 
@@ -981,6 +982,67 @@ func TestDeleteByID(t *testing.T) {
 	entries, _ := s.Read("dm", peer)
 	if len(entries) != 1 || entries[0].ID != "keep-1" {
 		t.Fatalf("unexpected entries after delete: %+v", entries)
+	}
+}
+
+func TestDeleteByPeer(t *testing.T) {
+	dir := t.TempDir()
+	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
+	s := NewStore(dir, selfAddr, ":9999")
+	defer func() { _ = s.Close() }()
+
+	identityA := domain.PeerIdentity("1111111111111111111111111111111111111111")
+	identityB := domain.PeerIdentity("2222222222222222222222222222222222222222")
+
+	// Messages with identityA (both directions).
+	_ = s.Append("dm", selfAddr, Entry{
+		ID: "a-out-1", Sender: selfAddr, Recipient: string(identityA),
+		Body: "outgoing to A", CreatedAt: "2026-01-01T00:00:00Z",
+	})
+	_ = s.Append("dm", selfAddr, Entry{
+		ID: "a-in-1", Sender: string(identityA), Recipient: selfAddr,
+		Body: "incoming from A", CreatedAt: "2026-01-01T00:01:00Z",
+	})
+
+	// Messages with identityB — must survive deletion of identityA.
+	_ = s.Append("dm", selfAddr, Entry{
+		ID: "b-out-1", Sender: selfAddr, Recipient: string(identityB),
+		Body: "outgoing to B", CreatedAt: "2026-01-01T00:02:00Z",
+	})
+
+	n, err := s.DeleteByPeer(identityA)
+	if err != nil {
+		t.Fatalf("delete identity: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 deleted rows, got %d", n)
+	}
+
+	// identityA conversation should be empty.
+	entries, _ := s.Read("dm", string(identityA))
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries for identityA, got %d", len(entries))
+	}
+
+	// identityB conversation should be intact.
+	entries, _ = s.Read("dm", string(identityB))
+	if len(entries) != 1 || entries[0].ID != "b-out-1" {
+		t.Fatalf("identityB entries unexpected: %+v", entries)
+	}
+
+	// Deleting already-empty identity returns 0.
+	n, err = s.DeleteByPeer(identityA)
+	if err != nil {
+		t.Fatalf("delete empty: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 deleted, got %d", n)
+	}
+
+	// Empty identity returns error.
+	_, err = s.DeleteByPeer("")
+	if err == nil {
+		t.Fatal("expected error for empty identity")
 	}
 }
 

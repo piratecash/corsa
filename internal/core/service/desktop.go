@@ -281,6 +281,15 @@ func (c *DesktopClient) Address() string {
 	return c.id.Address
 }
 
+// DeletePeerHistory removes all chat messages for the given identity from the
+// local chatlog database.
+func (c *DesktopClient) DeletePeerHistory(identity domain.PeerIdentity) (int64, error) {
+	if c.chatLog == nil {
+		return 0, nil
+	}
+	return c.chatLog.DeleteByPeer(identity)
+}
+
 func (c *DesktopClient) BootstrapPeers() []transport.Peer {
 	peers := make([]transport.Peer, 0, len(c.nodeCfg.BootstrapPeers))
 	for _, addr := range c.nodeCfg.BootstrapPeers {

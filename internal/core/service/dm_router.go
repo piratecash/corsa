@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 )
 
@@ -269,6 +270,46 @@ func (r *DMRouter) MyAddress() string {
 
 func (r *DMRouter) SetSendStatus(s string) {
 	r.setSendStatus(s)
+}
+
+// RemovePeer deletes an identity from the sidebar, clears its conversation
+// cache, and removes all chat history from the local database. If the removed
+// identity was active, the selection is cleared so the UI shows the placeholder.
+// RemovePeer deletes an identity from the sidebar, clears its conversation
+// cache, and removes all chat history from the local database. If the removed
+// identity was active, the selection is cleared. Returns true if the removed
+// identity was the active one (so the caller can decide what to select next).
+func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) bool {
+	id := string(identity)
+
+	r.mu.Lock()
+
+	delete(r.peers, id)
+	r.removePeerLocked(id)
+	r.cache.Evict(identity)
+
+	wasActive := r.activePeer == id
+	if wasActive {
+		r.activePeer = ""
+		r.peerClicked = false
+		r.activeMessages = nil
+	}
+
+	r.mu.Unlock()
+
+	// Delete chat history in background — SQLite I/O should not block the UI.
+	go func() {
+		if _, err := r.client.DeletePeerHistory(identity); err != nil {
+			log.Error().Str("identity", id).Err(err).Msg("failed to delete identity chat history")
+		}
+	}()
+
+	r.notify(UIEventSidebarUpdated)
+	if wasActive {
+		r.notify(UIEventMessagesUpdated)
+	}
+
+	return wasActive
 }
 
 // Start launches three background goroutines:

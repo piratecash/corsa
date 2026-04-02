@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 )
@@ -2535,6 +2536,143 @@ func TestPeerClickedTrueAfterAutoSelectThenNewPeerAutoSelect(t *testing.T) {
 		if !clicked {
 			t.Fatalf("after AutoSelectPeer(%q): peerClicked must be true", p)
 		}
+	}
+}
+
+// TestRemovePeer verifies that RemovePeer removes the peer from peers map,
+// peerOrder, evicts the cache, and returns true when the active peer is removed.
+// Auto-selection of the next neighbor is a UI-layer concern and not tested here.
+func TestRemovePeer(t *testing.T) {
+	r := newTestRouter()
+	r.peers["a"] = &RouterPeerState{Unread: 3}
+	r.peers["b"] = &RouterPeerState{Unread: 1}
+	r.peerOrder = []string{"a", "b"}
+	r.activePeer = "a"
+	r.peerClicked = true
+	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
+	r.cache.Load("a", []DirectMessage{{ID: "msg-1"}})
+
+	wasActive := r.RemovePeer(domain.PeerIdentity("a"))
+
+	// Drain UI events.
+	for len(r.uiEvents) > 0 {
+		<-r.uiEvents
+	}
+
+	if !wasActive {
+		t.Fatal("RemovePeer should return true when active peer is removed")
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if _, ok := r.peers["a"]; ok {
+		t.Fatal("peer 'a' should be removed from peers map")
+	}
+	for _, p := range r.peerOrder {
+		if p == "a" {
+			t.Fatal("peer 'a' should be removed from peerOrder")
+		}
+	}
+	if r.cache.MatchesPeer("a") {
+		t.Fatal("cache should be evicted for peer 'a'")
+	}
+
+	// RemovePeer clears activePeer; auto-selection is the UI layer's job.
+	if r.activePeer != "" {
+		t.Fatalf("activePeer should be empty after RemovePeer, got %q", r.activePeer)
+	}
+	if _, ok := r.peers["b"]; !ok {
+		t.Fatal("peer 'b' should still exist")
+	}
+}
+
+// TestRemovePeerClearsActiveWhenTailRemoved verifies that removing the last
+// identity in the list clears activePeer. The UI layer handles auto-selection.
+func TestRemovePeerClearsActiveWhenTailRemoved(t *testing.T) {
+	r := newTestRouter()
+	r.peers["a"] = &RouterPeerState{}
+	r.peers["b"] = &RouterPeerState{}
+	r.peers["c"] = &RouterPeerState{}
+	r.peerOrder = []string{"a", "b", "c"}
+	r.activePeer = "c"
+
+	wasActive := r.RemovePeer(domain.PeerIdentity("c"))
+
+	for len(r.uiEvents) > 0 {
+		<-r.uiEvents
+	}
+
+	if !wasActive {
+		t.Fatal("RemovePeer should return true when active peer is removed")
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.activePeer != "" {
+		t.Fatalf("activePeer should be empty after RemovePeer, got %q", r.activePeer)
+	}
+}
+
+// TestRemovePeerEmptyList verifies that removing the only identity leaves
+// activePeer empty.
+func TestRemovePeerEmptyList(t *testing.T) {
+	r := newTestRouter()
+	r.peers["a"] = &RouterPeerState{}
+	r.peerOrder = []string{"a"}
+	r.activePeer = "a"
+
+	wasActive := r.RemovePeer(domain.PeerIdentity("a"))
+
+	for len(r.uiEvents) > 0 {
+		<-r.uiEvents
+	}
+
+	if !wasActive {
+		t.Fatal("RemovePeer should return true when active peer is removed")
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.activePeer != "" {
+		t.Fatalf("activePeer should be empty when no peers remain, got %q", r.activePeer)
+	}
+}
+
+// TestRemovePeerNonActive verifies removing a non-active peer does not
+// disturb the current conversation.
+func TestRemovePeerNonActive(t *testing.T) {
+	r := newTestRouter()
+	r.peers["a"] = &RouterPeerState{}
+	r.peers["b"] = &RouterPeerState{}
+	r.peerOrder = []string{"a", "b"}
+	r.activePeer = "a"
+	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
+
+	wasActive := r.RemovePeer(domain.PeerIdentity("b"))
+
+	// Drain UI events.
+	for len(r.uiEvents) > 0 {
+		<-r.uiEvents
+	}
+
+	if wasActive {
+		t.Fatal("RemovePeer should return false when non-active peer is removed")
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.activePeer != "a" {
+		t.Fatalf("activePeer should remain 'a', got %q", r.activePeer)
+	}
+	if len(r.activeMessages) != 1 {
+		t.Fatalf("activeMessages should be untouched, got %d", len(r.activeMessages))
+	}
+	if _, ok := r.peers["b"]; ok {
+		t.Fatal("peer 'b' should be removed")
 	}
 }
 
