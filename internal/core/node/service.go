@@ -1737,7 +1737,7 @@ func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 		return false
 	}
 	if !entry.Blacklisted.IsZero() && time.Now().UTC().Before(entry.Blacklisted) {
-		log.Warn().Str("addr", ip).Time("until", entry.Blacklisted).Msg("reject connection: blacklisted")
+		log.Debug().Str("addr", ip).Time("until", entry.Blacklisted).Msg("reject connection: blacklisted")
 		return true
 	}
 	if !entry.Blacklisted.IsZero() && time.Now().UTC().After(entry.Blacklisted) {
