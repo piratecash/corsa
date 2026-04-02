@@ -1552,6 +1552,35 @@ func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string
 	}
 }
 
+// hasOutboundSessionForInbound checks whether an active outbound session
+// already exists for the given inbound peer address. Used during the inbound
+// hello handshake to detect duplicate connections — when two nodes dial each
+// other simultaneously, both end up with an inbound and an outbound TCP
+// connection to the same peer. Keeping both wastes resources and causes
+// duplicate entries in diagnostics.
+//
+// sessions is keyed by the dial address, which may be a fallback-port
+// variant (e.g. 10.0.0.1:64647) while the inbound peer declares the
+// primary address (10.0.0.1:64646). A direct map lookup would miss
+// that match. Instead we resolve both the inbound address and every
+// session key through resolveHealthAddress (which maps fallback →
+// primary via dialOrigin) and compare the canonical health-tracking
+// keys.
+//
+// Returns true when the inbound connection should be rejected because an
+// outbound session already covers this peer.
+func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	target := s.resolveHealthAddress(address)
+	for dialAddr := range s.sessions {
+		if s.resolveHealthAddress(dialAddr) == target {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1756,28 +1785,38 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			TotalTraffic:        sent + recv,
 			Capabilities:        s.peerCapabilitiesLocked(health.Address),
 		}
-		if session, ok := s.sessions[health.Address]; ok {
-			phf.ProtocolVersion = session.version
-			phf.ConnID = session.connID
-		}
-		// For inbound peers: emit a separate row per active TCP connection
-		// so that UI/diagnostics can distinguish multiple sessions to the
-		// same overlay address. Each row copies the shared health fields
-		// and overrides ConnID with the per-connection value.
-		inboundConns := s.inboundConnIDsLocked(health.Address)
-		if len(inboundConns) > 0 {
-			for _, cid := range inboundConns {
-				row := phf
-				row.ConnID = cid
-				row.Direction = string(peerDirectionInbound)
-				items = append(items, row)
+		// sessions is keyed by dial address which may differ from the
+		// health address when a fallback port was used. Iterate to find
+		// the matching session by resolved health key.
+		for dialAddr, session := range s.sessions {
+			if s.resolveHealthAddress(dialAddr) == health.Address {
+				phf.ProtocolVersion = session.version
+				phf.ConnID = session.connID
+				break
 			}
-			// If we also have an outbound session, emit it separately.
-			if phf.ConnID != 0 {
+		}
+		// When an outbound session exists, emit a single row with the
+		// outbound ConnID — even if stale inbound connections still
+		// linger (they will be cleaned up by the duplicate-connection
+		// rejection logic in the hello handler). For inbound-only
+		// peers, emit one row per active TCP connection so that
+		// UI/diagnostics can distinguish multiple sessions to the same
+		// overlay address.
+		if phf.ConnID != 0 {
+			// Outbound session present — single authoritative row.
+			items = append(items, phf)
+		} else {
+			inboundConns := s.inboundConnIDsLocked(health.Address)
+			if len(inboundConns) > 0 {
+				for _, cid := range inboundConns {
+					row := phf
+					row.ConnID = cid
+					row.Direction = string(peerDirectionInbound)
+					items = append(items, row)
+				}
+			} else {
 				items = append(items, phf)
 			}
-		} else {
-			items = append(items, phf)
 		}
 	}
 

@@ -7519,3 +7519,201 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 		t.Errorf("peerBuilds[%q] = %d, want %d", inboundAddr, build3, 20)
 	}
 }
+
+// TestHasOutboundSessionForInbound verifies that hasOutboundSessionForInbound
+// correctly detects an existing outbound session, preventing duplicate
+// inbound connections from the same peer.
+func TestHasOutboundSessionForInbound(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	peerAddr := domain.PeerAddress("10.0.0.9:64646")
+
+	// No outbound session — should return false.
+	if svc.hasOutboundSessionForInbound(peerAddr) {
+		t.Fatal("expected false when no outbound session exists")
+	}
+
+	// Register an outbound session.
+	svc.mu.Lock()
+	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan protocol.Frame)}
+	svc.mu.Unlock()
+
+	// Now should return true.
+	if !svc.hasOutboundSessionForInbound(peerAddr) {
+		t.Fatal("expected true when outbound session exists")
+	}
+
+	// Clean up session.
+	svc.mu.Lock()
+	delete(svc.sessions, peerAddr)
+	svc.mu.Unlock()
+
+	// Should return false again.
+	if svc.hasOutboundSessionForInbound(peerAddr) {
+		t.Fatal("expected false after session removed")
+	}
+}
+
+// TestHasOutboundSessionForInboundResolvesDialOrigin verifies that
+// hasOutboundSessionForInbound detects an outbound session stored under
+// a fallback dial address when the inbound peer declares its primary
+// address. In production dialOrigin maps fallback → primary
+// (e.g. dialOrigin["10.0.0.9:64647"] = "10.0.0.9:64646"), so
+// resolveHealthAddress(fallbackAddr) returns primaryAddr. The method
+// must resolve every session key the same way and compare against the
+// inbound address's resolved form.
+func TestHasOutboundSessionForInboundResolvesDialOrigin(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	primaryAddr := domain.PeerAddress("10.0.0.9:64646")
+	fallbackAddr := domain.PeerAddress("10.0.0.9:64647")
+
+	// Simulate production: outbound session dialed via fallback port,
+	// dialOrigin maps fallback → primary (the real production direction).
+	svc.mu.Lock()
+	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr, sendCh: make(chan protocol.Frame)}
+	svc.dialOrigin[fallbackAddr] = primaryAddr
+	svc.mu.Unlock()
+
+	// Inbound peer declares the primary address. The method should
+	// resolve the fallback session key to primaryAddr and match.
+	if !svc.hasOutboundSessionForInbound(primaryAddr) {
+		t.Fatal("expected true when outbound session exists via dialOrigin resolution")
+	}
+
+	// Direct lookup under primaryAddr should fail (no session there),
+	// confirming the test exercises the resolution path.
+	svc.mu.RLock()
+	_, directHit := svc.sessions[primaryAddr]
+	svc.mu.RUnlock()
+	if directHit {
+		t.Fatal("session should NOT be keyed by primaryAddr; test does not exercise resolution")
+	}
+}
+
+// TestDuplicateInboundConnectionRejected verifies that the hello handler
+// rejects an inbound connection when an outbound session already exists
+// for the same peer address.
+func TestDuplicateInboundConnectionRejected(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	peerAddr := domain.PeerAddress("10.0.0.8:64646")
+
+	// Simulate an existing outbound session.
+	svc.mu.Lock()
+	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan protocol.Frame)}
+	svc.mu.Unlock()
+	svc.markPeerConnected(peerAddr, peerDirectionOutbound)
+
+	// Connect as an inbound peer with a hello that declares the same
+	// address. Use Client "cli" to skip session auth — this exercises
+	// the non-auth hello path where the duplicate check lives.
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	hello := protocol.Frame{
+		Type:          "hello",
+		Version:       config.ProtocolVersion,
+		Client:        "cli",
+		ClientVersion: "0.25-test",
+		Listen:        string(peerAddr),
+		Address:       string(peerAddr),
+	}
+	writeJSONFrame(t, conn, hello)
+
+	reader := bufio.NewReader(conn)
+	reply := readJSONTestFrame(t, reader)
+
+	// The node should reject the duplicate inbound with an error frame.
+	if reply.Type != "error" {
+		t.Fatalf("expected error frame, got %q", reply.Type)
+	}
+	if reply.Code != "duplicate-connection" {
+		t.Fatalf("expected error code %q, got %q", "duplicate-connection", reply.Code)
+	}
+}
+
+// TestPeerHealthFramesSingleRowWithOutboundSession verifies that
+// peerHealthFrames emits exactly one row per peer when an outbound
+// session exists, even if stale inbound connection data is present.
+func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	peerAddr := domain.PeerAddress("10.0.0.7:64646")
+
+	// Mark peer connected as outbound and register session.
+	svc.mu.Lock()
+	svc.sessions[peerAddr] = &peerSession{
+		address: peerAddr,
+		connID:  42,
+		sendCh:  make(chan protocol.Frame),
+	}
+	svc.mu.Unlock()
+	svc.markPeerConnected(peerAddr, peerDirectionOutbound)
+
+	// Simulate a stale inbound connection entry (should not generate
+	// a second row since the outbound session takes priority).
+	staleConn, staleRemote := net.Pipe()
+	defer func() { _ = staleConn.Close() }()
+	defer func() { _ = staleRemote.Close() }()
+	svc.mu.Lock()
+	svc.connPeerInfo[staleConn] = &connPeerHello{
+		address:  peerAddr,
+		connID:   99,
+		identity: "stale-identity",
+	}
+	svc.mu.Unlock()
+
+	frames := svc.peerHealthFrames()
+
+	count := 0
+	for _, f := range frames {
+		if f.Address == string(peerAddr) {
+			count++
+			if f.Direction != string(peerDirectionOutbound) {
+				t.Errorf("expected direction %q, got %q", peerDirectionOutbound, f.Direction)
+			}
+			if f.ConnID != 42 {
+				t.Errorf("expected ConnID 42, got %d", f.ConnID)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 row for %s, got %d", peerAddr, count)
+	}
+}

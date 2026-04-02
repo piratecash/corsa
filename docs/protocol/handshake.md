@@ -318,6 +318,17 @@ On authentication failure:
 }
 ```
 
+On duplicate connection (inbound rejected because outbound session already exists):
+```json
+{
+  "type": "error",
+  "code": "duplicate-connection",
+  "error": "duplicate connection: outbound session already exists"
+}
+```
+
+When two nodes dial each other simultaneously, each ends up with both an inbound and an outbound TCP connection to the same peer. The responder detects the duplicate during the hello (or auth_session) handshake: if an outbound session to the same overlay address already exists, the inbound connection is rejected with `duplicate-connection`. The outbound session is always preferred because `connectedHostsLocked` already prevents redundant outbound dials — making the outbound the stable survivor.
+
 See [errors.md](errors.md) for full error reference.
 
 ---
@@ -684,6 +695,17 @@ Capability-токены гейтят новые типы фреймов и по�
   "message": "invalid signature"
 }
 ```
+
+На дублирующее соединение (inbound отклоняется, потому что outbound сессия уже существует):
+```json
+{
+  "type": "error",
+  "code": "duplicate-connection",
+  "error": "duplicate connection: outbound session already exists"
+}
+```
+
+Когда два узла одновременно подключаются друг к другу, каждый из них получает и inbound, и outbound TCP-соединение к одному и тому же пиру. Ответчик обнаруживает дубликат во время hello (или auth_session) handshake: если outbound сессия к тому же overlay-адресу уже существует, inbound-соединение отклоняется с кодом `duplicate-connection`. Outbound сессия всегда имеет приоритет, так как `connectedHostsLocked` уже предотвращает повторные outbound-подключения, делая outbound стабильным выжившим соединением.
 
 См. [errors.md](errors.md) для полного справочника ошибок.
 

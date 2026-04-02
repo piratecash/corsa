@@ -805,6 +805,18 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 		}
 		if addr := s.inboundPeerAddress(conn); addr != "" {
+			// Reject duplicate: if we already have an outbound session
+			// to this peer, close the inbound connection to avoid
+			// parallel TCP connections between the same pair of nodes.
+			if s.hasOutboundSessionForInbound(addr) {
+				log.Info().Str("peer", string(addr)).Msg("reject_duplicate_inbound_connection")
+				s.writeJSONFrameSync(conn, protocol.Frame{
+					Type:  "error",
+					Code:  protocol.ErrCodeDuplicateConnection,
+					Error: "duplicate connection: outbound session already exists",
+				})
+				return false
+			}
 			s.addPeerID(addr, domain.PeerIdentity(frame.Address))
 			s.trackInboundConnect(conn, addr, domain.PeerIdentity(frame.Address))
 			// Store version/build by the health-tracking address so that
@@ -1432,6 +1444,17 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 	}
 
 	if addr := s.inboundPeerAddress(conn); addr != "" {
+		// Reject duplicate: if we already have an outbound session
+		// to this peer, close the inbound connection to avoid
+		// parallel TCP connections between the same pair of nodes.
+		if s.hasOutboundSessionForInbound(addr) {
+			log.Info().Str("peer", string(addr)).Msg("reject_duplicate_inbound_auth_session")
+			return protocol.Frame{
+				Type:  "error",
+				Code:  protocol.ErrCodeDuplicateConnection,
+				Error: "duplicate connection: outbound session already exists",
+			}, false
+		}
 		s.addPeerID(addr, domain.PeerIdentity(state.Hello.Address))
 		s.trackInboundConnect(conn, addr, domain.PeerIdentity(state.Hello.Address))
 		s.addPeerVersion(addr, state.Hello.ClientVersion)

@@ -28,6 +28,7 @@ const (
 	ErrCodeBlacklisted                = "blacklisted"
 	ErrCodeInvalidAckDelete           = "invalid-ack-delete"
 	ErrCodeFrameTooLarge              = "frame-too-large"
+	ErrCodeDuplicateConnection        = "duplicate-connection"
 )
 
 var (
@@ -56,6 +57,7 @@ var (
 	ErrBlacklisted                = errors.New(ErrCodeBlacklisted)
 	ErrInvalidAckDelete           = errors.New(ErrCodeInvalidAckDelete)
 	ErrFrameTooLarge              = errors.New(ErrCodeFrameTooLarge)
+	ErrDuplicateConnection        = errors.New(ErrCodeDuplicateConnection)
 )
 
 func ErrorCode(err error) string {
@@ -110,6 +112,8 @@ func ErrorCode(err error) string {
 		return ErrCodeInvalidAckDelete
 	case errors.Is(err, ErrFrameTooLarge):
 		return ErrCodeFrameTooLarge
+	case errors.Is(err, ErrDuplicateConnection):
+		return ErrCodeDuplicateConnection
 	default:
 		return ErrCodeProtocol
 	}
@@ -165,6 +169,8 @@ func ErrorFromCode(code string) error {
 		return ErrInvalidAckDelete
 	case ErrCodeFrameTooLarge:
 		return ErrFrameTooLarge
+	case ErrCodeDuplicateConnection:
+		return ErrDuplicateConnection
 	default:
 		return ErrProtocol
 	}
