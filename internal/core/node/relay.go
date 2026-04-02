@@ -1,13 +1,16 @@
 package node
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
+	"corsa/internal/core/crashlog"
 	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
-
-	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -932,4 +935,543 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 		Str("mode", "session").
 		Msg("relay_message_sent_table_directed")
 	return true
+}
+
+
+func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
+	defer crashlog.DeferRecover()
+	for _, address := range s.routingTargetsForRecipient(receipt.Recipient) {
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		go s.sendReceiptToPeer(address, receipt)
+	}
+}
+
+func (s *Service) sendReceiptToPeer(address domain.PeerAddress, receipt protocol.DeliveryReceipt) bool {
+	defer crashlog.DeferRecover()
+	frame := protocol.Frame{
+		Type:        "send_delivery_receipt",
+		ID:          string(receipt.MessageID),
+		Address:     receipt.Sender,
+		Recipient:   receipt.Recipient,
+		Status:      receipt.Status,
+		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
+	}
+	if s.enqueuePeerFrame(address, frame) {
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "session").Str("status", receipt.Status).Msg("route_receipt_attempt")
+		return true
+	}
+	if s.queuePeerFrame(address, frame) {
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "queued").Str("status", receipt.Status).Msg("route_receipt_attempt")
+		return true
+	}
+	log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "dropped").Str("status", receipt.Status).Msg("route_receipt_attempt")
+	return false
+}
+
+func (s *Service) retryRelayDeliveries() {
+	if !s.CanForward() {
+		return
+	}
+
+	now := time.Now().UTC()
+	for _, msg := range s.retryableRelayMessages(now) {
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", s.noteRelayAttempt(relayMessageKey(msg.ID), now)).Msg("relay_retry_message")
+		decision := s.router.Route(msg)
+		go s.executeGossipTargets(msg, decision.GossipTargets)
+		// Table-directed relay (Phase 1.2): mirror the logic in
+		// storeIncomingMessage — use the routing table when a next-hop
+		// is known, fall back to blind gossip relay otherwise.
+		if decision.RelayNextHop != nil {
+			s.sendTableDirectedRelay(msg, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+		} else {
+			s.tryRelayToCapableFullNodes(msg, decision.GossipTargets)
+		}
+	}
+	for _, receipt := range s.retryableRelayReceipts(now) {
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
+		if !s.handleRelayReceipt(receipt) {
+			go s.gossipReceipt(receipt)
+		}
+	}
+}
+
+func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
+	s.mu.Lock()
+
+	items := append([]protocol.Envelope(nil), s.topics["dm"]...)
+	out := make([]protocol.Envelope, 0)
+	beforeLen := len(s.relayRetry)
+	for _, msg := range items {
+		key := relayMessageKey(msg.ID)
+		if msg.Recipient == "" || msg.Recipient == "*" || msg.Recipient == s.identity.Address {
+			delete(s.relayRetry, key)
+			continue
+		}
+		if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
+			delete(s.relayRetry, key)
+			continue
+		}
+		if s.hasReceiptForMessageLocked(msg.Sender, msg.ID) {
+			delete(s.relayRetry, key)
+			continue
+		}
+		if !shouldRetryRelayLocked(s.relayRetry, key, now) {
+			continue
+		}
+		out = append(out, msg)
+	}
+	afterLen := len(s.relayRetry)
+	if beforeLen != afterLen {
+		snapshot := s.queueStateSnapshotLocked()
+		s.mu.Unlock()
+		s.persistQueueState(snapshot)
+		return out
+	}
+	s.mu.Unlock()
+	return out
+}
+
+func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryReceipt {
+	s.mu.Lock()
+
+	out := make([]protocol.DeliveryReceipt, 0)
+	beforeLen := len(s.relayRetry)
+	for _, list := range s.receipts {
+		for _, receipt := range list {
+			key := relayReceiptKey(receipt)
+			if receipt.Recipient == "" || receipt.Recipient == s.identity.Address {
+				delete(s.relayRetry, key)
+				continue
+			}
+			if !shouldRetryRelayLocked(s.relayRetry, key, now) {
+				continue
+			}
+			out = append(out, receipt)
+		}
+	}
+	afterLen := len(s.relayRetry)
+	if beforeLen != afterLen {
+		snapshot := s.queueStateSnapshotLocked()
+		s.mu.Unlock()
+		s.persistQueueState(snapshot)
+		return out
+	}
+	s.mu.Unlock()
+	return out
+}
+
+func shouldRetryRelayLocked(items map[string]relayAttempt, key string, now time.Time) bool {
+	state, ok := items[key]
+	if !ok {
+		return false
+	}
+	firstSeen := state.FirstSeen
+	if firstSeen.IsZero() {
+		firstSeen = now
+	}
+	if now.Sub(firstSeen) > relayRetryTTL {
+		delete(items, key)
+		return false
+	}
+	if state.LastAttempt.IsZero() {
+		return true
+	}
+	return now.Sub(state.LastAttempt) >= relayRetryBackoff(state.Attempts)
+}
+
+func relayRetryBackoff(attempts int) time.Duration {
+	if attempts <= 0 {
+		return 5 * time.Second
+	}
+	backoff := 5 * time.Second
+	for i := 1; i < attempts; i++ {
+		backoff *= 2
+		if backoff >= 30*time.Second {
+			return 30 * time.Second
+		}
+	}
+	return backoff
+}
+
+func (s *Service) noteRelayAttempt(key string, now time.Time) int {
+	s.mu.Lock()
+	state := s.relayRetry[key]
+	if state.FirstSeen.IsZero() {
+		state.FirstSeen = now
+	}
+	state.LastAttempt = now
+	state.Attempts++
+	s.relayRetry[key] = state
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+	return state.Attempts
+}
+
+func (s *Service) trackRelayMessage(msg protocol.Envelope) {
+	if msg.Topic != "dm" || msg.Recipient == "" || msg.Recipient == "*" {
+		return
+	}
+	s.mu.Lock()
+	key := relayMessageKey(msg.ID)
+	state := s.relayRetry[key]
+	if state.FirstSeen.IsZero() {
+		// Enforce capacity: reject new entries when the retry map is full.
+		if len(s.relayRetry) >= maxRelayRetryEntries {
+			s.mu.Unlock()
+			return
+		}
+		state.FirstSeen = time.Now().UTC()
+		s.relayRetry[key] = state
+		snapshot := s.queueStateSnapshotLocked()
+		s.mu.Unlock()
+		s.persistQueueState(snapshot)
+		return
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
+	s.mu.Lock()
+	key := relayReceiptKey(receipt)
+	state := s.relayRetry[key]
+	dirty := false
+	if state.FirstSeen.IsZero() {
+		// Enforce capacity: reject new entries when the retry map is full.
+		// Deletions below (message key cleanup) still proceed.
+		if len(s.relayRetry) >= maxRelayRetryEntries {
+			// Still try to clean up the message key below before returning.
+		} else {
+			state.FirstSeen = time.Now().UTC()
+			s.relayRetry[key] = state
+			dirty = true
+		}
+	}
+	if _, ok := s.relayRetry[relayMessageKey(receipt.MessageID)]; ok {
+		delete(s.relayRetry, relayMessageKey(receipt.MessageID))
+		dirty = true
+	}
+	if !dirty {
+		s.mu.Unlock()
+		return
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func relayMessageKey(id protocol.MessageID) string {
+	return "msg|" + string(id)
+}
+
+func relayReceiptKey(receipt protocol.DeliveryReceipt) string {
+	return "receipt|" + receipt.Recipient + "|" + string(receipt.MessageID) + "|" + receipt.Status
+}
+
+func (s *Service) hasReceiptForMessageLocked(originalSender string, messageID protocol.MessageID) bool {
+	for _, receipt := range s.receipts[originalSender] {
+		if receipt.MessageID == messageID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID protocol.MessageID) int {
+	s.mu.Lock()
+	before := len(s.topics["dm"])
+	filtered := s.topics["dm"][:0]
+	for _, msg := range s.topics["dm"] {
+		if msg.ID == messageID && msg.Recipient == recipient {
+			delete(s.relayRetry, relayMessageKey(msg.ID))
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	if len(filtered) == 0 {
+		delete(s.topics, "dm")
+	} else {
+		s.topics["dm"] = filtered
+	}
+	removed := before - len(filtered)
+	if removed <= 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+	return removed
+}
+
+func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID protocol.MessageID, status string) int {
+	s.mu.Lock()
+	list := s.receipts[recipient]
+	if len(list) == 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	filtered := list[:0]
+	removed := 0
+	for _, receipt := range list {
+		if receipt.MessageID == messageID && receipt.Recipient == recipient && receipt.Status == status {
+			delete(s.relayRetry, relayReceiptKey(receipt))
+			removed++
+			continue
+		}
+		filtered = append(filtered, receipt)
+	}
+	if len(filtered) == 0 {
+		delete(s.receipts, recipient)
+	} else {
+		s.receipts[recipient] = filtered
+	}
+	if removed <= 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+	return removed
+}
+
+func (s *Service) queueStateSnapshot() queueStateFile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.queueStateSnapshotLocked()
+}
+
+func (s *Service) queueStateSnapshotLocked() queueStateFile {
+	pending := make(map[string][]pendingFrame, len(s.pending))
+	for address, items := range s.pending {
+		if len(items) == 0 {
+			continue
+		}
+		frames := make([]pendingFrame, len(items))
+		copy(frames, items)
+		pending[string(address)] = frames
+	}
+
+	relayRetry := make(map[string]relayAttempt, len(s.relayRetry))
+	for key, item := range s.relayRetry {
+		relayRetry[key] = item
+	}
+	relayMessages := make([]protocol.Envelope, 0, len(s.topics["dm"]))
+	for _, msg := range s.topics["dm"] {
+		if _, ok := relayRetry[relayMessageKey(msg.ID)]; ok {
+			relayMessages = append(relayMessages, msg)
+		}
+	}
+	relayReceipts := make([]protocol.DeliveryReceipt, 0)
+	for _, list := range s.receipts {
+		for _, receipt := range list {
+			if _, ok := relayRetry[relayReceiptKey(receipt)]; ok {
+				relayReceipts = append(relayReceipts, receipt)
+			}
+		}
+	}
+	outbound := make(map[string]outboundDelivery, len(s.outbound))
+	for key, item := range s.outbound {
+		outbound[key] = item
+	}
+
+	orphaned := make(map[string][]pendingFrame, len(s.orphaned))
+	for addr, items := range s.orphaned {
+		orphaned[string(addr)] = append([]pendingFrame(nil), items...)
+	}
+
+	return queueStateFile{
+		Version:            queueStateVersion,
+		Pending:            pending,
+		Orphaned:           orphaned,
+		RelayRetry:         relayRetry,
+		RelayMessages:      relayMessages,
+		RelayReceipts:      relayReceipts,
+		OutboundState:      outbound,
+		RelayForwardStates: s.relayStates.snapshot(),
+	}
+}
+
+func (s *Service) persistQueueState(snapshot queueStateFile) {
+	path := s.cfg.EffectiveQueueStatePath()
+	if err := saveQueueState(path, snapshot); err != nil {
+		log.Error().Str("path", path).Err(err).Msg("queue state save failed")
+	}
+}
+
+func sanitizeRelayState(items map[string]relayAttempt, messages []protocol.Envelope, receipts []protocol.DeliveryReceipt) {
+	valid := make(map[string]struct{}, len(messages)+len(receipts))
+	for _, msg := range messages {
+		valid[relayMessageKey(msg.ID)] = struct{}{}
+	}
+	for _, receipt := range receipts {
+		valid[relayReceiptKey(receipt)] = struct{}{}
+	}
+	for key := range items {
+		if _, ok := valid[key]; !ok {
+			delete(items, key)
+		}
+	}
+}
+
+func (s *Service) noteOutboundQueuedLocked(frame protocol.Frame, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
+	state := s.outbound[frame.ID]
+	if state.MessageID == "" {
+		state.MessageID = frame.ID
+		state.Recipient = frame.Recipient
+		state.QueuedAt = time.Now().UTC()
+	}
+	state.Status = "queued"
+	state.Error = errText
+	s.outbound[frame.ID] = state
+}
+
+func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time, retries int, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	state := s.outbound[frame.ID]
+	if state.MessageID == "" {
+		state.MessageID = frame.ID
+		state.Recipient = frame.Recipient
+	}
+	if state.QueuedAt.IsZero() {
+		state.QueuedAt = queuedAt
+	}
+	state.Status = "retrying"
+	state.Retries = retries
+	state.LastAttemptAt = time.Now().UTC()
+	state.Error = errText
+	s.outbound[frame.ID] = state
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText string) {
+	if frame.Type != "send_message" || frame.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	state := s.outbound[frame.ID]
+	if state.MessageID == "" {
+		state.MessageID = frame.ID
+		state.Recipient = frame.Recipient
+		state.QueuedAt = time.Now().UTC()
+	}
+	state.Status = status
+	state.LastAttemptAt = time.Now().UTC()
+	if status == "failed" {
+		state.Retries++
+	}
+	state.Error = errText
+	s.outbound[frame.ID] = state
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func (s *Service) clearOutboundQueued(messageID string) {
+	if strings.TrimSpace(messageID) == "" {
+		return
+	}
+	s.mu.Lock()
+	if _, ok := s.outbound[messageID]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.outbound, messageID)
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
+	if frame.Type != "send_delivery_receipt" || frame.ID == "" || frame.Recipient == "" || frame.Status == "" {
+		return
+	}
+
+	key := relayReceiptKey(protocol.DeliveryReceipt{
+		MessageID: protocol.MessageID(frame.ID),
+		Recipient: frame.Recipient,
+		Status:    frame.Status,
+	})
+
+	s.mu.Lock()
+	if _, ok := s.relayRetry[key]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.relayRetry, key)
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+}
+
+func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
+	defer crashlog.DeferRecover()
+	receipt := protocol.DeliveryReceipt{
+		MessageID:   msg.ID,
+		Sender:      s.identity.Address,
+		Recipient:   msg.Sender,
+		Status:      protocol.ReceiptStatusDelivered,
+		DeliveredAt: time.Now().UTC(),
+	}
+	s.storeDeliveryReceipt(receipt)
+}
+
+func receiptFrame(receipt protocol.DeliveryReceipt) protocol.ReceiptFrame {
+	return protocol.ReceiptFrame{
+		MessageID:   string(receipt.MessageID),
+		Sender:      receipt.Sender,
+		Recipient:   receipt.Recipient,
+		Status:      receipt.Status,
+		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func receiptFromFrame(frame protocol.Frame) (protocol.DeliveryReceipt, error) {
+	if strings.TrimSpace(frame.ID) == "" || strings.TrimSpace(frame.Address) == "" || strings.TrimSpace(frame.Recipient) == "" || strings.TrimSpace(frame.Status) == "" || strings.TrimSpace(frame.DeliveredAt) == "" {
+		return protocol.DeliveryReceipt{}, fmt.Errorf("missing delivery receipt fields")
+	}
+	if frame.Status != protocol.ReceiptStatusDelivered && frame.Status != protocol.ReceiptStatusSeen {
+		return protocol.DeliveryReceipt{}, fmt.Errorf("invalid delivery receipt status")
+	}
+
+	deliveredAt, err := time.Parse(time.RFC3339, frame.DeliveredAt)
+	if err != nil {
+		return protocol.DeliveryReceipt{}, err
+	}
+
+	return protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID(frame.ID),
+		Sender:      frame.Address,
+		Recipient:   frame.Recipient,
+		Status:      frame.Status,
+		DeliveredAt: deliveredAt.UTC(),
+	}, nil
+}
+
+func receiptFromReceiptFrame(frame protocol.ReceiptFrame) (protocol.DeliveryReceipt, error) {
+	if frame.Status != protocol.ReceiptStatusDelivered && frame.Status != protocol.ReceiptStatusSeen {
+		return protocol.DeliveryReceipt{}, fmt.Errorf("invalid delivery receipt status")
+	}
+	deliveredAt, err := time.Parse(time.RFC3339, frame.DeliveredAt)
+	if err != nil {
+		return protocol.DeliveryReceipt{}, err
+	}
+	return protocol.DeliveryReceipt{
+		MessageID:   protocol.MessageID(frame.MessageID),
+		Sender:      frame.Sender,
+		Recipient:   frame.Recipient,
+		Status:      frame.Status,
+		DeliveredAt: deliveredAt.UTC(),
+	}, nil
 }

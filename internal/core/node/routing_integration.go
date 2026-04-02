@@ -1,18 +1,21 @@
 package node
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
+	"corsa/internal/core/crashlog"
 	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
-
-	"github.com/rs/zerolog/log"
 )
 
 // announceWriteDeadline caps how long we block on a synchronous write
@@ -927,4 +930,203 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	}
 
 	return ""
+}
+
+
+// executeGossipTargets sends a message to pre-computed gossip targets from a
+// RoutingDecision. The target list is provided by the Router — targets are not
+// recomputed here.
+func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.PeerAddress) {
+	defer crashlog.DeferRecover()
+	for _, address := range targets {
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		go s.sendMessageToPeer(address, msg)
+	}
+}
+
+func (s *Service) routingTargets() []domain.PeerAddress {
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, _ domain.PeerIdentity) bool {
+		return !peerType.IsClient()
+	})
+}
+
+func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerAddress {
+	if msg.Topic != "dm" || msg.Recipient == "*" {
+		return s.routingTargets()
+	}
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool {
+		return !peerType.IsClient() || string(peerID) == msg.Recipient
+	})
+}
+
+func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddress {
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool {
+		return !peerType.IsClient() || string(peerID) == recipient
+	})
+}
+
+func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool) []domain.PeerAddress {
+	s.mu.RLock()
+	if len(s.sessions) > 0 {
+		type scoredTarget struct {
+			address domain.PeerAddress
+			score   int64
+		}
+		scored := make([]scoredTarget, 0, len(s.sessions))
+		for address := range s.sessions {
+			if address == "" || s.isSelfAddress(address) {
+				continue
+			}
+			primaryAddr := s.resolveHealthAddress(address)
+			peerType := s.peerTypeForAddressLocked(primaryAddr)
+			peerID := s.peerIDs[primaryAddr]
+			if !allow(address, peerType, peerID) {
+				continue
+			}
+			health := s.health[primaryAddr]
+			if health == nil || !health.Connected {
+				continue
+			}
+			if s.computePeerStateLocked(health) == peerStateStalled {
+				continue
+			}
+			scored = append(scored, scoredTarget{
+				address: address,
+				score:   scorePeerTargetLocked(health),
+			})
+		}
+		if len(scored) > 0 {
+			s.mu.RUnlock()
+			sort.Slice(scored, func(i, j int) bool {
+				if scored[i].score == scored[j].score {
+					return string(scored[i].address) < string(scored[j].address)
+				}
+				return scored[i].score > scored[j].score
+			})
+			limit := min(3, len(scored))
+			targets := make([]domain.PeerAddress, 0, limit)
+			for _, item := range scored[:limit] {
+				targets = append(targets, item.address)
+			}
+			return targets
+		}
+	}
+	s.mu.RUnlock()
+
+	targets := make([]domain.PeerAddress, 0, len(s.Peers()))
+	for _, peer := range s.Peers() {
+		if peer.Address == "" || s.isSelfAddress(peer.Address) {
+			continue
+		}
+		if !allow(peer.Address, s.peerTypeForAddress(peer.Address), s.peerIdentityForAddress(peer.Address)) {
+			continue
+		}
+		targets = append(targets, peer.Address)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		return string(targets[i]) < string(targets[j])
+	})
+	return targets
+}
+
+func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Envelope) {
+	defer crashlog.DeferRecover()
+	frame := protocol.Frame{
+		Type:       "send_message",
+		Topic:      msg.Topic,
+		ID:         string(msg.ID),
+		Address:    msg.Sender,
+		Recipient:  msg.Recipient,
+		Flag:       string(msg.Flag),
+		CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
+		TTLSeconds: msg.TTLSeconds,
+		Body:       string(msg.Payload),
+	}
+	if s.enqueuePeerFrame(address, frame) {
+		s.clearOutboundQueued(frame.ID)
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "session").Msg("route_message_attempt")
+		return
+	}
+	if s.queuePeerFrame(address, frame) {
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "queued").Msg("route_message_attempt")
+		return
+	}
+	s.markOutboundTerminal(frame, "failed", "unable to queue outbound frame")
+	log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "dropped").Msg("route_message_attempt")
+}
+
+func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
+	defer crashlog.DeferRecover()
+	for _, address := range s.routingTargets() {
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		go s.sendNoticeToPeer(address, ttl, ciphertext)
+	}
+}
+
+func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration, ciphertext string) {
+	defer crashlog.DeferRecover()
+	frame := protocol.Frame{
+		Type:       "publish_notice",
+		TTLSeconds: int(ttl.Seconds()),
+		Ciphertext: ciphertext,
+	}
+	if s.enqueuePeerFrame(address, frame) {
+		return
+	}
+
+	conn, err := net.DialTimeout("tcp", string(address), syncHandshakeTimeout)
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
+	reader := bufio.NewReader(conn)
+
+	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
+		return
+	}
+	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
+	if err != nil {
+		return
+	}
+	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(welcome.Challenge) != "" {
+		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:      "auth_session",
+			Address:   s.identity.Address,
+			Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
+		})
+		if err != nil {
+			return
+		}
+		if _, err := io.WriteString(conn, authLine); err != nil {
+			return
+		}
+		reply, err := readFrameLine(reader, maxResponseLineBytes)
+		if err != nil {
+			return
+		}
+		authReply, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
+		if err != nil || authReply.Type != "auth_ok" {
+			return
+		}
+	}
+	if welcome.Type == "error" {
+		return
+	}
+
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		return
+	}
+	_, _ = io.WriteString(conn, line)
+	_, _ = readFrameLine(reader, maxResponseLineBytes)
 }

@@ -577,20 +577,7 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 
 #### Незавершённые задачи перед здоровьем маршрутов
 
-Перед началом Phase 1.4 необходим рефакторинг для управления сложностью:
-
-**Высокий приоритет:** `node/service.go` (6200+ строк) — монолит, смешивающий управление пирами, интеграцию маршрутизации, relay/SOCKS5, метринг и жизненный цикл сессий. Разделить на: `peer_management.go`, `routing_integration.go` (частично выделен), `relay_handler.go`, `metering.go`.
-
-**Дисциплина типизации в этом рефакторе:** при разделении монолита убирать
-cast'ы из доменных типов в `string` на core-path'ах (например,
-`string(senderAddress)` там, где callee должен принимать `PeerAddress`).
-Внутри `node`, `routing`, `relay`, `health`, `queue` и state-management кода
-такие преобразования должны оставаться только для логирования, protocol
-serialization, config parsing и UI/RPC boundary.
-
-**Выполненный рефакторинг:** интерфейс RoutingProvider упрощён с 5 методов до 2 (`RoutingSnapshot()`, `PeerTransport()`). Удалены избыточные методы.
-
-**Исправлен баг:** inbound-пиры регистрировались в таблице маршрутизации с транспортным адресом вместо identity fingerprint.
+**Дисциплина типизации:** убирать cast'ы из доменных типов в `string` на core-path'ах (например, `string(senderAddress)` там, где callee должен принимать `PeerAddress`). Внутри `node`, `routing`, `relay`, `health`, `queue` и state-management кода такие преобразования должны оставаться только для логирования, protocol serialization, config parsing и UI/RPC boundary.
 
 **Из базовой маршрутизации (Фаза 1.2):**
 
@@ -629,12 +616,9 @@ serialization, config parsing и UI/RPC boundary.
 
 - [ ] `announce_routes` / withdrawal отправляется только peers с `mesh_routing_v1`
 - [ ] Без routing table сеть продолжает доставку через gossip fallback
-- [ ] Подтвердить: iteration 1 остаётся аддитивной, protocol bump не нужен
-- [ ] Подтвердить: iteration 1 не требует повышения `MinimumProtocolVersion`
 
 **Чеклист готовности к route health:**
 
-- [ ] разделить монолит `node/service.go` на focused files до начала route-health работ
 - [ ] переименовать неоднозначные поля вроде `address` в `listenAddress`, `transportAddress` или `identity` по фактической семантике
 - [ ] внедрить `KnownPeer`, `PeerSessionRef`, `InboundPeerRef` как embedded типы в runtime-структурах для устранения дублирования полей
 
