@@ -497,6 +497,54 @@ func TestAnnounceToAppliesSplitHorizon(t *testing.T) {
 	}
 }
 
+// --- Origin filtering (don't send peer its own originated routes) ---
+
+func TestAnnounceableOmitsRoutesOriginatedByPeer(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	// Route originated by peer-A, learned via peer-C (different NextHop).
+	// Split horizon alone would NOT filter this, but origin filter must.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "peer-A", NextHop: "peer-C",
+		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "bob", Origin: "peer-B", NextHop: "peer-C",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+
+	announceable := tbl.Announceable("peer-A")
+	for _, r := range announceable {
+		if r.Origin == "peer-A" {
+			t.Fatal("origin filter: routes originated by peer-A must be excluded when announcing to peer-A")
+		}
+	}
+	if len(announceable) != 1 || announceable[0].Identity != "bob" {
+		t.Fatalf("expected only bob's route, got %+v", announceable)
+	}
+}
+
+func TestAnnounceToOmitsRoutesOriginatedByPeer(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithClock(fixedClock(now)))
+
+	// Route originated by peer-A, learned via peer-C.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "peer-A", NextHop: "peer-C",
+		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "bob", Origin: "peer-B", NextHop: "peer-C",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+
+	entries := tbl.AnnounceTo("peer-A")
+	if len(entries) != 1 || entries[0].Identity != "bob" {
+		t.Fatalf("origin filter should exclude alice's route: got %+v", entries)
+	}
+}
+
 func TestAnnounceToStripsInternalFields(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(WithClock(fixedClock(now)))

@@ -677,6 +677,10 @@ func (t *Table) RefreshDirectPeers() int {
 
 // Announceable returns routes suitable for announcing to a specific peer,
 // applying split horizon: routes learned from excludeVia are omitted.
+// Routes originated by the peer (Origin == excludeVia) are also omitted —
+// the peer already knows its own routes and re-sending them wastes
+// bandwidth and triggers spurious "forged own origin" rejections on the
+// receiver side.
 // Withdrawn and expired routes are also excluded.
 //
 // Split horizon rule: routes where NextHop == excludeVia are not included
@@ -694,6 +698,9 @@ func (t *Table) Announceable(excludeVia PeerIdentity) []RouteEntry {
 			if r.NextHop == excludeVia {
 				continue
 			}
+			if r.Origin == excludeVia {
+				continue
+			}
 			if r.IsWithdrawn() || r.IsExpired(now) {
 				continue
 			}
@@ -704,9 +711,13 @@ func (t *Table) Announceable(excludeVia PeerIdentity) []RouteEntry {
 }
 
 // AnnounceTo returns the wire-safe projection of routes to announce to
-// a specific peer, applying split horizon and the +1 hop rule. This is
-// the preferred method for building announce_routes frames — it ensures
-// the boundary between model and wire format stays in the routing package.
+// a specific peer, applying split horizon, origin filtering and the +1
+// hop rule. This is the preferred method for building announce_routes
+// frames — it ensures the boundary between model and wire format stays
+// in the routing package.
+//
+// Origin filtering: routes where Origin == excludeVia are skipped because
+// the peer originated them and would reject them as forged own-origin.
 func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -717,6 +728,9 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 	for _, routes := range t.routes {
 		for _, r := range routes {
 			if r.NextHop == excludeVia {
+				continue
+			}
+			if r.Origin == excludeVia {
 				continue
 			}
 			if r.IsWithdrawn() || r.IsExpired(now) {

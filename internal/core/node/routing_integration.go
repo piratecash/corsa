@@ -352,7 +352,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		// syncSeqCounterLocked, breaking the per-origin SeqNo invariant.
 		if wireRoute.Origin == s.identity.Address {
 			rejected++
-			log.Warn().
+			log.Debug().
 				Str("identity", wireRoute.Identity).
 				Str("origin", wireRoute.Origin).
 				Str("from", string(senderIdentity)).
