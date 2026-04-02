@@ -551,6 +551,44 @@ func (t *Table) TickTTL() {
 	}
 }
 
+// RefreshDirectPeers extends the TTL of all active (non-withdrawn, non-expired)
+// direct routes originated by this node. This prevents own-origin direct routes
+// from expiring while the peer session is still alive. Should be called
+// periodically (e.g., from the announce loop) — it does not increment SeqNo
+// and does not trigger announcements.
+//
+// Returns the number of routes whose TTL was refreshed.
+func (t *Table) RefreshDirectPeers() int {
+	if t.localOrigin == "" {
+		return 0
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.clock()
+	refreshed := 0
+
+	for _, routes := range t.routes {
+		for i := range routes {
+			r := &routes[i]
+			if r.Source != RouteSourceDirect || r.Origin != t.localOrigin {
+				continue
+			}
+			if r.IsWithdrawn() || r.IsExpired(now) {
+				continue
+			}
+			ttl := t.defaultTTL
+			if t.isPeerInHoldDownLocked(r.Identity, now) {
+				ttl = t.penalizedTTL
+			}
+			r.ExpiresAt = now.Add(ttl)
+			refreshed++
+		}
+	}
+	return refreshed
+}
+
 // Announceable returns routes suitable for announcing to a specific peer,
 // applying split horizon: routes learned from excludeVia are omitted.
 // Withdrawn and expired routes are also excluded.

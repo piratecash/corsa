@@ -24,7 +24,7 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 `AnnounceEntry` is the wire-safe projection of `RouteEntry`. It contains only the four fields transmitted in `announce_routes` frames (Identity, Origin, Hops, SeqNo). Produced by `RouteEntry.ToAnnounceEntry()` or `Table.AnnounceTo()`. The wire carries the sender's local hop count as-is — the receiver adds +1 when inserting into its own table (receive path).
 
-`Table` is the thread-safe local storage for routes. It owns this node's identity (`localOrigin`) and a monotonic SeqNo counter per destination (`seqCounters`). Public operations: `AddDirectPeer`, `RemoveDirectPeer`, `UpdateRoute`, `WithdrawRoute`, `TickTTL`, `Announceable`, `AnnounceTo`, `Lookup`, and `Snapshot`.
+`Table` is the thread-safe local storage for routes. It owns this node's identity (`localOrigin`) and a monotonic SeqNo counter per destination (`seqCounters`). Public operations: `AddDirectPeer`, `RemoveDirectPeer`, `UpdateRoute`, `WithdrawRoute`, `RefreshDirectPeers`, `TickTTL`, `Announceable`, `AnnounceTo`, `Lookup`, and `Snapshot`.
 
 `Snapshot` is an immutable point-in-time copy of the full table, safe to read without locks.
 
@@ -46,7 +46,7 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 **Route selection order.** `Lookup()` sorts by source priority first (direct > hop_ack > announcement), then by hops ascending within the same source tier. This means a 3-hop direct route is preferred over a 1-hop announcement — source trust outweighs hop count.
 
-**TTL expiry.** Each entry carries an `ExpiresAt` timestamp (default 120s from insertion). `TickTTL()` removes expired entries. Flapping peers receive a shortened TTL — see flap dampening below.
+**TTL expiry.** Each entry carries an `ExpiresAt` timestamp (default 120s from insertion). `TickTTL()` removes expired entries. Flapping peers receive a shortened TTL — see flap dampening below. Own-origin direct routes are refreshed by `RefreshDirectPeers()` on every announce cycle (every 30s), preventing them from expiring while the peer session is still alive. Learned routes are refreshed naturally when the neighbor re-announces them.
 
 **NextHop is peer identity.** Routing operates at identity level, not transport addresses. A single peer identity may have multiple concurrent TCP sessions; session selection happens later in `node.Service` via the identity-to-session(s) index that resolves identities to active connections.
 
@@ -263,7 +263,7 @@ internal/core/rpc/
 
 `AnnounceEntry` — проекция `RouteEntry` для передачи по проводу. Содержит только четыре поля из `announce_routes` фреймов (Identity, Origin, Hops, SeqNo). Создаётся через `RouteEntry.ToAnnounceEntry()` или `Table.AnnounceTo()`. На провод уходит локальное значение hops отправителя как есть — получатель делает +1 при вставке в свою таблицу (receive path).
 
-`Table` — потокобезопасное локальное хранилище маршрутов. Владеет identity ноды (`localOrigin`) и монотонным счётчиком SeqNo по каждому destination (`seqCounters`). Публичные операции: `AddDirectPeer`, `RemoveDirectPeer`, `UpdateRoute`, `WithdrawRoute`, `TickTTL`, `Announceable`, `AnnounceTo`, `Lookup` и `Snapshot`.
+`Table` — потокобезопасное локальное хранилище маршрутов. Владеет identity ноды (`localOrigin`) и монотонным счётчиком SeqNo по каждому destination (`seqCounters`). Публичные операции: `AddDirectPeer`, `RemoveDirectPeer`, `UpdateRoute`, `WithdrawRoute`, `RefreshDirectPeers`, `TickTTL`, `Announceable`, `AnnounceTo`, `Lookup` и `Snapshot`.
 
 `Snapshot` — иммутабельная копия таблицы на момент времени, безопасная для чтения без блокировок.
 
@@ -285,7 +285,7 @@ internal/core/rpc/
 
 **Порядок выбора маршрута.** `Lookup()` сортирует по приоритету source (direct > hop_ack > announcement), затем по hops ascending в пределах одного уровня source. Direct-маршрут с 3 хопами предпочитается announcement с 1 хопом — доверие к источнику важнее количества хопов.
 
-**Истечение TTL.** Каждая запись имеет `ExpiresAt` (по умолчанию 120с с момента вставки). `TickTTL()` удаляет истёкшие записи. Нестабильные peer'ы получают укороченный TTL — см. демпфирование flap'ов ниже.
+**Истечение TTL.** Каждая запись имеет `ExpiresAt` (по умолчанию 120с с момента вставки). `TickTTL()` удаляет истёкшие записи. Нестабильные peer'ы получают укороченный TTL — см. демпфирование flap'ов ниже. Own-origin direct-маршруты обновляются через `RefreshDirectPeers()` на каждом цикле анонсов (каждые 30с), предотвращая их истечение пока сессия с peer'ом жива. Learned-маршруты обновляются естественным образом при переанонсировании соседом.
 
 **NextHop — это identity peer'a.** Маршрутизация работает на уровне identity, а не транспортных адресов. Один peer identity может иметь несколько параллельных TCP-сессий; выбор сессии происходит позже в `node.Service` через индекс identity→session(s) для резолва identity в активные соединения.
 

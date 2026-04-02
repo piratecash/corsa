@@ -152,8 +152,19 @@ func (a *AnnounceLoop) PendingTrigger() bool {
 }
 
 // announceToAllPeers sends the routing table to every capable peer,
-// applying split horizon per peer.
+// applying split horizon per peer. Before sending, it refreshes the TTL
+// of own-origin direct routes so they do not expire while peers remain
+// connected.
 func (a *AnnounceLoop) announceToAllPeers() {
+	// Refresh TTL of own-origin direct routes unconditionally, before
+	// checking for announce targets. Direct routes are created for any
+	// relay-capable peer (mesh_relay_v1), but announce targets require
+	// both mesh_routing_v1 and mesh_relay_v1. A node with only
+	// relay-only direct peers would have zero announce targets, and
+	// without this early refresh, TickTTL would expire the live direct
+	// routes after defaultTTL.
+	a.table.RefreshDirectPeers()
+
 	peers := a.peersFn()
 	if len(peers) == 0 {
 		return

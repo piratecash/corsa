@@ -1684,3 +1684,130 @@ func TestFlapSnapshotFiltersStaleEntries(t *testing.T) {
 		t.Errorf("expected 0 flap entries after window expiry, got %d", len(snap))
 	}
 }
+
+// --- RefreshDirectPeers ---
+
+func TestRefreshDirectPeersExtendsTTL(t *testing.T) {
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	current := now
+
+	tbl := NewTable(
+		WithLocalOrigin("self"),
+		WithClock(func() time.Time { return current }),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	// Add a direct peer — TTL starts at 120s from now.
+	mustAddDirect(t, tbl, "peer1")
+
+	routes := tbl.Lookup("peer1")
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	initialExpiry := routes[0].ExpiresAt
+	expectedInitial := now.Add(120 * time.Second)
+	if !initialExpiry.Equal(expectedInitial) {
+		t.Fatalf("initial ExpiresAt=%v, want %v", initialExpiry, expectedInitial)
+	}
+
+	// Advance 90s — route still alive but close to expiry.
+	current = now.Add(90 * time.Second)
+
+	refreshed := tbl.RefreshDirectPeers()
+	if refreshed != 1 {
+		t.Fatalf("expected 1 refreshed, got %d", refreshed)
+	}
+
+	routes = tbl.Lookup("peer1")
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route after refresh, got %d", len(routes))
+	}
+	newExpiry := routes[0].ExpiresAt
+	expectedNew := current.Add(120 * time.Second)
+	if !newExpiry.Equal(expectedNew) {
+		t.Fatalf("refreshed ExpiresAt=%v, want %v", newExpiry, expectedNew)
+	}
+
+	// Advance to 200s from original — original TTL would have expired,
+	// but refresh should have extended it.
+	current = now.Add(200 * time.Second)
+
+	routes = tbl.Lookup("peer1")
+	if len(routes) != 1 {
+		t.Fatalf("route should still be alive after refresh, got %d routes", len(routes))
+	}
+}
+
+func TestRefreshDirectPeersSkipsWithdrawn(t *testing.T) {
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	current := now
+
+	tbl := NewTable(
+		WithLocalOrigin("self"),
+		WithClock(func() time.Time { return current }),
+	)
+
+	mustAddDirect(t, tbl, "peer1")
+	mustRemoveDirect(t, tbl, "peer1")
+
+	refreshed := tbl.RefreshDirectPeers()
+	if refreshed != 0 {
+		t.Fatalf("withdrawn routes should not be refreshed, got %d", refreshed)
+	}
+}
+
+func TestRefreshDirectPeersSkipsForeignOrigin(t *testing.T) {
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tbl := NewTable(
+		WithLocalOrigin("self"),
+		WithClock(func() time.Time { return now }),
+	)
+
+	// Insert a route with foreign origin via announcement.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "peer2", Origin: "foreign", NextHop: "peer2",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+
+	refreshed := tbl.RefreshDirectPeers()
+	if refreshed != 0 {
+		t.Fatalf("foreign-origin routes should not be refreshed, got %d", refreshed)
+	}
+}
+
+func TestRefreshDirectPeersNoLocalOrigin(t *testing.T) {
+	tbl := NewTable()
+
+	refreshed := tbl.RefreshDirectPeers()
+	if refreshed != 0 {
+		t.Fatalf("expected 0 refreshed when no localOrigin, got %d", refreshed)
+	}
+}
+
+func TestDirectRouteExpiresWithoutRefresh(t *testing.T) {
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	current := now
+
+	tbl := NewTable(
+		WithLocalOrigin("self"),
+		WithClock(func() time.Time { return current }),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	mustAddDirect(t, tbl, "peer1")
+
+	// Advance past TTL without refresh.
+	current = now.Add(121 * time.Second)
+
+	routes := tbl.Lookup("peer1")
+	if len(routes) != 0 {
+		t.Fatalf("route should have expired without refresh, got %d", len(routes))
+	}
+
+	// Confirm TickTTL cleans it up.
+	tbl.TickTTL()
+	if tbl.Size() != 0 {
+		t.Fatalf("expired route should be removed by TickTTL, size=%d", tbl.Size())
+	}
+}
