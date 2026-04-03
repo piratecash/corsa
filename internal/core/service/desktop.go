@@ -21,6 +21,7 @@ import (
 	"corsa/internal/core/identity"
 	"corsa/internal/core/node"
 	"corsa/internal/core/protocol"
+	"corsa/internal/core/routing"
 	"corsa/internal/core/transport"
 )
 
@@ -452,7 +453,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Contacts = contacts
 	status.Peers = peers
 	status.PeerHealth = peerHealthFromFrame(peerHealthReply)
-	status.ReachableIDs = c.buildReachableIDs(ids)
+	status.ReachableIDs = c.buildReachableIDs()
 	status.Messages = stringifyMessages(messages)
 	status.MessageIDs = messageIDs
 	status.DirectMessages = nil // no longer loaded in ProbeNode; use FetchConversation on demand
@@ -465,18 +466,35 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	return status
 }
 
-// buildReachableIDs checks the routing table for each known identity and
-// returns a map indicating which identities have at least one live route.
-// Uses a direct call to localNode — no RPC frame round-trip required.
-func (c *DesktopClient) buildReachableIDs(knownIDs []string) map[domain.PeerIdentity]bool {
-	if c.localNode == nil {
+// buildReachableIDs returns a set of identities that have at least one live
+// route in the routing table. The set is built from the snapshot itself (all
+// routable destinations), not from a caller-supplied list — this ensures
+// sidebar peers that came from chatlog or DM headers are covered too.
+//
+// Embedded mode: direct localNode.RoutingSnapshot() call.
+// Remote TCP mode: falls back to fetch_reachable_ids RPC frame.
+func (c *DesktopClient) buildReachableIDs() map[domain.PeerIdentity]bool {
+	if c.localNode != nil {
+		return reachableFromSnapshot(c.localNode.RoutingSnapshot())
+	}
+	reply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_reachable_ids"})
+	if err != nil || reply.Type == "error" {
 		return nil
 	}
-	snap := c.localNode.RoutingSnapshot()
-	reachable := make(map[domain.PeerIdentity]bool, len(knownIDs))
-	for _, id := range knownIDs {
-		pid := domain.PeerIdentity(id)
-		reachable[pid] = snap.BestRoute(pid) != nil
+	reachable := make(map[domain.PeerIdentity]bool, len(reply.Identities))
+	for _, id := range reply.Identities {
+		reachable[domain.PeerIdentity(id)] = true
+	}
+	return reachable
+}
+
+// reachableFromSnapshot extracts identities with at least one live route.
+func reachableFromSnapshot(snap routing.Snapshot) map[domain.PeerIdentity]bool {
+	reachable := make(map[domain.PeerIdentity]bool)
+	for id := range snap.Routes {
+		if snap.BestRoute(id) != nil {
+			reachable[id] = true
+		}
 	}
 	return reachable
 }

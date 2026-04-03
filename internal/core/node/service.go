@@ -1047,6 +1047,9 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		senderIdentity := s.inboundPeerIdentity(conn)
 		s.handleAnnounceRoutes(senderIdentity, frame)
 		return true
+	case "fetch_reachable_ids":
+		s.writeJSONFrame(conn, s.reachableIDsFrame())
+		return true
 	default:
 		accepted = false
 		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
@@ -1126,6 +1129,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.fetchDMHeadersFrame()
 	case "fetch_relay_status":
 		return s.relayStatusFrame()
+	case "fetch_reachable_ids":
+		return s.reachableIDsFrame()
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand}
 	}

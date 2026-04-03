@@ -2,6 +2,7 @@ package node
 
 import (
 	"corsa/internal/core/domain"
+	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
 )
 
@@ -42,4 +43,21 @@ func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domai
 		return "", ""
 	}
 	return bestAddr, classifyAddress(bestAddr)
+}
+
+// reachableIDsFrame returns identities that have at least one live route in
+// the routing table. Used by desktop clients in remote TCP mode where direct
+// RoutingSnapshot() is not available.
+func (s *Service) reachableIDsFrame() protocol.Frame {
+	snap := s.routingTable.Snapshot()
+	var ids []string
+	for id := range snap.Routes {
+		if snap.BestRoute(id) != nil {
+			ids = append(ids, string(id))
+		}
+	}
+	return protocol.Frame{
+		Type:       "reachable_ids",
+		Identities: ids,
+	}
 }

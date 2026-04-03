@@ -859,7 +859,9 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 
 	// Sort: unread first by unread count descending, then by most recent activity.
 	// Within the unread group, higher unread counts rank first.
-	// This ensures deterministic sidebar order on startup.
+	// This ensures deterministic sidebar order on startup. The UI layer applies
+	// its own 4-tier sort (online/offline × unread/read) using the snapshot
+	// data, so this order serves as a stable tiebreaker.
 	sort.SliceStable(previews, func(i, j int) bool {
 		ui, uj := previews[i].UnreadCount, previews[j].UnreadCount
 		if (ui > 0) != (uj > 0) {

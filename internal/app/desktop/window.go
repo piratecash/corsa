@@ -1026,7 +1026,9 @@ func (w *Window) snapRecipients() []domain.PeerIdentity {
 		}
 	}
 	sort.Slice(recipients, func(i, j int) bool { return recipients[i] < recipients[j] })
-	return mergeRecipientOrder(recipients, w.snap.PeerOrder)
+	merged := mergeRecipientOrder(recipients, w.snap.PeerOrder)
+	sortSidebarPeers(merged, w.snap)
+	return merged
 }
 
 func (w *Window) recipientButton(id domain.PeerIdentity) *widget.Clickable {
@@ -1147,18 +1149,37 @@ func (w *Window) layoutUnreadBadge(gtx layout.Context, count int) layout.Dimensi
 	)
 }
 
-// layoutReachableIndicator draws a small filled circle: green when the
-// routing table has at least one live route to the identity, gray otherwise.
+// layoutReachableIndicator draws a small circle reflecting the routing table
+// reachability of the identity. Three visual states:
+//
+//   - ReachableIDs == nil         → gray outline only (probe failed / data unavailable)
+//   - ReachableIDs[id] == true    → green filled (at least one live route)
+//   - ReachableIDs[id] == false   → gray filled  (no live route)
 func (w *Window) layoutReachableIndicator(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity) layout.Dimensions {
 	sz := gtx.Dp(unit.Dp(10))
+	bounds := image.Pt(sz, sz)
+
+	if status.ReachableIDs == nil {
+		// Stroke-only circle: no reachability data available.
+		strokeWidth := float32(gtx.Dp(unit.Dp(1.5)))
+		stk := clip.Stroke{
+			Path:  clip.Ellipse{Max: bounds}.Path(gtx.Ops),
+			Width: strokeWidth,
+		}.Op().Push(gtx.Ops)
+		paint.ColorOp{Color: color.NRGBA{R: 96, G: 110, B: 130, A: 255}}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		stk.Pop()
+		return layout.Dimensions{Size: bounds}
+	}
+
 	indicatorColor := color.NRGBA{R: 96, G: 110, B: 130, A: 255} // gray — unreachable
 	if status.ReachableIDs[fingerprint] {
 		indicatorColor = color.NRGBA{R: 72, G: 199, B: 142, A: 255} // green — reachable
 	}
-	defer clip.Ellipse{Max: image.Pt(sz, sz)}.Push(gtx.Ops).Pop()
+	defer clip.Ellipse{Max: bounds}.Push(gtx.Ops).Pop()
 	paint.ColorOp{Color: indicatorColor}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
-	return layout.Dimensions{Size: image.Pt(sz, sz)}
+	return layout.Dimensions{Size: bounds}
 }
 
 func ellipsize(s string, limit int) string {

@@ -1594,52 +1594,64 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 }
 
 // TestBuildReachableIDsNilNode verifies that buildReachableIDs returns nil
-// when localNode is not set (remote TCP mode).
+// when localNode is not set and no TCP connection is available (remote mode
+// without a running node). The UI treats nil map as "all gray" indicators.
 func TestBuildReachableIDsNilNode(t *testing.T) {
 	t.Parallel()
 	c := &DesktopClient{
 		id:     mustGenerateIdentity(t),
 		appCfg: config.App{Version: "test"},
 	}
-	got := c.buildReachableIDs([]string{"aaa", "bbb"})
+	got := c.buildReachableIDs()
 	if got != nil {
-		t.Fatalf("expected nil for nil localNode, got %v", got)
+		t.Fatalf("expected nil for nil localNode without TCP, got %v", got)
 	}
 }
 
-// TestBuildReachableIDsEmptyTable verifies that all identities are marked
-// unreachable when the routing table has no routes.
+// TestBuildReachableIDsEmptyTable verifies that an empty routing table
+// produces an empty (non-nil) map — no identity is reachable.
 func TestBuildReachableIDsEmptyTable(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	ids := []string{"peer-a", "peer-b", "peer-c"}
-	got := c.buildReachableIDs(ids)
+	got := c.buildReachableIDs()
 	if got == nil {
-		t.Fatal("expected non-nil map")
+		t.Fatal("expected non-nil map for embedded node with empty routing table")
 	}
-	for _, id := range ids {
-		pid := domain.PeerIdentity(id)
-		if got[pid] {
-			t.Errorf("identity %q should be unreachable with empty routing table", id)
-		}
+	if len(got) != 0 {
+		t.Fatalf("expected empty map (no reachable identities), got %v", got)
 	}
 }
 
-// TestBuildReachableIDsEmptyList verifies that an empty identity list
-// produces an empty (non-nil) map.
-func TestBuildReachableIDsEmptyList(t *testing.T) {
+// TestReachableFromSnapshotFiltersWithdrawn verifies that reachableFromSnapshot
+// only includes identities with at least one live (non-withdrawn) route.
+func TestReachableFromSnapshotFiltersWithdrawn(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	got := c.buildReachableIDs(nil)
-	if got == nil {
-		t.Fatal("expected non-nil map for nil slice")
-	}
+	// With no routes added, snapshot should yield empty reachable set.
+	snap := c.localNode.RoutingSnapshot()
+	got := reachableFromSnapshot(snap)
 	if len(got) != 0 {
-		t.Fatalf("expected empty map, got %v", got)
+		t.Fatalf("expected empty reachable set from empty snapshot, got %v", got)
+	}
+}
+
+// TestFetchReachableIDsFrame verifies the node handles the fetch_reachable_ids
+// local frame and returns a reachable_ids response (empty for fresh node).
+func TestFetchReachableIDsFrame(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestDesktopClientWithNode(t)
+	defer func() { _ = c.Close() }()
+
+	reply := c.localNode.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"})
+	if reply.Type != "reachable_ids" {
+		t.Fatalf("expected reachable_ids response, got %q", reply.Type)
+	}
+	if len(reply.Identities) != 0 {
+		t.Fatalf("expected empty identities for fresh node, got %v", reply.Identities)
 	}
 }
 

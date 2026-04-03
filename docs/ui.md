@@ -207,12 +207,53 @@ snapRecipients()
 
 ### Reachable indicator
 
-Each contact in the sidebar displays a small colored dot next to the peer name. The color reflects whether the routing table contains at least one live (non-withdrawn, non-expired) route to that identity:
+Each contact in the sidebar displays a small colored dot next to the peer name. The indicator has three states:
 
 - **Green** — at least one route exists (identity is reachable through the mesh)
 - **Gray** — no route available (identity is unreachable)
+- **Gray outline** — reachability data is unavailable (probe failed or node not connected)
 
-The reachability data is populated during each `ProbeNode` cycle via a direct call to `node.Service.RoutingSnapshot()` (no RPC frame round-trip). The snapshot's `BestRoute(identity)` method determines whether a live route exists. Results are stored in `NodeStatus.ReachableIDs` and flow through the standard `RouterSnapshot` pipeline to the UI.
+The reachability data is populated during each `ProbeNode` cycle. In embedded mode, `buildReachableIDs()` calls `node.Service.RoutingSnapshot()` directly (no RPC round-trip) and extracts all identities with a live `BestRoute`. In remote TCP mode (`localNode == nil`), it falls back to the `fetch_reachable_ids` frame, which performs the same logic on the node side. The reachable set covers all identities in the routing table — not just those from `fetch_identities` — so sidebar peers that entered via chatlog or DM headers also get correct status. Results are stored in `NodeStatus.ReachableIDs` and flow through the standard `RouterSnapshot` pipeline to the UI.
+
+### Contact list sorting
+
+The sidebar contact list uses 4-tier priority sorting. This is a UI/product concern — the router provides data (peers, unread counts, reachability), and the presentation layer (`sidebar_sort.go`) decides display order. Sorting runs on every frame render using the current `RouterSnapshot`, so any state change (unread cleared, preview refreshed, reachability updated) is immediately reflected without explicit re-sort triggers.
+
+| Tier | Condition | Sort key |
+|------|-----------|----------|
+| 1 | Online + unread messages | Unread count descending |
+| 2 | Online, no unread | Last message timestamp descending |
+| 3 | Offline + unread messages | Unread count descending |
+| 4 | Offline, no unread | Last message timestamp descending |
+
+"Online" means `ReachableIDs[identity] == true` — at least one live route exists in the routing table.
+
+The sort pipeline in `snapRecipients()`:
+
+1. `mergeRecipientOrder()` — merges peers from `Peers` map with `PeerOrder` (router's internal ordering, used as stable tiebreaker)
+2. `sortSidebarPeers()` — applies 4-tier sort using `RouterSnapshot.Peers` and `RouterSnapshot.NodeStatus.ReachableIDs`
+
+When `ReachableIDs` is nil (probe not completed or failed), all peers are treated as offline, and the sort degrades gracefully to 2-tier (unread first, then by timestamp).
+
+### Сортировка списка контактов
+
+Sidebar список контактов использует 4-уровневую приоритетную сортировку. Это UI/продуктовая логика — роутер предоставляет данные (peers, счётчики непрочитанных, доступность), а слой представления (`sidebar_sort.go`) определяет порядок отображения. Сортировка выполняется на каждом кадре рендеринга из текущего `RouterSnapshot`, поэтому любое изменение состояния (очистка непрочитанных, обновление preview, изменение доступности) немедленно отражается без явных триггеров пересортировки.
+
+| Уровень | Условие | Ключ сортировки |
+|---------|---------|-----------------|
+| 1 | Online + есть непрочитанные | Число непрочитанных по убыванию |
+| 2 | Online, нет непрочитанных | Время последнего сообщения по убыванию |
+| 3 | Offline + есть непрочитанные | Число непрочитанных по убыванию |
+| 4 | Offline, нет непрочитанных | Время последнего сообщения по убыванию |
+
+"Online" означает `ReachableIDs[identity] == true` — хотя бы один живой маршрут существует в таблице маршрутизации.
+
+Конвейер сортировки в `snapRecipients()`:
+
+1. `mergeRecipientOrder()` — объединяет peers из `Peers` map с `PeerOrder` (внутренний порядок роутера, используется как стабильный tiebreaker)
+2. `sortSidebarPeers()` — применяет 4-уровневую сортировку используя `RouterSnapshot.Peers` и `RouterSnapshot.NodeStatus.ReachableIDs`
+
+Когда `ReachableIDs` равен nil (проба не завершена или не удалась), все peers считаются offline, и сортировка корректно деградирует до 2-уровневой (непрочитанные первыми, затем по timestamp).
 
 ### RPC architecture
 
@@ -479,12 +520,13 @@ snapRecipients()
 
 ### Индикатор достижимости
 
-Каждый контакт в sidebar отображает маленькую цветную точку рядом с именем. Цвет отражает наличие хотя бы одного живого (не withdrawn, не expired) маршрута до этого identity в routing table:
+Каждый контакт в sidebar отображает маленькую цветную точку рядом с именем. Индикатор имеет три состояния:
 
 - **Зелёный** — маршрут есть (identity достижим через mesh-сеть)
 - **Серый** — маршрутов нет (identity недоступен)
+- **Серый контур** — данные о достижимости недоступны (probe не удался или нода не подключена)
 
-Данные о достижимости заполняются при каждом цикле `ProbeNode` через прямой вызов `node.Service.RoutingSnapshot()` (без RPC frame round-trip). Метод `BestRoute(identity)` снимка определяет наличие живого маршрута. Результат хранится в `NodeStatus.ReachableIDs` и проходит через стандартный pipeline `RouterSnapshot` до UI.
+Данные о достижимости заполняются при каждом цикле `ProbeNode`. В embedded-режиме `buildReachableIDs()` вызывает `node.Service.RoutingSnapshot()` напрямую (без RPC round-trip) и извлекает все identity с живым `BestRoute`. В remote TCP режиме (`localNode == nil`) используется fallback через фрейм `fetch_reachable_ids`, который выполняет ту же логику на стороне ноды. Набор достижимых identity строится из всей routing table — не только из `fetch_identities` — поэтому sidebar peers, попавшие через chatlog или DM headers, тоже получают корректный статус. Результат хранится в `NodeStatus.ReachableIDs` и проходит через стандартный pipeline `RouterSnapshot` до UI.
 
 ### Архитектура RPC
 
