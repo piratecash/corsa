@@ -49,18 +49,26 @@ func TestRelayStateStoreBasic(t *testing.T) {
 	}
 }
 
-func TestRelayStateStoreDedupe(t *testing.T) {
+func TestRelayStateStoreIdempotentUpsertSameDestNewOrigin(t *testing.T) {
 	rs := newRelayStateStore()
 
 	state1 := &relayForwardState{
-		MessageID:    "msg-1",
-		PreviousHop:  "peer-a",
-		RemainingTTL: relayStateTTLSeconds,
+		MessageID:        "msg-1",
+		PreviousHop:      "peer-a",
+		ReceiptForwardTo: "peer-a",
+		ForwardedTo:      "peer-b",
+		RouteOrigin:      "origin-1",
+		RemainingTTL:     relayStateTTLSeconds,
 	}
+	// Same next-hop peer but different route origin (e.g. origin
+	// re-announced with new SeqNo). Both fields must be updated.
 	state2 := &relayForwardState{
-		MessageID:    "msg-1",
-		PreviousHop:  "peer-c", // different sender, same message ID
-		RemainingTTL: relayStateTTLSeconds,
+		MessageID:        "msg-1",
+		PreviousHop:      "peer-c",
+		ReceiptForwardTo: "peer-c",
+		ForwardedTo:      "peer-b", // same destination
+		RouteOrigin:      "origin-2",
+		RemainingTTL:     relayStateTTLSeconds / 2,
 	}
 
 	ok1 := rs.store(state1)
@@ -69,11 +77,121 @@ func TestRelayStateStoreDedupe(t *testing.T) {
 	if !ok1 {
 		t.Fatal("first store should succeed")
 	}
-	if ok2 {
-		t.Fatal("second store with same message_id should fail (dedupe)")
+	if !ok2 {
+		t.Fatal("second store with same message_id should succeed (idempotent upsert)")
 	}
 	if rs.count() != 1 {
-		t.Fatalf("expected count 1 after dedupe, got %d", rs.count())
+		t.Fatalf("expected count 1 after upsert, got %d", rs.count())
+	}
+	// PreviousHop and ReceiptForwardTo must be preserved from the original.
+	if fwd := rs.lookupReceiptForwardTo("msg-1"); fwd != "peer-a" {
+		t.Fatalf("expected ReceiptForwardTo='peer-a' (original), got %q", fwd)
+	}
+	rs.mu.Lock()
+	s := rs.states["msg-1"]
+	rs.mu.Unlock()
+	// RouteOrigin must be updated even if ForwardedTo is the same.
+	if s.RouteOrigin != "origin-2" {
+		t.Fatalf("expected RouteOrigin='origin-2' (updated for same-hop reroute), got %q", s.RouteOrigin)
+	}
+	if s.RemainingTTL != relayStateTTLSeconds/2 {
+		t.Fatalf("expected RemainingTTL=%d (refreshed), got %d", relayStateTTLSeconds/2, s.RemainingTTL)
+	}
+}
+
+func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
+	rs := newRelayStateStore()
+
+	state1 := &relayForwardState{
+		MessageID:        "msg-1",
+		PreviousHop:      "peer-a",
+		ReceiptForwardTo: "peer-a",
+		ForwardedTo:      "peer-b",
+		RouteOrigin:      "origin-1",
+		RemainingTTL:     relayStateTTLSeconds,
+	}
+	// Route changed — ForwardedTo and RouteOrigin must both update.
+	state2 := &relayForwardState{
+		MessageID:        "msg-1",
+		PreviousHop:      "peer-c",
+		ReceiptForwardTo: "peer-c",
+		ForwardedTo:      "peer-d", // different destination
+		RouteOrigin:      "origin-2",
+		RemainingTTL:     relayStateTTLSeconds / 2,
+	}
+
+	rs.store(state1)
+	rs.store(state2)
+
+	rs.mu.Lock()
+	s := rs.states["msg-1"]
+	rs.mu.Unlock()
+	if s.ForwardedTo != "peer-d" {
+		t.Fatalf("expected ForwardedTo='peer-d' (rerouted), got %q", s.ForwardedTo)
+	}
+	if s.RouteOrigin != "origin-2" {
+		t.Fatalf("expected RouteOrigin='origin-2' (updated for new route), got %q", s.RouteOrigin)
+	}
+	// PreviousHop preserved from original.
+	if fwd := rs.lookupReceiptForwardTo("msg-1"); fwd != "peer-a" {
+		t.Fatalf("expected ReceiptForwardTo='peer-a' (original), got %q", fwd)
+	}
+	// AbandonedForwardedTo captures old ForwardedTo before reroute.
+	abandoned := rs.lookupAbandonedForwardedTo("msg-1")
+	if len(abandoned) != 1 || abandoned[0] != "peer-b" {
+		t.Fatalf("expected AbandonedForwardedTo=['peer-b'] (old route), got %v", abandoned)
+	}
+}
+
+func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
+	rs := newRelayStateStore()
+
+	// First send: table-routed via peer-a.
+	rs.store(&relayForwardState{
+		MessageID:    "msg-1",
+		PreviousHop:  "upstream",
+		ForwardedTo:  "peer-a:1234",
+		RouteOrigin:  "origin-x",
+		RemainingTTL: relayStateTTLSeconds,
+	})
+
+	// Reroute 1: table via peer-b (peer-a abandoned).
+	rs.store(&relayForwardState{
+		MessageID:    "msg-1",
+		ForwardedTo:  "peer-b:5678",
+		RouteOrigin:  "origin-y",
+		RemainingTTL: relayStateTTLSeconds,
+	})
+
+	// Reroute 2: gossip via peer-c (peer-b abandoned).
+	rs.store(&relayForwardState{
+		MessageID:    "msg-1",
+		ForwardedTo:  "peer-c:9012",
+		RouteOrigin:  "",
+		RemainingTTL: relayStateTTLSeconds,
+	})
+
+	abandoned := rs.lookupAbandonedForwardedTo("msg-1")
+	if len(abandoned) != 2 {
+		t.Fatalf("expected 2 abandoned entries, got %d: %v", len(abandoned), abandoned)
+	}
+	if abandoned[0] != "peer-a:1234" {
+		t.Fatalf("expected abandoned[0]='peer-a:1234', got %q", abandoned[0])
+	}
+	if abandoned[1] != "peer-b:5678" {
+		t.Fatalf("expected abandoned[1]='peer-b:5678', got %q", abandoned[1])
+	}
+
+	// Same ForwardedTo upsert should NOT append a duplicate.
+	rs.store(&relayForwardState{
+		MessageID:    "msg-1",
+		ForwardedTo:  "peer-c:9012",
+		RouteOrigin:  "",
+		RemainingTTL: relayStateTTLSeconds,
+	})
+	abandoned = rs.lookupAbandonedForwardedTo("msg-1")
+	if len(abandoned) != 2 {
+		t.Fatalf("expected still 2 abandoned after same-dest upsert, got %d: %v", len(abandoned), abandoned)
 	}
 }
 

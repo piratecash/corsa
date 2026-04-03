@@ -28,14 +28,15 @@ const (
 // node. Each node knows only its own previous_hop and forwarded_to —
 // no single message reveals the full path.
 type relayForwardState struct {
-	MessageID        string
-	PreviousHop      domain.PeerAddress  // who sent this relay to me (transport address)
-	ReceiptForwardTo domain.PeerAddress  // = PreviousHop (where to send receipt back)
-	ForwardedTo      domain.PeerAddress  // who I forwarded to (for loop detection)
-	Recipient        domain.PeerIdentity // final recipient identity (for hop_ack route confirmation)
-	RouteOrigin      domain.PeerIdentity // route origin from routing decision (for triple-scoped hop_ack)
-	HopCount         int                 // incremented on each hop
-	RemainingTTL     int                 // seconds until cleanup (decremented by ticker)
+	MessageID           string
+	PreviousHop         domain.PeerAddress  // who sent this relay to me (transport address)
+	ReceiptForwardTo    domain.PeerAddress  // = PreviousHop (where to send receipt back)
+	ForwardedTo          domain.PeerAddress   // who I forwarded to (for loop detection)
+	AbandonedForwardedTo []domain.PeerAddress // old ForwardedTo values from reroutes (stale ack rejection)
+	Recipient           domain.PeerIdentity // final recipient identity (for hop_ack route confirmation)
+	RouteOrigin         domain.PeerIdentity // route origin from routing decision (for triple-scoped hop_ack)
+	HopCount            int                 // incremented on each hop
+	RemainingTTL        int                 // seconds until cleanup (decremented by ticker)
 }
 
 // relayStateStore is a concurrency-safe store for relay forwarding state.
@@ -188,8 +189,30 @@ func (rs *relayStateStore) updateState(state *relayForwardState) {
 func (rs *relayStateStore) store(state *relayForwardState) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if _, ok := rs.states[state.MessageID]; ok {
-		return false
+	if existing, ok := rs.states[state.MessageID]; ok {
+		// Idempotent upsert: refresh forwarding fields and TTL so that
+		// pending queue retries after route churn use the current best
+		// path instead of being rejected.
+		// PreviousHop and ReceiptForwardTo are preserved from the original
+		// store — they describe the upstream path and must not change.
+		//
+		// Both ForwardedTo and RouteOrigin are always updated. A resend
+		// may use the same next-hop peer but a different route origin
+		// (e.g. after the origin node re-announces with a new SeqNo),
+		// so checking only ForwardedTo would miss same-peer reroutes.
+		//
+		// AbandonedForwardedTo accumulates all old ForwardedTo addresses
+		// from previous reroutes. This lets the stale ack guard reject
+		// late acks from any abandoned next-hop, not just the most recent
+		// one (e.g. table via A → table via B → gossip via C: both A and
+		// B are stale and must be rejected).
+		if existing.ForwardedTo != state.ForwardedTo && existing.ForwardedTo != "" {
+			existing.AbandonedForwardedTo = append(existing.AbandonedForwardedTo, existing.ForwardedTo)
+		}
+		existing.ForwardedTo = state.ForwardedTo
+		existing.RouteOrigin = state.RouteOrigin
+		existing.RemainingTTL = state.RemainingTTL
+		return true
 	}
 	if len(rs.states) >= maxRelayStates {
 		rs.rejected++
@@ -204,6 +227,20 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 		rs.perPeer[state.PreviousHop]++
 	}
 	return true
+}
+
+// lookupForwardedTo returns the address the message was forwarded to,
+// or "" if unknown. Used by hop_ack processing to verify that the ack
+// sender matches the current forwarding destination — a mismatch
+// indicates a stale ack from a previous route and should be ignored.
+func (rs *relayStateStore) lookupForwardedTo(messageID string) domain.PeerAddress {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	state, ok := rs.states[messageID]
+	if !ok {
+		return ""
+	}
+	return state.ForwardedTo
 }
 
 // lookupReceiptForwardTo returns the address to forward a receipt back to
@@ -243,6 +280,18 @@ func (rs *relayStateStore) lookupRouteOrigin(messageID string) domain.PeerIdenti
 		return ""
 	}
 	return state.RouteOrigin
+}
+
+// lookupAbandonedForwardedTo returns all ForwardedTo addresses from previous
+// reroutes, or nil if the message was never rerouted.
+func (rs *relayStateStore) lookupAbandonedForwardedTo(messageID string) []domain.PeerAddress {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	state, ok := rs.states[messageID]
+	if !ok {
+		return nil
+	}
+	return state.AbandonedForwardedTo
 }
 
 // snapshot returns a copy of all relay forward states for persistence.
@@ -592,7 +641,15 @@ func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSe
 		log.Warn().Str("id", frame.ID).Str("code", errCode).Msg("relay_deliver_rejected")
 		return false
 	}
-	return stored
+	// Duplicate (stored=false, errCode="") means the message was already
+	// delivered earlier. Treat as success so the relay layer sends an ack
+	// and the upstream stops retrying — otherwise duplicates cause an
+	// infinite retry loop that wastes bandwidth.
+	if !stored {
+		log.Debug().Str("id", frame.ID).Msg("relay_deliver_duplicate_accepted")
+		return true
+	}
+	return true
 }
 
 // sendRelayHopAck sends a relay_hop_ack frame back to the peer that forwarded
@@ -618,21 +675,76 @@ func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, frame prot
 
 	// Confirm route via hop_ack: if the ack indicates the message was
 	// delivered or forwarded, promote the route through the peer that
-	// actually sent the ack. We use senderAddress (the transport address
-	// of the ack sender) rather than the stored ForwardedTo, because
-	// gossip fan-out may send relay_message to multiple peers but only
-	// record the first-winner — the ack can arrive from any of them.
-	// The ack sender is the peer that provably carried the message.
+	// actually sent the ack.
 	//
-	// routeOrigin scopes the confirmation to the exact (Identity, Origin,
-	// NextHop) triple that was used for the original send. If empty (gossip
-	// path), the first matching NextHop in Lookup order is promoted.
+	// Stale ack guard (table-routed path): when RouteOrigin is set, the
+	// message was sent via a specific routing table triple. After a
+	// reroute, store() updates ForwardedTo and RouteOrigin to reflect the
+	// new path. A late ack from the old next-hop would have a different
+	// peer identity than ForwardedTo — we skip route confirmation to avoid
+	// promoting a stale triple. The comparison is identity-based (not
+	// transport address) because a single peer may have multiple sessions
+	// (inbound + outbound) and the ack can arrive on any of them.
+	//
+	// Gossip fan-out: when RouteOrigin is empty, the message was broadcast
+	// to multiple peers and ForwardedTo records only the first. An ack
+	// from any gossip target is valid — skip the ForwardedTo check.
+	//
+	// Table→gossip fallback: when a message was first sent via table route
+	// and then retried via gossip, store() clears RouteOrigin to empty.
+	// A late ack from the old table-routed peer would bypass the stale
+	// guard (routeOrigin == ""). AbandonedForwardedTo accumulates all
+	// old next-hops across multiple reroutes so the fallback guard can
+	// reject stale acks from any of them.
 	if frame.Status == "delivered" || frame.Status == "forwarded" {
 		recipient := s.relayStates.lookupRecipient(frame.ID)
-		if recipient != "" {
-			routeOrigin := s.relayStates.lookupRouteOrigin(frame.ID)
-			s.confirmRouteViaHopAck(recipient, senderAddress, routeOrigin)
+		if recipient == "" {
+			return
 		}
+		forwardedTo := s.relayStates.lookupForwardedTo(frame.ID)
+		if forwardedTo == "" {
+			// Message was stored locally, not forwarded to any downstream
+			// hop. No route confirmation is appropriate — there is no
+			// next-hop triple to promote.
+			return
+		}
+		routeOrigin := s.relayStates.lookupRouteOrigin(frame.ID)
+		ackIdentity := s.resolvePeerIdentity(senderAddress)
+		// Stale ack guard (table-routed path): when RouteOrigin is set,
+		// verify the ack sender matches the peer we forwarded to.
+		// Comparison is identity-based because a peer may have multiple
+		// transport sessions.
+		if routeOrigin != "" {
+			fwdIdentity := s.resolvePeerIdentity(forwardedTo)
+			if fwdIdentity != "" && ackIdentity != "" && fwdIdentity != ackIdentity {
+				log.Debug().
+					Str("id", frame.ID).
+					Str("ack_identity", string(ackIdentity)).
+					Str("forwarded_identity", string(fwdIdentity)).
+					Msg("relay_hop_ack_stale_sender_ignored")
+				return
+			}
+		}
+		// Stale ack guard (table→gossip fallback): when RouteOrigin is
+		// empty and AbandonedForwardedTo is non-empty, one or more reroutes
+		// occurred before falling back to gossip. Reject acks from any
+		// abandoned next-hop — those are stale and must not promote an
+		// old route. Covers chains like A → B → gossip(C) where both A
+		// and B are stale.
+		if routeOrigin == "" && ackIdentity != "" {
+			for _, abandoned := range s.relayStates.lookupAbandonedForwardedTo(frame.ID) {
+				abandonedIdentity := s.resolvePeerIdentity(abandoned)
+				if abandonedIdentity != "" && abandonedIdentity == ackIdentity {
+					log.Debug().
+						Str("id", frame.ID).
+						Str("ack_identity", string(ackIdentity)).
+						Str("abandoned_forwarded_identity", string(abandonedIdentity)).
+						Msg("relay_hop_ack_stale_prev_route_ignored")
+					return
+				}
+			}
+		}
+		s.confirmRouteViaHopAck(recipient, senderAddress, routeOrigin)
 	}
 }
 
