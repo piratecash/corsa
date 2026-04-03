@@ -48,7 +48,27 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 **Self-route (local identity).** When `localOrigin` is configured, `Lookup()` and `Snapshot()` synthesize a local route entry for the node's own identity (`Hops=0`, `Source=RouteSourceLocal`). This route is not stored in the table — it is injected on read. It never expires, is never withdrawn, and is never included in announcements (`AnnounceTo`/`Announceable`). Peers discover this node via their own direct routes. The self-route ensures that a node can always resolve itself in the routing table without requiring an external peer session. `Snapshot().TotalEntries` and `Snapshot().ActiveEntries` do not count the synthetic self-route — these counters describe persisted table state and stay consistent with `ActiveSize()`. `reachableFromSnapshot`, `reachableIDsFrame`, and `fetch_route_summary` exclude `RouteSourceLocal` entries because reachability is about remote peers, not the node itself. `UpdateRoute` rejects `RouteSourceLocal` with `ErrLocalSourceReserved` — this source is purely synthetic and must never be persisted.
 
+```mermaid
+flowchart LR
+    A["Lookup(localOrigin)"] --> B["Synthesize RouteEntry\nHops=0, Source=Local\nExpiresAt=zero"]
+    B --> C["Return in results\n(prepended, highest trust)"]
+    D["Snapshot()"] --> B
+    E["AnnounceTo() / Announceable()"] -.->|"excluded"| F["Never sent on wire"]
+    G["UpdateRoute(Source=Local)"] -.->|"rejected"| H["ErrLocalSourceReserved"]
+```
+*Diagram — Self-route: synthetic, read-only, never stored or announced*
+
 **Собственный маршрут (локальная идентичность).** Когда `localOrigin` настроен, `Lookup()` и `Snapshot()` синтезируют локальный маршрут для собственной идентичности ноды (`Hops=0`, `Source=RouteSourceLocal`). Этот маршрут не хранится в таблице — он инжектируется при чтении. Он никогда не истекает, никогда не отзывается и никогда не включается в анонсы (`AnnounceTo`/`Announceable`). Пиры обнаруживают эту ноду через свои собственные прямые маршруты. Собственный маршрут гарантирует, что нода всегда может разрешить саму себя в таблице маршрутизации без внешней пир-сессии. `Snapshot().TotalEntries` и `Snapshot().ActiveEntries` не считают синтетический self-route — эти счётчики описывают персистированное состояние таблицы и согласованы с `ActiveSize()`. `reachableFromSnapshot`, `reachableIDsFrame` и `fetch_route_summary` исключают записи `RouteSourceLocal`, поскольку достижимость касается удалённых пиров, а не самой ноды. `UpdateRoute` отклоняет `RouteSourceLocal` с `ErrLocalSourceReserved` — этот источник чисто синтетический и не должен персистироваться.
+
+```mermaid
+flowchart LR
+    A["Lookup(localOrigin)"] --> B["Синтез RouteEntry\nHops=0, Source=Local\nExpiresAt=zero"]
+    B --> C["Возврат в результатах\n(prepended, высший trust)"]
+    D["Snapshot()"] --> B
+    E["AnnounceTo() / Announceable()"] -.->|"исключён"| F["Никогда не отправляется на провод"]
+    G["UpdateRoute(Source=Local)"] -.->|"отклонён"| H["ErrLocalSourceReserved"]
+```
+*Диаграмма — Self-route: синтетический, read-only, никогда не хранится и не анонсируется*
 
 **Trust hierarchy.** Per triple, `local > direct > hop_ack > announcement`. The `local` source (TrustRank=3) is reserved for the synthetic self-route and is never stored in the table. At the same SeqNo, a higher-trust source replaces a lower-trust one. Confirming one triple via hop_ack does not affect other triples, even those sharing the same NextHop.
 
@@ -56,7 +76,19 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 **Route selection order.** `Lookup()` sorts by source priority first (local > direct > hop_ack > announcement), then by hops ascending within the same source tier. This means a 3-hop direct route is preferred over a 1-hop announcement — source trust outweighs hop count.
 
-**TTL expiry.** Each entry carries an `ExpiresAt` timestamp (default 120s from insertion). `TickTTL()` removes expired entries and returns a slice of identities where the expiry exposed a surviving non-withdrawn backup route — `routingTableTTLLoop` uses this to trigger `drainPendingForIdentities` for immediate delivery via the backup. Flapping peers receive a shortened TTL — see flap dampening below. Own-origin direct routes are refreshed by `RefreshDirectPeers()` on every announce cycle (every 30s), preventing them from expiring while the peer session is still alive. Learned routes are refreshed naturally when the neighbor re-announces them.
+**TTL expiry.** Learned routes (from announcements and hop_ack) carry an `ExpiresAt` timestamp (default 120s from insertion). `TickTTL()` removes expired entries and returns a slice of identities where the expiry exposed a surviving non-withdrawn backup route — `routingTableTTLLoop` uses this to trigger `drainPendingForIdentities` for immediate delivery via the backup. Learned routes are refreshed naturally when the neighbor re-announces them. When a same-SeqNo re-announcement arrives for an expired entry, `UpdateRoute` accepts it as a valid refresh — the origin has not changed the route, it is simply re-confirming it.
+
+**Direct route lifecycle.** Own-origin direct routes use `ExpiresAt=zero` (never expire by time). Their lifetime is managed entirely by the session lifecycle: `AddDirectPeer` creates them on socket connect, `RemoveDirectPeer` withdraws them on socket close. This is event-driven — no periodic TTL refresh is needed. `RemoveDirectPeer` sets `Hops=HopsInfinity` and `ExpiresAt=now+defaultTTL` on the withdrawn entry, creating a tombstone that `TickTTL` cleans up after the default TTL window. This design eliminates a class of race conditions where `TickTTL` could permanently delete an active direct route between `RefreshDirectPeers` cycles, making a connected peer invisible to the routing table.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active: Socket connect → AddDirectPeer
+    Active --> Active: Announce loop reads route (ExpiresAt=zero, never expires)
+    Active --> Withdrawn: Socket close → RemoveDirectPeer (Hops=16, ExpiresAt=now+120s)
+    Withdrawn --> [*]: TickTTL removes tombstone after TTL
+    Withdrawn --> Active: Reconnect → AddDirectPeer (new SeqNo)
+```
+*Diagram — Direct route lifecycle: event-driven, no TTL expiry*
 
 **NextHop is peer identity.** Routing operates at identity level, not transport addresses. A single peer identity may have multiple concurrent TCP sessions; session selection happens later in `node.Service` via the identity-to-session(s) index that resolves identities to active connections.
 
@@ -112,14 +144,14 @@ sequenceDiagram
 
 **Full-table sync on connect.** Both outbound and inbound connection paths send an immediate full-table sync (`routingTable.AnnounceTo(peerIdentity)`) to the newly connected peer. This ensures symmetric initial convergence regardless of connection direction. The sync is gated on both `mesh_routing_v1` and `mesh_relay_v1` capabilities — matching the steady-state announce loop contract. A routing-only peer (mesh_routing_v1 without mesh_relay_v1) would learn routes it cannot deliver on the data plane, so it is excluded from connect-time sync as well. The outbound path checks `sessionHasCapability(address, capMeshRoutingV1) && sessionHasCapability(address, capMeshRelayV1)` in `establishPeerSession`. The inbound path checks `connHasCapability(conn, capMeshRoutingV1) && connHasCapability(conn, capMeshRelayV1)` in `trackInboundConnect`. Both paths pass the peer's Ed25519 identity fingerprint (`peerIdentity`) to `AnnounceTo` — not the transport or listen address. This is critical for NATed inbound peers whose listen address (e.g. `127.0.0.1:64646`) differs from their identity fingerprint; passing the transport address would break split horizon filtering. Legacy peers without either capability are silently skipped. Split horizon is applied — routes learned from the connecting peer are excluded. If the send fails (session queue full, connection lost between handshake and sync), a warning is logged (`routing_outbound_full_sync_failed` or `routing_inbound_full_sync_failed`). The peer will still receive the table on the next periodic announce cycle.
 
-**Flap dampening.** The routing table tracks per-peer disconnect frequency to prevent link flaps from churning routes and flooding the network with announcements. Each `RemoveDirectPeer` call records a withdrawal timestamp. When a peer accumulates `flapThreshold` (default 3) disconnects within `flapWindow` (default 120s), it enters hold-down state for `holdDownDuration` (default 30s). During hold-down, `AddDirectPeer` still creates the route (connectivity is preserved), but applies `penalizedTTL` (default 30s) instead of `defaultTTL` (120s). The `AddDirectPeerResult.Penalized` flag signals to the caller that the triggered announce should be suppressed — the route will be picked up by the next periodic announce cycle, reducing announcement churn. `TickTTL` cleans up stale flap state once both hold-down and the flap window have expired. All thresholds are configurable via `WithFlapWindow`, `WithFlapThreshold`, `WithHoldDownDuration`, and `WithPenalizedTTL` options.
+**Flap dampening.** The routing table tracks per-peer disconnect frequency to prevent link flaps from churning routes and flooding the network with announcements. Each `RemoveDirectPeer` call records a withdrawal timestamp. When a peer accumulates `flapThreshold` (default 3) disconnects within `flapWindow` (default 120s), it enters hold-down state for `holdDownDuration` (default 30s). During hold-down, `AddDirectPeer` still creates the route (connectivity is preserved), but the `AddDirectPeerResult.Penalized` flag signals to the caller that the triggered announce should be suppressed — the route will be picked up by the next periodic announce cycle, reducing announcement churn. Direct routes themselves have no TTL (see Direct route lifecycle above), so flap dampening affects only the announce timing, not route expiry. `TickTTL` cleans up stale flap state once both hold-down and the flap window have expired. All thresholds are configurable via `WithFlapWindow`, `WithFlapThreshold`, `WithHoldDownDuration`, and `WithPenalizedTTL` options.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Normal
     Normal --> Normal: disconnect (count < threshold)
     Normal --> HoldDown: disconnect (count >= threshold within window)
-    HoldDown --> HoldDown: reconnect → penalized TTL, no triggered announce
+    HoldDown --> HoldDown: reconnect → Penalized flag, announcement suppressed
     HoldDown --> Normal: holdDownDuration expires + flapWindow clears
 ```
 *Diagram — Peer flap detection state machine*
@@ -332,7 +364,19 @@ internal/core/rpc/
 
 **Порядок выбора маршрута.** `Lookup()` сортирует по приоритету source (direct > hop_ack > announcement), затем по hops ascending в пределах одного уровня source. Direct-маршрут с 3 хопами предпочитается announcement с 1 хопом — доверие к источнику важнее количества хопов.
 
-**Истечение TTL.** Каждая запись имеет `ExpiresAt` (по умолчанию 120с с момента вставки). `TickTTL()` удаляет истёкшие записи и возвращает слайс identity, у которых истечение обнажило выживший не-withdrawn backup route — `routingTableTTLLoop` использует это для запуска `drainPendingForIdentities` и немедленной доставки через backup. Нестабильные peer'ы получают укороченный TTL — см. демпфирование flap'ов ниже. Own-origin direct-маршруты обновляются через `RefreshDirectPeers()` на каждом цикле анонсов (каждые 30с), предотвращая их истечение пока сессия с peer'ом жива. Learned-маршруты обновляются естественным образом при переанонсировании соседом.
+**Истечение TTL.** Learned-маршруты (из анонсов и hop_ack) имеют `ExpiresAt` (по умолчанию 120с с момента вставки). `TickTTL()` удаляет истёкшие записи и возвращает слайс identity, у которых истечение обнажило выживший не-withdrawn backup route — `routingTableTTLLoop` использует это для запуска `drainPendingForIdentities` и немедленной доставки через backup. Learned-маршруты обновляются естественным образом при переанонсировании соседом. Когда переанонс с тем же SeqNo приходит для expired записи, `UpdateRoute` принимает его как валидное обновление — origin не менял маршрут, а просто переподтверждает его.
+
+**Жизненный цикл direct-маршрутов.** Own-origin direct-маршруты используют `ExpiresAt=zero` (никогда не истекают по времени). Их жизненный цикл полностью управляется сессией: `AddDirectPeer` создаёт при подключении сокета, `RemoveDirectPeer` отзывает при закрытии сокета. Это event-driven подход — периодическое обновление TTL не требуется. `RemoveDirectPeer` устанавливает `Hops=HopsInfinity` и `ExpiresAt=now+defaultTTL` на отозванной записи, создавая tombstone, который `TickTTL` уберёт после стандартного TTL. Такой дизайн устраняет класс гонок, при которых `TickTTL` мог безвозвратно удалить активный direct-маршрут между циклами `RefreshDirectPeers`, делая подключённый peer невидимым для таблицы маршрутизации.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Активный: Подключение сокета → AddDirectPeer
+    Активный --> Активный: Цикл анонсов читает маршрут (ExpiresAt=zero, не истекает)
+    Активный --> Отозванный: Закрытие сокета → RemoveDirectPeer (Hops=16, ExpiresAt=now+120s)
+    Отозванный --> [*]: TickTTL удаляет tombstone после TTL
+    Отозванный --> Активный: Переподключение → AddDirectPeer (новый SeqNo)
+```
+*Диаграмма — Жизненный цикл direct-маршрута: event-driven, без истечения TTL*
 
 **NextHop — это identity peer'a.** Маршрутизация работает на уровне identity, а не транспортных адресов. Один peer identity может иметь несколько параллельных TCP-сессий; выбор сессии происходит позже в `node.Service` через индекс identity→session(s) для резолва identity в активные соединения.
 
@@ -386,14 +430,14 @@ sequenceDiagram
 
 **Полная синхронизация таблицы при подключении.** Как outbound, так и inbound пути подключения отправляют немедленную полную синхронизацию таблицы (`routingTable.AnnounceTo(peerIdentity)`) новому подключённому peer'у. Это обеспечивает симметричную начальную сходимость независимо от направления подключения. Синхронизация закрыта гейтом обеих capability: `mesh_routing_v1` и `mesh_relay_v1` — в соответствии с контрактом цикла анонсов. Routing-only peer (mesh_routing_v1 без mesh_relay_v1) получил бы маршруты, которые он не может доставить на data plane, поэтому исключается из connect-time синхронизации. Outbound-путь проверяет `sessionHasCapability(address, capMeshRoutingV1) && sessionHasCapability(address, capMeshRelayV1)` в `establishPeerSession`. Inbound-путь проверяет `connHasCapability(conn, capMeshRoutingV1) && connHasCapability(conn, capMeshRelayV1)` в `trackInboundConnect`. Оба пути передают Ed25519 identity fingerprint peer'а (`peerIdentity`) в `AnnounceTo` — не transport/listen адрес. Это критично для NATed inbound peer'ов, чей listen-адрес (например, `127.0.0.1:64646`) отличается от fingerprint'а; передача transport-адреса сломала бы фильтрацию split horizon. Legacy peer'ы без любой из capability пропускаются без ошибки. Применяется split horizon — маршруты, полученные от подключающегося peer'a, исключаются. Если отправка не удалась (очередь сессии переполнена, соединение потеряно между handshake и sync), записывается предупреждение (`routing_outbound_full_sync_failed` или `routing_inbound_full_sync_failed`). Peer всё равно получит таблицу в следующем периодическом цикле анонсов.
 
-**Демпфирование flap'ов.** Routing table отслеживает частоту отключений per-peer для предотвращения спама маршрутами при нестабильных линках. Каждый вызов `RemoveDirectPeer` записывает timestamp отключения. Когда peer накапливает `flapThreshold` (по умолчанию 3) отключений в пределах `flapWindow` (по умолчанию 120с), он переходит в состояние hold-down на `holdDownDuration` (по умолчанию 30с). В режиме hold-down `AddDirectPeer` по-прежнему создаёт маршрут (связность сохраняется), но применяет `penalizedTTL` (по умолчанию 30с) вместо `defaultTTL` (120с). Флаг `AddDirectPeerResult.Penalized` сигнализирует caller'у, что triggered announce должен быть подавлен — маршрут будет подхвачен следующим периодическим циклом анонсов, снижая спам анонсами. `TickTTL` очищает устаревшее flap-состояние после истечения и hold-down, и flap window. Все пороги настраиваются через опции `WithFlapWindow`, `WithFlapThreshold`, `WithHoldDownDuration` и `WithPenalizedTTL`.
+**Демпфирование flap'ов.** Routing table отслеживает частоту отключений per-peer для предотвращения спама маршрутами при нестабильных линках. Каждый вызов `RemoveDirectPeer` записывает timestamp отключения. Когда peer накапливает `flapThreshold` (по умолчанию 3) отключений в пределах `flapWindow` (по умолчанию 120с), он переходит в состояние hold-down на `holdDownDuration` (по умолчанию 30с). В режиме hold-down `AddDirectPeer` по-прежнему создаёт маршрут (связность сохраняется), но флаг `AddDirectPeerResult.Penalized` сигнализирует caller'у, что triggered announce должен быть подавлен — маршрут будет подхвачен следующим периодическим циклом анонсов, снижая спам анонсами. Direct-маршруты не имеют TTL (см. Жизненный цикл direct-маршрутов выше), поэтому демпфирование flap'ов влияет только на тайминг анонсов, а не на истечение маршрутов. `TickTTL` очищает устаревшее flap-состояние после истечения и hold-down, и flap window. Все пороги настраиваются через опции `WithFlapWindow`, `WithFlapThreshold`, `WithHoldDownDuration` и `WithPenalizedTTL`.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Нормальный
     Нормальный --> Нормальный: disconnect (count < threshold)
     Нормальный --> HoldDown: disconnect (count >= threshold в окне)
-    HoldDown --> HoldDown: reconnect → penalized TTL, без triggered announce
+    HoldDown --> HoldDown: reconnect → флаг Penalized, announce подавлен
     HoldDown --> Нормальный: holdDownDuration истёк + flapWindow очищено
 ```
 *Диаграмма — Конечный автомат обнаружения flap'ов*

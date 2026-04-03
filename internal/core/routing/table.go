@@ -229,9 +229,21 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 		if !old.IsExpired(now) {
 			return RouteUnchanged, nil
 		}
+
+		// Expired entry with same SeqNo: the route died because TickTTL
+		// has not yet cleaned it up (runs every 10s). A same-SeqNo
+		// re-announcement from the origin is a valid refresh — the
+		// origin has not changed the route, it is simply re-confirming
+		// it. Without this, an expired-but-not-yet-cleaned entry blocks
+		// same-SeqNo refreshes until TickTTL removes the stale entry,
+		// creating a non-deterministic window where routes are lost
+		// despite the origin still advertising them.
+		existing[idx] = entry
+		t.syncSeqCounterLocked(entry)
+		return RouteAccepted, nil
 	}
 
-	// Stale SeqNo (entry.SeqNo < old.SeqNo) or expired unchanged entry.
+	// Stale SeqNo (entry.SeqNo < old.SeqNo).
 	return RouteRejected, nil
 }
 
@@ -371,32 +383,29 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 	existing := t.routes[peerIdentity]
 	idx := findByTriple(existing, key)
 
-	// Already active — refresh TTL only, no SeqNo bump.
+	// Already active — no-op. Direct routes have no TTL (ExpiresAt is
+	// zero), so there is nothing to refresh. Their lifetime is managed
+	// entirely by the session lifecycle: AddDirectPeer creates them,
+	// RemoveDirectPeer withdraws them on socket close.
 	if idx >= 0 && !existing[idx].IsWithdrawn() {
-		ttl := t.defaultTTL
-		if penalized {
-			ttl = t.penalizedTTL
-		}
-		existing[idx].ExpiresAt = now.Add(ttl)
 		return AddDirectPeerResult{Entry: existing[idx], Penalized: penalized}, nil
 	}
 
 	// New route or re-activation after withdrawal — increment SeqNo.
 	seq := t.nextSeqLocked(peerIdentity)
 
-	ttl := t.defaultTTL
-	if penalized {
-		ttl = t.penalizedTTL
-	}
-
+	// ExpiresAt is intentionally left zero: a direct route represents a
+	// live socket and must never expire by time. Only RemoveDirectPeer
+	// (triggered by socket close) may invalidate it. Zero ExpiresAt
+	// makes IsExpired return false unconditionally, so TickTTL will
+	// never remove an active direct route.
 	entry := RouteEntry{
-		Identity:  peerIdentity,
-		Origin:    t.localOrigin,
-		NextHop:   peerIdentity,
-		Hops:      1,
-		SeqNo:     seq,
-		Source:    RouteSourceDirect,
-		ExpiresAt: now.Add(ttl),
+		Identity: peerIdentity,
+		Origin:   t.localOrigin,
+		NextHop:  peerIdentity,
+		Hops:     1,
+		SeqNo:    seq,
+		Source:   RouteSourceDirect,
 	}
 
 	if idx < 0 {
@@ -645,42 +654,20 @@ func (t *Table) TickTTL() []PeerIdentity {
 	return exposed
 }
 
-// RefreshDirectPeers extends the TTL of all active (non-withdrawn, non-expired)
-// direct routes originated by this node. This prevents own-origin direct routes
-// from expiring while the peer session is still alive. Should be called
-// periodically (e.g., from the announce loop) — it does not increment SeqNo
-// and does not trigger announcements.
+// RefreshDirectPeers is a no-op retained for API compatibility.
 //
-// Returns the number of routes whose TTL was refreshed.
+// Direct routes now use ExpiresAt=zero (never expire by time). Their
+// lifetime is managed entirely by the session lifecycle: AddDirectPeer
+// creates them on socket connect, RemoveDirectPeer withdraws them on
+// socket close. No periodic TTL refresh is needed.
+//
+// Previously, direct routes had a finite TTL that required periodic
+// refresh. This created a race condition: if TickTTL removed an expired
+// direct route before the next refresh cycle, the route was permanently
+// lost (AddDirectPeer would not be called again for an already-counted
+// session).
 func (t *Table) RefreshDirectPeers() int {
-	if t.localOrigin == "" {
-		return 0
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	now := t.clock()
-	refreshed := 0
-
-	for _, routes := range t.routes {
-		for i := range routes {
-			r := &routes[i]
-			if r.Source != RouteSourceDirect || r.Origin != t.localOrigin {
-				continue
-			}
-			if r.IsWithdrawn() || r.IsExpired(now) {
-				continue
-			}
-			ttl := t.defaultTTL
-			if t.isPeerInHoldDownLocked(r.Identity, now) {
-				ttl = t.penalizedTTL
-			}
-			r.ExpiresAt = now.Add(ttl)
-			refreshed++
-		}
-	}
-	return refreshed
+	return 0
 }
 
 // Announceable returns routes suitable for announcing to a specific peer,
@@ -779,6 +766,24 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 
 	sortRoutes(result)
 	return result
+}
+
+// InspectTriple returns the raw route entry for the given dedup triple,
+// or nil if no entry exists. Unlike Lookup, it does not filter by
+// withdrawn/expired status — callers see the entry exactly as stored.
+// Intended for diagnostics and debugging (e.g. explaining why UpdateRoute
+// rejected an incoming entry).
+func (t *Table) InspectTriple(key RouteTriple) *RouteEntry {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	routes := t.routes[key.Identity]
+	idx := findByTriple(routes, key)
+	if idx < 0 {
+		return nil
+	}
+	dup := routes[idx]
+	return &dup
 }
 
 // Snapshot returns an immutable point-in-time view of the entire table.

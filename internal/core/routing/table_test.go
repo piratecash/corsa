@@ -389,13 +389,15 @@ func TestUpdateRouteUnchangedNotReturnedForExpired(t *testing.T) {
 	tbl.clock = fixedClock(expired)
 	tbl.mu.Unlock()
 
-	// Same route re-announced after expiry — rejected (not unchanged).
+	// Same route re-announced after expiry — accepted as valid refresh.
+	// The origin has not changed the route, it is simply re-confirming it.
+	// An expired entry should not block same-SeqNo refreshes.
 	status := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "charlie",
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
-	if status != RouteRejected {
-		t.Fatalf("expired route same-SeqNo reannounce should be RouteRejected, got %d", status)
+	if status != RouteAccepted {
+		t.Fatalf("expired route same-SeqNo reannounce should be RouteAccepted, got %d", status)
 	}
 }
 
@@ -918,7 +920,7 @@ func TestAddDirectPeerBumpsSeqNoAfterWithdrawal(t *testing.T) {
 	}
 }
 
-func TestAddDirectPeerRefreshesTTLOnRepeat(t *testing.T) {
+func TestAddDirectPeerIdempotentOnRepeat(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	t2 := t1.Add(30 * time.Second)
 	current := t1
@@ -928,16 +930,24 @@ func TestAddDirectPeerRefreshesTTLOnRepeat(t *testing.T) {
 		WithDefaultTTL(60*time.Second),
 	)
 
-	mustAddDirect(t, tbl, "peer-A")
+	res1, err := tbl.AddDirectPeer("peer-A")
+	if err != nil {
+		t.Fatalf("first AddDirectPeer failed: %v", err)
+	}
 	current = t2
-	mustAddDirect(t, tbl, "peer-A")
+	res2, err := tbl.AddDirectPeer("peer-A")
+	if err != nil {
+		t.Fatalf("repeat AddDirectPeer failed: %v", err)
+	}
 
-	snap := tbl.Snapshot()
-	r := snap.Routes["peer-A"][0]
-	expected := t2.Add(60 * time.Second)
-	if !r.ExpiresAt.Equal(expected) {
-		t.Fatalf("repeat AddDirectPeer should refresh TTL: expected %v, got %v",
-			expected, r.ExpiresAt)
+	// Direct routes have ExpiresAt=zero (event-driven lifecycle).
+	// Repeat call is idempotent — same entry, no SeqNo bump.
+	if !res1.Entry.ExpiresAt.IsZero() {
+		t.Fatalf("direct route should have zero ExpiresAt, got %v", res1.Entry.ExpiresAt)
+	}
+	if res2.Entry.SeqNo != res1.Entry.SeqNo {
+		t.Fatalf("repeat AddDirectPeer should not bump SeqNo: got %d, want %d",
+			res2.Entry.SeqNo, res1.Entry.SeqNo)
 	}
 }
 
@@ -1663,10 +1673,11 @@ func TestFlapDetectionTriggersHoldDown(t *testing.T) {
 		t.Fatal("peer should be penalized after exceeding flap threshold")
 	}
 
-	// TTL should be the penalized value (15s), not default (120s).
-	expectedExpiry := current.Add(15 * time.Second)
-	if !result.Entry.ExpiresAt.Equal(expectedExpiry) {
-		t.Fatalf("penalized TTL: expected expiry %v, got %v", expectedExpiry, result.Entry.ExpiresAt)
+	// Direct routes are event-driven: ExpiresAt stays zero even when penalized.
+	// The Penalized flag signals the caller to delay or suppress the announcement,
+	// not to shorten the route's lifetime.
+	if !result.Entry.ExpiresAt.IsZero() {
+		t.Fatalf("penalized direct route should still have zero ExpiresAt, got %v", result.Entry.ExpiresAt)
 	}
 }
 
@@ -1881,9 +1892,9 @@ func TestFlapSnapshotFiltersStaleEntries(t *testing.T) {
 	}
 }
 
-// --- RefreshDirectPeers ---
+// --- Direct route event-driven lifecycle ---
 
-func TestRefreshDirectPeersExtendsTTL(t *testing.T) {
+func TestDirectRouteNeverExpiresByTime(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	current := now
 
@@ -1893,118 +1904,87 @@ func TestRefreshDirectPeersExtendsTTL(t *testing.T) {
 		WithDefaultTTL(120*time.Second),
 	)
 
-	// Add a direct peer — TTL starts at 120s from now.
 	mustAddDirect(t, tbl, "peer1")
 
+	// Verify ExpiresAt is zero — direct routes are event-driven.
 	routes := tbl.Lookup("peer1")
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
-	initialExpiry := routes[0].ExpiresAt
-	expectedInitial := now.Add(120 * time.Second)
-	if !initialExpiry.Equal(expectedInitial) {
-		t.Fatalf("initial ExpiresAt=%v, want %v", initialExpiry, expectedInitial)
+	if !routes[0].ExpiresAt.IsZero() {
+		t.Fatalf("direct route ExpiresAt should be zero, got %v", routes[0].ExpiresAt)
 	}
 
-	// Advance 90s — route still alive but close to expiry.
-	current = now.Add(90 * time.Second)
-
-	refreshed := tbl.RefreshDirectPeers()
-	if refreshed != 1 {
-		t.Fatalf("expected 1 refreshed, got %d", refreshed)
-	}
+	// Advance far beyond any TTL — route must still be alive.
+	current = now.Add(24 * time.Hour)
 
 	routes = tbl.Lookup("peer1")
 	if len(routes) != 1 {
-		t.Fatalf("expected 1 route after refresh, got %d", len(routes))
-	}
-	newExpiry := routes[0].ExpiresAt
-	expectedNew := current.Add(120 * time.Second)
-	if !newExpiry.Equal(expectedNew) {
-		t.Fatalf("refreshed ExpiresAt=%v, want %v", newExpiry, expectedNew)
+		t.Fatalf("direct route must survive indefinitely, got %d routes", len(routes))
 	}
 
-	// Advance to 200s from original — original TTL would have expired,
-	// but refresh should have extended it.
-	current = now.Add(200 * time.Second)
-
+	// TickTTL must not remove it.
+	tbl.TickTTL()
 	routes = tbl.Lookup("peer1")
 	if len(routes) != 1 {
-		t.Fatalf("route should still be alive after refresh, got %d routes", len(routes))
+		t.Fatalf("TickTTL must not remove live direct route, got %d routes", len(routes))
 	}
 }
 
-func TestRefreshDirectPeersSkipsWithdrawn(t *testing.T) {
+func TestDirectRouteRemovedOnlyBySocketEvent(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	current := now
 
 	tbl := NewTable(
 		WithLocalOrigin("self"),
 		WithClock(func() time.Time { return current }),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	mustAddDirect(t, tbl, "peer1")
+
+	// RemoveDirectPeer (socket close) withdraws and sets tombstone TTL.
+	mustRemoveDirect(t, tbl, "peer1")
+
+	routes := tbl.Lookup("peer1")
+	if len(routes) != 0 {
+		t.Fatalf("withdrawn direct route should not appear in Lookup, got %d", len(routes))
+	}
+
+	// Tombstone exists with finite ExpiresAt — TickTTL will clean it up.
+	current = current.Add(121 * time.Second)
+	tbl.TickTTL()
+	if tbl.Size() != 0 {
+		t.Fatalf("tombstone should be cleaned by TickTTL, size=%d", tbl.Size())
+	}
+}
+
+func TestDirectRouteReconnectAfterWithdrawal(t *testing.T) {
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	current := now
+
+	tbl := NewTable(
+		WithLocalOrigin("self"),
+		WithClock(func() time.Time { return current }),
+		WithDefaultTTL(120*time.Second),
 	)
 
 	mustAddDirect(t, tbl, "peer1")
 	mustRemoveDirect(t, tbl, "peer1")
 
-	refreshed := tbl.RefreshDirectPeers()
-	if refreshed != 0 {
-		t.Fatalf("withdrawn routes should not be refreshed, got %d", refreshed)
-	}
-}
-
-func TestRefreshDirectPeersSkipsForeignOrigin(t *testing.T) {
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-
-	tbl := NewTable(
-		WithLocalOrigin("self"),
-		WithClock(func() time.Time { return now }),
-	)
-
-	// Insert a route with foreign origin via announcement.
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: "peer2", Origin: "foreign", NextHop: "peer2",
-		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
-	})
-
-	refreshed := tbl.RefreshDirectPeers()
-	if refreshed != 0 {
-		t.Fatalf("foreign-origin routes should not be refreshed, got %d", refreshed)
-	}
-}
-
-func TestRefreshDirectPeersNoLocalOrigin(t *testing.T) {
-	tbl := NewTable()
-
-	refreshed := tbl.RefreshDirectPeers()
-	if refreshed != 0 {
-		t.Fatalf("expected 0 refreshed when no localOrigin, got %d", refreshed)
-	}
-}
-
-func TestDirectRouteExpiresWithoutRefresh(t *testing.T) {
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	current := now
-
-	tbl := NewTable(
-		WithLocalOrigin("self"),
-		WithClock(func() time.Time { return current }),
-		WithDefaultTTL(120*time.Second),
-	)
-
+	// Peer reconnects — new direct route replaces tombstone.
+	current = current.Add(5 * time.Second)
 	mustAddDirect(t, tbl, "peer1")
 
-	// Advance past TTL without refresh.
-	current = now.Add(121 * time.Second)
-
 	routes := tbl.Lookup("peer1")
-	if len(routes) != 0 {
-		t.Fatalf("route should have expired without refresh, got %d", len(routes))
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route after reconnect, got %d", len(routes))
 	}
-
-	// Confirm TickTTL cleans it up.
-	tbl.TickTTL()
-	if tbl.Size() != 0 {
-		t.Fatalf("expired route should be removed by TickTTL, size=%d", tbl.Size())
+	if routes[0].IsWithdrawn() {
+		t.Fatal("reconnected route must not be withdrawn")
+	}
+	if !routes[0].ExpiresAt.IsZero() {
+		t.Fatalf("reconnected direct route ExpiresAt should be zero, got %v", routes[0].ExpiresAt)
 	}
 }
 

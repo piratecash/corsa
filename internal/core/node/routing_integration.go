@@ -444,6 +444,29 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 			drainIdentities[domain.PeerIdentity(wireRoute.Identity)] = struct{}{}
 		case routing.RouteRejected:
 			rejected++
+			existing := s.routingTable.InspectTriple(entry.DedupKey())
+			if existing != nil {
+				log.Debug().
+					Str("identity", wireRoute.Identity).
+					Str("origin", wireRoute.Origin).
+					Str("from", string(senderIdentity)).
+					Int("incoming_hops", receivedHops).
+					Uint64("incoming_seq", wireRoute.SeqNo).
+					Int("existing_hops", existing.Hops).
+					Uint64("existing_seq", existing.SeqNo).
+					Str("existing_source", existing.Source.String()).
+					Bool("existing_withdrawn", existing.IsWithdrawn()).
+					Str("existing_expires", existing.ExpiresAt.Format(time.RFC3339)).
+					Msg("route_rejected_by_existing")
+			} else {
+				log.Debug().
+					Str("identity", wireRoute.Identity).
+					Str("origin", wireRoute.Origin).
+					Str("from", string(senderIdentity)).
+					Int("incoming_hops", receivedHops).
+					Uint64("incoming_seq", wireRoute.SeqNo).
+					Msg("route_rejected_no_existing_triple")
+			}
 		}
 	}
 
