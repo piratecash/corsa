@@ -34,10 +34,27 @@ import (
 // failure and stops reconnection attempts — the peer must upgrade first.
 var errIncompatibleProtocol = errors.New("incompatible protocol version")
 
+// StoreResult describes the outcome of MessageStore.StoreMessage.
+// Three distinct states prevent conflating "already seen" with "write error",
+// allowing the caller to make the right decision for each case.
+type StoreResult int
+
+const (
+	// StoreInserted means the message was genuinely new and persisted.
+	StoreInserted StoreResult = iota
+	// StoreDuplicate means the message already existed in the durable store.
+	// The caller should NOT add it to s.topics or emit UI events.
+	StoreDuplicate
+	// StoreFailed means a write error occurred.  The message was NOT persisted
+	// but the caller should still keep it in-memory (s.topics) so it is not
+	// lost from the network.
+	StoreFailed
+)
+
 // MessageStore allows the desktop layer to own message persistence, while
 // relay-only nodes (corsa-node) leave this nil to skip local storage.
 type MessageStore interface {
-	StoreMessage(envelope protocol.Envelope, isOutgoing bool) bool
+	StoreMessage(envelope protocol.Envelope, isOutgoing bool) StoreResult
 	UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool
 }
 
@@ -1890,10 +1907,60 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 		return protocol.Frame{Type: "error", Error: err.Error()}
 	}
 
+	// Drop pending outbound messages destined for the deleted contact.
+	// The user explicitly removed this identity, so queued messages
+	// should not be delivered.
+	s.dropPendingForRecipient(string(identity))
+
 	// If the contact was not in the trust store, that is not an error —
 	// it may have originated from network discovery rather than the
 	// trusted contacts list.
 	return protocol.Frame{Type: "ok", Address: string(identity)}
+}
+
+// dropPendingForRecipient removes all pending send_message frames addressed
+// to the given recipient across every peer queue. It also clears the
+// corresponding outbound delivery tracking entries and pending dedup keys,
+// then persists the updated queue state to disk.
+func (s *Service) dropPendingForRecipient(recipient string) {
+	s.mu.Lock()
+
+	var dropped int
+	for addr, frames := range s.pending {
+		kept := frames[:0]
+		for _, pf := range frames {
+			if pf.Frame.Type == "send_message" && pf.Frame.Recipient == recipient {
+				key := pendingFrameKey(addr, pf.Frame)
+				delete(s.pendingKeys, key)
+				dropped++
+				continue
+			}
+			kept = append(kept, pf)
+		}
+		if len(kept) == 0 {
+			delete(s.pending, addr)
+		} else {
+			s.pending[addr] = kept
+		}
+	}
+
+	// Remove outbound delivery entries for the deleted recipient so the
+	// UI no longer shows stale "queued"/"retrying" statuses.
+	var outboundDropped int
+	for id, ob := range s.outbound {
+		if ob.Recipient == recipient {
+			delete(s.outbound, id)
+			outboundDropped++
+		}
+	}
+
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+
+	if dropped > 0 || outboundDropped > 0 {
+		log.Info().Str("recipient", recipient).Int("pending_dropped", dropped).Int("outbound_dropped", outboundDropped).Msg("dropped_pending_for_deleted_contact")
+		s.persistQueueState(snapshot)
+	}
 }
 
 func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
@@ -2219,10 +2286,6 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		CreatedAt:  msg.CreatedAt,
 	}
 
-	s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
-	count := len(s.topics[msg.Topic])
-	s.mu.Unlock()
-
 	// Only messages that belong to this node (sender or recipient) get
 	// persisted to chatlog, emit UI events, and push to local subscribers.
 	// Transit messages (relayed DMs where neither party is us) have their
@@ -2231,21 +2294,43 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	isLocal := s.isLocalMessage(msg)
 
 	// Persist message via the registered MessageStore (owned by the desktop
-	// layer). If no store is registered (relay-only node), skip persistence.
-	// Persist BEFORE emitting local change so the desktop UI can safely read
-	// the new entry from disk when it reacts to the event. If the write
-	// fails, skip emitLocalChange — the UI reads from SQLite, so waking it
-	// up with stale data would violate the "DB first, then UI event" invariant.
-	storeOK := true
+	// layer) BEFORE adding to s.topics. The store result determines whether
+	// the message enters in-memory state:
+	//
+	//   StoreInserted  → add to s.topics, emit event, gossip
+	//   StoreDuplicate → skip s.topics (already in chatlog on disk),
+	//                     skip event (no beep/unread). This closes both
+	//                     the event-path and the DMHeaders header-path
+	//                     that could otherwise re-trigger unread counts
+	//                     via repairUnreadFromHeaders after a restart.
+	//   StoreFailed    → add to s.topics (don't lose the message from
+	//                     the network), skip event (stale data).
+	//
+	// When no store is registered (relay-only node) or for transit messages,
+	// the message always enters s.topics.
+	storeResult := StoreInserted
 	if isLocal && s.messageStore != nil {
 		isOutgoing := msg.Sender == s.identity.Address
-		storeOK = s.messageStore.StoreMessage(envelope, isOutgoing)
+		// Unlock before calling into the store — it may do SQLite I/O.
+		s.mu.Unlock()
+		storeResult = s.messageStore.StoreMessage(envelope, isOutgoing)
+		s.mu.Lock()
 	}
+
+	// Duplicate local messages must NOT enter s.topics. The message is
+	// already persisted in chatlog, and adding it here would cause
+	// fetchDMHeadersFrame() to include it in DMHeaders, which lets
+	// repairUnreadFromHeaders() re-increment unread counts on the UI.
+	if storeResult != StoreDuplicate {
+		s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
+	}
+	count := len(s.topics[msg.Topic])
+	s.mu.Unlock()
 
 	// Only notify the desktop UI for messages this node participates in.
 	// Transit relay traffic must not wake up the UI.
-	// Skip the event if the store write failed — the UI would see stale data.
-	if isLocal && storeOK {
+	// Emit event only for genuinely new messages (StoreInserted).
+	if isLocal && storeResult == StoreInserted {
 		s.emitLocalChange(protocol.LocalChangeEvent{
 			Type:       protocol.LocalChangeNewMessage,
 			Topic:      msg.Topic,
@@ -2311,7 +2396,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// Receipt emission must not be gated by validateTimestamp — relayed
 	// DMs arrive via deliverRelayedMessage which passes validateTimestamp=false,
 	// but the recipient still needs to acknowledge delivery to the sender.
-	if isLocal && msg.Topic == "dm" && msg.Recipient != "*" {
+	// Skip for duplicates — the receipt was already sent on the first store.
+	if isLocal && storeResult != StoreDuplicate && msg.Topic == "dm" && msg.Recipient != "*" {
 		if msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
 			s.backgroundWg.Add(1)
 			go func() {

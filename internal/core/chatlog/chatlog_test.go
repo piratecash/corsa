@@ -52,11 +52,11 @@ func TestAppendAndRead(t *testing.T) {
 		Flag:      "immutable",
 	}
 
-	if err := s.Append("dm", selfAddr, entry); err != nil {
+	if err := s.Append("dm", domain.PeerIdentity(selfAddr), entry); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
-	entries, err := s.Read("dm", peerAddr)
+	entries, err := s.Read("dm", domain.PeerIdentity(peerAddr))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -71,6 +71,50 @@ func TestAppendAndRead(t *testing.T) {
 	}
 	if entries[0].Flag != "immutable" {
 		t.Fatalf("flag mismatch: got %s", entries[0].Flag)
+	}
+}
+
+func TestAppendReportNewDistinguishesInsertFromDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	selfAddr := "abcdef0123456789abcdef0123456789abcdef01"
+	peerAddr := "1234567890abcdef1234567890abcdef12345678"
+
+	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":0"))
+	defer func() { _ = s.Close() }()
+
+	entry := Entry{
+		ID:        "dedup-001",
+		Sender:    peerAddr,
+		Recipient: selfAddr,
+		Body:      "test body",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	// First insert should report new.
+	inserted, err := s.AppendReportNew("dm", domain.PeerIdentity(selfAddr), entry)
+	if err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first append should report inserted=true")
+	}
+
+	// Duplicate insert should report not-new.
+	inserted, err = s.AppendReportNew("dm", domain.PeerIdentity(selfAddr), entry)
+	if err != nil {
+		t.Fatalf("duplicate append: %v", err)
+	}
+	if inserted {
+		t.Fatal("duplicate append should report inserted=false")
+	}
+
+	// Only one row in the database.
+	entries, err := s.Read("dm", domain.PeerIdentity(peerAddr))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry after duplicate append, got %d", len(entries))
 	}
 }
 
@@ -90,12 +134,12 @@ func TestAppendMultipleMessages(t *testing.T) {
 			Body:      "body",
 			CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano),
 		}
-		if err := s.Append("dm", selfAddr, entry); err != nil {
+		if err := s.Append("dm", domain.PeerIdentity(selfAddr), entry); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
 
-	entries, err := s.Read("dm", peerAddr)
+	entries, err := s.Read("dm", domain.PeerIdentity(peerAddr))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -121,10 +165,10 @@ func TestReadLastN(t *testing.T) {
 			Body:      "body",
 			CreatedAt: base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano),
 		}
-		_ = s.Append("dm", selfAddr, entry)
+		_ = s.Append("dm", domain.PeerIdentity(selfAddr), entry)
 	}
 
-	last3, err := s.ReadLast("dm", peerAddr, 3)
+	last3, err := s.ReadLast("dm", domain.PeerIdentity(peerAddr), 3)
 	if err != nil {
 		t.Fatalf("read last: %v", err)
 	}
@@ -149,11 +193,11 @@ func TestSeparateConversationsPerPeer(t *testing.T) {
 	peer1 := "1111111111111111111111111111111111111111"
 	peer2 := "2222222222222222222222222222222222222222"
 
-	_ = s.Append("dm", selfAddr, Entry{ID: "m1", Sender: peer1, Recipient: selfAddr, Body: "from peer1", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
-	_ = s.Append("dm", selfAddr, Entry{ID: "m2", Sender: peer2, Recipient: selfAddr, Body: "from peer2", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m1", Sender: peer1, Recipient: selfAddr, Body: "from peer1", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m2", Sender: peer2, Recipient: selfAddr, Body: "from peer2", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 
-	entries1, _ := s.Read("dm", peer1)
-	entries2, _ := s.Read("dm", peer2)
+	entries1, _ := s.Read("dm", domain.PeerIdentity(peer1))
+	entries2, _ := s.Read("dm", domain.PeerIdentity(peer2))
 
 	if len(entries1) != 1 || entries1[0].ID != "m1" {
 		t.Fatalf("peer1 entries wrong: %v", entries1)
@@ -170,9 +214,9 @@ func TestGlobalMessages(t *testing.T) {
 
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 
-	_ = s.Append("global", selfAddr, Entry{ID: "g1", Sender: selfAddr, Recipient: "*", Body: "broadcast", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	_ = s.Append("global", domain.PeerIdentity(selfAddr), Entry{ID: "g1", Sender: selfAddr, Recipient: "*", Body: "broadcast", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 
-	entries, err := s.Read("global", "")
+	entries, err := s.Read("global", domain.PeerIdentity(""))
 	if err != nil {
 		t.Fatalf("read global: %v", err)
 	}
@@ -193,8 +237,8 @@ func TestListConversations(t *testing.T) {
 	t1 := time.Now().UTC().Add(-time.Hour)
 	t2 := time.Now().UTC()
 
-	_ = s.Append("dm", selfAddr, Entry{ID: "m1", Sender: peer1, Recipient: selfAddr, Body: "old", CreatedAt: t1.Format(time.RFC3339Nano)})
-	_ = s.Append("dm", selfAddr, Entry{ID: "m2", Sender: peer2, Recipient: selfAddr, Body: "new", CreatedAt: t2.Format(time.RFC3339Nano)})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m1", Sender: peer1, Recipient: selfAddr, Body: "old", CreatedAt: t1.Format(time.RFC3339Nano)})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m2", Sender: peer2, Recipient: selfAddr, Body: "new", CreatedAt: t2.Format(time.RFC3339Nano)})
 
 	convs, err := s.ListConversations()
 	if err != nil {
@@ -221,12 +265,12 @@ func TestHasEntryID(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1111111111111111111111111111111111111111"
 
-	_ = s.Append("dm", selfAddr, Entry{ID: "msg-abc", Sender: peer, Recipient: selfAddr, Body: "test", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "msg-abc", Sender: peer, Recipient: selfAddr, Body: "test", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 
-	if !s.HasEntryID("dm", peer, "msg-abc") {
+	if !s.HasEntryID("dm", domain.PeerIdentity(peer), domain.MessageID("msg-abc")) {
 		t.Fatal("expected HasEntryID to return true")
 	}
-	if s.HasEntryID("dm", peer, "msg-xyz") {
+	if s.HasEntryID("dm", domain.PeerIdentity(peer), domain.MessageID("msg-xyz")) {
 		t.Fatal("expected HasEntryID to return false for non-existent ID")
 	}
 }
@@ -236,7 +280,7 @@ func TestReadEmptyStore(t *testing.T) {
 	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
-	entries, err := s.Read("dm", "1111111111111111111111111111111111111111")
+	entries, err := s.Read("dm", domain.PeerIdentity("1111111111111111111111111111111111111111"))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -255,11 +299,11 @@ func TestPortIsolation(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1111111111111111111111111111111111111111"
 
-	_ = s1.Append("dm", selfAddr, Entry{ID: "m1", Sender: peer, Recipient: selfAddr, Body: "port9999", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
-	_ = s2.Append("dm", selfAddr, Entry{ID: "m2", Sender: peer, Recipient: selfAddr, Body: "port8888", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	_ = s1.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m1", Sender: peer, Recipient: selfAddr, Body: "port9999", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	_ = s2.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m2", Sender: peer, Recipient: selfAddr, Body: "port8888", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 
-	e1, _ := s1.Read("dm", peer)
-	e2, _ := s2.Read("dm", peer)
+	e1, _ := s1.Read("dm", domain.PeerIdentity(peer))
+	e2, _ := s2.Read("dm", domain.PeerIdentity(peer))
 
 	if len(e1) != 1 || e1[0].Body != "port9999" {
 		t.Fatalf("port 9999 entries wrong")
@@ -291,11 +335,11 @@ func TestAppendCreatesDirectory(t *testing.T) {
 		CreatedAt: "2026-03-24T00:00:00Z",
 	}
 
-	if err := s.Append("dm", selfAddr, entry); err != nil {
+	if err := s.Append("dm", domain.PeerIdentity(selfAddr), entry); err != nil {
 		t.Fatalf("Append should work after auto-create directory, got: %v", err)
 	}
 
-	entries, err := s.Read("dm", peerAddr)
+	entries, err := s.Read("dm", domain.PeerIdentity(peerAddr))
 	if err != nil {
 		t.Fatalf("read after auto-create: %v", err)
 	}
@@ -320,17 +364,17 @@ func TestDuplicateInsertIgnored(t *testing.T) {
 		CreatedAt: "2026-01-01T00:00:00Z",
 	}
 
-	if err := s.Append("dm", selfAddr, entry); err != nil {
+	if err := s.Append("dm", domain.PeerIdentity(selfAddr), entry); err != nil {
 		t.Fatalf("first append: %v", err)
 	}
 
 	// Second append with same ID should be silently ignored (INSERT OR IGNORE).
 	entry.Body = "duplicate"
-	if err := s.Append("dm", selfAddr, entry); err != nil {
+	if err := s.Append("dm", domain.PeerIdentity(selfAddr), entry); err != nil {
 		t.Fatalf("duplicate append: %v", err)
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry after duplicate, got %d", len(entries))
 	}
@@ -349,7 +393,7 @@ func TestAppendSetsDeliveryStatus(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1122334455667788112233445566778811223344"
 
-	err := s.Append("dm", selfAddr, Entry{
+	err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "msg-s1", Sender: selfAddr, Recipient: peer,
 		Body: "hello", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusSent,
 	})
@@ -357,7 +401,7 @@ func TestAppendSetsDeliveryStatus(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -375,7 +419,7 @@ func TestAppendDefaultsToSentStatus(t *testing.T) {
 	peer := "1122334455667788112233445566778811223344"
 
 	// Append without setting DeliveryStatus — should default to "sent".
-	err := s.Append("dm", selfAddr, Entry{
+	err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "msg-default", Sender: selfAddr, Recipient: peer,
 		Body: "hello", CreatedAt: "2026-01-01T00:00:00Z",
 	})
@@ -383,7 +427,7 @@ func TestAppendDefaultsToSentStatus(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusSent {
 		t.Fatalf("expected default status=%q, got %q", StatusSent, entries[0].DeliveryStatus)
 	}
@@ -397,16 +441,16 @@ func TestUpdateStatus(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1122334455667788112233445566778811223344"
 
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "msg-1", Sender: selfAddr, Recipient: peer,
 		Body: "first", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusSent,
 	})
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "msg-2", Sender: peer, Recipient: selfAddr,
 		Body: "second", CreatedAt: "2026-01-01T00:01:00Z", DeliveryStatus: StatusDelivered,
 	})
 
-	updated, err := s.UpdateStatus("dm", peer, "msg-1", StatusDelivered)
+	updated, err := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("msg-1"), StatusDelivered)
 	if err != nil {
 		t.Fatalf("update status: %v", err)
 	}
@@ -414,7 +458,7 @@ func TestUpdateStatus(t *testing.T) {
 		t.Fatal("expected update to return true")
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -438,12 +482,12 @@ func TestUpdateStatusNotFoundReturnsFalse(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1122334455667788112233445566778811223344"
 
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "msg-1", Sender: selfAddr, Recipient: peer,
 		Body: "hello", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusSent,
 	})
 
-	updated, err := s.UpdateStatus("dm", peer, "nonexistent", StatusDelivered)
+	updated, err := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("nonexistent"), StatusDelivered)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -460,17 +504,17 @@ func TestUpdateStatusToSeen(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1122334455667788112233445566778811223344"
 
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "msg-1", Sender: peer, Recipient: selfAddr,
 		Body: "incoming", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusDelivered,
 	})
 
-	updated, _ := s.UpdateStatus("dm", peer, "msg-1", StatusSeen)
+	updated, _ := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("msg-1"), StatusSeen)
 	if !updated {
 		t.Fatal("expected update to return true")
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusSeen {
 		t.Fatalf("expected %q, got %q", StatusSeen, entries[0].DeliveryStatus)
 	}
@@ -485,13 +529,13 @@ func TestUpdateStatusMonotonic(t *testing.T) {
 	peer := "1122334455667788112233445566778811223344"
 
 	// Start at "sent".
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "mono-1", Sender: selfAddr, Recipient: peer,
 		Body: "test", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusSent,
 	})
 
 	// Advance sent → delivered: should succeed.
-	ok, err := s.UpdateStatus("dm", peer, "mono-1", StatusDelivered)
+	ok, err := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("mono-1"), StatusDelivered)
 	if err != nil {
 		t.Fatalf("sent→delivered error: %v", err)
 	}
@@ -500,13 +544,13 @@ func TestUpdateStatusMonotonic(t *testing.T) {
 	}
 
 	// Advance delivered → seen: should succeed.
-	ok, _ = s.UpdateStatus("dm", peer, "mono-1", StatusSeen)
+	ok, _ = s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("mono-1"), StatusSeen)
 	if !ok {
 		t.Fatal("delivered→seen should return true")
 	}
 
 	// Attempt regression seen → delivered: should be silently rejected.
-	ok, err = s.UpdateStatus("dm", peer, "mono-1", StatusDelivered)
+	ok, err = s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("mono-1"), StatusDelivered)
 	if err != nil {
 		t.Fatalf("seen→delivered error: %v", err)
 	}
@@ -515,13 +559,13 @@ func TestUpdateStatusMonotonic(t *testing.T) {
 	}
 
 	// Attempt regression seen → sent: should also be rejected.
-	ok, _ = s.UpdateStatus("dm", peer, "mono-1", StatusSent)
+	ok, _ = s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("mono-1"), StatusSent)
 	if ok {
 		t.Fatal("seen→sent should return false (regression)")
 	}
 
 	// Verify status is still "seen".
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusSeen {
 		t.Fatalf("status should still be %q after regression attempts, got %q", StatusSeen, entries[0].DeliveryStatus)
 	}
@@ -535,17 +579,17 @@ func TestUpdateStatusDeliveredCannotRegressToSent(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1122334455667788112233445566778811223344"
 
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "mono-2", Sender: selfAddr, Recipient: peer,
 		Body: "test", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusDelivered,
 	})
 
-	ok, _ := s.UpdateStatus("dm", peer, "mono-2", StatusSent)
+	ok, _ := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("mono-2"), StatusSent)
 	if ok {
 		t.Fatal("delivered→sent should return false")
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusDelivered {
 		t.Fatalf("expected %q, got %q", StatusDelivered, entries[0].DeliveryStatus)
 	}
@@ -561,12 +605,12 @@ func TestListConversationsIncludesUnreadCount(t *testing.T) {
 	peerB := "2222222222222222222222222222222222222222"
 
 	// peerA: 2 incoming delivered (unread), 1 outgoing sent.
-	_ = s.Append("dm", selfAddr, Entry{ID: "a1", Sender: peerA, Recipient: selfAddr, Body: "hi", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusDelivered})
-	_ = s.Append("dm", selfAddr, Entry{ID: "a2", Sender: peerA, Recipient: selfAddr, Body: "hey", CreatedAt: "2026-01-01T00:01:00Z", DeliveryStatus: StatusDelivered})
-	_ = s.Append("dm", selfAddr, Entry{ID: "a3", Sender: selfAddr, Recipient: peerA, Body: "yo", CreatedAt: "2026-01-01T00:02:00Z", DeliveryStatus: StatusSent})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "a1", Sender: peerA, Recipient: selfAddr, Body: "hi", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusDelivered})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "a2", Sender: peerA, Recipient: selfAddr, Body: "hey", CreatedAt: "2026-01-01T00:01:00Z", DeliveryStatus: StatusDelivered})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "a3", Sender: selfAddr, Recipient: peerA, Body: "yo", CreatedAt: "2026-01-01T00:02:00Z", DeliveryStatus: StatusSent})
 
 	// peerB: 1 incoming seen (read).
-	_ = s.Append("dm", selfAddr, Entry{ID: "b1", Sender: peerB, Recipient: selfAddr, Body: "hello", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusSeen})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "b1", Sender: peerB, Recipient: selfAddr, Body: "hello", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusSeen})
 
 	convs, err := s.ListConversations()
 	if err != nil {
@@ -598,10 +642,10 @@ func TestListConversationsSortsUnreadFirst(t *testing.T) {
 	peerNew := "2222222222222222222222222222222222222222"
 
 	// peerOld: old message, but unread.
-	_ = s.Append("dm", selfAddr, Entry{ID: "o1", Sender: peerOld, Recipient: selfAddr, Body: "old", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusDelivered})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "o1", Sender: peerOld, Recipient: selfAddr, Body: "old", CreatedAt: "2026-01-01T00:00:00Z", DeliveryStatus: StatusDelivered})
 
 	// peerNew: newer message, but already seen.
-	_ = s.Append("dm", selfAddr, Entry{ID: "n1", Sender: peerNew, Recipient: selfAddr, Body: "new", CreatedAt: "2026-01-02T00:00:00Z", DeliveryStatus: StatusSeen})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "n1", Sender: peerNew, Recipient: selfAddr, Body: "new", CreatedAt: "2026-01-02T00:00:00Z", DeliveryStatus: StatusSeen})
 
 	convs, _ := s.ListConversations()
 	// peerOld should be first despite older timestamp because it has unread.
@@ -618,10 +662,10 @@ func TestReadLastEntry(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1111111111111111111111111111111111111111"
 
-	_ = s.Append("dm", selfAddr, Entry{ID: "m1", Sender: peer, Recipient: selfAddr, Body: "first", CreatedAt: "2026-01-01T00:00:00Z"})
-	_ = s.Append("dm", selfAddr, Entry{ID: "m2", Sender: selfAddr, Recipient: peer, Body: "second", CreatedAt: "2026-01-01T00:01:00Z"})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m1", Sender: peer, Recipient: selfAddr, Body: "first", CreatedAt: "2026-01-01T00:00:00Z"})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "m2", Sender: selfAddr, Recipient: peer, Body: "second", CreatedAt: "2026-01-01T00:01:00Z"})
 
-	entry, err := s.ReadLastEntry("dm", peer)
+	entry, err := s.ReadLastEntry("dm", domain.PeerIdentity(peer))
 	if err != nil {
 		t.Fatalf("read last entry: %v", err)
 	}
@@ -638,7 +682,7 @@ func TestReadLastEntryEmpty(t *testing.T) {
 	s := NewStore(dir, domain.PeerIdentity("aabbccdd11223344aabbccdd11223344aabbccdd"), domain.ListenAddress(":9999"))
 	defer func() { _ = s.Close() }()
 
-	entry, err := s.ReadLastEntry("dm", "1111111111111111111111111111111111111111")
+	entry, err := s.ReadLastEntry("dm", domain.PeerIdentity("1111111111111111111111111111111111111111"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -656,9 +700,9 @@ func TestReadLastEntryPerPeer(t *testing.T) {
 	peer1 := "1111111111111111111111111111111111111111"
 	peer2 := "2222222222222222222222222222222222222222"
 
-	_ = s.Append("dm", selfAddr, Entry{ID: "p1-old", Sender: peer1, Recipient: selfAddr, Body: "old", CreatedAt: "2026-01-01T00:00:00Z"})
-	_ = s.Append("dm", selfAddr, Entry{ID: "p1-new", Sender: selfAddr, Recipient: peer1, Body: "new", CreatedAt: "2026-01-01T00:01:00Z"})
-	_ = s.Append("dm", selfAddr, Entry{ID: "p2-only", Sender: peer2, Recipient: selfAddr, Body: "only", CreatedAt: "2026-01-01T00:00:30Z"})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "p1-old", Sender: peer1, Recipient: selfAddr, Body: "old", CreatedAt: "2026-01-01T00:00:00Z"})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "p1-new", Sender: selfAddr, Recipient: peer1, Body: "new", CreatedAt: "2026-01-01T00:01:00Z"})
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{ID: "p2-only", Sender: peer2, Recipient: selfAddr, Body: "only", CreatedAt: "2026-01-01T00:00:30Z"})
 
 	result, err := s.ReadLastEntryPerPeer()
 	if err != nil {
@@ -689,11 +733,11 @@ func TestReadLastEntryPerPeerDeterministicOnEqualTimestamp(t *testing.T) {
 
 	// Insert two messages with identical created_at for the same peer.
 	// The second insert has a higher rowid and should be the one returned.
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "dup-ts-first", Sender: selfAddr, Recipient: peer,
 		Body: "first insert", CreatedAt: sameTS,
 	})
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "dup-ts-second", Sender: selfAddr, Recipient: peer,
 		Body: "second insert", CreatedAt: sameTS,
 	})
@@ -721,16 +765,16 @@ func TestReadLastEntryDeterministicOnEqualTimestamp(t *testing.T) {
 	peer := "1111111111111111111111111111111111111111"
 	sameTS := "2026-03-24T12:00:00Z"
 
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "same-ts-a", Sender: selfAddr, Recipient: peer,
 		Body: "a", CreatedAt: sameTS,
 	})
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "same-ts-b", Sender: selfAddr, Recipient: peer,
 		Body: "b", CreatedAt: sameTS,
 	})
 
-	entry, err := s.ReadLastEntry("dm", peer)
+	entry, err := s.ReadLastEntry("dm", domain.PeerIdentity(peer))
 	if err != nil {
 		t.Fatalf("ReadLastEntry: %v", err)
 	}
@@ -750,7 +794,7 @@ func TestIntegrityCheckRecovery(t *testing.T) {
 
 	// Create a valid store and write some data.
 	s := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "m1", Sender: "1111111111111111111111111111111111111111",
 		Recipient: selfAddr, Body: "test", CreatedAt: "2026-01-01T00:00:00Z",
 	})
@@ -776,7 +820,7 @@ func TestIntegrityCheckRecovery(t *testing.T) {
 	}
 
 	// Fresh database should be empty.
-	entries, _ := s2.Read("dm", "1111111111111111111111111111111111111111")
+	entries, _ := s2.Read("dm", domain.PeerIdentity("1111111111111111111111111111111111111111"))
 	if entries != nil {
 		t.Fatalf("expected empty store after recovery, got %d entries", len(entries))
 	}
@@ -793,7 +837,7 @@ func TestFlagCheckConstraint(t *testing.T) {
 	// All valid flags should be accepted.
 	validFlags := []string{FlagNone, FlagImmutable, FlagSenderDelete, FlagAnyDelete, FlagAutoDeleteTTL}
 	for i, flag := range validFlags {
-		err := s.Append("dm", selfAddr, Entry{
+		err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 			ID: fmt.Sprintf("flag-%d", i), Sender: selfAddr, Recipient: peer,
 			Body: "test", CreatedAt: fmt.Sprintf("2026-01-01T00:%02d:00Z", i), Flag: flag,
 		})
@@ -804,14 +848,14 @@ func TestFlagCheckConstraint(t *testing.T) {
 
 	// Invalid flag: INSERT OR IGNORE silently ignores CHECK violations,
 	// so the row should not be inserted (no error, but no row either).
-	err := s.Append("dm", selfAddr, Entry{
+	err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "flag-bad", Sender: selfAddr, Recipient: peer,
 		Body: "test", CreatedAt: "2026-01-01T01:00:00Z", Flag: "invalid-flag",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if s.HasEntryID("dm", peer, "flag-bad") {
+	if s.HasEntryID("dm", domain.PeerIdentity(peer), domain.MessageID("flag-bad")) {
 		t.Fatal("invalid flag should not have been inserted")
 	}
 }
@@ -826,7 +870,7 @@ func TestDeliveryStatusCheckConstraint(t *testing.T) {
 
 	// All valid statuses should be accepted.
 	for i, status := range []string{StatusSent, StatusDelivered, StatusSeen} {
-		err := s.Append("dm", selfAddr, Entry{
+		err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 			ID: fmt.Sprintf("status-%d", i), Sender: selfAddr, Recipient: peer,
 			Body: "test", CreatedAt: fmt.Sprintf("2026-01-01T00:%02d:00Z", i), DeliveryStatus: status,
 		})
@@ -836,7 +880,7 @@ func TestDeliveryStatusCheckConstraint(t *testing.T) {
 	}
 
 	// Invalid delivery_status via direct UPDATE should fail.
-	_, err := s.UpdateStatus("dm", peer, "status-0", "invalid-status")
+	_, err := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("status-0"), "invalid-status")
 	if err == nil {
 		t.Fatal("expected error for invalid delivery_status, got nil")
 	}
@@ -850,7 +894,7 @@ func TestTTLSecondsStored(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1111111111111111111111111111111111111111"
 
-	err := s.Append("dm", selfAddr, Entry{
+	err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "ttl-1", Sender: selfAddr, Recipient: peer,
 		Body: "ephemeral", CreatedAt: "2026-01-01T00:00:00Z",
 		Flag: FlagAutoDeleteTTL, TTLSeconds: 3600,
@@ -859,7 +903,7 @@ func TestTTLSecondsStored(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1, got %d", len(entries))
 	}
@@ -880,7 +924,7 @@ func TestMetadataStored(t *testing.T) {
 	peer := "1111111111111111111111111111111111111111"
 
 	meta := `{"edited":true,"edit_at":"2026-01-01T00:05:00Z"}`
-	err := s.Append("dm", selfAddr, Entry{
+	err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "meta-1", Sender: selfAddr, Recipient: peer,
 		Body: "hello", CreatedAt: "2026-01-01T00:00:00Z",
 		Metadata: meta,
@@ -889,7 +933,7 @@ func TestMetadataStored(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].Metadata != meta {
 		t.Fatalf("expected metadata=%q, got %q", meta, entries[0].Metadata)
 	}
@@ -904,21 +948,21 @@ func TestDeleteExpired(t *testing.T) {
 	peer := "1111111111111111111111111111111111111111"
 
 	// Message with TTL=1 second created 2 hours ago — should be expired.
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "expired-1", Sender: selfAddr, Recipient: peer,
 		Body: "old ephemeral", CreatedAt: "2020-01-01T00:00:00Z",
 		Flag: FlagAutoDeleteTTL, TTLSeconds: 1,
 	})
 
 	// Message with TTL=999999 seconds created recently — should survive.
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "alive-1", Sender: selfAddr, Recipient: peer,
 		Body: "still alive", CreatedAt: "2099-01-01T00:00:00Z",
 		Flag: FlagAutoDeleteTTL, TTLSeconds: 999999,
 	})
 
 	// Regular message (no TTL) — should survive.
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "normal-1", Sender: selfAddr, Recipient: peer,
 		Body: "permanent", CreatedAt: "2020-01-01T00:00:00Z",
 	})
@@ -931,7 +975,7 @@ func TestDeleteExpired(t *testing.T) {
 		t.Fatalf("expected 1 deleted, got %d", deleted)
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 surviving entries, got %d", len(entries))
 	}
@@ -956,16 +1000,16 @@ func TestDeleteByID(t *testing.T) {
 
 	peer := "1111111111111111111111111111111111111111"
 
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "del-1", Sender: selfAddr, Recipient: peer,
 		Body: "to delete", CreatedAt: "2026-01-01T00:00:00Z",
 	})
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "keep-1", Sender: selfAddr, Recipient: peer,
 		Body: "to keep", CreatedAt: "2026-01-01T00:01:00Z",
 	})
 
-	ok, err := s.DeleteByID("del-1")
+	ok, err := s.DeleteByID(domain.MessageID("del-1"))
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -974,12 +1018,12 @@ func TestDeleteByID(t *testing.T) {
 	}
 
 	// Deleting non-existent returns false.
-	ok, _ = s.DeleteByID("nonexistent")
+	ok, _ = s.DeleteByID(domain.MessageID("nonexistent"))
 	if ok {
 		t.Fatal("expected false for non-existent message")
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if len(entries) != 1 || entries[0].ID != "keep-1" {
 		t.Fatalf("unexpected entries after delete: %+v", entries)
 	}
@@ -995,17 +1039,17 @@ func TestDeleteByPeer(t *testing.T) {
 	identityB := domain.PeerIdentity("2222222222222222222222222222222222222222")
 
 	// Messages with identityA (both directions).
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "a-out-1", Sender: selfAddr, Recipient: string(identityA),
 		Body: "outgoing to A", CreatedAt: "2026-01-01T00:00:00Z",
 	})
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "a-in-1", Sender: string(identityA), Recipient: selfAddr,
 		Body: "incoming from A", CreatedAt: "2026-01-01T00:01:00Z",
 	})
 
 	// Messages with identityB — must survive deletion of identityA.
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "b-out-1", Sender: selfAddr, Recipient: string(identityB),
 		Body: "outgoing to B", CreatedAt: "2026-01-01T00:02:00Z",
 	})
@@ -1019,13 +1063,13 @@ func TestDeleteByPeer(t *testing.T) {
 	}
 
 	// identityA conversation should be empty.
-	entries, _ := s.Read("dm", string(identityA))
+	entries, _ := s.Read("dm", identityA)
 	if len(entries) != 0 {
 		t.Fatalf("expected 0 entries for identityA, got %d", len(entries))
 	}
 
 	// identityB conversation should be intact.
-	entries, _ = s.Read("dm", string(identityB))
+	entries, _ = s.Read("dm", identityB)
 	if len(entries) != 1 || entries[0].ID != "b-out-1" {
 		t.Fatalf("identityB entries unexpected: %+v", entries)
 	}
@@ -1061,7 +1105,7 @@ func TestReceiptFlowSentToDeliveredToSeen(t *testing.T) {
 	peer := "1122334455667788112233445566778811223344"
 
 	// Step 1: Outgoing message appended with "sent".
-	err := s.Append("dm", selfAddr, Entry{
+	err := s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "flow-1", Sender: selfAddr, Recipient: peer,
 		Body: "encrypted-body", CreatedAt: "2026-01-01T00:00:00Z",
 		DeliveryStatus: StatusSent,
@@ -1070,13 +1114,13 @@ func TestReceiptFlowSentToDeliveredToSeen(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusSent {
 		t.Fatalf("step1: expected %q, got %q", StatusSent, entries[0].DeliveryStatus)
 	}
 
 	// Step 2: Receipt arrives — update to "delivered".
-	ok, err := s.UpdateStatus("dm", peer, "flow-1", StatusDelivered)
+	ok, err := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("flow-1"), StatusDelivered)
 	if err != nil {
 		t.Fatalf("update to delivered: %v", err)
 	}
@@ -1084,29 +1128,29 @@ func TestReceiptFlowSentToDeliveredToSeen(t *testing.T) {
 		t.Fatal("step2: expected update to return true")
 	}
 
-	entries, _ = s.Read("dm", peer)
+	entries, _ = s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusDelivered {
 		t.Fatalf("step2: expected %q, got %q", StatusDelivered, entries[0].DeliveryStatus)
 	}
 
 	// Step 3: Seen receipt arrives — update to "seen".
-	ok, _ = s.UpdateStatus("dm", peer, "flow-1", StatusSeen)
+	ok, _ = s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("flow-1"), StatusSeen)
 	if !ok {
 		t.Fatal("step3: expected update to return true")
 	}
 
-	entries, _ = s.Read("dm", peer)
+	entries, _ = s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusSeen {
 		t.Fatalf("step3: expected %q, got %q", StatusSeen, entries[0].DeliveryStatus)
 	}
 
 	// Step 4: Late "delivered" receipt — must be rejected (monotonic).
-	ok, _ = s.UpdateStatus("dm", peer, "flow-1", StatusDelivered)
+	ok, _ = s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("flow-1"), StatusDelivered)
 	if ok {
 		t.Fatal("step4: late delivered should be rejected after seen")
 	}
 
-	entries, _ = s.Read("dm", peer)
+	entries, _ = s.Read("dm", domain.PeerIdentity(peer))
 	if entries[0].DeliveryStatus != StatusSeen {
 		t.Fatalf("step4: status should still be %q, got %q", StatusSeen, entries[0].DeliveryStatus)
 	}
@@ -1121,19 +1165,19 @@ func TestStatusSurvivesStoreReopen(t *testing.T) {
 
 	// Open store, write message, update status, close.
 	s1 := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
-	_ = s1.Append("dm", selfAddr, Entry{
+	_ = s1.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "persist-1", Sender: selfAddr, Recipient: peer,
 		Body: "encrypted", CreatedAt: "2026-01-01T00:00:00Z",
 		DeliveryStatus: StatusSent,
 	})
-	_, _ = s1.UpdateStatus("dm", peer, "persist-1", StatusDelivered)
+	_, _ = s1.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("persist-1"), StatusDelivered)
 	_ = s1.Close()
 
 	// Reopen store — status should survive.
 	s2 := NewStore(dir, domain.PeerIdentity(selfAddr), domain.ListenAddress(":9999"))
 	defer func() { _ = s2.Close() }()
 
-	entries, err := s2.Read("dm", peer)
+	entries, err := s2.Read("dm", domain.PeerIdentity(peer))
 	if err != nil {
 		t.Fatalf("read after reopen: %v", err)
 	}
@@ -1156,12 +1200,12 @@ func TestUnreadCountReflectsStatusUpdates(t *testing.T) {
 	peer := "1122334455667788112233445566778811223344"
 
 	// Two incoming messages with "delivered" status (unread).
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "unread-1", Sender: peer, Recipient: selfAddr,
 		Body: "hello", CreatedAt: "2026-01-01T00:00:00Z",
 		DeliveryStatus: StatusDelivered,
 	})
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "unread-2", Sender: peer, Recipient: selfAddr,
 		Body: "world", CreatedAt: "2026-01-01T00:01:00Z",
 		DeliveryStatus: StatusDelivered,
@@ -1176,7 +1220,7 @@ func TestUnreadCountReflectsStatusUpdates(t *testing.T) {
 	}
 
 	// Mark first message as seen.
-	if _, err := s.UpdateStatus("dm", peer, "unread-1", StatusSeen); err != nil {
+	if _, err := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("unread-1"), StatusSeen); err != nil {
 		t.Fatalf("update status unread-1: %v", err)
 	}
 
@@ -1186,7 +1230,7 @@ func TestUnreadCountReflectsStatusUpdates(t *testing.T) {
 	}
 
 	// Mark second message as seen.
-	if _, err := s.UpdateStatus("dm", peer, "unread-2", StatusSeen); err != nil {
+	if _, err := s.UpdateStatus("dm", domain.PeerIdentity(peer), domain.MessageID("unread-2"), StatusSeen); err != nil {
 		t.Fatalf("update status unread-2: %v", err)
 	}
 
@@ -1211,12 +1255,12 @@ func TestMessageBodyStoredAsIs(t *testing.T) {
 	// Simulate encrypted body (base64-encoded ciphertext).
 	ciphertext := "U2VhbGVkQm94eyJub25jZSI6IjEyMyIsImNpcGhlcnRleHQiOiJhYmMifQ=="
 
-	_ = s.Append("dm", selfAddr, Entry{
+	_ = s.Append("dm", domain.PeerIdentity(selfAddr), Entry{
 		ID: "enc-1", Sender: selfAddr, Recipient: peer,
 		Body: ciphertext, CreatedAt: "2026-01-01T00:00:00Z",
 	})
 
-	entries, _ := s.Read("dm", peer)
+	entries, _ := s.Read("dm", domain.PeerIdentity(peer))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -1265,7 +1309,7 @@ func TestOutgoingMessageStoredEncrypted(t *testing.T) {
 	}
 
 	// Store the encrypted envelope in the chatlog (same path as SendDirectMessage).
-	err = s.Append("dm", sender.Address, Entry{
+	err = s.Append("dm", domain.PeerIdentity(sender.Address), Entry{
 		ID:             "enc-outgoing-1",
 		Sender:         sender.Address,
 		Recipient:      recipient.Address,
@@ -1278,7 +1322,7 @@ func TestOutgoingMessageStoredEncrypted(t *testing.T) {
 	}
 
 	// Read back from SQLite.
-	entries, err := s.Read("dm", recipient.Address)
+	entries, err := s.Read("dm", domain.PeerIdentity(recipient.Address))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -1359,11 +1403,11 @@ func TestNilDBOperationsAreSafe(t *testing.T) {
 	// A store with nil db (e.g. failed to open) should not panic.
 	s := &Store{identityAddr: "aabbccdd11223344aabbccdd11223344aabbccdd"}
 
-	if err := s.Append("dm", s.identityAddr, Entry{ID: "x"}); err == nil {
+	if err := s.Append("dm", domain.PeerIdentity(s.identityAddr), Entry{ID: "x"}); err == nil {
 		t.Fatal("expected error from nil db Append")
 	}
 
-	entries, err := s.Read("dm", "peer")
+	entries, err := s.Read("dm", domain.PeerIdentity("peer"))
 	if err != nil || entries != nil {
 		t.Fatalf("expected nil/nil from nil db Read, got %v/%v", entries, err)
 	}
@@ -1373,7 +1417,7 @@ func TestNilDBOperationsAreSafe(t *testing.T) {
 		t.Fatalf("expected nil/nil from nil db ListConversations")
 	}
 
-	if s.HasEntryID("dm", "peer", "x") {
+	if s.HasEntryID("dm", domain.PeerIdentity("peer"), domain.MessageID("x")) {
 		t.Fatal("expected false from nil db HasEntryID")
 	}
 
@@ -1392,7 +1436,7 @@ func TestCtxReadersRespectCancellation(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	// Insert a message so queries have data to return if they ignore ctx.
-	_ = s.Append("dm", "abcdef0123456789abcdef0123456789abcdef01", Entry{
+	_ = s.Append("dm", domain.PeerIdentity("abcdef0123456789abcdef0123456789abcdef01"), Entry{
 		ID:             "msg-1",
 		Sender:         "peer-1",
 		Recipient:      "abcdef0123456789abcdef0123456789abcdef01",
@@ -1404,11 +1448,11 @@ func TestCtxReadersRespectCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	if _, err := s.ReadCtx(ctx, "dm", "peer-1"); err == nil {
+	if _, err := s.ReadCtx(ctx, "dm", domain.PeerIdentity("peer-1")); err == nil {
 		t.Fatal("ReadCtx should return error on cancelled context")
 	}
 
-	if _, err := s.ReadLastCtx(ctx, "dm", "peer-1", 1); err == nil {
+	if _, err := s.ReadLastCtx(ctx, "dm", domain.PeerIdentity("peer-1"), 1); err == nil {
 		t.Fatal("ReadLastCtx should return error on cancelled context")
 	}
 
@@ -1416,7 +1460,7 @@ func TestCtxReadersRespectCancellation(t *testing.T) {
 		t.Fatal("ListConversationsCtx should return error on cancelled context")
 	}
 
-	if _, err := s.ReadLastEntryCtx(ctx, "dm", "peer-1"); err == nil {
+	if _, err := s.ReadLastEntryCtx(ctx, "dm", domain.PeerIdentity("peer-1")); err == nil {
 		t.Fatal("ReadLastEntryCtx should return error on cancelled context")
 	}
 

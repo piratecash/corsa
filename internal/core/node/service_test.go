@@ -4853,10 +4853,10 @@ type testMessageStore struct {
 	receipts []protocol.DeliveryReceipt
 }
 
-func (m *testMessageStore) StoreMessage(envelope protocol.Envelope, isOutgoing bool) bool {
+func (m *testMessageStore) StoreMessage(envelope protocol.Envelope, isOutgoing bool) StoreResult {
 	m.stored = append(m.stored, envelope)
 	m.outFlags = append(m.outFlags, isOutgoing)
-	return true
+	return StoreInserted
 }
 
 func (m *testMessageStore) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool {
@@ -4938,6 +4938,258 @@ func TestMessageStoreCalledForLocalDM(t *testing.T) {
 		t.Fatal("expected isOutgoing=false for incoming message")
 	}
 }
+
+// TestMessageStoreDuplicateSuppressesEvent verifies that when the
+// MessageStore reports a duplicate (returns false), storeIncomingMessage
+// does not emit a LocalChangeEvent. This prevents duplicate beeps and
+// unread increments after a client restart when relay backlog contains
+// messages already persisted in the chatlog.
+func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddress(t)
+	svc, cleanup := startTestNode(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+	})
+	defer cleanup()
+
+	// A store that returns StoreDuplicate on the second call.
+	calls := 0
+	dupStore := &duplicateAwareStore{storeFunc: func(envelope protocol.Envelope, isOutgoing bool) StoreResult {
+		calls++
+		if calls == 1 {
+			return StoreInserted
+		}
+		return StoreDuplicate
+	}}
+	svc.RegisterMessageStore(dupStore)
+
+	peerID, _ := identity.Generate()
+	peerPubKey := identity.PublicKeyBase64(peerID.PublicKey)
+	peerBoxKey := identity.BoxPublicKeyBase64(peerID.BoxPublicKey)
+	peerBoxSig := identity.SignBoxKeyBinding(peerID)
+
+	svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: peerAddr(peerID),
+			PubKey:  peerPubKey,
+			BoxKey:  peerBoxKey,
+			BoxSig:  peerBoxSig,
+		}},
+	})
+	svc.addKnownPubKey(peerAddr(peerID), peerPubKey)
+
+	sealed, err := directmsg.EncryptForParticipants(
+		peerID,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(svc.identity.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello"},
+	)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	events, cancel := svc.SubscribeLocalChanges()
+	defer cancel()
+
+	msgID, _ := protocol.NewMessageID()
+	msg := incomingMessage{
+		ID:        msgID,
+		Topic:     "dm",
+		Sender:    peerAddr(peerID),
+		Recipient: svc.identity.Address,
+		Flag:      protocol.MessageFlagImmutable,
+		CreatedAt: time.Now().UTC(),
+		Body:      sealed,
+	}
+
+	// First store — StoreMessage returns true → event emitted.
+	stored1, _, code1 := svc.storeIncomingMessage(msg, false)
+	if !stored1 || code1 != "" {
+		t.Fatalf("first store failed: stored=%v code=%q", stored1, code1)
+	}
+	// Drain all events from the first store. The node may emit both a
+	// new_message event and a receipt_update (delivery receipt sent back
+	// to the sender). We need to consume everything before the second
+	// store to avoid false positives.
+	drainTimeout := time.After(2 * time.Second)
+	gotFirst := false
+	for {
+		select {
+		case <-events:
+			gotFirst = true
+			// Keep draining — there may be more events (e.g. receipt_update).
+			continue
+		case <-time.After(300 * time.Millisecond):
+			// No more events within 300ms — done draining.
+		case <-drainTimeout:
+			if !gotFirst {
+				t.Fatal("expected LocalChangeEvent after first store")
+			}
+		}
+		break
+	}
+	if !gotFirst {
+		t.Fatal("expected at least one LocalChangeEvent after first store")
+	}
+
+	// Clear s.seen so the node-level dedup doesn't catch it (simulates restart).
+	svc.mu.Lock()
+	delete(svc.seen, string(msgID))
+	svc.mu.Unlock()
+
+	// Second store — StoreMessage returns StoreDuplicate.
+	// The duplicate is NOT added to s.topics (prevents DMHeaders
+	// from re-triggering unread counts via repairUnreadFromHeaders).
+	// storeIncomingMessage still returns stored=true because the
+	// in-memory seen check passes (we cleared s.seen above) and
+	// the message is accepted at the node level even though it
+	// doesn't enter s.topics.
+	stored2, _, code2 := svc.storeIncomingMessage(msg, false)
+	if !stored2 {
+		t.Fatal("second store should still return true (accepted by node)")
+	}
+	if code2 != "" {
+		t.Fatalf("duplicate should not produce error code, got %q", code2)
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("should NOT emit event for duplicate, got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: no event.
+	}
+
+	// Verify the duplicate did NOT enter s.topics — this is the key
+	// invariant that closes the DMHeaders → repairUnreadFromHeaders path.
+	svc.mu.RLock()
+	dmCount := 0
+	for _, env := range svc.topics["dm"] {
+		if string(env.ID) == string(msgID) {
+			dmCount++
+		}
+	}
+	svc.mu.RUnlock()
+	if dmCount != 1 {
+		t.Fatalf("expected exactly 1 copy in s.topics[dm], got %d", dmCount)
+	}
+}
+
+// TestDuplicateMessageExcludedFromDMHeaders verifies the full path:
+// after restart (s.seen cleared), a duplicate message that returns
+// StoreDuplicate must NOT appear in fetch_dm_headers. This is the
+// invariant that prevents repairUnreadFromHeaders() from re-incrementing
+// unread counts on the UI side.
+func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddress(t)
+	svc, cleanup := startTestNode(t, config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: normalizeAddress(addr),
+		BootstrapPeers:   []string{},
+	})
+	defer cleanup()
+
+	calls := 0
+	dupStore := &duplicateAwareStore{storeFunc: func(envelope protocol.Envelope, isOutgoing bool) StoreResult {
+		calls++
+		if calls == 1 {
+			return StoreInserted
+		}
+		return StoreDuplicate
+	}}
+	svc.RegisterMessageStore(dupStore)
+
+	peerID, _ := identity.Generate()
+	peerPubKey := identity.PublicKeyBase64(peerID.PublicKey)
+	peerBoxKey := identity.BoxPublicKeyBase64(peerID.BoxPublicKey)
+	peerBoxSig := identity.SignBoxKeyBinding(peerID)
+
+	svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: peerAddr(peerID),
+			PubKey:  peerPubKey,
+			BoxKey:  peerBoxKey,
+			BoxSig:  peerBoxSig,
+		}},
+	})
+	svc.addKnownPubKey(peerAddr(peerID), peerPubKey)
+
+	sealed, err := directmsg.EncryptForParticipants(
+		peerID,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(svc.identity.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello headers"},
+	)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	msgID, _ := protocol.NewMessageID()
+	msg := incomingMessage{
+		ID:        msgID,
+		Topic:     "dm",
+		Sender:    peerAddr(peerID),
+		Recipient: svc.identity.Address,
+		Flag:      protocol.MessageFlagImmutable,
+		CreatedAt: time.Now().UTC(),
+		Body:      sealed,
+	}
+
+	// First store — StoreInserted → message appears in DMHeaders.
+	svc.storeIncomingMessage(msg, false)
+
+	resp1 := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_dm_headers"})
+	found1 := 0
+	for _, h := range resp1.DMHeaders {
+		if h.ID == string(msgID) {
+			found1++
+		}
+	}
+	if found1 != 1 {
+		t.Fatalf("after first store: expected 1 header for msgID, got %d (total headers: %d)", found1, resp1.Count)
+	}
+
+	// Simulate restart: clear s.seen so the node-level dedup won't catch it.
+	svc.mu.Lock()
+	delete(svc.seen, string(msgID))
+	svc.mu.Unlock()
+
+	// Second store — StoreDuplicate → must NOT add another copy to DMHeaders.
+	svc.storeIncomingMessage(msg, false)
+
+	resp2 := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_dm_headers"})
+	found2 := 0
+	for _, h := range resp2.DMHeaders {
+		if h.ID == string(msgID) {
+			found2++
+		}
+	}
+	if found2 != 1 {
+		t.Fatalf("after duplicate store: expected still 1 header for msgID, got %d (total headers: %d)", found2, resp2.Count)
+	}
+}
+
+// duplicateAwareStore is a test MessageStore where the caller controls
+// the return value of StoreMessage.
+type duplicateAwareStore struct {
+	storeFunc func(protocol.Envelope, bool) StoreResult
+}
+
+func (d *duplicateAwareStore) StoreMessage(e protocol.Envelope, o bool) StoreResult {
+	return d.storeFunc(e, o)
+}
+func (d *duplicateAwareStore) UpdateDeliveryStatus(protocol.DeliveryReceipt) bool { return true }
+
+func peerAddr(id *identity.Identity) string { return id.Address }
 
 // TestMessageStoreNotCalledForTransitDM verifies that transit messages
 // (where this node is neither sender nor recipient) do NOT call the
@@ -7873,5 +8125,157 @@ func TestDeleteTrustedContactNotFound(t *testing.T) {
 	})
 	if reply.Type != "ok" {
 		t.Fatalf("expected ok for unknown address (idempotent), got %s: %s", reply.Type, reply.Error)
+	}
+}
+
+// TestDeleteTrustedContactDropsPendingMessages verifies that deleting a trusted
+// contact also removes all pending outbound messages addressed to that contact.
+func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	address := freeAddress(t)
+
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+	})
+	defer stop()
+
+	// Import a contact.
+	peerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate peer identity: %v", err)
+	}
+	peerBoxSig := identity.SignBoxKeyBinding(peerID)
+	importReply := svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{
+			{
+				Address: peerID.Address,
+				PubKey:  identity.PublicKeyBase64(peerID.PublicKey),
+				BoxKey:  identity.BoxPublicKeyBase64(peerID.BoxPublicKey),
+				BoxSig:  peerBoxSig,
+			},
+		},
+	})
+	if importReply.Type != "contacts_imported" {
+		t.Fatalf("import failed: %s", importReply.Error)
+	}
+
+	// Directly populate pending queue with messages for the peer.
+	relay := domain.PeerAddress("10.0.0.1:64646")
+	otherRecipient := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	svc.mu.Lock()
+	svc.pending[relay] = []pendingFrame{
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Recipient: peerID.Address}, QueuedAt: time.Now()},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Recipient: peerID.Address}, QueuedAt: time.Now()},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Recipient: otherRecipient}, QueuedAt: time.Now()},
+	}
+	for _, pf := range svc.pending[relay] {
+		svc.pendingKeys[pendingFrameKey(relay, pf.Frame)] = struct{}{}
+	}
+	svc.outbound["msg-1"] = outboundDelivery{MessageID: "msg-1", Recipient: peerID.Address, Status: "queued"}
+	svc.outbound["msg-2"] = outboundDelivery{MessageID: "msg-2", Recipient: peerID.Address, Status: "retrying"}
+	svc.outbound["msg-3"] = outboundDelivery{MessageID: "msg-3", Recipient: otherRecipient, Status: "queued"}
+	svc.mu.Unlock()
+
+	// Delete the contact.
+	deleteReply := svc.HandleLocalFrame(protocol.Frame{
+		Type:    "delete_trusted_contact",
+		Address: peerID.Address,
+	})
+	if deleteReply.Type != "ok" {
+		t.Fatalf("delete_trusted_contact failed: %s", deleteReply.Error)
+	}
+
+	// Verify: pending messages for deleted contact are gone, other messages remain.
+	svc.mu.RLock()
+	remaining := svc.pending[relay]
+	outbound1 := svc.outbound["msg-1"]
+	outbound2 := svc.outbound["msg-2"]
+	outbound3 := svc.outbound["msg-3"]
+	svc.mu.RUnlock()
+
+	if len(remaining) != 1 {
+		t.Fatalf("expected 1 remaining pending frame, got %d", len(remaining))
+	}
+	if remaining[0].Frame.ID != "msg-3" {
+		t.Fatalf("expected msg-3 to remain, got %s", remaining[0].Frame.ID)
+	}
+	if outbound1.MessageID != "" {
+		t.Fatal("outbound entry for msg-1 should have been removed")
+	}
+	if outbound2.MessageID != "" {
+		t.Fatal("outbound entry for msg-2 should have been removed")
+	}
+	if outbound3.MessageID == "" {
+		t.Fatal("outbound entry for msg-3 should still exist")
+	}
+}
+
+// TestDeleteTrustedContactPersistsOutboundOnly verifies that deleting a contact
+// persists the queue state even when only outbound delivery entries (no pending
+// frames) exist for the deleted recipient. Without this, stale outbound rows
+// would survive a restart.
+func TestDeleteTrustedContactPersistsOutboundOnly(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	address := freeAddress(t)
+	queuePath := filepath.Join(tempDir, "queue.json")
+
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   queuePath,
+	})
+	defer stop()
+
+	peerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate peer identity: %v", err)
+	}
+	peerBoxSig := identity.SignBoxKeyBinding(peerID)
+	svc.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{
+			{
+				Address: peerID.Address,
+				PubKey:  identity.PublicKeyBase64(peerID.PublicKey),
+				BoxKey:  identity.BoxPublicKeyBase64(peerID.BoxPublicKey),
+				BoxSig:  peerBoxSig,
+			},
+		},
+	})
+
+	// Only outbound entries, no pending frames.
+	svc.mu.Lock()
+	svc.outbound["ob-1"] = outboundDelivery{MessageID: "ob-1", Recipient: peerID.Address, Status: "delivered"}
+	svc.mu.Unlock()
+
+	// Persist initial state so the outbound entry is on disk.
+	svc.mu.RLock()
+	snapshot := svc.queueStateSnapshotLocked()
+	svc.mu.RUnlock()
+	svc.persistQueueState(snapshot)
+
+	// Delete the contact — should persist even though dropped == 0.
+	svc.HandleLocalFrame(protocol.Frame{
+		Type:    "delete_trusted_contact",
+		Address: peerID.Address,
+	})
+
+	// Reload queue state from disk and verify the outbound entry is gone.
+	reloaded, err := loadQueueState(queuePath)
+	if err != nil {
+		t.Fatalf("reload queue state: %v", err)
+	}
+	if _, ok := reloaded.OutboundState["ob-1"]; ok {
+		t.Fatal("outbound entry ob-1 should have been removed from persisted queue state")
 	}
 }

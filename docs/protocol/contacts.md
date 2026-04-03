@@ -115,6 +115,34 @@ Imports one or more contact entries into the local node.
 - The `count` field reflects how many contacts were successfully imported
 - Duplicate imports (same address + key) are idempotent
 
+### delete_trusted_contact
+
+Removes a contact from the trust store. Also drops all pending outbound messages addressed to the deleted contact and clears their outbound delivery tracking, so queued messages are never delivered after the user explicitly removes an identity.
+
+**Request Format:**
+```json
+{
+  "type": "delete_trusted_contact",
+  "address": "<40-char hex fingerprint>"
+}
+```
+
+**Response Format:**
+```json
+{
+  "type": "ok",
+  "address": "<deleted address>"
+}
+```
+
+**Behavior:**
+- Removes the contact from the persistent trust store
+- Drops all `send_message` frames in the pending queue where `recipient == address`
+- Removes corresponding `pendingKeys` dedup entries
+- Clears `outbound` delivery tracking entries for the deleted recipient
+- Persists updated queue state to disk
+- Idempotent: returns `ok` even if the address was not in the trust store
+
 ### fetch_identities
 
 Retrieves the list of all known identity addresses. This includes the local node and every peer whose identity has been learned through contact exchange or direct connection.
@@ -375,6 +403,34 @@ sequenceDiagram
 - Сохраняются только успешно проверенные контакты
 - Поле `count` отражает, сколько контактов было успешно импортировано
 - Дублирующиеся импорты (тот же адрес + ключ) идемпотентны
+
+### delete_trusted_contact
+
+Удаляет контакт из хранилища доверия. Также удаляет все ожидающие исходящие сообщения, адресованные удалённому контакту, и очищает трекинг доставки, чтобы поставленные в очередь сообщения не были доставлены после того, как пользователь явно удалил identity.
+
+**Формат запроса:**
+```json
+{
+  "type": "delete_trusted_contact",
+  "address": "<40-символьный hex-отпечаток>"
+}
+```
+
+**Формат ответа:**
+```json
+{
+  "type": "ok",
+  "address": "<удалённый адрес>"
+}
+```
+
+**Поведение:**
+- Удаляет контакт из постоянного хранилища доверия
+- Удаляет все фреймы `send_message` в очереди ожидания, где `recipient == address`
+- Удаляет соответствующие записи дедупликации `pendingKeys`
+- Очищает записи трекинга доставки `outbound` для удалённого получателя
+- Сохраняет обновлённое состояние очереди на диск
+- Идемпотентен: возвращает `ok` даже если адрес не был в хранилище доверия
 
 ### fetch_identities
 

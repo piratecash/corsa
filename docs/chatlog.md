@@ -91,15 +91,21 @@ sequenceDiagram
     NODE->>NODE: store in s.topics[dm]
     alt local message (sender or recipient is this node)
         NODE->>SVC: MessageStore.StoreMessage(envelope, isOutgoing)
-        SVC->>LOG: chatLog.Append(entry)
+        SVC->>LOG: chatLog.AppendReportNew(entry)
         Note over LOG: INSERT OR IGNORE into messages table<br/>sealed envelope stored as-is<br/>no extra encryption
-        SVC-->>NODE: true (success)
-        NODE-->>UI: LocalChangeEvent(new_message, ciphertext)
-        NODE->>NODE: push to DM subscribers
-        UI->>UI: if matches active conversation:
-        UI->>UI:   DecryptIncomingMessage(event)
-        UI->>UI:   cache.AppendMessage (instant)
-        Note over UI: single message decrypted,<br/>NOT full conversation re-read
+        alt genuinely new (RowsAffected > 0)
+            SVC-->>NODE: true
+            NODE-->>UI: LocalChangeEvent(new_message, ciphertext)
+            NODE->>NODE: push to DM subscribers
+            UI->>UI: if matches active conversation:
+            UI->>UI:   DecryptIncomingMessage(event)
+            Note over UI: trusted contacts first,<br/>then network contacts fallback
+            UI->>UI:   cache.AppendMessage (instant)
+            Note over UI: single message decrypted,<br/>NOT full conversation re-read
+        else duplicate (already in chatlog)
+            SVC-->>NODE: false
+            Note over NODE: no LocalChangeEvent emitted<br/>no beep, no unread increment
+        end
     else transit message (neither party is this node)
         Note over NODE: NOT written to chatlog<br/>(MessageStore not called)
         NODE->>NODE: trackRelayMessage()
@@ -257,6 +263,31 @@ internal-only columns (`topic`, `updated_at`) that are not exposed through the
 | `created_at`      | string | yes         | RFC3339Nano timestamp                                |
 | `updated_at`      | string | **no**      | RFC3339Nano timestamp set by `UpdateStatus()`. Internal bookkeeping — not read back through `Entry` or protocol frames. |
 
+#### Domain types in Store API
+
+All exported `chatlog.Store` methods use typed parameters from `domain` package
+instead of raw strings. This enforces compile-time distinction between
+peer identities, message IDs, and other string-shaped values:
+
+- **`domain.PeerIdentity`** — used for `selfAddress`, `peerAddress`, `identity` parameters (40-char Ed25519 hex fingerprint).
+- **`domain.MessageID`** — used for `messageID`, `id` parameters (UUID v4 string).
+- **`domain.ListenAddress`** — used for the `listenAddress` constructor parameter.
+
+Method signatures:
+
+- `Append(topic string, selfAddress domain.PeerIdentity, entry Entry) error`
+- `AppendReportNew(topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
+- `Read(topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
+- `ReadCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
+- `ReadLast(topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
+- `ReadLastEntry(topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `ReadLastEntryCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `UpdateStatus(topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
+- `HasEntryID(topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `DeleteByID(messageID domain.MessageID) (bool, error)`
+- `DeleteByPeer(identity domain.PeerIdentity) (int64, error)`
+
 #### Message status lifecycle
 
 ```
@@ -351,7 +382,7 @@ The `flag` column has a CHECK constraint enforcing these values.
 
 Two deletion methods are available:
 
-- **`DeleteByID(messageID)`** — removes a single message by primary key. Returns true if found.
+- **`DeleteByID(messageID domain.MessageID)`** — removes a single message by primary key. Returns true if found.
 - **`DeleteExpired()`** — batch-removes all auto-delete-ttl messages whose lifetime has elapsed. Uses one SQL query:
   ```sql
   DELETE FROM messages
@@ -558,25 +589,32 @@ end-to-end encryption for DMs.
 ```
 storeIncomingMessage()
   ├── validate timestamp and signatures
-  ├── store in-memory (s.topics[topic])
   ├── if isLocalMessage() && messageStore != nil:
-  │     ├── messageStore.StoreMessage(envelope, isOutgoing)
-  │     │     └── DesktopClient: chatLog.Append() → INSERT OR IGNORE
-  │     ├── if StoreMessage returns true:
+  │     ├── messageStore.StoreMessage(envelope, isOutgoing) → StoreResult
+  │     │     └── DesktopClient: chatLog.AppendReportNew() → INSERT OR IGNORE
+  │     ├── StoreInserted:
+  │     │     ├── add to s.topics (in-memory)
   │     │     ├── emitLocalChange() → notify UI
-  │     │     └── push to DM subscribers + delivery receipt
-  │     └── if StoreMessage returns false:
-  │           └── emitLocalChange() skipped (failed persistence)
+  │     │     └── delivery receipt + push to DM subscribers
+  │     ├── StoreDuplicate:
+  │     │     └── skip s.topics, skip event, skip delivery receipt
+  │     │         (closes both event-path and DMHeaders header-path)
+  │     └── StoreFailed:
+  │           ├── add to s.topics (don't lose from network)
+  │           └── skip event (stale data)
+  ├── if !isLocal or messageStore == nil:
+  │     └── add to s.topics unconditionally
   ├── gossip to peers (if routing, via shouldRouteStoredMessage)
   └── trackRelayMessage() (transit DMs only)
 ```
 
 The node delegates persistence to the registered `MessageStore` handler
-(implemented by `DesktopClient`). The handler calls `chatLog.Append()`
-synchronously. If `StoreMessage` returns false (persistence error),
-`emitLocalChange()` is skipped to maintain the "DB first, then event" invariant.
-Errors are logged by `DesktopClient` but do not fail the in-memory store
-and network propagation — those always proceed.
+(implemented by `DesktopClient`). The handler calls `chatLog.AppendReportNew()`
+synchronously and returns a `StoreResult` enum:
+
+- **`StoreInserted`** — genuinely new message (INSERT affected rows > 0). Added to `s.topics`, UI event emitted, delivery receipt sent.
+- **`StoreDuplicate`** — already in chatlog (INSERT OR IGNORE affected 0 rows). **Not** added to `s.topics`, event skipped, delivery receipt skipped. This is the durable deduplication layer: `s.seen` is ephemeral and does not survive process restarts, but the chatlog on disk is the source of truth. Keeping duplicates out of `s.topics` also prevents `fetchDMHeadersFrame()` from including them in DMHeaders, which would let `repairUnreadFromHeaders()` re-increment unread counts on the UI.
+- **`StoreFailed`** — write error. Added to `s.topics` (message is not lost from the network) but event is skipped. Errors are logged by `DesktopClient`; network propagation always proceeds.
 
 **Relay-only nodes (`corsa-node`) have `messageStore = nil`.** Messages are
 stored in-memory and relayed, but never persisted to SQLite.
@@ -812,15 +850,21 @@ sequenceDiagram
     NODE->>NODE: запись в s.topics[dm]
     alt локальное сообщение (sender или recipient — эта нода)
         NODE->>SVC: MessageStore.StoreMessage(envelope, isOutgoing)
-        SVC->>LOG: chatLog.Append(entry)
+        SVC->>LOG: chatLog.AppendReportNew(entry)
         Note over LOG: INSERT OR IGNORE в таблицу messages<br/>sealed envelope хранится как есть<br/>без доп. шифрования
-        SVC-->>NODE: true (успех)
-        NODE-->>UI: LocalChangeEvent(new_message, ciphertext)
-        NODE->>NODE: push подписчикам DM
-        UI->>UI: если совпадает с активным разговором:
-        UI->>UI:   DecryptIncomingMessage(event)
-        UI->>UI:   cache.AppendMessage (мгновенно)
-        Note over UI: расшифровка одного сообщения,<br/>НЕ полное перечитывание разговора
+        alt новое сообщение (RowsAffected > 0)
+            SVC-->>NODE: true
+            NODE-->>UI: LocalChangeEvent(new_message, ciphertext)
+            NODE->>NODE: push подписчикам DM
+            UI->>UI: если совпадает с активным разговором:
+            UI->>UI:   DecryptIncomingMessage(event)
+            Note over UI: сначала trusted contacts,<br/>затем fallback на network contacts
+            UI->>UI:   cache.AppendMessage (мгновенно)
+            Note over UI: расшифровка одного сообщения,<br/>НЕ полное перечитывание разговора
+        else дубликат (уже есть в chatlog)
+            SVC-->>NODE: false
+            Note over NODE: LocalChangeEvent не эмиттится<br/>нет звука, нет инкремента непрочитанных
+        end
     else транзитное сообщение (ни одна сторона — не эта нода)
         Note over NODE: НЕ записывается в chatlog<br/>(MessageStore не вызывается)
         NODE->>NODE: trackRelayMessage()
@@ -978,6 +1022,31 @@ CREATE TABLE IF NOT EXISTS messages (
 | `created_at`      | string | да          | Временная метка RFC3339Nano                                   |
 | `updated_at`      | string | **нет**     | Временная метка RFC3339Nano, устанавливаемая `UpdateStatus()`. Внутренняя бухгалтерия — не читается обратно через `Entry` или протокольные фреймы. |
 
+#### Доменные типы в API Store
+
+Все экспортируемые методы `chatlog.Store` используют типизированные параметры
+из пакета `domain` вместо сырых строк. Это обеспечивает компайл-тайм
+разграничение между peer identity, message ID и другими строковыми значениями:
+
+- **`domain.PeerIdentity`** — для параметров `selfAddress`, `peerAddress`, `identity` (40-символьный Ed25519 hex fingerprint).
+- **`domain.MessageID`** — для параметров `messageID`, `id` (строка UUID v4).
+- **`domain.ListenAddress`** — для параметра `listenAddress` в конструкторе.
+
+Сигнатуры методов:
+
+- `Append(topic string, selfAddress domain.PeerIdentity, entry Entry) error`
+- `AppendReportNew(topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
+- `Read(topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
+- `ReadCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
+- `ReadLast(topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
+- `ReadLastEntry(topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `ReadLastEntryCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `UpdateStatus(topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
+- `HasEntryID(topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `DeleteByID(messageID domain.MessageID) (bool, error)`
+- `DeleteByPeer(identity domain.PeerIdentity) (int64, error)`
+
 #### Жизненный цикл статуса
 
 ```
@@ -1072,7 +1141,7 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 
 Два метода удаления:
 
-- **`DeleteByID(messageID)`** — удаляет одно сообщение по первичному ключу. Возвращает true если найдено.
+- **`DeleteByID(messageID domain.MessageID)`** — удаляет одно сообщение по первичному ключу. Возвращает true если найдено.
 - **`DeleteExpired()`** — пакетное удаление всех auto-delete-ttl сообщений, время жизни которых истекло. Один SQL-запрос:
   ```sql
   DELETE FROM messages
@@ -1279,25 +1348,32 @@ flowchart LR
 ```
 storeIncomingMessage()
   ├── валидация timestamp и подписей
-  ├── запись в память (s.topics[topic])
   ├── если isLocalMessage() && messageStore != nil:
-  │     ├── messageStore.StoreMessage(envelope, isOutgoing)
-  │     │     └── DesktopClient: chatLog.Append() → INSERT OR IGNORE
-  │     ├── если StoreMessage вернул true:
+  │     ├── messageStore.StoreMessage(envelope, isOutgoing) → StoreResult
+  │     │     └── DesktopClient: chatLog.AppendReportNew() → INSERT OR IGNORE
+  │     ├── StoreInserted:
+  │     │     ├── добавить в s.topics (в памяти)
   │     │     ├── emitLocalChange() → уведомление UI
-  │     │     └── push подписчикам DM + delivery receipt
-  │     └── если StoreMessage вернул false:
-  │           └── emitLocalChange() пропускается (ошибка персистенции)
+  │     │     └── delivery receipt + push подписчикам DM
+  │     ├── StoreDuplicate:
+  │     │     └── пропустить s.topics, event, delivery receipt
+  │     │         (закрывает оба пути: event-path и DMHeaders header-path)
+  │     └── StoreFailed:
+  │           ├── добавить в s.topics (не терять из сети)
+  │           └── пропустить event (устаревшие данные)
+  ├── если !isLocal или messageStore == nil:
+  │     └── добавить в s.topics безусловно
   ├── gossip к peers (если relay, через shouldRouteStoredMessage)
   └── trackRelayMessage() (только транзитные DM)
 ```
 
 Нода делегирует персистентность зарегистрированному обработчику `MessageStore`
-(реализован `DesktopClient`). Обработчик вызывает `chatLog.Append()` синхронно.
-Если `StoreMessage` вернул false (ошибка персистенции), `emitLocalChange()`
-пропускается для поддержания инварианта «сначала БД, потом событие».
-Ошибки логируются `DesktopClient`, но не блокируют in-memory хранение
-и сетевое распространение — они продолжаются в любом случае.
+(реализован `DesktopClient`). Обработчик вызывает `chatLog.AppendReportNew()`
+синхронно и возвращает enum `StoreResult`:
+
+- **`StoreInserted`** — реально новое сообщение (INSERT затронул строки > 0). Добавляется в `s.topics`, UI event эмитится, delivery receipt отправляется.
+- **`StoreDuplicate`** — уже есть в chatlog (INSERT OR IGNORE затронул 0 строк). **Не** добавляется в `s.topics`, event пропускается, delivery receipt пропускается. Это надёжный слой дедупликации: `s.seen` эфемерна и не переживает рестарт процесса, но chatlog на диске — источник истины. Исключение дубликатов из `s.topics` также предотвращает попадание в DMHeaders через `fetchDMHeadersFrame()`, что не даёт `repairUnreadFromHeaders()` повторно инкрементить счётчик непрочитанных.
+- **`StoreFailed`** — ошибка записи. Добавляется в `s.topics` (сообщение не теряется из сети), но event пропускается. Ошибки логируются `DesktopClient`; сетевое распространение продолжается в любом случае.
 
 **Relay-only ноды (`corsa-node`) имеют `messageStore = nil`.** Сообщения
 хранятся в памяти и ретранслируются, но не записываются в SQLite.

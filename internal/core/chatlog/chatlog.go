@@ -65,13 +65,13 @@ type ConversationSummary struct {
 // Store manages the SQLite chatlog database for a single node identity.
 type Store struct {
 	db           *sql.DB
-	identityAddr string // full 40-char identity address
+	identityAddr domain.PeerIdentity // full 40-char identity address
 }
 
 // NewStoreFromDB wraps an existing *sql.DB (may be nil) into a Store.
 // Intended for tests that need a Store without filesystem side-effects.
 func NewStoreFromDB(db *sql.DB, identity domain.PeerIdentity) *Store {
-	return &Store{db: db, identityAddr: string(identity)}
+	return &Store{db: db, identityAddr: identity}
 }
 
 // NewStore creates a chatlog store backed by SQLite.
@@ -83,8 +83,8 @@ func NewStoreFromDB(db *sql.DB, identity domain.PeerIdentity) *Store {
 // If corruption is detected the file is renamed to *.corrupt and a fresh
 // database is created so the node can keep running.
 func NewStore(dir string, identity domain.PeerIdentity, listenAddress domain.ListenAddress) *Store {
-	identityAddr := string(identity)
-	short := identityAddr
+	identityAddr := identity
+	short := string(identityAddr)
 	if len(short) > 8 {
 		short = short[:8]
 	}
@@ -252,9 +252,19 @@ func (s *Store) Close() error {
 }
 
 // For DMs the peer is the other party; for global/broadcast use topic "global".
-func (s *Store) Append(topic string, selfAddress string, entry Entry) error {
+func (s *Store) Append(topic string, selfAddress domain.PeerIdentity, entry Entry) error {
+	inserted, err := s.AppendReportNew(topic, selfAddress, entry)
+	_ = inserted
+	return err
+}
+
+// AppendReportNew works like Append but also reports whether the entry was
+// actually inserted (true) or already existed (false). This allows callers
+// to distinguish genuinely new messages from duplicates that were silently
+// ignored by INSERT OR IGNORE, so they can suppress duplicate UI events.
+func (s *Store) AppendReportNew(topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error) {
 	if s.db == nil {
-		return fmt.Errorf("chatlog: database not available")
+		return false, fmt.Errorf("chatlog: database not available")
 	}
 
 	status := entry.DeliveryStatus
@@ -262,16 +272,17 @@ func (s *Store) Append(topic string, selfAddress string, entry Entry) error {
 		status = StatusSent
 	}
 
-	_, err := s.db.Exec(`
+	res, err := s.db.Exec(`
 		INSERT OR IGNORE INTO messages (id, topic, sender, recipient, body, flag, delivery_status, ttl_seconds, metadata, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID, topic, entry.Sender, entry.Recipient, entry.Body,
 		entry.Flag, status, entry.TTLSeconds, entry.Metadata, entry.CreatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("chatlog: insert %s: %w", entry.ID, err)
+		return false, fmt.Errorf("chatlog: insert %s: %w", entry.ID, err)
 	}
-	return nil
+	rows, _ := res.RowsAffected()
+	return rows > 0, nil
 }
 
 // statusRank maps delivery statuses to their monotonic order.
@@ -287,7 +298,7 @@ var statusRank = map[string]int{
 // lifecycle (sent → delivered → seen). Attempts to regress
 // (e.g. seen → delivered) are silently ignored and return false.
 // Returns true if the message was found and actually updated.
-func (s *Store) UpdateStatus(topic string, peerAddress string, messageID string, status string) (bool, error) {
+func (s *Store) UpdateStatus(topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error) {
 	if s.db == nil {
 		return false, fmt.Errorf("chatlog: database not available")
 	}
@@ -334,13 +345,13 @@ func (s *Store) UpdateStatus(topic string, peerAddress string, messageID string,
 	return n > 0, nil
 }
 
-func (s *Store) Read(topic string, peerAddress string) ([]Entry, error) {
+func (s *Store) Read(topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
 	return s.ReadCtx(context.Background(), topic, peerAddress)
 }
 
 // ReadCtx is the context-aware variant of Read.  The context deadline is
 // propagated to the underlying SQLite query so callers can bound I/O time.
-func (s *Store) ReadCtx(ctx context.Context, topic string, peerAddress string) ([]Entry, error) {
+func (s *Store) ReadCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
 	if s.db == nil {
 		return nil, nil
 	}
@@ -358,12 +369,12 @@ func (s *Store) ReadCtx(ctx context.Context, topic string, peerAddress string) (
 	return scanEntries(rows)
 }
 
-func (s *Store) ReadLast(topic string, peerAddress string, n int) ([]Entry, error) {
+func (s *Store) ReadLast(topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error) {
 	return s.ReadLastCtx(context.Background(), topic, peerAddress, n)
 }
 
 // ReadLastCtx is the context-aware variant of ReadLast.
-func (s *Store) ReadLastCtx(ctx context.Context, topic string, peerAddress string, n int) ([]Entry, error) {
+func (s *Store) ReadLastCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error) {
 	if s.db == nil {
 		return nil, nil
 	}
@@ -433,12 +444,12 @@ func (s *Store) ListConversationsCtx(ctx context.Context) ([]ConversationSummary
 	return result, rows.Err()
 }
 
-func (s *Store) ReadLastEntry(topic string, peerAddress string) (*Entry, error) {
+func (s *Store) ReadLastEntry(topic string, peerAddress domain.PeerIdentity) (*Entry, error) {
 	return s.ReadLastEntryCtx(context.Background(), topic, peerAddress)
 }
 
 // ReadLastEntryCtx is the context-aware variant of ReadLastEntry.
-func (s *Store) ReadLastEntryCtx(ctx context.Context, topic string, peerAddress string) (*Entry, error) {
+func (s *Store) ReadLastEntryCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error) {
 	if s.db == nil {
 		return nil, nil
 	}
@@ -498,7 +509,7 @@ func (s *Store) ReadLastEntryPerPeerCtx(ctx context.Context) (map[string]Entry, 
 			continue
 		}
 		peer := e.Recipient
-		if e.Recipient == selfAddr {
+		if e.Recipient == string(selfAddr) {
 			peer = e.Sender
 		}
 		result[peer] = e
@@ -551,7 +562,7 @@ func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
 }
 
 // Returns true if a row was deleted.
-func (s *Store) DeleteByID(messageID string) (bool, error) {
+func (s *Store) DeleteByID(messageID domain.MessageID) (bool, error) {
 	if s.db == nil {
 		return false, fmt.Errorf("chatlog: database not available")
 	}
@@ -565,7 +576,7 @@ func (s *Store) DeleteByID(messageID string) (bool, error) {
 	return n > 0, nil
 }
 
-func (s *Store) HasEntryID(topic string, peerAddress string, id string) bool {
+func (s *Store) HasEntryID(topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool {
 	if s.db == nil {
 		return false
 	}
@@ -577,7 +588,7 @@ func (s *Store) HasEntryID(topic string, peerAddress string, id string) bool {
 // HasEntryInConversation checks whether a message with the given ID exists
 // within a specific DM conversation. Used to validate reply_to references
 // before encrypting — prevents dangling or cross-conversation reply links.
-func (s *Store) HasEntryInConversation(peerAddress string, id string) bool {
+func (s *Store) HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool {
 	if s.db == nil || peerAddress == "" || id == "" {
 		return false
 	}
@@ -592,7 +603,7 @@ func (s *Store) HasEntryInConversation(peerAddress string, id string) bool {
 // peerQuery builds a WHERE clause for messages in a specific conversation.
 // For DMs it filters by (sender=self AND recipient=peer) OR (sender=peer AND recipient=self).
 // For global it filters by topic='global'.
-func (s *Store) peerQuery(topic string, peerAddress string, prefix string, suffix string) (string, []interface{}) {
+func (s *Store) peerQuery(topic string, peerAddress domain.PeerIdentity, prefix string, suffix string) (string, []interface{}) {
 	if topic == "dm" && peerAddress != "" {
 		return prefix +
 			`topic = 'dm' AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))` +

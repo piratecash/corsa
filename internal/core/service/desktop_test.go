@@ -1041,7 +1041,7 @@ func TestExecuteConsoleCommandFetchChatlog(t *testing.T) {
 	peer := "abcdef1234567890abcdef1234567890abcdef12"
 
 	// Insert a test entry.
-	err := c.chatLog.Append("dm", c.id.Address, chatlog.Entry{
+	err := c.chatLog.Append("dm", domain.PeerIdentity(c.id.Address), chatlog.Entry{
 		ID:             "msg-001",
 		Sender:         c.id.Address,
 		Recipient:      peer,
@@ -1075,7 +1075,7 @@ func TestExecuteConsoleCommandFetchChatlogPreviews(t *testing.T) {
 
 	peer := "abcdef1234567890abcdef1234567890abcdef12"
 
-	err := c.chatLog.Append("dm", c.id.Address, chatlog.Entry{
+	err := c.chatLog.Append("dm", domain.PeerIdentity(c.id.Address), chatlog.Entry{
 		ID:             "msg-preview",
 		Sender:         peer,
 		Recipient:      c.id.Address,
@@ -1104,7 +1104,7 @@ func TestExecuteConsoleCommandFetchConversations(t *testing.T) {
 
 	peer := "abcdef1234567890abcdef1234567890abcdef12"
 
-	err := c.chatLog.Append("dm", c.id.Address, chatlog.Entry{
+	err := c.chatLog.Append("dm", domain.PeerIdentity(c.id.Address), chatlog.Entry{
 		ID:             "msg-conv",
 		Sender:         c.id.Address,
 		Recipient:      peer,
@@ -1340,7 +1340,7 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 	}
 
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	err = c.chatLog.Append("dm", id.Address, chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
 		ID:             "msg-out-1",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1458,7 +1458,7 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 		if encErr != nil {
 			t.Fatalf("encrypt for %s: %v", tc.peerAddr, encErr)
 		}
-		err = c.chatLog.Append("dm", id.Address, chatlog.Entry{
+		err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
 			ID:             tc.msgID,
 			Sender:         id.Address,
 			Recipient:      tc.peerAddr,
@@ -1539,7 +1539,7 @@ func TestFetchConversationPreviewsIncludesUnreadCount(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 	// Insert as incoming (from peer) with status "delivered" so it counts as unread.
-	err = c.chatLog.Append("dm", id.Address, chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
 		ID:             "msg-unread",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1636,7 +1636,7 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	err = c.chatLog.Append("dm", id.Address, chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
 		ID:             "msg-single",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1723,7 +1723,7 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 		if encErr != nil {
 			t.Fatalf("encrypt msg %d: %v", i, encErr)
 		}
-		err = c.chatLog.Append("dm", id.Address, chatlog.Entry{
+		err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
 			ID:             fmt.Sprintf("msg-%d", i),
 			Sender:         id.Address,
 			Recipient:      peer.Address,

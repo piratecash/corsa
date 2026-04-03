@@ -209,9 +209,9 @@ func (c *DesktopClient) Close() error {
 // messages that belong to the local identity.
 // ──────────────────────────────────────────────────────────────
 
-func (c *DesktopClient) StoreMessage(envelope protocol.Envelope, isOutgoing bool) bool {
+func (c *DesktopClient) StoreMessage(envelope protocol.Envelope, isOutgoing bool) node.StoreResult {
 	if c.chatLog == nil {
-		return false
+		return node.StoreFailed
 	}
 	status := chatlog.StatusDelivered
 	if isOutgoing {
@@ -227,11 +227,15 @@ func (c *DesktopClient) StoreMessage(envelope protocol.Envelope, isOutgoing bool
 		DeliveryStatus: status,
 		TTLSeconds:     envelope.TTLSeconds,
 	}
-	if err := c.chatLog.Append(envelope.Topic, c.id.Address, entry); err != nil {
+	inserted, err := c.chatLog.AppendReportNew(envelope.Topic, domain.PeerIdentity(c.id.Address), entry)
+	if err != nil {
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
-		return false
+		return node.StoreFailed
 	}
-	return true
+	if !inserted {
+		return node.StoreDuplicate
+	}
+	return node.StoreInserted
 }
 
 func (c *DesktopClient) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool {
@@ -250,7 +254,7 @@ func (c *DesktopClient) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) b
 	if chatlogPeer == "" {
 		return true // not our message, nothing to update
 	}
-	if _, err := c.chatLog.UpdateStatus("dm", chatlogPeer, string(receipt.MessageID), receipt.Status); err != nil {
+	if _, err := c.chatLog.UpdateStatus("dm", domain.PeerIdentity(chatlogPeer), domain.MessageID(receipt.MessageID), receipt.Status); err != nil {
 		log.Error().Str("message_id", string(receipt.MessageID)).Str("status", receipt.Status).Err(err).Msg("chatlog update status failed")
 		return false
 	}
@@ -648,7 +652,7 @@ func (c *DesktopClient) consoleFetchChatlog(topic, peerAddress string) (string, 
 	if topic == "" {
 		topic = "dm"
 	}
-	entries, err := c.chatLog.Read(topic, peerAddress)
+	entries, err := c.chatLog.Read(topic, domain.PeerIdentity(peerAddress))
 	if err != nil {
 		return "", fmt.Errorf("chatlog read: %w", err)
 	}
@@ -713,7 +717,7 @@ func (c *DesktopClient) HasEntryInConversation(peerAddress, messageID string) bo
 	if c.chatLog == nil {
 		return false
 	}
-	return c.chatLog.HasEntryInConversation(peerAddress, messageID)
+	return c.chatLog.HasEntryInConversation(domain.PeerIdentity(peerAddress), domain.MessageID(messageID))
 }
 
 // ConsolePingJSON pings every connected peer over TCP and returns a
@@ -1170,7 +1174,7 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to string, msg do
 	}
 
 	if msg.ReplyTo != "" && c.chatLog != nil {
-		if !c.chatLog.HasEntryInConversation(to, string(msg.ReplyTo)) {
+		if !c.chatLog.HasEntryInConversation(domain.PeerIdentity(to), domain.MessageID(msg.ReplyTo)) {
 			return nil, fmt.Errorf("reply_to message %q not found in conversation with %s", msg.ReplyTo, to)
 		}
 	}
@@ -1671,7 +1675,7 @@ func sanitizeReplyReferences(messages []DirectMessage, store *chatlog.Store, sel
 		if peerAddr == selfAddress {
 			peerAddr = messages[i].Recipient
 		}
-		if !store.HasEntryInConversation(peerAddr, string(messages[i].ReplyTo)) {
+		if !store.HasEntryInConversation(domain.PeerIdentity(peerAddr), domain.MessageID(messages[i].ReplyTo)) {
 			messages[i].ReplyTo = ""
 		}
 	}
@@ -1689,16 +1693,30 @@ func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) 
 	if event.Sender == c.id.Address {
 		senderPubKey = identity.PublicKeyBase64(c.id.PublicKey)
 	} else {
+		// Try the trust store first (explicitly added contacts).
 		contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
 		if err != nil {
 			return nil
 		}
 		contacts := contactsFromFrame(contactsReply)
 		contact, ok := contacts[event.Sender]
-		if !ok || contact.PubKey == "" {
-			return nil
+		if ok && contact.PubKey != "" {
+			senderPubKey = contact.PubKey
+		} else {
+			// Fall back to all known contacts (includes keys recovered
+			// via on-demand sync for relayed messages from senders that
+			// are not in the local trust store yet).
+			allReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+			if err != nil {
+				return nil
+			}
+			allContacts := contactsFromFrame(allReply)
+			allContact, ok := allContacts[event.Sender]
+			if !ok || allContact.PubKey == "" {
+				return nil
+			}
+			senderPubKey = allContact.PubKey
 		}
-		senderPubKey = contact.PubKey
 	}
 
 	msg, err := directmsg.DecryptForIdentity(c.id, event.Sender, senderPubKey, event.Recipient, event.Body)
@@ -1729,7 +1747,7 @@ func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) 
 			if event.Sender == c.id.Address {
 				peerAddress = event.Recipient
 			}
-			if !c.chatLog.HasEntryInConversation(peerAddress, string(replyTo)) {
+			if !c.chatLog.HasEntryInConversation(domain.PeerIdentity(peerAddress), domain.MessageID(replyTo)) {
 				replyTo = ""
 			}
 		}
@@ -1947,7 +1965,7 @@ func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress strin
 
 	// Read directly from the local chatlog — no node frame roundtrip.
 	// Use context-aware variant so caller deadlines bound SQLite I/O.
-	entries, err := c.chatLog.ReadCtx(ctx, "dm", peerAddress)
+	entries, err := c.chatLog.ReadCtx(ctx, "dm", domain.PeerIdentity(peerAddress))
 	if err != nil {
 		return nil, fmt.Errorf("chatlog read: %w", err)
 	}
@@ -2099,7 +2117,7 @@ func (c *DesktopClient) FetchSinglePreview(ctx context.Context, peerAddress stri
 
 	// Read directly from the local chatlog — no node frame roundtrip.
 	// Use context-aware variant so caller deadlines bound SQLite I/O.
-	entry, err := c.chatLog.ReadLastEntryCtx(ctx, "dm", peerAddress)
+	entry, err := c.chatLog.ReadLastEntryCtx(ctx, "dm", domain.PeerIdentity(peerAddress))
 	if err != nil {
 		return nil, fmt.Errorf("chatlog read last: %w", err)
 	}
