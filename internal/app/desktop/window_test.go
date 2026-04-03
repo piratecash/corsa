@@ -4,12 +4,13 @@ import (
 	"testing"
 
 	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/service"
 )
 
 func TestMergeRecipientOrder(t *testing.T) {
-	recipients := []string{"a", "b", "c", "d"}
-	order := []string{"c", "a"}
+	recipients := []domain.PeerIdentity{"a", "b", "c", "d"}
+	order := []domain.PeerIdentity{"c", "a"}
 
 	merged := mergeRecipientOrder(recipients, order)
 
@@ -23,7 +24,7 @@ func TestMergeRecipientOrder(t *testing.T) {
 }
 
 func TestMergeRecipientOrderEmpty(t *testing.T) {
-	merged := mergeRecipientOrder(nil, []string{"a"})
+	merged := mergeRecipientOrder(nil, []domain.PeerIdentity{"a"})
 	if merged != nil {
 		t.Fatalf("expected nil for empty recipients, got %v", merged)
 	}
@@ -31,7 +32,7 @@ func TestMergeRecipientOrderEmpty(t *testing.T) {
 
 func TestSearchKnownIdentities(t *testing.T) {
 	knownIDs := []string{"abc-def-ghi", "xyz-abc-123", "zzz-yyy-xxx"}
-	recipients := []string{"abc-def-ghi"} // already listed
+	recipients := []domain.PeerIdentity{"abc-def-ghi"} // already listed
 	self := "self-addr"
 
 	results := searchKnownIdentities(knownIDs, recipients, self, "abc")

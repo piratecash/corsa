@@ -612,22 +612,6 @@ approach. The routing table is not the place for global search.
 
 **Completed:** model invariants, minimal vertical slice (table routing, announcements, withdrawals, hop_ack, gossip fallback), RPC observability (`fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup`). Full documentation: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md).
 
-#### Migrate UI and DMRouter layer to `domain.PeerIdentity`
-
-The sidebar and related functions (`snapRecipients`, `mergeRecipientOrder`, `ensureSelectedRecipient`, `layoutContactsCard`, `searchKnownIdentities`, `recipientsToChildren`) pass identity addresses as `[]string`. The `recipientButtons` map key and `recipientEditor` text also use raw `string`. The same applies to `DMRouter.peers` map key and `RouterSnapshot.Peers` / `PeerOrder`.
-
-These should use `domain.PeerIdentity` to get compile-time safety against mixing identity addresses with other string values (transport addresses, user input, aliases, etc.).
-
-- [ ] `DMRouter.peers` map key: `map[string]*RouterPeerState` → `map[domain.PeerIdentity]*RouterPeerState`
-- [ ] `RouterSnapshot.Peers`: `map[string]*RouterPeerState` → `map[domain.PeerIdentity]*RouterPeerState`
-- [ ] `RouterSnapshot.PeerOrder`: `[]string` → `[]domain.PeerIdentity`
-- [ ] `snapRecipients() []string` → `[]domain.PeerIdentity`
-- [ ] `mergeRecipientOrder`, `ensureSelectedRecipient`, `searchKnownIdentities`, `recipientsToChildren` parameter types
-- [ ] `recipientButtons map[string]*widget.Clickable` → `map[domain.PeerIdentity]*widget.Clickable`
-- [ ] `layoutRecipientButton`, `layoutContactsCard` parameter types
-- [ ] Update all call sites that iterate over or index into these structures
-- [ ] Update dm_router_test.go and window_test.go
-
 #### Pending work before route health
 
 **Typing discipline:** remove domain-to-string casts in core paths (for example `string(senderAddress)` when the callee should accept `PeerAddress`). Inside `node`, `routing`, `relay`, `health`, `queue`, and state-management code, `string(...)` conversions from `PeerAddress` / `PeerIdentity` should remain only for logging, protocol serialization, config parsing, and UI/RPC formatting boundaries.

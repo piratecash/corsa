@@ -54,10 +54,10 @@ type Window struct {
 	copyIdentityButton   widget.Clickable
 	languageToggle       widget.Clickable
 	languageOptions      map[string]*widget.Clickable
-	recipientButtons     map[string]*widget.Clickable
-	recipientRightClick  map[string]*rightClickState
+	recipientButtons     map[domain.PeerIdentity]*widget.Clickable
+	recipientRightClick  map[domain.PeerIdentity]*rightClickState
 	messageSelectables   map[string]*widget.Selectable
-	lastChatPeer         string
+	lastChatPeer         domain.PeerIdentity
 	language             string
 	showLanguageMenu     bool
 	consoleOpen          bool
@@ -67,7 +67,7 @@ type Window struct {
 	lastCursorPos image.Point
 
 	// Context menu state for right-click on recipient buttons.
-	contextMenuPeer      string // fingerprint of the peer whose context menu is open
+	contextMenuPeer      domain.PeerIdentity // fingerprint of the peer whose context menu is open
 	contextMenuPos       image.Point
 	ctxMenuCopy          widget.Clickable
 	ctxMenuDelete        widget.Clickable
@@ -124,8 +124,8 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 		theme:               theme,
 		language:            language,
 		languageOptions:     make(map[string]*widget.Clickable),
-		recipientButtons:    make(map[string]*widget.Clickable),
-		recipientRightClick: make(map[string]*rightClickState),
+		recipientButtons:    make(map[domain.PeerIdentity]*widget.Clickable),
+		recipientRightClick: make(map[domain.PeerIdentity]*rightClickState),
 		messageSelectables:  make(map[string]*widget.Selectable),
 		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
@@ -247,7 +247,7 @@ func (w *Window) handlePendingActions() {
 		w.chatList.Position.BeforeEnd = false
 	}
 	if pa.RecipientText != "" {
-		w.recipientEditor.SetText(pa.RecipientText)
+		w.recipientEditor.SetText(string(pa.RecipientText))
 	}
 }
 
@@ -292,7 +292,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 	if w.ctxMenuCopy.Clicked(gtx) {
 		gtx.Execute(clipboard.WriteCmd{
 			Type: "text/plain",
-			Data: io.NopCloser(strings.NewReader(w.contextMenuPeer)),
+			Data: io.NopCloser(strings.NewReader(string(w.contextMenuPeer))),
 		})
 		w.router.SetSendStatus(w.t("status.identity_copied"))
 		w.contextMenuPeer = ""
@@ -308,7 +308,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 		w.showAliasEditor = true
 		existing := ""
 		if w.prefs != nil {
-			existing = w.prefs.Alias(domain.PeerIdentity(w.contextMenuPeer))
+			existing = w.prefs.Alias(w.contextMenuPeer)
 		}
 		w.aliasEditor.SetText(existing)
 		gtx.Execute(key.FocusCmd{Tag: &w.aliasEditor})
@@ -320,7 +320,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 	if w.ctxMenuAliasSave.Clicked(gtx) {
 		alias := strings.TrimSpace(w.aliasEditor.Text())
 		if w.prefs != nil {
-			w.prefs.SetAlias(domain.PeerIdentity(w.contextMenuPeer), alias)
+			w.prefs.SetAlias(w.contextMenuPeer, alias)
 			_ = w.prefs.Save()
 		}
 		w.contextMenuPeer = ""
@@ -361,7 +361,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 			}
 		}
 
-		wasActive, err := w.router.RemovePeer(domain.PeerIdentity(peer))
+		wasActive, err := w.router.RemovePeer(peer)
 		if err != nil {
 			w.router.SetSendStatus(w.t("status.delete_failed", err))
 			if w.window != nil {
@@ -372,12 +372,12 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 
 		// Remove saved alias together with the identity.
 		if w.prefs != nil {
-			w.prefs.SetAlias(domain.PeerIdentity(peer), "")
+			w.prefs.SetAlias(peer, "")
 			_ = w.prefs.Save()
 		}
 
 		if wasActive && removedIdx >= 0 && len(recipients) > 1 {
-			remaining := make([]string, 0, len(recipients)-1)
+			remaining := make([]domain.PeerIdentity, 0, len(recipients)-1)
 			remaining = append(remaining, recipients[:removedIdx]...)
 			remaining = append(remaining, recipients[removedIdx+1:]...)
 			nextIdx := removedIdx
@@ -385,7 +385,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 				nextIdx = len(remaining) - 1
 			}
 			w.router.SelectPeer(remaining[nextIdx])
-			w.recipientEditor.SetText(remaining[nextIdx])
+			w.recipientEditor.SetText(string(remaining[nextIdx]))
 		}
 
 		if w.window != nil {
@@ -423,9 +423,9 @@ func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
 }
 
 func (w *Window) triggerSend() {
-	to := strings.TrimSpace(w.snap.ActivePeer)
+	to := domain.PeerIdentity(strings.TrimSpace(string(w.snap.ActivePeer)))
 	if to == "" {
-		to = strings.TrimSpace(w.recipientEditor.Text())
+		to = domain.PeerIdentity(strings.TrimSpace(w.recipientEditor.Text()))
 	}
 	body := strings.TrimSpace(w.messageEditor.Text())
 	if body == "" {
@@ -510,7 +510,7 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	)
 }
 
-func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatus, recipients []string) layout.Dimensions {
+func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatus, recipients []domain.PeerIdentity) layout.Dimensions {
 	rows := []string{
 		w.t("clients.you", w.snap.MyAddress),
 		w.t("clients.known", len(recipients)),
@@ -551,7 +551,7 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 	})
 }
 
-func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatus, results []string) layout.Dimensions {
+func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatus, results []domain.PeerIdentity) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -595,7 +595,7 @@ func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatu
 			if len(results) > 4 {
 				results = results[:4]
 			}
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, recipientsToChildren(results, func(gtx layout.Context, identity string) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, recipientsToChildren(results, func(gtx layout.Context, identity domain.PeerIdentity) layout.Dimensions {
 				return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					return w.layoutRecipientButton(gtx, status, identity, false)
 				})
@@ -604,13 +604,14 @@ func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatu
 	)
 }
 
-func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeStatus, fingerprint string, showUnread bool) layout.Dimensions {
+func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity, showUnread bool) layout.Dimensions {
 	btn := w.recipientButton(fingerprint)
 	rc := w.recipientRightClickState(fingerprint)
 
 	return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		fpStr := string(fingerprint)
 		for btn.Clicked(gtx) {
-			w.recipientEditor.SetText(fingerprint)
+			w.recipientEditor.SetText(fpStr)
 			w.router.SetSendStatus(w.t("status.chat_selected"))
 			w.router.SelectPeer(fingerprint)
 		}
@@ -641,7 +642,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 				w.showDeleteConfirm = false
 				w.showAliasEditor = false
 				// Auto-select this identity so the user sees the chat.
-				w.recipientEditor.SetText(fingerprint)
+				w.recipientEditor.SetText(fpStr)
 				w.router.SelectPeer(fingerprint)
 			}
 		}
@@ -688,7 +689,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						preview := w.snapPreview(fingerprint)
 						if strings.TrimSpace(preview) == "" {
-							preview = fingerprint
+							preview = fpStr
 						}
 						label := material.Body2(w.theme, ellipsize(preview, 44))
 						label.Color = color.NRGBA{R: 187, G: 197, B: 212, A: 255}
@@ -995,7 +996,7 @@ func (w *Window) localNodeErrorRow() string {
 	return w.t("node.error", w.t("node.error.none"))
 }
 
-func (w *Window) snapPreview(recipient string) string {
+func (w *Window) snapPreview(recipient domain.PeerIdentity) string {
 	me := w.snap.MyAddress
 	ps, ok := w.snap.Peers[recipient]
 	if ok && ps.Preview.Body != "" {
@@ -1011,18 +1012,19 @@ func (w *Window) snapPreview(recipient string) string {
 // state. Contacts are managed exclusively by the router: loaded from
 // chatlog at startup, added on incoming messages, removed via RemovePeer.
 // No polling or external contact source is involved.
-func (w *Window) snapRecipients() []string {
-	recipients := make([]string, 0, len(w.snap.Peers))
+func (w *Window) snapRecipients() []domain.PeerIdentity {
+	recipients := make([]domain.PeerIdentity, 0, len(w.snap.Peers))
+	me := domain.PeerIdentity(w.snap.MyAddress)
 	for id := range w.snap.Peers {
-		if id != w.snap.MyAddress && id != "" {
+		if id != me && id != "" {
 			recipients = append(recipients, id)
 		}
 	}
-	sort.Strings(recipients)
+	sort.Slice(recipients, func(i, j int) bool { return recipients[i] < recipients[j] })
 	return mergeRecipientOrder(recipients, w.snap.PeerOrder)
 }
 
-func (w *Window) recipientButton(id string) *widget.Clickable {
+func (w *Window) recipientButton(id domain.PeerIdentity) *widget.Clickable {
 	if btn, ok := w.recipientButtons[id]; ok {
 		return btn
 	}
@@ -1039,7 +1041,7 @@ type rightClickState struct {
 	pressed bool
 }
 
-func (w *Window) recipientRightClickState(id string) *rightClickState {
+func (w *Window) recipientRightClickState(id domain.PeerIdentity) *rightClickState {
 	if s, ok := w.recipientRightClick[id]; ok {
 		return s
 	}
@@ -1048,12 +1050,12 @@ func (w *Window) recipientRightClickState(id string) *rightClickState {
 	return s
 }
 
-func (w *Window) ensureSelectedRecipient(recipients []string) {
+func (w *Window) ensureSelectedRecipient(recipients []domain.PeerIdentity) {
 	selected := w.snap.ActivePeer
 
 	if len(recipients) == 0 {
-		if strings.TrimSpace(selected) != "" {
-			w.recipientEditor.SetText(selected)
+		if strings.TrimSpace(string(selected)) != "" {
+			w.recipientEditor.SetText(string(selected))
 		} else {
 			w.recipientEditor.SetText("")
 		}
@@ -1062,32 +1064,32 @@ func (w *Window) ensureSelectedRecipient(recipients []string) {
 
 	for _, recipient := range recipients {
 		if recipient == selected {
-			w.recipientEditor.SetText(recipient)
+			w.recipientEditor.SetText(string(recipient))
 			return
 		}
 	}
 
-	if strings.TrimSpace(selected) != "" {
-		w.recipientEditor.SetText(selected)
+	if strings.TrimSpace(string(selected)) != "" {
+		w.recipientEditor.SetText(string(selected))
 		return
 	}
 
 	// Auto-select first recipient. AutoSelectPeer sends seen receipts
 	// the same way SelectPeer does — the chat is on screen.
 	w.router.AutoSelectPeer(recipients[0])
-	w.recipientEditor.SetText(recipients[0])
+	w.recipientEditor.SetText(string(recipients[0]))
 }
 
-func mergeRecipientOrder(recipients, order []string) []string {
+func mergeRecipientOrder(recipients, order []domain.PeerIdentity) []domain.PeerIdentity {
 	if len(recipients) == 0 {
 		return nil
 	}
-	known := make(map[string]struct{}, len(recipients))
+	known := make(map[domain.PeerIdentity]struct{}, len(recipients))
 	for _, recipient := range recipients {
 		known[recipient] = struct{}{}
 	}
-	out := make([]string, 0, len(recipients))
-	used := make(map[string]struct{}, len(recipients))
+	out := make([]domain.PeerIdentity, 0, len(recipients))
+	used := make(map[domain.PeerIdentity]struct{}, len(recipients))
 	for _, recipient := range order {
 		if _, ok := known[recipient]; !ok {
 			continue
@@ -1156,7 +1158,7 @@ func intToString(v int) string {
 	return strconv.Itoa(v)
 }
 
-func (w *Window) layoutConversation(gtx layout.Context, recipient string, conversation []service.DirectMessage) layout.Dimensions {
+func (w *Window) layoutConversation(gtx layout.Context, recipient domain.PeerIdentity, conversation []service.DirectMessage) layout.Dimensions {
 	list := material.List(w.theme, &w.chatList)
 	return list.Layout(gtx, len(conversation), func(gtx layout.Context, index int) layout.Dimensions {
 		message := conversation[index]
@@ -1166,7 +1168,7 @@ func (w *Window) layoutConversation(gtx layout.Context, recipient string, conver
 	})
 }
 
-func (w *Window) layoutChatBubble(gtx layout.Context, recipient string, message service.DirectMessage) layout.Dimensions {
+func (w *Window) layoutChatBubble(gtx layout.Context, recipient domain.PeerIdentity, message service.DirectMessage) layout.Dimensions {
 	me := w.snap.MyAddress
 	isMine := message.Sender == me
 
@@ -1297,24 +1299,25 @@ func (w *Window) messageSelectable(id string) *widget.Selectable {
 	return sel
 }
 
-func searchKnownIdentities(knownIDs, recipients []string, self, query string) []string {
+func searchKnownIdentities(knownIDs []string, recipients []domain.PeerIdentity, self, query string) []domain.PeerIdentity {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if query == "" {
 		return nil
 	}
 
-	alreadyListed := make(map[string]struct{}, len(recipients))
+	alreadyListed := make(map[domain.PeerIdentity]struct{}, len(recipients))
 	for _, recipient := range recipients {
 		alreadyListed[recipient] = struct{}{}
 	}
 
-	results := make([]string, 0, len(knownIDs))
-	seen := make(map[string]struct{}, len(knownIDs))
-	for _, id := range knownIDs {
-		id = strings.TrimSpace(id)
-		if id == "" || id == self {
+	results := make([]domain.PeerIdentity, 0, len(knownIDs))
+	seen := make(map[domain.PeerIdentity]struct{}, len(knownIDs))
+	for _, raw := range knownIDs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || raw == self {
 			continue
 		}
+		id := domain.PeerIdentity(raw)
 		if _, ok := seen[id]; ok {
 			continue
 		}
@@ -1322,17 +1325,17 @@ func searchKnownIdentities(knownIDs, recipients []string, self, query string) []
 		if _, ok := alreadyListed[id]; ok {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(id), query) {
+		if !strings.Contains(strings.ToLower(raw), query) {
 			continue
 		}
 		results = append(results, id)
 	}
 
-	sort.Strings(results)
+	sort.Slice(results, func(i, j int) bool { return results[i] < results[j] })
 	return results
 }
 
-func recipientsToChildren(values []string, render func(layout.Context, string) layout.Dimensions) []layout.FlexChild {
+func recipientsToChildren(values []domain.PeerIdentity, render func(layout.Context, domain.PeerIdentity) layout.Dimensions) []layout.FlexChild {
 	children := make([]layout.FlexChild, 0, len(values))
 	for _, value := range values {
 		value := value
@@ -1366,13 +1369,13 @@ func fallback(value, alt string) string {
 
 // peerDisplayName returns the user-assigned alias for the identity,
 // falling back to shortFingerprint when no alias is set.
-func (w *Window) peerDisplayName(identity string) string {
+func (w *Window) peerDisplayName(identity domain.PeerIdentity) string {
 	if w.prefs != nil {
-		if alias := w.prefs.Alias(domain.PeerIdentity(identity)); alias != "" {
+		if alias := w.prefs.Alias(identity); alias != "" {
 			return alias
 		}
 	}
-	return shortFingerprint(identity)
+	return shortFingerprint(string(identity))
 }
 
 func (w *Window) t(key string, args ...any) string {
@@ -1633,7 +1636,7 @@ func (w *Window) contextMenuCard(gtx layout.Context) layout.Dimensions {
 
 func (w *Window) layoutContextMenuItems(gtx layout.Context) layout.Dimensions {
 	aliasLabel := w.t("context.set_alias")
-	if w.prefs != nil && w.prefs.Alias(domain.PeerIdentity(w.contextMenuPeer)) != "" {
+	if w.prefs != nil && w.prefs.Alias(w.contextMenuPeer) != "" {
 		aliasLabel = w.t("context.edit_alias")
 	}
 
@@ -1721,7 +1724,7 @@ func (w *Window) layoutAliasEditorMenu(gtx layout.Context) layout.Dimensions {
 		if submit, ok := ev.(widget.SubmitEvent); ok {
 			alias := strings.TrimSpace(submit.Text)
 			if w.prefs != nil {
-				w.prefs.SetAlias(domain.PeerIdentity(w.contextMenuPeer), alias)
+				w.prefs.SetAlias(w.contextMenuPeer, alias)
 				_ = w.prefs.Save()
 			}
 			w.contextMenuPeer = ""

@@ -50,7 +50,7 @@ func TestEnsurePeerLocked(t *testing.T) {
 // the front of peerOrder, deduplicating any prior occurrences.
 func TestPromotePeerLocked(t *testing.T) {
 	r := newTestRouter()
-	r.peerOrder = []string{"a", "b", "c"}
+	r.peerOrder = []domain.PeerIdentity{"a", "b", "c"}
 
 	r.mu.Lock()
 	r.promotePeerLocked("c")
@@ -66,7 +66,7 @@ func TestPromotePeerLocked(t *testing.T) {
 	r.mu.Lock()
 	r.promotePeerLocked("a")
 	r.mu.Unlock()
-	expected := []string{"a", "c", "b"}
+	expected := []domain.PeerIdentity{"a", "c", "b"}
 	for i, v := range expected {
 		if r.peerOrder[i] != v {
 			t.Fatalf("index %d: expected %q, got %q", i, v, r.peerOrder[i])
@@ -94,13 +94,13 @@ func TestPromotePeerLocked(t *testing.T) {
 // a peer out of peerOrder (including duplicates).
 func TestRemovePeerLocked(t *testing.T) {
 	r := newTestRouter()
-	r.peerOrder = []string{"a", "b", "c", "b", "d"}
+	r.peerOrder = []domain.PeerIdentity{"a", "b", "c", "b", "d"}
 
 	r.mu.Lock()
 	r.removePeerLocked("b")
 	r.mu.Unlock()
 
-	expected := []string{"a", "c", "d"}
+	expected := []domain.PeerIdentity{"a", "c", "d"}
 	if len(r.peerOrder) != len(expected) {
 		t.Fatalf("expected %v, got %v", expected, r.peerOrder)
 	}
@@ -185,17 +185,18 @@ func TestSeedPreviews(t *testing.T) {
 		if p.PeerAddress == "" {
 			continue
 		}
-		r.ensurePeerLocked(p.PeerAddress)
-		r.peers[p.PeerAddress].Preview = p
+		pid := domain.PeerIdentity(p.PeerAddress)
+		r.ensurePeerLocked(pid)
+		r.peers[pid].Preview = p
 		if p.UnreadCount > 0 {
-			r.peers[p.PeerAddress].Unread = p.UnreadCount
-			r.promotePeerLocked(p.PeerAddress)
+			r.peers[pid].Unread = p.UnreadCount
+			r.promotePeerLocked(pid)
 		}
 	}
 	r.mu.Unlock()
 
 	// All peers should be in the peers map.
-	for _, addr := range []string{"peer-with-unread", "peer-all-read", "peer-also-unread"} {
+	for _, addr := range []domain.PeerIdentity{"peer-with-unread", "peer-all-read", "peer-also-unread"} {
 		r.mu.RLock()
 		_, ok := r.peers[addr]
 		r.mu.RUnlock()
@@ -237,7 +238,7 @@ func TestResetIdentityState(t *testing.T) {
 	r.mu.Lock()
 	r.peers["old-peer-1"] = &RouterPeerState{Unread: 3, Preview: ConversationPreview{Body: "old msg"}}
 	r.peers["old-peer-2"] = &RouterPeerState{}
-	r.peerOrder = []string{"old-peer-1", "old-peer-2"}
+	r.peerOrder = []domain.PeerIdentity{"old-peer-1", "old-peer-2"}
 	r.activePeer = "old-peer-1"
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "m1"}}
@@ -417,7 +418,7 @@ func TestSnapshotIsConsistent(t *testing.T) {
 	r.activePeer = "peer-1"
 	r.peerClicked = true
 	r.peers["peer-1"] = &RouterPeerState{Unread: 3}
-	r.peerOrder = []string{"peer-1"}
+	r.peerOrder = []domain.PeerIdentity{"peer-1"}
 	r.activeMessages = []DirectMessage{{ID: "m1", Body: "hello"}}
 	r.nodeStatus = NodeStatus{Peers: []string{"a"}}
 	r.sendStatus = "ok"
@@ -531,7 +532,7 @@ func TestDoMarkSeenSkipsWhenNoMessages(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = "peer-1"
 	r.peers["peer-1"] = &RouterPeerState{Unread: 5}
-	r.peerOrder = []string{"peer-1"}
+	r.peerOrder = []domain.PeerIdentity{"peer-1"}
 	// activeMessages is intentionally empty — simulates load not completed.
 	r.mu.Unlock()
 
@@ -765,12 +766,12 @@ func TestSeedPreviewsSortOrder(t *testing.T) {
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
-	order := append([]string(nil), r.peerOrder...)
+	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
 	r.mu.RUnlock()
 
 	// Expected: unread first sorted by unread count descending (10 > 1),
 	// then read sorted by timestamp descending (new > old).
-	expected := []string{"unread-high", "unread-low", "new-read", "old-read"}
+	expected := []domain.PeerIdentity{"unread-high", "unread-low", "new-read", "old-read"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -796,11 +797,11 @@ func TestSeedPreviewsSortOrderSameUnreadByTimestamp(t *testing.T) {
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
-	order := append([]string(nil), r.peerOrder...)
+	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
 	r.mu.RUnlock()
 
 	// Same unread count → timestamp decides; read peers come last.
-	expected := []string{"unread-new", "unread-old", "read-only"}
+	expected := []domain.PeerIdentity{"unread-new", "unread-old", "read-only"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -851,13 +852,13 @@ func TestSeedPreviewsReordersEventPathPeers(t *testing.T) {
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
-	order := append([]string(nil), r.peerOrder...)
+	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
 	r.mu.RUnlock()
 
 	// All peers are SQL-applied (event-path data was older). The SQL sort
 	// places them: unread first (peer-B), then by timestamp desc (peer-A,
 	// peer-C). The two event-path slots are filled by sqlSorted in order.
-	expected := []string{"peer-B", "peer-A", "peer-C"}
+	expected := []domain.PeerIdentity{"peer-B", "peer-A", "peer-C"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -907,7 +908,7 @@ func TestSeedPreviewsDoesNotRepositionFresherPeers(t *testing.T) {
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
-	order := append([]string(nil), r.peerOrder...)
+	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
 	unreadF := r.peers["peer-F"].Unread
 	bodyF := r.peers["peer-F"].Preview.Body
 	r.mu.RUnlock()
@@ -915,7 +916,7 @@ func TestSeedPreviewsDoesNotRepositionFresherPeers(t *testing.T) {
 	// peer-F keeps position 0 (fresher event-path data — not repositioned).
 	// peer-Old's slot is filled by the SQL sort: peer-S takes that slot
 	// (first in sqlSorted), peer-Old is appended (second in sqlSorted).
-	expected := []string{"peer-F", "peer-S", "peer-Old"}
+	expected := []domain.PeerIdentity{"peer-F", "peer-S", "peer-Old"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -960,12 +961,12 @@ func TestSeedPreviewsPreservesEventOnlyPeers(t *testing.T) {
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
-	order := append([]string(nil), r.peerOrder...)
+	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
 	r.mu.RUnlock()
 
 	// event-only-peer keeps its original position (not in previews, not
 	// repositioned); sql-peer fills the SQL-applied slot after it.
-	expected := []string{"event-only-peer", "sql-peer"}
+	expected := []domain.PeerIdentity{"event-only-peer", "sql-peer"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -1512,8 +1513,8 @@ func TestRepairUnreadSubsequentSyncIncrements(t *testing.T) {
 func TestStartupDoneClosedOnPanic(t *testing.T) {
 	r := &DMRouter{
 		client:         &DesktopClient{id: &identity.Identity{Address: "me"}},
-		peers:          make(map[string]*RouterPeerState),
-		peerOrder:      make([]string, 0),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
 		// cache intentionally nil → resetIdentityState() panics on r.cache.Load()
 		uiEvents:    make(chan UIEvent, 32),
@@ -1539,8 +1540,8 @@ func TestStartupDoneClosedOnPanic(t *testing.T) {
 func TestEventListenerBuffersDuringStartup(t *testing.T) {
 	r := &DMRouter{
 		client:         &DesktopClient{id: &identity.Identity{Address: "me"}},
-		peers:          make(map[string]*RouterPeerState),
-		peerOrder:      make([]string, 0),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
@@ -1801,8 +1802,8 @@ func TestNotifyOverflowRetainsAllEventTypes(t *testing.T) {
 	close(done)
 	r := &DMRouter{
 		client:         &DesktopClient{id: &identity.Identity{Address: "me"}},
-		peers:          make(map[string]*RouterPeerState),
-		peerOrder:      make([]string, 0),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 1), // capacity 1 → overflows quickly
@@ -2489,10 +2490,10 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 func TestAutoSelectAndSelectPeerBothClearUnread(t *testing.T) {
 	cases := []struct {
 		name     string
-		selectFn func(r *DMRouter, addr string)
+		selectFn func(r *DMRouter, addr domain.PeerIdentity)
 	}{
-		{"SelectPeer", func(r *DMRouter, addr string) { r.SelectPeer(addr) }},
-		{"AutoSelectPeer", func(r *DMRouter, addr string) { r.AutoSelectPeer(addr) }},
+		{"SelectPeer", func(r *DMRouter, addr domain.PeerIdentity) { r.SelectPeer(addr) }},
+		{"AutoSelectPeer", func(r *DMRouter, addr domain.PeerIdentity) { r.AutoSelectPeer(addr) }},
 	}
 
 	for _, tc := range cases {
@@ -2527,7 +2528,7 @@ func TestAutoSelectAndSelectPeerBothClearUnread(t *testing.T) {
 func TestPeerClickedTrueAfterAutoSelectThenNewPeerAutoSelect(t *testing.T) {
 	r := newTestRouter()
 
-	peers := []string{"peer-1", "peer-2", "peer-3"}
+	peers := []domain.PeerIdentity{"peer-1", "peer-2", "peer-3"}
 	for _, p := range peers {
 		r.AutoSelectPeer(p)
 
@@ -2552,7 +2553,7 @@ func TestRemovePeer(t *testing.T) {
 	r := newTestRouter()
 	r.peers["a"] = &RouterPeerState{Unread: 3}
 	r.peers["b"] = &RouterPeerState{Unread: 1}
-	r.peerOrder = []string{"a", "b"}
+	r.peerOrder = []domain.PeerIdentity{"a", "b"}
 	r.activePeer = "a"
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
@@ -2603,7 +2604,7 @@ func TestRemovePeerClearsActiveWhenTailRemoved(t *testing.T) {
 	r.peers["a"] = &RouterPeerState{}
 	r.peers["b"] = &RouterPeerState{}
 	r.peers["c"] = &RouterPeerState{}
-	r.peerOrder = []string{"a", "b", "c"}
+	r.peerOrder = []domain.PeerIdentity{"a", "b", "c"}
 	r.activePeer = "c"
 
 	wasActive, err := r.RemovePeer(domain.PeerIdentity("c"))
@@ -2632,7 +2633,7 @@ func TestRemovePeerClearsActiveWhenTailRemoved(t *testing.T) {
 func TestRemovePeerEmptyList(t *testing.T) {
 	r := newTestRouter()
 	r.peers["a"] = &RouterPeerState{}
-	r.peerOrder = []string{"a"}
+	r.peerOrder = []domain.PeerIdentity{"a"}
 	r.activePeer = "a"
 
 	wasActive, err := r.RemovePeer(domain.PeerIdentity("a"))
@@ -2662,7 +2663,7 @@ func TestRemovePeerNonActive(t *testing.T) {
 	r := newTestRouter()
 	r.peers["a"] = &RouterPeerState{}
 	r.peers["b"] = &RouterPeerState{}
-	r.peerOrder = []string{"a", "b"}
+	r.peerOrder = []domain.PeerIdentity{"a", "b"}
 	r.activePeer = "a"
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
 
@@ -2712,7 +2713,7 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 
 	r.peers["a"] = &RouterPeerState{Unread: 2}
 	r.peers["b"] = &RouterPeerState{Unread: 1}
-	r.peerOrder = []string{"a", "b"}
+	r.peerOrder = []domain.PeerIdentity{"a", "b"}
 	r.activePeer = "a"
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
@@ -2762,8 +2763,8 @@ func newTestRouter() *DMRouter {
 	close(done) // pre-closed so tests don't block on startupDone
 	return &DMRouter{
 		client:         &DesktopClient{id: &identity.Identity{Address: "me"}},
-		peers:          make(map[string]*RouterPeerState),
-		peerOrder:      make([]string, 0),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),

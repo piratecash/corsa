@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/rpc"
 	"corsa/internal/core/service"
@@ -87,8 +88,8 @@ func (m *mockDMRouterProvider) Snapshot() service.RouterSnapshot {
 	return service.RouterSnapshot{}
 }
 
-func (m *mockDMRouterProvider) SendMessage(to, body string) {
-	m.lastTo = to
+func (m *mockDMRouterProvider) SendMessage(to domain.PeerIdentity, body string) {
+	m.lastTo = string(to)
 	m.lastBody = body
 }
 

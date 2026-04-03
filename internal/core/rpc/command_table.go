@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"corsa/internal/core/config"
+	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 )
 
@@ -524,7 +525,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				// DMRouter.SendMessage is async — the actual delivery happens
 				// in a goroutine. We return "queued" to reflect that the message
 				// was accepted for delivery, not that it was delivered.
-				dmRouter.SendMessage(to, body)
+				dmRouter.SendMessage(domain.PeerIdentity(to), body)
 				return jsonResponse(map[string]interface{}{"status": "queued", "to": to})
 			},
 		)

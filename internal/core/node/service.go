@@ -75,6 +75,7 @@ type Service struct {
 	inboundHealthRefs     map[domain.PeerAddress]int // resolved overlay address → active inbound connection count
 	inboundTracked        map[net.Conn]struct{}      // connections promoted via trackInboundConnect (auth complete or auth not required)
 	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
+	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
 	connAuth              map[net.Conn]*connAuthState
 	connPeerInfo          map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
 	connSendCh            map[net.Conn]chan sendItem  // per-connection buffered send channel; decouples callers from socket I/O
@@ -600,6 +601,13 @@ func (s *Service) CanForward() bool {
 
 func (s *Service) Address() string {
 	return s.identity.Address
+}
+
+// WaitBackground blocks until all fire-and-forget goroutines tracked by
+// backgroundWg have finished. Tests call this before TempDir cleanup to
+// avoid "directory not empty" races caused by async disk writes.
+func (s *Service) WaitBackground() {
+	s.backgroundWg.Wait()
 }
 
 func (s *Service) SubscriberCount(recipient string) int {
@@ -2300,7 +2308,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// but the recipient still needs to acknowledge delivery to the sender.
 	if isLocal && msg.Topic == "dm" && msg.Recipient != "*" {
 		if msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
-			go s.emitDeliveryReceipt(msg)
+			s.backgroundWg.Add(1)
+			go func() {
+				defer s.backgroundWg.Done()
+				s.emitDeliveryReceipt(msg)
+			}()
 		}
 	}
 

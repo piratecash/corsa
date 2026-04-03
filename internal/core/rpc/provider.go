@@ -26,7 +26,7 @@ type ChatlogProvider interface {
 // DMRouterProvider abstracts access to dm_router.
 type DMRouterProvider interface {
 	Snapshot() service.RouterSnapshot
-	SendMessage(to, body string)
+	SendMessage(to domain.PeerIdentity, body string)
 }
 
 // MetricsProvider abstracts access to the metrics collector.

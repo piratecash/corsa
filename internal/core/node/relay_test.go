@@ -593,13 +593,15 @@ func newTestService(t *testing.T, nodeType config.NodeType) *Service {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	tempDir := t.TempDir()
-	return NewService(config.Node{
+	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             nodeType,
 	}, id)
+	t.Cleanup(svc.WaitBackground)
+	return svc
 }
 
 // TestClientNodeDropsTransitRelayMessage verifies INV-4: a client node that
@@ -1447,6 +1449,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 	}, id)
+	t.Cleanup(svc.WaitBackground)
 
 	t.Run("inbound_only", func(t *testing.T) {
 		// Register an inbound connection with relay capability.
