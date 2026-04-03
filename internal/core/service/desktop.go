@@ -160,6 +160,7 @@ type NodeStatus struct {
 	Contacts         map[string]Contact
 	Peers            []string
 	PeerHealth       []PeerHealth
+	ReachableIDs     map[domain.PeerIdentity]bool // identity reachable via routing table (at least one live route exists)
 	Stored           string
 	Messages         []string
 	MessageIDs       []string
@@ -451,6 +452,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Contacts = contacts
 	status.Peers = peers
 	status.PeerHealth = peerHealthFromFrame(peerHealthReply)
+	status.ReachableIDs = c.buildReachableIDs(ids)
 	status.Messages = stringifyMessages(messages)
 	status.MessageIDs = messageIDs
 	status.DirectMessages = nil // no longer loaded in ProbeNode; use FetchConversation on demand
@@ -461,6 +463,22 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Gazeta = notices
 	status.CheckedAt = time.Now()
 	return status
+}
+
+// buildReachableIDs checks the routing table for each known identity and
+// returns a map indicating which identities have at least one live route.
+// Uses a direct call to localNode — no RPC frame round-trip required.
+func (c *DesktopClient) buildReachableIDs(knownIDs []string) map[domain.PeerIdentity]bool {
+	if c.localNode == nil {
+		return nil
+	}
+	snap := c.localNode.RoutingSnapshot()
+	reachable := make(map[domain.PeerIdentity]bool, len(knownIDs))
+	for _, id := range knownIDs {
+		pid := domain.PeerIdentity(id)
+		reachable[pid] = snap.BestRoute(pid) != nil
+	}
+	return reachable
 }
 
 func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {

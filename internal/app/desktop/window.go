@@ -667,6 +667,11 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 							Spacing:   layout.SpaceBetween,
 							Alignment: layout.Middle,
 						}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									return w.layoutReachableIndicator(gtx, status, fingerprint)
+								})
+							}),
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 								title := material.Body1(w.theme, w.peerDisplayName(fingerprint))
 								title.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
@@ -1140,6 +1145,20 @@ func (w *Window) layoutUnreadBadge(gtx layout.Context, count int) layout.Dimensi
 			})
 		}),
 	)
+}
+
+// layoutReachableIndicator draws a small filled circle: green when the
+// routing table has at least one live route to the identity, gray otherwise.
+func (w *Window) layoutReachableIndicator(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity) layout.Dimensions {
+	sz := gtx.Dp(unit.Dp(10))
+	indicatorColor := color.NRGBA{R: 96, G: 110, B: 130, A: 255} // gray — unreachable
+	if status.ReachableIDs[fingerprint] {
+		indicatorColor = color.NRGBA{R: 72, G: 199, B: 142, A: 255} // green — reachable
+	}
+	defer clip.Ellipse{Max: image.Pt(sz, sz)}.Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: indicatorColor}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	return layout.Dimensions{Size: image.Pt(sz, sz)}
 }
 
 func ellipsize(s string, limit int) string {

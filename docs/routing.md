@@ -552,4 +552,17 @@ internal/core/node/
 internal/core/rpc/
     routing_commands.go          — RegisterRoutingCommands: fetch_route_table, fetch_route_summary, fetch_route_lookup
     handler_routing_test.go      — юнит-тесты RPC-команд маршрутизации
+
+internal/core/service/
+    desktop.go                   — buildReachableIDs: populates NodeStatus.ReachableIDs via direct RoutingSnapshot() call
+    desktop_test.go              — unit tests for buildReachableIDs (nil node, empty table, empty list)
+
+internal/app/desktop/
+    window.go                    — layoutReachableIndicator: renders green/gray dot per contact based on ReachableIDs
 ```
+
+### UI reachability indicator
+
+The desktop sidebar uses the routing table to display a per-contact reachability indicator. During each `ProbeNode` cycle, `DesktopClient.buildReachableIDs()` calls `node.Service.RoutingSnapshot()` directly (no RPC frame) and checks `Snapshot.BestRoute(identity)` for each known identity. The result is stored in `NodeStatus.ReachableIDs map[PeerIdentity]bool` and flows through `RouterSnapshot.NodeStatus` to the UI, where `layoutReachableIndicator` draws a green (reachable) or gray (unreachable) dot next to the contact name.
+
+**Индикатор достижимости в UI.** Sidebar десктопного приложения использует routing table для отображения индикатора достижимости каждого контакта. При каждом цикле `ProbeNode` метод `DesktopClient.buildReachableIDs()` вызывает `node.Service.RoutingSnapshot()` напрямую (без RPC frame) и проверяет `Snapshot.BestRoute(identity)` для каждого известного identity. Результат сохраняется в `NodeStatus.ReachableIDs map[PeerIdentity]bool` и поступает через `RouterSnapshot.NodeStatus` в UI, где `layoutReachableIndicator` рисует зелёную (достижим) или серую (недоступен) точку рядом с именем контакта.

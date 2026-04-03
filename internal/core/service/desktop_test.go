@@ -1592,3 +1592,62 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildReachableIDsNilNode verifies that buildReachableIDs returns nil
+// when localNode is not set (remote TCP mode).
+func TestBuildReachableIDsNilNode(t *testing.T) {
+	t.Parallel()
+	c := &DesktopClient{
+		id:     mustGenerateIdentity(t),
+		appCfg: config.App{Version: "test"},
+	}
+	got := c.buildReachableIDs([]string{"aaa", "bbb"})
+	if got != nil {
+		t.Fatalf("expected nil for nil localNode, got %v", got)
+	}
+}
+
+// TestBuildReachableIDsEmptyTable verifies that all identities are marked
+// unreachable when the routing table has no routes.
+func TestBuildReachableIDsEmptyTable(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestDesktopClientWithNode(t)
+	defer func() { _ = c.Close() }()
+
+	ids := []string{"peer-a", "peer-b", "peer-c"}
+	got := c.buildReachableIDs(ids)
+	if got == nil {
+		t.Fatal("expected non-nil map")
+	}
+	for _, id := range ids {
+		pid := domain.PeerIdentity(id)
+		if got[pid] {
+			t.Errorf("identity %q should be unreachable with empty routing table", id)
+		}
+	}
+}
+
+// TestBuildReachableIDsEmptyList verifies that an empty identity list
+// produces an empty (non-nil) map.
+func TestBuildReachableIDsEmptyList(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestDesktopClientWithNode(t)
+	defer func() { _ = c.Close() }()
+
+	got := c.buildReachableIDs(nil)
+	if got == nil {
+		t.Fatal("expected non-nil map for nil slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty map, got %v", got)
+	}
+}
+
+func mustGenerateIdentity(t *testing.T) *identity.Identity {
+	t.Helper()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	return id
+}

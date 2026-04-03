@@ -14,6 +14,7 @@ Window (Gio event loop)
   ├── Sidebar (contacts card)
   │   ├── Identity search
   │   ├── Recipient list (from router peers)
+  │   │   └── Reachable indicator (green/gray dot)
   │   └── Context menu (copy, alias, delete)
   ├── Chat area
   │   ├── Message list (scrollable)
@@ -204,6 +205,15 @@ snapRecipients()
 | `UIEventStatusUpdated` | Health poll completed | Network status indicator updates |
 | `UIEventBeep` | New incoming message (not during startup replay) | System notification sound |
 
+### Reachable indicator
+
+Each contact in the sidebar displays a small colored dot next to the peer name. The color reflects whether the routing table contains at least one live (non-withdrawn, non-expired) route to that identity:
+
+- **Green** — at least one route exists (identity is reachable through the mesh)
+- **Gray** — no route available (identity is unreachable)
+
+The reachability data is populated during each `ProbeNode` cycle via a direct call to `node.Service.RoutingSnapshot()` (no RPC frame round-trip). The snapshot's `BestRoute(identity)` method determines whether a live route exists. Results are stored in `NodeStatus.ReachableIDs` and flow through the standard `RouterSnapshot` pipeline to the UI.
+
 ### RPC architecture
 
 ```mermaid
@@ -276,6 +286,7 @@ Window (Gio event loop)
   ├── Sidebar (карточка контактов)
   │   ├── Поиск identity
   │   ├── Список получателей (из peers роутера)
+  │   │   └── Индикатор достижимости (зеленая/серая точка)
   │   └── Контекстное меню (копировать, псевдоним, удалить)
   ├── Область чата
   │   ├── Список сообщений (скроллируемый)
@@ -465,6 +476,15 @@ snapRecipients()
 | `UIEventSidebarUpdated` | Peer добавлен/удален, счетчик непрочитанных изменен, превью обновлено | Перерисовка sidebar |
 | `UIEventStatusUpdated` | Завершен health poll | Обновление индикатора сети |
 | `UIEventBeep` | Новое входящее сообщение (не во время стартового replay) | Системный звук уведомления |
+
+### Индикатор достижимости
+
+Каждый контакт в sidebar отображает маленькую цветную точку рядом с именем. Цвет отражает наличие хотя бы одного живого (не withdrawn, не expired) маршрута до этого identity в routing table:
+
+- **Зелёный** — маршрут есть (identity достижим через mesh-сеть)
+- **Серый** — маршрутов нет (identity недоступен)
+
+Данные о достижимости заполняются при каждом цикле `ProbeNode` через прямой вызов `node.Service.RoutingSnapshot()` (без RPC frame round-trip). Метод `BestRoute(identity)` снимка определяет наличие живого маршрута. Результат хранится в `NodeStatus.ReachableIDs` и проходит через стандартный pipeline `RouterSnapshot` до UI.
 
 ### Архитектура RPC
 
