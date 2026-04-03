@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -2119,5 +2120,51 @@ func TestTickTTLNoExposedWhenAllRoutesExpire(t *testing.T) {
 	}
 	if tbl.Size() != 0 {
 		t.Fatalf("expected empty table, got %d", tbl.Size())
+	}
+}
+
+func TestUpdateRoutePreservesExtra(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("local"))
+	extra := json.RawMessage(`{"onion_box":"deadbeef"}`)
+	entry := RouteEntry{
+		Identity: "X", Origin: "A", NextHop: "B",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		Extra: extra,
+	}
+	status := mustUpdate(t, tbl, entry)
+	if status != RouteAccepted {
+		t.Fatalf("expected accepted, got %v", status)
+	}
+
+	routes := tbl.Lookup("X")
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if string(routes[0].Extra) != string(extra) {
+		t.Fatalf("Extra lost after UpdateRoute: got %s", string(routes[0].Extra))
+	}
+}
+
+func TestToAnnounceEntryPreservesExtra(t *testing.T) {
+	extra := json.RawMessage(`{"onion_box":"deadbeef","future":true}`)
+	entry := RouteEntry{
+		Identity: "X", Origin: "A", NextHop: "B",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		Extra: extra,
+	}
+	ae := entry.ToAnnounceEntry()
+	if string(ae.Extra) != string(extra) {
+		t.Fatalf("Extra lost in ToAnnounceEntry: got %s", string(ae.Extra))
+	}
+}
+
+func TestToAnnounceEntryNilExtraForLocalRoute(t *testing.T) {
+	entry := RouteEntry{
+		Identity: "X", Origin: "A", NextHop: "A",
+		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+	}
+	ae := entry.ToAnnounceEntry()
+	if ae.Extra != nil {
+		t.Fatalf("expected nil Extra for local route, got %s", string(ae.Extra))
 	}
 }

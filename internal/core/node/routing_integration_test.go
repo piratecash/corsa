@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/json"
 	"net"
 	"strings"
 	"sync"
@@ -500,6 +501,47 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 	}
 	if routes[0].Source != routing.RouteSourceHopAck {
 		t.Fatalf("expected source=hop_ack after confirmation, got %s", routes[0].Source)
+	}
+}
+
+// TestConfirmRouteViaHopAck_PreservesExtra verifies that hop_ack promotion
+// does not strip the Extra field from the original announcement entry.
+// Without this, re-announces after hop_ack confirmation would silently
+// drop future wire fields (e.g. onion_box).
+func TestConfirmRouteViaHopAck_PreservesExtra(t *testing.T) {
+	svc := newTestServiceWithRouting(idNodeA)
+
+	extra := json.RawMessage(`{"onion_box":"deadbeef","future":true}`)
+	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity:  idTargetX,
+		Origin:    idTargetX,
+		NextHop:   idPeerB,
+		Hops:      2,
+		SeqNo:     1,
+		Source:    routing.RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(routing.DefaultTTL),
+		Extra:     extra,
+	})
+	if err != nil || status != routing.RouteAccepted {
+		t.Fatal("UpdateRoute should succeed")
+	}
+
+	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
+
+	routes := svc.routingTable.Lookup(idTargetX)
+	if len(routes) == 0 {
+		t.Fatal("expected route to exist after hop_ack")
+	}
+	if routes[0].Source != routing.RouteSourceHopAck {
+		t.Fatalf("expected source=hop_ack, got %s", routes[0].Source)
+	}
+	if string(routes[0].Extra) != string(extra) {
+		t.Fatalf("Extra lost after hop_ack promotion: got %q, want %q", string(routes[0].Extra), string(extra))
+	}
+
+	ae := routes[0].ToAnnounceEntry()
+	if string(ae.Extra) != string(extra) {
+		t.Fatalf("Extra lost in ToAnnounceEntry after hop_ack: got %q", string(ae.Extra))
 	}
 }
 

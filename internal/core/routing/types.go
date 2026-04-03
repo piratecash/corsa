@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -134,6 +135,11 @@ type RouteEntry struct {
 	// RemainingTTL at insertion time. After expiry the route is treated as
 	// withdrawn.
 	ExpiresAt time.Time
+
+	// Extra holds opaque JSON fields from the wire that this node does not
+	// understand. Preserved across table updates so that re-announced routes
+	// carry forward-compatible extensions unchanged.
+	Extra json.RawMessage
 }
 
 // Validate checks structural invariants of the entry. Returns an error
@@ -239,11 +245,20 @@ func (s Snapshot) BestRoute(identity PeerIdentity) *RouteEntry {
 // AnnounceEntry is the wire-safe projection of a RouteEntry.
 // It contains only the fields transmitted in announce_routes frames.
 // Produced by RouteEntry.ToAnnounceEntry or Table.AnnounceTo.
+//
+// Extra carries opaque JSON fields from the wire that this node does not
+// understand. When re-announcing a learned route, Extra is forwarded
+// unchanged — enabling forward-compatible relay of future protocol
+// extensions (e.g. onion box keys) through older nodes.
 type AnnounceEntry struct {
 	Identity PeerIdentity
 	Origin   PeerIdentity
 	Hops     int
 	SeqNo    uint64
+
+	// Extra holds unknown wire fields for forward-compatible relay.
+	// Nil for locally originated routes.
+	Extra json.RawMessage
 }
 
 // ToAnnounceEntry projects a RouteEntry into the wire format for
@@ -260,6 +275,7 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 		Origin:   e.Origin,
 		Hops:     e.Hops,
 		SeqNo:    e.SeqNo,
+		Extra:    e.Extra,
 	}
 }
 

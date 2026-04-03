@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -232,11 +233,103 @@ type ChatPreviewFrame struct {
 // AnnounceRouteFrame is a single route entry inside an announce_routes frame.
 // The wire format carries only the fields needed for distance-vector convergence;
 // RemainingTTL and Source are derived locally by the receiver.
+//
+// Extra preserves any JSON fields beyond the known set (identity, origin,
+// hops, seq). When a node re-announces a route learned from a neighbor,
+// the Extra blob is forwarded unchanged — ensuring that future protocol
+// extensions (e.g. onion box keys) survive transit through older nodes
+// that do not yet understand them.
 type AnnounceRouteFrame struct {
 	Identity string `json:"identity"`
 	Origin   string `json:"origin"`
 	Hops     int    `json:"hops"`
 	SeqNo    uint64 `json:"seq"`
+
+	// Extra holds unknown JSON fields for forward-compatible relay.
+	// Nil when no extra fields are present.
+	Extra json.RawMessage `json:"-"`
+}
+
+// knownRouteFields lists JSON keys that AnnounceRouteFrame handles itself.
+// Everything else is captured into Extra for forward-compatible relay.
+var knownRouteFields = map[string]struct{}{
+	"identity": {},
+	"origin":   {},
+	"hops":     {},
+	"seq":      {},
+}
+
+// UnmarshalJSON deserializes an AnnounceRouteFrame, capturing any fields
+// beyond the known set into Extra for forward-compatible relay.
+func (f *AnnounceRouteFrame) UnmarshalJSON(data []byte) error {
+	// Decode the known fields via an alias to avoid infinite recursion.
+	type plain AnnounceRouteFrame
+	if err := json.Unmarshal(data, (*plain)(f)); err != nil {
+		return err
+	}
+
+	// Reset Extra before collecting unknown keys. Without this, a reused
+	// struct instance would keep stale Extra from a previous Unmarshal call
+	// when the new payload has no unknown fields.
+	f.Extra = nil
+
+	// Collect all top-level keys and keep the unknown ones.
+	var allFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &allFields); err != nil {
+		return err
+	}
+
+	extra := make(map[string]json.RawMessage, len(allFields))
+	for k, v := range allFields {
+		if _, known := knownRouteFields[k]; !known {
+			extra[k] = v
+		}
+	}
+
+	if len(extra) > 0 {
+		raw, err := json.Marshal(extra)
+		if err != nil {
+			return err
+		}
+		f.Extra = raw
+	}
+
+	return nil
+}
+
+// MarshalJSON serializes an AnnounceRouteFrame, merging any Extra fields
+// back into the top-level JSON object alongside the known fields.
+func (f AnnounceRouteFrame) MarshalJSON() ([]byte, error) {
+	// Start with Extra if present, then overlay known fields on top.
+	// Known fields always win if there's a key collision.
+	var obj map[string]json.RawMessage
+	if len(f.Extra) > 0 {
+		if err := json.Unmarshal(f.Extra, &obj); err != nil {
+			return nil, fmt.Errorf("AnnounceRouteFrame: malformed Extra: %w", err)
+		}
+		if obj == nil {
+			// Extra was valid JSON but not an object (e.g. "null").
+			// Only JSON objects can carry extension fields.
+			return nil, fmt.Errorf("AnnounceRouteFrame: Extra is not a JSON object")
+		}
+	} else {
+		obj = make(map[string]json.RawMessage, 4)
+	}
+
+	if raw, err := json.Marshal(f.Identity); err == nil {
+		obj["identity"] = raw
+	}
+	if raw, err := json.Marshal(f.Origin); err == nil {
+		obj["origin"] = raw
+	}
+	if raw, err := json.Marshal(f.Hops); err == nil {
+		obj["hops"] = raw
+	}
+	if raw, err := json.Marshal(f.SeqNo); err == nil {
+		obj["seq"] = raw
+	}
+
+	return json.Marshal(obj)
 }
 
 type ConversationFrame struct {

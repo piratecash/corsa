@@ -577,19 +577,14 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 
 #### Незавершённые задачи перед здоровьем маршрутов
 
-**Дисциплина типизации:** убирать cast'ы из доменных типов в `string` на core-path'ах (например, `string(senderAddress)` там, где callee должен принимать `PeerAddress`). Внутри `node`, `routing`, `relay`, `health`, `queue` и state-management кода такие преобразования должны оставаться только для логирования, protocol serialization, config parsing и UI/RPC boundary.
-
 **Из базовой маршрутизации (Фаза 1.2):**
 
-- [ ] Сохранять неизвестные поля в route entries при ре-анонсировании (forward-compatible relay для onion box keys)
 - [ ] Обработка смены identity при реконнекте: отозвать старый identity, добавить новый
 - [ ] Integration test: убить единственный table-routed next-hop во время доставки, убедиться что сообщение приходит через gossip за 5s
 - [ ] Integration test: peer с 2 TCP-сессиями, убить одну — маршрут остаётся, доставка не прерывается
 - [ ] Integration test: 5 узлов, проверить выбор кратчайшего пути
 - [ ] Integration test: отключить узел, проверить propagation withdrawal < 5s
 - [ ] Integration test: реконнект с другим identity, проверить withdrawal старых маршрутов
-- [ ] Mixed-version test: routing-capable узел работает рядом с legacy узлом
-- [ ] Triggered withdrawal не ломает legacy peers
 - [ ] Integration test: реконнект всегда вызывает full table sync (нет stale cached routes)
 - [ ] Integration test: быстрый disconnect/reconnect цикл (3 узла в треугольнике) — нет routing loop или count-to-infinity; таблица сходится за 2 announce цикла
 
@@ -598,15 +593,12 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 - [ ] Ограничить анонсы до max 100 маршрутов на announce frame, с fairness rotation
 - [ ] Реализовать fairness rotation для лимита размера анонса (direct всегда включены, offset rotation для остальных)
 - [ ] Реализовать periodic full sync каждый 5-й цикл (разбить на несколько фреймов при необходимости)
-- [ ] Реализовать trust hierarchy в `UpdateRoute()`: direct > hop_ack > announcement (per identity-origin-nextHop triple)
-- [ ] Реализовать короткий TTL (30s) для маршрутов от flapping peers (3+ disconnects за 10 мин)
 - [ ] Добавить anti-poisoning правила: `announcement` advisory-only, не может переопределить свежий `direct`/`hop_ack`
 - [ ] Отклонять или деприоритизировать аномальные route announcements (неправдоподобный `hops`, внезапные всплески identity, нет свежего `SeqNo`)
 - [ ] Rate-limit `announce_routes` / `withdrawal` per peer чтобы triggered updates не стали routing flood
 - [ ] Добавить квоты на количество новых identity и route entries от одного peer за временное окно
 - [ ] Добавить jitter / pacing для periodic full sync чтобы узлы не синхронизировали bandwidth spikes
 - [ ] Добавить `route_via_table` / `route_via_gossip` log markers
-- [ ] Написать unit-тесты для trust hierarchy (direct > hop_ack > announcement, per-identity-per-nexthop)
 - [ ] Написать unit-тесты для announcement fairness rotation
 - [ ] Написать unit-тесты для anti-poisoning правил приёма анонсов
 - [ ] Integration test: вредоносный peer анонсирует ложные маршруты, доставка деградирует максимум до gossip fallback
@@ -614,13 +606,7 @@ func (t *Table) Lookup(identity string) []RouteEntry {
 
 **Release / compatibility:**
 
-- [ ] `announce_routes` / withdrawal отправляется только peers с `mesh_routing_v1`
 - [ ] Без routing table сеть продолжает доставку через gossip fallback
-
-**Чеклист готовности к route health:**
-
-- [ ] переименовать неоднозначные поля вроде `address` в `listenAddress`, `transportAddress` или `identity` по фактической семантике
-- [ ] внедрить `KnownPeer`, `PeerSessionRef`, `InboundPeerRef` как embedded типы в runtime-структурах для устранения дублирования полей
 
 ---
 

@@ -127,6 +127,7 @@ func (s *Service) SendAnnounceRoutes(peerAddress domain.PeerAddress, routes []ro
 			Origin:   string(r.Origin),
 			Hops:     r.Hops,
 			SeqNo:    r.SeqNo,
+			Extra:    r.Extra,
 		}
 	}
 
@@ -420,6 +421,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 			Hops:     receivedHops,
 			SeqNo:    wireRoute.SeqNo,
 			Source:   routing.RouteSourceAnnouncement,
+			Extra:    wireRoute.Extra,
 		}
 
 		status, err := s.routingTable.UpdateRoute(entry)
@@ -943,6 +945,7 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 			SeqNo:     route.SeqNo,
 			Source:    routing.RouteSourceHopAck,
 			ExpiresAt: route.ExpiresAt,
+			Extra:     route.Extra,
 		}
 
 		status, err := s.routingTable.UpdateRoute(confirmed)

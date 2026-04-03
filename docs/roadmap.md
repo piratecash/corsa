@@ -614,19 +614,14 @@ approach. The routing table is not the place for global search.
 
 #### Pending work before route health
 
-**Typing discipline:** remove domain-to-string casts in core paths (for example `string(senderAddress)` when the callee should accept `PeerAddress`). Inside `node`, `routing`, `relay`, `health`, `queue`, and state-management code, `string(...)` conversions from `PeerAddress` / `PeerIdentity` should remain only for logging, protocol serialization, config parsing, and UI/RPC formatting boundaries.
-
 **From base routing (Phase 1.2):**
 
-- [ ] Preserve unknown fields in route entries when re-announcing (forward-compatible relay for onion box keys)
 - [ ] Handle identity change on reconnect: withdraw old identity, add new
 - [ ] Integration test: kill the only table-routed next-hop mid-delivery, verify message arrives via gossip within 5s
 - [ ] Integration test: peer with 2 TCP sessions, kill one — route stays, delivery uninterrupted
 - [ ] Integration test: 5 nodes, verify shortest path selection
 - [ ] Integration test: disconnect node, verify withdrawal propagation < 5s
 - [ ] Integration test: reconnect with different identity, verify old routes withdrawn
-- [ ] Mixed-version test: routing-capable node works alongside legacy node
-- [ ] Triggered withdrawal does not break legacy peers
 - [ ] Integration test: reconnect always triggers full table sync (no stale cached routes)
 - [ ] Integration test: rapid disconnect/reconnect cycle (3 nodes in triangle) — verify no routing loop or count-to-infinity; table converges within 2 announce cycles
 
@@ -635,15 +630,12 @@ approach. The routing table is not the place for global search.
 - [ ] Limit announcements to max 100 routes per announce frame, with fairness rotation
 - [ ] Implement fairness rotation for announcement size limit (direct always included, offset rotation)
 - [ ] Implement periodic full sync every 5th cycle (split across multiple frames if needed)
-- [ ] Implement trust hierarchy in `UpdateRoute()`: direct > hop_ack > announcement (per identity-origin-nextHop triple)
-- [ ] Implement shorter TTL (30s) for routes from flapping peers (3+ disconnects in 10 min)
 - [ ] Add anti-poisoning acceptance rules: `announcement` advisory-only, cannot override fresher `direct`/`hop_ack`
 - [ ] Reject or deprioritize anomalous route announcements (implausible `hops`, sudden identity spikes, no fresh `SeqNo`)
 - [ ] Rate-limit `announce_routes` / `withdrawal` per peer so triggered updates cannot become a routing flood
 - [ ] Add quotas for how many new identities and route entries one peer may introduce per time window
 - [ ] Add jitter / pacing for periodic full sync so nodes do not synchronize bandwidth spikes
 - [ ] Add `route_via_table` / `route_via_gossip` log markers
-- [ ] Write unit tests for trust hierarchy (direct > hop_ack > announcement, per-identity-per-nexthop)
 - [ ] Write unit tests for announcement fairness rotation
 - [ ] Write unit tests for anti-poisoning announcement acceptance rules
 - [ ] Integration test: malicious peer advertises false routes, delivery degrades at most to gossip fallback
@@ -651,13 +643,7 @@ approach. The routing table is not the place for global search.
 
 **Release / compatibility:**
 
-- [ ] `announce_routes` / withdrawal sent only to peers with `mesh_routing_v1`
 - [ ] Without routing table, network continues delivery via gossip fallback
-
-**Route-health readiness checklist:**
-
-- [ ] rename ambiguous fields like `address` to `listenAddress`, `transportAddress`, or `identity` where semantics are unclear
-- [ ] adopt `KnownPeer`, `PeerSessionRef`, `InboundPeerRef` as embedded types in runtime structs to eliminate field duplication
 
 ---
 
