@@ -101,8 +101,12 @@ func TestHandleAnnounceRoutesSkipsSelf(t *testing.T) {
 	svc.handleAnnounceRoutes(idPeerB, frame)
 
 	routes := svc.routingTable.Lookup(idNodeA)
-	if len(routes) != 0 {
-		t.Fatal("route about self should not be added")
+	// Lookup returns the synthetic local self-route (RouteSourceLocal) but
+	// the announced route from peerB must not be stored.
+	for _, r := range routes {
+		if r.Source != routing.RouteSourceLocal {
+			t.Fatalf("only local self-route expected, got source=%s origin=%s", r.Source, r.Origin)
+		}
 	}
 }
 

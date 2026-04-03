@@ -164,6 +164,14 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 		return RouteRejected, err
 	}
 
+	// RouteSourceLocal is purely synthetic — it exists only in Lookup/Snapshot
+	// results and must never be persisted in the table. Allowing it would let
+	// any caller inject a zero-hop highest-trust route for an arbitrary
+	// identity, bypassing all real routing.
+	if entry.Source == RouteSourceLocal {
+		return RouteRejected, ErrLocalSourceReserved
+	}
+
 	// Direct routes must originate from this node. A RouteSourceDirect entry
 	// with a foreign Origin would outrank all announcement/hop_ack routes in
 	// Lookup and never be eligible for own-origin withdrawal on disconnect.
@@ -743,8 +751,13 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 }
 
 // Lookup returns all non-withdrawn, non-expired routes for the given identity,
-// sorted by preference: source priority (direct > hop_ack > announcement),
+// sorted by preference: source priority (local > direct > hop_ack > announcement),
 // then by hops ascending within the same source tier.
+//
+// When the queried identity matches the node's own localOrigin, a synthetic
+// local route (Hops=0, RouteSourceLocal) is prepended. This ensures a node
+// can always resolve a route to itself without requiring an external peer
+// session or an explicit table entry.
 func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -752,6 +765,12 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	now := t.clock()
 	routes := t.routes[identity]
 	var result []RouteEntry
+
+	// Synthesize a local route for own identity — zero hops, never expires.
+	if t.localOrigin != "" && identity == t.localOrigin {
+		result = append(result, t.localRouteEntry())
+	}
+
 	for _, r := range routes {
 		if !r.IsWithdrawn() && !r.IsExpired(now) {
 			result = append(result, r)
@@ -765,6 +784,10 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 // Snapshot returns an immutable point-in-time view of the entire table.
 // All fields (routes, counts, flap state) are captured under a single
 // lock acquisition, ensuring a self-consistent response for RPC consumers.
+//
+// When localOrigin is configured, a synthetic local route (Hops=0,
+// RouteSourceLocal) is injected for the node's own identity, ensuring
+// that RPC consumers always see a route to the local node.
 func (t *Table) Snapshot() Snapshot {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -788,6 +811,19 @@ func (t *Table) Snapshot() Snapshot {
 			}
 		}
 	}
+
+	// Inject synthetic local route for own identity. The self-route is
+	// read-time only — it is NOT counted in TotalEntries/ActiveEntries
+	// because those counters describe persisted table state and must
+	// stay consistent with ActiveSize().
+	if t.localOrigin != "" {
+		localEntry := t.localRouteEntry()
+		snap.Routes[t.localOrigin] = append(
+			[]RouteEntry{localEntry},
+			snap.Routes[t.localOrigin]...,
+		)
+	}
+
 	snap.TotalEntries = totalEntries
 	snap.ActiveEntries = activeEntries
 
@@ -866,6 +902,24 @@ func (t *Table) FlapSnapshot() []FlapEntry {
 // LocalOrigin returns this node's identity string.
 func (t *Table) LocalOrigin() PeerIdentity {
 	return t.localOrigin
+}
+
+// localRouteEntry returns a synthetic route entry representing the node
+// itself. Hops=0 means local delivery with no network traversal. The
+// entry never expires and has the highest trust rank (RouteSourceLocal).
+// Returns zero-value RouteEntry if localOrigin is not configured.
+func (t *Table) localRouteEntry() RouteEntry {
+	if t.localOrigin == "" {
+		return RouteEntry{}
+	}
+	return RouteEntry{
+		Identity: t.localOrigin,
+		Origin:   t.localOrigin,
+		NextHop:  t.localOrigin,
+		Hops:     0,
+		SeqNo:    0,
+		Source:   RouteSourceLocal,
+	}
 }
 
 // ActiveSize returns the number of non-withdrawn, non-expired entries.

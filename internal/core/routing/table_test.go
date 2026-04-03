@@ -2168,3 +2168,260 @@ func TestToAnnounceEntryNilExtraForLocalRoute(t *testing.T) {
 		t.Fatalf("expected nil Extra for local route, got %s", string(ae.Extra))
 	}
 }
+
+// --- Self-route (local identity) tests ---
+
+func TestLookupOwnIdentityReturnsSelfRoute(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	routes := tbl.Lookup("nodeA")
+	if len(routes) == 0 {
+		t.Fatal("Lookup for own identity must return at least one route")
+	}
+
+	self := routes[0]
+	if self.Identity != "nodeA" {
+		t.Fatalf("expected Identity=nodeA, got %s", self.Identity)
+	}
+	if self.Origin != "nodeA" {
+		t.Fatalf("expected Origin=nodeA, got %s", self.Origin)
+	}
+	if self.NextHop != "nodeA" {
+		t.Fatalf("expected NextHop=nodeA, got %s", self.NextHop)
+	}
+	if self.Hops != 0 {
+		t.Fatalf("expected Hops=0 for self-route, got %d", self.Hops)
+	}
+	if self.Source != RouteSourceLocal {
+		t.Fatalf("expected Source=local, got %s", self.Source)
+	}
+}
+
+func TestLookupOwnIdentityEmptyTable(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	// Even with a completely empty table, self-route must be present.
+	routes := tbl.Lookup("nodeA")
+	if len(routes) != 1 {
+		t.Fatalf("expected exactly 1 route (self), got %d", len(routes))
+	}
+	if routes[0].Source != RouteSourceLocal {
+		t.Fatalf("expected local source, got %s", routes[0].Source)
+	}
+}
+
+func TestLookupOwnIdentitySelfRouteHasHighestPriority(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	// Add an announcement route for the same identity via a remote peer.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "nodeA", Origin: "peerB", NextHop: "peerB",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+
+	routes := tbl.Lookup("nodeA")
+	if len(routes) < 2 {
+		t.Fatalf("expected at least 2 routes, got %d", len(routes))
+	}
+
+	// Self-route must be first (highest priority).
+	if routes[0].Source != RouteSourceLocal {
+		t.Fatalf("self-route must be first in sorted results, got %s", routes[0].Source)
+	}
+}
+
+func TestLookupOtherIdentityDoesNotInjectSelfRoute(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	routes := tbl.Lookup("nodeB")
+	if len(routes) != 0 {
+		t.Fatalf("expected 0 routes for unknown identity, got %d", len(routes))
+	}
+}
+
+func TestSnapshotContainsSelfRoute(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	snap := tbl.Snapshot()
+
+	selfRoutes, ok := snap.Routes["nodeA"]
+	if !ok || len(selfRoutes) == 0 {
+		t.Fatal("snapshot must contain self-route for own identity")
+	}
+
+	found := false
+	for _, r := range selfRoutes {
+		if r.Source == RouteSourceLocal && r.Hops == 0 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("snapshot must contain a RouteSourceLocal entry with Hops=0")
+	}
+
+	// Counters describe persisted table state only — the synthetic
+	// self-route is NOT counted to stay consistent with ActiveSize().
+	if snap.TotalEntries != 0 {
+		t.Fatalf("TotalEntries must not count synthetic self-route, got %d", snap.TotalEntries)
+	}
+	if snap.ActiveEntries != 0 {
+		t.Fatalf("ActiveEntries must not count synthetic self-route, got %d", snap.ActiveEntries)
+	}
+}
+
+func TestSnapshotBestRouteReturnsSelfForOwnIdentity(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	snap := tbl.Snapshot()
+	best := snap.BestRoute("nodeA")
+	if best == nil {
+		t.Fatal("BestRoute must return non-nil for own identity")
+	}
+	if best.Source != RouteSourceLocal {
+		t.Fatalf("expected local source as best, got %s", best.Source)
+	}
+}
+
+func TestSelfRouteNeverExpires(t *testing.T) {
+	now := time.Now()
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(now)),
+	)
+
+	entry := tbl.localRouteEntry()
+	if entry.IsExpired(now.Add(365 * 24 * time.Hour)) {
+		t.Fatal("self-route must never expire")
+	}
+	if entry.IsWithdrawn() {
+		t.Fatal("self-route must never be withdrawn")
+	}
+}
+
+func TestAnnounceToDoesNotIncludeSelfRoute(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	// Add a direct peer so there's at least one real route.
+	mustAddDirect(t, tbl, "peerB")
+
+	entries := tbl.AnnounceTo("peerB")
+	for _, e := range entries {
+		if e.Identity == "nodeA" && e.Hops == 0 {
+			t.Fatal("self-route (Hops=0) must not be included in announcements")
+		}
+	}
+}
+
+func TestLookupWithoutLocalOriginNoSelfRoute(t *testing.T) {
+	tbl := NewTable()
+
+	routes := tbl.Lookup("someNode")
+	if len(routes) != 0 {
+		t.Fatalf("without localOrigin, no self-route should be injected, got %d", len(routes))
+	}
+}
+
+func TestSnapshotCountersMatchActiveSize(t *testing.T) {
+	now := time.Now()
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(now)),
+	)
+
+	// Empty table — counters must agree and both be zero.
+	snap := tbl.Snapshot()
+	if snap.ActiveEntries != tbl.ActiveSize() {
+		t.Fatalf("empty table: ActiveEntries=%d != ActiveSize()=%d",
+			snap.ActiveEntries, tbl.ActiveSize())
+	}
+
+	// Add a real direct peer.
+	mustAddDirect(t, tbl, "peerB")
+
+	snap = tbl.Snapshot()
+	if snap.ActiveEntries != tbl.ActiveSize() {
+		t.Fatalf("with direct peer: ActiveEntries=%d != ActiveSize()=%d",
+			snap.ActiveEntries, tbl.ActiveSize())
+	}
+	if snap.ActiveEntries != 1 {
+		t.Fatalf("expected ActiveEntries=1 (one real route), got %d", snap.ActiveEntries)
+	}
+
+	// Self-route must be visible in Routes map but not in counters.
+	selfRoutes := snap.Routes["nodeA"]
+	hasSelfRoute := false
+	for _, r := range selfRoutes {
+		if r.Source == RouteSourceLocal {
+			hasSelfRoute = true
+		}
+	}
+	if !hasSelfRoute {
+		t.Fatal("self-route missing from Snapshot().Routes")
+	}
+}
+
+func TestUpdateRouteRejectsRouteSourceLocal(t *testing.T) {
+	tbl := NewTable(
+		WithLocalOrigin("nodeA"),
+		WithClock(fixedClock(time.Now())),
+	)
+
+	// Attempt to persist a RouteSourceLocal entry for a remote identity.
+	status, err := tbl.UpdateRoute(RouteEntry{
+		Identity: "remoteNode",
+		Origin:   "remoteNode",
+		NextHop:  "remoteNode",
+		Hops:     0,
+		SeqNo:    1,
+		Source:   RouteSourceLocal,
+	})
+	if status != RouteRejected {
+		t.Fatalf("expected RouteRejected for RouteSourceLocal, got %v", status)
+	}
+	if err != ErrLocalSourceReserved {
+		t.Fatalf("expected ErrLocalSourceReserved, got %v", err)
+	}
+
+	// Also reject for own identity — local source must stay synthetic.
+	status, err = tbl.UpdateRoute(RouteEntry{
+		Identity: "nodeA",
+		Origin:   "nodeA",
+		NextHop:  "nodeA",
+		Hops:     0,
+		SeqNo:    1,
+		Source:   RouteSourceLocal,
+	})
+	if status != RouteRejected {
+		t.Fatalf("expected RouteRejected for own identity RouteSourceLocal, got %v", status)
+	}
+	if err != ErrLocalSourceReserved {
+		t.Fatalf("expected ErrLocalSourceReserved, got %v", err)
+	}
+
+	// Verify no entries were persisted.
+	if tbl.Size() != 0 {
+		t.Fatalf("expected empty table after rejections, got size=%d", tbl.Size())
+	}
+}

@@ -490,10 +490,13 @@ func (c *DesktopClient) buildReachableIDs() map[domain.PeerIdentity]bool {
 }
 
 // reachableFromSnapshot extracts identities with at least one live route.
+// The synthetic local self-route (RouteSourceLocal) is excluded because
+// reachability is about remote peers, not the node itself.
 func reachableFromSnapshot(snap routing.Snapshot) map[domain.PeerIdentity]bool {
 	reachable := make(map[domain.PeerIdentity]bool)
 	for id := range snap.Routes {
-		if snap.BestRoute(id) != nil {
+		best := snap.BestRoute(id)
+		if best != nil && best.Source != routing.RouteSourceLocal {
 			reachable[id] = true
 		}
 	}

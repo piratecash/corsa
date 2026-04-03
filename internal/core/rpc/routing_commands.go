@@ -134,6 +134,8 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		snapTime := snap.TakenAt
 
 		// Count unique reachable destinations (active, non-withdrawn routes).
+		// RouteSourceLocal (synthetic self-route) is excluded — reachability
+		// is about remote peers, not the node itself.
 		destinations := make(map[string]struct{})
 		directPeers := make(map[string]struct{})
 		for ident, entries := range snap.Routes {
@@ -141,8 +143,11 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 				if e.IsWithdrawn() || e.IsExpired(snapTime) {
 					continue
 				}
+				if e.Source == routing.RouteSourceLocal {
+					continue
+				}
 				destinations[string(ident)] = struct{}{}
-				if e.Source.String() == "direct" {
+				if e.Source == routing.RouteSourceDirect {
 					directPeers[string(ident)] = struct{}{}
 				}
 			}
@@ -263,6 +268,8 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 // Higher value = more trusted, matching RouteSource.TrustRank().
 func sourcePriority(source string) int {
 	switch source {
+	case "local":
+		return 3
 	case "direct":
 		return 2
 	case "hop_ack":

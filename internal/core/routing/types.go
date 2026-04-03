@@ -26,6 +26,7 @@ var (
 	ErrDirectForeignOrigin = errors.New("routing: direct route Origin must equal localOrigin")
 	ErrNoLocalOrigin       = errors.New("routing: Table.localOrigin not set (use WithLocalOrigin)")
 	ErrEmptyPeerID         = errors.New("routing: peerIdentity must not be empty")
+	ErrLocalSourceReserved = errors.New("routing: RouteSourceLocal is synthetic and cannot be persisted via UpdateRoute")
 )
 
 // Flap detection defaults. A peer that disconnects and reconnects more than
@@ -68,11 +69,14 @@ const (
 	RouteSourceAnnouncement RouteSource = iota // learned via announce_routes frame
 	RouteSourceHopAck                          // confirmed by relay_hop_ack
 	RouteSourceDirect                          // directly connected peer
+	RouteSourceLocal                           // synthetic: the node itself (hops=0, never expires)
 )
 
 // String returns a human-readable representation for logging and debugging.
 func (s RouteSource) String() string {
 	switch s {
+	case RouteSourceLocal:
+		return "local"
 	case RouteSourceDirect:
 		return "direct"
 	case RouteSourceHopAck:
@@ -88,6 +92,8 @@ func (s RouteSource) String() string {
 // more trusted. This avoids relying on iota ordering.
 func (s RouteSource) TrustRank() int {
 	switch s {
+	case RouteSourceLocal:
+		return 3
 	case RouteSourceDirect:
 		return 2
 	case RouteSourceHopAck:
@@ -158,7 +164,11 @@ func (e RouteEntry) Validate() error {
 	if string(e.NextHop) == "" {
 		return ErrEmptyNextHop
 	}
-	if e.Hops < 1 || e.Hops > HopsInfinity {
+	if e.Source == RouteSourceLocal {
+		if e.Hops != 0 {
+			return errors.New("routing: local route must have Hops=0")
+		}
+	} else if e.Hops < 1 || e.Hops > HopsInfinity {
 		return ErrInvalidHops
 	}
 	if e.Source == RouteSourceDirect {

@@ -798,3 +798,76 @@ func TestConsoleParserRoutingCommands(t *testing.T) {
 		t.Error("expected error for fetch_route_lookup without identity")
 	}
 }
+
+func TestFetchRouteSummaryExcludesSelfRoute(t *testing.T) {
+	now := time.Now()
+	// Snapshot that includes a synthetic local self-route alongside a real
+	// direct peer route. The summary must not count the self-route in
+	// reachable_identities or direct_peers.
+	provider := &mockRoutingProvider{
+		snapshot: routing.Snapshot{
+			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+				"nodeA": {
+					// Synthetic local self-route (as injected by Table.Snapshot).
+					{
+						Identity: "nodeA",
+						Origin:   "nodeA",
+						NextHop:  "nodeA",
+						Hops:     0,
+						SeqNo:    0,
+						Source:   routing.RouteSourceLocal,
+					},
+				},
+				"peer-B": {
+					{
+						Identity:  "peer-B",
+						Origin:    "nodeA",
+						NextHop:   "peer-B",
+						Hops:      1,
+						SeqNo:     3,
+						Source:    routing.RouteSourceDirect,
+						ExpiresAt: now.Add(100 * time.Second),
+					},
+				},
+			},
+			TakenAt: now,
+			// Counters describe persisted state only — the synthetic
+			// self-route is not counted, matching Table.Snapshot() behaviour.
+			TotalEntries:  1,
+			ActiveEntries: 1,
+		},
+	}
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_summary"})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	// Only peer-B should be counted — the local self-route is excluded.
+	reachable, _ := result["reachable_identities"].(float64)
+	if int(reachable) != 1 {
+		t.Errorf("expected reachable_identities=1 (self-route excluded), got %v", reachable)
+	}
+	direct, _ := result["direct_peers"].(float64)
+	if int(direct) != 1 {
+		t.Errorf("expected direct_peers=1 (self-route excluded), got %v", direct)
+	}
+
+	// Verify counters from snapshot pass through correctly.
+	total, _ := result["total_entries"].(float64)
+	if int(total) != 1 {
+		t.Errorf("expected total_entries=1 (self-route not counted), got %v", total)
+	}
+	active, _ := result["active_entries"].(float64)
+	if int(active) != 1 {
+		t.Errorf("expected active_entries=1 (self-route not counted), got %v", active)
+	}
+}

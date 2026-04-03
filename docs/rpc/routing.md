@@ -45,9 +45,9 @@ Response:
 | `routes[].next_hop.identity` | string | Ed25519 fingerprint of the next-hop peer |
 | `routes[].next_hop.address` | string | Live transport address, best-effort (omitted if peer disconnected) |
 | `routes[].next_hop.network` | string | Live network type: `"ipv4"`, `"ipv6"`, `"torv3"`, etc., best-effort (omitted if disconnected) |
-| `routes[].hops` | int | Distance to destination (1=direct, 16=withdrawn) |
+| `routes[].hops` | int | Distance to destination (0=local/self, 1=direct, 16=withdrawn) |
 | `routes[].seq_no` | int | Monotonic sequence number scoped to origin |
-| `routes[].source` | string | How route was learned: `"direct"`, `"hop_ack"`, `"announcement"` |
+| `routes[].source` | string | How route was learned: `"local"`, `"direct"`, `"hop_ack"`, `"announcement"` |
 | `routes[].withdrawn` | bool | True if hops >= 16 |
 | `routes[].expired` | bool | True if TTL has elapsed (relative to `snapshot_at`) |
 | `routes[].ttl_seconds` | float | Remaining time-to-live in seconds (relative to `snapshot_at`) |
@@ -144,12 +144,12 @@ Response:
 | `routes[].next_hop` | string | Peer to forward through |
 | `routes[].hops` | int | Distance to destination |
 | `routes[].seq_no` | int | Sequence number |
-| `routes[].source` | string | `"direct"`, `"hop_ack"`, or `"announcement"` |
-| `routes[].ttl_seconds` | float | Remaining TTL (relative to `snapshot_at`) |
+| `routes[].source` | string | `"local"`, `"direct"`, `"hop_ack"`, or `"announcement"` |
+| `routes[].ttl_seconds` | float | Remaining TTL (relative to `snapshot_at`); 0 for local self-route |
 | `count` | int | Number of routes found |
 | `snapshot_at` | string | ISO 8601 timestamp when snapshot was taken |
 
-Returns `count: 0` and empty `routes` array if the identity is unknown or has no active routes. Returns 400 if `identity` argument is missing or malformed (must be 40-char lowercase hex).
+When the queried identity matches the node's own identity, a synthetic local route (`source: "local"`, `hops: 0`) is always present. Returns `count: 0` and empty `routes` array if the identity is unknown or has no active routes. Returns 400 if `identity` argument is missing or malformed (must be 40-char lowercase hex).
 
 ### Availability
 
@@ -301,12 +301,12 @@ corsa-cli fetch_route_lookup <identity>
 | `routes[].next_hop` | string | Peer для пересылки |
 | `routes[].hops` | int | Расстояние до цели |
 | `routes[].seq_no` | int | Sequence number |
-| `routes[].source` | string | `"direct"`, `"hop_ack"` или `"announcement"` |
-| `routes[].ttl_seconds` | float | Оставшийся TTL (относительно `snapshot_at`) |
+| `routes[].source` | string | `"local"`, `"direct"`, `"hop_ack"` или `"announcement"` |
+| `routes[].ttl_seconds` | float | Оставшийся TTL (относительно `snapshot_at`); 0 для локального собственного маршрута |
 | `count` | int | Количество найденных маршрутов |
 | `snapshot_at` | string | ISO 8601 timestamp момента снапшота |
 
-Возвращает `count: 0` и пустой массив `routes`, если identity неизвестен или не имеет активных маршрутов. Возвращает 400, если аргумент `identity` отсутствует или имеет неверный формат (должен быть 40-символьный hex в нижнем регистре).
+Когда запрашиваемый identity совпадает с собственным identity ноды, синтетический локальный маршрут (`source: "local"`, `hops: 0`) всегда присутствует. Возвращает `count: 0` и пустой массив `routes`, если identity неизвестен или не имеет активных маршрутов. Возвращает 400, если аргумент `identity` отсутствует или имеет неверный формат (должен быть 40-символьный hex в нижнем регистре).
 
 ### Доступность
 

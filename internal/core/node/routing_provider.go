@@ -48,11 +48,15 @@ func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domai
 // reachableIDsFrame returns identities that have at least one live route in
 // the routing table. Used by desktop clients in remote TCP mode where direct
 // RoutingSnapshot() is not available.
+//
+// The synthetic local self-route (RouteSourceLocal) is excluded because
+// reachability is about remote peers, not the node itself.
 func (s *Service) reachableIDsFrame() protocol.Frame {
 	snap := s.routingTable.Snapshot()
 	var ids []string
 	for id := range snap.Routes {
-		if snap.BestRoute(id) != nil {
+		best := snap.BestRoute(id)
+		if best != nil && best.Source != routing.RouteSourceLocal {
 			ids = append(ids, string(id))
 		}
 	}
