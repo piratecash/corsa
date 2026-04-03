@@ -1382,6 +1382,10 @@ graph LR
 ```
 *Diagram — Iteration dependency and incremental delivery*
 
+### Technical debt / Refactoring
+
+- [ ] Unify `MessageID` type: move `protocol.MessageID` into `domain` package so all layers share one typed ID without circular imports. Update `protocol.Envelope`, `protocol.DeliveryReceipt`, chatlog entries, and frame serialization to use `domain.MessageID`. Currently `domain.MessageID` and `protocol.MessageID` are independent `string` aliases — they should converge.
+
 ### Product iterations after mesh
 
 These iterations continue the roadmap after the mesh foundation is stable.

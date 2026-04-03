@@ -879,7 +879,7 @@ func TestMetadataStored(t *testing.T) {
 	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
 	peer := "1111111111111111111111111111111111111111"
 
-	meta := `{"reply_to":"msg-abc","edited":true}`
+	meta := `{"edited":true,"edit_at":"2026-01-01T00:05:00Z"}`
 	err := s.Append("dm", selfAddr, Entry{
 		ID: "meta-1", Sender: selfAddr, Recipient: peer,
 		Body: "hello", CreatedAt: "2026-01-01T00:00:00Z",
@@ -1254,9 +1254,11 @@ func TestOutgoingMessageStoredEncrypted(t *testing.T) {
 	// Encrypt via the real directmsg envelope (X25519 + AES-256-GCM + ed25519 signature).
 	ciphertext, err := directmsg.EncryptForParticipants(
 		sender,
-		recipient.Address,
-		identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
-		plaintext,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: plaintext},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/crashlog"
@@ -80,6 +81,42 @@ type Window struct {
 	showAliasEditor      bool // true when alias input is shown
 	aliasEditor          widget.Editor
 
+	// Context menu state for right-click on chat messages.
+	msgContextMsg *service.DirectMessage // message whose context menu is open (nil = closed)
+	msgContextPos image.Point
+	msgCtxReply   widget.Clickable
+	msgCtxCopy    widget.Clickable
+	msgRightClick map[string]*rightClickState // keyed by message ID
+
+	// Reply state: when the user replies to a message, we remember the
+	// target UUID and show a quote preview above the composer.
+	replyToMsg        *service.DirectMessage // message being replied to (nil = no active reply)
+	replyCancelButton widget.Clickable
+
+	// msgCacheByID stores message metadata for O(1) lookup when rendering
+	// reply quotes (body, sender, timestamp). Rebuilt once per frame.
+	msgCacheByID map[string]cachedMsg
+
+	// replyQuoteTags maps message IDs to stable pointer event tags for
+	// click-to-scroll behavior on reply quotes.
+	replyQuoteTags map[string]*widget.Clickable
+
+	// scrollToMsgID is set when the user clicks a reply quote. The actual
+	// scroll is deferred to the next frame's layout() — applying Position
+	// changes inside list.Layout() is unreliable because the list overwrites
+	// them during its own position computation.
+	scrollToMsgID string
+	// scrollClickY stores the cursor Y position relative to the chat
+	// viewport at the moment the user clicked the reply quote.
+	scrollClickY int
+	// chatViewportH stores the chat list viewport height (pixels) from
+	// the most recent layout pass, used for cursor-relative scroll math.
+	chatViewportH int
+	// chatCursorY tracks the cursor Y relative to the chat viewport,
+	// updated by a pointer tracker scoped to layoutConversation.
+	chatCursorY   int
+	chatCursorTag int // stable tag for the chat-area pointer tracker
+
 	snap service.RouterSnapshot
 
 	consoleMu sync.Mutex
@@ -127,6 +164,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 		recipientButtons:    make(map[domain.PeerIdentity]*widget.Clickable),
 		recipientRightClick: make(map[domain.PeerIdentity]*rightClickState),
 		messageSelectables:  make(map[string]*widget.Selectable),
+		msgRightClick:       make(map[string]*rightClickState),
 		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 	}
@@ -188,6 +226,9 @@ func (w *Window) loop(window *app.Window) error {
 
 func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.snap = w.router.Snapshot()
+	w.rebuildMsgCache()
+	w.applyDeferredScroll()
+	w.resetReplyOnPeerChange()
 	w.handlePendingActions()
 	w.handleActions(gtx)
 	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
@@ -233,7 +274,30 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 			}
 			return w.layoutContextMenuOverlay(gtx)
 		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if w.msgContextMsg == nil {
+				return layout.Dimensions{}
+			}
+			return w.layoutMsgContextMenuOverlay(gtx)
+		}),
 	)
+}
+
+// resetReplyOnPeerChange clears reply and message-context-menu state when
+// the active conversation changes. This runs every frame so that even
+// switching to an empty chat (where no message bubbles are rendered)
+// properly discards stale reply references from the previous peer.
+func (w *Window) resetReplyOnPeerChange() {
+	peer := w.snap.ActivePeer
+	if peer == w.lastChatPeer {
+		return
+	}
+	w.replyToMsg = nil
+	w.msgContextMsg = nil
+	w.scrollToMsgID = ""
+	// lastChatPeer and per-message widget caches (messageSelectables,
+	// msgRightClick) are updated lazily in messageSelectable() when the
+	// first bubble is rendered, which also handles the non-empty case.
 }
 
 // Gio widgets are single-threaded — mutations MUST happen on the UI goroutine.
@@ -242,6 +306,9 @@ func (w *Window) handlePendingActions() {
 
 	if pa.ClearEditor {
 		w.messageEditor.SetText("")
+	}
+	if pa.ClearReply {
+		w.replyToMsg = nil
 	}
 	if pa.ScrollToEnd {
 		w.chatList.Position.BeforeEnd = false
@@ -282,6 +349,8 @@ func (w *Window) handleActions(gtx layout.Context) {
 	}
 
 	w.handleContextMenuActions(gtx)
+	w.handleMsgContextMenuActions(gtx)
+	w.handleReplyCancel(gtx)
 }
 
 func (w *Window) handleContextMenuActions(gtx layout.Context) {
@@ -431,7 +500,14 @@ func (w *Window) triggerSend() {
 	if body == "" {
 		return
 	}
-	w.router.SendMessage(to, body)
+	outgoing := domain.OutgoingDM{Body: body}
+	if w.replyToMsg != nil {
+		outgoing.ReplyTo = domain.MessageID(w.replyToMsg.ID)
+	}
+	// replyToMsg is cleared by handlePendingActions (ClearReply) after the
+	// send succeeds. On failure the editor text is preserved and the reply
+	// context stays intact so the user can retry without losing the quote.
+	w.router.SendMessage(to, outgoing)
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
@@ -786,6 +862,9 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 			Axis: layout.Vertical,
 		}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return w.layoutReplyPreview(gtx)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.messageInputCard(gtx)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
@@ -1048,6 +1127,23 @@ type rightClickState struct {
 	pressed bool
 }
 
+// cachedMsg holds pre-indexed message metadata for O(1) reply quote rendering.
+type cachedMsg struct {
+	Body      string
+	Sender    string
+	Timestamp time.Time
+	Index     int // position in ActiveMessages slice for scroll-to
+}
+
+func (w *Window) msgRightClickState(id string) *rightClickState {
+	if s, ok := w.msgRightClick[id]; ok {
+		return s
+	}
+	s := new(rightClickState)
+	w.msgRightClick[id] = s
+	return s
+}
+
 func (w *Window) recipientRightClickState(id domain.PeerIdentity) *rightClickState {
 	if s, ok := w.recipientRightClick[id]; ok {
 		return s
@@ -1199,6 +1295,27 @@ func intToString(v int) string {
 }
 
 func (w *Window) layoutConversation(gtx layout.Context, recipient domain.PeerIdentity, conversation []service.DirectMessage) layout.Dimensions {
+	w.chatViewportH = gtx.Constraints.Max.Y
+
+	// Track cursor Y relative to the chat viewport (not the window).
+	// This scoped tracker gives correct coordinates for scroll math
+	// in applyDeferredScroll, since the chat area is offset from the
+	// top of the window by headers, paddings, etc.
+	defer clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops).Pop()
+	event.Op(gtx.Ops, &w.chatCursorTag)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target: &w.chatCursorTag,
+			Kinds:  pointer.Move | pointer.Press | pointer.Drag,
+		})
+		if !ok {
+			break
+		}
+		if pe, ok := ev.(pointer.Event); ok {
+			w.chatCursorY = int(pe.Position.Y)
+		}
+	}
+
 	list := material.List(w.theme, &w.chatList)
 	return list.Layout(gtx, len(conversation), func(gtx layout.Context, index int) layout.Dimensions {
 		message := conversation[index]
@@ -1231,6 +1348,27 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 	}
 	gtx.Constraints.Max.X = maxWidth
 
+	// Read right-click events from the previous frame.
+	rc := w.msgRightClickState(message.ID)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target: rc,
+			Kinds:  pointer.Press,
+		})
+		if !ok {
+			break
+		}
+		pe, ok := ev.(pointer.Event)
+		if !ok {
+			continue
+		}
+		if pe.Kind == pointer.Press && pe.Buttons.Contain(pointer.ButtonSecondary) {
+			msgCopy := message
+			w.msgContextMsg = &msgCopy
+			w.msgContextPos = w.lastCursorPos
+		}
+	}
+
 	borderColor := color.NRGBA{R: 55, G: 68, B: 86, A: 255}
 	authorColor := color.NRGBA{R: 162, G: 176, B: 196, A: 255}
 	statusColor := color.NRGBA{R: 110, G: 130, B: 160, A: 180}
@@ -1240,9 +1378,24 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 	}
 
 	border := widget.Border{Color: borderColor, CornerRadius: unit.Dp(8), Width: unit.Dp(1)}
-	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+
+	// Record the bubble content first to measure its size.
+	macro := op.Record(gtx.Ops)
+	dims := border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			children := []layout.FlexChild{
+			children := []layout.FlexChild{}
+
+			// Show quoted message if this is a reply.
+			if message.ReplyTo != "" {
+				children = append(children,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return w.layoutReplyQuote(gtx, message.ReplyTo, isMine)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+				)
+			}
+
+			children = append(children,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{
 						Axis:      layout.Horizontal,
@@ -1255,7 +1408,7 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							label := material.Caption(w.theme, message.Timestamp.Local().Format("15:04"))
+							label := material.Caption(w.theme, message.Timestamp.Local().Format("02.01.2006 15:04"))
 							label.Color = color.NRGBA{R: 160, G: 185, B: 220, A: 255}
 							return label.Layout(gtx)
 						}),
@@ -1278,7 +1431,7 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 
 					return sel.Layout(gtx, w.theme.Shaper, font.Font{Typeface: w.theme.Face}, w.theme.TextSize, textMaterial, selMaterial)
 				}),
-			}
+			)
 
 			if isMine && (message.DeliveredAt != nil || message.ReceiptStatus == "queued" || message.ReceiptStatus == "retrying" || message.ReceiptStatus == "failed" || message.ReceiptStatus == "expired" || message.ReceiptStatus == "sent" || message.ReceiptStatus == "delivered" || message.ReceiptStatus == "seen") {
 				children = append(children,
@@ -1287,15 +1440,15 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 						statusText := ""
 						switch {
 						case message.ReceiptStatus == "seen" && message.DeliveredAt != nil:
-							statusText = "✓✓ " + message.DeliveredAt.Local().Format("15:04")
+							statusText = "✓✓ " + message.DeliveredAt.Local().Format("02.01.2006 15:04")
 						case message.ReceiptStatus == "seen":
 							statusText = "✓✓"
 						case message.ReceiptStatus == "delivered" && message.DeliveredAt != nil:
-							statusText = "✓ " + message.DeliveredAt.Local().Format("15:04")
+							statusText = "✓ " + message.DeliveredAt.Local().Format("02.01.2006 15:04")
 						case message.ReceiptStatus == "delivered":
 							statusText = "✓"
 						case message.DeliveredAt != nil:
-							statusText = "✓ " + message.DeliveredAt.Local().Format("15:04")
+							statusText = "✓ " + message.DeliveredAt.Local().Format("02.01.2006 15:04")
 						case message.ReceiptStatus == "queued":
 							statusText = w.t("chat.status.queued")
 						case message.ReceiptStatus == "retrying":
@@ -1319,6 +1472,17 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 		})
 	})
+	bubbleCall := macro.Stop()
+
+	// Create a clip area sized to the bubble so that event.Op is scoped
+	// exclusively to this message. Without this, widget.Border does not
+	// create an input clip and all message tags share the parent list's
+	// area, causing the wrong message to be selected on right-click.
+	defer clip.Rect(image.Rectangle{Max: dims.Size}).Push(gtx.Ops).Pop()
+	event.Op(gtx.Ops, rc)
+	bubbleCall.Add(gtx.Ops)
+
+	return dims
 }
 
 // messageSelectable returns a reusable Selectable widget for the given
@@ -1329,6 +1493,8 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 func (w *Window) messageSelectable(id string) *widget.Selectable {
 	if peer := w.snap.ActivePeer; peer != w.lastChatPeer {
 		w.messageSelectables = make(map[string]*widget.Selectable)
+		w.msgRightClick = make(map[string]*rightClickState)
+		w.replyQuoteTags = make(map[string]*widget.Clickable)
 		w.lastChatPeer = peer
 	}
 	sel := w.messageSelectables[id]
@@ -1919,6 +2085,436 @@ func (w *Window) card(gtx layout.Context, titleText string, rows []string, extra
 
 	contentOps.Add(gtx.Ops)
 	return dims
+}
+
+// handleMsgContextMenuActions processes clicks on the message context menu items.
+func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
+	if w.msgContextMsg == nil {
+		return
+	}
+
+	if w.msgCtxReply.Clicked(gtx) {
+		msgCopy := *w.msgContextMsg
+		w.replyToMsg = &msgCopy
+		w.msgContextMsg = nil
+		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+		return
+	}
+
+	if w.msgCtxCopy.Clicked(gtx) {
+		gtx.Execute(clipboard.WriteCmd{
+			Type: "text/plain",
+			Data: io.NopCloser(strings.NewReader(w.msgContextMsg.Body)),
+		})
+		w.router.SetSendStatus(w.t("status.message_copied"))
+		w.msgContextMsg = nil
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+		return
+	}
+}
+
+// handleReplyCancel clears the reply state when the cancel button is clicked.
+func (w *Window) handleReplyCancel(gtx layout.Context) {
+	if w.replyToMsg == nil {
+		return
+	}
+	for w.replyCancelButton.Clicked(gtx) {
+		w.replyToMsg = nil
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}
+}
+
+// layoutMsgContextMenuOverlay renders the right-click context menu for a chat message.
+func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensions {
+	// Dismiss on click outside.
+	dismissArea := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
+	event.Op(gtx.Ops, w.msgContextMsg)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: w.msgContextMsg, Kinds: pointer.Press})
+		if !ok {
+			break
+		}
+		if _, ok := ev.(pointer.Event); ok {
+			w.msgContextMsg = nil
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+		}
+	}
+	dismissArea.Pop()
+
+	menuWidth := gtx.Dp(unit.Dp(180))
+	windowW := gtx.Constraints.Max.X
+	windowH := gtx.Constraints.Max.Y
+
+	// Measure the menu.
+	measureGTX := gtx
+	measureGTX.Constraints.Min.X = menuWidth
+	measureGTX.Constraints.Max.X = menuWidth
+	measureGTX.Constraints.Min.Y = 0
+	measureGTX.Constraints.Max.Y = windowH
+	macro := op.Record(measureGTX.Ops)
+	dims := w.msgContextMenuCard(measureGTX)
+	menuCall := macro.Stop()
+
+	x := w.msgContextPos.X
+	y := w.msgContextPos.Y
+	if x+menuWidth > windowW {
+		x = windowW - menuWidth
+	}
+	if x < 0 {
+		x = 0
+	}
+	if y+dims.Size.Y > windowH {
+		y = y - dims.Size.Y
+		if y < 0 {
+			y = 0
+		}
+	}
+
+	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
+	menuCall.Add(gtx.Ops)
+	stack.Pop()
+
+	return layout.Dimensions{}
+}
+
+func (w *Window) msgContextMenuCard(gtx layout.Context) layout.Dimensions {
+	borderColor := color.NRGBA{R: 72, G: 85, B: 106, A: 255}
+	bgColor := color.NRGBA{R: 28, G: 34, B: 44, A: 255}
+	rr := gtx.Dp(unit.Dp(8))
+	borderWidth := gtx.Dp(unit.Dp(1))
+
+	macro := op.Record(gtx.Ops)
+	dims := layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return w.layoutMsgContextMenuItems(gtx)
+		})
+	})
+	contentCall := macro.Stop()
+	bounds := image.Rectangle{Max: dims.Size}
+
+	defer clip.UniformRRect(bounds, rr).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: borderColor}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	innerBounds := image.Rectangle{
+		Min: image.Pt(borderWidth, borderWidth),
+		Max: image.Pt(dims.Size.X-borderWidth, dims.Size.Y-borderWidth),
+	}
+	innerRR := rr - borderWidth
+	if innerRR < 0 {
+		innerRR = 0
+	}
+	defer clip.UniformRRect(innerBounds, innerRR).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: bgColor}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	contentCall.Add(gtx.Ops)
+	return dims
+}
+
+func (w *Window) layoutMsgContextMenuItems(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.msgCtxReply, w.t("context.reply"),
+				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.msgCtxCopy, w.t("context.copy_message"),
+				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+	)
+}
+
+// layoutReplyQuote renders a compact quote block for the referenced message.
+// Shows sender name and date above the quoted text. Clicking scrolls to the
+// original message in the conversation.
+func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, isMine bool) layout.Dimensions {
+	replyToStr := string(replyTo)
+	quotedBody := w.findMessageBody(replyToStr)
+	if quotedBody == "" {
+		quotedBody = w.t("chat.reply_unknown")
+	}
+	quotedBody = ellipsize(quotedBody, 80)
+
+	// Resolve sender display name and timestamp from cache.
+	var quotedAuthor string
+	var quotedTime string
+	if cm, ok := w.findCachedMsg(replyToStr); ok {
+		if cm.Sender == w.snap.MyAddress {
+			quotedAuthor = w.t("chat.you_label")
+		} else {
+			quotedAuthor = w.peerDisplayName(domain.PeerIdentity(cm.Sender))
+		}
+		quotedTime = cm.Timestamp.Local().Format("02.01.2006 15:04")
+	}
+
+	barColor := color.NRGBA{R: 100, G: 140, B: 200, A: 255}
+	if !isMine {
+		barColor = color.NRGBA{R: 120, G: 150, B: 180, A: 255}
+	}
+	bgColor := color.NRGBA{R: 30, G: 38, B: 50, A: 180}
+
+	// Use raw pointer events for click-to-scroll. widget.Clickable inside
+	// op.Record is unreliable — its pointer filters may not replay correctly
+	// through the macro. We use the same op.Record/clip.Rect/event.Op pattern
+	// as the right-click handler on the bubble.
+	tag := w.replyQuoteTag(replyToStr) // reuse as stable tag identity
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target: tag,
+			Kinds:  pointer.Press,
+		})
+		if !ok {
+			break
+		}
+		pe, ok := ev.(pointer.Event)
+		if !ok {
+			continue
+		}
+		if pe.Kind == pointer.Press && pe.Buttons.Contain(pointer.ButtonPrimary) {
+			w.scrollToMsgID = replyToStr
+			w.scrollClickY = w.chatCursorY
+		}
+	}
+
+	// Record content to measure, then create a clip area for pointer events.
+	quoteMacro := op.Record(gtx.Ops)
+	dims := layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			defer clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(unit.Dp(4))).Push(gtx.Ops).Pop()
+			paint.ColorOp{Color: bgColor}.Add(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+			return layout.Dimensions{Size: gtx.Constraints.Min}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					barW := gtx.Dp(unit.Dp(3))
+					barH := gtx.Dp(unit.Dp(40))
+					sz := image.Pt(barW, barH)
+					defer clip.UniformRRect(image.Rectangle{Max: sz}, gtx.Dp(unit.Dp(1))).Push(gtx.Ops).Pop()
+					paint.ColorOp{Color: barColor}.Add(gtx.Ops)
+					paint.PaintOp{}.Add(gtx.Ops)
+					return layout.Dimensions{Size: sz}
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Left: unit.Dp(6), Top: unit.Dp(2), Bottom: unit.Dp(2), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if quotedAuthor == "" && quotedTime == "" {
+									return layout.Dimensions{}
+								}
+								header := quotedAuthor
+								if quotedTime != "" {
+									if header != "" {
+										header += " · "
+									}
+									header += quotedTime
+								}
+								lbl := material.Caption(w.theme, header)
+								lbl.Color = barColor
+								lbl.Font.Weight = font.Bold
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								label := material.Caption(w.theme, quotedBody)
+								label.Color = color.NRGBA{R: 170, G: 185, B: 210, A: 255}
+								label.MaxLines = 2
+								return label.Layout(gtx)
+							}),
+						)
+					})
+				}),
+			)
+		}),
+	)
+	quoteCall := quoteMacro.Stop()
+
+	// Create a dedicated clip area for the quote so pointer events are scoped
+	// to this element, not the parent bubble.
+	defer clip.Rect(image.Rectangle{Max: dims.Size}).Push(gtx.Ops).Pop()
+	event.Op(gtx.Ops, tag)
+	quoteCall.Add(gtx.Ops)
+	return dims
+}
+
+// applyDeferredScroll scrolls the chat list so that the target message
+// appears at the same vertical level where the user clicked the quote.
+//
+// Uses scrollClickY (cursor Y at click time) and chatViewportH (chat
+// area height from the previous layout pass) to compute the fraction
+// of the viewport, then offsets Position.First so the target message
+// lands at that fraction of the visible item range.
+func (w *Window) applyDeferredScroll() {
+	if w.scrollToMsgID == "" {
+		return
+	}
+	target := w.scrollToMsgID
+	w.scrollToMsgID = ""
+	cm, ok := w.findCachedMsg(target)
+	if !ok {
+		return
+	}
+
+	visibleCount := w.chatList.Position.Count
+	if visibleCount <= 0 {
+		visibleCount = 1
+	}
+
+	// Estimate how many items above the target we need to show so
+	// that the target ends up at the cursor's vertical position.
+	// fraction=0 → top of viewport, fraction=1 → bottom.
+	// Subtract 1 to compensate for item spacing and partial-item
+	// rendering that shifts the target below the cursor.
+	itemsAbove := visibleCount / 2 // default: center
+	if w.chatViewportH > 0 {
+		fraction := float64(w.scrollClickY) / float64(w.chatViewportH)
+		if fraction < 0 {
+			fraction = 0
+		}
+		if fraction > 1 {
+			fraction = 1
+		}
+		itemsAbove = int(fraction*float64(visibleCount) + 0.5)
+	}
+
+	first := cm.Index - itemsAbove
+	if first < 0 {
+		first = 0
+	}
+	w.chatList.Position.First = first
+	w.chatList.Position.Offset = 0
+	w.chatList.Position.BeforeEnd = true
+}
+
+// rebuildMsgCache populates msgCacheByID from the current snapshot.
+// Called once per frame from layout(), before any rendering that needs
+// reply quote lookups. Stores body, sender, timestamp and index for
+// scroll-to-original support.
+func (w *Window) rebuildMsgCache() {
+	msgs := w.snap.ActiveMessages
+	if len(msgs) == 0 {
+		w.msgCacheByID = nil
+		return
+	}
+	m := make(map[string]cachedMsg, len(msgs))
+	for i := range msgs {
+		m[msgs[i].ID] = cachedMsg{
+			Body:      msgs[i].Body,
+			Sender:    msgs[i].Sender,
+			Timestamp: msgs[i].Timestamp,
+			Index:     i,
+		}
+	}
+	w.msgCacheByID = m
+}
+
+// findMessageBody looks up a message body by ID using the per-frame cache.
+func (w *Window) findMessageBody(id string) string {
+	if w.msgCacheByID == nil {
+		return ""
+	}
+	if cm, ok := w.msgCacheByID[id]; ok {
+		return cm.Body
+	}
+	return ""
+}
+
+// findCachedMsg returns full cached metadata for a message ID.
+func (w *Window) findCachedMsg(id string) (cachedMsg, bool) {
+	if w.msgCacheByID == nil {
+		return cachedMsg{}, false
+	}
+	cm, ok := w.msgCacheByID[id]
+	return cm, ok
+}
+
+// replyQuoteTag returns a stable pointer event tag for a reply quote,
+// keyed by the referenced message ID. Uses *widget.Clickable as a
+// convenient heap-allocated identity — only its address matters.
+func (w *Window) replyQuoteTag(replyToID string) *widget.Clickable {
+	if w.replyQuoteTags == nil {
+		w.replyQuoteTags = make(map[string]*widget.Clickable)
+	}
+	if c, ok := w.replyQuoteTags[replyToID]; ok {
+		return c
+	}
+	c := &widget.Clickable{}
+	w.replyQuoteTags[replyToID] = c
+	return c
+}
+
+// layoutReplyPreview renders the reply quote banner above the composer input.
+func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
+	if w.replyToMsg == nil {
+		return layout.Dimensions{}
+	}
+
+	quotedBody := ellipsize(w.replyToMsg.Body, 80)
+	bgColor := color.NRGBA{R: 30, G: 40, B: 55, A: 255}
+	barColor := color.NRGBA{R: 100, G: 140, B: 200, A: 255}
+
+	return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Stack{}.Layout(gtx,
+			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+				defer clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(unit.Dp(6))).Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: bgColor}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+				return layout.Dimensions{Size: gtx.Constraints.Min}
+			}),
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							barW := gtx.Dp(unit.Dp(3))
+							barH := gtx.Dp(unit.Dp(24))
+							sz := image.Pt(barW, barH)
+							defer clip.UniformRRect(image.Rectangle{Max: sz}, gtx.Dp(unit.Dp(1))).Push(gtx.Ops).Pop()
+							paint.ColorOp{Color: barColor}.Add(gtx.Ops)
+							paint.PaintOp{}.Add(gtx.Ops)
+							return layout.Dimensions{Size: sz}
+						}),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										label := material.Caption(w.theme, w.t("compose.replying_to"))
+										label.Color = color.NRGBA{R: 130, G: 155, B: 195, A: 255}
+										return label.Layout(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										label := material.Caption(w.theme, quotedBody)
+										label.Color = color.NRGBA{R: 180, G: 195, B: 218, A: 255}
+										label.MaxLines = 1
+										return label.Layout(gtx)
+									}),
+								)
+							})
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								btn := material.Button(w.theme, &w.replyCancelButton, "✕")
+								btn.Background = color.NRGBA{R: 50, G: 60, B: 78, A: 255}
+								btn.Color = color.NRGBA{R: 200, G: 210, B: 225, A: 255}
+								btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
+								return btn.Layout(gtx)
+							})
+						}),
+					)
+				})
+			}),
+		)
+	})
 }
 
 func fill(gtx layout.Context, c color.NRGBA) {

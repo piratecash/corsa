@@ -119,7 +119,7 @@ sequenceDiagram
     participant NODE as Local node
     participant LOG as Chatlog (SQLite)
 
-    UI->>SVC: SendDirectMessage(peer, body)
+    UI->>SVC: SendDirectMessage(peer, body, replyTo)
     SVC->>SVC: encrypt: EncryptForParticipants()
     Note over SVC: creates sealed envelope<br/>with recipient-part + sender-part<br/>both encrypted, ed25519 signed
     SVC->>NODE: send_message(dm, envelope)
@@ -374,11 +374,26 @@ The `metadata` column stores arbitrary JSON for fields that don't have their own
 column. This provides forward compatibility — new message properties can be stored
 without schema migrations. Examples of future metadata:
 
-- `{"reply_to": "msg-uuid"}` — reply threading
 - `{"edited": true, "edit_at": "2026-..."}` — edit history
 - `{"reactions": {"👍": 2}}` — message reactions
 
 When `metadata` is empty string, it means no extra data is present.
+
+**Design note on `reply_to`:** reply threading is implemented via the `ReplyTo`
+field inside `PlainMessage`, which is fully encrypted within the AES-GCM envelope.
+The relay server and the local chatlog SQLite never see this value in plaintext.
+The UI extracts `reply_to` after decryption. This is an intentional privacy
+decision — the reply graph is not observable without the decryption key, even
+with direct access to the SQLite file. `reply_to` is NOT duplicated into
+the `metadata` column.
+
+**Receive-side sanitization:** both the chatlog reload path (`decryptDirectMessages`)
+and the live-event path (`DecryptIncomingMessage`) validate that a decrypted
+`reply_to` references a message ID that exists within the same DM conversation.
+If the referenced ID is missing — whether due to a malicious sender crafting a
+cross-thread reference or a message that was deleted/expired — the `ReplyTo`
+field is silently cleared. This preserves the invariant that `reply_to` always
+resolves within the same thread, so the UI never encounters broken quote links.
 
 ### Integrity check and recovery
 
@@ -1080,11 +1095,27 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 колонки. Это обеспечивает совместимость вперёд — новые свойства сообщений можно
 хранить без миграций схемы. Примеры будущих метаданных:
 
-- `{"reply_to": "msg-uuid"}` — цепочки ответов
 - `{"edited": true, "edit_at": "2026-..."}` — история редактирования
 - `{"reactions": {"👍": 2}}` — реакции на сообщения
 
 Пустая строка означает отсутствие дополнительных данных.
+
+**Архитектурное решение по `reply_to`:** цепочки ответов реализованы через
+поле `ReplyTo` внутри `PlainMessage`, которое полностью шифруется в AES-GCM
+конверте. Relay-сервер и локальный chatlog SQLite никогда не видят это значение
+в открытом виде. UI извлекает `reply_to` после расшифровки. Это осознанное
+решение в пользу приватности — граф ответов не наблюдаем без ключа расшифровки,
+даже при прямом доступе к файлу SQLite. `reply_to` НЕ дублируется в столбец
+`metadata`.
+
+**Санитизация на стороне получателя:** оба пути — загрузка из chatlog
+(`decryptDirectMessages`) и обработка live-события (`DecryptIncomingMessage`) —
+проверяют, что расшифрованный `reply_to` ссылается на ID сообщения, существующего
+в той же DM-беседе. Если указанный ID отсутствует — будь то из-за злонамеренного
+отправителя, создавшего кросс-тредовую ссылку, или из-за удалённого/просроченного
+сообщения — поле `ReplyTo` молча очищается. Это поддерживает инвариант: `reply_to`
+всегда разрешается внутри того же треда, и UI никогда не встретит битые ссылки
+на цитаты.
 
 ### Проверка целостности и восстановление
 

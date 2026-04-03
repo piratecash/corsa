@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -183,7 +184,7 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 	RegisterNetworkCommands(t, node)
 	RegisterMeshCommands(t, node)
 	RegisterIdentityCommands(t, node)
-	RegisterMessageCommands(t, node, dmRouter)
+	RegisterMessageCommands(t, node, dmRouter, chatlog)
 	RegisterChatlogCommands(t, chatlog)
 	RegisterNoticeCommands(t, node)
 	RegisterMetricsCommands(t, metricsProvider)
@@ -223,6 +224,25 @@ func validationError(err error) CommandResponse {
 // internalError creates a CommandResponse for provider/system failures (500).
 func internalError(err error) CommandResponse {
 	return CommandResponse{Error: err, ErrorKind: ErrInternal}
+}
+
+// numericArg extracts a numeric argument that may arrive as float64 (JSON path)
+// or as a string (key=value / positional path). Returns 0 and false when the
+// key is absent or the value cannot be interpreted as a positive number.
+func numericArg(args map[string]interface{}, key string) (int, bool) {
+	v, exists := args[key]
+	if !exists {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n), n > 0
+	case string:
+		i, err := strconv.Atoi(n)
+		return i, err == nil && i > 0
+	default:
+		return 0, false
+	}
 }
 
 // --- Registration helpers for common patterns ---
@@ -394,7 +414,9 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 
 // RegisterMessageCommands registers message-related commands.
 // Commands requiring dmRouter are only registered when it is non-nil.
-func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterProvider) {
+// chatlog is optional — when non-nil, send_dm validates reply_to references
+// synchronously against the conversation history before queueing.
+func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterProvider, chatlog ChatlogProvider) {
 	t.Register(
 		CommandInfo{Name: "fetch_messages", Description: "Fetch messages from a topic (supports limit, offset via JSON)", Category: "message", Usage: "[topic]"},
 		func(req CommandRequest) CommandResponse {
@@ -403,11 +425,11 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				return validationError(fmt.Errorf("topic is required"))
 			}
 			frame := protocol.Frame{Type: "fetch_messages", Topic: topic}
-			if limit, ok := req.Args["limit"].(float64); ok && limit > 0 {
-				frame.Limit = int(limit)
+			if limit, ok := numericArg(req.Args, "limit"); ok {
+				frame.Limit = limit
 			}
-			if offset, ok := req.Args["offset"].(float64); ok && offset > 0 {
-				frame.Count = int(offset)
+			if offset, ok := numericArg(req.Args, "offset"); ok {
+				frame.Count = offset
 			}
 			return frameResponse(node.HandleLocalFrame(frame))
 		},
@@ -421,11 +443,11 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				return validationError(fmt.Errorf("topic is required"))
 			}
 			frame := protocol.Frame{Type: "fetch_message_ids", Topic: topic}
-			if limit, ok := req.Args["limit"].(float64); ok && limit > 0 {
-				frame.Limit = int(limit)
+			if limit, ok := numericArg(req.Args, "limit"); ok {
+				frame.Limit = limit
 			}
-			if offset, ok := req.Args["offset"].(float64); ok && offset > 0 {
-				frame.Count = int(offset)
+			if offset, ok := numericArg(req.Args, "offset"); ok {
+				frame.Count = offset
 			}
 			return frameResponse(node.HandleLocalFrame(frame))
 		},
@@ -462,11 +484,11 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				recipient = node.Address()
 			}
 			frame := protocol.Frame{Type: "fetch_inbox", Topic: topic, Recipient: recipient}
-			if limit, ok := req.Args["limit"].(float64); ok && limit > 0 {
-				frame.Limit = int(limit)
+			if limit, ok := numericArg(req.Args, "limit"); ok {
+				frame.Limit = limit
 			}
-			if offset, ok := req.Args["offset"].(float64); ok && offset > 0 {
-				frame.Count = int(offset)
+			if offset, ok := numericArg(req.Args, "offset"); ok {
+				frame.Count = offset
 			}
 			return frameResponse(node.HandleLocalFrame(frame))
 		},
@@ -522,10 +544,27 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				if strings.TrimSpace(body) == "" {
 					return validationError(fmt.Errorf("body is required"))
 				}
-				// DMRouter.SendMessage is async — the actual delivery happens
-				// in a goroutine. We return "queued" to reflect that the message
-				// was accepted for delivery, not that it was delivered.
-				dmRouter.SendMessage(domain.PeerIdentity(to), body)
+				var replyTo string
+				if raw, exists := req.Args["reply_to"]; exists {
+					s, ok := raw.(string)
+					if !ok {
+						return validationError(fmt.Errorf("reply_to must be a string"))
+					}
+					replyTo = s
+				}
+				replyToID := domain.MessageID(replyTo)
+				if !replyToID.IsValidOrEmpty() {
+					return validationError(fmt.Errorf("reply_to must be a valid message ID (UUID v4)"))
+				}
+				if replyToID != "" && chatlog != nil {
+					if !chatlog.HasEntryInConversation(to, string(replyToID)) {
+						return validationError(fmt.Errorf("reply_to references a message that does not exist in this conversation"))
+					}
+				}
+				dmRouter.SendMessage(domain.PeerIdentity(to), domain.OutgoingDM{
+					Body:    body,
+					ReplyTo: replyToID,
+				})
 				return jsonResponse(map[string]interface{}{"status": "queued", "to": to})
 			},
 		)

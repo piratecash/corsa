@@ -89,6 +89,7 @@ type DirectMessage struct {
 	Sender        string
 	Recipient     string
 	Body          string
+	ReplyTo       domain.MessageID
 	Timestamp     time.Time
 	ReceiptStatus string
 	DeliveredAt   *time.Time
@@ -702,6 +703,16 @@ func (c *DesktopClient) FetchConversations() (string, error) {
 	return c.consoleFetchConversations()
 }
 
+// HasEntryInConversation checks whether a message with the given ID exists
+// in the conversation with peerAddress. Returns false when chatlog is not
+// available (standalone node mode).
+func (c *DesktopClient) HasEntryInConversation(peerAddress, messageID string) bool {
+	if c.chatLog == nil {
+		return false
+	}
+	return c.chatLog.HasEntryInConversation(peerAddress, messageID)
+}
+
 // ConsolePingJSON pings every connected peer over TCP and returns a
 // structured JSON report. Implements rpc.DiagnosticProvider.
 func (c *DesktopClient) ConsolePingJSON() (string, error) {
@@ -1144,19 +1155,34 @@ func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAdd
 	return imported, nil
 }
 
-func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) (*DirectMessage, error) {
+func (c *DesktopClient) SendDirectMessage(ctx context.Context, to string, msg domain.OutgoingDM) (*DirectMessage, error) {
 	to = strings.TrimSpace(to)
-	body = strings.TrimSpace(body)
-	if to == "" || body == "" {
+	msg.Body = strings.TrimSpace(msg.Body)
+	msg.ReplyTo = domain.MessageID(strings.TrimSpace(string(msg.ReplyTo)))
+	if to == "" || msg.Body == "" {
 		return nil, fmt.Errorf("recipient and message are required")
 	}
+	if !msg.ReplyTo.IsValidOrEmpty() {
+		return nil, fmt.Errorf("reply_to must be a valid message ID (UUID v4)")
+	}
 
-	recipient, err := c.ensureRecipientContact(ctx, to)
+	if msg.ReplyTo != "" && c.chatLog != nil {
+		if !c.chatLog.HasEntryInConversation(to, string(msg.ReplyTo)) {
+			return nil, fmt.Errorf("reply_to message %q not found in conversation with %s", msg.ReplyTo, to)
+		}
+	}
+
+	contact, err := c.ensureRecipientContact(ctx, to)
 	if err != nil {
 		return nil, err
 	}
 
-	ciphertext, err := directmsg.EncryptForParticipants(c.id, to, recipient.BoxKey, body)
+	recipient := domain.DMRecipient{
+		Address:      domain.PeerIdentity(to),
+		BoxKeyBase64: contact.BoxKey,
+	}
+
+	ciphertext, err := directmsg.EncryptForParticipants(c.id, recipient, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -1187,15 +1213,17 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to, body string) 
 		return nil, fmt.Errorf("unexpected send reply: %s", reply.Type)
 	}
 
-	msg := &DirectMessage{
+	result := &DirectMessage{
 		ID:            string(messageID),
 		Sender:        c.id.Address,
 		Recipient:     to,
-		Body:          body, // plaintext — already known to us
+		Body:          msg.Body, // plaintext — already known to us
+		ReplyTo:       msg.ReplyTo,
 		Timestamp:     now,
 		ReceiptStatus: "sent",
 	}
-	return msg, nil
+
+	return result, nil
 }
 
 func (c *DesktopClient) ensureRecipientContact(ctx context.Context, recipient string) (Contact, error) {
@@ -1605,11 +1633,17 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			}
 		}
 
+		replyTo := domain.MessageID(message.ReplyTo)
+		if replyTo != "" && !replyTo.IsValid() {
+			replyTo = ""
+		}
+
 		out = append(out, DirectMessage{
 			ID:            item.ID,
 			Sender:        sender,
 			Recipient:     recipient,
 			Body:          message.Body,
+			ReplyTo:       replyTo,
 			Timestamp:     item.Timestamp,
 			ReceiptStatus: receiptStatus,
 			DeliveredAt:   deliveredAt,
@@ -1617,6 +1651,27 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 	}
 
 	return out
+}
+
+// sanitizeReplyReferences checks that each ReplyTo points to a message
+// that actually exists in the same conversation. Requires the persistent
+// chatlog store — malformed UUIDs are already cleared during decryption.
+func sanitizeReplyReferences(messages []DirectMessage, store *chatlog.Store, selfAddress string) {
+	if store == nil {
+		return
+	}
+	for i := range messages {
+		if messages[i].ReplyTo == "" {
+			continue
+		}
+		peerAddr := messages[i].Sender
+		if peerAddr == selfAddress {
+			peerAddr = messages[i].Recipient
+		}
+		if !store.HasEntryInConversation(peerAddr, string(messages[i].ReplyTo)) {
+			messages[i].ReplyTo = ""
+		}
+	}
 }
 
 func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) *DirectMessage {
@@ -1659,11 +1714,30 @@ func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) 
 		status = "sent"
 	}
 
+	// Sanitize reply_to: drop references to messages that don't exist in
+	// this conversation. Prevents a remote peer from injecting dangling or
+	// cross-thread reply links.
+	replyTo := domain.MessageID(msg.ReplyTo)
+	if replyTo != "" {
+		if !replyTo.IsValid() {
+			replyTo = ""
+		} else if c.chatLog != nil {
+			peerAddress := event.Sender
+			if event.Sender == c.id.Address {
+				peerAddress = event.Recipient
+			}
+			if !c.chatLog.HasEntryInConversation(peerAddress, string(replyTo)) {
+				replyTo = ""
+			}
+		}
+	}
+
 	return &DirectMessage{
 		ID:            event.MessageID,
 		Sender:        event.Sender,
 		Recipient:     event.Recipient,
 		Body:          msg.Body,
+		ReplyTo:       replyTo,
 		Timestamp:     ts,
 		ReceiptStatus: status,
 	}
@@ -1918,7 +1992,9 @@ func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress strin
 		})
 	}
 
-	return decryptDirectMessages(c.id, decryptContacts, records, deliveryReceipts, pendingMessages), nil
+	messages := decryptDirectMessages(c.id, decryptContacts, records, deliveryReceipts, pendingMessages)
+	sanitizeReplyReferences(messages, c.chatLog, c.id.Address)
+	return messages, nil
 }
 
 // FetchConversationPreviews loads the last message for each DM conversation

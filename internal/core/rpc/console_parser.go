@@ -10,9 +10,13 @@ import (
 // into a CommandRequest with named args that CommandTable can execute directly.
 // Used by both the UI console (in-process) and rpc.Client (over HTTP via /exec).
 //
-// Supports two input formats:
-//   - Named command:  "send_dm addr hello world" (positional args mapped to named args)
-//   - Raw JSON frame: {"type":"ping"} (type becomes command name, all fields become args)
+// Supports three input formats:
+//   - Named command:   "send_dm addr hello world" (positional args mapped to named args)
+//   - Key=value:       "send_dm to=addr body=hello reply_to=a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" (all tokens are key=value)
+//   - Raw JSON frame:  {"type":"ping"} (type becomes command name, all fields become args)
+//
+// Key=value mode is auto-detected when every token after the command contains '='
+// with a non-empty key. If any token is bare, the entire input is treated as positional.
 //
 // Command names are case-insensitive: "HELP", "Help", "help" all work.
 func ParseConsoleInput(input string) (CommandRequest, error) {
@@ -27,8 +31,28 @@ func ParseConsoleInput(input string) (CommandRequest, error) {
 		return parseJSONFrame(trimmed)
 	}
 
+	// Quote-aware tokenization: handles body="hello world" as a single token.
+	// Used for key=value detection. Falls back to strings.Fields for positional.
+	allTokens, quoteErr := splitQuotedTokens(trimmed)
+	if quoteErr != nil {
+		return CommandRequest{}, quoteErr
+	}
+	if len(allTokens) == 0 {
+		return CommandRequest{}, fmt.Errorf("empty command")
+	}
+	command := strings.ToLower(strings.TrimSpace(allTokens[0]))
+	if command == "" {
+		return CommandRequest{}, fmt.Errorf("empty command")
+	}
+	quotedTokens := allTokens[1:]
+
+	if args, ok := tryParseKeyValue(quotedTokens); ok {
+		return CommandRequest{Name: command, Args: args}, nil
+	}
+
+	// Positional fallback: use simple whitespace split (no quote handling)
+	// to preserve backward-compatible multi-word body joining.
 	fields := strings.Fields(trimmed)
-	command := strings.ToLower(fields[0])
 	positional := fields[1:]
 
 	args, err := mapPositionalArgs(command, positional)
@@ -40,6 +64,87 @@ func ParseConsoleInput(input string) (CommandRequest, error) {
 		Name: command,
 		Args: args,
 	}, nil
+}
+
+// splitQuotedTokens splits input on whitespace but preserves quoted segments.
+// Both double quotes and single quotes are supported. The quotes themselves
+// are stripped from the returned tokens.
+//
+// Backslash escapes are recognized inside quoted segments: \" produces a
+// literal double quote, \' a literal single quote, and \\ a literal
+// backslash. Outside quotes, backslash has no special meaning.
+//
+// Returns an error if a quoted segment is not closed before the end of input.
+func splitQuotedTokens(input string) ([]string, error) {
+	var tokens []string
+	var current strings.Builder
+	inQuote := false
+	var quoteChar byte
+
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		switch {
+		case inQuote:
+			if ch == '\\' && i+1 < len(input) {
+				next := input[i+1]
+				if next == quoteChar || next == '\\' {
+					current.WriteByte(next)
+					i++
+				} else {
+					current.WriteByte(ch)
+				}
+			} else if ch == quoteChar {
+				inQuote = false
+			} else {
+				current.WriteByte(ch)
+			}
+		case ch == '"' || ch == '\'':
+			inQuote = true
+			quoteChar = ch
+		case ch == ' ' || ch == '\t':
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	if inQuote {
+		return nil, fmt.Errorf("unterminated %c quote", quoteChar)
+	}
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+	return tokens, nil
+}
+
+// tryParseKeyValue attempts to parse all tokens as key=value pairs.
+// Returns the map and true if every token has '=' with a non-empty key.
+// Returns nil and false if any token is bare — caller should fall through
+// to positional parsing.
+//
+// Values are always stored as strings. Typed JSON values (numbers, booleans,
+// arrays) are handled by the JSON frame path (parseJSONFrame); key=value
+// mode is a console convenience where every value is text.
+func tryParseKeyValue(tokens []string) (map[string]interface{}, bool) {
+	if len(tokens) == 0 {
+		return nil, false
+	}
+	for _, tok := range tokens {
+		idx := strings.IndexByte(tok, '=')
+		if idx < 1 {
+			return nil, false
+		}
+	}
+	m := make(map[string]interface{}, len(tokens))
+	for _, tok := range tokens {
+		idx := strings.IndexByte(tok, '=')
+		key := tok[:idx]
+		value := tok[idx+1:]
+		m[key] = value
+	}
+	return m, true
 }
 
 // parseJSONFrame parses a raw JSON object as a command request.

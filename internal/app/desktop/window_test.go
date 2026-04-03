@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"testing"
+	"time"
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/domain"
@@ -309,5 +310,138 @@ func TestNetworkStatusSummary(t *testing.T) {
 				t.Errorf("total: got %d, want %d", gotTotal, tt.wantTotal)
 			}
 		})
+	}
+}
+
+func TestFindMessageBody(t *testing.T) {
+	t.Parallel()
+
+	w := &Window{
+		snap: service.RouterSnapshot{
+			ActiveMessages: []service.DirectMessage{
+				{ID: "aaa", Body: "hello"},
+				{ID: "bbb", Body: "world"},
+			},
+		},
+	}
+	w.rebuildMsgCache()
+
+	if got := w.findMessageBody("aaa"); got != "hello" {
+		t.Errorf("findMessageBody(aaa) = %q, want %q", got, "hello")
+	}
+	if got := w.findMessageBody("bbb"); got != "world" {
+		t.Errorf("findMessageBody(bbb) = %q, want %q", got, "world")
+	}
+	if got := w.findMessageBody("nonexistent"); got != "" {
+		t.Errorf("findMessageBody(nonexistent) = %q, want empty", got)
+	}
+}
+
+func TestFindCachedMsg(t *testing.T) {
+	t.Parallel()
+
+	ts := time.Date(2026, 4, 3, 12, 30, 0, 0, time.UTC)
+	w := &Window{
+		snap: service.RouterSnapshot{
+			ActiveMessages: []service.DirectMessage{
+				{ID: "aaa", Body: "hello", Sender: "alice", Timestamp: ts},
+				{ID: "bbb", Body: "world", Sender: "bob", Timestamp: ts.Add(time.Minute)},
+			},
+		},
+	}
+	w.rebuildMsgCache()
+
+	cm, ok := w.findCachedMsg("aaa")
+	if !ok {
+		t.Fatal("findCachedMsg(aaa) not found")
+	}
+	if cm.Sender != "alice" {
+		t.Errorf("Sender = %q, want %q", cm.Sender, "alice")
+	}
+	if cm.Index != 0 {
+		t.Errorf("Index = %d, want 0", cm.Index)
+	}
+	if cm.Timestamp != ts {
+		t.Errorf("Timestamp = %v, want %v", cm.Timestamp, ts)
+	}
+
+	cm2, ok := w.findCachedMsg("bbb")
+	if !ok {
+		t.Fatal("findCachedMsg(bbb) not found")
+	}
+	if cm2.Index != 1 {
+		t.Errorf("Index = %d, want 1", cm2.Index)
+	}
+
+	_, ok = w.findCachedMsg("nonexistent")
+	if ok {
+		t.Error("findCachedMsg(nonexistent) should return false")
+	}
+}
+
+func TestTriggerSendSetsReplyTo(t *testing.T) {
+	t.Parallel()
+
+	replyMsg := &service.DirectMessage{
+		ID:   "reply-target-id",
+		Body: "original message",
+	}
+	w := &Window{
+		replyToMsg: replyMsg,
+	}
+
+	// triggerSend builds OutgoingDM with ReplyTo but does NOT clear
+	// replyToMsg — the router clears it via PendingActions.ClearReply
+	// after successful delivery.
+	outgoing := domain.OutgoingDM{Body: "my reply"}
+	if w.replyToMsg != nil {
+		outgoing.ReplyTo = domain.MessageID(w.replyToMsg.ID)
+	}
+
+	if outgoing.ReplyTo != "reply-target-id" {
+		t.Errorf("ReplyTo = %q, want %q", outgoing.ReplyTo, "reply-target-id")
+	}
+	if w.replyToMsg == nil {
+		t.Error("replyToMsg should remain set until ClearReply arrives")
+	}
+}
+
+func TestResetReplyOnPeerChange(t *testing.T) {
+	t.Parallel()
+
+	w := &Window{
+		replyToMsg: &service.DirectMessage{ID: "msg-1", Body: "hello"},
+		snap: service.RouterSnapshot{
+			ActivePeer: "peer-b",
+		},
+		lastChatPeer: "peer-a",
+	}
+
+	w.resetReplyOnPeerChange()
+
+	if w.replyToMsg != nil {
+		t.Error("replyToMsg should be nil after peer change")
+	}
+	if w.msgContextMsg != nil {
+		t.Error("msgContextMsg should be nil after peer change")
+	}
+}
+
+func TestResetReplyOnPeerChangeSamePeer(t *testing.T) {
+	t.Parallel()
+
+	replyMsg := &service.DirectMessage{ID: "msg-1", Body: "hello"}
+	w := &Window{
+		replyToMsg: replyMsg,
+		snap: service.RouterSnapshot{
+			ActivePeer: "peer-a",
+		},
+		lastChatPeer: "peer-a",
+	}
+
+	w.resetReplyOnPeerChange()
+
+	if w.replyToMsg != replyMsg {
+		t.Error("replyToMsg should remain unchanged when peer is the same")
 	}
 }

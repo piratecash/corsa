@@ -101,9 +101,11 @@ func TestRelayChain4NodesDMDelivery(t *testing.T) {
 	// Encrypt a DM from sender to recipient.
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"hello-through-relay-chain",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello-through-relay-chain"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt DM: %v", err)
@@ -162,9 +164,11 @@ func TestRelayDedupeFromTwoNeighbors(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
-		svc.Address(),
-		identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
-		"dedupe-test-body",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(svc.Address()),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "dedupe-test-body"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
@@ -479,9 +483,11 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 
 	ciphertext, _ := directmsg.EncryptForParticipants(
 		senderID,
-		svc.Address(),
-		identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
-		"not-blocked",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(svc.Address()),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "not-blocked"},
 	)
 
 	frame := protocol.Frame{
@@ -619,9 +625,11 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 	// Encrypt DM and inject into nodeA.
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"hello-via-live-route",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello-via-live-route"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)

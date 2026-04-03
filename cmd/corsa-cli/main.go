@@ -120,6 +120,10 @@ func parseArgs(command string, args []string, named bool) (map[string]interface{
 }
 
 // parseNamedArgs converts key=value pairs into a map.
+// Values are always stored as strings — the same semantics as the in-process
+// console parser (tryParseKeyValue). Handlers that need numeric values use
+// numericArg() to accept both string and float64 representations. Typed JSON
+// values (numbers, booleans, arrays) are handled by the raw-JSON path above.
 func parseNamedArgs(args []string) (map[string]interface{}, error) {
 	m := make(map[string]interface{}, len(args))
 	for _, arg := range args {
@@ -129,15 +133,7 @@ func parseNamedArgs(args []string) (map[string]interface{}, error) {
 		}
 		key := arg[:idx]
 		value := arg[idx+1:]
-
-		// Try to parse as JSON value (number, bool, null, object, array).
-		// Fall back to plain string on parse failure.
-		var parsed interface{}
-		if err := json.Unmarshal([]byte(value), &parsed); err == nil {
-			m[key] = parsed
-		} else {
-			m[key] = value
-		}
+		m[key] = value
 	}
 	return m, nil
 }

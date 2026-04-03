@@ -79,6 +79,7 @@ type DMRouter struct {
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
 	pendingScrollToEnd   bool
 	pendingClearEditor   bool
+	pendingClearReply    bool
 	pendingRecipientText domain.PeerIdentity
 }
 
@@ -87,6 +88,7 @@ type DMRouter struct {
 type PendingActions struct {
 	ScrollToEnd   bool
 	ClearEditor   bool
+	ClearReply    bool
 	RecipientText domain.PeerIdentity
 }
 
@@ -135,10 +137,12 @@ func (r *DMRouter) ConsumePendingActions() PendingActions {
 	pa := PendingActions{
 		ScrollToEnd:   r.pendingScrollToEnd,
 		ClearEditor:   r.pendingClearEditor,
+		ClearReply:    r.pendingClearReply,
 		RecipientText: r.pendingRecipientText,
 	}
 	r.pendingScrollToEnd = false
 	r.pendingClearEditor = false
+	r.pendingClearReply = false
 	r.pendingRecipientText = ""
 	r.mu.Unlock()
 	return pa
@@ -216,7 +220,7 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 	}()
 }
 
-func (r *DMRouter) SendMessage(to domain.PeerIdentity, body string) {
+func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 	r.setSendStatus("sending…")
 	toStr := string(to)
 
@@ -224,7 +228,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, body string) {
 		defer recoverLog("SendMessage")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		msg, err := r.client.SendDirectMessage(ctx, toStr, body)
+		sent, err := r.client.SendDirectMessage(ctx, toStr, msg)
 		cancel()
 
 		r.mu.Lock()
@@ -237,20 +241,21 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, body string) {
 
 		r.sendStatus = "message sent"
 		r.pendingClearEditor = true
+		r.pendingClearReply = true
 
-		if msg != nil && r.cache.MatchesPeer(toStr) {
-			r.cache.AppendMessage(*msg)
+		if sent != nil && r.cache.MatchesPeer(toStr) {
+			r.cache.AppendMessage(*sent)
 			r.activeMessages = r.cache.Messages()
 			r.pendingScrollToEnd = true
 		}
 
-		if msg != nil {
+		if sent != nil {
 			r.ensurePeerLocked(to)
 			r.peers[to].Preview = ConversationPreview{
 				PeerAddress: toStr,
-				Sender:      msg.Sender,
-				Body:        msg.Body,
-				Timestamp:   msg.Timestamp,
+				Sender:      sent.Sender,
+				Body:        sent.Body,
+				Timestamp:   sent.Timestamp,
 			}
 			r.promotePeerLocked(to)
 		}

@@ -12,12 +12,14 @@ import (
 	"fmt"
 	"time"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 )
 
 type PlainMessage struct {
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`
+	ReplyTo   string    `json:"reply_to,omitempty"`
 }
 
 type sealedEnvelope struct {
@@ -35,8 +37,8 @@ type sealedPart struct {
 	Data      string `json:"data"`
 }
 
-func EncryptForParticipants(sender *identity.Identity, recipientAddress, recipientBoxKeyBase64, body string) (string, error) {
-	recipientBoxKey, err := base64.StdEncoding.DecodeString(recipientBoxKeyBase64)
+func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM) (string, error) {
+	recipientBoxKey, err := base64.StdEncoding.DecodeString(recipient.BoxKeyBase64)
 	if err != nil {
 		return "", fmt.Errorf("decode recipient box key: %w", err)
 	}
@@ -48,8 +50,9 @@ func EncryptForParticipants(sender *identity.Identity, recipientAddress, recipie
 	}
 
 	plain, err := json.Marshal(PlainMessage{
-		Body:      body,
+		Body:      msg.Body,
 		CreatedAt: time.Now().UTC(),
+		ReplyTo:   string(msg.ReplyTo),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal direct message: %w", err)
@@ -68,7 +71,7 @@ func EncryptForParticipants(sender *identity.Identity, recipientAddress, recipie
 	unsigned := sealedEnvelope{
 		Version:   "dm-v1",
 		From:      sender.Address,
-		To:        recipientAddress,
+		To:        string(recipient.Address),
 		Recipient: recipientPart,
 		Sender:    senderPart,
 	}

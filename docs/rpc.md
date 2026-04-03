@@ -385,7 +385,7 @@ The standalone node creates a `CommandTable` and calls `RegisterAllCommands` wit
 
 #### ParseConsoleInput
 
-`ParseConsoleInput` accepts two input formats: named commands (`send_dm addr hello world`) and raw JSON frames (`{"type":"ping"}`). Command names are case-insensitive. For JSON input, the `type` field becomes the command name and all fields are passed as args. Used by both the UI console (in-process) and `rpc.Client` (over HTTP).
+`ParseConsoleInput` accepts three input formats: positional commands (`send_dm addr hello world`), key=value pairs (`send_dm to=addr body=hello reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e`), and raw JSON frames (`{"type":"ping"}`). Key=value mode is auto-detected when every token after the command contains `=` with a non-empty key; otherwise input is treated as positional. Command names are case-insensitive. For JSON input, the `type` field becomes the command name and all fields are passed as args. Used by both the UI console (in-process) and `rpc.Client` (over HTTP).
 
 **Frame field normalization.** Protocol wire frames use different field names than RPC handlers. `normalizeFrameArgs` bridges the gap so pasting real wire frames into the console works. Aliases are applied only when the RPC-expected field is absent; if both are present, the RPC field wins.
 
@@ -812,7 +812,7 @@ Standalone нода создаёт `CommandTable` и вызывает `RegisterA
 
 #### ParseConsoleInput
 
-`ParseConsoleInput` принимает два формата ввода: именованные команды (`send_dm addr hello world`) и сырые JSON-фреймы (`{"type":"ping"}`). Имена команд регистронезависимы. Для JSON-ввода поле `type` становится именем команды, все поля передаются как args. Используется и UI-консолью (in-process), и `rpc.Client` (через HTTP).
+`ParseConsoleInput` принимает три формата ввода: позиционные команды (`send_dm addr hello world`), пары key=value (`send_dm to=addr body=hello reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e`) и сырые JSON-фреймы (`{"type":"ping"}`). Режим key=value определяется автоматически — если все токены после команды содержат `=` с непустым ключом; иначе ввод обрабатывается как позиционный. Имена команд регистронезависимы. Для JSON-ввода поле `type` становится именем команды, все поля передаются как args. Используется и UI-консолью (in-process), и `rpc.Client` (через HTTP).
 
 **Нормализация полей фрейма.** Проводные фреймы протокола используют другие имена полей, чем RPC-обработчики. `normalizeFrameArgs` устраняет разрыв, чтобы вставка реальных wire-фреймов в консоль работала. Алиасы применяются только если RPC-поле отсутствует; если присутствуют оба — RPC-поле имеет приоритет.
 

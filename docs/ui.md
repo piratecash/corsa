@@ -19,8 +19,15 @@ Window (Gio event loop)
   ├── Chat area
   │   ├── Message list (scrollable)
   │   └── Message bubbles (with delivery status)
+  │       ├── Author + timestamp (DD.MM.YYYY HH:MM)
+  │       ├── Reply quote (if reply): sender · date + quoted text
+  │       │   └── Click scrolls to original message
+  │       ├── Message body (selectable text)
+  │       ├── Delivery status (sent/delivered/seen)
+  │       └── Context menu (right-click: Reply, Copy)
   └── Composer card
       ├── Recipient display
+      ├── Reply preview banner (when replying)
       ├── Message input
       ├── Send button
       └── Status line (send/delete/sync feedback)
@@ -332,8 +339,15 @@ Window (Gio event loop)
   ├── Область чата
   │   ├── Список сообщений (скроллируемый)
   │   └── Пузыри сообщений (со статусом доставки)
+  │       ├── Автор + дата (ДД.ММ.ГГГГ ЧЧ:ММ)
+  │       ├── Цитата ответа (если ответ): отправитель · дата + текст
+  │       │   └── Клик прокручивает к оригинальному сообщению
+  │       ├── Тело сообщения (выделяемый текст)
+  │       ├── Статус доставки (отправлено/доставлено/прочитано)
+  │       └── Контекстное меню (правый клик: Ответить, Копировать)
   └── Карточка ввода
       ├── Отображение получателя
+      ├── Баннер предпросмотра ответа (при ответе)
       ├── Поле ввода сообщения
       ├── Кнопка отправки
       └── Строка статуса (обратная связь по отправке/удалению/синхронизации)

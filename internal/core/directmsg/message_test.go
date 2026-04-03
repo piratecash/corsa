@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
 )
 
@@ -21,7 +22,14 @@ func TestEncryptDecryptForSenderAndRecipient(t *testing.T) {
 		t.Fatalf("Generate recipient failed: %v", err)
 	}
 
-	ciphertext, err := EncryptForParticipants(sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), "hello encrypted world")
+	ciphertext, err := EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello encrypted world"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
 	}
@@ -73,7 +81,14 @@ func TestDecryptFailsForThirdParty(t *testing.T) {
 		t.Fatalf("Generate third party failed: %v", err)
 	}
 
-	ciphertext, err := EncryptForParticipants(sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), "classified")
+	ciphertext, err := EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "classified"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
 	}
@@ -102,7 +117,14 @@ func TestDecryptFailsWhenSignatureIsTampered(t *testing.T) {
 		t.Fatalf("Generate recipient failed: %v", err)
 	}
 
-	ciphertext, err := EncryptForParticipants(sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), "tamper check")
+	ciphertext, err := EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "tamper check"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
 	}
@@ -132,5 +154,69 @@ func TestDecryptFailsWhenSignatureIsTampered(t *testing.T) {
 		tampered,
 	); err == nil {
 		t.Fatal("expected tampered signature verification to fail")
+	}
+}
+
+func TestEncryptDecryptWithReplyTo(t *testing.T) {
+	t.Parallel()
+
+	sender, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate sender failed: %v", err)
+	}
+
+	recipient, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient failed: %v", err)
+	}
+
+	expectedReplyTo := "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5"
+	ciphertext, err := EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{
+			Body:    "hello with reply",
+			ReplyTo: domain.MessageID(expectedReplyTo),
+		},
+	)
+	if err != nil {
+		t.Fatalf("EncryptForParticipants failed: %v", err)
+	}
+
+	gotRecipient, err := DecryptForIdentity(
+		recipient,
+		sender.Address,
+		identity.PublicKeyBase64(sender.PublicKey),
+		recipient.Address,
+		ciphertext,
+	)
+	if err != nil {
+		t.Fatalf("recipient decrypt failed: %v", err)
+	}
+	if gotRecipient.Body != "hello with reply" {
+		t.Fatalf("unexpected recipient body: %q", gotRecipient.Body)
+	}
+	if gotRecipient.ReplyTo != expectedReplyTo {
+		t.Fatalf("unexpected recipient replyTo: expected %q, got %q", expectedReplyTo, gotRecipient.ReplyTo)
+	}
+
+	gotSender, err := DecryptForIdentity(
+		sender,
+		sender.Address,
+		identity.PublicKeyBase64(sender.PublicKey),
+		recipient.Address,
+		ciphertext,
+	)
+	if err != nil {
+		t.Fatalf("sender decrypt failed: %v", err)
+	}
+	if gotSender.Body != "hello with reply" {
+		t.Fatalf("unexpected sender body: %q", gotSender.Body)
+	}
+	if gotSender.ReplyTo != expectedReplyTo {
+		t.Fatalf("unexpected sender replyTo: expected %q, got %q", expectedReplyTo, gotSender.ReplyTo)
 	}
 }

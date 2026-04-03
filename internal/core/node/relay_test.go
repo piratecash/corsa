@@ -577,7 +577,14 @@ func registerSenderKey(t *testing.T, svc *Service) *identity.Identity {
 // delivery the recipient is svc.Address().
 func sealDMBody(t *testing.T, sender *identity.Identity, recipientAddress, recipientBoxKeyBase64 string) string {
 	t.Helper()
-	sealed, err := directmsg.EncryptForParticipants(sender, recipientAddress, recipientBoxKeyBase64, "test-body")
+	sealed, err := directmsg.EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientAddress),
+			BoxKeyBase64: recipientBoxKeyBase64,
+		},
+		domain.OutgoingDM{Body: "test-body"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants: %v", err)
 	}
@@ -820,9 +827,11 @@ func TestRelayedDMEmitsDeliveryReceipt(t *testing.T) {
 	// Create a properly encrypted DM payload.
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
-		svc.Address(),
-		identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
-		"relay-receipt-test-secret",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(svc.Address()),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "relay-receipt-test-secret"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants: %v", err)

@@ -1319,9 +1319,11 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
-		nodeB.Address(),
-		identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
-		"secret-for-b",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(nodeB.Address()),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "secret-for-b"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -1410,9 +1412,11 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
-		nodeB.Address(),
-		identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
-		"push-route-secret",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(nodeB.Address()),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "push-route-secret"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -1536,9 +1540,11 @@ func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
-		nodeB.Address(),
-		identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
-		"tampered",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(nodeB.Address()),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "tampered"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -1634,9 +1640,11 @@ func TestDirectMessageAllowsHistoricalTimestampWithoutTTL(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		svc.identity,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"late-but-valid",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "late-but-valid"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -1672,9 +1680,11 @@ func TestDirectMessageRejectsExpiredTTL(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		svc.identity,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"already-expired",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "already-expired"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -1896,9 +1906,11 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
-		idB.Address,
-		identity.BoxPublicKeyBase64(idB.BoxPublicKey),
-		"retry-route-secret",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(idB.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(idB.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "retry-route-secret"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -1953,9 +1965,11 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		fullNode.identity,
-		idClient.Address,
-		identity.BoxPublicKeyBase64(idClient.BoxPublicKey),
-		"backlog-secret",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(idClient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(idClient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "backlog-secret"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -2070,9 +2084,11 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderNode.identity,
-		idRecipient.Address,
-		identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
-		"sender-client-backlog-secret",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(idRecipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "sender-client-backlog-secret"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -2162,9 +2178,11 @@ func TestRelayMessageDoesNotStallGossipDelivery(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderNode.identity,
-		idRecipient.Address,
-		identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
-		"relay-stall-test-secret",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(idRecipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "relay-stall-test-secret"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -2337,9 +2355,11 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"for-myself-no-reroute",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "for-myself-no-reroute"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
@@ -4878,9 +4898,11 @@ func TestMessageStoreCalledForLocalDM(t *testing.T) {
 
 	sealed, err := directmsg.EncryptForParticipants(
 		peerID,
-		svc.identity.Address,
-		identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
-		"hello from peer",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(svc.identity.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello from peer"},
 	)
 	if err != nil {
 		t.Fatalf("seal envelope: %v", err)
@@ -4950,9 +4972,11 @@ func TestMessageStoreNotCalledForTransitDM(t *testing.T) {
 
 	sealed, err := directmsg.EncryptForParticipants(
 		senderID,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"transit message",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "transit message"},
 	)
 	if err != nil {
 		t.Fatalf("seal envelope: %v", err)
@@ -5020,9 +5044,11 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 	// 1. Store a LOCAL DM (from sender to this node).
 	localSealed, err := directmsg.EncryptForParticipants(
 		senderID,
-		relayID.Address,
-		identity.BoxPublicKeyBase64(relayID.BoxPublicKey),
-		"local message for me",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(relayID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(relayID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "local message for me"},
 	)
 	if err != nil {
 		t.Fatalf("seal local envelope: %v", err)
@@ -5038,9 +5064,11 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 	// 2. Store a TRANSIT DM (foreign sender → foreign recipient, relay only).
 	transitSealed, err := directmsg.EncryptForParticipants(
 		foreignID,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"transit only",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "transit only"},
 	)
 	if err != nil {
 		t.Fatalf("seal transit envelope: %v", err)
@@ -5106,9 +5134,11 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 	// Store an outgoing DM so we can later send a receipt for it.
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
-		recipientID.Address,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"status-race-test",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientID.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "status-race-test"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
@@ -5198,9 +5228,11 @@ func TestNodeWithoutMessageStoreStillRelays(t *testing.T) {
 
 	sealed, err := directmsg.EncryptForParticipants(
 		peerID,
-		svc.identity.Address,
-		identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
-		"hello",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(svc.identity.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello"},
 	)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
@@ -5899,9 +5931,11 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	for i := 0; i < messageCount; i++ {
 		ct, err := directmsg.EncryptForParticipants(
 			senderID,
-			recipientAddr,
-			identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-			fmt.Sprintf("body-%d", i),
+			domain.DMRecipient{
+				Address:      domain.PeerIdentity(recipientAddr),
+				BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+			},
+			domain.OutgoingDM{Body: fmt.Sprintf("body-%d", i)},
 		)
 		if err != nil {
 			t.Fatalf("encrypt message %d: %v", i, err)
@@ -6637,9 +6671,11 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 	// Encrypt a test message from sender to recipient.
 	ct, err := directmsg.EncryptForParticipants(
 		senderID,
-		recipientAddr,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"hello via transit relay",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientAddr),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello via transit relay"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt message: %v", err)
@@ -6802,9 +6838,11 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 
 	ct, err := directmsg.EncryptForParticipants(
 		senderID,
-		recipientAddr,
-		identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		"backlog recovery test",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipientAddr),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "backlog recovery test"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt message: %v", err)
@@ -7200,9 +7238,11 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	// Create a properly encrypted DM from senderID to nodeB.
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
-		nodeB.Address(),
-		identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
-		"relay-sync-test-secret",
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(nodeB.Address()),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "relay-sync-test-secret"},
 	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants: %v", err)

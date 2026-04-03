@@ -108,34 +108,36 @@ func TestParseArgsPositionalBodyWithEquals(t *testing.T) {
 	}
 }
 
-func TestParseArgsNumericValue(t *testing.T) {
+func TestParseArgsNumericValueIsString(t *testing.T) {
+	// Key=value always stores strings; handlers use numericArg() for conversion.
 	result, err := parseArgs("test", []string{"limit=10"}, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// JSON numbers are float64
-	if result["limit"] != float64(10) {
-		t.Errorf("expected limit=10 (float64), got %v (%T)", result["limit"], result["limit"])
+	if result["limit"] != "10" {
+		t.Errorf("expected limit='10' (string), got %v (%T)", result["limit"], result["limit"])
 	}
 }
 
-func TestParseArgsBoolValue(t *testing.T) {
+func TestParseArgsBoolLikeValueIsString(t *testing.T) {
+	// "true" stays as string, not parsed as bool.
 	result, err := parseArgs("test", []string{"verbose=true"}, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result["verbose"] != true {
-		t.Errorf("expected verbose=true, got %v", result["verbose"])
+	if result["verbose"] != "true" {
+		t.Errorf("expected verbose='true' (string), got %v (%T)", result["verbose"], result["verbose"])
 	}
 }
 
-func TestParseArgsNullValue(t *testing.T) {
+func TestParseArgsNullLikeValueIsString(t *testing.T) {
+	// "null" stays as string, not parsed as nil.
 	result, err := parseArgs("test", []string{"filter=null"}, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result["filter"] != nil {
-		t.Errorf("expected filter=nil, got %v", result["filter"])
+	if result["filter"] != "null" {
+		t.Errorf("expected filter='null' (string), got %v (%T)", result["filter"], result["filter"])
 	}
 }
 

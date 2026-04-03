@@ -1,8 +1,10 @@
 package rpc_test
 
 import (
-	"corsa/internal/core/protocol"
+	"strings"
 	"testing"
+
+	"corsa/internal/core/protocol"
 )
 
 func TestMessageFetchMessagesValidTopic(t *testing.T) {
@@ -496,8 +498,147 @@ func TestMessageSendDMSuccess(t *testing.T) {
 	if dmRouter.lastTo != "peer-addr" {
 		t.Errorf("expected dmRouter.lastTo = %q, got %q", "peer-addr", dmRouter.lastTo)
 	}
-	if dmRouter.lastBody != "hello world" {
-		t.Errorf("expected dmRouter.lastBody = %q, got %q", "hello world", dmRouter.lastBody)
+	if dmRouter.lastMsg.Body != "hello world" {
+		t.Errorf("expected dmRouter.lastMsg.Body = %q, got %q", "hello world", dmRouter.lastMsg.Body)
+	}
+}
+
+func TestMessageSendDMRejectsNonStringReplyTo(t *testing.T) {
+	node := &mockNodeProvider{}
+	dmRouter := &mockDMRouterProvider{}
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	// reply_to as number — must be rejected, not silently dropped.
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":       "peer-addr",
+		"body":     "hello",
+		"reply_to": 123,
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "reply_to must be a string") {
+		t.Errorf("expected validation error about reply_to, got %q", errMsg)
+	}
+
+	// reply_to as bool — same rejection.
+	code2, result2 := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":       "peer-addr",
+		"body":     "hello",
+		"reply_to": true,
+	})
+
+	expectStatusCode(t, code2, 400)
+	if errMsg, _ := result2["error"].(string); !strings.Contains(errMsg, "reply_to must be a string") {
+		t.Errorf("expected validation error about reply_to, got %q", errMsg)
+	}
+}
+
+func TestMessageSendDMRejectsInvalidUUIDReplyTo(t *testing.T) {
+	node := &mockNodeProvider{}
+	dmRouter := &mockDMRouterProvider{}
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	// reply_to as string but not UUID v4 — must be rejected synchronously.
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":       "peer-addr",
+		"body":     "hello",
+		"reply_to": "not-a-uuid",
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "valid message ID") {
+		t.Errorf("expected UUID validation error, got %q", errMsg)
+	}
+
+	// Verify dmRouter was never called — the request should not be enqueued.
+	if dmRouter.lastTo != "" {
+		t.Errorf("expected dmRouter not called, but lastTo=%q", dmRouter.lastTo)
+	}
+}
+
+func TestMessageSendDMAcceptsValidUUIDReplyTo(t *testing.T) {
+	node := &mockNodeProvider{}
+	dmRouter := &mockDMRouterProvider{}
+	// Without chatlog, existence check is skipped — format-valid UUID is accepted.
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":       "peer-addr",
+		"body":     "hello",
+		"reply_to": "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+	})
+
+	expectStatusCode(t, code, 200)
+	expectField(t, result, "status", "queued")
+	if dmRouter.lastMsg.ReplyTo != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
+		t.Errorf("expected reply_to forwarded, got %q", dmRouter.lastMsg.ReplyTo)
+	}
+}
+
+func TestMessageSendDMRejectsDanglingReplyToWithChatlog(t *testing.T) {
+	node := &mockNodeProvider{}
+	dmRouter := &mockDMRouterProvider{}
+	chatlog := &mockChatlogProvider{
+		knownEntries: map[string]bool{}, // empty — no messages exist
+	}
+
+	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
+
+	// Valid UUID format but does not exist in conversation — must be rejected.
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":       "peer-addr",
+		"body":     "hello",
+		"reply_to": "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "does not exist") {
+		t.Errorf("expected existence validation error, got %q", errMsg)
+	}
+	if dmRouter.lastTo != "" {
+		t.Errorf("expected dmRouter not called, but lastTo=%q", dmRouter.lastTo)
+	}
+}
+
+func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
+	node := &mockNodeProvider{}
+	dmRouter := &mockDMRouterProvider{}
+	chatlog := &mockChatlogProvider{
+		knownEntries: map[string]bool{
+			"peer-addr:a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5": true,
+		},
+	}
+
+	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":       "peer-addr",
+		"body":     "hello",
+		"reply_to": "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+	})
+
+	expectStatusCode(t, code, 200)
+	expectField(t, result, "status", "queued")
+	if dmRouter.lastMsg.ReplyTo != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
+		t.Errorf("expected reply_to forwarded, got %q", dmRouter.lastMsg.ReplyTo)
+	}
+}
+
+func TestMessageSendDMAcceptsEmptyReplyTo(t *testing.T) {
+	node := &mockNodeProvider{}
+	dmRouter := &mockDMRouterProvider{}
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	// Omitted reply_to — should succeed normally.
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":   "peer-addr",
+		"body": "hello",
+	})
+
+	expectStatusCode(t, code, 200)
+	expectField(t, result, "status", "queued")
+	if dmRouter.lastMsg.ReplyTo != "" {
+		t.Errorf("expected empty reply_to, got %q", dmRouter.lastMsg.ReplyTo)
 	}
 }
 

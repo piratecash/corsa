@@ -58,6 +58,9 @@ type mockChatlogProvider struct {
 	previewsErr         error
 	conversationsResult string
 	conversationsErr    error
+	// knownEntries maps "peerAddress:messageID" to existence.
+	// Used by HasEntryInConversation for reply_to validation tests.
+	knownEntries map[string]bool
 }
 
 // FetchChatlog returns the configured chatlog result or error.
@@ -78,19 +81,27 @@ func (m *mockChatlogProvider) FetchConversations() (string, error) {
 	return m.conversationsResult, m.conversationsErr
 }
 
+// HasEntryInConversation checks knownEntries map for "peerAddress:messageID".
+func (m *mockChatlogProvider) HasEntryInConversation(peerAddress, messageID string) bool {
+	if m.knownEntries == nil {
+		return false
+	}
+	return m.knownEntries[peerAddress+":"+messageID]
+}
+
 // mockDMRouterProvider is a test double for DMRouterProvider.
 type mockDMRouterProvider struct {
-	lastTo   string
-	lastBody string
+	lastTo  string
+	lastMsg domain.OutgoingDM
 }
 
 func (m *mockDMRouterProvider) Snapshot() service.RouterSnapshot {
 	return service.RouterSnapshot{}
 }
 
-func (m *mockDMRouterProvider) SendMessage(to domain.PeerIdentity, body string) {
+func (m *mockDMRouterProvider) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 	m.lastTo = string(to)
-	m.lastBody = body
+	m.lastMsg = msg
 }
 
 // buildTestTable creates a CommandTable with all commands registered using given providers.
@@ -124,6 +135,13 @@ func setupTestServerWithDMRouter(t *testing.T, nodeProvider rpc.NodeProvider, ch
 		t.Fatalf("create test server: %v", err)
 	}
 	return server
+}
+
+// setupTestServerWithDMRouterAndChatlog creates a test RPC server with both
+// DMRouterProvider and ChatlogProvider for tests that need reply_to validation.
+func setupTestServerWithDMRouterAndChatlog(t *testing.T, nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider, dmRouter rpc.DMRouterProvider) *rpc.Server {
+	t.Helper()
+	return setupTestServerWithDMRouter(t, nodeProvider, chatlogProvider, dmRouter)
 }
 
 // postJSON sends a POST request with JSON body and returns status code and parsed response.

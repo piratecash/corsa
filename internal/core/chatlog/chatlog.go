@@ -574,6 +574,21 @@ func (s *Store) HasEntryID(topic string, peerAddress string, id string) bool {
 	return err == nil
 }
 
+// HasEntryInConversation checks whether a message with the given ID exists
+// within a specific DM conversation. Used to validate reply_to references
+// before encrypting — prevents dangling or cross-conversation reply links.
+func (s *Store) HasEntryInConversation(peerAddress string, id string) bool {
+	if s.db == nil || peerAddress == "" || id == "" {
+		return false
+	}
+	query, params := s.peerQuery("dm", peerAddress,
+		`SELECT 1 FROM messages WHERE id = ? AND `, ` LIMIT 1`)
+	params = append([]interface{}{id}, params...)
+	var exists int
+	err := s.db.QueryRow(query, params...).Scan(&exists)
+	return err == nil
+}
+
 // peerQuery builds a WHERE clause for messages in a specific conversation.
 // For DMs it filters by (sender=self AND recipient=peer) OR (sender=peer AND recipient=self).
 // For global it filters by topic='global'.

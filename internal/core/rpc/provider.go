@@ -21,12 +21,16 @@ type ChatlogProvider interface {
 	FetchChatlog(topic, peerAddress string) (string, error)
 	FetchChatlogPreviews() (string, error)
 	FetchConversations() (string, error)
+	// HasEntryInConversation checks whether a message with the given ID
+	// exists in the conversation with peerAddress. Used by send_dm to
+	// validate reply_to references synchronously before queueing.
+	HasEntryInConversation(peerAddress, messageID string) bool
 }
 
 // DMRouterProvider abstracts access to dm_router.
 type DMRouterProvider interface {
 	Snapshot() service.RouterSnapshot
-	SendMessage(to domain.PeerIdentity, body string)
+	SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM)
 }
 
 // MetricsProvider abstracts access to the metrics collector.

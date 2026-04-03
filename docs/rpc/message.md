@@ -155,24 +155,36 @@ fetch_dm_headers
 
 Queue a direct message for delivery (desktop mode only, returns 503 on standalone node).
 
-Request: `{"to": "address", "body": "message text"}`
+Request: `{"to": "address", "body": "message text", "reply_to": "<uuid-v4>"}` (`reply_to` is optional — omit for regular messages, provide a message ID to create a reply).
+
+Validation (synchronous, returns 400 on failure):
+
+- `to` and `body` are required (non-empty strings).
+- `reply_to` must be a valid UUID v4 string when present.
+- When chatlog is available (desktop mode), `reply_to` is checked against the conversation history — referencing a non-existent message is rejected before queueing.
 
 Response: `{"status": "queued", "to": "address"}`. The message is accepted for async delivery via DMRouter. Actual delivery happens in a background goroutine — check delivery receipts for confirmation.
 
 #### CLI
 
 ```bash
-# Positional (to body...)
+# Positional (to body...) — reply_to is not available in positional mode
 corsa-cli send_dm a1b2c3d4... hello world
 
 # Named
 corsa-cli send_dm to=a1b2c3d4... body="hello world"
 
-# JSON
-corsa-cli '{"type": "send_dm", "to": "a1b2c3d4...", "body": "hello world"}'
+# Named with reply
+corsa-cli send_dm to=a1b2c3d4... body="I agree" reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e
+
+# JSON (command name first, single JSON argument with fields)
+corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "hello world"}'
+
+# JSON with reply
+corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "I agree", "reply_to": "e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e"}'
 ```
 
-Note: JSON wire format uses `recipient`, the RPC handler expects `to`. The `normalizeFrameArgs` layer maps `recipient` → `to` automatically when pasting wire frames into the console.
+Note: JSON wire format uses `recipient`, the RPC handler expects `to`. The `normalizeFrameArgs` layer maps `recipient` → `to` automatically when pasting wire frames into the console. The `reply_to` field is only available via named args or JSON — positional mode joins all tokens after `<to>` into `body`. The `reply_to` value is encrypted inside the PlainMessage envelope — the relay server never sees it.
 
 #### Console
 
@@ -334,24 +346,36 @@ fetch_dm_headers
 
 Постановка прямого сообщения в очередь доставки (только desktop-режим, возвращает 503 на standalone-ноде).
 
-Запрос: `{"to": "address", "body": "текст сообщения"}`
+Запрос: `{"to": "address", "body": "текст сообщения", "reply_to": "<uuid-v4>"}` (`reply_to` — необязательное поле; пропустите для обычных сообщений, укажите ID сообщения для создания ответа).
+
+Валидация (синхронная, возвращает 400 при ошибке):
+
+- `to` и `body` обязательны (непустые строки).
+- `reply_to` должен быть валидным UUID v4, если указан.
+- При наличии chatlog (desktop-режим) `reply_to` проверяется по истории переписки — ссылка на несуществующее сообщение отклоняется до постановки в очередь.
 
 Ответ: `{"status": "queued", "to": "address"}`. Сообщение принято для асинхронной доставки через DMRouter. Фактическая отправка происходит в фоновой goroutine — используйте delivery receipts для подтверждения.
 
 #### CLI
 
 ```bash
-# Позиционные (to body...)
+# Позиционные (to body...) — reply_to недоступен в позиционном режиме
 corsa-cli send_dm a1b2c3d4... hello world
 
 # Именованные
 corsa-cli send_dm to=a1b2c3d4... body="hello world"
 
-# JSON
-corsa-cli '{"type": "send_dm", "to": "a1b2c3d4...", "body": "hello world"}'
+# Именованные с ответом
+corsa-cli send_dm to=a1b2c3d4... body="Согласен" reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e
+
+# JSON (имя команды первым, затем один JSON-аргумент с полями)
+corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "hello world"}'
+
+# JSON с ответом
+corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "Согласен", "reply_to": "e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e"}'
 ```
 
-Примечание: JSON wire-формат использует `recipient`, RPC-обработчик ожидает `to`. Слой `normalizeFrameArgs` автоматически маппит `recipient` → `to` при вставке wire-фреймов в консоль.
+Примечание: JSON wire-формат использует `recipient`, RPC-обработчик ожидает `to`. Слой `normalizeFrameArgs` автоматически маппит `recipient` → `to` при вставке wire-фреймов в консоль. Поле `reply_to` доступно только через именованные аргументы или JSON — в позиционном режиме все токены после `<to>` объединяются в `body`. Значение `reply_to` шифруется внутри PlainMessage-конверта — relay-сервер его не видит.
 
 #### Консоль
 

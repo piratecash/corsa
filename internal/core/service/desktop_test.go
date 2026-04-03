@@ -115,7 +115,14 @@ func TestDecryptDirectMessages(t *testing.T) {
 		t.Fatalf("Generate recipient failed: %v", err)
 	}
 
-	ciphertext, err := directmsg.EncryptForParticipants(sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), "secret phrase")
+	ciphertext, err := directmsg.EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "secret phrase"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
 	}
@@ -147,6 +154,100 @@ func TestDecryptDirectMessages(t *testing.T) {
 	}
 }
 
+func TestDecryptDirectMessagesSanitizesDanglingReplyTo(t *testing.T) {
+	t.Parallel()
+
+	// Valid UUID v4 IDs for test messages (version=4, variant=8/9/a/b).
+	const (
+		id1      = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+		id2      = "11111111-2222-4333-9444-555555555555"
+		id3      = "66666666-7777-4888-a999-aaaaaaaaaaaa"
+		id4      = "bbbbbbbb-cccc-4ddd-beee-ffffffffffff"
+		idOrphan = "deadbeef-dead-4eef-8ead-beefdeadbeef" // valid v4 format, but not in batch
+	)
+
+	sender, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate sender failed: %v", err)
+	}
+	recipient, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate recipient failed: %v", err)
+	}
+
+	dmRecipient := domain.DMRecipient{
+		Address:      domain.PeerIdentity(recipient.Address),
+		BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+	}
+
+	// Message 1: no reply_to.
+	ct1, err := directmsg.EncryptForParticipants(sender, dmRecipient, domain.OutgoingDM{Body: "hello"})
+	if err != nil {
+		t.Fatalf("encrypt msg1: %v", err)
+	}
+
+	// Message 2: valid reply_to pointing at msg1 (exists in batch).
+	ct2, err := directmsg.EncryptForParticipants(sender, dmRecipient, domain.OutgoingDM{Body: "reply ok", ReplyTo: domain.MessageID(id1)})
+	if err != nil {
+		t.Fatalf("encrypt msg2: %v", err)
+	}
+
+	// Message 3: dangling reply_to — valid UUID format but not in batch.
+	ct3, err := directmsg.EncryptForParticipants(sender, dmRecipient, domain.OutgoingDM{Body: "reply dangling", ReplyTo: domain.MessageID(idOrphan)})
+	if err != nil {
+		t.Fatalf("encrypt msg3: %v", err)
+	}
+
+	// Message 4: malformed reply_to — not a UUID at all.
+	ct4, err := directmsg.EncryptForParticipants(sender, dmRecipient, domain.OutgoingDM{Body: "reply garbage", ReplyTo: "not-a-uuid"})
+	if err != nil {
+		t.Fatalf("encrypt msg4: %v", err)
+	}
+
+	contacts := map[string]Contact{
+		sender.Address: {
+			BoxKey: identity.BoxPublicKeyBase64(sender.BoxPublicKey),
+			PubKey: identity.PublicKeyBase64(sender.PublicKey),
+		},
+	}
+
+	ts := mustTime(t, "2026-03-19T10:00:00Z")
+	messages := []MessageRecord{
+		{ID: id1, Sender: sender.Address, Recipient: recipient.Address, Body: ct1, Timestamp: ts},
+		{ID: id2, Sender: sender.Address, Recipient: recipient.Address, Body: ct2, Timestamp: ts},
+		{ID: id3, Sender: sender.Address, Recipient: recipient.Address, Body: ct3, Timestamp: ts},
+		{ID: id4, Sender: sender.Address, Recipient: recipient.Address, Body: ct4, Timestamp: ts},
+	}
+
+	got := decryptDirectMessages(recipient, contacts, messages, nil, nil)
+
+	if len(got) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(got))
+	}
+
+	// msg-1: no reply_to — stays empty.
+	if got[0].ReplyTo != "" {
+		t.Errorf("msg-1: expected empty ReplyTo, got %q", got[0].ReplyTo)
+	}
+
+	// msg-2: reply_to=id1 exists in batch — preserved.
+	if got[1].ReplyTo != domain.MessageID(id1) {
+		t.Errorf("msg-2: expected ReplyTo=%s, got %q", id1, got[1].ReplyTo)
+	}
+
+	// msg-3: reply_to=idOrphan — valid UUID but not in batch — preserved by
+	// decryptDirectMessages (dangling-reference checks require the chatlog
+	// store and happen in sanitizeReplyReferences, called by FetchConversation).
+	if got[2].ReplyTo != domain.MessageID(idOrphan) {
+		t.Errorf("msg-3: expected ReplyTo=%s (dangling but valid format preserved), got %q", idOrphan, got[2].ReplyTo)
+	}
+
+	// msg-4: reply_to=not-a-uuid — invalid format — sanitized during decryption.
+	if got[3].ReplyTo != "" {
+		t.Errorf("msg-4: expected empty ReplyTo (invalid format sanitized), got %q", got[3].ReplyTo)
+	}
+}
+
 func TestDecryptDirectMessagesMarksLifecycleStatuses(t *testing.T) {
 	t.Parallel()
 
@@ -159,7 +260,14 @@ func TestDecryptDirectMessagesMarksLifecycleStatuses(t *testing.T) {
 		t.Fatalf("Generate recipient failed: %v", err)
 	}
 
-	ciphertext, err := directmsg.EncryptForParticipants(sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), "queued later")
+	ciphertext, err := directmsg.EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "queued later"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
 	}
@@ -223,13 +331,27 @@ func TestDecryptOutgoingWithoutSelfInContacts(t *testing.T) {
 	}
 
 	// Encrypt an outgoing message (self → peer).
-	outCipher, err := directmsg.EncryptForParticipants(self, peer.Address, identity.BoxPublicKeyBase64(peer.BoxPublicKey), "outgoing text")
+	outCipher, err := directmsg.EncryptForParticipants(
+		self,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(peer.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "outgoing text"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants outgoing failed: %v", err)
 	}
 
 	// Encrypt an incoming message (peer → self).
-	inCipher, err := directmsg.EncryptForParticipants(peer, self.Address, identity.BoxPublicKeyBase64(self.BoxPublicKey), "incoming text")
+	inCipher, err := directmsg.EncryptForParticipants(
+		peer,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(self.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(self.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "incoming text"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants incoming failed: %v", err)
 	}
@@ -278,7 +400,14 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 		t.Fatalf("Generate recipient failed: %v", err)
 	}
 
-	ciphertext, err := directmsg.EncryptForParticipants(sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), "hello after restart")
+	ciphertext, err := directmsg.EncryptForParticipants(
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello after restart"},
+	)
 	if err != nil {
 		t.Fatalf("EncryptForParticipants failed: %v", err)
 	}
@@ -1039,7 +1168,12 @@ func TestDeliveredAtSynthesizedAfterRestart(t *testing.T) {
 	// Encrypt a test message.
 	body := "restart status test"
 	ciphertext, err := directmsg.EncryptForParticipants(
-		sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey), body,
+		sender,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(recipient.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: body},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
@@ -1194,7 +1328,12 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 
 	// Encrypt an outgoing message (self → peer).
 	ciphertext, err := directmsg.EncryptForParticipants(
-		id, peer.Address, identity.BoxPublicKeyBase64(peer.BoxPublicKey), "hello from test",
+		id,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(peer.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello from test"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
@@ -1309,7 +1448,12 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 		{peer2.Address, peer2, "hello peer2", "msg-p2"},
 	} {
 		ct, encErr := directmsg.EncryptForParticipants(
-			id, tc.peerAddr, identity.BoxPublicKeyBase64(tc.peerID.BoxPublicKey), tc.body,
+			id,
+			domain.DMRecipient{
+				Address:      domain.PeerIdentity(tc.peerAddr),
+				BoxKeyBase64: identity.BoxPublicKeyBase64(tc.peerID.BoxPublicKey),
+			},
+			domain.OutgoingDM{Body: tc.body},
 		)
 		if encErr != nil {
 			t.Fatalf("encrypt for %s: %v", tc.peerAddr, encErr)
@@ -1384,7 +1528,12 @@ func TestFetchConversationPreviewsIncludesUnreadCount(t *testing.T) {
 
 	// Insert an outgoing message (so we have a conversation).
 	ct, err := directmsg.EncryptForParticipants(
-		id, peer.Address, identity.BoxPublicKeyBase64(peer.BoxPublicKey), "msg body",
+		id,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(peer.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "msg body"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
@@ -1477,7 +1626,12 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 	}
 
 	ct, err := directmsg.EncryptForParticipants(
-		id, peer.Address, identity.BoxPublicKeyBase64(peer.BoxPublicKey), "single preview body",
+		id,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(peer.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "single preview body"},
 	)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
@@ -1559,7 +1713,12 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		body := strings.Repeat("x", i+1) // "x", "xx", "xxx"
 		ct, encErr := directmsg.EncryptForParticipants(
-			id, peer.Address, identity.BoxPublicKeyBase64(peer.BoxPublicKey), body,
+			id,
+			domain.DMRecipient{
+				Address:      domain.PeerIdentity(peer.Address),
+				BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+			},
+			domain.OutgoingDM{Body: body},
 		)
 		if encErr != nil {
 			t.Fatalf("encrypt msg %d: %v", i, encErr)

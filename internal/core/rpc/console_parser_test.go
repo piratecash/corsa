@@ -11,6 +11,37 @@ func TestParseConsoleInputEmptyInput(t *testing.T) {
 	}
 }
 
+func TestParseConsoleInputQuoteOnlyInput(t *testing.T) {
+	// Quoted-only inputs produce zero tokens after stripping quotes.
+	// Must return an error, not panic.
+	inputs := []string{`""`, `''`, `"  "`, `' '`}
+	for _, input := range inputs {
+		_, err := ParseConsoleInput(input)
+		if err == nil {
+			t.Errorf("ParseConsoleInput(%q): expected error, got nil", input)
+		}
+	}
+}
+
+func TestParseConsoleInputUnterminatedQuote(t *testing.T) {
+	// Unterminated quotes must return an error instead of silently
+	// folding subsequent key=value tokens into the quoted value.
+	inputs := []struct {
+		input string
+		desc  string
+	}{
+		{`send_dm to=peer body="hello world`, "unterminated double quote in body"},
+		{`send_dm to=peer body='hello world`, "unterminated single quote in body"},
+		{`send_dm to=peer body="hello world reply_to=a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5`, "unterminated quote swallows reply_to"},
+	}
+	for _, tt := range inputs {
+		_, err := ParseConsoleInput(tt.input)
+		if err == nil {
+			t.Errorf("%s: ParseConsoleInput(%q): expected error, got nil", tt.desc, tt.input)
+		}
+	}
+}
+
 func TestParseConsoleInputSimpleCommand(t *testing.T) {
 	tests := []string{
 		"ping", "help", "hello", "version",
@@ -386,6 +417,232 @@ func TestParseConsoleInputJSONFrameOffsetNotOverwritten(t *testing.T) {
 	offset, _ := req.Args["offset"].(float64)
 	if offset != 5 {
 		t.Errorf("expected offset=5 (not overwritten by count), got %v", offset)
+	}
+}
+
+func TestParseConsoleInputKeyValueSendDMWithReplyTo(t *testing.T) {
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body=hello reply_to=a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Name != "send_dm" {
+		t.Errorf("expected command send_dm, got %s", req.Name)
+	}
+	if req.Args["to"] != "peer-addr" {
+		t.Errorf("expected to=peer-addr, got %v", req.Args["to"])
+	}
+	if req.Args["body"] != "hello" {
+		t.Errorf("expected body=hello, got %v", req.Args["body"])
+	}
+	if req.Args["reply_to"] != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
+		t.Errorf("expected reply_to=a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5, got %v", req.Args["reply_to"])
+	}
+}
+
+func TestParseConsoleInputKeyValueQuotedMultiWordBody(t *testing.T) {
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body="hello world" reply_to=a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Name != "send_dm" {
+		t.Errorf("expected command send_dm, got %s", req.Name)
+	}
+	if req.Args["to"] != "peer-addr" {
+		t.Errorf("expected to=peer-addr, got %v", req.Args["to"])
+	}
+	if req.Args["body"] != "hello world" {
+		t.Errorf("expected body='hello world', got %v", req.Args["body"])
+	}
+	if req.Args["reply_to"] != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
+		t.Errorf("expected reply_to=a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5, got %v", req.Args["reply_to"])
+	}
+}
+
+func TestParseConsoleInputKeyValueSingleQuotes(t *testing.T) {
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body='multi word message'`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Args["body"] != "multi word message" {
+		t.Errorf("expected body='multi word message', got %v", req.Args["body"])
+	}
+}
+
+func TestParseConsoleInputKeyValueEscapedDoubleQuotes(t *testing.T) {
+	// body="He said \"hi\"" should produce: He said "hi"
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body="He said \"hi\""`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := `He said "hi"`
+	if req.Args["body"] != want {
+		t.Errorf("expected body=%q, got %v", want, req.Args["body"])
+	}
+}
+
+func TestParseConsoleInputKeyValueEscapedSingleQuotes(t *testing.T) {
+	// body='It\'s fine' should produce: It's fine
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body='It\'s fine'`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "It's fine"
+	if req.Args["body"] != want {
+		t.Errorf("expected body=%q, got %v", want, req.Args["body"])
+	}
+}
+
+func TestParseConsoleInputKeyValueEscapedBackslash(t *testing.T) {
+	// body="path\\to\\file" should produce: path\to\file
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body="path\\to\\file"`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := `path\to\file`
+	if req.Args["body"] != want {
+		t.Errorf("expected body=%q, got %v", want, req.Args["body"])
+	}
+}
+
+func TestParseConsoleInputKeyValueBackslashNonSpecial(t *testing.T) {
+	// Backslash before non-special char inside quotes is kept literal.
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body="hello\nworld"`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := `hello\nworld`
+	if req.Args["body"] != want {
+		t.Errorf("expected body=%q, got %v", want, req.Args["body"])
+	}
+}
+
+func TestParseConsoleInputKeyValueFallsBackToPositional(t *testing.T) {
+	// Mixed bare and key=value tokens — should fall through to positional parsing.
+	req, err := ParseConsoleInput("send_dm peer-addr hello world")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Args["to"] != "peer-addr" {
+		t.Errorf("expected to=peer-addr, got %v", req.Args["to"])
+	}
+	if req.Args["body"] != "hello world" {
+		t.Errorf("expected body='hello world', got %v", req.Args["body"])
+	}
+}
+
+func TestParseConsoleInputKeyValueScalarBodyTrue(t *testing.T) {
+	// body=true must be kept as the string "true", not parsed as bool.
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body=true`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, ok := req.Args["body"].(string)
+	if !ok {
+		t.Fatalf("expected body to be string, got %T", req.Args["body"])
+	}
+	if body != "true" {
+		t.Errorf("expected body='true', got %q", body)
+	}
+}
+
+func TestParseConsoleInputKeyValueScalarBodyNumber(t *testing.T) {
+	// body=123 must be kept as the string "123", not parsed as float64.
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body=123`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, ok := req.Args["body"].(string)
+	if !ok {
+		t.Fatalf("expected body to be string, got %T", req.Args["body"])
+	}
+	if body != "123" {
+		t.Errorf("expected body='123', got %q", body)
+	}
+}
+
+func TestParseConsoleInputKeyValueScalarBodyNull(t *testing.T) {
+	// body=null must be kept as the string "null", not parsed as nil.
+	req, err := ParseConsoleInput(`send_dm to=peer-addr body=null`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, ok := req.Args["body"].(string)
+	if !ok {
+		t.Fatalf("expected body to be string, got %T (%v)", req.Args["body"], req.Args["body"])
+	}
+	if body != "null" {
+		t.Errorf("expected body='null', got %q", body)
+	}
+}
+
+func TestParseConsoleInputKeyValueNoArgs(t *testing.T) {
+	// No args after command — key=value should not activate, positional handles it.
+	req, err := ParseConsoleInput("ping")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Name != "ping" {
+		t.Errorf("expected command ping, got %s", req.Name)
+	}
+}
+
+func TestNumericArg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		args    map[string]interface{}
+		key     string
+		wantVal int
+		wantOK  bool
+	}{
+		{"float64 from JSON", map[string]interface{}{"limit": float64(10)}, "limit", 10, true},
+		{"string from key=value", map[string]interface{}{"limit": "10"}, "limit", 10, true},
+		{"zero float64", map[string]interface{}{"limit": float64(0)}, "limit", 0, false},
+		{"zero string", map[string]interface{}{"limit": "0"}, "limit", 0, false},
+		{"negative float64", map[string]interface{}{"offset": float64(-5)}, "offset", -5, false},
+		{"negative string", map[string]interface{}{"offset": "-5"}, "offset", -5, false},
+		{"non-numeric string", map[string]interface{}{"limit": "abc"}, "limit", 0, false},
+		{"missing key", map[string]interface{}{}, "limit", 0, false},
+		{"nil args", nil, "limit", 0, false},
+		{"bool value", map[string]interface{}{"limit": true}, "limit", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			val, ok := numericArg(tt.args, tt.key)
+			if ok != tt.wantOK {
+				t.Errorf("numericArg(%v, %q) ok = %v, want %v", tt.args, tt.key, ok, tt.wantOK)
+			}
+			if val != tt.wantVal {
+				t.Errorf("numericArg(%v, %q) val = %d, want %d", tt.args, tt.key, val, tt.wantVal)
+			}
+		})
+	}
+}
+
+func TestParseConsoleInputKeyValuePagination(t *testing.T) {
+	// key=value with numeric params should produce strings that numericArg can parse.
+	req, err := ParseConsoleInput(`fetch_messages topic=dm limit=10 offset=5`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Args["topic"] != "dm" {
+		t.Errorf("expected topic=dm, got %v", req.Args["topic"])
+	}
+	// Values arrive as strings from key=value parser.
+	if req.Args["limit"] != "10" {
+		t.Errorf("expected limit='10', got %v (%T)", req.Args["limit"], req.Args["limit"])
+	}
+	if req.Args["offset"] != "5" {
+		t.Errorf("expected offset='5', got %v (%T)", req.Args["offset"], req.Args["offset"])
+	}
+	// numericArg should extract them correctly.
+	if limit, ok := numericArg(req.Args, "limit"); !ok || limit != 10 {
+		t.Errorf("numericArg(limit) = %d, %v; want 10, true", limit, ok)
+	}
+	if offset, ok := numericArg(req.Args, "offset"); !ok || offset != 5 {
+		t.Errorf("numericArg(offset) = %d, %v; want 5, true", offset, ok)
 	}
 }
 
