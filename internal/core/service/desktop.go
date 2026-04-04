@@ -52,8 +52,8 @@ type MessageRecord struct {
 
 type DeliveryReceipt struct {
 	MessageID   string
-	Sender      string
-	Recipient   string
+	Sender      domain.PeerIdentity
+	Recipient   domain.PeerIdentity
 	Status      string
 	DeliveredAt time.Time
 }
@@ -86,8 +86,8 @@ type PeerHealth struct {
 
 type DirectMessage struct {
 	ID            string
-	Sender        string
-	Recipient     string
+	Sender        domain.PeerIdentity
+	Recipient     domain.PeerIdentity
 	Body          string
 	ReplyTo       domain.MessageID
 	Timestamp     time.Time
@@ -97,14 +97,14 @@ type DirectMessage struct {
 
 type DMHeader struct {
 	ID        string
-	Sender    string
-	Recipient string
+	Sender    domain.PeerIdentity
+	Recipient domain.PeerIdentity
 	Timestamp time.Time
 }
 
 type ConversationPreview struct {
-	PeerAddress string
-	Sender      string
+	PeerAddress domain.PeerIdentity
+	Sender      domain.PeerIdentity
 	Body        string
 	Timestamp   time.Time
 	UnreadCount int // number of incoming messages with delivery_status != 'seen'
@@ -245,16 +245,16 @@ func (c *DesktopClient) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) b
 	// The receipt sender is the message recipient (confirming delivery/seen).
 	// The receipt recipient is the message sender (being notified).
 	// The peer in the chatlog is the other party.
-	var chatlogPeer string
+	var chatlogPeer domain.PeerIdentity
 	if receipt.Sender == c.id.Address {
-		chatlogPeer = receipt.Recipient
+		chatlogPeer = domain.PeerIdentity(receipt.Recipient)
 	} else if receipt.Recipient == c.id.Address {
-		chatlogPeer = receipt.Sender
+		chatlogPeer = domain.PeerIdentity(receipt.Sender)
 	}
 	if chatlogPeer == "" {
 		return true // not our message, nothing to update
 	}
-	if _, err := c.chatLog.UpdateStatus("dm", domain.PeerIdentity(chatlogPeer), domain.MessageID(receipt.MessageID), receipt.Status); err != nil {
+	if _, err := c.chatLog.UpdateStatus("dm", chatlogPeer, domain.MessageID(receipt.MessageID), receipt.Status); err != nil {
 		log.Error().Str("message_id", string(receipt.MessageID)).Str("status", receipt.Status).Err(err).Msg("chatlog update status failed")
 		return false
 	}
@@ -285,8 +285,8 @@ func (c *DesktopClient) ListenAddress() string {
 	return c.nodeCfg.ListenAddress
 }
 
-func (c *DesktopClient) Address() string {
-	return c.id.Address
+func (c *DesktopClient) Address() domain.PeerIdentity {
+	return domain.PeerIdentity(c.id.Address)
 }
 
 // DeletePeerHistory removes all chat messages for the given identity from the
@@ -555,18 +555,18 @@ func incomingContactsToTrust(self string, trustedContacts, decryptContacts map[s
 	toImport := make(map[string]protocol.ContactFrame)
 
 	for _, message := range messages {
-		if message.Recipient != self || message.Sender == self {
+		if message.Recipient != domain.PeerIdentity(self) || message.Sender == domain.PeerIdentity(self) {
 			continue
 		}
-		if _, ok := trustedContacts[message.Sender]; ok {
+		if _, ok := trustedContacts[string(message.Sender)]; ok {
 			continue
 		}
-		contact, ok := decryptContacts[message.Sender]
+		contact, ok := decryptContacts[string(message.Sender)]
 		if !ok || contact.BoxKey == "" || contact.PubKey == "" || contact.BoxSignature == "" {
 			continue
 		}
-		toImport[message.Sender] = protocol.ContactFrame{
-			Address: message.Sender,
+		toImport[string(message.Sender)] = protocol.ContactFrame{
+			Address: string(message.Sender),
 			PubKey:  contact.PubKey,
 			BoxKey:  contact.BoxKey,
 			BoxSig:  contact.BoxSignature,
@@ -1162,8 +1162,8 @@ func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAdd
 	return imported, nil
 }
 
-func (c *DesktopClient) SendDirectMessage(ctx context.Context, to string, msg domain.OutgoingDM) (*DirectMessage, error) {
-	to = strings.TrimSpace(to)
+func (c *DesktopClient) SendDirectMessage(ctx context.Context, to domain.PeerIdentity, msg domain.OutgoingDM) (*DirectMessage, error) {
+	to = domain.PeerIdentity(strings.TrimSpace(string(to)))
 	msg.Body = strings.TrimSpace(msg.Body)
 	msg.ReplyTo = domain.MessageID(strings.TrimSpace(string(msg.ReplyTo)))
 	if to == "" || msg.Body == "" {
@@ -1174,18 +1174,18 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to string, msg do
 	}
 
 	if msg.ReplyTo != "" && c.chatLog != nil {
-		if !c.chatLog.HasEntryInConversation(domain.PeerIdentity(to), domain.MessageID(msg.ReplyTo)) {
+		if !c.chatLog.HasEntryInConversation(to, domain.MessageID(msg.ReplyTo)) {
 			return nil, fmt.Errorf("reply_to message %q not found in conversation with %s", msg.ReplyTo, to)
 		}
 	}
 
-	contact, err := c.ensureRecipientContact(ctx, to)
+	contact, err := c.ensureRecipientContact(ctx, string(to))
 	if err != nil {
 		return nil, err
 	}
 
 	recipient := domain.DMRecipient{
-		Address:      domain.PeerIdentity(to),
+		Address:      to,
 		BoxKeyBase64: contact.BoxKey,
 	}
 
@@ -1206,7 +1206,7 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to string, msg do
 		Topic:      "dm",
 		ID:         string(messageID),
 		Address:    c.id.Address,
-		Recipient:  to,
+		Recipient:  string(to),
 		Flag:       string(protocol.MessageFlagSenderDelete),
 		CreatedAt:  createdAt,
 		TTLSeconds: 0,
@@ -1222,7 +1222,7 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to string, msg do
 
 	result := &DirectMessage{
 		ID:            string(messageID),
-		Sender:        c.id.Address,
+		Sender:        domain.PeerIdentity(c.id.Address),
 		Recipient:     to,
 		Body:          msg.Body, // plaintext — already known to us
 		ReplyTo:       msg.ReplyTo,
@@ -1284,8 +1284,8 @@ func (c *DesktopClient) ensureRecipientContact(ctx context.Context, recipient st
 	return contact, nil
 }
 
-func (c *DesktopClient) MarkConversationSeen(ctx context.Context, counterparty string, messages []DirectMessage) error {
-	counterparty = strings.TrimSpace(counterparty)
+func (c *DesktopClient) MarkConversationSeen(ctx context.Context, counterparty domain.PeerIdentity, messages []DirectMessage) error {
+	counterparty = domain.PeerIdentity(strings.TrimSpace(string(counterparty)))
 	if counterparty == "" {
 		return nil
 	}
@@ -1294,7 +1294,7 @@ func (c *DesktopClient) MarkConversationSeen(ctx context.Context, counterparty s
 	seenAt := time.Now().UTC().Format(time.RFC3339)
 
 	for _, message := range messages {
-		if message.Sender != counterparty || message.Recipient != c.id.Address {
+		if message.Sender != counterparty || message.Recipient != domain.PeerIdentity(c.id.Address) {
 			continue
 		}
 		if message.ReceiptStatus == protocol.ReceiptStatusSeen {
@@ -1305,7 +1305,7 @@ func (c *DesktopClient) MarkConversationSeen(ctx context.Context, counterparty s
 			Type:        "send_delivery_receipt",
 			ID:          message.ID,
 			Address:     c.id.Address,
-			Recipient:   counterparty,
+			Recipient:   string(counterparty),
 			Status:      protocol.ReceiptStatusSeen,
 			DeliveredAt: seenAt,
 		})
@@ -1532,8 +1532,8 @@ func receiptRecordsFromFrames(receipts []protocol.ReceiptFrame) []DeliveryReceip
 		}
 		out = append(out, DeliveryReceipt{
 			MessageID:   receipt.MessageID,
-			Sender:      receipt.Sender,
-			Recipient:   receipt.Recipient,
+			Sender:      domain.PeerIdentity(receipt.Sender),
+			Recipient:   domain.PeerIdentity(receipt.Recipient),
 			Status:      receipt.Status,
 			DeliveredAt: deliveredAt.UTC(),
 		})
@@ -1647,8 +1647,8 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 
 		out = append(out, DirectMessage{
 			ID:            item.ID,
-			Sender:        sender,
-			Recipient:     recipient,
+			Sender:        domain.PeerIdentity(sender),
+			Recipient:     domain.PeerIdentity(recipient),
 			Body:          message.Body,
 			ReplyTo:       replyTo,
 			Timestamp:     item.Timestamp,
@@ -1672,10 +1672,10 @@ func sanitizeReplyReferences(messages []DirectMessage, store *chatlog.Store, sel
 			continue
 		}
 		peerAddr := messages[i].Sender
-		if peerAddr == selfAddress {
+		if peerAddr == domain.PeerIdentity(selfAddress) {
 			peerAddr = messages[i].Recipient
 		}
-		if !store.HasEntryInConversation(domain.PeerIdentity(peerAddr), domain.MessageID(messages[i].ReplyTo)) {
+		if !store.HasEntryInConversation(peerAddr, domain.MessageID(messages[i].ReplyTo)) {
 			messages[i].ReplyTo = ""
 		}
 	}
@@ -1755,8 +1755,8 @@ func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) 
 
 	return &DirectMessage{
 		ID:            event.MessageID,
-		Sender:        event.Sender,
-		Recipient:     event.Recipient,
+		Sender:        domain.PeerIdentity(event.Sender),
+		Recipient:     domain.PeerIdentity(event.Recipient),
 		Body:          msg.Body,
 		ReplyTo:       replyTo,
 		Timestamp:     ts,
@@ -1814,8 +1814,8 @@ func dmHeadersFromFrame(frame protocol.Frame) []DMHeader {
 		}
 		out = append(out, DMHeader{
 			ID:        h.ID,
-			Sender:    h.Sender,
-			Recipient: h.Recipient,
+			Sender:    domain.PeerIdentity(h.Sender),
+			Recipient: domain.PeerIdentity(h.Recipient),
 			Timestamp: ts.UTC(),
 		})
 	}
@@ -1825,7 +1825,7 @@ func dmHeadersFromFrame(frame protocol.Frame) []DMHeader {
 func missingDMHeaderContacts(self string, contacts map[string]Contact, headers []DMHeader) []string {
 	missing := make(map[string]struct{})
 	for _, h := range headers {
-		for _, address := range []string{h.Sender, h.Recipient} {
+		for _, address := range []string{string(h.Sender), string(h.Recipient)} {
 			address = strings.TrimSpace(address)
 			if address == "" || address == "*" || address == self {
 				continue
@@ -1851,18 +1851,18 @@ func (c *DesktopClient) importIncomingDMHeaderContacts(trustedContacts, networkC
 	toImport := make(map[string]protocol.ContactFrame)
 
 	for _, h := range headers {
-		if h.Recipient != c.id.Address || h.Sender == c.id.Address {
+		if h.Recipient != domain.PeerIdentity(c.id.Address) || h.Sender == domain.PeerIdentity(c.id.Address) {
 			continue
 		}
-		if _, ok := trustedContacts[h.Sender]; ok {
+		if _, ok := trustedContacts[string(h.Sender)]; ok {
 			continue
 		}
-		contact, ok := networkContacts[h.Sender]
+		contact, ok := networkContacts[string(h.Sender)]
 		if !ok || contact.BoxKey == "" || contact.PubKey == "" || contact.BoxSignature == "" {
 			continue
 		}
-		toImport[h.Sender] = protocol.ContactFrame{
-			Address: h.Sender,
+		toImport[string(h.Sender)] = protocol.ContactFrame{
+			Address: string(h.Sender),
 			PubKey:  contact.PubKey,
 			BoxKey:  contact.BoxKey,
 			BoxSig:  contact.BoxSignature,
@@ -1954,8 +1954,8 @@ func (c *DesktopClient) fetchContactsForDecrypt(ctx context.Context, senders []s
 // chatlog on disk, decrypts it, and returns the messages. This is called
 // on demand when the user switches to a conversation rather than keeping
 // all conversations in memory.
-func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress string) ([]DirectMessage, error) {
-	peerAddress = strings.TrimSpace(peerAddress)
+func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress domain.PeerIdentity) ([]DirectMessage, error) {
+	peerAddress = domain.PeerIdentity(strings.TrimSpace(string(peerAddress)))
 	if peerAddress == "" {
 		return nil, fmt.Errorf("peer address is required")
 	}
@@ -1965,7 +1965,7 @@ func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress strin
 
 	// Read directly from the local chatlog — no node frame roundtrip.
 	// Use context-aware variant so caller deadlines bound SQLite I/O.
-	entries, err := c.chatLog.ReadCtx(ctx, "dm", domain.PeerIdentity(peerAddress))
+	entries, err := c.chatLog.ReadCtx(ctx, "dm", peerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog read: %w", err)
 	}
@@ -2061,18 +2061,20 @@ func (c *DesktopClient) FetchConversationPreviews(ctx context.Context) ([]Conver
 
 	out := make([]ConversationPreview, 0, len(lastEntries))
 	for peerAddr, entry := range lastEntries {
-		sender := entry.Sender
+		peer := domain.PeerIdentity(peerAddr)
+		senderRaw := entry.Sender
+		sender := domain.PeerIdentity(senderRaw)
 
 		// For outgoing messages (sender == self) use the identity key directly.
 		var senderPubKey string
-		if sender == c.id.Address {
+		if senderRaw == c.id.Address {
 			senderPubKey = identity.PublicKeyBase64(c.id.PublicKey)
 		} else {
-			contact, ok := decryptContacts[sender]
+			contact, ok := decryptContacts[senderRaw]
 			if !ok || contact.PubKey == "" {
 				ts, _ := parseTimestamp(entry.CreatedAt)
 				out = append(out, ConversationPreview{
-					PeerAddress: peerAddr,
+					PeerAddress: peer,
 					Sender:      sender,
 					Body:        "",
 					Timestamp:   ts.UTC(),
@@ -2083,11 +2085,11 @@ func (c *DesktopClient) FetchConversationPreviews(ctx context.Context) ([]Conver
 			senderPubKey = contact.PubKey
 		}
 
-		message, decryptErr := directmsg.DecryptForIdentity(c.id, sender, senderPubKey, entry.Recipient, entry.Body)
+		message, decryptErr := directmsg.DecryptForIdentity(c.id, senderRaw, senderPubKey, entry.Recipient, entry.Body)
 		if decryptErr != nil {
 			ts, _ := parseTimestamp(entry.CreatedAt)
 			out = append(out, ConversationPreview{
-				PeerAddress: peerAddr,
+				PeerAddress: peer,
 				Sender:      sender,
 				Body:        "",
 				Timestamp:   ts.UTC(),
@@ -2098,7 +2100,7 @@ func (c *DesktopClient) FetchConversationPreviews(ctx context.Context) ([]Conver
 
 		ts, _ := parseTimestamp(entry.CreatedAt)
 		out = append(out, ConversationPreview{
-			PeerAddress: peerAddr,
+			PeerAddress: peer,
 			Sender:      sender,
 			Body:        message.Body,
 			Timestamp:   ts.UTC(),
@@ -2110,14 +2112,18 @@ func (c *DesktopClient) FetchConversationPreviews(ctx context.Context) ([]Conver
 }
 
 // FetchSinglePreview loads and decrypts the last message for a single conversation.
-func (c *DesktopClient) FetchSinglePreview(ctx context.Context, peerAddress string) (*ConversationPreview, error) {
+func (c *DesktopClient) FetchSinglePreview(ctx context.Context, peerAddress domain.PeerIdentity) (*ConversationPreview, error) {
+	peerAddress = domain.PeerIdentity(strings.TrimSpace(string(peerAddress)))
+	if peerAddress == "" {
+		return nil, fmt.Errorf("peer address is required")
+	}
 	if c.chatLog == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
 
 	// Read directly from the local chatlog — no node frame roundtrip.
 	// Use context-aware variant so caller deadlines bound SQLite I/O.
-	entry, err := c.chatLog.ReadLastEntryCtx(ctx, "dm", domain.PeerIdentity(peerAddress))
+	entry, err := c.chatLog.ReadLastEntryCtx(ctx, "dm", peerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog read last: %w", err)
 	}
@@ -2125,18 +2131,19 @@ func (c *DesktopClient) FetchSinglePreview(ctx context.Context, peerAddress stri
 		return nil, nil
 	}
 
-	sender := entry.Sender
-	contacts, err := c.fetchContactsForDecrypt(ctx, []string{sender})
+	senderRaw := entry.Sender
+	sender := domain.PeerIdentity(senderRaw)
+	contacts, err := c.fetchContactsForDecrypt(ctx, []string{senderRaw})
 	if err != nil {
 		return nil, err
 	}
 
 	// For outgoing messages (sender == self) use the identity key directly.
 	var senderPubKey string
-	if sender == c.id.Address {
+	if senderRaw == c.id.Address {
 		senderPubKey = identity.PublicKeyBase64(c.id.PublicKey)
 	} else {
-		contact, ok := contacts[sender]
+		contact, ok := contacts[senderRaw]
 		if !ok || contact.PubKey == "" {
 			ts, _ := parseTimestamp(entry.CreatedAt)
 			return &ConversationPreview{
@@ -2151,7 +2158,7 @@ func (c *DesktopClient) FetchSinglePreview(ctx context.Context, peerAddress stri
 
 	ts, _ := parseTimestamp(entry.CreatedAt)
 
-	message, decryptErr := directmsg.DecryptForIdentity(c.id, sender, senderPubKey, entry.Recipient, entry.Body)
+	message, decryptErr := directmsg.DecryptForIdentity(c.id, senderRaw, senderPubKey, entry.Recipient, entry.Body)
 	if decryptErr != nil {
 		return &ConversationPreview{
 			PeerAddress: peerAddress,

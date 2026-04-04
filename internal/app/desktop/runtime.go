@@ -44,7 +44,7 @@ func (r *NodeRuntime) ListenAddress() string {
 }
 
 func (r *NodeRuntime) Address() string {
-	return r.service.Address()
+	return string(r.service.Address())
 }
 
 func (r *NodeRuntime) Running() bool {

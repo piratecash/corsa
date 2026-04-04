@@ -1017,7 +1017,7 @@ func (c *ConsoleWindow) executeCommand(input string) (string, error) {
 	if req.Name == "help" {
 		addr := ""
 		if c.parent.client != nil {
-			addr = c.parent.client.Address()
+			addr = string(c.parent.client.Address())
 		}
 		return consoleHelpText(c.parent.cmdTable, addr), nil
 	}

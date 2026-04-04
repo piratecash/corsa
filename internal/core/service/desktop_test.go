@@ -143,8 +143,8 @@ func TestDecryptDirectMessages(t *testing.T) {
 	}}, nil, nil)
 	want := []DirectMessage{{
 		ID:        "id-1",
-		Sender:    sender.Address,
-		Recipient: recipient.Address,
+		Sender:    domain.PeerIdentity(sender.Address),
+		Recipient: domain.PeerIdentity(recipient.Address),
 		Body:      "secret phrase",
 		Timestamp: mustTime(t, "2026-03-19T10:00:00Z"),
 	}}
@@ -450,7 +450,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 			{ID: "msg-adv", Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext, Timestamp: ts, PersistedStatus: "delivered"},
 		}
 		receipts := []DeliveryReceipt{
-			{MessageID: "msg-adv", Sender: sender.Address, Recipient: recipient.Address, Status: "seen", DeliveredAt: time.Now()},
+			{MessageID: "msg-adv", Sender: domain.PeerIdentity(sender.Address), Recipient: domain.PeerIdentity(recipient.Address), Status: "seen", DeliveredAt: time.Now()},
 		}
 		got := decryptDirectMessages(recipient, contacts, records, receipts, nil)
 		if got[0].ReceiptStatus != "seen" {
@@ -464,7 +464,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 			{ID: "msg-noreg", Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext, Timestamp: ts, PersistedStatus: "seen"},
 		}
 		receipts := []DeliveryReceipt{
-			{MessageID: "msg-noreg", Sender: sender.Address, Recipient: recipient.Address, Status: "delivered", DeliveredAt: time.Now()},
+			{MessageID: "msg-noreg", Sender: domain.PeerIdentity(sender.Address), Recipient: domain.PeerIdentity(recipient.Address), Status: "delivered", DeliveredAt: time.Now()},
 		}
 		got := decryptDirectMessages(recipient, contacts, records, receipts, nil)
 		if got[0].ReceiptStatus != "seen" {
@@ -1305,6 +1305,11 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 	svc := node.NewService(cfg, id)
 	store := chatlog.NewStore(dir, domain.PeerIdentity(id.Address), domain.ListenAddress(":0"))
 
+	// WaitBackground must run before TempDir cleanup to avoid
+	// "directory not empty" races caused by async disk writes
+	// (e.g. trust store persistence after import_contacts).
+	t.Cleanup(func() { svc.WaitBackground() })
+
 	c := &DesktopClient{
 		id:        id,
 		appCfg:    config.App{Version: "test"},
@@ -1352,7 +1357,7 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	msgs, err := c.FetchConversation(context.Background(), peer.Address)
+	msgs, err := c.FetchConversation(context.Background(), domain.PeerIdentity(peer.Address))
 	if err != nil {
 		t.Fatalf("FetchConversation: %v", err)
 	}
@@ -1480,19 +1485,183 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 	}
 
 	// Build a map for easier assertion.
-	byPeer := make(map[string]ConversationPreview, len(previews))
+	byPeer := make(map[domain.PeerIdentity]ConversationPreview, len(previews))
 	for _, p := range previews {
 		byPeer[p.PeerAddress] = p
 	}
-	if p, ok := byPeer[peer1.Address]; !ok {
+	if p, ok := byPeer[domain.PeerIdentity(peer1.Address)]; !ok {
 		t.Fatal("missing preview for peer1")
 	} else if p.Body != "hello peer1" {
 		t.Fatalf("peer1 preview body = %q, want %q", p.Body, "hello peer1")
 	}
-	if p, ok := byPeer[peer2.Address]; !ok {
+	if p, ok := byPeer[domain.PeerIdentity(peer2.Address)]; !ok {
 		t.Fatal("missing preview for peer2")
 	} else if p.Body != "hello peer2" {
 		t.Fatalf("peer2 preview body = %q, want %q", p.Body, "hello peer2")
+	}
+}
+
+// TestFetchConversationPreviewsShowsIncomingMessage verifies that when the
+// last message in a conversation is from the peer (incoming), the preview
+// returns that peer's message, not the user's earlier outgoing message.
+// This is the regression test for the sidebar preview bug where only
+// outgoing messages appeared in the identity list.
+func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
+	t.Parallel()
+	c, id := newTestDesktopClientWithNode(t)
+	defer func() { _ = c.Close() }()
+
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate peer: %v", err)
+	}
+
+	// Register the peer as a trusted contact so decryption succeeds.
+	boxSig := identity.SignBoxKeyBinding(peer)
+	reply := c.localNode.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: peer.Address,
+			PubKey:  identity.PublicKeyBase64(peer.PublicKey),
+			BoxKey:  identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+			BoxSig:  boxSig,
+		}},
+	})
+	if reply.Type == "error" {
+		t.Fatalf("import_contacts failed: %s", reply.Code)
+	}
+
+	// 1. Self sends a message to peer (older).
+	outCt, err := directmsg.EncryptForParticipants(
+		id,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(peer.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "hello from me"},
+	)
+	if err != nil {
+		t.Fatalf("encrypt outgoing: %v", err)
+	}
+	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+		ID:             "msg-out",
+		Sender:         id.Address,
+		Recipient:      peer.Address,
+		Body:           outCt,
+		CreatedAt:      time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339Nano),
+		DeliveryStatus: chatlog.StatusSent,
+	})
+	if err != nil {
+		t.Fatalf("append outgoing: %v", err)
+	}
+
+	// 2. Peer replies (newer — this should be the preview).
+	inCt, err := directmsg.EncryptForParticipants(
+		peer,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentity(id.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "reply from peer"},
+	)
+	if err != nil {
+		t.Fatalf("encrypt incoming: %v", err)
+	}
+	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+		ID:             "msg-in",
+		Sender:         peer.Address,
+		Recipient:      id.Address,
+		Body:           inCt,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		DeliveryStatus: chatlog.StatusDelivered,
+	})
+	if err != nil {
+		t.Fatalf("append incoming: %v", err)
+	}
+
+	previews, err := c.FetchConversationPreviews(context.Background())
+	if err != nil {
+		t.Fatalf("FetchConversationPreviews: %v", err)
+	}
+	if len(previews) != 1 {
+		t.Fatalf("expected 1 preview, got %d", len(previews))
+	}
+
+	p := previews[0]
+	if p.PeerAddress != domain.PeerIdentity(peer.Address) {
+		t.Fatalf("preview peer = %q, want %q", p.PeerAddress, peer.Address)
+	}
+	if p.Sender != domain.PeerIdentity(peer.Address) {
+		t.Fatalf("preview sender = %q, want peer %q (incoming message should be shown)", p.Sender, peer.Address)
+	}
+	if p.Body != "reply from peer" {
+		t.Fatalf("preview body = %q, want %q", p.Body, "reply from peer")
+	}
+}
+
+// TestFetchSinglePreviewShowsIncomingMessage verifies that FetchSinglePreview
+// returns the peer's incoming message when it is the most recent in the conversation.
+func TestFetchSinglePreviewShowsIncomingMessage(t *testing.T) {
+	t.Parallel()
+	c, id := newTestDesktopClientWithNode(t)
+	defer func() { _ = c.Close() }()
+
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate peer: %v", err)
+	}
+
+	// Register the peer as a trusted contact.
+	boxSig := identity.SignBoxKeyBinding(peer)
+	c.localNode.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: peer.Address,
+			PubKey:  identity.PublicKeyBase64(peer.PublicKey),
+			BoxKey:  identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+			BoxSig:  boxSig,
+		}},
+	})
+
+	// Self sends a message, then peer replies.
+	outCt, _ := directmsg.EncryptForParticipants(id, domain.DMRecipient{
+		Address:      domain.PeerIdentity(peer.Address),
+		BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+	}, domain.OutgoingDM{Body: "my message"})
+
+	_ = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+		ID:        "out-1",
+		Sender:    id.Address,
+		Recipient: peer.Address,
+		Body:      outCt,
+		CreatedAt: time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339Nano),
+	})
+
+	inCt, _ := directmsg.EncryptForParticipants(peer, domain.DMRecipient{
+		Address:      domain.PeerIdentity(id.Address),
+		BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
+	}, domain.OutgoingDM{Body: "peer reply"})
+
+	_ = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+		ID:        "in-1",
+		Sender:    peer.Address,
+		Recipient: id.Address,
+		Body:      inCt,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+
+	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity(peer.Address))
+	if err != nil {
+		t.Fatalf("FetchSinglePreview: %v", err)
+	}
+	if preview == nil {
+		t.Fatal("expected non-nil preview")
+	}
+	if preview.Sender != domain.PeerIdentity(peer.Address) {
+		t.Fatalf("sender = %q, want %q", preview.Sender, peer.Address)
+	}
+	if preview.Body != "peer reply" {
+		t.Fatalf("body = %q, want %q", preview.Body, "peer reply")
 	}
 }
 
@@ -1648,14 +1817,14 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	preview, err := c.FetchSinglePreview(context.Background(), peer.Address)
+	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity(peer.Address))
 	if err != nil {
 		t.Fatalf("FetchSinglePreview: %v", err)
 	}
 	if preview == nil {
 		t.Fatal("expected non-nil preview")
 	}
-	if preview.PeerAddress != peer.Address {
+	if preview.PeerAddress != domain.PeerIdentity(peer.Address) {
 		t.Fatalf("unexpected peer: %s", preview.PeerAddress)
 	}
 	if preview.Body != "single preview body" {
@@ -1670,7 +1839,7 @@ func TestFetchSinglePreviewNonExistentPeerReturnsNil(t *testing.T) {
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	preview, err := c.FetchSinglePreview(context.Background(), "nonexistent-peer")
+	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity("nonexistent-peer"))
 	if err != nil {
 		t.Fatalf("FetchSinglePreview: %v", err)
 	}
@@ -1688,11 +1857,43 @@ func TestFetchSinglePreviewNilChatlogReturnsError(t *testing.T) {
 	}
 	c := &DesktopClient{id: id, appCfg: config.App{Version: "test"}}
 
-	_, err = c.FetchSinglePreview(context.Background(), "somepeer")
+	_, err = c.FetchSinglePreview(context.Background(), domain.PeerIdentity("somepeer"))
 	if err == nil {
 		t.Fatal("expected error when chatlog is nil")
 	}
 	if !strings.Contains(err.Error(), "chatlog not available") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestFetchSinglePreviewEmptyPeerReturnsError verifies that an empty peer
+// address is rejected immediately.
+func TestFetchSinglePreviewEmptyPeerReturnsError(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestDesktopClientWithNode(t)
+	defer func() { _ = c.Close() }()
+
+	_, err := c.FetchSinglePreview(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for empty peer address")
+	}
+	if !strings.Contains(err.Error(), "peer address is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestFetchSinglePreviewWhitespacePeerReturnsError verifies that a
+// whitespace-only peer address is trimmed and rejected as empty.
+func TestFetchSinglePreviewWhitespacePeerReturnsError(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestDesktopClientWithNode(t)
+	defer func() { _ = c.Close() }()
+
+	_, err := c.FetchSinglePreview(context.Background(), "   ")
+	if err == nil {
+		t.Fatal("expected error for whitespace-only peer address")
+	}
+	if !strings.Contains(err.Error(), "peer address is required") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -1736,7 +1937,7 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 		}
 	}
 
-	msgs, err := c.FetchConversation(context.Background(), peer.Address)
+	msgs, err := c.FetchConversation(context.Background(), domain.PeerIdentity(peer.Address))
 	if err != nil {
 		t.Fatalf("FetchConversation: %v", err)
 	}

@@ -13,7 +13,7 @@ import (
 // receipt statuses updated in-place).
 type ConversationCache struct {
 	mu          sync.RWMutex
-	peerAddress string
+	peerAddress domain.PeerIdentity
 	messages    []DirectMessage
 	index       map[string]int // message ID → index in messages slice
 }
@@ -25,7 +25,7 @@ func NewConversationCache() *ConversationCache {
 }
 
 // Load is called when switching conversations or doing a full reload from SQLite.
-func (c *ConversationCache) Load(peerAddress string, messages []DirectMessage) {
+func (c *ConversationCache) Load(peerAddress domain.PeerIdentity, messages []DirectMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -38,7 +38,7 @@ func (c *ConversationCache) Load(peerAddress string, messages []DirectMessage) {
 	}
 }
 
-func (c *ConversationCache) PeerAddress() string {
+func (c *ConversationCache) PeerAddress() domain.PeerIdentity {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.peerAddress
@@ -121,14 +121,14 @@ func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt *
 func (c *ConversationCache) Evict(identity domain.PeerIdentity) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.peerAddress == string(identity) {
+	if c.peerAddress == identity {
 		c.peerAddress = ""
 		c.messages = nil
 		c.index = make(map[string]int)
 	}
 }
 
-func (c *ConversationCache) MatchesPeer(peerAddress string) bool {
+func (c *ConversationCache) MatchesPeer(peerAddress domain.PeerIdentity) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.peerAddress == peerAddress

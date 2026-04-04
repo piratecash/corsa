@@ -34,7 +34,7 @@ func TestMergeRecipientOrderEmpty(t *testing.T) {
 func TestSearchKnownIdentities(t *testing.T) {
 	knownIDs := []string{"abc-def-ghi", "xyz-abc-123", "zzz-yyy-xxx"}
 	recipients := []domain.PeerIdentity{"abc-def-ghi"} // already listed
-	self := "self-addr"
+	self := domain.PeerIdentity("self-addr")
 
 	results := searchKnownIdentities(knownIDs, recipients, self, "abc")
 
@@ -49,7 +49,7 @@ func TestSearchKnownIdentities(t *testing.T) {
 }
 
 func TestSearchKnownIdentitiesEmptyQuery(t *testing.T) {
-	results := searchKnownIdentities([]string{"a", "b"}, nil, "self", "")
+	results := searchKnownIdentities([]string{"a", "b"}, nil, domain.PeerIdentity("self"), "")
 	if results != nil {
 		t.Fatalf("expected nil for empty query, got %v", results)
 	}

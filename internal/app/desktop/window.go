@@ -340,7 +340,7 @@ func (w *Window) handleActions(gtx layout.Context) {
 	for w.copyIdentityButton.Clicked(gtx) {
 		gtx.Execute(clipboard.WriteCmd{
 			Type: "text/plain",
-			Data: io.NopCloser(strings.NewReader(w.snap.MyAddress)),
+			Data: io.NopCloser(strings.NewReader(string(w.snap.MyAddress))),
 		})
 		w.router.SetSendStatus(w.t("status.identity_copied"))
 		if w.window != nil {
@@ -1098,7 +1098,7 @@ func (w *Window) snapPreview(recipient domain.PeerIdentity) string {
 // No polling or external contact source is involved.
 func (w *Window) snapRecipients() []domain.PeerIdentity {
 	recipients := make([]domain.PeerIdentity, 0, len(w.snap.Peers))
-	me := domain.PeerIdentity(w.snap.MyAddress)
+	me := w.snap.MyAddress
 	for id := range w.snap.Peers {
 		if id != me && id != "" {
 			recipients = append(recipients, id)
@@ -1130,7 +1130,7 @@ type rightClickState struct {
 // cachedMsg holds pre-indexed message metadata for O(1) reply quote rendering.
 type cachedMsg struct {
 	Body      string
-	Sender    string
+	Sender    domain.PeerIdentity
 	Timestamp time.Time
 	Index     int // position in ActiveMessages slice for scroll-to
 }
@@ -1505,7 +1505,7 @@ func (w *Window) messageSelectable(id string) *widget.Selectable {
 	return sel
 }
 
-func searchKnownIdentities(knownIDs []string, recipients []domain.PeerIdentity, self, query string) []domain.PeerIdentity {
+func searchKnownIdentities(knownIDs []string, recipients []domain.PeerIdentity, self domain.PeerIdentity, query string) []domain.PeerIdentity {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if query == "" {
 		return nil
@@ -1520,7 +1520,7 @@ func searchKnownIdentities(knownIDs []string, recipients []domain.PeerIdentity, 
 	seen := make(map[domain.PeerIdentity]struct{}, len(knownIDs))
 	for _, raw := range knownIDs {
 		raw = strings.TrimSpace(raw)
-		if raw == "" || raw == self {
+		if raw == "" || domain.PeerIdentity(raw) == self {
 			continue
 		}
 		id := domain.PeerIdentity(raw)
@@ -2253,7 +2253,7 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 		if cm.Sender == w.snap.MyAddress {
 			quotedAuthor = w.t("chat.you_label")
 		} else {
-			quotedAuthor = w.peerDisplayName(domain.PeerIdentity(cm.Sender))
+			quotedAuthor = w.peerDisplayName(cm.Sender)
 		}
 		quotedTime = cm.Timestamp.Local().Format("02.01.2006 15:04")
 	}

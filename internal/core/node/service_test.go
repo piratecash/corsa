@@ -1317,6 +1317,12 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 		return len(nodeA.Peers()) >= 1 && len(nodeB.Peers()) >= 1
 	})
 
+	// Subscribe to nodeB local changes BEFORE sending, so we catch the
+	// pushed message event deterministically instead of polling via
+	// repeated TCP connections (which creates load and races).
+	eventCh, cancelSub := nodeB.SubscribeLocalChanges()
+	defer cancelSub()
+
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
 		domain.DMRecipient{
@@ -1338,13 +1344,20 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 		t.Fatalf("unexpected nodeA direct store response: %#v", frames[1])
 	}
 
-	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "dm-msg-1"
-	})
+	// Wait for nodeB to receive and store the pushed message via local
+	// change event — deterministic, no TCP polling.
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev := <-eventCh:
+			if ev.Type == protocol.LocalChangeNewMessage && ev.MessageID == "dm-msg-1" {
+				goto messageReceived
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for dm-msg-1 LocalChangeNewMessage on nodeB")
+		}
+	}
+messageReceived:
 
 	inboxB := exchangeFrames(t, nodeB.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
