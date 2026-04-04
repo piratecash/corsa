@@ -865,7 +865,7 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 				return w.layoutReplyPreview(gtx)
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return w.messageInputCard(gtx)
+				return w.messageInputCard(gtx, recipient)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1032,7 +1032,7 @@ func networkStateColors(state string) (color.NRGBA, color.NRGBA) {
 	}
 }
 
-func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
+func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity) layout.Dimensions {
 	borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
 	backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
 	cardHeight := gtx.Dp(unit.Dp(96))
@@ -1051,9 +1051,44 @@ func (w *Window) messageInputCard(gtx layout.Context) layout.Dimensions {
 					Axis: layout.Vertical,
 				}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						label := material.Body2(w.theme, w.t("compose.body"))
-						label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-						return label.Layout(gtx)
+						if recipient == "" {
+							label := material.Body2(w.theme, w.t("compose.body"))
+							label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
+							return label.Layout(gtx)
+						}
+						return layout.Flex{
+							Axis:      layout.Horizontal,
+							Alignment: layout.Baseline,
+						}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								label := material.Body2(w.theme, w.t("compose.body_for"))
+								label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
+								return label.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								name := w.peerDisplayName(recipient)
+								lbl := material.Body1(w.theme, name)
+								lbl.Font.Weight = font.Bold
+								lbl.TextSize = unit.Sp(17)
+								lbl.Color = color.NRGBA{R: 150, G: 210, B: 255, A: 255}
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Caption(w.theme, w.t("compose.identity_label"))
+								lbl.Color = color.NRGBA{R: 160, G: 170, B: 190, A: 255}
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Body1(w.theme, shortFingerprint(string(recipient)))
+								lbl.Font.Weight = font.Bold
+								lbl.TextSize = unit.Sp(15)
+								lbl.Color = color.NRGBA{R: 130, G: 235, B: 190, A: 255}
+								return lbl.Layout(gtx)
+							}),
+						)
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
