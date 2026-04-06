@@ -56,7 +56,8 @@ type RouterSnapshot struct {
 }
 
 type DMRouter struct {
-	client *DesktopClient
+	client     *DesktopClient
+	fileBridge *FileTransferBridge
 
 	mu               sync.RWMutex
 	activePeer       domain.PeerIdentity
@@ -68,6 +69,7 @@ type DMRouter struct {
 	nodeStatus       NodeStatus
 	sendStatus       string
 	seenMessageIDs   map[string]struct{}
+	peerGen          map[domain.PeerIdentity]uint64 // bumped by RemovePeer; goroutines compare to detect stale sends
 	initialSynced    bool
 	previewsSeeded   bool // true after seedPreviews() successfully set unread counts from SQL
 	replayingStartup bool // true during buffered-event replay; suppresses Unread++ in updateSidebarFromEvent
@@ -92,12 +94,14 @@ type PendingActions struct {
 	RecipientText domain.PeerIdentity
 }
 
-func NewDMRouter(client *DesktopClient) *DMRouter {
+func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge) *DMRouter {
 	return &DMRouter{
 		client:         client,
+		fileBridge:     fileBridge,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
+		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    make(chan struct{}),
@@ -169,6 +173,7 @@ func (r *DMRouter) AutoSelectPeer(peerAddress domain.PeerIdentity) {
 //   - cache miss → retries loadConversation + doMarkSeen
 //   - cache valid, Unread > 0 (stuck badge after rollback) → retries doMarkSeen
 //   - cache valid, Unread == 0 → true no-op
+//
 // Programmatic re-selection (AutoSelectPeer) of the same peer is always
 // a true no-op regardless of cache or unread state.
 func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked bool) {
@@ -249,6 +254,11 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 
 func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 	to = normalizePeer(to)
+
+	r.mu.RLock()
+	gen := r.peerGen[to]
+	r.mu.RUnlock()
+
 	r.setSendStatus("sending…")
 
 	go func() {
@@ -259,6 +269,16 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 		cancel()
 
 		r.mu.Lock()
+		if r.peerGen[to] != gen {
+			// Peer was removed while the send was in flight. Do not
+			// recreate the sidebar entry from stale async work.
+			r.mu.Unlock()
+			log.Info().
+				Str("peer", string(to)).
+				Msg("dm_router: peer removed during in-flight send, discarding result")
+			return
+		}
+
 		if err != nil {
 			r.sendStatus = "send failed: " + err.Error()
 			r.mu.Unlock()
@@ -293,6 +313,111 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 	}()
 }
 
+// SendFileAnnounce sends a file_announce DM and registers the sender-side
+// file mapping. File transfer orchestration (prepare → send → commit/rollback)
+// is delegated to FileTransferBridge; DMRouter handles only the peerGen
+// stale-send guard and UI state updates.
+func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func()) error {
+	if r.fileBridge == nil {
+		return fmt.Errorf("file transfer not available")
+	}
+
+	to = normalizePeer(to)
+
+	r.mu.RLock()
+	gen := r.peerGen[to]
+	r.mu.RUnlock()
+
+	r.setSendStatus("sending…")
+
+	go func() {
+		defer recoverLog("SendFileAnnounce")
+
+		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+		defer cancel()
+
+		result, err := r.fileBridge.PrepareAndSend(ctx, to, msg, meta)
+		if err != nil {
+			if onAsyncFailure != nil {
+				onAsyncFailure()
+			}
+			r.setSendStatusNotify("file announce failed: " + err.Error())
+			return
+		}
+
+		r.mu.Lock()
+		if r.peerGen[to] != gen {
+			// Peer was removed while we were sending. The sender mapping
+			// is committed but orphaned — clean up only this specific
+			// mapping to avoid destroying legitimate transfers for the
+			// same peer in a newer generation.
+			r.mu.Unlock()
+			r.fileBridge.RollbackMapping(result.FileID)
+			if onAsyncFailure != nil {
+				onAsyncFailure()
+			}
+			r.setSendStatusNotify("file announce cancelled: peer removed")
+			log.Info().
+				Str("peer", string(to)).
+				Str("file_id", string(result.FileID)).
+				Msg("dm_router: peer removed after file commit, removed orphaned sender mapping")
+			return
+		}
+		r.sendStatus = "message sent"
+		r.pendingClearEditor = true
+		r.pendingClearReply = true
+
+		if r.cache.MatchesPeer(to) {
+			r.cache.AppendMessage(*result.Sent)
+			r.activeMessages = r.cache.Messages()
+			r.pendingScrollToEnd = true
+		}
+
+		r.ensurePeerLocked(to)
+		r.peers[to].Preview = ConversationPreview{
+			PeerAddress: to,
+			Sender:      result.Sent.Sender,
+			Body:        result.Sent.Body,
+			Timestamp:   result.Sent.Timestamp,
+		}
+		r.promotePeerLocked(to)
+		r.mu.Unlock()
+
+		r.notify(UIEventMessagesUpdated)
+		r.notify(UIEventSidebarUpdated)
+	}()
+
+	return nil
+}
+
+// FileBridge returns the file transfer bridge for callers that need
+// direct access to file transfer operations (GUI, RPC).
+func (r *DMRouter) FileBridge() *FileTransferBridge {
+	return r.fileBridge
+}
+
+// tryRegisterFileReceive checks if a decrypted message is a file_announce
+// from a remote peer and registers the receiver-side mapping if so. Safe to
+// call multiple times for the same message — RegisterFileReceive is idempotent.
+//
+// Thread safety: called only from the DMRouter event loop (single goroutine)
+// or from loadConversation (under router lifecycle). The underlying
+// RegisterIncomingFileTransfer → FileTransferManager.RegisterFileReceive is
+// protected by its own mutex.
+func (r *DMRouter) tryRegisterFileReceive(msg *DirectMessage) {
+	if msg == nil || r.fileBridge == nil {
+		return
+	}
+	if msg.Command != domain.FileActionAnnounce || msg.CommandData == "" {
+		return
+	}
+	// Only register for incoming messages (sender is not us).
+	if msg.Sender == r.client.Address() {
+		return
+	}
+	r.fileBridge.RegisterIncoming(*msg)
+}
+
 func (r *DMRouter) ActivePeer() domain.PeerIdentity {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -325,11 +450,22 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	identity = normalizePeer(identity)
 	id := string(identity)
 
-	// Delete chat history from the local database.
+	// Delete chat history from the local database. This is the gate
+	// operation: if it fails, the peer is NOT removed and peerGen stays
+	// unchanged so in-flight goroutines remain valid.
 	if _, err := r.client.DeletePeerHistory(identity); err != nil {
 		log.Error().Str("identity", id).Err(err).Msg("failed to delete identity chat history")
 		return false, fmt.Errorf("delete identity %s: %w", id, err)
 	}
+
+	// Bump generation BEFORE any best-effort cleanup. In-flight goroutines
+	// (SendMessage, SendFileAnnounce) that captured gen before this point
+	// will see a stale generation and discard their results. Without this
+	// ordering, a slow CleanupPeer could leave a window where in-flight
+	// sends slip through the peerGen guard.
+	r.mu.Lock()
+	r.peerGen[identity]++
+	r.mu.Unlock()
 
 	// Best-effort: remove from the node trust store. The RPC requires a
 	// live connection to the local node, which may be absent (e.g. during
@@ -339,8 +475,13 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 		log.Warn().Str("identity", id).Err(err).Msg("trust store cleanup failed (best-effort)")
 	}
 
-	r.mu.Lock()
+	// Best-effort: clean up file transfer mappings and associated files
+	// (transmit refs, downloaded files, partial downloads).
+	if r.fileBridge != nil {
+		r.fileBridge.CleanupPeer(identity)
+	}
 
+	r.mu.Lock()
 	delete(r.peers, identity)
 	r.removePeerLocked(identity)
 	r.cache.Evict(identity)
@@ -612,6 +753,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		var decryptedMsg *DirectMessage
 		msg := r.client.DecryptIncomingMessage(event)
 		if msg != nil {
+			r.tryRegisterFileReceive(msg)
 			decryptedMsg = msg
 			r.mu.Lock()
 			r.ensurePeerLocked(peerID)
@@ -691,6 +833,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		return
 	}
 
+	r.tryRegisterFileReceive(msg)
 	r.cache.AppendMessage(*msg)
 	r.mu.Lock()
 	r.activeMessages = r.cache.Messages()
@@ -887,6 +1030,15 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity) bool {
 	r.mu.RUnlock()
 	if current != peerAddress {
 		return false
+	}
+
+	// Register receiver-side mappings for any file_announce messages loaded
+	// from the database — ensures transfer state is restored after restart.
+	myAddr := r.client.Address()
+	for i := range messages {
+		if messages[i].Command == domain.FileActionAnnounce && messages[i].Sender != myAddr {
+			r.tryRegisterFileReceive(&messages[i])
+		}
 	}
 
 	r.cache.Load(peerAddress, messages)
@@ -1371,6 +1523,14 @@ func (r *DMRouter) setSendStatus(s string) {
 	r.mu.Lock()
 	r.sendStatus = s
 	r.mu.Unlock()
+}
+
+// setSendStatusNotify updates the send status and emits UIEventStatusUpdated.
+// Consolidates the repeated lock→set→unlock→notify(UIEventStatusUpdated)
+// pattern used in error/success paths of SendFileAnnounce.
+func (r *DMRouter) setSendStatusNotify(s string) {
+	r.setSendStatus(s)
+	r.notify(UIEventStatusUpdated)
 }
 
 // notify sends a UIEvent without blocking. If the channel is full, a

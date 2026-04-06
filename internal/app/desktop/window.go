@@ -1,17 +1,21 @@
 package desktop
 
 import (
+	"encoding/json"
 	"image"
 	"image/color"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"corsa/internal/core/config"
 	"corsa/internal/core/crashlog"
@@ -33,6 +37,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+	"gioui.org/x/explorer"
 )
 
 type Window struct {
@@ -117,6 +122,26 @@ type Window struct {
 	chatCursorY   int
 	chatCursorTag int // stable tag for the chat-area pointer tracker
 
+	// File attachment state: when the user picks a file via the native dialog,
+	// these fields hold the selected file path and metadata until Send is pressed.
+	// attachedFile is only mutated on the UI goroutine — background goroutines
+	// deliver the selected path via pendingAttach (buffered channel, drained in
+	// handlePendingActions) and call window.Invalidate() to trigger a frame.
+	attachButton    widget.Clickable
+	attachedFile    string // absolute path to the selected file (empty = no attachment)
+	attachCancelBtn widget.Clickable
+	pendingAttach   chan string // delivers file path from ChooseFile goroutine → UI goroutine
+
+	// File download buttons for incoming file cards (keyed by message ID).
+	fileDownloadBtns       map[string]*widget.Clickable
+	fileCancelDownloadBtns map[string]*widget.Clickable
+	fileRestartBtns        map[string]*widget.Clickable
+
+	// Native file dialog via gioui.org/x/explorer. Initialized once in Run()
+	// together with the app.Window. ChooseFile is blocking and must be called
+	// from a separate goroutine; ListenEvents must be called in the event loop.
+	fileExplorer *explorer.Explorer
+
 	snap service.RouterSnapshot
 
 	consoleMu sync.Mutex
@@ -167,6 +192,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 		msgRightClick:       make(map[string]*rightClickState),
 		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
+		pendingAttach:       make(chan string, 1),
 	}
 	w.aliasEditor.SingleLine = true
 	w.aliasEditor.Submit = true
@@ -179,6 +205,7 @@ func (w *Window) Run() error {
 
 		window := new(app.Window)
 		w.window = window
+		w.fileExplorer = explorer.NewExplorer(window)
 		window.Option(
 			app.Title(w.t("app.title")+" — "+w.t("app.subtitle")),
 			app.Size(unit.Dp(1100), unit.Dp(1100)),
@@ -213,7 +240,9 @@ func (w *Window) startPolling(window *app.Window) {
 
 func (w *Window) loop(window *app.Window) error {
 	for {
-		switch e := window.Event().(type) {
+		e := window.Event()
+		w.fileExplorer.ListenEvents(e)
+		switch e := e.(type) {
 		case app.DestroyEvent:
 			return e.Err
 		case app.FrameEvent:
@@ -316,6 +345,14 @@ func (w *Window) handlePendingActions() {
 	if pa.RecipientText != "" {
 		w.recipientEditor.SetText(string(pa.RecipientText))
 	}
+
+	// Drain file path delivered by triggerFileAttach goroutine.
+	// This keeps all w.attachedFile mutations on the UI goroutine.
+	select {
+	case path := <-w.pendingAttach:
+		w.attachedFile = path
+	default:
+	}
 }
 
 func (w *Window) handleActions(gtx layout.Context) {
@@ -333,6 +370,17 @@ func (w *Window) handleActions(gtx layout.Context) {
 
 	for w.sendButton.Clicked(gtx) {
 		w.triggerSend()
+	}
+
+	for w.attachButton.Clicked(gtx) {
+		w.triggerFileAttach()
+	}
+
+	for w.attachCancelBtn.Clicked(gtx) {
+		w.attachedFile = ""
+		if w.window != nil {
+			w.window.Invalidate()
+		}
 	}
 
 	w.handleMessageSubmitShortcut(gtx)
@@ -496,6 +544,13 @@ func (w *Window) triggerSend() {
 	if to == "" {
 		to = domain.PeerIdentity(strings.TrimSpace(w.recipientEditor.Text()))
 	}
+
+	// File attachment takes priority: if a file is attached, send file_announce DM.
+	if w.attachedFile != "" {
+		w.triggerFileSend(to)
+		return
+	}
+
 	body := strings.TrimSpace(w.messageEditor.Text())
 	if body == "" {
 		return
@@ -508,6 +563,130 @@ func (w *Window) triggerSend() {
 	// send succeeds. On failure the editor text is preserved and the reply
 	// context stays intact so the user can retry without losing the quote.
 	w.router.SendMessage(to, outgoing)
+}
+
+// triggerFileAttach opens the native file picker dialog via Gio explorer
+// in a background goroutine (ChooseFile is blocking). The selected path
+// is delivered to the UI goroutine via pendingAttach channel, drained in
+// handlePendingActions — Window fields are never mutated from the
+// background goroutine.
+func (w *Window) triggerFileAttach() {
+	if w.fileExplorer == nil {
+		return
+	}
+	go func() {
+		rc, err := w.fileExplorer.ChooseFile()
+		if err != nil {
+			// User cancelled or platform error — silently ignore cancel.
+			return
+		}
+		defer func() { _ = rc.Close() }()
+
+		// On desktop platforms the returned io.ReadCloser is *os.File,
+		// which gives us the full path needed for SHA-256 hashing,
+		// filename extraction, and copy to transmit directory.
+		f, ok := rc.(*os.File)
+		if !ok {
+			w.router.SetSendStatus(w.t("file.prepare_failed", "unsupported platform"))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+
+		// Deliver the path to the UI goroutine via buffered channel.
+		// Non-blocking send: if a previous pick hasn't been consumed yet
+		// (user picked twice very fast), the newer path wins.
+		select {
+		case w.pendingAttach <- f.Name():
+		default:
+			// Channel full — drain stale value, then send the new one.
+			select {
+			case <-w.pendingAttach:
+			default:
+			}
+			w.pendingAttach <- f.Name()
+		}
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}()
+}
+
+// triggerFileSend prepares the attached file and sends a file_announce DM.
+// Any text in the message editor is included as the file caption (user-visible
+// description alongside the file card).
+func (w *Window) triggerFileSend(to domain.PeerIdentity) {
+	if to == "" {
+		return
+	}
+	srcPath := w.attachedFile
+	caption := w.messageEditor.Text() // capture before clearing
+	w.attachedFile = ""               // clear immediately so user cannot double-send
+	w.router.SetSendStatus(w.t("file.sending"))
+
+	// restoreAttach delivers the source path back to the UI goroutine via
+	// pendingAttach so the user can retry without re-picking the file.
+	// attachedFile is only mutated on the UI goroutine (handlePendingActions
+	// drains the channel each frame), preserving the thread-safety invariant.
+	restoreAttach := func() {
+		select {
+		case w.pendingAttach <- srcPath:
+		default:
+			select {
+			case <-w.pendingAttach:
+			default:
+			}
+			w.pendingAttach <- srcPath
+		}
+	}
+
+	go func() {
+		result, err := prepareFileForTransmit(
+			w.client.StoreFileForTransmit,
+			w.client.TransmitFileSize,
+			w.client.RemoveUnreferencedTransmitFile,
+			srcPath,
+		)
+		if err != nil {
+			restoreAttach()
+			w.router.SetSendStatus(w.t("file.prepare_failed", err))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+
+		outgoing, err := buildFileAnnounceOutgoing(result, caption)
+		if err != nil {
+			// Blob is stored but no token/mapping will ever reference it.
+			w.client.RemoveUnreferencedTransmitFile(result.FileHash)
+			restoreAttach()
+			w.router.SetSendStatus(w.t("file.prepare_failed", err))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+
+		meta := domain.FileAnnouncePayload{
+			FileHash:    result.FileHash,
+			FileName:    result.FileName,
+			FileSize:    result.FileSize,
+			ContentType: result.ContentType,
+		}
+		if err := w.router.SendFileAnnounce(to, outgoing, meta, restoreAttach); err != nil {
+			// SendFileAnnounce failed synchronously (e.g. fileBridge == nil)
+			// before the goroutine that calls PrepareAndSend could take
+			// ownership. The blob has no ref and no pending — clean it up.
+			w.client.RemoveUnreferencedTransmitFile(result.FileHash)
+			restoreAttach()
+			w.router.SetSendStatus(w.t("file.prepare_failed", err))
+		}
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}()
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
@@ -1035,7 +1214,13 @@ func networkStateColors(state string) (color.NRGBA, color.NRGBA) {
 func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity) layout.Dimensions {
 	borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
 	backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
-	cardHeight := gtx.Dp(unit.Dp(96))
+
+	// Card height adapts to content: base 96dp, grows when file chip is attached.
+	baseHeight := unit.Dp(96)
+	if w.attachedFile != "" {
+		baseHeight = unit.Dp(136)
+	}
+	cardHeight := gtx.Dp(baseHeight)
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.Y = cardHeight
@@ -1050,6 +1235,7 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 				return layout.Flex{
 					Axis: layout.Vertical,
 				}.Layout(gtx,
+					// Recipient header.
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if recipient == "" {
 							label := material.Body2(w.theme, w.t("compose.body"))
@@ -1090,22 +1276,493 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 							}),
 						)
 					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+					// Attached file chip (visible only when file is selected).
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						w.messageEditor.SingleLine = false
-						editor := material.Editor(w.theme, &w.messageEditor, w.t("compose.placeholder"))
-						editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
-						editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
+						if w.attachedFile == "" {
+							return layout.Dimensions{}
+						}
+						return w.layoutAttachedFilePreview(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+					// Input row: [+] button + editor.
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{
+							Axis:      layout.Horizontal,
+							Alignment: layout.Middle,
+						}.Layout(gtx,
+							// Attach file button "+".
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								btn := material.Button(w.theme, &w.attachButton, w.t("file.attach_icon"))
+								btn.Background = color.NRGBA{R: 55, G: 65, B: 85, A: 255}
+								btn.Color = color.NRGBA{R: 200, G: 210, B: 230, A: 255}
+								btn.TextSize = unit.Sp(18)
+								btn.Inset = layout.UniformInset(unit.Dp(4))
+								gtx.Constraints.Min.X = gtx.Dp(unit.Dp(32))
+								gtx.Constraints.Max.X = gtx.Dp(unit.Dp(32))
+								gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(32))
+								gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(32))
+								return btn.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+							// Message editor.
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								w.messageEditor.SingleLine = false
+								editor := material.Editor(w.theme, &w.messageEditor, w.t("compose.placeholder"))
+								editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
+								editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
 
-						height := gtx.Dp(unit.Dp(36))
-						gtx.Constraints.Min.Y = height
-						gtx.Constraints.Max.Y = height
-						return editor.Layout(gtx)
+								height := gtx.Dp(unit.Dp(28))
+								gtx.Constraints.Min.Y = height
+								gtx.Constraints.Max.Y = height
+								return editor.Layout(gtx)
+							}),
+						)
 					}),
 				)
 			})
 		})
 	})
+}
+
+// layoutAttachedFilePreview renders a self-contained chip/badge card showing
+// the attached file. Visually separated from the editor, it floats above
+// the text input like a removable tag (similar to Claude's file attach UI).
+func (w *Window) layoutAttachedFilePreview(gtx layout.Context) layout.Dimensions {
+	chipBg := color.NRGBA{R: 40, G: 48, B: 62, A: 255}
+	chipBorder := color.NRGBA{R: 72, G: 85, B: 110, A: 255}
+	nameFg := color.NRGBA{R: 235, G: 240, B: 248, A: 255}
+	iconFg := color.NRGBA{R: 160, G: 175, B: 200, A: 255}
+
+	fileName := filepath.Base(w.attachedFile)
+
+	// Outer inset to separate the chip from the editor below.
+	return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// Draw chip with a 1px border and rounded corners.
+		macro := op.Record(gtx.Ops)
+		dims := layout.Inset{Top: unit.Dp(1), Bottom: unit.Dp(1), Left: unit.Dp(1), Right: unit.Dp(1)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			innerMacro := op.Record(gtx.Ops)
+			innerDims := layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(10), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{
+					Axis:      layout.Horizontal,
+					Alignment: layout.Middle,
+				}.Layout(gtx,
+					// File icon.
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Caption(w.theme, w.t("file.icon"))
+						lbl.Color = iconFg
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+					// File name (truncated if needed by Gio constraints).
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Body2(w.theme, fileName)
+						lbl.Color = nameFg
+						lbl.MaxLines = 1
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					// Close / cancel button "×".
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(w.theme, &w.attachCancelBtn, "\u00d7") // × character
+						btn.Background = color.NRGBA{R: 65, G: 70, B: 85, A: 255}
+						btn.Color = color.NRGBA{R: 210, G: 215, B: 225, A: 255}
+						btn.TextSize = unit.Sp(14)
+						btn.Inset = layout.UniformInset(unit.Dp(2))
+						btn.CornerRadius = unit.Dp(10)
+						gtx.Constraints.Min.X = gtx.Dp(unit.Dp(24))
+						gtx.Constraints.Max.X = gtx.Dp(unit.Dp(24))
+						gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(24))
+						gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(24))
+						return btn.Layout(gtx)
+					}),
+				)
+			})
+			innerCall := innerMacro.Stop()
+
+			// Fill chip background.
+			r := gtx.Dp(unit.Dp(8))
+			defer clip.UniformRRect(image.Rectangle{Max: innerDims.Size}, r).Push(gtx.Ops).Pop()
+			paint.ColorOp{Color: chipBg}.Add(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+			innerCall.Add(gtx.Ops)
+			return innerDims
+		})
+		call := macro.Stop()
+
+		// Border: draw a slightly larger rounded rect behind the chip.
+		borderR := gtx.Dp(unit.Dp(9))
+		defer clip.UniformRRect(image.Rectangle{Max: dims.Size}, borderR).Push(gtx.Ops).Pop()
+		paint.ColorOp{Color: chipBorder}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		call.Add(gtx.Ops)
+		return dims
+	})
+}
+
+// layoutFileCard renders a file transfer card inside a chat bubble.
+// Sender sees: file name, size, bytes transferred, percentage, and a progress bar.
+// Receiver sees: file name, size, and a download button (non-functional for now).
+// If the message body contains a user caption (not the "[file]" sentinel),
+// it is displayed above the file card.
+func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessage, isMine bool) layout.Dimensions {
+	var payload domain.FileAnnouncePayload
+	if err := json.Unmarshal([]byte(message.CommandData), &payload); err != nil {
+		label := material.Caption(w.theme, w.t("file.invalid"))
+		label.Color = color.NRGBA{R: 255, G: 100, B: 100, A: 255}
+		return label.Layout(gtx)
+	}
+
+	cardBg := color.NRGBA{R: 35, G: 45, B: 60, A: 255}
+	nameFg := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	sizeFg := color.NRGBA{R: 160, G: 175, B: 200, A: 255}
+	captionFg := color.NRGBA{R: 230, G: 235, B: 245, A: 255}
+	progressBg := color.NRGBA{R: 50, G: 60, B: 80, A: 255}
+	progressFg := color.NRGBA{R: 72, G: 150, B: 255, A: 255}
+
+	// Determine if there is a user caption (body != sentinel).
+	caption := ""
+	if message.Body != domain.FileDMBodySentinel {
+		caption = message.Body
+	}
+
+	// Query real transfer progress from FileTransferManager.
+	fileID := domain.FileID(message.ID)
+	bytesTransferred, _, transferState, transferFound := w.router.FileBridge().Progress(fileID, isMine)
+	percent := 0
+	if payload.FileSize > 0 && bytesTransferred > 0 {
+		percent = int(bytesTransferred * 100 / payload.FileSize)
+		if percent > 100 {
+			percent = 100
+		}
+	}
+
+	// Receiver: determine if download is actively transferring data
+	// (show progress bar + cancel). Terminal states and waiting_ack
+	// do NOT show progress bar.
+	receiverDownloadActive := !isMine && (transferState == "downloading" || transferState == "verifying")
+
+	// Sender/receiver terminal states — no progress bar needed.
+	senderCompleted := isMine && (transferState == "completed" || transferState == "tombstone")
+	receiverTerminal := !isMine && (transferState == "completed" ||
+		transferState == "waiting_ack" || transferState == "waiting_route")
+	receiverFailed := !isMine && transferState == "failed"
+
+	// Schedule a delayed redraw while transfer is in progress or
+	// awaiting confirmation (waiting_ack needs redraw for ack arrival).
+	transferInProgress := (isMine && !senderCompleted && transferState != "") ||
+		receiverDownloadActive || transferState == "waiting_ack"
+	if transferInProgress && w.window != nil {
+		window := w.window
+		time.AfterFunc(500*time.Millisecond, func() {
+			window.Invalidate()
+		})
+	}
+
+	macro := op.Record(gtx.Ops)
+	dims := layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(10), Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		children := []layout.FlexChild{}
+
+		// User caption above the file card (if present).
+		if caption != "" {
+			children = append(children,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(w.theme, caption)
+					lbl.Color = captionFg
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+			)
+		}
+
+		// File icon + name.
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Body2(w.theme, w.t("file.icon"))
+						lbl.Color = color.NRGBA{R: 100, G: 180, B: 255, A: 255}
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Body2(w.theme, payload.FileName)
+						lbl.Font.Weight = font.Bold
+						lbl.Color = nameFg
+						return lbl.Layout(gtx)
+					}),
+				)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		)
+
+		// File size display: full size for terminal states, progress for active.
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				var sizeText string
+				if senderCompleted || receiverTerminal || receiverFailed {
+					sizeText = formatFileSize(payload.FileSize)
+				} else {
+					sizeText = formatFileSize(bytesTransferred) + " / " + formatFileSize(payload.FileSize) +
+						"  (" + strconv.Itoa(percent) + "%)"
+				}
+				lbl := material.Caption(w.theme, sizeText)
+				lbl.Color = sizeFg
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		)
+
+		// Sender: show progress bar only while serving, hide when completed.
+		// Receiver: show download button in "available" state, progress bar + cancel
+		// during active download, restart button for failed, nothing for terminal states.
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if isMine && !senderCompleted {
+					return w.layoutFileProgressBar(gtx, progressBg, progressFg, percent)
+				}
+				if receiverDownloadActive {
+					return w.layoutReceiverProgress(gtx, progressBg, progressFg, percent, message.ID)
+				}
+				if receiverFailed {
+					return w.layoutFileRestartButton(gtx, message.ID)
+				}
+				if !isMine && !receiverTerminal && transferFound {
+					return w.layoutFileDownloadButton(gtx, message.ID)
+				}
+				return layout.Dimensions{}
+			}),
+		)
+
+		// Show status label for terminal/informational states.
+		var stateLabel string
+		var stateLabelColor color.NRGBA
+		showLabel := false
+
+		switch {
+		// Sender: "downloaded" when receiver confirmed.
+		case isMine && transferState == "completed":
+			stateLabel = "downloaded"
+			stateLabelColor = color.NRGBA{R: 100, G: 220, B: 130, A: 255}
+			showLabel = true
+
+		// Receiver: "completed" only after file_downloaded_ack.
+		case !isMine && transferState == "completed":
+			stateLabel = "completed"
+			stateLabelColor = color.NRGBA{R: 100, G: 220, B: 130, A: 255}
+			showLabel = true
+
+		// Receiver: waiting for sender ack — show "confirming...".
+		case !isMine && transferState == "waiting_ack":
+			stateLabel = "confirming..."
+			stateLabelColor = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
+			showLabel = true
+
+		case !isMine && transferState == "failed":
+			stateLabel = "failed"
+			stateLabelColor = color.NRGBA{R: 255, G: 100, B: 100, A: 255}
+			showLabel = true
+
+		case !isMine && transferState == "waiting_route":
+			stateLabel = "sender offline"
+			stateLabelColor = color.NRGBA{R: 255, G: 200, B: 80, A: 255}
+			showLabel = true
+
+		// Receiver: no mapping exists — registration was rejected
+		// (quota, invalid metadata, etc.). Show "unavailable" instead
+		// of a misleading Download button.
+		case !isMine && !transferFound:
+			stateLabel = "unavailable"
+			stateLabelColor = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
+			showLabel = true
+		}
+
+		if showLabel {
+			labelText := stateLabel
+			labelColor := stateLabelColor
+			children = append(children,
+				layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Caption(w.theme, labelText)
+					lbl.Color = labelColor
+					return lbl.Layout(gtx)
+				}),
+			)
+		}
+
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	})
+	call := macro.Stop()
+
+	defer clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(unit.Dp(8))).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: cardBg}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	call.Add(gtx.Ops)
+	return dims
+}
+
+// layoutFileProgressBar renders a progress bar for the sender side.
+// percent is the current transfer progress (0–100). When percent is 0
+// a minimal sliver is shown to indicate the transfer has been initiated.
+func (w *Window) layoutFileProgressBar(gtx layout.Context, bg, fg color.NRGBA, percent int) layout.Dimensions {
+	barHeight := gtx.Dp(unit.Dp(6))
+	barWidth := gtx.Constraints.Max.X
+	if barWidth > gtx.Dp(unit.Dp(260)) {
+		barWidth = gtx.Dp(unit.Dp(260))
+	}
+
+	// Background track.
+	stack := clip.UniformRRect(image.Rectangle{Max: image.Pt(barWidth, barHeight)}, gtx.Dp(unit.Dp(3))).Push(gtx.Ops)
+	paint.ColorOp{Color: bg}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	stack.Pop()
+
+	// Progress fill based on actual percentage.
+	fillPercent := percent
+	if fillPercent <= 0 {
+		fillPercent = 0
+	}
+	if fillPercent > 100 {
+		fillPercent = 100
+	}
+	fillWidth := barWidth * fillPercent / 100
+	if fillWidth < 2 && fillPercent > 0 {
+		fillWidth = 2
+	}
+	if fillWidth > 0 {
+		fillStack := clip.UniformRRect(image.Rectangle{Max: image.Pt(fillWidth, barHeight)}, gtx.Dp(unit.Dp(3))).Push(gtx.Ops)
+		paint.ColorOp{Color: fg}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		fillStack.Pop()
+	}
+
+	return layout.Dimensions{Size: image.Pt(barWidth, barHeight)}
+}
+
+// layoutReceiverProgress renders the progress bar with a cancel button (✕)
+// for receiver-side active downloads. The cancel button resets the transfer
+// to available state and deletes the partial file.
+func (w *Window) layoutReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, percent int, messageID string) layout.Dimensions {
+	if w.fileCancelDownloadBtns == nil {
+		w.fileCancelDownloadBtns = make(map[string]*widget.Clickable)
+	}
+	cancelBtn, ok := w.fileCancelDownloadBtns[messageID]
+	if !ok {
+		cancelBtn = new(widget.Clickable)
+		w.fileCancelDownloadBtns[messageID] = cancelBtn
+	}
+
+	for cancelBtn.Clicked(gtx) {
+		fileID := domain.FileID(messageID)
+		go func() {
+			if err := w.router.FileBridge().CancelDownload(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID).
+					Msg("file_download: CancelFileDownload failed")
+			}
+		}()
+	}
+
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle, Spacing: layout.SpaceBetween}.Layout(gtx,
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return w.layoutFileProgressBar(gtx, bg, fg, percent)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			matBtn := material.Button(w.theme, cancelBtn, "✕")
+			matBtn.Background = color.NRGBA{R: 65, G: 70, B: 85, A: 255}
+			matBtn.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+			matBtn.Inset = layout.UniformInset(unit.Dp(2))
+			matBtn.CornerRadius = unit.Dp(10)
+			matBtn.TextSize = unit.Sp(12)
+			gtx.Constraints.Min = image.Pt(gtx.Dp(unit.Dp(24)), gtx.Dp(unit.Dp(24)))
+			gtx.Constraints.Max = gtx.Constraints.Min
+			return matBtn.Layout(gtx)
+		}),
+	)
+}
+
+// layoutFileDownloadButton renders a download button for the receiver side.
+// When clicked, triggers FileTransferManager.StartDownload which sends the
+// first chunk_request and transitions the receiver state to downloading.
+func (w *Window) layoutFileDownloadButton(gtx layout.Context, messageID string) layout.Dimensions {
+	if w.fileDownloadBtns == nil {
+		w.fileDownloadBtns = make(map[string]*widget.Clickable)
+	}
+	btn, ok := w.fileDownloadBtns[messageID]
+	if !ok {
+		btn = new(widget.Clickable)
+		w.fileDownloadBtns[messageID] = btn
+	}
+
+	for btn.Clicked(gtx) {
+		fileID := domain.FileID(messageID)
+		go func() {
+			if err := w.router.FileBridge().StartDownload(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID).
+					Msg("file_download: StartFileDownload failed")
+			}
+		}()
+	}
+
+	matBtn := material.Button(w.theme, btn, w.t("file.download"))
+	matBtn.Background = color.NRGBA{R: 36, G: 67, B: 126, A: 255}
+	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	matBtn.Inset = layout.Inset{
+		Top: unit.Dp(4), Bottom: unit.Dp(4),
+		Left: unit.Dp(12), Right: unit.Dp(12),
+	}
+	matBtn.CornerRadius = unit.Dp(6)
+	matBtn.TextSize = unit.Sp(13)
+	return layout.Flex{}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(100))
+			return matBtn.Layout(gtx)
+		}),
+	)
+}
+
+// layoutFileRestartButton renders a restart button for failed receiver-side
+// downloads. When clicked, resets the receiver mapping to available state
+// (RestartDownload) and immediately initiates a new download (StartDownload).
+func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) layout.Dimensions {
+	if w.fileRestartBtns == nil {
+		w.fileRestartBtns = make(map[string]*widget.Clickable)
+	}
+	btn, ok := w.fileRestartBtns[messageID]
+	if !ok {
+		btn = new(widget.Clickable)
+		w.fileRestartBtns[messageID] = btn
+	}
+
+	for btn.Clicked(gtx) {
+		fileID := domain.FileID(messageID)
+		go func() {
+			if err := w.router.FileBridge().RestartDownload(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID).
+					Msg("file_download: RestartFileDownload failed")
+				return
+			}
+			if err := w.router.FileBridge().StartDownload(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID).
+					Msg("file_download: StartFileDownload after restart failed")
+			}
+		}()
+	}
+
+	matBtn := material.Button(w.theme, btn, w.t("file.restart"))
+	matBtn.Background = color.NRGBA{R: 180, G: 80, B: 60, A: 255}
+	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	matBtn.Inset = layout.Inset{
+		Top: unit.Dp(4), Bottom: unit.Dp(4),
+		Left: unit.Dp(12), Right: unit.Dp(12),
+	}
+	matBtn.CornerRadius = unit.Dp(6)
+	matBtn.TextSize = unit.Sp(13)
+	return layout.Flex{}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(100))
+			return matBtn.Layout(gtx)
+		}),
+	)
 }
 
 func (w *Window) localNodeErrorRow() string {
@@ -1451,6 +2108,11 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					// Render file card for file_announce messages instead of plain text.
+					if message.Command == domain.FileActionAnnounce && message.CommandData != "" {
+						return w.layoutFileCard(gtx, message, isMine)
+					}
+
 					sel := w.messageSelectable(message.ID)
 					sel.SetText(message.Body)
 					textColor := color.NRGBA{R: 245, G: 247, B: 250, A: 255}

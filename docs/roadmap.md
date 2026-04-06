@@ -8,8 +8,8 @@ Related documentation:
 - [protocol/messaging.md](protocol/messaging.md) — message send/store protocol
 
 Source: `internal/core/node/relay.go`, `internal/core/node/ratelimit.go`,
-`internal/core/node/capabilities.go`, `internal/core/node/admission.go`
-Source (planned): `internal/core/routing/` (routing module),
+`internal/core/node/capabilities.go`, `internal/core/node/admission.go`,
+`internal/core/routing/` (routing module),
 `internal/core/rpc/routing_commands.go` (routing RPC commands)
 
 Quick links:
@@ -17,44 +17,43 @@ Quick links:
 - [Current state](#current-state)
 - [Design principles](#design-principles)
 - [Protocol versioning policy](#protocol-versioning-policy)
-- [Iteration 1 — Routing table](#iter-1)
+- [Routing table](#iter-1)
+  - [Network core extraction](#network-core-extraction-peerconn--netcore)
   - [Pending work before route health](#pending-work-before-route-health)
   - [Route health, probes, and RTT scoring](#route-health-probes-and-rtt-scoring)
-- [Iteration 2 — Reliability, reputation, and multi-path](#iter-2)
-- [Iteration 3 — Optimization and scaling](#iter-3)
-- [Iteration 4 — Structured overlay (DHT)](#iter-4)
-- [Iteration 5 — Local names](#iter-5)
-- [Iteration 6 — Message deletion](#iter-6)
-- [Iteration 7 — Android app](#iter-7)
-- [Iteration 8 — Second-layer encryption](#iter-8)
-- [Iteration 9 — DPI bypass](#iter-9)
-- [Iteration 10 — Google WSS fallback](#iter-10)
-- [Iteration 11 — SOCKS5 tunnel](#iter-11)
-- [Iteration 12 — Group chats](#iter-12)
-- [Iteration 13 — Onion DM](#iter-13)
-  - [13.1 — Onion wrapping for DM envelope](#iter-13-1)
-  - [13.2 — Onion receipts](#iter-13-2)
-  - [13.3 — Ephemeral keys and forward secrecy](#iter-13-3)
-  - [13.4 — Path selection and circuit diversity](#iter-13-4)
-  - [13.5 — Traffic analysis resistance](#iter-13-5)
-- [Iteration 14 — Global names](#iter-14)
-- [Iteration 15 — Gazeta extensions](#iter-15)
-- [Iteration 16 — iOS app](#iter-16)
-- [Iteration 17 — BLE last mile](#iter-17)
-  - [17.1 — BLE transport and peer discovery](#iter-17-1)
-  - [17.2 — BLE fragmentation and MTU adaptation](#iter-17-2)
-  - [17.3 — BLE deduplication and relay](#iter-17-3)
-  - [17.4 — BLE rate limiting and QoS](#iter-17-4)
-- [Iteration 18 — Meshtastic last mile](#iter-18)
-  - [18.1 — Meshtastic transport bridge](#iter-18-1)
-  - [18.2 — Radio-aware fragmentation and pacing](#iter-18-2)
-  - [18.3 — Radio mesh relay and deduplication](#iter-18-3)
-- [Iteration 19 — Custom encryption builder](#iter-19)
-- [Iteration 20 — Voice calls](#iter-20)
-- [Iteration 21 — File transfer](#iter-21)
-- [Iteration 22 — LAN discovery](#iter-22)
-- [Iteration 23 — NAT traversal and hole punching](#iter-23)
-- [Iteration 24 — Congestion control and QoS](#iter-24)
+- [Message deletion](#iter-6)
+- [Android app](#iter-7)
+- [Google WSS fallback](#iter-10)
+- [Voice calls](#iter-20)
+- [Reliability, reputation, and multi-path](#iter-2)
+- [Optimization and scaling](#iter-3)
+- [Structured overlay (DHT)](#iter-4)
+- [Second-layer encryption](#iter-8)
+- [DPI bypass](#iter-9)
+- [SOCKS5 tunnel](#iter-11)
+- [Group chats](#iter-12)
+- [Onion DM](#iter-13)
+  - [Onion wrapping for DM envelope](#iter-13-1)
+  - [Onion receipts](#iter-13-2)
+  - [Ephemeral keys and forward secrecy](#iter-13-3)
+  - [Path selection and circuit diversity](#iter-13-4)
+  - [Traffic analysis resistance](#iter-13-5)
+- [Global names](#iter-14)
+- [Gazeta extensions](#iter-15)
+- [iOS app](#iter-16)
+- [BLE last mile](#iter-17)
+  - [BLE transport and peer discovery](#iter-17-1)
+  - [BLE fragmentation and MTU adaptation](#iter-17-2)
+  - [BLE deduplication and relay](#iter-17-3)
+  - [BLE rate limiting and QoS](#iter-17-4)
+- [Meshtastic last mile](#iter-18)
+  - [Meshtastic transport bridge](#iter-18-1)
+  - [Radio-aware fragmentation and pacing](#iter-18-2)
+  - [Radio mesh relay and deduplication](#iter-18-3)
+- [Custom encryption builder](#iter-19)
+- [LAN discovery](#iter-22)
+- [NAT traversal and hole punching](#iter-23)
+- [Congestion control and QoS](#iter-24)
 - [Key architectural decisions](#key-architectural-decisions-rationale)
 
 ### Current state
@@ -155,462 +154,70 @@ behavior, the protocol version must be raised.
 - [ ] Update `config.ProtocolVersion` and `config.MinimumProtocolVersion` only in a dedicated commit/PR after passing compatibility checklist
 
 <a id="iter-1"></a>
-### Iteration 1 — Routing table (distance vector with withdrawals)
+### Routing table (distance vector with withdrawals)
 
-**Goal:** each node knows which identities are reachable through which
-neighbors. Routes are treated as **hints**, not as the single source of
-truth — gossip fallback is always available.
+**Status: core implementation completed.** Distance-vector routing with per-origin SeqNo, withdrawals, triggered updates, split horizon, flap detection, hop_ack confirmation, and RPC observability are fully implemented and tested. Full documentation: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md), [`protocol/relay.md`](protocol/relay.md).
 
-**Problem after iteration 1:** relay works, but the node does not know
-**where** to relay. The gossip fallback from iteration 1 is blind. If a
-node has 8 peers, the message goes to 3 random ones instead of the one
-correct one.
+Remaining work under this iteration:
 
-**Capability gate:** `announce_routes` and `withdraw_routes` are only
-exchanged with peers that have `"mesh_routing_v1"` in their capability
-set (from iteration 0).
+#### Network core extraction (`PeerConn` → `NetCore`)
 
-**Routing module** (`internal/core/routing/`):
+**Problem:** `net.Conn` is exposed across 54 functions and 9 maps in `Service`.
+Any code with a connection reference can call `.Write()` directly, bypassing
+the single-writer goroutine — a class of bugs that has already caused byte
+interleaving on shared TCP sockets (P1 fix during file transfer work). The compiler
+cannot prevent this because `net.Conn` is an interface with a public `Write`
+method.
 
-Routing logic is extracted into a dedicated package, separate from
-`internal/core/node/`. The `node` package is already large (~90 fields
-in `Service`). A standalone routing module provides clean boundaries,
-independent unit testing, and minimizes refactoring when routing
-evolves across iterations 2–4.
+**Phase 1 — `PeerConn` (in-package refactoring):**
 
-```
-internal/core/routing/
-  types.go            — RouteEntry (with Origin), Snapshot (exported types)
-  table.go            — Table (route storage, lookup, TTL, split horizon)
-  announce.go         — announce/withdraw protocol + periodic loop
-
-internal/core/node/
-  routing.go          — Router interface + GossipRouter (existing)
-  table_router.go     — TableRouter adapter (delegates to routing.Table)
-```
-
-Files added in [Iteration 1.5](#iter-1-5): `routing/health.go`,
-`routing/probe.go`, `routing/score.go`, `routing/query.go`.
-
-The `routing` package exposes a `Table` type with a clean API:
-`Lookup()`, `UpdateRoute()`, `WithdrawRoute()`, `Announceable()`,
-`Snapshot()`. The `node.Service` holds a `*routing.Table` and passes
-events (peer connect/disconnect, hop_ack, session close) through
-explicit method calls — no hidden coupling.
-
-The `Router` interface remains in the `node` package (it depends on
-`protocol.Envelope`). A new `TableRouter` implementation wraps
-`routing.Table` and implements `Router.Route()` by delegating to
-`Table.Lookup()` and falling back to gossip when no route is found.
-
-**RPC access** (`internal/core/rpc/routing_commands.go`):
-
-Routing data is exposed via the existing `CommandTable` through a `RoutingProvider` interface with two methods: `RoutingSnapshot()` (immutable point-in-time table copy) and `PeerTransport(peerIdentity)` (live transport address resolution). When the provider is nil (legacy node without routing), all routing commands return 503 and are hidden from help.
-
-RPC commands (category `"routing"`):
-
-| Command | Description | Usage |
-|---|---|---|
-| `fetch_route_table` | Full table snapshot with structured `next_hop` object | — |
-| `fetch_route_summary` | Entry counts, reachable identities, flap state | — |
-| `fetch_route_lookup` | Active routes for a destination, sorted by preference | `<identity>` |
-| `fetch_route_health` | Health states per (identity, origin, nextHop) triple | — (Iter 1.5) |
-
-Full field-level specification: [`rpc/routing.md`](rpc/routing.md). Implementation details: [`routing.md`](routing.md).
-
-**Table structure:**
+Introduce a `PeerConn` type that owns the connection, its writer goroutine,
+capabilities, identity, and auth state. `net.Conn` becomes a private field —
+the only way to send data is `PeerConn.Send(frame)`, which routes through the
+internal write channel. Nine separate maps in `Service` collapse into one:
 
 ```go
-type RouteEntry struct {
-    Identity  string      // target identity (Ed25519 fingerprint)
-    Origin    string      // who originated this route (directly connected to Identity)
-    NextHop   string      // peer identity we learned this from (not transport address)
-    Hops      int         // distance (1 = direct peer, 16 = HopsInfinity/withdrawn)
-    SeqNo     uint64      // monotonic per-Origin, only Origin may advance
-    Source    RouteSource // RouteSourceDirect | RouteSourceAnnouncement | RouteSourceHopAck
-    ExpiresAt time.Time   // absolute expiry; derived from defaultTTL at insert time
-}
+// Before: 9 maps keyed by net.Conn
+inboundConns, inboundMetered, inboundTracked, connAuth,
+connPeerInfo, connSendCh, connWriterDone, inboundByIP, sessions
 
-type Table struct {
-    mu               sync.RWMutex
-    routes           map[string][]RouteEntry // identity → routes
-    localOrigin      string                  // this node's Ed25519 fingerprint
-    seqCounters      map[string]uint64       // next SeqNo per destination
-    defaultTTL       time.Duration           // default route lifetime (120s)
-    penalizedTTL     time.Duration           // TTL for flapping peers (30s)
-    flapState        map[string]*peerFlapState
-    flapWindow       time.Duration           // disconnect counting window (120s)
-    flapThreshold    int                     // disconnects before hold-down (3)
-    holdDownDuration time.Duration           // hold-down period (30s)
-}
-
-func (t *Table) Lookup(identity string) []RouteEntry
-func (t *Table) AddDirectPeer(peerIdentity string) (AddDirectPeerResult, error)
-func (t *Table) RemoveDirectPeer(peerIdentity string) (RemoveDirectPeerResult, error)
-func (t *Table) InvalidateTransitRoutes(peerIdentity string) int
-func (t *Table) UpdateRoute(entry RouteEntry) (bool, error)
-func (t *Table) WithdrawRoute(identity, origin, nextHop string, seqNo uint64) bool
-func (t *Table) Announceable(excludeVia string) []RouteEntry
-func (t *Table) AnnounceTo(excludeVia string) []AnnounceEntry
-func (t *Table) Snapshot() Snapshot
-func (t *Table) TickTTL()      // removes expired (ExpiresAt elapsed) and withdrawn (Hops >= 16) entries
-func (t *Table) Size() int     // total entries including withdrawn
-func (t *Table) ActiveSize() int // non-withdrawn, non-expired entries only
-func (t *Table) FlapSnapshot() []FlapEntry
+// After: 1 map keyed by connection ID
+conns map[connID]*PeerConn
 ```
 
-**Why NextHop is a peer identity, not a transport address:** a single
-peer identity can have multiple transport sessions (inbound + outbound,
-fallback port, reconnect). Storing a transport address would lose
-working sessions. The routing table operates at identity level; session
-selection for the actual send is delegated to `node.Service`, which
-already iterates sessions by peer identity.
+Migration is incremental — each map is replaced one at a time, old callers
+are updated, tests stay green at every step.
 
-**Key difference from previous version:** route entries have an `Origin`
-field and a `SeqNo` that is strictly per-origin. Only the node that
-originally announced the identity (the one directly connected to it)
-may advance the `SeqNo`. Intermediate nodes forward the route with the
-same `(Origin, SeqNo)` — they never increment or fabricate a new seq
-for someone else's route. This prevents seq-space hijacking where an
-intermediate node could override legitimate withdrawals.
+**Phase 2 — `NetCore` (separate package):**
 
-This enables:
-
-- **Withdrawals** — the origin node explicitly withdraws a route by
-  sending a higher `SeqNo` with `hops=infinity` (16). Receivers
-  immediately invalidate the stale entry instead of waiting for TTL
-  expiry. Because only the origin controls the seq, no intermediate
-  node can accidentally or maliciously cancel the withdrawal.
-- **Triggered updates** — when a route changes (peer connects/disconnects),
-  an immediate announce of just that change is sent, without waiting for
-  the 30-second periodic cycle.
-
-**How the table is populated:**
-
-1. **Direct peers** — on peer connect, their identity is added as
-   `hops=1, source="direct"`. On disconnect — removed, and a
-   **withdrawal** is immediately triggered to all neighbors.
-
-   **Why hops=1, not 0:** a direct connection still traverses one
-   network link. Using `hops=1` keeps the metric consistent: every
-   hop adds 1, and the metric is additive across the path. With
-   `hops=0` for direct, a two-hop route would show `hops=1`, which
-   is confusing. The value `hops=1` means "identity reachable through
-   one link" and `hops=16` remains infinity (withdrawal).
-
-2. **Route announcements** — frame type `announce_routes`:
-
-```json
-{
-  "type": "announce_routes",
-  "routes": [
-    {"identity": "alice_addr", "origin": "charlie_addr", "hops": 1, "seq": 42},
-    {"identity": "carol_addr", "origin": "bob_addr",     "hops": 2, "seq": 17},
-    {"identity": "dave_addr",  "origin": "dave_addr",    "hops": 16, "seq": 18}
-  ]
-}
-```
-
-**Extensibility for onion (Iteration 13.1):** when a node supports
-`onion_relay_v1`, it adds optional fields to each route entry in its
-own announcements (origin == self):
-
-```json
-{
-  "identity": "alice_addr", "origin": "self_addr", "hops": 1, "seq": 42,
-  "box_key": "<base64 X25519 public key>",
-  "box_key_binding_sig": "<base64 ed25519 signature of 'corsa-boxkey-v1|identity|box_key'>"
-}
-```
-
-These fields are **optional** and **ignored** by nodes that do not
-support `onion_relay_v1`. Nodes without onion capability omit them;
-nodes with onion capability use them to build onion paths (see
-Iteration 13.1 trust model for transit box keys). The binding signature
-prevents key substitution by intermediate relayers: each hop in the
-announcement chain can verify that the box key was genuinely published
-by its origin. Nodes that relay an announcement with box-key fields
-preserve them as-is (they are part of the route entry, same as `seq`).
-
-`hops=1` = direct peer, `hops=2` = one intermediate hop, `hops=16` =
-infinity (withdrawal). The table deduplicates and compares updates by
-the composite key `(identity, origin, nextHop)`:
-
-- **Same origin, same nextHop:** accept only if `seq` is strictly
-  higher than the stored entry. This is the normal per-origin
-  sequence ordering.
-- **Different origin, same nextHop:** these are independent route
-  lineages. Both entries coexist. If neighbor B first advertises
-  `(F, origin=C, seq=5)` and later `(F, origin=D, seq=1)`, the
-  second is a new lineage, not a stale update — it must not be
-  rejected by comparing against C's seq.
-- **Same origin, different nextHop:** these are alternative paths
-  from the same origin. Both are stored; `Lookup()` ranks them.
-
-Every 30 seconds a node sends the full table to peers (periodic refresh).
-Between cycles, **triggered updates** send only changes immediately.
-
-3. **Hop-ack confirmation** — when a `relay_hop_ack` is received for a
-   message to identity X, the node looks up which route triple it used
-   to send that message (tracked locally by `message_id`). Only that
-   specific `(identity, origin, nextHop)` triple is promoted to
-   `source="hop_ack"`. The wire-level `relay_hop_ack` itself carries
-   only `message_id` — origin is resolved locally, not transmitted.
-   This means a hop_ack for `(X, origin=C, via B)` does not promote
-   `(X, origin=D, via B)` even though both go through B, and does not
-   promote `(Y, origin=C, via B)` even for the same origin — each
-   triple is independently confirmed. This is more reliable than
-   end-to-end delivery receipts, which can travel via gossip and prove
-   nothing about the chosen path.
-
-**Trust hierarchy for route sources:** not all route information is
-equally trustworthy. The table enforces a strict priority when multiple
-sources report the same `(identity, origin, nextHop)` triple:
-
-1. **`direct`** — the identity is locally connected. Always wins.
-   Cannot be overridden by announcement or hop_ack.
-2. **`hop_ack`** — confirmed by actual message delivery for this
-   specific `(identity, origin, nextHop)` triple (origin resolved
-   locally from the message's routing decision). Stronger than passive
-   announcements because it proves this particular path works. Does
-   not extend to other triples through the same next_hop.
-3. **`announcement`** — received via `announce_routes` from a neighbor.
-   Lowest trust. Any peer can claim any route; without verification
-   the claim is just a hint.
-
-When `UpdateRoute()` receives a new entry, it checks the existing
-entry's `Source` for the same `(identity, origin, nextHop)` triple.
-A lower-trust source cannot override a higher-trust one within the
-same lineage. If a peer announces a route that was already confirmed
-by `hop_ack`, the announcement is accepted only if its `SeqNo` is
-strictly higher (indicating a genuine topology change from the origin).
-
-**Different origins are independent lineages.** If neighbor B reports
-`(F, origin=C, seq=5)` and then `(F, origin=D, seq=1)`, these are
-separate entries. The second is not compared against C's seq — it has
-its own lineage. Both may coexist in the table.
-
-Additionally, routes learned from peers with **unstable sessions**
-(3 or more disconnects within the last 10 minutes) receive a shorter
-numeric TTL: `RemainingTTL=30` instead of the default `120`. This
-prevents flapping peers from polluting the table with routes that
-constantly appear and disappear.
-
-**Split horizon** (loop protection): when node B announces routes to
-node A, it **omits** routes that it learned through A. These routes are
-simply not included in the announcement — no fake `hops=16` is sent.
-This avoids the seq-space conflict: sending a withdrawal with `hops=16`
-for someone else's route would require fabricating a `SeqNo` that the
-origin node never produced, violating the per-origin seq invariant.
-Split horizon is simpler, safe, and does not create false withdrawal
-entries that could propagate and confuse other nodes.
-
-**Protection against route poisoning:** `announce_routes` remains an
-advisory mechanism, not a source of truth. A neighbor can lie about
-reachability, so receivers apply strict acceptance rules:
-
-1. **Never trust an announcement more than direct/hop_ack.**
-   `announcement` must not override `direct`, and must not displace an
-   already confirmed `hop_ack` route without a fresher `SeqNo`.
-2. **Accept only physically plausible updates.** A neighbor may advertise
-   a route only with `hops >= 1`, and forwarding must increase the metric
-   by exactly 1. If a peer suddenly advertises an anomalously large set of
-   identities or sharply improves a metric without a new `SeqNo`, the
-   update is rejected or assigned a reduced TTL.
-3. **Bind learned routes to the specific session and neighbor identity.**
-   When the session closes, all routes learned from it are invalidated
-   immediately regardless of `RemainingTTL`.
-4. **Do not make the table a single point of failure.** Even a suspicious
-   or stale route must not break delivery: on doubt, the node lowers the
-   route's priority and falls back to gossip rather than trusting it to
-   completion.
-
-In the future this can be strengthened with a capability such as
-`mesh_attested_links_v1`, where adjacencies or path segments are backed by
-signatures. But iteration 2 should remain fully functional without a
-cryptographically attested map of the whole network.
-
-**Table is a hint, not the truth:** if the routing table suggests a
-next_hop, the node tries it first. If the next_hop session is not
-active or the capability is missing, the node falls back to gossip
-immediately. The table never blocks delivery.
-
-**Route lifetime is tied to session lifetime.** All routes learned
-from a peer (both direct and announced) are invalidated when the
-session to that peer closes. On session close, the node:
-
-1. Removes the direct peer entry for that identity. Since this node
-   **is** the origin for its own direct-peer routes, it legitimately
-   sends a triggered withdrawal (`hops=16` with its own incremented
-   `SeqNo`) to all neighbors.
-2. Removes all transit routes where `NextHop == disconnected_peer`
-   from the **local table only**. These routes are not withdrawn on
-   the wire — the node is not the origin and must not fabricate
-   a withdrawal with someone else's `SeqNo`.
-3. **Stops announcing** the removed transit routes. Because the node
-   uses split horizon and the routes are no longer in its table,
-   they naturally disappear from subsequent periodic announces.
-   Neighbors detect the absence and let the routes expire via TTL
-   (at most 120 seconds, or faster if the actual origin sends a
-   real withdrawal).
-
-This is the correct behavior under per-origin `SeqNo`: only the
-origin may emit a withdrawal. An intermediate node that loses its
-upstream session can only (a) locally invalidate, (b) stop
-re-advertising, and (c) rely on TTL expiry at downstream peers.
-The practical convergence impact is small: the origin will typically
-detect the same partition and emit its own withdrawal. If the origin
-is unreachable, downstream nodes still converge within one TTL window
-(120s default, 30s for flapping peers).
-
-On reconnect, the peer must re-announce its routes from scratch.
-This prevents stale routes from persisting across identity changes
-or network partitions. If a peer reconnects with a **different
-identity** (different Ed25519 public key), the old identity's direct
-route is withdrawn (the node is the origin for that route) and the
-new identity is added as a fresh entry.
-
-**Route selection with the table:**
-
-```mermaid
-flowchart TD
-    MSG["Route(msg)"]
-    PUSH{"PushSubscribers<br/>for recipient?"}
-    PUSH_Y["Push to local<br/>subscribers"]
-    LOOKUP{"Routing table<br/>has entry for<br/>msg.Recipient?"}
-    CAP{"next_hop has<br/>mesh_relay_v1?"}
-    RELAY["Fill RelayNextHop<br/>→ send relay_message"]
-    GOSSIP["Fill GossipTargets<br/>→ send via gossip"]
-
-    MSG --> PUSH
-    PUSH -->|yes| PUSH_Y
-    PUSH -->|no| LOOKUP
-    PUSH_Y --> LOOKUP
-    LOOKUP -->|yes| CAP
-    CAP -->|yes| RELAY
-    CAP -->|no| GOSSIP
-    LOOKUP -->|no| GOSSIP
-
-    style PUSH_Y fill:#e3f2fd,stroke:#1565c0
-    style RELAY fill:#e8f5e9,stroke:#2e7d32
-    style GOSSIP fill:#fff3e0,stroke:#e65100
-```
-*Diagram — Full routing decision: push + table lookup + gossip fallback*
-
-**Withdrawal and triggered update flow:**
-
-```mermaid
-sequenceDiagram
-    participant A as Node A
-    participant B as Node B
-    participant C as Node C
-
-    Note over C: Node W disconnects from C
-
-    rect rgb(255, 240, 240)
-        Note over C: Triggered withdrawal (immediate)
-        C->>B: announce_routes [{W, hops=16, seq=5}]
-        B->>B: Invalidate: W via C
-        B->>A: announce_routes [{W, hops=16, seq=5}]
-        A->>A: Invalidate: W via B
-        Note over A,C: Withdrawal propagated in < 1 second
-    end
-
-    Note over C: Node W reconnects to C
-
-    rect rgb(240, 255, 240)
-        Note over C: Triggered announcement (immediate)
-        C->>B: announce_routes [{W, hops=1, seq=6}]
-        B->>B: Store: W via C (2 hops, seq=6)
-        B->>A: announce_routes [{W, hops=2, seq=6}]
-        A->>A: Store: W via B (3 hops, seq=6)
-    end
-```
-*Diagram — Fast withdrawal and re-announcement via triggered updates*
-
-**Announce cycle (periodic + triggered):**
-
-```mermaid
-sequenceDiagram
-    participant A as Node A
-    participant B as Node B
-    participant C as Node C
-
-    Note over A: Direct peers: [X, Y]
-    Note over B: Direct peers: [A, C, Z]
-    Note over C: Direct peers: [B, W]
-
-    rect rgb(240, 248, 255)
-        Note over A,C: Periodic announce (every 30s)
-        A->>B: announce_routes [{X,1,seq=1}, {Y,1,seq=1}]
-        B->>B: Store: X via A (2 hops), Y via A (2 hops)
-        B->>A: announce_routes [{C,1,seq=1}, {Z,1,seq=1}]
-        Note over B: Split horizon: B omits X,Y<br/>(learned from A) when announcing to A
-        B->>C: announce_routes [{A,1,seq=1}, {Z,1,seq=1}, {X,2,seq=1}, {Y,2,seq=1}]
-        Note over B: Split horizon: B omits W<br/>(learned from C) when announcing to C
-        C->>B: announce_routes [{W,1,seq=1}]
-        A->>A: Store: C via B (2 hops), Z via B (2 hops)
-    end
-
-    rect rgb(240, 255, 240)
-        Note over A,C: Second cycle — convergence
-        B->>A: announce_routes [{C,1,seq=1}, {Z,1,seq=1}, {W,2,seq=1}]
-        A->>A: Store: W via B (3 hops)
-        Note over A: Table converged:<br/>X=direct(1), Y=direct(1),<br/>C via B (2), Z via B (2),<br/>W via B (3)
-    end
-```
-*Diagram — Route announcement convergence with split horizon*
-
-**Announcement size limit with fairness rotation:** each
-`announce_routes` frame carries at most 100 route entries to bound
-frame size. When the table exceeds 100 entries, the node applies a
-fair selection strategy:
-
-1. **Direct peers always included** — routes with `source="direct"`
-   are never omitted, as they are the most valuable and typically
-   few (limited by max connections).
-2. **Remaining slots filled by rotation** — non-direct routes are
-   sorted by hops (closest first) and then rotated using a per-peer
-   offset that advances each cycle. This ensures all routes are
-   eventually announced to every peer, not just the closest ones.
-3. **Periodic full sync** — every 5th cycle (every 2.5 minutes), the
-   node sends a full table dump split across multiple frames if needed.
-   This handles edge cases where rotation misses routes during topology
-   changes.
-
-**Route selection with hop count (MVP):**
-
-In the core iteration, routes are ranked by hop count and trust source
-only. Composite scoring with RTT, health states, and probes is added in
-Iteration 1.5. The simple metric is sufficient for the first working
-routing table: `direct` routes are preferred, then `hop_ack`-confirmed,
-then lowest-hop-count `announcement`.
+`PeerConn` moves into a new `internal/core/netcore` package and becomes
+unexported (`peerConn`). `Service` communicates with the network layer through
+an interface:
 
 ```go
-func (t *Table) Lookup(identity string) []RouteEntry {
-    // 1. Filter: exclude withdrawn (hops=16)
-    // 2. Sort: source priority (direct > hop_ack > announcement),
-    //    then by hops ascending
-    // 3. Return sorted slice (caller uses first entry as RelayNextHop)
+type Network interface {
+    Send(dst PeerID, frame Frame) bool
+    SendWithCap(dst PeerID, frame Frame, cap Capability) bool
+    Broadcast(frame Frame, filter func(PeerID) bool)
+    PeersByCapability(cap Capability) []PeerID
+    Disconnect(dst PeerID)
 }
 ```
 
-**Done when:** a message from A to F goes via the shortest path, not
-random nodes. When a node disconnects, withdrawal propagates within
-seconds. Logs show `route_via_table` instead of `route_via_gossip`.
-The table converges within 1-2 announce cycles (30-60 seconds).
-On reconnect, the peer re-announces its full table (no incremental
-sync in this iteration).
+`net.Conn` cannot be imported outside `netcore` — compile-time guarantee that
+no other package can bypass the write queue. This also enables mock-based
+testing of all protocol logic without real TCP sockets.
 
-**Out of scope: global discovery.** Distance vector gives each node
-knowledge only via its neighbors. There is no mechanism to find an
-arbitrary identity if no neighbor has advertised a route to it. This is
-a fundamental DV boundary, not a defect. Global "find any user in the
-network" requires a separate discovery/query layer — see
-[Iteration 4 — Structured overlay (DHT)](#iter-4) for the planned
-approach. The routing table is not the place for global search.
+**Open bugs (blocking Phase 1 completion):**
 
-**Completed:** model invariants, minimal vertical slice (table routing, announcements, withdrawals, hop_ack, gossip fallback), RPC observability (`fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup`). Full documentation: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md).
+- [ ] P2: `writeJSONFrame` / `writeJSONFrameSync` fall back to direct `conn.Write` for outbound peer sessions when `enqueueFrame` returns `enqueueUnregistered` — no mutex protects against concurrent writes from `servePeerSession` (`service.go:1391-1399`, `1423-1429`)
+
+**Status:** Phase 1 design complete, implementation pending. Phase 2 planned
+as a follow-up migration after Phase 1 is stable.
+
+**Depends on:** none (internal refactoring, no wire-protocol changes).
+
+---
 
 #### Pending work before route health
 
@@ -640,6 +247,38 @@ approach. The routing table is not the place for global search.
 - [ ] Write unit tests for anti-poisoning announcement acceptance rules
 - [ ] Integration test: malicious peer advertises false routes, delivery degrades at most to gossip fallback
 - [ ] Integration test: route-update flood does not evict honest peers or trigger a full-sync storm
+
+**DMRouter architecture:**
+
+- [ ] Extract client interface for DMRouter (replace concrete `*DesktopClient` with interface — testability, mockability)
+- [ ] DMRouter remains a pure message router + UI (file transfer orchestration already extracted to `FileTransferBridge`; remove remaining implicit dependencies)
+
+**File transfer protocol:**
+
+- [ ] `file_announce_cancel` compensating command: if sender-side Commit fails after DM delivery, send a cancel to the receiver so they remove the unsupported file card instead of waiting for chunk_request timeout
+- [ ] Implement ban scoring for direct-connect peers: invalid file commands → ban score → disconnect at threshold
+- [ ] Implement `TemporarilyUnavailable` state with grace period (`FileUnavailableGracePeriod`, 24h default)
+- [ ] Implement receiver-side `Evicted` state (local only, no protocol signal)
+- [ ] Implement resource limits: `MaxPartialDownloadStorage` with LRU eviction
+- [ ] Implement periodic transmit directory GC (hourly scan, delete orphans older than 7 days) — currently cleanup only runs at startup
+- [ ] Unit test: ban score increases on invalid file command from direct-connect peer
+- [ ] Unit test: ban score does NOT increase for relayed invalid file command (directPeer ≠ SRC)
+- [ ] Unit test: peer disconnected when ban score reaches threshold
+- [ ] Unit test: sender state machine — file deleted → TempUnavailable → tombstone
+- [ ] Unit test: MaxPartialDownloadStorage LRU eviction
+- [ ] Unit test: startup validation — inaccessible dir → TemporarilyUnavailable (not tombstone)
+- [ ] Unit test: TemporarilyUnavailable → active when file reappears
+- [ ] Unit test: TemporarilyUnavailable → tombstone after grace period
+- [ ] Unit test: LRU eviction → Evicted state (no protocol signal)
+- [ ] Unit test: Evicted → Available on user re-accept (restart from 0)
+- [ ] Integration test: full lifecycle (announce DM → download via file commands → verify → file_downloaded file command)
+- [ ] Integration test: resume after interruption from last offset
+- [ ] Integration test: sender cancels mid-transfer (delete file_announce DM → FileMapping tombstoned → transmit file freed if RefCount=0)
+- [ ] Integration test: receiver cancels mid-transfer (delete file_announce DM → partial download cleaned up → FileMapping removed)
+- [ ] Integration test: file transfer commands do not block DM delivery under load
+- [ ] Integration test: no route → WaitingRoute, file commands silently dropped (no gossip)
+- [ ] Integration test: capability gate — file commands never sent to legacy peers
+- [ ] Mixed-version test: file-capable node alongside legacy node — no file traffic leaks to legacy
 
 **Release / compatibility:**
 
@@ -687,7 +326,7 @@ internal/core/routing/
   query.go            — route_query / route_query_response
 ```
 
-##### 1.5a. Next-hop health state machine
+##### Next-hop health state machine
 
 Each `(identity, origin, nextHop)` triple is independently tracked with
 an explicit health state — matching the routing table's dedup key. A
@@ -757,7 +396,7 @@ type RouteHealthState struct {
 Routes with `Bad` or `Dead` health are not selected by `Lookup()` unless
 no other route exists (last resort before gossip fallback).
 
-##### 1.5b. Route probe mechanism
+##### Route probe mechanism
 
 A lightweight probe verifies that a specific next-hop can actually
 forward traffic to the claimed identity, without waiting for real
@@ -811,7 +450,7 @@ sequenceDiagram
 ```
 *Diagram — Route probe and health recovery*
 
-##### 1.5c. RTT-weighted composite route score
+##### RTT-weighted composite route score
 
 Pure hop-count metrics can choose a 2-hop path through a congested
 transcontinental relay over a 3-hop local mesh path. Adding RTT
@@ -901,7 +540,7 @@ flowchart TD
 ```
 *Diagram — Route selection using composite score*
 
-##### 1.5d. Targeted route query
+##### Targeted route query
 
 When a route to a target identity is `Bad` or all known routes are
 exhausted, the node can ask its connected peers for better routes using
@@ -1009,8 +648,190 @@ traffic.
 - [ ] Mixed-version test: 1.5 node does not send probe/query frames to 1.0-only peer
 - [ ] Confirmed: iteration 1.5 is additive; new capabilities are optional, no protocol bump required
 
+<a id="iter-6"></a>
+### Message deletion controls
+
+**Goal:** add dialog/message deletion behavior with explicit flags and policy.
+
+**Why now:** expected mainstream UX before mobile multiplies sync complexity.
+
+**Done when:** users can delete local history, request two-sided deletion where
+allowed, and see when a message is protected from deletion by policy flags.
+
+#### File transfer cancellation via delete-message DM
+
+Deleting a `file_announce` DM is equivalent to cancelling the associated
+file transfer. No separate `file_cancel` command exists — the
+delete-message DM is the single cancellation mechanism.
+
+**Mechanism — delete-message DM applied to `file_announce`:**
+
+When a user deletes a `file_announce` message (from either side):
+
+1. The `FileMapping` associated with this message's FileID is removed
+   (transitioned to tombstone).
+2. If the deleted mapping was the last reference to the transmit file
+   (`RefCount` drops to 0), the transmit file is deleted from disk.
+3. If other `FileMapping`s still reference the same transmit file
+   (same content sent to multiple recipients), the file is preserved —
+   only the mapping is removed.
+4. The other side receives the delete-message DM and performs the same
+   cleanup locally: sender removes FileMapping + transmit file (if
+   RefCount=0); receiver removes partial download and FileMapping.
+
+No message — no file.
+
+**Dependency:** requires file transfer (see [protocol/file_transfer.md](protocol/file_transfer.md)) for
+`FileMapping`, `RefCount`, and transmit file storage structures.
+
+---
+
+Отмена передачи файлов через delete-message DM
+
+Удаление `file_announce` DM эквивалентно отмене связанной передачи файла.
+Отдельной команды `file_cancel` нет — delete-message DM является единственным
+механизмом отмены.
+
+При удалении `file_announce` (с любой стороны): FileMapping переходит в
+tombstone; если RefCount падает до 0, transmit-файл удаляется с диска;
+другая сторона получает delete-message и выполняет аналогичную очистку.
+
+---
+
+<a id="iter-7"></a>
+### Android app
+
+**Goal:** ship the first mobile client on Android.
+
+**Dependency:** comes after A1-A2 so mobile is not built on obviously rough
+chat UX.
+
+**Done when:** Android can run as a light client with identity, contacts,
+direct messaging, and reliable sync with desktop/full nodes.
+
+<a id="iter-10"></a>
+### Backup channels via Google WSS
+
+**Goal:** add fallback transport for networks where direct connections are
+unreliable or blocked.
+
+**Positioning:** this is part of the broader hostile-network resilience story,
+not a standalone headline.
+
+**Done when:** a node can fall back to WSS relay/bootstrap transport without
+breaking existing identity, delivery, or capability semantics.
+
+<a id="iter-20"></a>
+### Voice calls
+
+**Goal:** enable real-time voice communication between identities over the mesh
+network, with end-to-end encryption and onion routing where available.
+
+**Dependency:** requires stable onion delivery (A9) for private call setup and
+signaling. Requires reliable relay (Iterations 1–3) for media transport.
+
+**Transport restriction:** voice calls operate exclusively over TCP/IP mesh
+connections. BLE (A13) and Meshtastic LoRa (A14) transports are explicitly
+excluded — their bandwidth and latency characteristics are incompatible with
+real-time audio requirements.
+
+**Signaling protocol (MSI — Media Session Information):**
+
+Call setup and teardown use dedicated capability-gated frame types, not
+ordinary DM payloads. This is critical for mixed-version safety: a peer
+without `voice_call_v1` must never receive signaling frames (it would
+not know how to parse them and might surface them as opaque user content
+or reject the connection).
+
+Signaling frame types (all gated by `voice_call_v1`):
+
+- `call_request` — initiate a call (contains session_id, codec list)
+- `call_accept` — accept an incoming call (contains selected codec)
+- `call_reject` — reject or cancel a call (contains reason code)
+- `call_end` — terminate an active call
+- `call_ringing` — signal that the callee's device is ringing
+- `call_hold` / `call_resume` — hold/resume an active call
+
+These frames are sent through the existing lossless delivery pipeline
+(same transport as DM, but with distinct `type` field), optionally
+wrapped in onion (Iteration 13) for privacy. A peer receiving an
+unknown frame type drops it silently per the existing unknown-frame
+handling rule — but the capability gate ensures this case does not
+arise in normal operation.
+
+The signaling channel carries no media — only session control. Each
+signaling frame includes a `session_id` and monotonic `seq` to prevent
+replay and allow multi-call multiplexing.
+
+**Media transport — lossy channel:**
+
+Audio packets are sent over a lossy channel where timely delivery takes
+priority over reliability. Lost packets are concealed by the codec, not
+retransmitted. The lossy channel uses a separate packet type from
+lossless DM delivery:
+
+- **Priority bypass:** media packets bypass congestion control when the
+  send queue is saturated. This prevents file transfers or bulk messages
+  from starving the audio stream — a caller should never hear silence
+  because a file upload is in progress.
+- **Jitter buffer:** the receiver maintains a jitter buffer (default
+  60–200 ms adaptive) to smooth packet arrival variance. Buffer depth
+  adapts to observed network jitter.
+- **Codec negotiation:** during call setup, peers exchange supported
+  codecs and select the best common option. Initial codec set: Opus
+  (primary, variable bitrate 6–128 kbit/s, 20 ms frames) with fallback
+  to a lower-bitrate mode for constrained links. Codec selection is
+  extensible via capability negotiation.
+
+**Congestion-aware quality adaptation:**
+
+The call monitors RTT and packet loss per media session. When loss exceeds
+a threshold (e.g. 5%), the sender reduces bitrate or switches to a
+lower-quality codec preset. When conditions improve, quality ramps back
+up. This is independent of the general congestion control — it is
+per-call quality management.
+
+**Group voice (future extension):**
+
+Group voice calls relay lossy audio to a reduced set of peers (2 instead
+of all) to contain bandwidth. Each peer re-relays to its own neighbors,
+forming a low-fanout distribution tree. Active speaker detection can
+further reduce traffic by transmitting only the dominant speaker's audio
+at full rate.
+
+**Done when:** two identities can establish a voice call with end-to-end
+encryption, the call setup is signaled through onion routes (if available),
+media packets are relayed with bounded latency, and the protocol degrades
+gracefully when network conditions are insufficient.
+
+**Progress:**
+
+- [ ] Design MSI signaling protocol (call_request/call_accept/call_reject/call_end/call_ringing/call_hold/call_resume)
+- [ ] Define signaling frame types in `protocol/frame.go` (distinct `type` field, not DM payload)
+- [ ] Gate all signaling frames on `voice_call_v1` capability — never send to peers without it
+- [ ] Implement signaling over existing lossless delivery pipeline (same transport, distinct frame types)
+- [ ] Implement lossy packet type for media transport
+- [ ] Implement priority bypass: media packets skip congestion control queue
+- [ ] Implement jitter buffer (adaptive 60–200 ms)
+- [ ] Implement Opus codec integration (variable bitrate, 20 ms frames)
+- [ ] Implement codec negotiation during call setup
+- [ ] Implement congestion-aware quality adaptation (bitrate reduction on loss)
+- [ ] Implement call state machine (idle → ringing → active → ended)
+- [ ] Integrate onion wrapping for signaling (optional, uses privacy mode from 13.1)
+- [ ] Add `voice_call_v1` capability gate
+- [ ] Unit test: signaling frames never sent to peers without `voice_call_v1`
+- [ ] Unit test: peer without `voice_call_v1` never receives call_request (capability gate)
+- [ ] Unit test: call setup and teardown state machine
+- [ ] Unit test: media packet priority over bulk traffic
+- [ ] Unit test: jitter buffer smoothing under variable delay
+- [ ] Unit test: codec negotiation selects best common codec
+- [ ] Unit test: quality adaptation reduces bitrate on packet loss
+- [ ] Integration test: voice call through 3-hop relay path
+- [ ] Integration test: file transfer during active call does not degrade audio
+- [ ] Update `docs/protocol/relay.md` (lossy media channel, priority bypass)
+
 <a id="iter-2"></a>
-### Iteration 2 — Reliability, reputation, multi-path, and incremental sync
+### Reliability, reputation, multi-path, and incremental sync
 
 **Goal:** multiple routes per identity, automatic failover based on
 hop-by-hop ack success rate, protection against black-hole nodes.
@@ -1228,7 +1049,7 @@ after 5 messages.
 - [ ] Confirmed: iteration 3 does not require raising `MinimumProtocolVersion`
 
 <a id="iter-3"></a>
-### Iteration 3 — Optimization and scaling
+### Optimization and scaling
 
 **Goal:** pure optimization for network growth to hundreds of nodes.
 No new protocol semantics — only efficiency improvements.
@@ -1319,7 +1140,7 @@ does not produce false negatives.
 - [ ] Confirmed: iteration 4 does not require raising `MinimumProtocolVersion`
 
 <a id="iter-4"></a>
-### Iteration 4 (future) — Structured overlay (DHT)
+### Structured overlay (DHT) (future)
 
 **Goal:** scaling to thousands of nodes.
 
@@ -1357,7 +1178,7 @@ changes.
 - [ ] Add rollback test: `DHTRouter` → legacy/`TableRouter`
 - [ ] Add mixed-version migration test: old/new routing backends coexist
 
-### Iteration dependency graph
+### Dependency graph
 
 ```mermaid
 graph LR
@@ -1392,39 +1213,8 @@ These iterations continue the roadmap after the mesh foundation is stable.
 They are ordered by practical delivery value for product growth, privacy, and
 hostile-network resilience.
 
-<a id="iter-5"></a>
-### Iteration 5 — Local names for identities
-
-**Goal:** let the user assign a human-readable local label to each identity.
-
-**Why now:** cheapest UX win before broader user growth.
-
-**Done when:** the desktop shows local aliases everywhere identity fingerprints
-are shown, while preserving the real identity as the canonical underlying key.
-
-<a id="iter-6"></a>
-### Iteration 6 — Message deletion controls
-
-**Goal:** add dialog/message deletion behavior with explicit flags and policy.
-
-**Why now:** expected mainstream UX before mobile multiplies sync complexity.
-
-**Done when:** users can delete local history, request two-sided deletion where
-allowed, and see when a message is protected from deletion by policy flags.
-
-<a id="iter-7"></a>
-### Iteration 7 — Android app
-
-**Goal:** ship the first mobile client on Android.
-
-**Dependency:** comes after A1-A2 so mobile is not built on obviously rough
-chat UX.
-
-**Done when:** Android can run as a light client with identity, contacts,
-direct messaging, and reliable sync with desktop/full nodes.
-
 <a id="iter-8"></a>
-### Iteration 8 — Second-layer encryption and key exchange
+### Second-layer encryption and key exchange
 
 **Goal:** add optional contact-level payload encryption on top of network
 transport encryption.
@@ -1437,7 +1227,7 @@ public-key exchange is visible in UI, and messages can be wrapped in a second
 verified encryption layer.
 
 <a id="iter-9"></a>
-### Iteration 9 — DPI bypass
+### DPI bypass
 
 **Goal:** improve reachability in hostile networks where traffic is throttled,
 classified, or blocked.
@@ -1448,20 +1238,8 @@ understood.
 **Done when:** the transport layer supports at least one obfuscation strategy
 that measurably improves connectivity in filtered environments.
 
-<a id="iter-10"></a>
-### Iteration 10 — Backup channels via Google WSS
-
-**Goal:** add fallback transport for networks where direct connections are
-unreliable or blocked.
-
-**Positioning:** this is part of the broader hostile-network resilience story,
-not a standalone headline.
-
-**Done when:** a node can fall back to WSS relay/bootstrap transport without
-breaking existing identity, delivery, or capability semantics.
-
 <a id="iter-11"></a>
-### Iteration 11 — SOCKS5 tunnel between identities
+### SOCKS5 tunnel between identities
 
 **Goal:** allow identity-to-identity private tunneling, not only chat delivery.
 
@@ -1471,7 +1249,7 @@ breaking existing identity, delivery, or capability semantics.
 clear permissions, lifecycle controls, and bandwidth limits.
 
 <a id="iter-12"></a>
-### Iteration 12 — Group chats
+### Group chats
 
 **Goal:** enable multi-party conversations where a message sent once is
 delivered to all group members, with consistent group membership visible to
@@ -1541,7 +1319,7 @@ membership, pairwise session key rotation, and delivery receipts — all
 operating over the existing mesh relay without a central server.
 
 <a id="iter-13"></a>
-### Iteration 13 — Onion delivery for DMs
+### Onion delivery for DMs
 
 **Goal:** hide path metadata in multi-hop DM delivery. Onion is an opt-in
 transport wrapper around the existing sealed DM envelope — not a replacement.
@@ -1647,7 +1425,7 @@ sequenceDiagram
 *Diagram — Full onion DM delivery and receipt return flow*
 
 <a id="iter-13-1"></a>
-#### 13.1 — Onion wrapping for DM envelope
+#### Onion wrapping for DM envelope
 
 **Goal:** no intermediate hop sees the recipient address or DM content.
 
@@ -1908,7 +1686,7 @@ protocol error — it is expected behavior in a dynamic network.
 - [ ] Confirm: 13.1 does not require raising `MinimumProtocolVersion`
 
 <a id="iter-13-2"></a>
-#### 13.2 — Onion receipts
+#### Onion receipts
 
 **Goal:** delivery and read receipts for onion DMs also travel through onion
 routes, so no intermediate node can correlate a receipt back to the original
@@ -1964,7 +1742,7 @@ delivery experience — privacy mode looks like a bug.
 - [ ] Confirm: 13.2 does not require raising `MinimumProtocolVersion`
 
 <a id="iter-13-3"></a>
-#### 13.3 — Ephemeral keys and forward secrecy
+#### Ephemeral keys and forward secrecy
 
 **Goal:** compromise of a node's long-term box key does not reveal the content
 of past onion messages that transited through it.
@@ -2165,7 +1943,7 @@ modifying `dm-v1`.
 - [ ] Confirm: 13.3 does not require raising `MinimumProtocolVersion`
 
 <a id="iter-13-4"></a>
-#### 13.4 — Path selection and circuit diversity
+#### Path selection and circuit diversity
 
 **Goal:** the sender does not always use the same onion path, so a single
 compromised hop cannot build a statistical profile of who talks to whom.
@@ -2303,7 +2081,7 @@ must be active and carrying traffic before onion becomes usable.
 - [ ] Update `docs/protocol/delivery.md` (path selection impact on delivery latency, bootstrap tradeoff)
 
 <a id="iter-13-5"></a>
-#### 13.5 — Traffic analysis resistance
+#### Traffic analysis resistance
 
 **Goal:** make it harder to correlate sender and recipient by observing
 message size and timing at intermediate hops.
@@ -2651,7 +2429,7 @@ simultaneously — the most realistic (and hardest to debug) failure modes:
 - [ ] Integration test: mixed network + chunked onion message + receipt path under overload. Scenario: sender sends a chunked message (13.5) via a 3-hop onion path (13.4) where the network enters Iteration 3e global overload mid-delivery. Verify: chunks that passed before overload are assembled; chunks dropped by load shedding cause the group to timeout; receipt (13.2) follows its own independent path; sender detects partial failure via missing delivery receipt and retries with new `E`. This test covers the 13.2 + 13.4 + 13.5 + global overload interaction.
 
 <a id="iter-14"></a>
-### Iteration 14 — Global names instead of raw identity
+### Global names instead of raw identity
 
 **Goal:** introduce a global naming layer so users can find and recognize peers
 without memorizing fingerprints.
@@ -2662,7 +2440,7 @@ without memorizing fingerprints.
 an identity with conflict handling and ownership proof.
 
 <a id="iter-15"></a>
-### Iteration 15 — Gazeta protocol extensions
+### Gazeta protocol extensions
 
 **Goal:** expand the anonymous/broadcast protocol where it creates clear product
 value beyond direct messaging.
@@ -2674,7 +2452,7 @@ story is sharper.
 use-cases and compatibility rules.
 
 <a id="iter-16"></a>
-### Iteration 16 — iOS app
+### iOS app
 
 **Goal:** ship the second mobile client on iOS.
 
@@ -2685,7 +2463,7 @@ already validated.
 set that is practical on the chosen framework.
 
 <a id="iter-17"></a>
-### Iteration 17 — BLE last mile
+### BLE last mile
 
 **Goal:** add a short-range local transport so that nearby devices can exchange
 CORSA messages over Bluetooth Low Energy without internet connectivity. BLE
@@ -2793,7 +2571,7 @@ sequenceDiagram
 *Diagram — BLE topology discovery and source-routed delivery*
 
 <a id="iter-17-1"></a>
-#### 17.1 — BLE transport and peer discovery
+#### BLE transport and peer discovery
 
 **Goal:** establish BLE as a working transport: scan, advertise, connect,
 exchange CORSA frames, discover peers via ANNOUNCE.
@@ -2846,7 +2624,7 @@ presence is gated behind a capability flag (`ble_transport`). Existing
 WebSocket and relay paths remain the primary transport.
 
 <a id="iter-17-2"></a>
-#### 17.2 — BLE fragmentation and MTU adaptation
+#### BLE fragmentation and MTU adaptation
 
 **Goal:** reliably deliver CORSA frames that exceed the BLE link MTU via
 per-link fragmentation and reassembly.
@@ -2926,7 +2704,7 @@ exhaustion → reject new + cleanup oldest.
 - [ ] Update `docs/protocol/delivery.md` (fragment priority, staggering parameters)
 
 <a id="iter-17-3"></a>
-#### 17.3 — BLE deduplication and relay
+#### BLE deduplication and relay
 
 **Goal:** prevent message amplification in the BLE mesh while ensuring
 reliable multi-hop delivery.
@@ -3010,7 +2788,7 @@ missing and retransmit them.
 - [ ] Update `docs/encryption.md` (Bloom filter parameterization, dedup ID composition)
 
 <a id="iter-17-4"></a>
-#### 17.4 — BLE rate limiting and QoS
+#### BLE rate limiting and QoS
 
 **Goal:** prevent any single peer, message type, or traffic pattern from
 starving others on the constrained BLE transport.
@@ -3117,7 +2895,7 @@ bonding (outside app control), remote peers' cached topology entries (expire
 naturally via freshness TTL).
 
 <a id="iter-18"></a>
-### Iteration 18 — Meshtastic last mile
+### Meshtastic last mile
 
 **Goal:** integrate a radio-based last-mile path via Meshtastic LoRa hardware,
 enabling CORSA message delivery in off-grid, field, or infrastructure-denied
@@ -3187,7 +2965,7 @@ These constraints mean Meshtastic reuses BLE patterns (fragmentation, QoS,
 dedup) but with tighter limits and different tuning.
 
 <a id="iter-18-1"></a>
-#### 18.1 — Meshtastic transport bridge
+#### Meshtastic transport bridge
 
 **Goal:** establish the Meshtastic serial/BLE API as a working CORSA
 transport: send frames, receive frames, discover radio-reachable peers.
@@ -3227,7 +3005,7 @@ non-CORSA Meshtastic users.
 - [ ] Update `docs/protocol/delivery.md` (Meshtastic reachability model)
 
 <a id="iter-18-2"></a>
-#### 18.2 — Radio-aware fragmentation and pacing
+#### Radio-aware fragmentation and pacing
 
 **Goal:** deliver frames exceeding the LoRa MTU (237 bytes) reliably, with
 pacing that respects regulatory duty cycle limits.
@@ -3284,7 +3062,7 @@ lower priorities are deferred until the budget recovers.
 - [ ] Update `docs/protocol/delivery.md` (Meshtastic QoS, airtime budget)
 
 <a id="iter-18-3"></a>
-#### 18.3 — Radio mesh relay and deduplication
+#### Radio mesh relay and deduplication
 
 **Goal:** enable multi-hop message relay over the LoRa mesh while preventing
 amplification in the low-bandwidth radio environment.
@@ -3344,7 +3122,7 @@ standard transport selection logic — no special-case code.
 - [ ] Update `docs/protocol/delivery.md` (Meshtastic TTL, bridge transport selection)
 
 <a id="iter-19"></a>
-### Iteration 19 — Custom encryption builder
+### Custom encryption builder
 
 **Goal:** keep any custom "brick-based" encryption workflow strictly isolated as
 an experimental laboratory feature.
@@ -3356,456 +3134,8 @@ stronger than reviewed encryption.
 disabled by default, and separated from the main security claims of the
 product.
 
-<a id="iter-20"></a>
-### Iteration 20 — Voice calls
-
-**Goal:** enable real-time voice communication between identities over the mesh
-network, with end-to-end encryption and onion routing where available.
-
-**Dependency:** requires stable onion delivery (A9) for private call setup and
-signaling. Requires reliable relay (Iterations 1–3) for media transport.
-
-**Transport restriction:** voice calls operate exclusively over TCP/IP mesh
-connections. BLE (A13) and Meshtastic LoRa (A14) transports are explicitly
-excluded — their bandwidth and latency characteristics are incompatible with
-real-time audio requirements.
-
-**Signaling protocol (MSI — Media Session Information):**
-
-Call setup and teardown use dedicated capability-gated frame types, not
-ordinary DM payloads. This is critical for mixed-version safety: a peer
-without `voice_call_v1` must never receive signaling frames (it would
-not know how to parse them and might surface them as opaque user content
-or reject the connection).
-
-Signaling frame types (all gated by `voice_call_v1`):
-
-- `call_request` — initiate a call (contains session_id, codec list)
-- `call_accept` — accept an incoming call (contains selected codec)
-- `call_reject` — reject or cancel a call (contains reason code)
-- `call_end` — terminate an active call
-- `call_ringing` — signal that the callee's device is ringing
-- `call_hold` / `call_resume` — hold/resume an active call
-
-These frames are sent through the existing lossless delivery pipeline
-(same transport as DM, but with distinct `type` field), optionally
-wrapped in onion (Iteration 13) for privacy. A peer receiving an
-unknown frame type drops it silently per the existing unknown-frame
-handling rule — but the capability gate ensures this case does not
-arise in normal operation.
-
-The signaling channel carries no media — only session control. Each
-signaling frame includes a `session_id` and monotonic `seq` to prevent
-replay and allow multi-call multiplexing.
-
-**Media transport — lossy channel:**
-
-Audio packets are sent over a lossy channel where timely delivery takes
-priority over reliability. Lost packets are concealed by the codec, not
-retransmitted. The lossy channel uses a separate packet type from
-lossless DM delivery:
-
-- **Priority bypass:** media packets bypass congestion control when the
-  send queue is saturated. This prevents file transfers or bulk messages
-  from starving the audio stream — a caller should never hear silence
-  because a file upload is in progress.
-- **Jitter buffer:** the receiver maintains a jitter buffer (default
-  60–200 ms adaptive) to smooth packet arrival variance. Buffer depth
-  adapts to observed network jitter.
-- **Codec negotiation:** during call setup, peers exchange supported
-  codecs and select the best common option. Initial codec set: Opus
-  (primary, variable bitrate 6–128 kbit/s, 20 ms frames) with fallback
-  to a lower-bitrate mode for constrained links. Codec selection is
-  extensible via capability negotiation.
-
-**Congestion-aware quality adaptation:**
-
-The call monitors RTT and packet loss per media session. When loss exceeds
-a threshold (e.g. 5%), the sender reduces bitrate or switches to a
-lower-quality codec preset. When conditions improve, quality ramps back
-up. This is independent of the general congestion control — it is
-per-call quality management.
-
-**Group voice (future extension):**
-
-Group voice calls relay lossy audio to a reduced set of peers (2 instead
-of all) to contain bandwidth. Each peer re-relays to its own neighbors,
-forming a low-fanout distribution tree. Active speaker detection can
-further reduce traffic by transmitting only the dominant speaker's audio
-at full rate.
-
-**Done when:** two identities can establish a voice call with end-to-end
-encryption, the call setup is signaled through onion routes (if available),
-media packets are relayed with bounded latency, and the protocol degrades
-gracefully when network conditions are insufficient.
-
-**Progress:**
-
-- [ ] Design MSI signaling protocol (call_request/call_accept/call_reject/call_end/call_ringing/call_hold/call_resume)
-- [ ] Define signaling frame types in `protocol/frame.go` (distinct `type` field, not DM payload)
-- [ ] Gate all signaling frames on `voice_call_v1` capability — never send to peers without it
-- [ ] Implement signaling over existing lossless delivery pipeline (same transport, distinct frame types)
-- [ ] Implement lossy packet type for media transport
-- [ ] Implement priority bypass: media packets skip congestion control queue
-- [ ] Implement jitter buffer (adaptive 60–200 ms)
-- [ ] Implement Opus codec integration (variable bitrate, 20 ms frames)
-- [ ] Implement codec negotiation during call setup
-- [ ] Implement congestion-aware quality adaptation (bitrate reduction on loss)
-- [ ] Implement call state machine (idle → ringing → active → ended)
-- [ ] Integrate onion wrapping for signaling (optional, uses privacy mode from 13.1)
-- [ ] Add `voice_call_v1` capability gate
-- [ ] Unit test: signaling frames never sent to peers without `voice_call_v1`
-- [ ] Unit test: peer without `voice_call_v1` never receives call_request (capability gate)
-- [ ] Unit test: call setup and teardown state machine
-- [ ] Unit test: media packet priority over bulk traffic
-- [ ] Unit test: jitter buffer smoothing under variable delay
-- [ ] Unit test: codec negotiation selects best common codec
-- [ ] Unit test: quality adaptation reduces bitrate on packet loss
-- [ ] Integration test: voice call through 3-hop relay path
-- [ ] Integration test: file transfer during active call does not degrade audio
-- [ ] Update `docs/protocol/relay.md` (lossy media channel, priority bypass)
-
-<a id="iter-21"></a>
-### Iteration 21 — File transfer
-
-**Goal:** enable peer-to-peer file transfer between identities with resume
-support, progress tracking, and flow control.
-
-**Dependency:** requires stable DM delivery (Iterations 1–2). Benefits from
-congestion control (Iteration 24) for bandwidth management but works without
-it using a simpler rate-limiting approach.
-
-**Capability gate:** `file_transfer_v1`. Nodes without the capability never
-receive file transfer frames.
-
-**New files:**
-
-```
-internal/core/node/
-  file_transfer.go        — FileTransferManager, transfer state machine
-  file_transfer_state.go  — per-peer transfer registry (256 slots per direction)
-```
-
-#### 21a. Frame types
-
-**`file_send_request`** — initiates a new transfer:
-
-```json
-{
-  "type": "file_send_request",
-  "file_number": 0,
-  "file_type": 0,
-  "file_size": 1048576,
-  "file_id": "base64_32_bytes",
-  "filename": "photo.jpg"
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `file_number` | `uint8` | 0–255, chosen by sender, unique per direction per peer |
-| `file_type` | `uint32` | 0 = normal file, 1 = avatar, extensible |
-| `file_size` | `uint64` | Total size in bytes; `UINT64_MAX` = unknown/streaming |
-| `file_id` | `[32]byte` | Content hash for dedup/resume (e.g. SHA-256 of file) |
-| `filename` | `string` | Optional, max 255 bytes UTF-8 |
-
-**`file_control`** — manages an active transfer:
-
-```json
-{
-  "type": "file_control",
-  "send_receive": 0,
-  "file_number": 0,
-  "control_type": 0,
-  "seek_position": 0
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `send_receive` | `uint8` | 0 = targets file being sent, 1 = targets file being received |
-| `file_number` | `uint8` | Identifies the transfer |
-| `control_type` | `uint8` | 0 = accept/unpause, 1 = pause, 2 = kill, 3 = seek |
-| `seek_position` | `uint64` | Only present when `control_type` = 3 (seek); byte offset |
-
-**`file_data`** — carries a chunk of file content:
-
-```json
-{
-  "type": "file_data",
-  "file_number": 0,
-  "data": "base64_chunk"
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `file_number` | `uint8` | Identifies the transfer |
-| `data` | `[]byte` | 0–1371 bytes; chunk < max size signals transfer completion for unknown-size files |
-
-#### 21b. Transfer state machine
-
-Each file transfer (identified by `(peer, direction, file_number)`) goes
-through these states:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: file_send_request received
-
-    Pending --> Accepted: file_control(accept)
-    Pending --> Seeking: file_control(seek)
-    Pending --> Cancelled: file_control(kill)
-
-    Seeking --> Accepted: file_control(accept)
-    Seeking --> Cancelled: file_control(kill)
-
-    Accepted --> Transferring: first file_data sent/received
-    Accepted --> PausedLocal: file_control(pause) from local
-    Accepted --> PausedRemote: file_control(pause) from remote
-    Accepted --> Cancelled: file_control(kill)
-
-    Transferring --> PausedLocal: file_control(pause) from local
-    Transferring --> PausedRemote: file_control(pause) from remote
-    Transferring --> Completed: all data received or short final chunk
-    Transferring --> Cancelled: file_control(kill)
-
-    PausedLocal --> PausedBoth: file_control(pause) from remote
-    PausedLocal --> Transferring: file_control(accept) from local
-    PausedLocal --> Cancelled: file_control(kill)
-
-    PausedRemote --> PausedBoth: file_control(pause) from local
-    PausedRemote --> Transferring: file_control(accept) from remote
-    PausedRemote --> Cancelled: file_control(kill)
-
-    PausedBoth --> PausedRemote: file_control(accept) from local
-    PausedBoth --> PausedLocal: file_control(accept) from remote
-    PausedBoth --> Cancelled: file_control(kill)
-
-    Completed --> [*]
-    Cancelled --> [*]
-```
-*Diagram — File transfer state machine with bidirectional pause*
-
-**Key invariant:** when a side pauses, only that side can unpause. If both
-pause, both must unpause before data flows again.
-
-#### 21c. Transfer initiation and resume flow
-
-```mermaid
-sequenceDiagram
-    participant S as Sender
-    participant R as Receiver
-
-    S->>R: file_send_request(file_number=0, type=0, size=1048576, file_id=SHA256, name="photo.jpg")
-    Note over R: Check local storage by file_id<br/>Found partial: 524288 bytes received
-
-    R->>S: file_control(send_receive=1, file_number=0, control_type=3, seek=524288)
-    Note over S: Seek to byte 524288
-
-    R->>S: file_control(send_receive=1, file_number=0, control_type=0)
-    Note over S: Transfer accepted, start sending from offset 524288
-
-    loop Until all data sent
-        S->>R: file_data(file_number=0, data=[1371 bytes])
-    end
-
-    S->>R: file_data(file_number=0, data=[remaining bytes, < 1371])
-    Note over R: Chunk < max size OR total == file_size<br/>Transfer complete
-
-    Note over S: Transport layer confirms last chunk acked<br/>Transfer complete, file_number=0 free for reuse
-```
-*Diagram — File transfer with seek/resume after partial download*
-
-#### 21d. Concurrent transfers and file number management
-
-```
-Peer A → Peer B (outgoing):  file_numbers 0–255 (chosen by A)
-Peer B → Peer A (outgoing):  file_numbers 0–255 (chosen by B)
-                              ─────────────────────────────────
-                              Total: 512 concurrent transfers per peer pair
-```
-
-The `send_receive` field in `file_control` distinguishes direction. When
-`send_receive=0`, the control targets a file being **sent** by the sender of
-the control. When `send_receive=1`, it targets a file being **received**.
-
-**File number lifecycle:** a file number is occupied from `file_send_request`
-until `Completed` or `Cancelled`. On completion or cancellation, the number
-is immediately freed for reuse. If the peer goes offline, all file numbers
-are freed.
-
-```go
-type FileTransferRegistry struct {
-    mu       sync.RWMutex
-    outgoing [256]*FileTransfer // files we are sending
-    incoming [256]*FileTransfer // files we are receiving
-}
-
-type FileTransfer struct {
-    FileNumber   uint8
-    FileType     uint32
-    FileSize     uint64           // UINT64_MAX = unknown
-    FileID       [32]byte
-    Filename     string
-    State        FileTransferState
-    BytesSent    uint64           // sender tracks
-    BytesRecvd   uint64           // receiver tracks
-    SeekPosition uint64           // from seek control
-    PausedLocal  bool
-    PausedRemote bool
-    CreatedAt    time.Time
-}
-```
-
-#### 21e. Completion detection
-
-Two rules determine when a transfer is complete:
-
-1. **Known size:** `BytesRecvd == FileSize` → transfer complete. Any extra
-   data beyond `FileSize` is discarded.
-2. **Unknown size** (`FileSize == UINT64_MAX`): a `file_data` chunk with
-   `len(data) < max_chunk_size` (1371 bytes) signals completion. A 0-length
-   chunk completes a 0-byte file.
-
-**Critical invariant for unknown-size transfers:** all non-final chunks
-MUST be exactly `max_chunk_size` (1371 bytes). A sender MUST NOT emit a
-shorter chunk for pacing, flow control, or any other reason before the
-final chunk. If the sender needs to throttle throughput, it adjusts the
-inter-chunk delay, not the chunk size. This invariant is what makes
-`len(data) < max_chunk_size` a reliable end-of-stream signal. Violating
-it terminates the transfer prematurely on the receiver side.
-
-```mermaid
-flowchart TD
-    RECV["Receive file_data chunk"]
-    KNOWN{"FileSize known?"}
-    CHECK_SIZE{"BytesRecvd == FileSize?"}
-    CHECK_SHORT{"len(data) < 1371?"}
-    ADD["BytesRecvd += len(data)"]
-    COMPLETE["Transfer COMPLETE<br/>free file_number"]
-    CONTINUE["Continue receiving"]
-
-    RECV --> ADD --> KNOWN
-    KNOWN -->|yes| CHECK_SIZE
-    KNOWN -->|no, UINT64_MAX| CHECK_SHORT
-    CHECK_SIZE -->|yes| COMPLETE
-    CHECK_SIZE -->|no| CONTINUE
-    CHECK_SHORT -->|yes| COMPLETE
-    CHECK_SHORT -->|no| CONTINUE
-
-    style COMPLETE fill:#c8e6c9,stroke:#2e7d32
-```
-*Diagram — Completion detection: known vs unknown file size*
-
-The sender confirms completion when the transport layer acknowledges the
-last `file_data` chunk (using the lossless delivery tracking from
-`net_crypto` / mesh relay).
-
-#### 21f. Avatar transfer optimization
-
-Avatar transfers (file_type=1) use the `file_id` as the content hash
-(SHA-256 of the avatar image). Before sending avatar data:
-
-1. Sender sends `file_send_request` with type=1 and file_id=SHA256(avatar).
-2. Receiver checks local avatar cache by file_id.
-3. If already cached → receiver sends `file_control(kill)` immediately
-   (no data transfer needed).
-4. If not cached → normal accept/transfer flow.
-
-This avoids redundant avatar transfers on every reconnect.
-
-#### 21g. Interaction with message delivery
-
-File data is classified as **bulk** traffic (see Iteration 24). This means:
-
-- When congestion control is active (Iteration 24), file data yields
-  bandwidth to signaling and real-time packets.
-- Without Iteration 24, a simple token bucket rate limiter is used:
-  `max_file_data_rate` (default 100 chunks/sec per peer). This prevents
-  file transfers from monopolizing the connection.
-- DM messages are always sent as lossless priority traffic and are never
-  blocked by file transfers.
-
-```mermaid
-flowchart LR
-    DM["DM messages<br/>(lossless, priority)"]
-    FILE["File data<br/>(bulk, rate-limited)"]
-    VOICE["Voice packets<br/>(lossy, bypass)"]
-    QUEUE["Send queue"]
-    LINK["Network link"]
-
-    DM -->|always sent| QUEUE
-    VOICE -->|bypass queue| LINK
-    FILE -->|rate-limited| QUEUE
-    QUEUE --> LINK
-
-    style DM fill:#e3f2fd,stroke:#1565c0
-    style VOICE fill:#fff3e0,stroke:#e65100
-    style FILE fill:#f5f5f5,stroke:#9e9e9e
-```
-*Diagram — Traffic priority: DM > voice (bypass) > file data (rate-limited)*
-
-#### 21h. Offline behavior and cleanup
-
-When a peer session closes:
-
-1. All active transfers (both incoming and outgoing) are moved to `Cancelled`.
-2. All 256 file numbers per direction are freed.
-3. Partial received data is **retained** on disk, indexed by `file_id`.
-4. On reconnect, the sender re-initiates transfers. The receiver detects
-   partial data via `file_id` and sends a seek to resume.
-
-The protocol does not persist transfer state across restarts. This keeps
-the implementation simple — resume relies entirely on the `file_id` and
-the receiver's local storage.
-
-**Done when:** two identities can send files with progress indication,
-resume interrupted transfers, and manage concurrent transfers without
-starving the message channel.
-
-**Progress:**
-
-- [ ] Define `file_send_request` frame type (file number, type, size, file_id, filename)
-- [ ] Define `file_control` frame type (accept, pause, kill, seek)
-- [ ] Define `file_data` frame type (file number, data chunk)
-- [ ] Implement `FileTransferRegistry` with 256-slot arrays per direction
-- [ ] Implement `FileTransfer` state machine (pending → seeking → accepted → transferring → paused → completed/cancelled)
-- [ ] Implement bidirectional pause (local/remote/both)
-- [ ] Implement seek/resume support using file ID and local partial storage
-- [ ] Implement completion detection (size match or short final chunk)
-- [ ] Implement file number lifecycle (free on complete/cancel/disconnect)
-- [ ] Implement avatar transfer optimization (check file_id hash before accepting)
-- [ ] Implement token bucket rate limiter for file data (`max_file_data_rate` default 100 chunks/sec)
-- [ ] Add `file_transfer_v1` capability gate
-- [ ] Cleanup all transfers on peer disconnect
-- [ ] Retain partial received data on disk indexed by file_id for resume
-- [ ] Unit test: concurrent file transfers (multiple files in parallel, independent file numbers)
-- [ ] Unit test: seek/resume after reconnect (partial data detected by file_id)
-- [ ] Unit test: pause by both sides, unpause by one — transfer stays paused
-- [ ] Unit test: pause by both sides, unpause by both — transfer resumes
-- [ ] Unit test: unknown-size transfer with short final chunk → complete
-- [ ] Unit test: known-size transfer, excess data beyond file_size → discarded
-- [ ] Unit test: 0-byte file transfer (single 0-length chunk)
-- [ ] Unit test: unknown-size transfer — non-final chunks MUST be exactly max_chunk_size (1371); short chunk terminates
-- [ ] Unit test: unknown-size transfer — sender pacing via inter-chunk delay, NOT via shorter chunks
-- [ ] Unit test: transfer cleanup on peer disconnect (all file numbers freed)
-- [ ] Unit test: avatar with matching file_id → immediate kill, no data transfer
-- [ ] Unit test: file_number reuse after completion
-- [ ] Unit test: rate limiter prevents file data from starving DM delivery
-- [ ] Integration test: large file transfer with interruption and resume
-- [ ] Integration test: file transfer does not block DM delivery under load
-- [ ] Integration test: 10 concurrent file transfers between same peer pair
-- [ ] Update `docs/protocol/messaging.md` (file transfer frames, state machine, capability gate)
-
-**Release / Compatibility:**
-
-- [ ] `file_send_request` / `file_control` / `file_data` sent only to peers with `file_transfer_v1`
-- [ ] Legacy peers never receive file transfer frames
-- [ ] Mixed-version test: file-capable node works alongside node without file support
-- [ ] Confirmed: Iteration 21 does not require raising `MinimumProtocolVersion`
-
 <a id="iter-22"></a>
-### Iteration 22 — LAN discovery
+### LAN discovery
 
 **Goal:** automatically discover and connect to peers on the same local
 network without relying on bootstrap nodes or internet connectivity.
@@ -3829,7 +3159,7 @@ internal/core/node/
   lan_discovery.go  — LAN discovery sender/listener, address classification
 ```
 
-#### 22a. Discovery packet format
+#### Discovery packet format
 
 The discovery packet is minimal — no encryption, no signature. It is a
 trigger for handshake initiation, not a trust mechanism.
@@ -3852,7 +3182,7 @@ Total: 65 bytes
 
 The version byte allows future extension without breaking older clients.
 
-#### 22b. Discovery flow
+#### Discovery flow
 
 ```mermaid
 sequenceDiagram
@@ -3903,7 +3233,7 @@ packet matches a known contact (friend list or pending request). Unknown
 identities are silently ignored. This ensures that a spoofed discovery
 from an unknown identity does not cause the listener to reveal itself.
 
-#### 22c. Address classification and routing priority
+#### Address classification and routing priority
 
 ```go
 func IsLANAddress(ip net.IP) bool {
@@ -3947,7 +3277,7 @@ flowchart TD
 ```
 *Diagram — Routing priority: LAN > WAN direct > relay > gossip*
 
-#### 22d. Broadcast targets
+#### Broadcast targets
 
 | Protocol | Target address | Scope |
 |---|---|---|
@@ -3959,7 +3289,7 @@ The node sends to **all three** targets to maximize coverage across
 different network configurations. The designated port (default 33445) is
 configurable via `lan_discovery_port` in config.
 
-#### 22e. Rate limiting and anti-amplification
+#### Rate limiting and anti-amplification
 
 - **Inbound:** at most `max_lan_discovery_per_second` (default 10)
   discovery packets processed per second. Excess packets are silently
@@ -4012,7 +3342,7 @@ over relay.
 - [ ] Confirmed: Iteration 22 does not require raising `MinimumProtocolVersion`
 
 <a id="iter-23"></a>
-### Iteration 23 — NAT traversal and hole punching
+### NAT traversal and hole punching
 
 **Goal:** establish direct UDP connections between peers behind NATs,
 reducing relay dependency and improving latency for voice calls and
@@ -4036,7 +3366,7 @@ internal/core/node/
   hole_punch.go      — hole punch state machine, port prediction
 ```
 
-#### 23a. NAT classification
+#### NAT classification
 
 NAT behavior has two independent dimensions (RFC 4787):
 
@@ -4086,7 +3416,7 @@ is at least Address-Dependent. This probe is best-effort — when no
 second relay IP is available, the node assumes Address-Dependent
 filtering (conservative fallback that still allows mutual punch).
 
-#### 23b. External address discovery
+#### External address discovery
 
 Each node collects external address observations from peers it communicates
 with. When a peer receives a packet from a node, the source IP:port visible
@@ -4124,7 +3454,7 @@ Mapping alone does not determine hole-punch difficulty. The **filtering**
 type is probed separately during hole-punch coordination (see 23c) and
 defaults to Address-Dependent when probing is not possible.
 
-#### 23c. Hole punch coordination protocol
+#### Hole punch coordination protocol
 
 Before hole punching, both peers must confirm they are online, know each
 other's external address, and are actively trying to connect. This
@@ -4156,7 +3486,7 @@ coordination happens via the existing relay/mesh channel.
 }
 ```
 
-#### 23d. Hole punch flow
+#### Hole punch flow
 
 ```mermaid
 sequenceDiagram
@@ -4189,7 +3519,7 @@ sequenceDiagram
 ```
 *Diagram — Hole punch coordination and execution for cone/restricted NATs*
 
-#### 23e. Symmetric NAT port prediction
+#### Symmetric NAT port prediction
 
 ```mermaid
 flowchart TD
@@ -4229,7 +3559,7 @@ flowchart TD
 **Rate limiting:** at most 48 probe packets per 3 seconds per hole punch
 attempt. This prevents DoS-ing the NAT with too many mappings.
 
-#### 23f. Connection upgrade from relay to direct
+#### Connection upgrade from relay to direct
 
 When a direct UDP connection is established via hole punching, the node
 does not immediately drop the relay path. Instead:
@@ -4301,19 +3631,19 @@ gracefully.
 - [ ] Confirmed: Iteration 23 does not require raising `MinimumProtocolVersion`
 
 <a id="iter-24"></a>
-### Iteration 24 — Congestion control and QoS
+### Congestion control and QoS
 
 **Goal:** adapt sending rate to network capacity, prevent link saturation,
 and prioritize real-time traffic over bulk transfers.
 
-**Dependency:** benefits file transfer (Iteration 21) and voice calls
+**Dependency:** benefits file transfer and voice calls
 (Iteration 20). Works at the transport layer.
 
 **Why:** without congestion control, a large file transfer can saturate the
 link and cause packet loss for all traffic. Voice calls require guaranteed
 minimum bandwidth even when the link is busy.
 
-#### 24a. Per-connection congestion state
+#### Per-connection congestion state
 
 Each peer connection maintains independent congestion tracking. A congested
 link to peer A does not throttle traffic to peer B.
@@ -4360,7 +3690,7 @@ Each `PeerConnection` embeds a `CongestionState`. When a new connection is
 established, congestion state is initialized with `MinSendRate` and the
 sliding window starts from the current time.
 
-#### 24b. AIMD rate adaptation algorithm
+#### AIMD rate adaptation algorithm
 
 The algorithm estimates link capacity by observing the send queue over a
 sliding window:
@@ -4433,7 +3763,7 @@ func (cs *CongestionState) RecordCongestionEvent(now time.Time) {
 }
 ```
 
-#### 24c. Priority classes and packet classification
+#### Priority classes and packet classification
 
 Three traffic classes determine how packets interact with congestion control:
 
@@ -4485,7 +3815,7 @@ flowchart LR
 |---|---|---|---|
 | **Signaling** (highest) | Handshake, keepalive, routing control, call signaling | Always sent immediately. Never queued or throttled. Not counted toward congestion budget. | `handshake`, `keepalive`, `route_withdrawal`, `call_request`, `call_accept` |
 | **Real-time** (high) | Voice frames, video frames | Bypass congestion queue. Sent even when link is congested. Counted toward congestion metrics but never held back. | `voice_frame`, `video_frame` |
-| **Bulk** (normal) | Messages, file data, route announcements, sync | Subject to congestion control. Queued and rate-limited. Yields bandwidth to higher classes. | `dm_message`, `file_data`, `route_announce`, `group_sync` |
+| **Bulk** (normal) | Messages, file data, route announcements, sync | Subject to congestion control. Queued and rate-limited. Yields bandwidth to higher classes. | `dm_message`, `chunk_response` file cmds, `route_announce`, `group_sync` |
 
 ```go
 type PriorityClass uint8
@@ -4508,7 +3838,7 @@ func ClassifyPacket(dataID uint8) PriorityClass {
 }
 ```
 
-#### 24d. Priority queue architecture
+#### Priority queue architecture
 
 The send path uses a three-tier queue. Signaling and real-time packets
 bypass the congestion gate entirely:
@@ -4575,7 +3905,7 @@ func (q *PrioritySendQueue) Enqueue(pkt []byte, class PriorityClass) error {
 
 // Drain writes frames to the TCP session respecting priority order.
 // Called on each send tick. The session parameter is the peer's
-// TCP connection writer (not a datagram socket — the protocol uses
+// TCP connection writer (not a UDP datagram socket — the protocol uses
 // persistent TCP sessions for all frame delivery).
 func (q *PrioritySendQueue) Drain(session FrameWriter) int {
     sent := 0
@@ -4620,7 +3950,7 @@ drainBulk:
 }
 ```
 
-#### 24e. Congestion detection and RTT estimation
+#### Congestion detection and RTT estimation
 
 Round-trip time is estimated from the existing TCP session. Two sources
 contribute RTT samples:
@@ -4646,7 +3976,7 @@ sequenceDiagram
     participant B as Peer B
 
     A->>B: relay_message(to=F, msg_id=42) (t=0ms)
-    A->>B: file_data(file_number=1, chunk) (t=5ms)
+    A->>B: DM(Command=chunk_response) (t=5ms)
     A->>B: relay_message(to=G, msg_id=43) (t=10ms)
 
     B->>A: relay_hop_ack(msg_id=42)
@@ -4655,7 +3985,7 @@ sequenceDiagram
     Note over A: Send queue growing<br/>(TCP write buffer filling)
     Note over A: Congestion event:<br/>reduce bulk send rate
 
-    A->>A: Throttle file_data to<br/>BulkBudget() per tick
+    A->>A: Throttle chunk_response file cmds to<br/>BulkBudget() per tick
     Note over A: Signaling + real-time<br/>still bypass throttle
 ```
 *Diagram — RTT estimation from hop_ack and congestion response*
@@ -4695,7 +4025,7 @@ frame rate. Since TCP handles retransmission at the transport layer, the
 application-level congestion controller focuses on preventing queue
 buildup rather than managing individual frame retransmissions.
 
-#### 24f. Backpressure and relay integration
+#### Backpressure and relay integration
 
 When a relay node experiences congestion, it signals upstream through
 existing mechanisms (Iteration 3 overload mode):
@@ -4741,14 +4071,14 @@ stateDiagram-v2
 
 In all states, signaling and real-time packets are never deferred.
 
-#### 24g. Interaction between congestion control and file transfer
+#### Interaction between congestion control and file transfer
 
-File transfer (Iteration 21) is the primary consumer of bulk bandwidth.
+File transfer is the primary consumer of bulk bandwidth.
 The congestion controller ensures file data does not starve other traffic:
 
 ```mermaid
 flowchart TD
-    FT[File transfer engine<br/>generates file_data chunks] --> BQ[Bulk queue]
+    FT[File transfer engine<br/>generates chunk_response file cmds] --> BQ[Bulk queue]
     DM[DM message] --> CLS{Classify}
     VC[Voice frame] --> CLS
     KA[Keepalive] --> CLS
@@ -4763,7 +4093,7 @@ flowchart TD
     CG -- Open --> OUT
     CG -- Closed --> WAIT[Backpressure to<br/>file transfer engine]
 
-    WAIT --> PAUSE[file_control: pause<br/>if queue full for > 5s]
+    WAIT --> PAUSE[Auto-pause downloads<br/>if queue full for > 5s]
 
     style FT fill:#e3f2fd,stroke:#1565c0
     style VC fill:#fff9c4,stroke:#f57f17
@@ -4915,7 +4245,7 @@ graph LR
 | LAN discovery requires authenticated handshake, not blind trust | A broadcast packet can be spoofed. The discovery packet is only a trigger — actual peer addition requires completing a standard handshake. |
 | Priority bypass for real-time media packets | Without priority bypass, a file transfer or sync burst can starve voice packets. Real-time traffic must never wait in the bulk queue. |
 | NAT traversal as optional overlay, relay as guaranteed fallback | Hole punching improves latency but is not guaranteed (symmetric NATs). The protocol must work without direct connections — relay is always available. |
-| File transfer resume via file ID, not filename | Filenames can change or collide. A 32-byte file ID (typically a hash) uniquely identifies the content for resume and dedup across restarts. |
+| File transfer resume via FileID (DM MessageID), integrity via FileHash (SHA-256) | FileID (UUID of the announce DM) identifies the transfer event for resume. FileHash (SHA-256 of file content) verifies integrity after assembly. These are deliberately separate: same file sent twice = two FileIDs, one FileHash. |
 | Per-origin SeqNo with `(identity, origin, nextHop)` dedup key | Only the origin may advance SeqNo. Intermediate nodes forward (origin, seq) unchanged. Dedup key includes origin so that different lineages for the same identity coexist — changing origin through the same neighbor is a new lineage, not a stale update. |
 | Split horizon, not poisoned reverse with fake infinity | Sending hops=16 for someone else's route requires fabricating a SeqNo the origin never produced, violating per-origin seq invariant. Split horizon simply omits routes — simpler, safer, no false withdrawals. |
 | On session close: wire withdrawal only for own-origin routes, local-only invalidation for transit | An intermediate node cannot emit a withdrawal for a transit route it doesn't own (would require fabricating origin's SeqNo). Instead it locally drops the route and stops advertising it; downstream peers converge via TTL expiry or origin's own withdrawal. |

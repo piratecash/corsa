@@ -5,23 +5,42 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"corsa/internal/core/config"
-	"corsa/internal/core/protocol"
 	"github.com/gofiber/fiber/v3"
 )
+
+// rpcMaxBodyBytes is the maximum HTTP request body size accepted by the RPC
+// server. Without an explicit limit, Fiber defaults to 4 MiB which is
+// reasonable, but setting it explicitly ensures the value is intentional
+// and auditable. 1 MiB is sufficient for all RPC commands — the largest
+// payload is send_dm with a sealed DM body (~87 KiB base64).
+const rpcMaxBodyBytes = 1 * 1024 * 1024
+
+// authMaxAttempts is the maximum number of failed authentication attempts
+// allowed from a single IP within authWindowDuration before temporary lockout.
+const authMaxAttempts = 10
+
+// authWindowDuration is the sliding window for tracking auth failures.
+const authWindowDuration = 5 * time.Minute
+
+// authLockoutDuration is how long an IP is locked out after exceeding
+// authMaxAttempts failed authentication attempts.
+const authLockoutDuration = 15 * time.Minute
 
 // Server is the HTTP layer for external RPC access.
 // It wraps a CommandTable and exposes it via Fiber HTTP endpoints.
 // Desktop UI should call CommandTable directly, not through Server.
 type Server struct {
-	app   *fiber.App
-	cfg   config.RPC
-	table *CommandTable
-	node  NodeProvider
+	app         *fiber.App
+	cfg         config.RPC
+	table       *CommandTable
+	node        NodeProvider
+	authLimiter *authRateLimiter
 }
 
 // NewServer creates a new RPC HTTP server backed by the given CommandTable.
@@ -34,13 +53,15 @@ func NewServer(cfg config.RPC, table *CommandTable, node ...NodeProvider) (*Serv
 	}
 
 	app := fiber.New(fiber.Config{
-		AppName: "CORSA RPC",
+		AppName:   "CORSA RPC",
+		BodyLimit: rpcMaxBodyBytes,
 	})
 
 	server := &Server{
-		app:   app,
-		cfg:   cfg,
-		table: table,
+		app:         app,
+		cfg:         cfg,
+		table:       table,
+		authLimiter: newAuthRateLimiter(),
 	}
 	if len(node) > 0 {
 		server.node = node[0]
@@ -143,7 +164,7 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 }
 
 // handleFrame accepts a raw JSON protocol frame and dispatches it through
-// CommandTable, falling back to HandleLocalFrame for unregistered frame types.
+// CommandTable. Only CommandTable-registered frame types are accepted.
 //
 // CommandTable dispatch gives diagnostic-enriched responses for ping/get_peers
 // (via DiagnosticProvider overrides) and chatlog support for fetch_chatlog,
@@ -151,8 +172,11 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 // matches the desktop console's ExecuteConsoleCommand behavior where these
 // frame types get special handling instead of going directly to HandleLocalFrame.
 //
-// Unregistered frame types are forwarded to HandleLocalFrame, preserving all
-// caller-supplied wire fields for custom/unknown frame types.
+// Unregistered frame types are REJECTED (400 Bad Request). Previously they
+// were forwarded to HandleLocalFrame, but this allowed HTTP clients to inject
+// network-level frames (relay_message, push_message, subscribe_inbox) that
+// bypass P2P authentication. Only CommandTable-registered types have proper
+// validation and authorization checks for the RPC context.
 //
 // POST /rpc/v1/frame {"type":"hello","client":"desktop","client_version":"2.0"}
 func (s *Server) handleFrame(c fiber.Ctx) error {
@@ -171,19 +195,15 @@ func (s *Server) handleFrame(c fiber.Ctx) error {
 	resp := s.table.Execute(req)
 
 	if resp.ErrorKind == ErrNotFound {
-		// Unregistered frame type — forward raw frame to node.
-		// This preserves all caller-supplied wire fields.
-		frame, parseErr := protocol.ParseFrameLine(string(body))
-		if parseErr != nil {
-			return ErrorResponse(c, fiber.StatusBadRequest, fmt.Sprintf("invalid frame JSON: %v", parseErr))
-		}
-		reply := s.node.HandleLocalFrame(frame)
-		data, marshalErr := json.Marshal(reply)
-		if marshalErr != nil {
-			return ErrorResponse(c, fiber.StatusInternalServerError, fmt.Sprintf("marshal response: %v", marshalErr))
-		}
-		c.Set("Content-Type", "application/json")
-		return c.Status(fiber.StatusOK).Send(data)
+		// Unregistered frame type — reject. Previously, unknown frame types
+		// were forwarded to HandleLocalFrame, which processes them as if
+		// they came from an authenticated P2P peer. This allowed HTTP
+		// clients to inject relay_message, push_message, subscribe_inbox
+		// and other network-level frames, bypassing P2P authentication.
+		//
+		// Only CommandTable-registered frame types are safe for RPC dispatch
+		// because they have explicit validation and authorization checks.
+		return ErrorResponse(c, fiber.StatusBadRequest, fmt.Sprintf("unknown frame type: %s", req.Name))
 	}
 
 	if resp.Error != nil {
@@ -237,6 +257,14 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 
 	// Mesh
 	rpc.Post("/mesh/relay_status", s.legacyHandler("fetch_relay_status"))
+
+	// File Transfer
+	rpc.Post("/file/send_file_announce", s.legacyArgHandler("send_file_announce"))
+	rpc.Post("/file/transfers", s.legacyHandler("fetch_file_transfers"))
+	rpc.Post("/file/mapping", s.legacyHandler("fetch_file_mapping"))
+	rpc.Post("/file/retry_chunk", s.legacyArgHandler("retry_file_chunk"))
+	rpc.Post("/file/start_download", s.legacyArgHandler("start_file_download"))
+	rpc.Post("/file/cancel_download", s.legacyArgHandler("cancel_file_download"))
 }
 
 // legacyHandler creates a Fiber handler for a no-args command.
@@ -275,6 +303,10 @@ func (s *Server) legacyArgHandler(command string) fiber.Handler {
 // authMiddleware returns a Fiber handler that validates HTTP Basic authentication.
 // Per RFC 7235 §3.1, every 401 response includes a WWW-Authenticate header
 // so clients know which scheme to use.
+//
+// Includes per-IP rate limiting of failed authentication attempts to prevent
+// brute-force credential guessing. After authMaxAttempts failures within
+// authWindowDuration, the IP is locked out for authLockoutDuration.
 func (s *Server) authMiddleware() fiber.Handler {
 	username := s.cfg.Username
 	password := s.cfg.Password
@@ -285,30 +317,142 @@ func (s *Server) authMiddleware() fiber.Handler {
 	}
 
 	return func(c fiber.Ctx) error {
+		ip := c.IP()
+
+		// Check if this IP is currently locked out due to too many failures.
+		if s.authLimiter.isLockedOut(ip) {
+			return ErrorResponse(c, fiber.StatusTooManyRequests, "too many authentication attempts")
+		}
+
 		auth := c.Get("Authorization", "")
 		if auth == "" {
+			s.authLimiter.recordFailure(ip)
 			return unauthorizedResponse(c, "missing authorization header")
 		}
 
 		if !strings.HasPrefix(auth, "Basic ") {
+			s.authLimiter.recordFailure(ip)
 			return unauthorizedResponse(c, "invalid authorization header")
 		}
 
 		encoded := strings.TrimPrefix(auth, "Basic ")
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
+			s.authLimiter.recordFailure(ip)
 			return unauthorizedResponse(c, "invalid base64 encoding")
 		}
 
 		parts := strings.SplitN(string(decoded), ":", 2)
 		if len(parts) != 2 {
+			s.authLimiter.recordFailure(ip)
 			return unauthorizedResponse(c, "invalid credentials format")
 		}
 
 		if parts[0] != username || parts[1] != password {
+			s.authLimiter.recordFailure(ip)
 			return unauthorizedResponse(c, "invalid credentials")
 		}
 
+		// Successful auth — reset failure count for this IP.
+		s.authLimiter.resetFailures(ip)
 		return c.Next()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auth rate limiter — prevents brute-force credential guessing
+// ---------------------------------------------------------------------------
+
+// authRateLimiter tracks failed authentication attempts per IP and enforces
+// temporary lockouts after too many failures.
+type authRateLimiter struct {
+	mu       sync.Mutex
+	failures map[string]*authFailureRecord
+}
+
+type authFailureRecord struct {
+	attempts    []time.Time
+	lockedUntil time.Time
+}
+
+func newAuthRateLimiter() *authRateLimiter {
+	return &authRateLimiter{
+		failures: make(map[string]*authFailureRecord),
+	}
+}
+
+// isLockedOut returns true if the IP is currently locked out.
+func (al *authRateLimiter) isLockedOut(ip string) bool {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	rec, ok := al.failures[ip]
+	if !ok {
+		return false
+	}
+	if time.Now().Before(rec.lockedUntil) {
+		return true
+	}
+	return false
+}
+
+// recordFailure records a failed authentication attempt from the given IP.
+// If the number of recent failures exceeds the threshold, locks out the IP.
+func (al *authRateLimiter) recordFailure(ip string) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+
+	now := time.Now()
+	rec, ok := al.failures[ip]
+	if !ok {
+		rec = &authFailureRecord{}
+		al.failures[ip] = rec
+	}
+
+	// Prune attempts outside the window.
+	cutoff := now.Add(-authWindowDuration)
+	recent := rec.attempts[:0]
+	for _, t := range rec.attempts {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+	recent = append(recent, now)
+	rec.attempts = recent
+
+	if len(rec.attempts) >= authMaxAttempts {
+		rec.lockedUntil = now.Add(authLockoutDuration)
+		log.Warn().Str("ip", ip).Int("attempts", len(rec.attempts)).Msg("auth rate limit lockout")
+	}
+}
+
+// resetFailures clears the failure record for an IP after successful auth.
+func (al *authRateLimiter) resetFailures(ip string) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	delete(al.failures, ip)
+}
+
+// cleanup removes stale entries to prevent unbounded map growth.
+func (al *authRateLimiter) cleanup() {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	now := time.Now()
+	for ip, rec := range al.failures {
+		if now.After(rec.lockedUntil) && len(rec.attempts) == 0 {
+			delete(al.failures, ip)
+			continue
+		}
+		// Prune old attempts.
+		cutoff := now.Add(-authWindowDuration)
+		recent := rec.attempts[:0]
+		for _, t := range rec.attempts {
+			if t.After(cutoff) {
+				recent = append(recent, t)
+			}
+		}
+		rec.attempts = recent
+		if len(rec.attempts) == 0 && now.After(rec.lockedUntil) {
+			delete(al.failures, ip)
+		}
 	}
 }

@@ -170,7 +170,7 @@ func TestExecRPCSendsCommandAndArgs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"queued"}`))
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
 	}))
 	defer server.Close()
 

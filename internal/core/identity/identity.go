@@ -3,7 +3,6 @@ package identity
 import (
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -78,7 +77,7 @@ func LoadOrCreate(path string) (*Identity, error) {
 }
 
 func Generate() (*Identity, error) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		return nil, fmt.Errorf("generate ed25519 key: %w", err)
 	}
@@ -243,7 +242,7 @@ func decodeIdentity(data []byte) (*Identity, error) {
 
 func generateBoxKeyPair() (*ecdh.PrivateKey, []byte, error) {
 	curve := ecdh.X25519()
-	privateKey, err := curve.GenerateKey(rand.Reader)
+	privateKey, err := curve.GenerateKey(nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate x25519 key: %w", err)
 	}

@@ -47,6 +47,36 @@ func (m *mockNodeProvider) ClientVersion() string {
 	return "0.16-alpha"
 }
 
+// FetchFileTransfers returns an empty JSON array for tests.
+func (m *mockNodeProvider) FetchFileTransfers() (json.RawMessage, error) {
+	return json.RawMessage("[]"), nil
+}
+
+// FetchFileMappings returns an empty JSON array for tests.
+func (m *mockNodeProvider) FetchFileMappings() (json.RawMessage, error) {
+	return json.RawMessage("[]"), nil
+}
+
+// RetryFileChunk is a no-op stub for tests.
+func (m *mockNodeProvider) RetryFileChunk(_ domain.FileID) error {
+	return nil
+}
+
+// StartFileDownload is a no-op stub for tests.
+func (m *mockNodeProvider) StartFileDownload(_ domain.FileID) error {
+	return nil
+}
+
+// CancelFileDownload is a no-op stub for tests.
+func (m *mockNodeProvider) CancelFileDownload(_ domain.FileID) error {
+	return nil
+}
+
+// RestartFileDownload is a no-op stub for tests.
+func (m *mockNodeProvider) RestartFileDownload(_ domain.FileID) error {
+	return nil
+}
+
 // mockChatlogProvider is a test double for ChatlogProvider.
 // It allows configurable responses for testing different scenarios.
 type mockChatlogProvider struct {
@@ -91,8 +121,9 @@ func (m *mockChatlogProvider) HasEntryInConversation(peerAddress, messageID stri
 
 // mockDMRouterProvider is a test double for DMRouterProvider.
 type mockDMRouterProvider struct {
-	lastTo  string
-	lastMsg domain.OutgoingDM
+	lastTo            string
+	lastMsg           domain.OutgoingDM
+	fileAnnounceError error // if set, SendFileAnnounce returns this error
 }
 
 func (m *mockDMRouterProvider) Snapshot() service.RouterSnapshot {
@@ -102,6 +133,15 @@ func (m *mockDMRouterProvider) Snapshot() service.RouterSnapshot {
 func (m *mockDMRouterProvider) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 	m.lastTo = string(to)
 	m.lastMsg = msg
+}
+
+func (m *mockDMRouterProvider) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, _ domain.FileAnnouncePayload, _ func()) error {
+	if m.fileAnnounceError != nil {
+		return m.fileAnnounceError
+	}
+	m.lastTo = string(to)
+	m.lastMsg = msg
+	return nil
 }
 
 // buildTestTable creates a CommandTable with all commands registered using given providers.

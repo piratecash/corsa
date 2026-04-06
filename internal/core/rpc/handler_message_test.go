@@ -492,7 +492,7 @@ func TestMessageSendDMSuccess(t *testing.T) {
 	})
 
 	expectStatusCode(t, code, 200)
-	expectField(t, result, "status", "queued")
+	expectField(t, result, "status", "pending")
 	expectField(t, result, "to", "peer-addr")
 
 	if dmRouter.lastTo != "peer-addr" {
@@ -569,7 +569,7 @@ func TestMessageSendDMAcceptsValidUUIDReplyTo(t *testing.T) {
 	})
 
 	expectStatusCode(t, code, 200)
-	expectField(t, result, "status", "queued")
+	expectField(t, result, "status", "pending")
 	if dmRouter.lastMsg.ReplyTo != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
 		t.Errorf("expected reply_to forwarded, got %q", dmRouter.lastMsg.ReplyTo)
 	}
@@ -618,7 +618,7 @@ func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
 	})
 
 	expectStatusCode(t, code, 200)
-	expectField(t, result, "status", "queued")
+	expectField(t, result, "status", "pending")
 	if dmRouter.lastMsg.ReplyTo != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
 		t.Errorf("expected reply_to forwarded, got %q", dmRouter.lastMsg.ReplyTo)
 	}
@@ -636,7 +636,7 @@ func TestMessageSendDMAcceptsEmptyReplyTo(t *testing.T) {
 	})
 
 	expectStatusCode(t, code, 200)
-	expectField(t, result, "status", "queued")
+	expectField(t, result, "status", "pending")
 	if dmRouter.lastMsg.ReplyTo != "" {
 		t.Errorf("expected empty reply_to, got %q", dmRouter.lastMsg.ReplyTo)
 	}

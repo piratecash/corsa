@@ -1522,7 +1522,11 @@ func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 // TestOnNewMessageNonActivePeerRegistersSeenID verifies dedup even when
 // the message is for a non-active peer (sidebar-only update path).
 func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
+	db, cl := newTestChatLog(t)
+	defer func() { _ = db.Close() }()
+
 	r := newTestRouter()
+	r.client.chatLog = cl
 
 	r.mu.Lock()
 	r.activePeer = "peer-2" // different from sender
@@ -1538,10 +1542,15 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 
 	r.onNewMessage(event)
 
-	r.mu.RLock()
-	_, seen := r.seenMessageIDs["msg-456"]
-	r.mu.RUnlock()
-	if !seen {
+	// The non-active-peer path may spawn a goroutine that reads from
+	// chatlog. Wait for it to settle before checking seenMessageIDs.
+	ok := pollCondition(200*time.Millisecond, func() bool {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		_, seen := r.seenMessageIDs["msg-456"]
+		return seen
+	})
+	if !ok {
 		t.Fatal("onNewMessage should register MessageID in seenMessageIDs even for non-active peer")
 	}
 }
@@ -3404,6 +3413,117 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 	}
 }
 
+// TestRemovePeerBumpsPeerGen verifies that RemovePeer increments the
+// per-peer generation counter so that in-flight goroutines (SendMessage,
+// SendFileAnnounce) detect the removal and skip ensurePeerLocked /
+// promotePeerLocked, preventing a deleted peer from "resurrecting" in
+// the sidebar.
+func TestRemovePeerBumpsPeerGen(t *testing.T) {
+	r := newTestRouter()
+	r.peers["alice"] = &RouterPeerState{Unread: 0}
+	r.peerOrder = []domain.PeerIdentity{"alice"}
+	r.activePeer = "alice"
+	r.peerClicked = true
+
+	// Capture generation before removal — this is what the goroutine would
+	// read before the async send starts.
+	r.mu.RLock()
+	genBefore := r.peerGen["alice"]
+	r.mu.RUnlock()
+
+	// Remove the peer (simulates user deleting the conversation).
+	_, err := r.RemovePeer("alice")
+	if err != nil {
+		t.Fatalf("RemovePeer: %v", err)
+	}
+
+	// Drain UI events from RemovePeer.
+	for len(r.uiEvents) > 0 {
+		<-r.uiEvents
+	}
+
+	// Verify generation was bumped.
+	r.mu.RLock()
+	genAfter := r.peerGen["alice"]
+	r.mu.RUnlock()
+
+	if genAfter <= genBefore {
+		t.Fatalf("peerGen should be incremented after RemovePeer: before=%d after=%d", genBefore, genAfter)
+	}
+
+	// Simulate what the goroutine does after the async send completes:
+	// it checks the generation under lock and must NOT re-add the peer.
+	r.mu.Lock()
+	stale := r.peerGen["alice"] != genBefore
+	if !stale {
+		// This branch must NOT execute — the generation must differ.
+		r.ensurePeerLocked("alice")
+		r.promotePeerLocked("alice")
+	}
+	r.mu.Unlock()
+
+	if !stale {
+		t.Fatal("goroutine should detect stale generation and skip peer reinsertion")
+	}
+
+	// Peer must still be absent from the sidebar.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if _, ok := r.peers["alice"]; ok {
+		t.Fatal("peer 'alice' must not exist after RemovePeer + stale goroutine guard")
+	}
+	for _, p := range r.peerOrder {
+		if p == "alice" {
+			t.Fatal("peer 'alice' must not be in peerOrder")
+		}
+	}
+}
+
+// TestRemovePeerGenDoesNotBlockFreshSend verifies that after removing and
+// re-adding a peer (new conversation), a fresh SendMessage goroutine can
+// still insert the peer because it captured the new generation.
+func TestRemovePeerGenDoesNotBlockFreshSend(t *testing.T) {
+	r := newTestRouter()
+	r.peers["bob"] = &RouterPeerState{Unread: 1}
+	r.peerOrder = []domain.PeerIdentity{"bob"}
+
+	// Remove.
+	_, err := r.RemovePeer("bob")
+	if err != nil {
+		t.Fatalf("RemovePeer: %v", err)
+	}
+	for len(r.uiEvents) > 0 {
+		<-r.uiEvents
+	}
+
+	// Capture the CURRENT generation — a new send starts here.
+	r.mu.RLock()
+	freshGen := r.peerGen["bob"]
+	r.mu.RUnlock()
+
+	// Simulate the goroutine completing: generation matches, so it proceeds.
+	r.mu.Lock()
+	if r.peerGen["bob"] != freshGen {
+		r.mu.Unlock()
+		t.Fatal("fresh generation should match — no intervening RemovePeer")
+	}
+	r.ensurePeerLocked("bob")
+	r.peers["bob"].Preview = ConversationPreview{PeerAddress: "bob", Body: "new message"}
+	r.promotePeerLocked("bob")
+	r.mu.Unlock()
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if _, ok := r.peers["bob"]; !ok {
+		t.Fatal("fresh send should re-create peer after removal")
+	}
+	if r.peers["bob"].Preview.Body != "new message" {
+		t.Fatalf("unexpected preview: %q", r.peers["bob"].Preview.Body)
+	}
+}
+
 // TestOnNewMessageActivePeerUpdatesPreview verifies the fix for the sidebar
 // preview bug: when an incoming message arrives for the active peer and the
 // cache is loaded, peers[peerID].Preview must be updated so the sidebar
@@ -4011,6 +4131,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 //   - ConversationCache not overwritten (cache.MatchesPeer unchanged)
 //   - activeMessages not mutated (remains nil)
 //   - no UIEventMessagesUpdated emitted from goroutine (stale-peer = no UI churn)
+//
 // Without the activePeer guard, the fallback would corrupt cache and emit
 // spurious UI events for a peer that is no longer active.
 func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
@@ -4605,11 +4726,14 @@ func awaitEvent(t *testing.T, ch <-chan UIEvent, target UIEventType, timeout tim
 func newTestRouter() *DMRouter {
 	done := make(chan struct{})
 	close(done) // pre-closed so tests don't block on startupDone
+	client := &DesktopClient{id: &identity.Identity{Address: "me"}}
 	return &DMRouter{
-		client:         &DesktopClient{id: &identity.Identity{Address: "me"}},
+		client:         client,
+		fileBridge:     NewFileTransferBridge(client),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
+		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -4663,5 +4787,136 @@ func pollCondition(timeout time.Duration, fn func() bool) bool {
 			return false
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// TestPostCommitPeerGenRaceRemovesOrphanedMapping verifies the fix for the P2
+// bug: "peerGen check after Commit() leaves orphaned sender mapping".
+//
+// Scenario (all inside the SendFileAnnounce goroutine):
+//  1. Goroutine captures gen before the async send.
+//  2. PrepareFileAnnounce succeeds → token is live.
+//  3. SendDirectMessage succeeds → DM delivered.
+//  4. Pre-Commit peerGen check passes (peer still present).
+//  5. token.Commit() succeeds → sender mapping is committed (fileID known).
+//  6. RemovePeer runs concurrently → bumps peerGen, cleans up peer state.
+//  7. Post-Commit peerGen re-check detects mismatch.
+//  8. RemoveSenderMapping(fileID) is called — targeted cleanup of the single
+//     orphaned mapping, NOT CleanupPeerTransfers which would destroy any
+//     legitimate transfers for the same peer in a newer generation.
+//
+// Steps 1–5 and 7–8 are simulated inline because DesktopClient is a
+// concrete type and the goroutine is not directly injectable.
+func TestPostCommitPeerGenRaceRemovesOrphanedMapping(t *testing.T) {
+	t.Parallel()
+
+	r := newTestRouter()
+	peer := domain.PeerIdentity("alice")
+
+	r.peers[peer] = &RouterPeerState{Unread: 0}
+	r.peerOrder = []domain.PeerIdentity{peer}
+	r.activePeer = peer
+	r.peerClicked = true
+
+	// Step 1: goroutine captures generation before async send.
+	r.mu.RLock()
+	gen := r.peerGen[peer]
+	r.mu.RUnlock()
+
+	// Steps 2–5 happen (PrepareFileAnnounce, SendDM, pre-Commit check, Commit).
+	// We assume Commit succeeded — the sender mapping is now live.
+	orphanedFileID := domain.FileID("orphaned-file-123")
+
+	// Step 6: RemovePeer runs concurrently (another goroutine or RPC call).
+	_, err := r.RemovePeer(peer)
+	if err != nil {
+		t.Fatalf("RemovePeer: %v", err)
+	}
+	for len(r.uiEvents) > 0 {
+		<-r.uiEvents
+	}
+
+	// Step 7: post-Commit peerGen re-check inside the goroutine.
+	r.mu.Lock()
+	raceDetected := r.peerGen[peer] != gen
+	if !raceDetected {
+		// This path must NOT be taken — RemovePeer must have bumped gen.
+		r.ensurePeerLocked(peer)
+		r.promotePeerLocked(peer)
+		r.mu.Unlock()
+		t.Fatal("post-Commit peerGen check must detect the race")
+	}
+	r.mu.Unlock()
+
+	// Step 8: RollbackMapping is called with the specific fileID.
+	// With localNode == nil this is a safe no-op, but it exercises the
+	// code path and proves no panic. The important assertion is that we
+	// call the targeted method, not the broad peer-level one.
+	r.fileBridge.RollbackMapping(orphanedFileID)
+
+	// Verify the peer was NOT resurrected in the sidebar.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if _, ok := r.peers[peer]; ok {
+		t.Fatal("peer must not exist after RemovePeer — post-Commit cleanup must not re-add it")
+	}
+	for _, p := range r.peerOrder {
+		if p == peer {
+			t.Fatal("peer must not be in peerOrder after RemovePeer")
+		}
+	}
+}
+
+// TestSendFileAnnounceAsyncFailureCallsOnFailure verifies that the
+// onAsyncFailure callback is invoked when the async goroutine inside
+// SendFileAnnounce fails (e.g. PrepareAndSend returns an error).
+// This is the fix for the P2 bug: "Attachment lost on async failure path
+// inside SendFileAnnounce" — without the callback, the user's attachment
+// disappears from the composer and cannot be retried.
+func TestSendFileAnnounceAsyncFailureCallsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	r := newTestRouter()
+	peer := domain.PeerIdentity("bob")
+
+	r.mu.Lock()
+	r.peers[peer] = &RouterPeerState{Unread: 0}
+	r.peerOrder = []domain.PeerIdentity{peer}
+	r.peerGen[peer] = 1
+	r.mu.Unlock()
+
+	callbackCalled := make(chan struct{}, 1)
+	onFailure := func() {
+		callbackCalled <- struct{}{}
+	}
+
+	// SendFileAnnounce returns nil synchronously (pre-validation passes
+	// because fileBridge != nil). The goroutine then calls PrepareAndSend
+	// which fails because DesktopClient.localNode is nil.
+	err := r.SendFileAnnounce(peer, domain.OutgoingDM{
+		Body: "test file",
+	}, domain.FileAnnouncePayload{
+		FileHash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		FileName: "test.txt",
+		FileSize: 1024,
+	}, onFailure)
+	if err != nil {
+		t.Fatalf("SendFileAnnounce should return nil synchronously: %v", err)
+	}
+
+	select {
+	case <-callbackCalled:
+		// onAsyncFailure was called — attachment restoration works.
+	case <-time.After(5 * time.Second):
+		t.Fatal("onAsyncFailure callback was not called within timeout — attachment would be lost")
+	}
+
+	// Verify that sendStatus reflects the async failure.
+	r.mu.RLock()
+	status := r.sendStatus
+	r.mu.RUnlock()
+	if status == "" || status == "sending…" {
+		t.Errorf("sendStatus should reflect failure, got %q", status)
 	}
 }

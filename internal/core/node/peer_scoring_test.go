@@ -649,13 +649,16 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 
 	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 
-	// Create two fake connections.
+	// Create two fake connections and register them as inbound PeerConns.
 	authConn, authPeer := net.Pipe()
 	defer func() { _ = authPeer.Close() }()
 	spoofConn, spoofPeer := net.Pipe()
 	defer func() { _ = spoofPeer.Close() }()
 
-	// Simulate hello on both connections (stores connPeerInfo).
+	svc.registerInboundConn(authConn)
+	svc.registerInboundConn(spoofConn)
+
+	// Simulate hello on both connections (populates PeerConn state).
 	svc.rememberConnPeerAddr(authConn, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)})
 	svc.rememberConnPeerAddr(spoofConn, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)})
 

@@ -4,6 +4,18 @@
 
 The messaging system supports two topics: direct messages (`dm`) and global broadcasts (`global`). Messages are cryptographically signed, deduplicated, and support various deletion flags. Direct messages use TTL for expiry and require sender pubkey to be known (boxkey-binding is verified when available); global messages skip DM-specific validation and are treated as broadcasts.
 
+### PlainMessage extensions
+
+The encrypted DM body (`PlainMessage`) may carry optional `command` and `command_data` fields (`json:",omitempty"`). When `command` is set, the message is a protocol command rather than a regular text message. Currently one command is defined: `file_announce` (see [file_transfer.md](file_transfer.md) for details). The `body` field remains required for all DMs; for `file_announce` it contains either the user's description text or the sentinel `"[file]"` when no description is provided.
+
+File transfer operations other than the announce use a separate protocol frame (`FileCommandFrame`) routed through `file_router`. See [file_transfer.md](file_transfer.md) for the full specification.
+
+### Расширения PlainMessage
+
+Зашифрованное тело DM (`PlainMessage`) может содержать необязательные поля `command` и `command_data` (`json:",omitempty"`). Когда `command` установлен, сообщение является протокольной командой, а не обычным текстом. Сейчас определена одна команда: `file_announce` (подробности в [file_transfer.md](file_transfer.md)). Поле `body` остаётся обязательным для всех DM; для `file_announce` оно содержит текст описания от пользователя или сентинел `"[file]"`, когда описание не предоставлено.
+
+Все файловые операции, кроме анонса, используют отдельный протокольный фрейм (`FileCommandFrame`), маршрутизируемый через `file_router`. Полная спецификация — в [file_transfer.md](file_transfer.md).
+
 ## Commands
 
 ### send_message

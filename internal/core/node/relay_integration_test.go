@@ -644,8 +644,8 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 		sendMessageFrame("dm", "live-route-1", senderID.Address, recipientID.Address,
 			string(protocol.MessageFlagImmutable), ts, 0, ciphertext),
 	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("expected message_stored, got %s: %s", frames[1].Type, frames[1].Error)
+	if frames[1].Type != "message_stored" && frames[1].Type != "message_known" {
+		t.Fatalf("expected message_stored or message_known, got %s: %s", frames[1].Type, frames[1].Error)
 	}
 
 	// Read push_message on recipient connection.

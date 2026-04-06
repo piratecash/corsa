@@ -345,6 +345,7 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 		c.parent.t("node.listen", fallback(status.ListenerAddress, c.parent.runtime.ListenAddress())),
 		c.parent.t("node.type", fallback(status.NodeType, "full")),
 		c.parent.t("node.services", fallback(joinOrNone(status.Services), "identity,contacts,messages,gazeta,relay")),
+		c.parent.t("node.capabilities", fallback(joinOrNone(status.Capabilities), "none")),
 		c.parent.t("node.connected", status.Connected),
 		c.parent.t("node.known_peers", len(status.Peers)),
 		c.parent.t("node.connected_peers", connectedPeers),
@@ -1094,7 +1095,7 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 	commands := table.Commands()
 
 	// Group by category, preserving display order.
-	categoryOrder := []string{"system", "network", "routing", "metrics", "identity", "message", "chatlog", "notice"}
+	categoryOrder := []string{"system", "network", "routing", "metrics", "identity", "message", "file", "chatlog", "notice"}
 	categoryLabels := map[string]string{
 		"system":   "Control",
 		"network":  "Network",
@@ -1102,6 +1103,7 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 		"metrics":  "Metrics",
 		"identity": "Identity & Contacts",
 		"message":  "Messages",
+		"file":     "File Transfer",
 		"chatlog":  "Chat History",
 		"notice":   "Notices",
 	}

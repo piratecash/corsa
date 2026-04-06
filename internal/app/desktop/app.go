@@ -45,7 +45,8 @@ func Run() error {
 		}
 	}()
 
-	router := service.NewDMRouter(client)
+	fileBridge := service.NewFileTransferBridge(client)
+	router := service.NewDMRouter(client, fileBridge)
 
 	// Metrics collector — samples node traffic every second, keeps 1 hour history.
 	metricsCollector := metrics.NewCollector(nodeService)

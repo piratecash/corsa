@@ -185,6 +185,7 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 	RegisterMeshCommands(t, node)
 	RegisterIdentityCommands(t, node)
 	RegisterMessageCommands(t, node, dmRouter, chatlog)
+	RegisterFileCommands(t, node, dmRouter)
 	RegisterChatlogCommands(t, chatlog)
 	RegisterNoticeCommands(t, node)
 	RegisterMetricsCommands(t, metricsProvider)
@@ -565,12 +566,224 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 					Body:    body,
 					ReplyTo: replyToID,
 				})
-				return jsonResponse(map[string]interface{}{"status": "queued", "to": to})
+				return jsonResponse(map[string]interface{}{
+					"status":  "pending",
+					"message": "message queued for delivery; actual send is asynchronous",
+					"to":      to,
+				})
 			},
 		)
 	} else {
 		t.RegisterUnavailable(sendDMInfo)
 	}
+}
+
+// registerFileAnnounceCommand registers the send_file_announce RPC command.
+// The command constructs a file_announce DM — a user-visible message stored
+// in chatlog with delivery receipts and gossip fallback, carrying file
+// metadata (name, size, hash, content type) inside the encrypted envelope.
+func registerFileAnnounceCommand(t *CommandTable, node NodeProvider, dmRouter DMRouterProvider) {
+	info := CommandInfo{
+		Name:        "send_file_announce",
+		Description: "Announce a file for transfer (sends file_announce DM)",
+		Category:    "file",
+		Usage:       "<to> <file_name> <file_size> <file_hash> [content_type] [body]",
+	}
+
+	if dmRouter == nil || node == nil {
+		t.RegisterUnavailable(info)
+		return
+	}
+
+	t.Register(info, func(req CommandRequest) CommandResponse {
+		to, _ := req.Args["to"].(string)
+		if strings.TrimSpace(to) == "" {
+			return validationError(fmt.Errorf("to is required"))
+		}
+
+		fileName, _ := req.Args["file_name"].(string)
+		if strings.TrimSpace(fileName) == "" {
+			return validationError(fmt.Errorf("file_name is required"))
+		}
+
+		fileSizeRaw, ok := req.Args["file_size"]
+		if !ok {
+			return validationError(fmt.Errorf("file_size is required"))
+		}
+		fileSize, err := parseUint64Arg(fileSizeRaw)
+		if err != nil {
+			return validationError(fmt.Errorf("file_size: %w", err))
+		}
+		if fileSize == 0 {
+			return validationError(fmt.Errorf("file_size must be greater than zero"))
+		}
+
+		fileHash, _ := req.Args["file_hash"].(string)
+		if strings.TrimSpace(fileHash) == "" {
+			return validationError(fmt.Errorf("file_hash is required"))
+		}
+		if err := domain.ValidateFileHash(fileHash); err != nil {
+			return validationError(fmt.Errorf("file_hash: %w", err))
+		}
+
+		contentType, _ := req.Args["content_type"].(string)
+		if strings.TrimSpace(contentType) == "" {
+			contentType = "application/octet-stream"
+		}
+
+		body, _ := req.Args["body"].(string)
+		if strings.TrimSpace(body) == "" {
+			body = domain.FileDMBodySentinel
+		}
+
+		announcePayload := domain.FileAnnouncePayload{
+			FileName:    fileName,
+			FileSize:    fileSize,
+			ContentType: contentType,
+			FileHash:    fileHash,
+		}
+		commandData, err := json.Marshal(announcePayload)
+		if err != nil {
+			return internalError(fmt.Errorf("marshal file announce payload: %w", err))
+		}
+
+		// Validate the transmit file and reserve a sender quota slot
+		// synchronously. The actual DM delivery and sender mapping
+		// registration happen asynchronously inside SendFileAnnounce —
+		// the response reflects only pre-send validation, not delivery.
+		if err := dmRouter.SendFileAnnounce(domain.PeerIdentity(to), domain.OutgoingDM{
+			Body:        body,
+			Command:     domain.FileActionAnnounce,
+			CommandData: string(commandData),
+		}, domain.FileAnnouncePayload{
+			FileHash:    fileHash,
+			FileName:    fileName,
+			FileSize:    fileSize,
+			ContentType: contentType,
+		}, nil); err != nil {
+			return internalError(fmt.Errorf("file announce failed: %w", err))
+		}
+
+		return jsonResponse(map[string]interface{}{
+			"status":    "pending",
+			"message":   "file announce validated and queued for delivery; actual send is asynchronous",
+			"to":        to,
+			"file_name": fileName,
+			"file_size": fileSize,
+			"file_hash": fileHash,
+		})
+	})
+}
+
+// parseUint64Arg converts a value that may arrive as float64 (JSON path) or
+// string (key=value / positional) to uint64.
+func parseUint64Arg(v interface{}) (uint64, error) {
+	switch n := v.(type) {
+	case float64:
+		if n < 0 {
+			return 0, fmt.Errorf("must be non-negative")
+		}
+		return uint64(n), nil
+	case string:
+		return strconv.ParseUint(n, 10, 64)
+	default:
+		return 0, fmt.Errorf("unsupported type %T", v)
+	}
+}
+
+// RegisterFileCommands registers file transfer commands.
+// Includes send_file_announce plus observability commands for active transfers.
+func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterProvider) {
+	registerFileAnnounceCommand(t, node, dmRouter)
+
+	transfersInfo := CommandInfo{Name: "fetch_file_transfers", Description: "List all active/pending file transfers", Category: "file"}
+	mappingInfo := CommandInfo{Name: "fetch_file_mapping", Description: "Show sender FileMapping table (no TransmitPath)", Category: "file"}
+	retryInfo := CommandInfo{Name: "retry_file_chunk", Description: "Force retry current pending chunk request", Category: "file", Usage: "<file_id>"}
+	startInfo := CommandInfo{Name: "start_file_download", Description: "Start downloading a previously announced file", Category: "file", Usage: "<file_id>"}
+	cancelInfo := CommandInfo{Name: "cancel_file_download", Description: "Cancel an active download and delete partial data", Category: "file", Usage: "<file_id>"}
+	restartInfo := CommandInfo{Name: "restart_file_download", Description: "Reset a failed download back to available for re-download", Category: "file", Usage: "<file_id>"}
+
+	if node == nil {
+		t.RegisterUnavailable(transfersInfo)
+		t.RegisterUnavailable(mappingInfo)
+		t.RegisterUnavailable(retryInfo)
+		t.RegisterUnavailable(startInfo)
+		t.RegisterUnavailable(cancelInfo)
+		t.RegisterUnavailable(restartInfo)
+		return
+	}
+
+	t.Register(transfersInfo,
+		func(req CommandRequest) CommandResponse {
+			data, err := node.FetchFileTransfers()
+			if err != nil {
+				return internalError(fmt.Errorf("fetch file transfers: %w", err))
+			}
+			return CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(mappingInfo,
+		func(req CommandRequest) CommandResponse {
+			data, err := node.FetchFileMappings()
+			if err != nil {
+				return internalError(fmt.Errorf("fetch file mappings: %w", err))
+			}
+			return CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(retryInfo,
+		func(req CommandRequest) CommandResponse {
+			fileID, _ := req.Args["file_id"].(string)
+			if strings.TrimSpace(fileID) == "" {
+				return validationError(fmt.Errorf("file_id is required"))
+			}
+			if err := node.RetryFileChunk(domain.FileID(fileID)); err != nil {
+				return internalError(fmt.Errorf("retry file chunk: %w", err))
+			}
+			return jsonResponse(map[string]interface{}{"status": "retried", "file_id": fileID})
+		},
+	)
+
+	t.Register(startInfo,
+		func(req CommandRequest) CommandResponse {
+			fileID, _ := req.Args["file_id"].(string)
+			if strings.TrimSpace(fileID) == "" {
+				return validationError(fmt.Errorf("file_id is required"))
+			}
+			if err := node.StartFileDownload(domain.FileID(fileID)); err != nil {
+				return internalError(fmt.Errorf("start file download: %w", err))
+			}
+			return jsonResponse(map[string]interface{}{"status": "downloading", "file_id": fileID})
+		},
+	)
+
+	t.Register(cancelInfo,
+		func(req CommandRequest) CommandResponse {
+			fileID, _ := req.Args["file_id"].(string)
+			if strings.TrimSpace(fileID) == "" {
+				return validationError(fmt.Errorf("file_id is required"))
+			}
+			if err := node.CancelFileDownload(domain.FileID(fileID)); err != nil {
+				return internalError(fmt.Errorf("cancel file download: %w", err))
+			}
+			return jsonResponse(map[string]interface{}{"status": "cancelled", "file_id": fileID})
+		},
+	)
+
+	t.Register(restartInfo,
+		func(req CommandRequest) CommandResponse {
+			fileID, _ := req.Args["file_id"].(string)
+			if strings.TrimSpace(fileID) == "" {
+				return validationError(fmt.Errorf("file_id is required"))
+			}
+			if err := node.RestartFileDownload(domain.FileID(fileID)); err != nil {
+				return internalError(fmt.Errorf("restart file download: %w", err))
+			}
+			return jsonResponse(map[string]interface{}{"status": "restarted", "file_id": fileID})
+		},
+	)
 }
 
 // RegisterChatlogCommands registers chatlog-related commands.

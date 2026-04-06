@@ -14,6 +14,7 @@ require (
 
 require (
 	gioui.org/shader v1.0.8 // indirect
+	gioui.org/x v0.9.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.9.0 // indirect

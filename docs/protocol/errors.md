@@ -58,6 +58,7 @@ For `incompatible-protocol-version` errors, additional fields are included:
 | `blacklisted` | Remote IP has been banned (exceeded 1000 ban points) | 403 Forbidden | Source IP address has accumulated too many violations and is temporarily or permanently blocked |
 | `invalid-ack-delete` | Invalid ack_delete frame or signature | 400 Bad Request | Acknowledgment deletion frame is malformed, missing fields, or signature verification failed |
 | `duplicate-connection` | (Deprecated — no longer emitted) Inbound hello was previously rejected when an outbound session existed | 409 Conflict | Removed: rejecting the inbound side of a simultaneous dial prevented the initiator from gossiping to the responder, breaking one-way message propagation. Both connections now coexist; the routing layer deduplicates by identity |
+| `rate-limited` | Command rate limit exceeded on inbound TCP connection | 429 Too Many Requests | Per-connection command rate limiter has been exhausted (burst: 100 commands, refill: 30/s). Connection is closed and the IP receives ban points. Legitimate peers never approach this limit; hitting it indicates a flood attack or misbehaving client |
 
 ## Error Code Categories
 
@@ -102,6 +103,7 @@ These errors indicate missing data:
 These errors indicate the request is blocked:
 
 - `blacklisted` - IP address banned
+- `rate-limited` - Command rate limit exceeded
 
 ### Connection Errors (409)
 
@@ -286,6 +288,7 @@ graph TB
 | `blacklisted` | IP-адрес удаленного хоста был запрещен (превышены 1000 точек запрета) | 403 Forbidden | IP-адрес источника накопил слишком много нарушений и временно или постоянно заблокирован |
 | `invalid-ack-delete` | Недействительный кадр ack_delete или подпись | 400 Bad Request | Кадр удаления подтверждения неправильно сформирован, отсутствуют поля или проверка подписи не удалась |
 | `duplicate-connection` | (Устарел — больше не отправляется) Ранее входящий hello отклонялся при наличии outbound-сессии | 409 Conflict | Удалено: отклонение входящей стороны при одновременном подключении не позволяло инициатору передавать gossip-сообщения респондеру, нарушая однонаправленную доставку. Теперь оба соединения сосуществуют; маршрутизация дедуплицирует по identity |
+| `rate-limited` | Превышен лимит скорости команд на входящем TCP-соединении | 429 Too Many Requests | Лимит команд на соединение исчерпан (пакет: 100 команд, пополнение: 30/с). Соединение закрывается, IP получает баллы бана. Легитимные пиры никогда не приближаются к этому лимиту; срабатывание указывает на flood-атаку или некорректный клиент |
 
 ## Категории кодов ошибок
 
@@ -330,6 +333,7 @@ graph TB
 Эти ошибки указывают на блокировку запроса:
 
 - `blacklisted` - IP-адрес запрещен
+- `rate-limited` - Превышен лимит скорости команд
 
 ### Ошибки соединения (409)
 

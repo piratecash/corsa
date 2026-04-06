@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"corsa/internal/core/node"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
+	"corsa/internal/core/service/filetransfer"
 	"corsa/internal/core/transport"
 )
 
@@ -90,6 +92,8 @@ type DirectMessage struct {
 	Recipient     domain.PeerIdentity
 	Body          string
 	ReplyTo       domain.MessageID
+	Command       domain.FileAction // e.g. FileActionAnnounce for file transfers; empty for regular DMs
+	CommandData   string            // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
 	Timestamp     time.Time
 	ReceiptStatus string
 	DeliveredAt   *time.Time
@@ -158,6 +162,7 @@ type NodeStatus struct {
 	ListenerAddress  string
 	ClientVersion    string
 	Services         []string
+	Capabilities     []string
 	KnownIDs         []string
 	Contacts         map[string]Contact
 	Peers            []string
@@ -289,6 +294,12 @@ func (c *DesktopClient) Address() domain.PeerIdentity {
 	return domain.PeerIdentity(c.id.Address)
 }
 
+// TransmitDir returns the absolute path to the directory where files awaiting
+// transfer are stored. Derived from the node data directory.
+func (c *DesktopClient) TransmitDir() string {
+	return filepath.Join(c.nodeCfg.EffectiveDataDir(), domain.TransmitSubdir)
+}
+
 // DeletePeerHistory removes all chat messages for the given identity from the
 // local chatlog database.
 func (c *DesktopClient) DeletePeerHistory(identity domain.PeerIdentity) (int64, error) {
@@ -358,6 +369,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.ListenerAddress = strings.TrimSpace(welcome.Listen)
 	status.ClientVersion = welcome.ClientVersion
 	status.Services = welcome.Services
+	status.Capabilities = welcome.Capabilities
 
 	peersReply, err := c.localRequestFrame(protocol.Frame{Type: "get_peers"})
 	if err != nil {
@@ -1226,11 +1238,128 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to domain.PeerIde
 		Recipient:     to,
 		Body:          msg.Body, // plaintext — already known to us
 		ReplyTo:       msg.ReplyTo,
+		Command:       msg.Command,
+		CommandData:   msg.CommandData,
 		Timestamp:     now,
 		ReceiptStatus: "sent",
 	}
 
 	return result, nil
+}
+
+// StoreFileForTransmit copies the source file into the transmit directory
+// through FileStore, which handles content-addressed dedup and ref counting.
+// Returns the SHA-256 hash of the file content.
+func (c *DesktopClient) StoreFileForTransmit(sourcePath string) (string, error) {
+	if c.localNode == nil {
+		return "", fmt.Errorf("no local node (embedded mode required)")
+	}
+	return c.localNode.StoreFileForTransmit(sourcePath)
+}
+
+// TransmitFileSize returns the byte size of the stored transmit blob.
+// The size comes from the persisted copy, not from the original source file.
+func (c *DesktopClient) TransmitFileSize(fileHash string) (uint64, error) {
+	if c.localNode == nil {
+		return 0, fmt.Errorf("no local node (embedded mode required)")
+	}
+	return c.localNode.TransmitFileSize(fileHash)
+}
+
+// RemoveUnreferencedTransmitFile deletes the transmit blob for the given hash
+// if no active sender mapping or pending reservation protects it. Used to
+// clean up after EnsureStored when PrepareFileAnnounce fails before creating
+// a token.
+func (c *DesktopClient) RemoveUnreferencedTransmitFile(fileHash string) {
+	if c.localNode == nil {
+		return
+	}
+	c.localNode.RemoveUnreferencedTransmitFile(fileHash)
+}
+
+// PrepareFileAnnounce atomically validates transmit file availability and
+// reserves a sender quota slot. Returns a token that the caller uses to
+// either Commit (after the DM is sent successfully) or Rollback (on any
+// failure). This encapsulates the entire transmit-file and sender-mapping
+// lifecycle so callers (dm_router) only deal with sending the DM.
+func (c *DesktopClient) PrepareFileAnnounce(
+	fileHash, fileName, contentType string,
+	fileSize uint64,
+) (*filetransfer.SenderAnnounceToken, error) {
+	if c.localNode == nil {
+		return nil, fmt.Errorf("no local node (embedded mode required)")
+	}
+	return c.localNode.PrepareFileAnnounce(fileHash, fileName, contentType, fileSize)
+}
+
+// RegisterIncomingFileTransfer registers a receiver-side file mapping.
+// Called when a file_announce DM is decrypted from a remote peer.
+// Returns an error if the announce metadata is invalid.
+func (c *DesktopClient) RegisterIncomingFileTransfer(
+	fileID domain.FileID,
+	fileHash, fileName, contentType string,
+	fileSize uint64,
+	sender domain.PeerIdentity,
+) error {
+	if c.localNode == nil {
+		return fmt.Errorf("no local node (embedded mode required)")
+	}
+	return c.localNode.RegisterIncomingFileTransfer(fileID, fileHash, fileName, contentType, fileSize, sender)
+}
+
+// CancelFileDownload aborts an active download and resets the mapping.
+func (c *DesktopClient) CancelFileDownload(fileID domain.FileID) error {
+	if c.localNode == nil {
+		return fmt.Errorf("no local node (embedded mode required)")
+	}
+	return c.localNode.CancelFileDownload(fileID)
+}
+
+// StartFileDownload begins downloading a previously registered incoming file.
+func (c *DesktopClient) StartFileDownload(fileID domain.FileID) error {
+	if c.localNode == nil {
+		return fmt.Errorf("no local node (embedded mode required)")
+	}
+	return c.localNode.StartFileDownload(fileID)
+}
+
+// RestartFileDownload resets a failed download back to available state.
+func (c *DesktopClient) RestartFileDownload(fileID domain.FileID) error {
+	if c.localNode == nil {
+		return fmt.Errorf("no local node (embedded mode required)")
+	}
+	return c.localNode.RestartFileDownload(fileID)
+}
+
+// FileTransferProgress returns the transfer progress for a given file.
+// isSender=true queries the sender mapping; false queries the receiver mapping.
+func (c *DesktopClient) FileTransferProgress(
+	fileID domain.FileID,
+	isSender bool,
+) (bytesTransferred, totalSize uint64, state string, found bool) {
+	if c.localNode == nil {
+		return 0, 0, "", false
+	}
+	return c.localNode.FileTransferProgress(fileID, isSender)
+}
+
+// CleanupPeerTransfers removes all file transfer mappings and files associated
+// with the given peer identity.
+func (c *DesktopClient) CleanupPeerTransfers(peer domain.PeerIdentity) {
+	if c.localNode == nil {
+		return
+	}
+	c.localNode.CleanupPeerTransfers(peer)
+}
+
+// RemoveSenderMapping removes a single sender mapping by fileID, releasing
+// the transmit file ref if the mapping is not in a terminal state. Returns
+// true if the mapping existed and was removed.
+func (c *DesktopClient) RemoveSenderMapping(fileID domain.FileID) bool {
+	if c.localNode == nil {
+		return false
+	}
+	return c.localNode.RemoveSenderMapping(fileID)
 }
 
 func (c *DesktopClient) ensureRecipientContact(ctx context.Context, recipient string) (Contact, error) {
@@ -1651,6 +1780,8 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			Recipient:     domain.PeerIdentity(recipient),
 			Body:          message.Body,
 			ReplyTo:       replyTo,
+			Command:       domain.FileAction(message.Command),
+			CommandData:   message.CommandData,
 			Timestamp:     item.Timestamp,
 			ReceiptStatus: receiptStatus,
 			DeliveredAt:   deliveredAt,
@@ -1759,6 +1890,8 @@ func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) 
 		Recipient:     domain.PeerIdentity(event.Recipient),
 		Body:          msg.Body,
 		ReplyTo:       replyTo,
+		Command:       domain.FileAction(msg.Command),
+		CommandData:   msg.CommandData,
 		Timestamp:     ts,
 		ReceiptStatus: status,
 	}

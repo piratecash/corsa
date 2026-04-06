@@ -72,6 +72,12 @@ type Frame struct {
 	// Routing table fields (Iteration 1 — distance vector)
 	// Used with type="announce_routes".
 	AnnounceRoutes []AnnounceRouteFrame `json:"routes,omitempty"`
+
+	// RawLine carries a pre-serialized JSON line (including trailing newline)
+	// that bypasses MarshalFrameLine's json.Marshal. Used for frame types like
+	// file_command that have their own wire format (FileCommandFrame) and must
+	// be forwarded verbatim through the per-connection write queue.
+	RawLine string `json:"-"`
 }
 
 type ContactFrame struct {
@@ -184,13 +190,63 @@ func IsJSONLine(line string) bool {
 	return strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}")
 }
 
+// maxJSONDepth is the maximum nesting depth allowed in inbound JSON frames.
+// The Frame struct has a maximum depth of 3 (top-level → array element →
+// nested struct). Anything deeper is either malformed or a deliberate attempt
+// to amplify memory allocation in the JSON tokenizer.
+const maxJSONDepth = 10
+
 func ParseFrameLine(line string) (Frame, error) {
+	if err := checkJSONDepth(line, maxJSONDepth); err != nil {
+		return Frame{}, err
+	}
 	var frame Frame
 	err := json.Unmarshal([]byte(line), &frame)
 	return frame, err
 }
 
+// checkJSONDepth scans the raw JSON string for nesting depth (counting { and
+// [ as depth increments). Returns an error if the depth exceeds maxDepth.
+// This runs in O(n) time with zero allocations — much cheaper than letting
+// json.Decoder parse a deeply nested structure.
+func checkJSONDepth(data string, maxDepth int) error {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch c {
+		case '{', '[':
+			depth++
+			if depth > maxDepth {
+				return fmt.Errorf("JSON nesting depth %d exceeds maximum %d", depth, maxDepth)
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return nil
+}
+
 func MarshalFrameLine(frame Frame) (string, error) {
+	if frame.RawLine != "" {
+		return frame.RawLine, nil
+	}
 	data, err := json.Marshal(frame)
 	if err != nil {
 		return "", err

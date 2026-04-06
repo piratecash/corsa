@@ -26,6 +26,8 @@ import (
 	"corsa/internal/core/identity"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
+	"corsa/internal/core/service/filerouter"
+	"corsa/internal/core/service/filetransfer"
 	"corsa/internal/core/transport"
 )
 
@@ -93,11 +95,8 @@ type Service struct {
 	inboundTracked        map[net.Conn]struct{}      // connections promoted via trackInboundConnect (auth complete or auth not required)
 	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
-	connAuth              map[net.Conn]*connAuthState
-	connPeerInfo          map[net.Conn]*connPeerHello // inbound conn → peer info from hello frame
-	connSendCh            map[net.Conn]chan sendItem  // per-connection buffered send channel; decouples callers from socket I/O
-	connWriterDone        map[net.Conn]chan struct{}  // closed by connWriter when it exits; used to wait for drain before TCP close
-	connIDCounter         uint64                      // monotonic counter for connection IDs (protected by mu)
+	inboundPeerConns      map[net.Conn]*PeerConn     // inbound conn → PeerConn (single source of truth for connection state)
+	connIDCounter         uint64                     // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
 	listener              net.Listener
@@ -113,12 +112,21 @@ type Service struct {
 	router                Router                                    // routing strategy for outbound message delivery
 	relayStates           *relayStateStore                          // hop-by-hop relay forwarding state (Iteration 1)
 	relayLimiter          *relayRateLimiter                         // per-peer token bucket for relay fan-out
+	connLimiter           *connRateLimiter                          // per-IP connection rate limiter at accept level
+	cmdLimiter            *commandRateLimiter                       // per-connection command rate limiter for non-relay frames
+	inboundByIP           map[string]int                            // IP → active inbound connection count (per-IP cap)
 	routingTable          *routing.Table                            // distance-vector routing table (Phase 1.2)
 	announceLoop          *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
 	identitySessions      map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
 	identityRelaySessions map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
+	disableRateLimiting   bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
 	drainDone             func()                                    // test hook: called after drainPendingForIdentities completes; nil in production
 	done                  chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
+
+	// File transfer subsystem (Iteration 21).
+	fileStore    *filetransfer.FileStore // content-addressed file storage in transmit dir
+	fileTransfer *filetransfer.Manager   // sender/receiver state machines
+	fileRouter   *filerouter.Router      // routing file commands through the mesh
 }
 
 type subscriber struct {
@@ -188,16 +196,6 @@ type connAuthState struct {
 	Verified  bool
 }
 
-// connPeerHello caches hello frame info to avoid re-parsing for subsequent frames.
-type connPeerHello struct {
-	address      domain.PeerAddress  // listen address (transport) for health tracking
-	identity     domain.PeerIdentity // Ed25519 fingerprint from hello.Address (routing identity)
-	connID       uint64              // monotonic connection ID for diagnostics
-	lastActivity time.Time           // last frame received on this connection (per-conn staleness)
-	networks     map[domain.NetGroup]struct{}
-	capabilities []domain.Capability // intersection of local and remote capabilities from handshake
-}
-
 type banEntry struct {
 	Score       int
 	Blacklisted time.Time
@@ -217,6 +215,7 @@ const (
 	banThreshold                    = 1000
 	banIncrementInvalidSig          = 100
 	banIncrementIncompatibleVersion = 1000 // immediate blacklist: incompatible protocol wastes resources on every connect
+	banIncrementRateLimit           = 200  // command rate limit violation signals intentional abuse
 	banDuration                     = 24 * time.Hour
 	// nodeName and networkName are the protocol-level identifiers included
 	// in handshake, ping/pong and other frames. Defined once here so that
@@ -463,10 +462,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		inboundMetered:        make(map[net.Conn]*MeteredConn),
 		inboundHealthRefs:     make(map[domain.PeerAddress]int),
 		inboundTracked:        make(map[net.Conn]struct{}),
-		connAuth:              make(map[net.Conn]*connAuthState),
-		connPeerInfo:          make(map[net.Conn]*connPeerHello),
-		connSendCh:            make(map[net.Conn]chan sendItem),
-		connWriterDone:        make(map[net.Conn]chan struct{}),
+		inboundPeerConns:      make(map[net.Conn]*PeerConn),
 		bans:                  make(map[string]banEntry),
 		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:      make(map[domain.PeerIdentity]int),
@@ -488,6 +484,9 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	svc.relayStates = newRelayStateStore()
 	svc.relayStates.restore(queueState.RelayForwardStates)
 	svc.relayLimiter = newRelayRateLimiter()
+	svc.connLimiter = newConnRateLimiter()
+	svc.cmdLimiter = newCommandRateLimiter()
+	svc.inboundByIP = make(map[string]int)
 	return svc
 }
 
@@ -511,6 +510,10 @@ func (s *Service) Run(ctx context.Context) error {
 	// Start relay state TTL ticker; stopped on shutdown.
 	s.relayStates.start()
 	defer s.relayStates.stop()
+
+	// Initialize file transfer subsystem (Iteration 21).
+	s.initFileTransfer()
+	defer s.stopFileTransfer()
 
 	// Start routing table TTL ticker and announce loop (Phase 1.2).
 	routingCtx, routingCancel := context.WithCancel(ctx)
@@ -580,12 +583,31 @@ func (s *Service) Run(ctx context.Context) error {
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
+		// Per-IP connection rate limiting — reject before allocating any
+		// per-connection resources (goroutines, maps, buffers). Prevents
+		// SYN flood and connection exhaustion from a single source.
+		ip := remoteIP(conn.RemoteAddr())
+		if !s.disableRateLimiting && !s.connLimiter.allowConnect(ip) {
+			log.Warn().Str("ip", ip).Str("reason", "conn-rate-limit").Msg("reject connection")
+			_ = conn.Close()
+			continue
+		}
+
+		// Per-IP concurrent connection cap — even within rate limits, no
+		// single IP should monopolize connection slots.
+		if !s.disableRateLimiting && !s.tryIncrementIPConn(ip) {
+			log.Warn().Str("ip", ip).Str("reason", "max-conn-per-ip").Msg("reject connection")
+			_ = conn.Close()
+			continue
+		}
+
 		s.connWg.Add(1)
-		go func(c net.Conn) {
+		go func(c net.Conn, cip string) {
 			defer s.connWg.Done()
 			defer crashlog.DeferRecover()
+			defer s.decrementIPConn(cip)
 			s.handleConn(c)
-		}(conn)
+		}(conn, ip)
 	}
 }
 
@@ -653,7 +675,7 @@ func (s *Service) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, fun
 }
 
 func (s *Service) handleConn(conn net.Conn) {
-	if s.isBlacklistedConn(conn) {
+	if !s.disableRateLimiting && s.isBlacklistedConn(conn) {
 		_ = conn.Close()
 		return
 	}
@@ -691,14 +713,49 @@ func (s *Service) handleConn(conn net.Conn) {
 	}()
 
 	reader := bufio.NewReader(conn)
+	connKey := conn.RemoteAddr().String()
+	defer s.cmdLimiter.removeConn(connKey)
 	for {
+		// Set a read deadline before each frame read. This prevents
+		// Slowloris-style attacks where a peer opens a connection and
+		// sends data extremely slowly (or not at all) to hold the
+		// connection slot and goroutine indefinitely. Legitimate peers
+		// send heartbeat pings every 30s, so 120s is generous.
+		if tc, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = tc.SetReadDeadline(time.Now().Add(inboundReadTimeout))
+		}
+
 		line, err := readFrameLine(reader, maxCommandLineBytes)
 		if err != nil {
 			if errors.Is(err, errFrameTooLarge) {
+				log.Debug().Str("addr", conn.RemoteAddr().String()).
+					Msg("inbound_read_loop: closing connection — frame exceeds max size")
 				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
 			} else if err != io.EOF {
+				log.Debug().Err(err).Str("addr", conn.RemoteAddr().String()).
+					Msg("inbound_read_loop: closing connection — read error")
 				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
+			} else {
+				log.Debug().Str("addr", conn.RemoteAddr().String()).
+					Msg("inbound_read_loop: peer closed connection (EOF)")
 			}
+			return
+		}
+
+		// Per-connection command rate limiting — prevents a single peer
+		// from flooding with valid commands to exhaust CPU.
+		//
+		// file_command frames are exempt: they are high-throughput data-plane
+		// frames (chunk_request / chunk_response) that easily exceed the
+		// control-plane rate (30 cmd/s). They are already gated behind
+		// authentication + file_transfer_v1 capability in handleJSONCommand,
+		// so the attack surface is limited to authenticated peers.
+		if peekFrameType(line) != protocol.FileCommandFrameType &&
+			!s.cmdLimiter.allowCommand(connKey) {
+			log.Debug().Str("addr", conn.RemoteAddr().String()).
+				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
+			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
+			s.addBanScore(conn, banIncrementRateLimit)
 			return
 		}
 
@@ -922,12 +979,48 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, s.fetchMessageFrame(frame.Topic, frame.ID))
 		return true
 	case "fetch_inbox":
+		// For authenticated remote peers, restrict fetch_inbox to their own
+		// identity. Without this, an authenticated peer could fetch any
+		// recipient's inbox and see encrypted DMs + metadata.
+		if s.isConnAuthenticated(conn) {
+			peerID := s.inboundPeerIdentity(conn)
+			requestedRecipient := strings.TrimSpace(frame.Recipient)
+			if requestedRecipient != "" && requestedRecipient != string(peerID) {
+				accepted = false
+				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "fetch_inbox: recipient must match authenticated identity"})
+				return true
+			}
+		}
 		s.writeJSONFrame(conn, s.fetchInboxFrame(frame.Topic, frame.Recipient))
 		return true
 	case "fetch_delivery_receipts":
 		s.writeJSONFrame(conn, s.fetchDeliveryReceiptsFrame(frame.Recipient))
 		return true
 	case "subscribe_inbox":
+		// subscribe_inbox requires an authenticated session. Without this
+		// gate, any unauthenticated client could subscribe to an arbitrary
+		// recipient's inbox and receive all their DMs (encrypted bodies +
+		// metadata: sender, timestamps, message IDs).
+		if !s.isConnAuthenticated(conn) {
+			accepted = false
+			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
+			return true
+		}
+		// Identity binding: the authenticated peer may only subscribe to
+		// its own identity. Without this check, an authenticated peer could
+		// subscribe to a different identity's inbox and receive their messages.
+		peerIdentity := s.inboundPeerIdentity(conn)
+		requestedRecipient := strings.TrimSpace(frame.Recipient)
+		if requestedRecipient != "" && requestedRecipient != string(peerIdentity) {
+			accepted = false
+			log.Warn().
+				Str("peer_identity", string(peerIdentity)).
+				Str("requested_recipient", requestedRecipient).
+				Msg("subscribe_inbox identity mismatch")
+			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
+			s.addBanScore(conn, banIncrementInvalidSig)
+			return true
+		}
 		reply, sub := s.subscribeInboxFrame(conn, frame)
 		s.writeJSONFrame(conn, reply)
 		if sub != nil {
@@ -940,14 +1033,12 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		// frame in each direction is sufficient for full bidirectional sync.
 		// Sent here (not after auth_ok) so that short-lived connections like
 		// syncPeer — which never send subscribe_inbox — are not affected.
-		if s.isConnAuthenticated(conn) {
-			s.writeJSONFrame(conn, protocol.Frame{
-				Type:       "subscribe_inbox",
-				Topic:      "dm",
-				Recipient:  s.identity.Address,
-				Subscriber: s.cfg.AdvertiseAddress,
-			})
-		}
+		s.writeJSONFrame(conn, protocol.Frame{
+			Type:       "subscribe_inbox",
+			Topic:      "dm",
+			Recipient:  s.identity.Address,
+			Subscriber: s.cfg.AdvertiseAddress,
+		})
 		return true
 	case "subscribed":
 		// Response to our reverse subscribe_inbox sent to the outbound peer.
@@ -1064,6 +1155,21 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 		senderIdentity := s.inboundPeerIdentity(conn)
 		s.handleAnnounceRoutes(senderIdentity, frame)
 		return true
+	case "file_command":
+		// File command frames require an authenticated session and
+		// file_transfer_v1 capability. The frame uses its own wire format
+		// (FileCommandFrame) — we pass the raw JSON line to the file router
+		// for separate parsing and validation.
+		if !s.isConnAuthenticated(conn) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(conn, domain.CapFileTransferV1) {
+			accepted = false
+			return true
+		}
+		s.handleFileCommandFrame(json.RawMessage(line))
+		return true
 	case "fetch_reachable_ids":
 		s.writeJSONFrame(conn, s.reachableIDsFrame())
 		return true
@@ -1153,66 +1259,20 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	}
 }
 
-// connSend returns the per-connection send channel, or nil if the connection
-// was not registered (e.g. outbound peer sessions that bypass handleConn).
-func (s *Service) connSend(conn net.Conn) chan sendItem {
+// peerConnFor returns the PeerConn for a registered inbound connection,
+// or nil for outbound peer sessions that bypass handleConn.
+func (s *Service) peerConnFor(conn net.Conn) *PeerConn {
 	s.mu.RLock()
-	ch := s.connSendCh[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
-	return ch
-}
-
-// connSendWithDone returns the send channel and the writerDone channel for
-// the connection. Used by enqueueFrameSync to detect a dead writer goroutine
-// without waiting for the full syncFlushTimeout.
-func (s *Service) connSendWithDone(conn net.Conn) (chan sendItem, <-chan struct{}) {
-	s.mu.RLock()
-	ch := s.connSendCh[conn]
-	done := s.connWriterDone[conn]
-	s.mu.RUnlock()
-	return ch, done
+	return pc
 }
 
 const connWriteTimeout = 30 * time.Second
 
-// sendItem carries serialised frame data through the per-connection send
-// channel. When ack is non-nil the writer goroutine closes it after the
-// data has been handed to the socket, letting the caller block until the
-// write completes (used by writeJSONFrameSync for error-path frames that
-// must reach the wire before the connection is torn down).
-type sendItem struct {
-	data []byte
-	ack  chan struct{}
-}
-
-// connWriter is the single writer goroutine per inbound connection. It drains
-// the send channel and performs the actual TCP write with a deadline. If the
-// remote peer is slow, only this goroutine blocks — all callers that enqueue
-// data via the channel remain free. The goroutine exits when sendCh is closed
-// (by unregisterInboundConn), after draining any remaining buffered frames.
-// It closes writerDone on exit so unregisterInboundConn can wait for the
-// drain to complete before the TCP connection is closed.
-//
-// ack semantics: ack is closed only after a successful conn.Write, confirming
-// the bytes reached the socket. On write error the goroutine exits without
-// closing ack — callers waiting in enqueueFrameSync observe writerDone
-// instead and receive enqueueDropped.
-func (s *Service) connWriter(conn net.Conn, sendCh <-chan sendItem, writerDone chan<- struct{}) {
-	defer crashlog.DeferRecover()
-	defer close(writerDone)
-	for item := range sendCh {
-		_ = conn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
-		if _, err := conn.Write(item.data); err != nil {
-			// Write failed — do NOT close ack. The caller will see
-			// writerDone close and interpret it as enqueueDropped.
-			return
-		}
-		if item.ack != nil {
-			close(item.ack)
-		}
-		_ = conn.SetWriteDeadline(time.Time{})
-	}
-}
+// connWriter is now replaced by PeerConn.writerLoop(). The single writer
+// goroutine per inbound connection is started inside newPeerConn() and
+// drains PeerConn.sendCh. See peer_conn.go for sendItem and the implementation.
 
 type enqueueResult int
 
@@ -1223,30 +1283,23 @@ const (
 )
 
 // enqueueFrame sends the serialised bytes to the per-connection writer
-// goroutine. Fire-and-forget: the caller does not wait for the write.
-func (s *Service) enqueueFrame(conn net.Conn, data []byte) (result enqueueResult) {
-	ch := s.connSend(conn)
-	if ch == nil {
+// goroutine via PeerConn.sendRaw. Fire-and-forget: the caller does not
+// wait for the write.
+func (s *Service) enqueueFrame(conn net.Conn, data []byte) enqueueResult {
+	pc := s.peerConnFor(conn)
+	if pc == nil {
 		return enqueueUnregistered
 	}
-
-	// Catch send-on-closed-channel: unregisterInboundConn may close ch between
-	// our connSend lookup and the actual send below. This is the only correct
-	// recovery — the connection is already gone.
-	defer func() {
-		if r := recover(); r != nil {
-			result = enqueueDropped
-		}
-	}()
-
-	select {
-	case ch <- sendItem{data: data}:
+	switch pc.sendRaw(data) {
+	case sendOK:
 		return enqueueSent
-	default:
-		// Send buffer full — peer is too slow. Close the connection so the
-		// writer goroutine exits and handleConn cleans up.
+	case sendBufferFull:
+		// Peer too slow — evict by closing the connection.
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
 		_ = conn.Close()
+		return enqueueDropped
+	default:
+		// sendChanClosed: connection already shutting down, don't close again.
 		return enqueueDropped
 	}
 }
@@ -1254,57 +1307,101 @@ func (s *Service) enqueueFrame(conn net.Conn, data []byte) (result enqueueResult
 const syncFlushTimeout = 5 * time.Second
 
 // enqueueFrameSync sends the serialised bytes to the per-connection writer
-// goroutine and blocks until the writer has handed the data to the socket.
+// goroutine via PeerConn.sendRawSync and blocks until the writer has handed
+// the data to the socket.
 // Used by writeJSONFrameSync for error-path frames that must be delivered
 // before the connection is torn down.
-//
-// It observes writerDone so that if the writer goroutine has already exited
-// (conn.Write error or slow-peer eviction by another goroutine) the call
-// returns immediately instead of waiting for the full syncFlushTimeout.
-func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) (result enqueueResult) {
-	ch, writerDone := s.connSendWithDone(conn)
-	if ch == nil {
+func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
+	pc := s.peerConnFor(conn)
+	if pc == nil {
 		return enqueueUnregistered
 	}
-
-	ack := make(chan struct{})
-
-	defer func() {
-		if r := recover(); r != nil {
-			result = enqueueDropped
-		}
-	}()
-
-	select {
-	case ch <- sendItem{data: data, ack: ack}:
-		// Enqueued — wait for the writer goroutine to flush.
-	default:
+	switch pc.sendRawSync(data) {
+	case sendOK:
+		return enqueueSent
+	case sendBufferFull:
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
 		_ = conn.Close()
 		return enqueueDropped
-	}
-
-	select {
-	case <-ack:
-		return enqueueSent
-	case <-writerDone:
-		// Writer exited (write error or conn closed) without closing ack —
-		// the frame was not delivered.
-		return enqueueDropped
-	case <-time.After(syncFlushTimeout):
+	case sendTimeout:
+		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("sync flush timeout, disconnecting peer")
 		_ = conn.Close()
+		return enqueueDropped
+	default:
+		// sendWriterDone / sendChanClosed: connection already dying,
+		// don't close — let handleConn's deferred cleanup do it.
 		return enqueueDropped
 	}
 }
 
+// sendFrameToIdentity sends a protocol frame to the peer identified by its
+// Ed25519 identity fingerprint. It searches outbound sessions first, then
+// inbound connections, checking that the matched connection has the required
+// capability. This is the identity-based counterpart of sendFrameToAddress.
+//
+// Returns true if the frame was accepted into the peer's write queue.
+func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Frame, requiredCap domain.Capability) bool {
+	s.mu.RLock()
+
+	// 1. Outbound sessions — preferred path, one writer per session (servePeerSession).
+	for _, sess := range s.sessions {
+		if sess.peerIdentity != dst || sess.conn == nil {
+			continue
+		}
+		if !hasCapability(sess.capabilities, requiredCap) {
+			continue
+		}
+		s.mu.RUnlock()
+		select {
+		case sess.sendCh <- frame:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// 2. Inbound connections — fallback, one writer per PeerConn.
+	var target net.Conn
+	for c, pc := range s.inboundPeerConns {
+		if pc == nil || pc.Identity() != dst {
+			continue
+		}
+		if !pc.HasCapability(requiredCap) {
+			continue
+		}
+		target = c
+		break
+	}
+
+	s.mu.RUnlock()
+
+	if target == nil {
+		return false
+	}
+
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		log.Warn().Err(err).
+			Str("peer", string(dst)).
+			Str("frame_type", frame.Type).
+			Msg("sendFrameToIdentity: marshal failed")
+		return false
+	}
+
+	return s.enqueueFrame(target, []byte(line)) == enqueueSent
+}
+
 func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
-	log.Debug().
+	ev := log.Debug().
 		Str("protocol", "json/tcp").
 		Str("addr", conn.RemoteAddr().String()).
 		Str("direction", "send").
 		Str("command", frame.Type).
-		Bool("accepted", frame.Type != "error").
-		Msg("protocol_trace")
+		Bool("accepted", frame.Type != "error")
+	if frame.Type == "error" {
+		ev = ev.Str("code", frame.Code).Str("error", frame.Error)
+	}
+	ev.Msg("protocol_trace")
 
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
@@ -1330,13 +1427,16 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 // teardown, preserving the "write completed before return" contract that
 // error-path callers rely on.
 func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) {
-	log.Debug().
+	ev := log.Debug().
 		Str("protocol", "json/tcp").
 		Str("addr", conn.RemoteAddr().String()).
 		Str("direction", "send").
 		Str("command", frame.Type).
-		Bool("accepted", frame.Type != "error").
-		Msg("protocol_trace")
+		Bool("accepted", frame.Type != "error")
+	if frame.Type == "error" {
+		ev = ev.Str("code", frame.Code).Str("error", frame.Error)
+	}
+	ev.Msg("protocol_trace")
 
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
@@ -1392,13 +1492,17 @@ func requiresSessionAuth(frame protocol.Frame) bool {
 
 // isConnAuthenticated returns true when the connection has completed
 // session auth (auth_session verified). Connections that never initiated
-// auth (connAuth entry is nil) are considered unauthenticated — they may
+// auth (PeerConn.auth is nil) are considered unauthenticated — they may
 // still issue commands, but they should not trigger high-trust side effects
 // such as peer promotion.
 func (s *Service) isConnAuthenticated(conn net.Conn) bool {
 	s.mu.RLock()
-	state := s.connAuth[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
+	if pc == nil {
+		return false
+	}
+	state := pc.Auth()
 	return state != nil && state.Verified
 }
 
@@ -1407,8 +1511,12 @@ func (s *Service) isCommandAllowedForConn(conn net.Conn, command string) bool {
 		return true
 	}
 	s.mu.RLock()
-	state := s.connAuth[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
+	if pc == nil {
+		return true
+	}
+	state := pc.Auth()
 	return state == nil || state.Verified
 }
 
@@ -1424,11 +1532,15 @@ func (s *Service) prepareConnAuth(conn net.Conn, hello protocol.Frame) (string, 
 		return "", err
 	}
 	s.mu.Lock()
-	s.connAuth[conn] = &connAuthState{
+	pc := s.inboundPeerConns[conn]
+	s.mu.Unlock()
+	if pc == nil {
+		return "", fmt.Errorf("connection not registered")
+	}
+	pc.SetAuth(&connAuthState{
 		Hello:     hello,
 		Challenge: challenge,
-	}
-	s.mu.Unlock()
+	})
 	return challenge, nil
 }
 
@@ -1450,8 +1562,12 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 
 func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
 	s.mu.Lock()
-	state := s.connAuth[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.Unlock()
+	if pc == nil {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
+	}
+	state := pc.Auth()
 	if state == nil {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
 	}
@@ -1467,13 +1583,19 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()}, false
 	}
 
-	s.mu.Lock()
-	state.Verified = true
-	state.Challenge = ""
-	s.connAuth[conn] = state
-	s.mu.Unlock()
+	// Replace the auth state with a verified copy instead of mutating
+	// the existing struct in place. Readers that obtained the old pointer
+	// via pc.Auth() see a consistent pre-verification snapshot; new
+	// readers see the verified state. This preserves the "connAuthState
+	// is never mutated after creation" invariant that makes the
+	// PeerConn.mu snapshot-based locking safe.
+	verified := &connAuthState{
+		Hello:    state.Hello,
+		Verified: true,
+	}
+	pc.SetAuth(verified)
 
-	s.learnPeerFromFrame(conn.RemoteAddr().String(), state.Hello)
+	s.learnPeerFromFrame(conn.RemoteAddr().String(), verified.Hello)
 	s.registerHelloRoute(conn, state.Hello)
 
 	// Announce the newly authenticated peer to all active outbound sessions.
@@ -1501,8 +1623,12 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 
 func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	state := s.connAuth[conn]
+	pc := s.inboundPeerConns[conn]
+	s.mu.RUnlock()
+	if pc == nil {
+		return protocol.Frame{}, false
+	}
+	state := pc.Auth()
 	if state == nil || !state.Verified {
 		return protocol.Frame{}, false
 	}
@@ -1510,15 +1636,17 @@ func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bo
 }
 
 func (s *Service) clearConnAuth(conn net.Conn) {
-	s.mu.Lock()
-	delete(s.connAuth, conn)
-	delete(s.connPeerInfo, conn)
-	s.mu.Unlock()
+	s.mu.RLock()
+	pc := s.inboundPeerConns[conn]
+	s.mu.RUnlock()
+	if pc != nil {
+		pc.ClearAuth()
+	}
 }
 
-// rememberConnPeerAddr stores info from the peer's hello frame so that
-// later frames on this connection can look up the overlay identity and
-// self-declared reachable networks without relying on conn.RemoteAddr().
+// rememberConnPeerAddr populates the PeerConn with identity, address,
+// capabilities, and networks from the hello frame. All subsequent lookups
+// use PeerConn as the single source of truth for inbound connection state.
 //
 // The identity field stores the Ed25519 fingerprint (hello.Address) for
 // routing purposes. The address field stores the listen address for health
@@ -1529,19 +1657,19 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 	if addr == "" {
 		addr = strings.TrimSpace(hello.Address)
 	}
-	ident := strings.TrimSpace(hello.Address)
 	s.mu.Lock()
-	cid := s.nextConnIDLocked()
-	info := &connPeerHello{
-		address:      domain.PeerAddress(addr),
-		identity:     domain.PeerIdentity(ident),
-		connID:       cid,
-		lastActivity: time.Now().UTC(),
-		networks:     domain.ParseNetGroups(hello.Networks),
-		capabilities: intersectCapabilities(localCapabilities(), hello.Capabilities),
-	}
-	s.connPeerInfo[conn] = info
+	pc := s.inboundPeerConns[conn]
 	s.mu.Unlock()
+	if pc == nil {
+		return
+	}
+	pc.ApplyOpts(PeerConnOpts{
+		Address:      domain.PeerAddress(addr),
+		Identity:     domain.PeerIdentity(strings.TrimSpace(hello.Address)),
+		LastActivity: time.Now().UTC(),
+		Networks:     domain.ParseNetGroups(hello.Networks),
+		Caps:         intersectCapabilities(localCapabilities(), hello.Capabilities),
+	})
 }
 
 // inboundPeerAddress returns the overlay address declared by the
@@ -1549,12 +1677,12 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 // known yet. The returned address is suitable for health tracking.
 func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
 	s.mu.RLock()
-	info := s.connPeerInfo[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
-	if info == nil {
+	if pc == nil {
 		return ""
 	}
-	return info.address
+	return pc.Address()
 }
 
 // trackedInboundPeerAddress returns the peer overlay address only when
@@ -1567,12 +1695,12 @@ func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
 func (s *Service) trackedInboundPeerAddress(conn net.Conn) domain.PeerAddress {
 	s.mu.RLock()
 	_, tracked := s.inboundTracked[conn]
-	info := s.connPeerInfo[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
-	if !tracked || info == nil {
+	if !tracked || pc == nil {
 		return ""
 	}
-	return info.address
+	return pc.Address()
 }
 
 // trackInboundConnect increments the inbound connection reference count
@@ -1658,23 +1786,23 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddre
 //     for old clients that don't send "networks".
 func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]struct{} {
 	s.mu.RLock()
-	info := s.connPeerInfo[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
 
-	if info == nil {
+	if pc == nil {
 		return nil
 	}
 
 	// If the peer declared its networks, validate against advertised address.
-	if len(info.networks) > 0 {
-		return validateDeclaredNetworks(info.networks, info.address)
+	if nets := pc.Networks(); len(nets) > 0 {
+		return validateDeclaredNetworks(nets, pc.Address())
 	}
 
 	// Infer from advertised address if it classifies to a known routable group.
-	if info.address != "" {
-		g := classifyAddress(info.address)
+	if addr := pc.Address(); addr != "" {
+		g := classifyAddress(addr)
 		if g != domain.NetGroupUnknown && g != domain.NetGroupLocal {
-			return peerReachableGroups(info.address)
+			return peerReachableGroups(addr)
 		}
 	}
 
@@ -1774,6 +1902,35 @@ func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 		delete(s.bans, ip)
 	}
 	return false
+}
+
+// tryIncrementIPConn atomically checks and increments the per-IP inbound
+// connection counter. Returns false if the IP has reached maxConnPerIP.
+func (s *Service) tryIncrementIPConn(ip string) bool {
+	if ip == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inboundByIP[ip] >= maxConnPerIP {
+		return false
+	}
+	s.inboundByIP[ip]++
+	return true
+}
+
+// decrementIPConn decrements the per-IP inbound connection counter.
+func (s *Service) decrementIPConn(ip string) {
+	if ip == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inboundByIP[ip] > 1 {
+		s.inboundByIP[ip]--
+	} else {
+		delete(s.inboundByIP, ip)
+	}
 }
 
 func (s *Service) addBanScore(conn net.Conn, delta int) {
@@ -2661,11 +2818,9 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 	}
 	s.inboundConns[conn] = struct{}{}
 
-	sendCh := make(chan sendItem, 128)
-	writerDone := make(chan struct{})
-	s.connSendCh[conn] = sendCh
-	s.connWriterDone[conn] = writerDone
-	go s.connWriter(conn, sendCh, writerDone)
+	s.connIDCounter++
+	pc := newPeerConn(connID(s.connIDCounter), conn, Inbound, PeerConnOpts{})
+	s.inboundPeerConns[conn] = pc
 
 	if mc, ok := conn.(*MeteredConn); ok {
 		s.inboundMetered[conn] = mc
@@ -2675,27 +2830,22 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 
 func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Lock()
-	ch := s.connSendCh[conn]
-	writerDone := s.connWriterDone[conn]
+	pc := s.inboundPeerConns[conn]
 	delete(s.inboundConns, conn)
 	delete(s.inboundMetered, conn)
-	delete(s.connPeerInfo, conn)
-	delete(s.connSendCh, conn)
-	delete(s.connWriterDone, conn)
+	delete(s.inboundPeerConns, conn)
 	s.mu.Unlock()
 
-	// Close the send channel so the writer goroutine drains remaining frames
-	// and exits. Any concurrent enqueueFrame callers that already hold a
-	// reference to this channel will catch the send-on-closed-channel panic
-	// via recover in enqueueFrame.
-	if ch != nil {
-		close(ch)
-	}
-	// Wait for the writer goroutine to finish draining before the caller
-	// closes the TCP connection — otherwise conn.Write inside connWriter
-	// would fail and remaining queued frames would be lost.
-	if writerDone != nil {
-		<-writerDone
+	// PeerConn.Close() handles the full shutdown sequence:
+	// 1. rawConn.Close() — unblocks writer stuck in conn.Write
+	// 2. close(sendCh) — signals writer to drain and exit
+	// 3. <-writerDone — waits for drain to complete
+	//
+	// Note: handleConn calls metered.Close() before unregisterInboundConn,
+	// which is now redundant (PeerConn.Close does it). The double Close on
+	// net.Conn is safe — subsequent calls return an error but don't panic.
+	if pc != nil {
+		pc.Close()
 	}
 }
 
@@ -3122,12 +3272,8 @@ func expectedReplyType(requestType string) string {
 // the peer session without waiting for a response. These frames are delivered
 // on a best-effort basis; the remote side may send an ack asynchronously, but
 // the sender must not block the session waiting for it.
-//
-// Currently identical to isRelayFrame — all relay frames are fire-and-forget.
-// If future iterations add non-relay fire-and-forget frames, this function
-// should be extended independently.
 func isFireAndForgetFrame(frameType string) bool {
-	return isRelayFrame(frameType) || frameType == "announce_routes"
+	return isRelayFrame(frameType) || frameType == "announce_routes" || frameType == protocol.FileCommandFrameType
 }
 
 // heartbeatInterval is the base interval between ping/pong heartbeats.

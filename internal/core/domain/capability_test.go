@@ -4,8 +4,9 @@ import "testing"
 
 func TestCapabilityString(t *testing.T) {
 	cases := map[Capability]string{
-		CapMeshRelayV1:   "mesh_relay_v1",
-		CapMeshRoutingV1: "mesh_routing_v1",
+		CapMeshRelayV1:    "mesh_relay_v1",
+		CapMeshRoutingV1:  "mesh_routing_v1",
+		CapFileTransferV1: "file_transfer_v1",
 	}
 	for c, want := range cases {
 		if got := c.String(); got != want {
@@ -21,8 +22,10 @@ func TestParseCapability(t *testing.T) {
 	}{
 		{"mesh_relay_v1", CapMeshRelayV1},
 		{"mesh_routing_v1", CapMeshRoutingV1},
+		{"file_transfer_v1", CapFileTransferV1},
 		{"MESH_RELAY_V1", CapMeshRelayV1},
 		{"Mesh_Routing_V1", CapMeshRoutingV1},
+		{"FILE_TRANSFER_V1", CapFileTransferV1},
 	}
 	for _, tc := range valid {
 		c, ok := ParseCapability(tc.input)
@@ -44,10 +47,10 @@ func TestParseCapability(t *testing.T) {
 }
 
 func TestParseCapabilities(t *testing.T) {
-	names := []string{"mesh_relay_v1", "bogus", "mesh_routing_v1"}
+	names := []string{"mesh_relay_v1", "bogus", "mesh_routing_v1", "file_transfer_v1"}
 	caps := ParseCapabilities(names)
-	if len(caps) != 2 {
-		t.Fatalf("expected 2 capabilities, got %d: %v", len(caps), caps)
+	if len(caps) != 3 {
+		t.Fatalf("expected 3 capabilities, got %d: %v", len(caps), caps)
 	}
 	if caps[0] != CapMeshRelayV1 {
 		t.Errorf("caps[0] = %v, want %v", caps[0], CapMeshRelayV1)

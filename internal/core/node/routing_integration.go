@@ -18,25 +18,20 @@ import (
 	"corsa/internal/core/routing"
 )
 
-// announceWriteDeadline caps how long we block on a synchronous write
-// to an inbound peer during announce_routes. Prevents a single slow
-// connection from stalling the entire announce cycle.
-const announceWriteDeadline = 5 * time.Second
-
 // inboundPeerIdentity returns the peer identity (Ed25519 fingerprint)
 // for an inbound connection, derived from the hello frame's Address field.
-// This is distinct from connPeerHello.address which stores the listen
+// This is distinct from PeerConn.Address() which stores the listen
 // address (transport) for health tracking. NATed peers advertise a
 // non-routable listen address (e.g. 127.0.0.1:64646) that must never
 // be used as a routing identity.
 func (s *Service) inboundPeerIdentity(conn net.Conn) domain.PeerIdentity {
 	s.mu.RLock()
-	info := s.connPeerInfo[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
-	if info == nil {
+	if pc == nil {
 		return ""
 	}
-	return info.identity
+	return pc.Identity()
 }
 
 // routingTableTTLLoop runs periodic TTL cleanup on the routing table.
@@ -181,21 +176,15 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 		return false
 	}
 
-	result := s.enqueueFrameSync(target, []byte(line))
-	switch result {
+	switch s.enqueueFrameSync(target, []byte(line)) {
 	case enqueueSent:
 		return true
 	case enqueueUnregistered:
-		// No send channel — fall back to direct write with a deadline
-		// so one slow peer cannot stall the caller.
-		_ = target.SetWriteDeadline(time.Now().Add(announceWriteDeadline))
-		_, writeErr := io.WriteString(target, line)
-		_ = target.SetWriteDeadline(time.Time{}) // clear deadline
-		if writeErr != nil {
-			log.Debug().Err(writeErr).Str("peer", remoteAddr).Msg("frame_inbound_write_failed")
-			return false
-		}
-		return true
+		// Tracked inbound connection MUST have a PeerConn. If it doesn't,
+		// the state is inconsistent — fail closed rather than bypassing
+		// the PeerConn writer with a raw conn.Write.
+		log.Warn().Str("peer", remoteAddr).Msg("frame_inbound_unregistered: tracked conn missing PeerConn — state inconsistency")
+		return false
 	default:
 		// enqueueDropped — buffer full or conn closing.
 		log.Debug().Str("peer", remoteAddr).Msg("frame_inbound_dropped")
@@ -250,18 +239,18 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	// Inbound connections — only if identity not already covered by an
 	// outbound session above (dedup by identity).
 	for conn := range s.inboundTracked {
-		info := s.connPeerInfo[conn]
-		if info == nil || info.identity == "" {
+		pc := s.inboundPeerConns[conn]
+		if pc == nil || pc.Identity() == "" {
 			continue
 		}
-		if _, dup := seen[info.identity]; dup {
+		if _, dup := seen[pc.Identity()]; dup {
 			continue
 		}
-		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
-			seen[info.identity] = struct{}{}
+		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
+			seen[pc.Identity()] = struct{}{}
 			targets = append(targets, routing.AnnounceTarget{
 				Address:  inboundConnKey(conn),
-				Identity: info.identity,
+				Identity: pc.Identity(),
 			})
 		}
 	}
@@ -825,11 +814,11 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 
 	// Inbound connections — synchronous write path.
 	for conn := range s.inboundTracked {
-		info := s.connPeerInfo[conn]
-		if info == nil || info.identity != peerIdentity {
+		pc := s.inboundPeerConns[conn]
+		if pc == nil || pc.Identity() != peerIdentity {
 			continue
 		}
-		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
+		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			return inboundConnKey(conn)
 		}
 	}
@@ -861,11 +850,11 @@ func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.P
 
 	// Inbound connections.
 	for conn := range s.inboundTracked {
-		info := s.connPeerInfo[conn]
-		if info == nil || info.identity != peerIdentity {
+		pc := s.inboundPeerConns[conn]
+		if pc == nil || pc.Identity() != peerIdentity {
 			continue
 		}
-		if sessionHasCap(info.capabilities, domain.CapMeshRelayV1) {
+		if sessionHasCap(pc.Capabilities(), domain.CapMeshRelayV1) {
 			return inboundConnKey(conn)
 		}
 	}
@@ -1014,9 +1003,9 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	}
 
 	// Inbound connection: match on the connection's transport address.
-	for conn, info := range s.connPeerInfo {
-		if info != nil && conn.RemoteAddr().String() == string(address) {
-			return info.identity
+	for conn, pc := range s.inboundPeerConns {
+		if pc != nil && conn.RemoteAddr().String() == string(address) {
+			return pc.Identity()
 		}
 	}
 

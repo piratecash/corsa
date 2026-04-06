@@ -1467,11 +1467,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c2.Close() }()
 
 		svc.mu.Lock()
-		svc.connPeerInfo[c1] = &connPeerHello{
-			address:      "inbound-peer-1",
-			identity:     "inbound-peer-1",
-			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		}
+		pc := newPeerConn(connID(1), c1, Inbound, PeerConnOpts{
+			Address:  domain.PeerAddress("inbound-peer-1"),
+			Identity: domain.PeerIdentity("inbound-peer-1"),
+			Caps:     []domain.Capability{domain.CapMeshRelayV1},
+		})
+		svc.inboundPeerConns[c1] = pc
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1481,7 +1482,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 
 		// Cleanup.
 		svc.mu.Lock()
-		delete(svc.connPeerInfo, c1)
+		delete(svc.inboundPeerConns, c1)
 		svc.mu.Unlock()
 	})
 
@@ -1500,11 +1501,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
-		svc.connPeerInfo[c1] = &connPeerHello{
-			address:      domain.PeerAddress(peerAddr),
-			identity:     domain.PeerIdentity(peerID),
-			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		}
+		pc := newPeerConn(connID(2), c1, Inbound, PeerConnOpts{
+			Address:  domain.PeerAddress(peerAddr),
+			Identity: domain.PeerIdentity(peerID),
+			Caps:     []domain.Capability{domain.CapMeshRelayV1},
+		})
+		svc.inboundPeerConns[c1] = pc
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1515,7 +1517,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress(peerAddr))
-		delete(svc.connPeerInfo, c1)
+		delete(svc.inboundPeerConns, c1)
 		svc.mu.Unlock()
 	})
 
@@ -1532,11 +1534,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
-		svc.connPeerInfo[c1] = &connPeerHello{
-			address:      "inbound-peer-2",
-			identity:     "inbound-id-2",
-			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		}
+		pc := newPeerConn(connID(3), c1, Inbound, PeerConnOpts{
+			Address:  domain.PeerAddress("inbound-peer-2"),
+			Identity: domain.PeerIdentity("inbound-id-2"),
+			Caps:     []domain.Capability{domain.CapMeshRelayV1},
+		})
+		svc.inboundPeerConns[c1] = pc
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1547,7 +1550,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-peer"))
-		delete(svc.connPeerInfo, c1)
+		delete(svc.inboundPeerConns, c1)
 		svc.mu.Unlock()
 	})
 
@@ -1567,11 +1570,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
-		svc.connPeerInfo[c1] = &connPeerHello{
-			address:      "127.0.0.1:64646", // NATed listen address
-			identity:     domain.PeerIdentity(sharedID),
-			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		}
+		pc := newPeerConn(connID(4), c1, Inbound, PeerConnOpts{
+			Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
+			Identity: domain.PeerIdentity(sharedID),
+			Caps:     []domain.Capability{domain.CapMeshRelayV1},
+		})
+		svc.inboundPeerConns[c1] = pc
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1582,7 +1586,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-addr-X"))
-		delete(svc.connPeerInfo, c1)
+		delete(svc.inboundPeerConns, c1)
 		svc.mu.Unlock()
 	})
 }

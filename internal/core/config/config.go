@@ -39,6 +39,7 @@ type Node struct {
 	QueueStatePath   string
 	PeersStatePath   string
 	ChatLogDir       string // directory for chatlog .jsonl files (defaults to ".corsa")
+	DownloadDir      string // directory for downloaded files (defaults to "<DataDir>/downloads")
 	ProxyAddress     string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
 	Type             NodeType
 	ListenerEnabled  bool
@@ -83,6 +84,7 @@ func Default() Config {
 	queueStatePath := envOrDefault("CORSA_QUEUE_STATE_PATH", defaultQueueStatePath(listenAddress))
 	peersStatePath := envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress))
 	chatLogDir := envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir())
+	downloadDir := envOrDefault("CORSA_DOWNLOAD_DIR", "")
 	proxyAddress := envOrDefault("CORSA_PROXY", "")
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
@@ -105,6 +107,7 @@ func Default() Config {
 			QueueStatePath:   queueStatePath,
 			PeersStatePath:   peersStatePath,
 			ChatLogDir:       chatLogDir,
+			DownloadDir:      downloadDir,
 			ProxyAddress:     proxyAddress,
 			Type:             nodeType,
 			ListenerEnabled:  listenerEnabled,
@@ -180,6 +183,22 @@ func (n Node) EffectiveChatLogDir() string {
 		return n.ChatLogDir
 	}
 	return defaultChatLogDir()
+}
+
+// EffectiveDataDir returns the base data directory for all node-local state
+// (transmit files, transfers metadata, downloads). It reuses EffectiveChatLogDir
+// so that CORSA_CHATLOG_DIR moves everything together.
+func (n Node) EffectiveDataDir() string {
+	return n.EffectiveChatLogDir()
+}
+
+// EffectiveDownloadDir returns the directory where received files are saved.
+// Override via CORSA_DOWNLOAD_DIR environment variable.
+func (n Node) EffectiveDownloadDir() string {
+	if strings.TrimSpace(n.DownloadDir) != "" {
+		return n.DownloadDir
+	}
+	return filepath.Join(n.EffectiveDataDir(), "downloads")
 }
 
 func envOrDefault(key, fallback string) string {

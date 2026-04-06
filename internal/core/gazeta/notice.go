@@ -1,10 +1,7 @@
 package gazeta
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdh"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +9,7 @@ import (
 	"time"
 
 	"corsa/internal/core/identity"
+	"corsa/internal/crypto/ecdhgcm"
 )
 
 type Notice struct {
@@ -33,6 +31,8 @@ type sealedNotice struct {
 	Data      string `json:"data"`
 }
 
+const gazetaKeyLabel = "gazeta-v1"
+
 func EncryptForRecipient(recipientBoxKeyBase64, topic, from, body string) (string, error) {
 	recipientBoxKey, err := base64.StdEncoding.DecodeString(recipientBoxKeyBase64)
 	if err != nil {
@@ -45,31 +45,6 @@ func EncryptForRecipient(recipientBoxKeyBase64, topic, from, body string) (strin
 		return "", fmt.Errorf("create recipient public key: %w", err)
 	}
 
-	ephemeralKey, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		return "", fmt.Errorf("generate ephemeral key: %w", err)
-	}
-
-	sharedSecret, err := ephemeralKey.ECDH(recipientKey)
-	if err != nil {
-		return "", fmt.Errorf("derive shared secret: %w", err)
-	}
-
-	block, err := aes.NewCipher(deriveKey(sharedSecret))
-	if err != nil {
-		return "", fmt.Errorf("create aes cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("create gcm: %w", err)
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("generate nonce: %w", err)
-	}
-
 	plain, err := json.Marshal(PlainNotice{
 		Topic:     topic,
 		From:      from,
@@ -80,11 +55,15 @@ func EncryptForRecipient(recipientBoxKeyBase64, topic, from, body string) (strin
 		return "", fmt.Errorf("marshal plain notice: %w", err)
 	}
 
-	ciphertext := gcm.Seal(nil, nonce, plain, nil)
+	box, err := ecdhgcm.Seal(recipientKey, plain, gazetaKeyLabel)
+	if err != nil {
+		return "", err
+	}
+
 	sealed, err := json.Marshal(sealedNotice{
-		Ephemeral: base64.RawURLEncoding.EncodeToString(ephemeralKey.PublicKey().Bytes()),
-		Nonce:     base64.RawURLEncoding.EncodeToString(nonce),
-		Data:      base64.RawURLEncoding.EncodeToString(ciphertext),
+		Ephemeral: base64.RawURLEncoding.EncodeToString(box.EphemeralPub),
+		Nonce:     base64.RawURLEncoding.EncodeToString(box.Nonce),
+		Data:      base64.RawURLEncoding.EncodeToString(box.Ciphertext),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal sealed notice: %w", err)
@@ -104,42 +83,28 @@ func DecryptForIdentity(id *identity.Identity, encoded string) (*PlainNotice, er
 		return nil, fmt.Errorf("unmarshal sealed notice: %w", err)
 	}
 
-	curve := ecdh.X25519()
 	ephemeralBytes, err := base64.RawURLEncoding.DecodeString(sealed.Ephemeral)
 	if err != nil {
 		return nil, fmt.Errorf("decode ephemeral key: %w", err)
-	}
-
-	ephemeralKey, err := curve.NewPublicKey(ephemeralBytes)
-	if err != nil {
-		return nil, fmt.Errorf("restore ephemeral key: %w", err)
-	}
-
-	sharedSecret, err := id.BoxPrivateKey.ECDH(ephemeralKey)
-	if err != nil {
-		return nil, fmt.Errorf("derive shared secret: %w", err)
-	}
-
-	block, err := aes.NewCipher(deriveKey(sharedSecret))
-	if err != nil {
-		return nil, fmt.Errorf("create aes cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("create gcm: %w", err)
 	}
 
 	nonce, err := base64.RawURLEncoding.DecodeString(sealed.Nonce)
 	if err != nil {
 		return nil, fmt.Errorf("decode nonce: %w", err)
 	}
+
 	ciphertext, err := base64.RawURLEncoding.DecodeString(sealed.Data)
 	if err != nil {
 		return nil, fmt.Errorf("decode ciphertext: %w", err)
 	}
 
-	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	box := &ecdhgcm.SealedBox{
+		EphemeralPub: ephemeralBytes,
+		Nonce:        nonce,
+		Ciphertext:   ciphertext,
+	}
+
+	plain, err := ecdhgcm.Open(id.BoxPrivateKey, box, gazetaKeyLabel)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt notice: %w", err)
 	}
@@ -155,9 +120,4 @@ func DecryptForIdentity(id *identity.Identity, encoded string) (*PlainNotice, er
 func ID(ciphertext string) string {
 	sum := sha256.Sum256([]byte(ciphertext))
 	return base64.RawURLEncoding.EncodeToString(sum[:16])
-}
-
-func deriveKey(sharedSecret []byte) []byte {
-	sum := sha256.Sum256(append([]byte("gazeta-v1"), sharedSecret...))
-	return sum[:]
 }

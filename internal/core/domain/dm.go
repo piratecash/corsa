@@ -42,7 +42,13 @@ type DMRecipient struct {
 // OutgoingDM is the plaintext content to encrypt and send as a direct message.
 // New fields (reactions, forwarding, etc.) are added here without changing
 // function signatures across the call chain.
+//
+// For file_announce DMs: Command is set to FileActionAnnounce and
+// CommandData holds the JSON-encoded FileAnnouncePayload. Body contains
+// either a user-provided caption or FileDMBodySentinel.
 type OutgoingDM struct {
-	Body    string
-	ReplyTo MessageID
+	Body        string
+	ReplyTo     MessageID
+	Command     FileAction // e.g. FileActionAnnounce for file_announce DMs; empty for regular DMs
+	CommandData string     // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
 }

@@ -8,6 +8,8 @@ The relay protocol enables hop-by-hop message forwarding through intermediate no
 
 The relay subsystem is gated by the `mesh_relay_v1` capability negotiated during handshake. Nodes without this capability continue to use the existing gossip-based delivery. Legacy peers never receive `relay_message` or `relay_hop_ack` frames.
 
+**Scope:** The relay protocol handles DM delivery only (`topic == "dm"`). File transfer operations use a separate `FileCommandFrame` protocol with its own routing through `file_router` (capability `file_transfer_v1`). FileCommandFrame uses best-route forwarding with hop TTL, ed25519 authentication, and nonce-based anti-replay. See [file_transfer.md](file_transfer.md) for the full specification.
+
 ### Commands
 
 #### relay_message (peer → peer)
@@ -410,6 +412,8 @@ All handshake and session timeouts are defined as named constants in `admission.
 Протокол ретрансляции обеспечивает пошаговую пересылку сообщений через промежуточные узлы. Когда узел A хочет отправить DM узлу F, но ни один из прямых пиров A не знает F, сообщение может пройти через несколько промежуточных узлов (A→B→C→D→E→F) пока не достигнет получателя.
 
 Подсистема ретрансляции управляется capability `mesh_relay_v1`, согласованным при рукопожатии. Узлы без этой capability продолжают использовать существующую gossip-доставку. Legacy-пиры никогда не получают фреймы `relay_message` или `relay_hop_ack`.
+
+**Область применения:** Протокол ретрансляции обрабатывает только DM-доставку (`topic == "dm"`). Файловые операции используют отдельный протокол `FileCommandFrame` с собственной маршрутизацией через `file_router` (capability `file_transfer_v1`). FileCommandFrame использует best-route пересылку с hop TTL, ed25519-аутентификацией и nonce-основанной anti-replay защитой. Полная спецификация — в [file_transfer.md](file_transfer.md).
 
 ### Команды
 

@@ -666,34 +666,27 @@ func TestFrameEndpointDispatchesThroughCommandTable(t *testing.T) {
 	}
 }
 
-// TestFrameEndpointUnknownTypeFallsToNode verifies that unregistered frame types
-// are forwarded to HandleLocalFrame with all wire fields preserved.
-func TestFrameEndpointUnknownTypeFallsToNode(t *testing.T) {
-	var receivedFrame protocol.Frame
+// TestFrameEndpointRejectsUnknownType verifies that unregistered frame types
+// are rejected instead of being forwarded to HandleLocalFrame. Previously,
+// unknown types were forwarded, which allowed HTTP clients to inject network-
+// level frames (relay_message, push_message, subscribe_inbox) bypassing P2P
+// authentication. Now only CommandTable-registered types are accepted.
+func TestFrameEndpointRejectsUnknownType(t *testing.T) {
 	node := &mockNodeProvider{
 		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			receivedFrame = frame
-			return protocol.Frame{Type: "custom_response"}
+			t.Fatal("HandleLocalFrame should not be called for unknown frame types")
+			return protocol.Frame{}
 		},
 	}
 	server := setupTestServerWithNode(t, node)
 
-	code, result := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
+	code, _ := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
 		"type":           "custom_frame_type",
 		"client":         "external-tool",
 		"client_version": "5.0",
 	})
 
-	expectStatusCode(t, code, 200)
-	expectField(t, result, "type", "custom_response")
-
-	// Unknown frame type — forwarded to HandleLocalFrame with wire fields preserved.
-	if receivedFrame.Client != "external-tool" {
-		t.Errorf("expected Client='external-tool' preserved, got %q", receivedFrame.Client)
-	}
-	if receivedFrame.ClientVersion != "5.0" {
-		t.Errorf("expected ClientVersion='5.0' preserved, got %q", receivedFrame.ClientVersion)
-	}
+	expectStatusCode(t, code, 400)
 }
 
 // TestFrameEndpointChatlogDispatch verifies that chatlog frame types are dispatched

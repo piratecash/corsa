@@ -17,6 +17,12 @@ const (
 	// CapMeshRoutingV1 gates distance-vector routing via announce_routes
 	// frames (Phase 1.2).
 	CapMeshRoutingV1 Capability = "mesh_routing_v1"
+
+	// CapFileTransferV1 gates file transfer commands (Iteration 21).
+	// Only peers advertising this capability receive or relay
+	// FileCommandFrame traffic. The file_announce DM is not gated
+	// because it travels through the standard DM pipeline.
+	CapFileTransferV1 Capability = "file_transfer_v1"
 )
 
 // String returns the stable string label for the capability.
@@ -28,7 +34,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapMeshRelayV1, CapMeshRoutingV1:
+	case CapMeshRelayV1, CapMeshRoutingV1, CapFileTransferV1:
 		return c, true
 	default:
 		return "", false

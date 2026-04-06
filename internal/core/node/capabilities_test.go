@@ -10,7 +10,7 @@ import (
 
 func TestLocalCapabilities(t *testing.T) {
 	caps := localCapabilities()
-	expected := []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1}
+	expected := []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1, domain.CapFileTransferV1}
 	if len(caps) != len(expected) {
 		t.Fatalf("localCapabilities() = %v, want %v", caps, expected)
 	}
@@ -23,7 +23,7 @@ func TestLocalCapabilities(t *testing.T) {
 
 func TestLocalCapabilityStrings(t *testing.T) {
 	strs := localCapabilityStrings()
-	expected := []string{"mesh_relay_v1", "mesh_routing_v1"}
+	expected := []string{"mesh_relay_v1", "mesh_routing_v1", "file_transfer_v1"}
 	if len(strs) != len(expected) {
 		t.Fatalf("localCapabilityStrings() = %v, want %v", strs, expected)
 	}
@@ -143,13 +143,14 @@ func TestConnHasCapability(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 
 	svc := &Service{
-		connPeerInfo: map[net.Conn]*connPeerHello{
-			serverConn: {
-				address:      "10.0.0.1:64646",
-				capabilities: []domain.Capability{domain.CapMeshRelayV1},
-			},
-		},
+		inboundPeerConns: make(map[net.Conn]*PeerConn),
 	}
+
+	pc := newPeerConn(connID(1), serverConn, Inbound, PeerConnOpts{
+		Address: domain.PeerAddress("10.0.0.1:64646"),
+		Caps:    []domain.Capability{domain.CapMeshRelayV1},
+	})
+	svc.inboundPeerConns[serverConn] = pc
 
 	if !svc.connHasCapability(serverConn, domain.CapMeshRelayV1) {
 		t.Fatal("serverConn should have mesh_relay_v1")
@@ -168,8 +169,11 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 
 	svc := &Service{
-		connPeerInfo: make(map[net.Conn]*connPeerHello),
+		inboundPeerConns: make(map[net.Conn]*PeerConn),
 	}
+
+	pc := newPeerConn(connID(1), serverConn, Inbound, PeerConnOpts{})
+	svc.inboundPeerConns[serverConn] = pc
 
 	hello := protocol.Frame{
 		Type:         "hello",
@@ -178,15 +182,15 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 	}
 	svc.rememberConnPeerAddr(serverConn, hello)
 
-	info := svc.connPeerInfo[serverConn]
-	if info == nil {
-		t.Fatal("connPeerInfo should be set after rememberConnPeerAddr")
+	caps := pc.Capabilities()
+	if caps == nil {
+		t.Fatal("PeerConn capabilities should be set after rememberConnPeerAddr")
 	}
 
-	// localCapabilities() returns [mesh_relay_v1, mesh_routing_v1] (Phase 1.2).
+	// localCapabilities() returns [mesh_relay_v1, mesh_routing_v1, file_transfer_v1].
 	// The remote hello advertises ["mesh_relay_v1", "mesh_routing_v1"].
-	// The intersection should contain both.
-	if len(info.capabilities) != 2 || info.capabilities[0] != domain.CapMeshRelayV1 || info.capabilities[1] != domain.CapMeshRoutingV1 {
-		t.Fatalf("expected [mesh_relay_v1, mesh_routing_v1], got %v", info.capabilities)
+	// The intersection should contain only the two common capabilities.
+	if len(caps) != 2 || caps[0] != domain.CapMeshRelayV1 || caps[1] != domain.CapMeshRoutingV1 {
+		t.Fatalf("expected [mesh_relay_v1, mesh_routing_v1], got %v", caps)
 	}
 }

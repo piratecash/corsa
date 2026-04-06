@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -145,6 +146,49 @@ func isRelayFrame(frameType string) bool {
 	return frameType == "relay_message" || frameType == "relay_hop_ack"
 }
 
+// peekFrameType extracts the "type" field value from a raw JSON line without
+// full parsing. Returns an empty string if the type field is not found or the
+// line is not valid JSON. This is used in the inbound read loop to classify
+// frames before applying rate limiters — avoiding the cost of json.Unmarshal
+// for every inbound frame just to decide which rate bucket to charge.
+//
+// The scanner looks for the first occurrence of `"type":"<value>"` allowing
+// optional whitespace around the colon. This covers all well-formed frames
+// produced by Corsa peers. If `"type"` appears inside a string value before
+// the actual field, the scanner may return "" — this fails safely toward
+// applying rate limiting (not exempting).
+func peekFrameType(line string) string {
+	const key = `"type"`
+	idx := strings.Index(line, key)
+	if idx < 0 {
+		return ""
+	}
+
+	// Skip past `"type"` and any whitespace + colon.
+	pos := idx + len(key)
+	for pos < len(line) && (line[pos] == ' ' || line[pos] == '\t') {
+		pos++
+	}
+	if pos >= len(line) || line[pos] != ':' {
+		return ""
+	}
+	pos++ // skip ':'
+	for pos < len(line) && (line[pos] == ' ' || line[pos] == '\t') {
+		pos++
+	}
+	if pos >= len(line) || line[pos] != '"' {
+		return ""
+	}
+	pos++ // skip opening quote
+
+	// Read until closing quote.
+	end := strings.IndexByte(line[pos:], '"')
+	if end < 0 {
+		return ""
+	}
+	return line[pos : pos+end]
+}
+
 // errFrameTooLarge is returned by readFrameLine when the accumulated line
 // exceeds the caller-specified limit before a newline is found.
 var errFrameTooLarge = fmt.Errorf("frame line exceeds size limit")
@@ -225,6 +269,16 @@ const syncHandshakeTimeout = 1500 * time.Millisecond
 // frames on an established peer session (relay_message, relay_hop_ack, and
 // peerSessionRequest).
 const sessionWriteTimeout = 3 * time.Second
+
+// inboundReadTimeout is the maximum time an inbound connection may remain
+// idle (no complete frame received) before the server closes it. This
+// prevents Slowloris-style attacks where a peer opens a connection and
+// trickles data to hold the connection slot indefinitely.
+//
+// Legitimate peers send heartbeat pings every 30 seconds. A 120-second
+// timeout allows for 4 missed heartbeats before disconnection, which is
+// generous even on high-latency links.
+const inboundReadTimeout = 120 * time.Second
 
 // NOTE: relay-specific frame validation (ID, recipient, topic checks) is
 // handled inside handleRelayMessage itself. A separate validateRelayMessage

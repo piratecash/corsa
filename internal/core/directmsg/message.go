@@ -1,12 +1,8 @@
 package directmsg
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,12 +10,15 @@ import (
 
 	"corsa/internal/core/domain"
 	"corsa/internal/core/identity"
+	"corsa/internal/crypto/ecdhgcm"
 )
 
 type PlainMessage struct {
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
-	ReplyTo   string    `json:"reply_to,omitempty"`
+	Body        string    `json:"body"`
+	CreatedAt   time.Time `json:"created_at"`
+	ReplyTo     string    `json:"reply_to,omitempty"`
+	Command     string    `json:"command,omitempty"`      // e.g. "file_announce"; empty for regular DMs
+	CommandData string    `json:"command_data,omitempty"` // JSON-encoded payload; empty for regular DMs
 }
 
 type sealedEnvelope struct {
@@ -50,9 +49,11 @@ func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipi
 	}
 
 	plain, err := json.Marshal(PlainMessage{
-		Body:      msg.Body,
-		CreatedAt: time.Now().UTC(),
-		ReplyTo:   string(msg.ReplyTo),
+		Body:        msg.Body,
+		CreatedAt:   time.Now().UTC(),
+		ReplyTo:     string(msg.ReplyTo),
+		Command:     string(msg.Command),
+		CommandData: msg.CommandData,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal direct message: %w", err)
@@ -199,66 +200,25 @@ func decodeSenderPublicKey(senderAddress, encoded string) (ed25519.PublicKey, er
 	return publicKey, nil
 }
 
+const dmKeyLabel = "corsa-dm-v1"
+
 func sealForPublicKey(publicKey *ecdh.PublicKey, plain []byte) (sealedPart, error) {
-	curve := ecdh.X25519()
-	ephemeralKey, err := curve.GenerateKey(rand.Reader)
+	box, err := ecdhgcm.Seal(publicKey, plain, dmKeyLabel)
 	if err != nil {
-		return sealedPart{}, fmt.Errorf("generate ephemeral key: %w", err)
+		return sealedPart{}, err
 	}
 
-	sharedSecret, err := ephemeralKey.ECDH(publicKey)
-	if err != nil {
-		return sealedPart{}, fmt.Errorf("derive shared secret: %w", err)
-	}
-
-	block, err := aes.NewCipher(deriveKey(sharedSecret))
-	if err != nil {
-		return sealedPart{}, fmt.Errorf("create aes cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return sealedPart{}, fmt.Errorf("create gcm: %w", err)
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return sealedPart{}, fmt.Errorf("generate nonce: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nil, nonce, plain, nil)
 	return sealedPart{
-		Ephemeral: base64.RawURLEncoding.EncodeToString(ephemeralKey.PublicKey().Bytes()),
-		Nonce:     base64.RawURLEncoding.EncodeToString(nonce),
-		Data:      base64.RawURLEncoding.EncodeToString(ciphertext),
+		Ephemeral: base64.RawURLEncoding.EncodeToString(box.EphemeralPub),
+		Nonce:     base64.RawURLEncoding.EncodeToString(box.Nonce),
+		Data:      base64.RawURLEncoding.EncodeToString(box.Ciphertext),
 	}, nil
 }
 
 func openPart(id *identity.Identity, part sealedPart) (*PlainMessage, error) {
-	curve := ecdh.X25519()
 	ephemeralBytes, err := base64.RawURLEncoding.DecodeString(part.Ephemeral)
 	if err != nil {
 		return nil, fmt.Errorf("decode ephemeral key: %w", err)
-	}
-
-	ephemeralKey, err := curve.NewPublicKey(ephemeralBytes)
-	if err != nil {
-		return nil, fmt.Errorf("restore ephemeral key: %w", err)
-	}
-
-	sharedSecret, err := id.BoxPrivateKey.ECDH(ephemeralKey)
-	if err != nil {
-		return nil, fmt.Errorf("derive shared secret: %w", err)
-	}
-
-	block, err := aes.NewCipher(deriveKey(sharedSecret))
-	if err != nil {
-		return nil, fmt.Errorf("create aes cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("create gcm: %w", err)
 	}
 
 	nonce, err := base64.RawURLEncoding.DecodeString(part.Nonce)
@@ -271,7 +231,13 @@ func openPart(id *identity.Identity, part sealedPart) (*PlainMessage, error) {
 		return nil, fmt.Errorf("decode ciphertext: %w", err)
 	}
 
-	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	box := &ecdhgcm.SealedBox{
+		EphemeralPub: ephemeralBytes,
+		Nonce:        nonce,
+		Ciphertext:   ciphertext,
+	}
+
+	plain, err := ecdhgcm.Open(id.BoxPrivateKey, box, dmKeyLabel)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt payload: %w", err)
 	}
@@ -282,9 +248,4 @@ func openPart(id *identity.Identity, part sealedPart) (*PlainMessage, error) {
 	}
 
 	return &message, nil
-}
-
-func deriveKey(sharedSecret []byte) []byte {
-	sum := sha256.Sum256(append([]byte("corsa-dm-v1"), sharedSecret...))
-	return sum[:]
 }

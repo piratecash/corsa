@@ -163,7 +163,7 @@ Validation (synchronous, returns 400 on failure):
 - `reply_to` must be a valid UUID v4 string when present.
 - When chatlog is available (desktop mode), `reply_to` is checked against the conversation history — referencing a non-existent message is rejected before queueing.
 
-Response: `{"status": "queued", "to": "address"}`. The message is accepted for async delivery via DMRouter. Actual delivery happens in a background goroutine — check delivery receipts for confirmation.
+Response: `{"status": "pending", "to": "address"}`. The message is accepted for async delivery via DMRouter. Actual delivery happens in a background goroutine — check delivery receipts for confirmation.
 
 #### CLI
 
@@ -354,7 +354,7 @@ fetch_dm_headers
 - `reply_to` должен быть валидным UUID v4, если указан.
 - При наличии chatlog (desktop-режим) `reply_to` проверяется по истории переписки — ссылка на несуществующее сообщение отклоняется до постановки в очередь.
 
-Ответ: `{"status": "queued", "to": "address"}`. Сообщение принято для асинхронной доставки через DMRouter. Фактическая отправка происходит в фоновой goroutine — используйте delivery receipts для подтверждения.
+Ответ: `{"status": "pending", "to": "address"}`. Сообщение принято для асинхронной доставки через DMRouter. Фактическая отправка происходит в фоновой goroutine — используйте delivery receipts для подтверждения.
 
 #### CLI
 

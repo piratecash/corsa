@@ -12,8 +12,9 @@ import (
 //
 //   - mesh_relay_v1: hop-by-hop relay (relay_message frames)
 //   - mesh_routing_v1: distance-vector routing via announce_routes frames (Phase 1.2)
+//   - file_transfer_v1: file transfer commands (Iteration 21)
 func localCapabilities() []domain.Capability {
-	return []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1}
+	return []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1, domain.CapFileTransferV1}
 }
 
 // localCapabilityStrings returns the wire-format string list for the hello/
@@ -64,15 +65,10 @@ func (s *Service) sessionHasCapability(address domain.PeerAddress, capability do
 // capability in its negotiated set (stored during the hello handshake).
 func (s *Service) connHasCapability(conn net.Conn, capability domain.Capability) bool {
 	s.mu.RLock()
-	info := s.connPeerInfo[conn]
+	pc := s.inboundPeerConns[conn]
 	s.mu.RUnlock()
-	if info == nil {
+	if pc == nil {
 		return false
 	}
-	for _, c := range info.capabilities {
-		if c == capability {
-			return true
-		}
-	}
-	return false
+	return pc.HasCapability(capability)
 }

@@ -36,17 +36,21 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *Meter
 
 // isConnTrafficTrustedLocked returns true when the connection's claimed
 // peer address can be trusted for traffic attribution.  On the session-auth
-// path connAuth exists and we require Verified==true; on the legacy
-// (no-session-auth) path connAuth is nil and attribution is allowed.
+// path PeerConn.auth exists and we require Verified==true; on the legacy
+// (no-session-auth) path auth is nil and attribution is allowed.
 // Caller must hold s.mu (read or write).
 func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
-	state := s.connAuth[conn]
+	pc := s.inboundPeerConns[conn]
+	if pc == nil {
+		return false
+	}
+	state := pc.Auth()
 	return state == nil || state.Verified
 }
 
 // accumulateInboundTraffic adds byte counters from an inbound MeteredConn
 // to the peer's cumulative traffic totals. The peer address is resolved
-// from the connPeerInfo map populated during the hello handshake.
+// from the PeerConn populated during the hello handshake.
 // Traffic is only attributed when the connection's identity has been
 // verified (or no session-auth was required), preventing unauthenticated
 // clients from spoofing another peer's traffic counters.
@@ -63,11 +67,11 @@ func (s *Service) accumulateInboundTraffic(mc *MeteredConn) {
 	if !s.isConnTrafficTrustedLocked(mc) {
 		return
 	}
-	info := s.connPeerInfo[mc]
-	if info == nil || info.address == "" {
+	pc := s.inboundPeerConns[mc]
+	if pc == nil || pc.Address() == "" {
 		return
 	}
-	address := s.resolveHealthAddress(info.address)
+	address := s.resolveHealthAddress(pc.Address())
 	health := s.ensurePeerHealthLocked(address)
 	health.BytesSent += sent
 	health.BytesReceived += received
@@ -97,11 +101,11 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 		if !s.isConnTrafficTrustedLocked(conn) {
 			continue
 		}
-		info := s.connPeerInfo[conn]
-		if info == nil || info.address == "" {
+		pc := s.inboundPeerConns[conn]
+		if pc == nil || pc.Address() == "" {
 			continue
 		}
-		address := s.resolveHealthAddress(info.address)
+		address := s.resolveHealthAddress(pc.Address())
 		lt := result[address]
 		lt.sent += mc.BytesWritten()
 		lt.received += mc.BytesRead()

@@ -343,7 +343,7 @@ func TestSystemHelpIncludesAllCategories(t *testing.T) {
 	}
 
 	// Verify we have commands from different categories
-	expectedCategories := []string{"system", "network", "identity", "message", "chatlog", "notice"}
+	expectedCategories := []string{"system", "network", "identity", "message", "file", "chatlog", "notice"}
 	for _, cat := range expectedCategories {
 		if _, exists := categories[cat]; !exists {
 			t.Errorf("expected category %q not found", cat)

@@ -28,15 +28,15 @@ const (
 // node. Each node knows only its own previous_hop and forwarded_to —
 // no single message reveals the full path.
 type relayForwardState struct {
-	MessageID           string
-	PreviousHop         domain.PeerAddress  // who sent this relay to me (transport address)
-	ReceiptForwardTo    domain.PeerAddress  // = PreviousHop (where to send receipt back)
+	MessageID            string
+	PreviousHop          domain.PeerAddress   // who sent this relay to me (transport address)
+	ReceiptForwardTo     domain.PeerAddress   // = PreviousHop (where to send receipt back)
 	ForwardedTo          domain.PeerAddress   // who I forwarded to (for loop detection)
 	AbandonedForwardedTo []domain.PeerAddress // old ForwardedTo values from reroutes (stale ack rejection)
-	Recipient           domain.PeerIdentity // final recipient identity (for hop_ack route confirmation)
-	RouteOrigin         domain.PeerIdentity // route origin from routing decision (for triple-scoped hop_ack)
-	HopCount            int                 // incremented on each hop
-	RemainingTTL        int                 // seconds until cleanup (decremented by ticker)
+	Recipient            domain.PeerIdentity  // final recipient identity (for hop_ack route confirmation)
+	RouteOrigin          domain.PeerIdentity  // route origin from routing decision (for triple-scoped hop_ack)
+	HopCount             int                  // incremented on each hop
+	RemainingTTL         int                  // seconds until cleanup (decremented by ticker)
 }
 
 // relayStateStore is a concurrency-safe store for relay forwarding state.
@@ -894,15 +894,12 @@ func (s *Service) countCapablePeers(cap domain.Capability) int {
 		}
 	}
 
-	for _, info := range s.connPeerInfo {
-		if _, dup := seen[info.identity]; dup {
+	for _, pc := range s.inboundPeerConns {
+		if _, dup := seen[pc.Identity()]; dup {
 			continue
 		}
-		for _, c := range info.capabilities {
-			if c == cap {
-				seen[info.identity] = struct{}{}
-				break
-			}
+		if pc.HasCapability(cap) {
+			seen[pc.Identity()] = struct{}{}
 		}
 	}
 

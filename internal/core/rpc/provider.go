@@ -1,6 +1,8 @@
 package rpc
 
 import (
+	"encoding/json"
+
 	"corsa/internal/core/domain"
 	"corsa/internal/core/protocol"
 	"corsa/internal/core/routing"
@@ -13,6 +15,29 @@ type NodeProvider interface {
 	HandleLocalFrame(frame protocol.Frame) protocol.Frame
 	Address() string
 	ClientVersion() string
+	// FetchFileTransfers returns a JSON-encoded list of active and pending
+	// sender/receiver file transfers. Terminal states are excluded.
+	FetchFileTransfers() (json.RawMessage, error)
+
+	// FetchFileMappings returns a JSON-encoded list of active and pending
+	// sender file mappings (TransmitPath is excluded from the output).
+	FetchFileMappings() (json.RawMessage, error)
+
+	// RetryFileChunk forces an immediate retry of a stalled chunk request
+	// for the given file ID.
+	RetryFileChunk(fileID domain.FileID) error
+
+	// StartFileDownload begins downloading a file that was previously
+	// announced via file_announce DM. Sends the first chunk_request.
+	StartFileDownload(fileID domain.FileID) error
+
+	// CancelFileDownload aborts an active download, deletes partial data,
+	// and resets the receiver mapping to available state.
+	CancelFileDownload(fileID domain.FileID) error
+
+	// RestartFileDownload resets a failed download back to available state
+	// so the user can re-initiate the download.
+	RestartFileDownload(fileID domain.FileID) error
 }
 
 // ChatlogProvider abstracts access to chatlog operations.
@@ -31,6 +56,14 @@ type ChatlogProvider interface {
 type DMRouterProvider interface {
 	Snapshot() service.RouterSnapshot
 	SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM)
+	// SendFileAnnounce validates the transmit file, then asynchronously
+	// sends a file_announce DM and registers the sender-side mapping
+	// using the real DM message ID. Returns an error synchronously if
+	// pre-send validation fails (e.g. transmit file missing).
+	// onAsyncFailure (may be nil) is called inside the send goroutine
+	// when the async delivery fails, giving the caller a chance to
+	// restore UI state (e.g. re-attach the file for retry).
+	SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func()) error
 }
 
 // MetricsProvider abstracts access to the metrics collector.

@@ -43,7 +43,7 @@ graph TB
 
     subgraph Desktop_Providers["Desktop Providers (optional, nil on standalone node)"]
         CP["ChatlogProvider<br/>FetchChatlog() · FetchChatlogPreviews() · FetchConversations()"]
-        DP["DMRouterProvider<br/>Snapshot() · SendMessage()"]
+        DP["DMRouterProvider<br/>Snapshot() · SendMessage() · SendFileAnnounce()"]
         DC["DesktopClient<br/>(chatlog.Store / SQLite)"]
         DMR["DMRouter<br/>(UI state, conversations,<br/>message routing)"]
     end
@@ -470,7 +470,7 @@ graph TB
 
     subgraph Desktop_Providers["Desktop-провайдеры (опционально, nil на standalone-ноде)"]
         CP["ChatlogProvider<br/>FetchChatlog() · FetchChatlogPreviews() · FetchConversations()"]
-        DP["DMRouterProvider<br/>Snapshot() · SendMessage()"]
+        DP["DMRouterProvider<br/>Snapshot() · SendMessage() · SendFileAnnounce()"]
         DC["DesktopClient<br/>(chatlog.Store / SQLite)"]
         DMR["DMRouter<br/>(состояние UI, разговоры,<br/>маршрутизация сообщений)"]
     end

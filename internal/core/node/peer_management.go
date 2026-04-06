@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -285,7 +286,7 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 // For inbound connections the actual TCP remote IP is used instead of the
 // peer's self-reported overlay address.  A NATed peer or a peer that
 // advertises a different endpoint would not reserve its real host if we
-// relied on connPeerInfo.address, allowing a second outbound connection
+// relied on PeerConn.Address(), allowing a second outbound connection
 // to the same machine.
 // Caller must hold s.mu at least for read.
 func (s *Service) connectedHostsLocked() map[string]struct{} {
@@ -306,8 +307,8 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
 	for conn := range s.inboundConns {
-		if info := s.connPeerInfo[conn]; info != nil {
-			if !info.lastActivity.IsZero() && now.Sub(info.lastActivity) >= stallThreshold {
+		if pc := s.inboundPeerConns[conn]; pc != nil {
+			if la := pc.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
 				continue
 			}
 		}
@@ -1192,6 +1193,16 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	for {
 		line, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
+			if err == io.EOF {
+				log.Debug().Str("peer", string(session.address)).
+					Msg("peer_session_read: remote closed connection (EOF)")
+			} else if errors.Is(err, errFrameTooLarge) {
+				log.Debug().Str("peer", string(session.address)).
+					Msg("peer_session_read: frame exceeds max response size")
+			} else {
+				log.Debug().Err(err).Str("peer", string(session.address)).
+					Msg("peer_session_read: read error")
+			}
 			select {
 			case session.errCh <- err:
 			default:
@@ -1199,8 +1210,23 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			return
 		}
 
-		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
+		trimmed := strings.TrimSpace(line)
+		frame, err := protocol.ParseFrameLine(trimmed)
 		if err != nil {
+			continue
+		}
+
+		// file_command frames use their own wire format (FileCommandFrame)
+		// and require the raw JSON for decryption and routing. Dispatch them
+		// directly to the file router instead of going through the
+		// inboxCh → handlePeerSessionFrame path, which only has access to
+		// the parsed protocol.Frame (missing src/dst/payload fields).
+		if frame.Type == "file_command" {
+			s.markPeerRead(session.address, frame)
+			s.markPeerUsefulReceive(session.address)
+			if s.sessionHasCapability(session.address, domain.CapFileTransferV1) {
+				s.handleFileCommandFrame(json.RawMessage(trimmed))
+			}
 			continue
 		}
 
@@ -1503,6 +1529,15 @@ func (s *Service) handlePeerSessionFrame(address domain.PeerAddress, frame proto
 		if session != nil {
 			s.handleAnnounceRoutes(session.peerIdentity, frame)
 		}
+	case "error":
+		// Remote sent an explicit error frame before closing the connection.
+		// Log at Warn so it stands out from the subsequent EOF line that
+		// carries no context about the disconnect reason.
+		log.Warn().
+			Str("peer", string(address)).
+			Str("code", frame.Code).
+			Str("error", frame.Error).
+			Msg("peer_session: remote reported error")
 	}
 }
 
@@ -1684,13 +1719,16 @@ func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame
 
 func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame) {
 	accepted := frame.Type != "error"
-	log.Debug().
+	ev := log.Debug().
 		Str("protocol", "json/tcp").
 		Str("addr", string(address)).
 		Str("direction", "recv").
 		Str("command", frame.Type).
-		Bool("accepted", accepted).
-		Msg("protocol_trace")
+		Bool("accepted", accepted)
+	if frame.Type == "error" {
+		ev = ev.Str("code", frame.Code).Str("error", frame.Error)
+	}
+	ev.Msg("protocol_trace")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1730,9 +1768,9 @@ func (s *Service) nextConnIDLocked() uint64 {
 // Must be called with s.mu held (read lock).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
-	for _, info := range s.connPeerInfo {
-		if info != nil && info.address == address {
-			ids = append(ids, info.connID)
+	for _, pc := range s.inboundPeerConns {
+		if pc != nil && pc.Address() == address {
+			ids = append(ids, pc.ConnIDNum())
 		}
 	}
 	return ids
@@ -1868,15 +1906,15 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 
 // peerCapabilitiesLocked returns the negotiated capabilities for a peer
 // as wire-format strings for PeerHealthFrame.  Checks outbound sessions
-// first, then falls back to inbound connPeerInfo.
+// first, then falls back to inbound PeerConns.
 // Must be called while holding s.mu at least for read.
 func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 	if session, ok := s.sessions[address]; ok && len(session.capabilities) > 0 {
 		return domain.CapabilityStrings(session.capabilities)
 	}
-	for _, info := range s.connPeerInfo {
-		if info.address == address && len(info.capabilities) > 0 {
-			return domain.CapabilityStrings(info.capabilities)
+	for _, pc := range s.inboundPeerConns {
+		if pc.Address() == address && len(pc.Capabilities()) > 0 {
+			return domain.CapabilityStrings(pc.Capabilities())
 		}
 	}
 	return nil
@@ -2197,14 +2235,15 @@ func (s *Service) evictStaleInboundConns() {
 	s.mu.RLock()
 	var stale []net.Conn
 	for conn := range s.inboundConns {
-		info := s.connPeerInfo[conn]
-		if info == nil {
+		pc := s.inboundPeerConns[conn]
+		if pc == nil {
 			continue
 		}
-		if info.lastActivity.IsZero() {
+		la := pc.LastActivity()
+		if la.IsZero() {
 			continue
 		}
-		if now.Sub(info.lastActivity) >= stallThreshold {
+		if now.Sub(la) >= stallThreshold {
 			stale = append(stale, conn)
 		}
 	}
@@ -2214,9 +2253,9 @@ func (s *Service) evictStaleInboundConns() {
 		var addr domain.PeerAddress
 		var ident domain.PeerIdentity
 		s.mu.RLock()
-		if info := s.connPeerInfo[conn]; info != nil {
-			addr = info.address
-			ident = info.identity
+		if pc := s.inboundPeerConns[conn]; pc != nil {
+			addr = pc.Address()
+			ident = pc.Identity()
 		}
 		s.mu.RUnlock()
 		log.Warn().Str("peer", string(addr)).Str("identity", string(ident)).Str("remote", conn.RemoteAddr().String()).Msg("force-closing stale inbound connection")
@@ -2226,11 +2265,12 @@ func (s *Service) evictStaleInboundConns() {
 
 // touchConnActivity updates the per-connection last activity timestamp.
 func (s *Service) touchConnActivity(conn net.Conn) {
-	s.mu.Lock()
-	if info := s.connPeerInfo[conn]; info != nil {
-		info.lastActivity = time.Now().UTC()
+	s.mu.RLock()
+	pc := s.inboundPeerConns[conn]
+	s.mu.RUnlock()
+	if pc != nil {
+		pc.SetLastActivity(time.Now().UTC())
 	}
-	s.mu.Unlock()
 }
 
 func (s *Service) externalListenAddress() string {

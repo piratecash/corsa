@@ -528,6 +528,24 @@ func TestHandlePeerSessionFrame_AnnouncePeerUnderLimitPassesAll(t *testing.T) {
 	}
 }
 
+// TestHandlePeerSessionFrame_ErrorFrameDoesNotPanic verifies that an inbound
+// error frame (e.g. code=rate-limited sent by the remote before closing the
+// connection) is handled gracefully without panicking. The handler logs at Warn
+// level so the disconnect reason is visible in the logs.
+func TestHandlePeerSessionFrame_ErrorFrameDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+
+	frame := protocol.Frame{
+		Type:  "error",
+		Code:  protocol.ErrCodeRateLimited,
+		Error: "command rate limit exceeded",
+	}
+
+	// Must not panic or leave dangling state.
+	svc.handlePeerSessionFrame("10.0.0.99:1234", frame)
+}
+
 // ---------------------------------------------------------------------------
 // Capacity limit constant value tests
 // ---------------------------------------------------------------------------
@@ -568,5 +586,75 @@ func TestHandshakeTimeoutConstants(t *testing.T) {
 	}
 	if sessionWriteTimeout != 3*time.Second {
 		t.Errorf("sessionWriteTimeout = %v, want 3s", sessionWriteTimeout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// peekFrameType
+// ---------------------------------------------------------------------------
+
+func TestPeekFrameType_ValidFrames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		line     string
+		expected string
+	}{
+		{"file_command", `{"type":"file_command","sub":"chunk_request"}`, "file_command"},
+		{"send_message", `{"type":"send_message","to":"abc"}`, "send_message"},
+		{"relay_message", `{"type":"relay_message","body":"..."}`, "relay_message"},
+		{"hello", `{"type":"hello","version":1}`, "hello"},
+		{"ping", `{"type":"ping"}`, "ping"},
+		{"with_spaces", `{ "type" : "file_command" }`, "file_command"},
+		{"with_tabs", "{\t\"type\"\t:\t\"file_command\"\t}", "file_command"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := peekFrameType(tt.line)
+			if got != tt.expected {
+				t.Errorf("peekFrameType(%q) = %q, want %q", tt.line, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPeekFrameType_MissingOrMalformed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+	}{
+		{"empty", ""},
+		{"no_type_field", `{"command":"hello"}`},
+		{"no_colon", `{"type" "hello"}`},
+		{"no_value_quote", `{"type":123}`},
+		{"unclosed_value", `{"type":"hello`},
+		{"type_in_value", `{"data":"type","other":"x"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := peekFrameType(tt.line)
+			if got != "" {
+				t.Errorf("peekFrameType(%q) = %q, want empty", tt.line, got)
+			}
+		})
+	}
+}
+
+func TestPeekFrameType_FileCommandExemptionMatch(t *testing.T) {
+	t.Parallel()
+
+	// Verify that peekFrameType output matches the constant used in the
+	// rate limiter exemption check, ensuring file_command frames are
+	// correctly identified.
+	line := `{"type":"file_command","sub":"chunk_response","hash":"abc123","offset":0,"data":"..."}`
+	got := peekFrameType(line)
+	if got != protocol.FileCommandFrameType {
+		t.Errorf("peekFrameType returned %q, want %q — file transfer frames would not be exempt from rate limiting",
+			got, protocol.FileCommandFrameType)
 	}
 }

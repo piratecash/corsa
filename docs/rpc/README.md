@@ -12,6 +12,7 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | [Network](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [network.md](network.md) |
 | [Identity](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [identity.md](identity.md) |
 | [Message](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [message.md](message.md) |
+| [File Transfer](file.md) | `send_file_announce`, `fetch_file_transfers`, `fetch_file_mapping`, `retry_file_chunk`, `start_file_download`, `cancel_file_download` | [file.md](file.md) |
 | [Chatlog](chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [chatlog.md](chatlog.md) |
 | [Notice](notice.md) | `fetch_notices` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
@@ -62,6 +63,7 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | [Сеть](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [network.md](network.md) |
 | [Идентификация](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [identity.md](identity.md) |
 | [Сообщения](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [message.md](message.md) |
+| [Файловый трансфер](file.md) | `send_file_announce`, `fetch_file_transfers`, `fetch_file_mapping`, `retry_file_chunk`, `start_file_download`, `cancel_file_download` | [file.md](file.md) |
 | [История чатов](chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [chatlog.md](chatlog.md) |
 | [Уведомления](notice.md) | `fetch_notices` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
