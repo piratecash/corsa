@@ -178,6 +178,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -188,8 +191,25 @@ jobs:
           mkdir -p dist
           find release-artifacts -type f -exec cp {} dist/ \;
 
+      - name: Resolve release notes
+        id: release_notes
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes_file="docs/release-notes/RELEASE-${tag}.md"
+
+          if [ -f "${notes_file}" ]; then
+            echo "use_body_path=true" >> "${GITHUB_OUTPUT}"
+            echo "body_path=${notes_file}" >> "${GITHUB_OUTPUT}"
+            echo "Found release notes: ${notes_file}"
+          else
+            echo "use_body_path=false" >> "${GITHUB_OUTPUT}"
+            echo "No release notes file found for ${tag}; falling back to generated notes."
+          fi
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: ${{ steps.release_notes.outputs.use_body_path == 'true' && steps.release_notes.outputs.body_path || '' }}
+          generate_release_notes: ${{ steps.release_notes.outputs.use_body_path != 'true' }}
