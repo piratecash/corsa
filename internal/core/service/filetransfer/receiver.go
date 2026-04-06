@@ -1018,11 +1018,11 @@ func (m *Manager) sendFileDownloaded(fileID domain.FileID, sender domain.PeerIde
 //
 // Symlink defense (two layers):
 //
-//  1. O_NOFOLLOW: the file is opened with syscall.O_NOFOLLOW, which makes the
-//     kernel reject the open with ELOOP if the final path component is a
-//     symlink. This prevents the file at the symlink target from being created
-//     or opened in the first place — closing the window where O_CREATE would
-//     follow the symlink and create an arbitrary file before any user-space
+//  1. Kernel no-follow where available: openNoFollow uses O_NOFOLLOW on
+//     platforms that support it, making the kernel reject the open with ELOOP
+//     if the final path component is a symlink. This prevents the file at the
+//     symlink target from being created or opened in the first place — closing
+//     the window where O_CREATE would follow the symlink before any user-space
 //     check could run.
 //
 //  2. verifyNotSymlink (defense in depth): after the open, Lstat on the path

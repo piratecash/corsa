@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"corsa/internal/core/domain"
@@ -420,25 +419,6 @@ func evalSymlinksPartial(p string) string {
 		current = parent
 	}
 	return p
-}
-
-// openNoFollow opens a file with O_NOFOLLOW, causing the kernel to reject the
-// open with ELOOP if the final path component is a symlink. This prevents
-// O_CREATE from following the symlink and creating a file at the target path —
-// closing the TOCTOU window that exists between open and verifyNotSymlink.
-//
-// Callers should still use verifyNotSymlink after the open as defense in depth:
-// openNoFollow prevents the initial symlink follow, while verifyNotSymlink
-// detects a post-open swap (regular file → symlink between open and write).
-func openNoFollow(path string, flags int, perm os.FileMode) (*os.File, error) {
-	f, err := os.OpenFile(path, flags|syscall.O_NOFOLLOW, perm)
-	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
-			return nil, fmt.Errorf("path is a symlink (O_NOFOLLOW rejected): %s", path)
-		}
-		return nil, err
-	}
-	return f, nil
 }
 
 // verifyNotSymlink checks that the file at path is not a symlink and that the
