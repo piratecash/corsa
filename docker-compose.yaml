@@ -17,7 +17,7 @@ services:
       # CORSA_RPC_USERNAME: ""
       # CORSA_RPC_PASSWORD: ""
     volumes:
-      - corsa-data:/home/corsa/.corsa
+      - corsa-data:/home/corsa/.corsacore
 
 volumes:
   corsa-data:

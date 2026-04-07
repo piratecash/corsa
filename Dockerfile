@@ -17,12 +17,12 @@ WORKDIR /home/corsa
 
 COPY --from=builder /out/corsa-node /usr/local/bin/corsa-node
 
-RUN mkdir -p /home/corsa/.corsa && chown -R corsa:corsa /home/corsa
+RUN mkdir -p /home/corsa/.corsacore && chown -R corsa:corsa /home/corsa
 
 USER corsa
 
 ENV CORSA_LISTEN_ADDRESS=:64646
-VOLUME ["/home/corsa/.corsa"]
+VOLUME ["/home/corsa/.corsacore"]
 EXPOSE 64646/tcp
 EXPOSE 46464/tcp
 
