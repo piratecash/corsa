@@ -561,11 +561,13 @@ func copyFile(src, dst, expectedHash string) error {
 	}
 	defer func() { _ = in.Close() }()
 
-	tmp := dst + ".tmp"
-	out, err := os.Create(tmp)
+	tmpDir := filepath.Dir(dst)
+	tmpPattern := filepath.Base(dst) + ".*.tmp"
+	out, err := os.CreateTemp(tmpDir, tmpPattern)
 	if err != nil {
 		return err
 	}
+	tmp := out.Name()
 
 	h := sha256.New()
 	tee := io.TeeReader(in, h)
@@ -591,7 +593,11 @@ func copyFile(src, dst, expectedHash string) error {
 		return fmt.Errorf("source file changed during copy: expected hash %s, got %s", expectedHash, actualHash)
 	}
 
-	return os.Rename(tmp, dst)
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // partialDownloadPath returns the path for a partially downloaded file.
