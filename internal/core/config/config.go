@@ -79,12 +79,12 @@ func Default() Config {
 	listenerEnabled, listenerSet := listenerFromEnv()
 	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress, listenerSet, listenerEnabled, nodeType))
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
-	identityPath := envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress))
-	trustStorePath := envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress))
-	queueStatePath := envOrDefault("CORSA_QUEUE_STATE_PATH", defaultQueueStatePath(listenAddress))
-	peersStatePath := envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress))
-	chatLogDir := envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir())
-	downloadDir := envOrDefault("CORSA_DOWNLOAD_DIR", "")
+	identityPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress)))
+	trustStorePath := resolveStartupPath(envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress)))
+	queueStatePath := resolveStartupPath(envOrDefault("CORSA_QUEUE_STATE_PATH", defaultQueueStatePath(listenAddress)))
+	peersStatePath := resolveStartupPath(envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress)))
+	chatLogDir := resolveStartupPath(envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir()))
+	downloadDir := resolveStartupPath(envOrDefault("CORSA_DOWNLOAD_DIR", ""))
 	proxyAddress := envOrDefault("CORSA_PROXY", "")
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
@@ -206,6 +206,20 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func resolveStartupPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return path
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return abs
 }
 
 func defaultIdentityPath(listenAddress string) string {

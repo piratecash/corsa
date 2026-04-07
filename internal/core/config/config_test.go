@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -122,13 +124,71 @@ func TestDefaultConfigIncludesPeersAndProxy(t *testing.T) {
 	t.Setenv("CORSA_CHATLOG_DIR", "")
 
 	cfg := Default()
-	if cfg.Node.PeersStatePath != ".corsa/peers-64646.json" {
+	wantPeers, err := filepath.Abs(filepath.Join(".corsa", "peers-64646.json"))
+	if err != nil {
+		t.Fatalf("filepath.Abs peers: %v", err)
+	}
+	if cfg.Node.PeersStatePath != wantPeers {
 		t.Fatalf("unexpected default PeersStatePath: %s", cfg.Node.PeersStatePath)
 	}
 	if cfg.Node.ProxyAddress != "" {
 		t.Fatalf("expected empty ProxyAddress by default, got %s", cfg.Node.ProxyAddress)
 	}
-	if cfg.Node.ChatLogDir != ".corsa" {
+	wantChatlog, err := filepath.Abs(".corsa")
+	if err != nil {
+		t.Fatalf("filepath.Abs chatlog: %v", err)
+	}
+	if cfg.Node.ChatLogDir != wantChatlog {
 		t.Fatalf("unexpected default ChatLogDir: %s", cfg.Node.ChatLogDir)
+	}
+}
+
+func TestDefaultAnchorsPathsToStartupDirectory(t *testing.T) {
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+
+	baseDir := t.TempDir()
+	if err := os.Chdir(baseDir); err != nil {
+		t.Fatalf("chdir baseDir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWD)
+	}()
+	startupWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd startupWD: %v", err)
+	}
+
+	t.Setenv("CORSA_PEERS_PATH", "")
+	t.Setenv("CORSA_QUEUE_STATE_PATH", "")
+	t.Setenv("CORSA_TRUST_STORE_PATH", "")
+	t.Setenv("CORSA_IDENTITY_PATH", "")
+	t.Setenv("CORSA_CHATLOG_DIR", "")
+	t.Setenv("CORSA_DOWNLOAD_DIR", "")
+	t.Setenv("CORSA_LISTEN_ADDRESS", "")
+
+	cfg := Default()
+
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir otherDir: %v", err)
+	}
+
+	if got, want := cfg.Node.ChatLogDir, filepath.Join(startupWD, ".corsa"); got != want {
+		t.Fatalf("ChatLogDir = %q, want %q", got, want)
+	}
+	if got, want := cfg.Node.PeersStatePath, filepath.Join(startupWD, ".corsa", "peers-64646.json"); got != want {
+		t.Fatalf("PeersStatePath = %q, want %q", got, want)
+	}
+	if got, want := cfg.Node.QueueStatePath, filepath.Join(startupWD, ".corsa", "queue-64646.json"); got != want {
+		t.Fatalf("QueueStatePath = %q, want %q", got, want)
+	}
+	if got, want := cfg.Node.IdentityPath, filepath.Join(startupWD, ".corsa", "identity-64646.json"); got != want {
+		t.Fatalf("IdentityPath = %q, want %q", got, want)
+	}
+	if got, want := cfg.Node.TrustStorePath, filepath.Join(startupWD, ".corsa", "trust-64646.json"); got != want {
+		t.Fatalf("TrustStorePath = %q, want %q", got, want)
 	}
 }
