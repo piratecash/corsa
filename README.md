@@ -25,6 +25,7 @@ Main docs:
 - architecture: [docs/architecture.md](docs/architecture.md)
 - protocol: [docs/protocol.md](docs/protocol.md)
 - encryption: [docs/encryption.md](docs/encryption.md)
+- donate: [docs/donate.md](docs/donate.md)
 
 Desktop localization:
 
@@ -161,6 +162,19 @@ docker run -d -p 64646:64646 \
   corsa-node
 ```
 
+Donate:
+
+- PirateCash: `PB2vfGqfagNb12DyYTZBYWGnreyt7E4Pug`
+- Cosanta: `Cbbp3meofT1ESU5p4d9ucXpXw9pxKCMEyi`
+- PIRATE / COSANTA (BEP-20): `0x52be29951B0D10d5eFa48D58363a25fE5Cc097e9`
+- Bitcoin: `bc1q2ph64sryt6skegze6726fp98u44kjsc5exktap`
+- DASH: `Xv7U37XKp5d4fjvbeuganwhqXN7Sm4JJkt`
+- Zcash (t-address): `t1bDVifcVuXWW8QctVdhuEghm8WqZjvU1US`
+- Zcash (shielded): `zs1hwyqs4mfrynq0ysjmhv8wuau5zam0gwpx8ujfv8epgyufkmmsp6t7cfk9y0th7qyx7fsc5azm08`
+- Monero: `4AzdEoZxeGMFkdtAxaNLAZakqEVsWpVb2at4u6966WGDiXkS7ZPyi7haeThTGUAWXVKDTmQ9DYTWRHMjGVSBW82xRQqPxkg`
+
+Source: [pirate.cash/en/donate](https://pirate.cash/en/donate/)
+
 ---
 
 ## Русский
@@ -187,6 +201,7 @@ docker run -d -p 64646:64646 \
 - архитектура: [docs/architecture.md](docs/architecture.md)
 - протокол: [docs/protocol.md](docs/protocol.md)
 - шифрование: [docs/encryption.md](docs/encryption.md)
+- донаты: [docs/donate.md](docs/donate.md)
 
 Локализация desktop-клиента:
 
@@ -322,3 +337,16 @@ docker run -d -p 64646:64646 \
   -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node
 ```
+
+Donate:
+
+- PirateCash: `PB2vfGqfagNb12DyYTZBYWGnreyt7E4Pug`
+- Cosanta: `Cbbp3meofT1ESU5p4d9ucXpXw9pxKCMEyi`
+- PIRATE / COSANTA (BEP-20): `0x52be29951B0D10d5eFa48D58363a25fE5Cc097e9`
+- Bitcoin: `bc1q2ph64sryt6skegze6726fp98u44kjsc5exktap`
+- DASH: `Xv7U37XKp5d4fjvbeuganwhqXN7Sm4JJkt`
+- Zcash (t-address): `t1bDVifcVuXWW8QctVdhuEghm8WqZjvU1US`
+- Zcash (shielded): `zs1hwyqs4mfrynq0ysjmhv8wuau5zam0gwpx8ujfv8epgyufkmmsp6t7cfk9y0th7qyx7fsc5azm08`
+- Monero: `4AzdEoZxeGMFkdtAxaNLAZakqEVsWpVb2at4u6966WGDiXkS7ZPyi7haeThTGUAWXVKDTmQ9DYTWRHMjGVSBW82xRQqPxkg`
+
+Источник: [pirate.cash/en/donate](https://pirate.cash/en/donate/)

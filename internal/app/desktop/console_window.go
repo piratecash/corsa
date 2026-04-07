@@ -7,6 +7,8 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,7 @@ import (
 	"gioui.org/font"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -45,6 +48,7 @@ const (
 	consoleTabPeers
 	consoleTabTraffic
 	consoleTabInfo
+	consoleTabDonate
 )
 
 type consoleEntry struct {
@@ -61,6 +65,14 @@ type consoleSuggestion struct {
 	Insert string
 }
 
+type consoleDonateEntry struct {
+	Label      string
+	Address    string
+	Text       widget.Selectable
+	Scroll     widget.List
+	CopyButton widget.Clickable
+}
+
 type ConsoleWindow struct {
 	parent            *Window
 	theme             *material.Theme
@@ -72,12 +84,14 @@ type ConsoleWindow struct {
 	peerSectionList   widget.List
 	historyList       widget.List
 	suggestList       widget.List
+	donateList        widget.List
 	consoleEditor     widget.Editor
 	runButton         widget.Clickable
 	consoleTabButton  widget.Clickable
 	peersTabButton    widget.Clickable
 	trafficTabButton  widget.Clickable
 	infoTabButton     widget.Clickable
+	donateTabButton   widget.Clickable
 	activeTab         int32     // consoleTab value; accessed atomically (UI writes, ticker reads)
 	trafficSamplesIn  []float32 // per-second received bytes/s (newest last)
 	trafficSamplesOut []float32 // per-second sent bytes/s (newest last)
@@ -95,6 +109,9 @@ type ConsoleWindow struct {
 	suggestBaseQuery  string
 	suggestSnapshot   []consoleSuggestion
 	cachedCommands    []consoleSuggestion // loaded from CommandTable at init
+	donateEntries     []consoleDonateEntry
+	donateLink        widget.Selectable
+	donateLinkButton  widget.Clickable
 }
 
 func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
@@ -115,10 +132,15 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 		suggestList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
+		donateList: widget.List{
+			List: layout.List{Axis: layout.Vertical},
+		},
 		suggestButtons:  make(map[string]*widget.Clickable),
 		selectedSuggest: -1,
+		donateEntries:   newConsoleDonateEntries(),
 	}
 	window.consoleEditor.SingleLine = true
+	window.donateLink.SetText(consoleDonateURL)
 	window.consoleEntries = []consoleEntry{
 		newConsoleEntry(consoleEntry{
 			Command:   "help",
@@ -224,6 +246,14 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 	for c.infoTabButton.Clicked(gtx) {
 		atomic.StoreInt32(&c.activeTab, int32(consoleTabInfo))
 	}
+	for c.donateTabButton.Clicked(gtx) {
+		atomic.StoreInt32(&c.activeTab, int32(consoleTabDonate))
+	}
+	for c.donateLinkButton.Clicked(gtx) {
+		go func() {
+			_ = openExternalURL(consoleDonateURL)
+		}()
+	}
 	for c.runButton.Clicked(gtx) {
 		c.submitConsoleCommand()
 	}
@@ -301,6 +331,10 @@ func (c *ConsoleWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return c.layoutTabButton(gtx, &c.infoTabButton, c.currentTab() == consoleTabInfo, c.parent.t("console.tab.info"))
 		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutTabButton(gtx, &c.donateTabButton, c.currentTab() == consoleTabDonate, c.parent.t("console.tab.donate"))
+		}),
 	)
 }
 
@@ -331,6 +365,8 @@ func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
 		return c.layoutTrafficTab(gtx)
 	case consoleTabInfo:
 		return c.layoutInfoTab(gtx, status)
+	case consoleTabDonate:
+		return c.layoutDonateTab(gtx)
 	default:
 		return c.layoutConsoleTab(gtx)
 	}
@@ -361,6 +397,27 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 
 func (c *ConsoleWindow) layoutInfoTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
 	return c.card(gtx, c.parent.t("console.info_title"), c.infoRows(status))
+}
+
+func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		return layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.donate_title"))
+			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(title.Layout),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					list := material.List(c.theme, &c.donateList)
+					return list.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+						return c.layoutDonateSection(gtx)
+					})
+				}),
+			)
+		})
+	})
 }
 
 func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
@@ -875,6 +932,25 @@ func newConsoleEntry(entry consoleEntry) consoleEntry {
 	return entry
 }
 
+const consoleDonateURL = "https://pirate.cash/donate/"
+
+func newConsoleDonateEntries() []consoleDonateEntry {
+	entries := []consoleDonateEntry{
+		{Label: "PirateCash", Address: "PB2vfGqfagNb12DyYTZBYWGnreyt7E4Pug"},
+		{Label: "Cosanta", Address: "Cbbp3meofT1ESU5p4d9ucXpXw9pxKCMEyi"},
+		{Label: "PIRATE / COSANTA (BEP-20)", Address: "0x52be29951B0D10d5eFa48D58363a25fE5Cc097e9"},
+		{Label: "Bitcoin", Address: "bc1q2ph64sryt6skegze6726fp98u44kjsc5exktap"},
+		{Label: "Dash", Address: "Xv7U37XKp5d4fjvbeuganwhqXN7Sm4JJkt"},
+		{Label: "Zcash", Address: "zs1hwyqs4mfrynq0ysjmhv8wuau5zam0gwpx8ujfv8epgyufkmmsp6t7cfk9y0th7qyx7fsc5azm08"},
+		{Label: "Monero", Address: "4AzdEoZxeGMFkdtAxaNLAZakqEVsWpVb2at4u6966WGDiXkS7ZPyi7haeThTGUAWXVKDTmQ9DYTWRHMjGVSBW82xRQqPxkg"},
+	}
+	for i := range entries {
+		entries[i].Text.SetText(entries[i].Address)
+		entries[i].Scroll = widget.List{List: layout.List{Axis: layout.Horizontal}}
+	}
+	return entries
+}
+
 func (c *ConsoleWindow) layoutSelectableOutput(gtx layout.Context, entry *consoleEntry) layout.Dimensions {
 	textColor := color.NRGBA{R: 208, G: 216, B: 228, A: 255}
 	if entry.Failed {
@@ -891,6 +967,155 @@ func (c *ConsoleWindow) layoutSelectableOutput(gtx layout.Context, entry *consol
 
 	entry.OutputText.SetText(entry.Output)
 	return entry.OutputText.Layout(gtx, c.theme.Shaper, font.Font{Typeface: c.theme.Face}, c.theme.TextSize, textMaterial, selectionMaterial)
+}
+
+func (c *ConsoleWindow) layoutSelectableText(gtx layout.Context, sel *widget.Selectable, text string, textColor color.NRGBA) layout.Dimensions {
+	textMacro := op.Record(gtx.Ops)
+	paint.ColorOp{Color: textColor}.Add(gtx.Ops)
+	textMaterial := textMacro.Stop()
+
+	selectionMacro := op.Record(gtx.Ops)
+	paint.ColorOp{Color: color.NRGBA{R: 72, G: 96, B: 140, A: 180}}.Add(gtx.Ops)
+	selectionMaterial := selectionMacro.Stop()
+
+	sel.SetText(text)
+	return sel.Layout(gtx, c.theme.Shaper, font.Font{Typeface: c.theme.Face}, c.theme.TextSize, textMaterial, selectionMaterial)
+}
+
+func (c *ConsoleWindow) layoutDonateSection(gtx layout.Context) layout.Dimensions {
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		children := []layout.FlexChild{
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := material.Body2(c.theme, c.parent.t("console.donate_description"))
+				label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
+				return label.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := material.Body2(c.theme, c.parent.t("console.donate_source"))
+				label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
+				return label.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return c.donateLinkButton.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					pointer.CursorPointer.Add(gtx.Ops)
+					label := material.Body2(c.theme, consoleDonateURL)
+					label.Color = color.NRGBA{R: 124, G: 177, B: 255, A: 255}
+					label.Font.Weight = 600
+					return label.Layout(gtx)
+				})
+			}),
+		}
+
+		for i := range c.donateEntries {
+			entry := &c.donateEntries[i]
+			children = append(children,
+				layout.Rigid(layout.Spacer{Height: unit.Dp(14)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					for entry.CopyButton.Clicked(gtx) {
+						gtx.Execute(clipboard.WriteCmd{
+							Type: "text/plain",
+							Data: io.NopCloser(strings.NewReader(entry.Address)),
+						})
+					}
+					return c.layoutDonateAddressCard(gtx, entry)
+				}),
+			)
+		}
+
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	})
+}
+
+func (c *ConsoleWindow) layoutDonateAddressCard(gtx layout.Context, entry *consoleDonateEntry) layout.Dimensions {
+	border := color.NRGBA{R: 56, G: 68, B: 86, A: 255}
+	bg := color.NRGBA{R: 28, G: 35, B: 46, A: 255}
+
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		borderMacro := op.Record(gtx.Ops)
+		dims := layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			contentMacro := op.Record(gtx.Ops)
+			contentDims := layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return c.layoutDonateBadge(gtx, entry.Label)
+									}),
+								)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return entry.Scroll.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+									return c.layoutSelectableText(gtx, &entry.Text, entry.Address, color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+								})
+							}),
+						)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(c.theme, &entry.CopyButton, c.parent.t("console.copy"))
+						btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
+						return btn.Layout(gtx)
+					}),
+				)
+			})
+			contentCall := contentMacro.Stop()
+
+			defer clip.UniformRRect(image.Rectangle{Max: contentDims.Size}, gtx.Dp(unit.Dp(10))).Push(gtx.Ops).Pop()
+			paint.ColorOp{Color: bg}.Add(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+			contentCall.Add(gtx.Ops)
+			return contentDims
+		})
+		borderCall := borderMacro.Stop()
+
+		defer clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(unit.Dp(11))).Push(gtx.Ops).Pop()
+		paint.ColorOp{Color: border}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		borderCall.Add(gtx.Ops)
+		return dims
+	})
+}
+
+func (c *ConsoleWindow) layoutDonateBadge(gtx layout.Context, text string) layout.Dimensions {
+	bg := color.NRGBA{R: 42, G: 51, B: 64, A: 255}
+	fg := color.NRGBA{R: 198, G: 210, B: 226, A: 255}
+
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Min.X = 0
+		inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
+		macro := op.Record(gtx.Ops)
+		dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			label := material.Caption(c.theme, strings.ToUpper(text))
+			label.Color = fg
+			label.Font.Weight = 600
+			return label.Layout(gtx)
+		})
+		call := macro.Stop()
+
+		defer clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(unit.Dp(10))).Push(gtx.Ops).Pop()
+		paint.ColorOp{Color: bg}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		call.Add(gtx.Ops)
+		return dims
+	})
+}
+
+func openExternalURL(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
 }
 
 // card renders a styled card using the console window's own theme to avoid
