@@ -82,3 +82,30 @@ func TestCopyFileRemovesTempOnHashMismatch(t *testing.T) {
 		}
 	}
 }
+
+func TestCopyFileCreatesTransmitDirWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "source.png")
+	content := []byte("recreate-missing-transmit-dir")
+	if err := os.WriteFile(srcPath, content, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	sum := sha256.Sum256(content)
+	expectedHash := hex.EncodeToString(sum[:])
+	dstPath := filepath.Join(dir, "transmit", expectedHash+".png")
+
+	if err := copyFile(srcPath, dstPath, expectedHash); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+
+	got, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("destination content = %q, want %q", got, content)
+	}
+}

@@ -562,6 +562,9 @@ func copyFile(src, dst, expectedHash string) error {
 	defer func() { _ = in.Close() }()
 
 	tmpDir := filepath.Dir(dst)
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		return fmt.Errorf("create transmit dir: %w", err)
+	}
 	tmpPattern := filepath.Base(dst) + ".*.tmp"
 	out, err := os.CreateTemp(tmpDir, tmpPattern)
 	if err != nil {

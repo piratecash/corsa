@@ -63,6 +63,7 @@ type Window struct {
 	recipientButtons     map[domain.PeerIdentity]*widget.Clickable
 	recipientRightClick  map[domain.PeerIdentity]*rightClickState
 	messageSelectables   map[string]*widget.Selectable
+	sendStatusSelectable widget.Selectable
 	lastChatPeer         domain.PeerIdentity
 	language             string
 	showLanguageMenu     bool
@@ -1030,16 +1031,18 @@ func (w *Window) layoutLoadingCard(gtx layout.Context, title string) layout.Dime
 func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 	recipient := w.snap.ActivePeer
 	status := w.snap.NodeStatus
+	sendStatus := w.snap.SendStatus
 
-	var rows []string
-	if sendStatus := w.snap.SendStatus; sendStatus != "" {
-		rows = append(rows, sendStatus)
-	}
-
-	return w.card(gtx, "", rows, func(gtx layout.Context) layout.Dimensions {
+	return w.card(gtx, "", nil, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{
 			Axis: layout.Vertical,
 		}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if sendStatus == "" {
+					return layout.Dimensions{}
+				}
+				return w.layoutSendStatusRow(gtx, sendStatus)
+			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.layoutReplyPreview(gtx)
 			}),
@@ -1072,6 +1075,29 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 					}),
 				)
 			}),
+		)
+	})
+}
+
+func (w *Window) layoutSendStatusRow(gtx layout.Context, statusText string) layout.Dimensions {
+	textMacro := op.Record(gtx.Ops)
+	paint.ColorOp{Color: color.NRGBA{R: 196, G: 205, B: 218, A: 255}}.Add(gtx.Ops)
+	textMaterial := textMacro.Stop()
+
+	selectionMacro := op.Record(gtx.Ops)
+	paint.ColorOp{Color: color.NRGBA{R: 72, G: 96, B: 140, A: 180}}.Add(gtx.Ops)
+	selectionMaterial := selectionMacro.Stop()
+
+	w.sendStatusSelectable.SetText(statusText)
+
+	return layout.Inset{Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return w.sendStatusSelectable.Layout(
+			gtx,
+			w.theme.Shaper,
+			font.Font{Typeface: w.theme.Face},
+			w.theme.TextSize,
+			textMaterial,
+			selectionMaterial,
 		)
 	})
 }
