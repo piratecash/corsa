@@ -10,10 +10,10 @@ const trafficHistoryCapacity = 3600 // 1 hour at 1 sample per second
 // TrafficSample holds a single point-in-time traffic snapshot.
 type TrafficSample struct {
 	Timestamp     time.Time `json:"timestamp"`
-	BytesSentPS   int64     `json:"bytes_sent_ps"`   // bytes sent delta since previous sample
-	BytesRecvPS   int64     `json:"bytes_recv_ps"`   // bytes received delta since previous sample
-	TotalSent     int64     `json:"total_sent"`      // cumulative bytes sent at this moment
-	TotalReceived int64     `json:"total_received"`  // cumulative bytes received at this moment
+	BytesSentPS   int64     `json:"bytes_sent_ps"`  // bytes sent delta since previous sample
+	BytesRecvPS   int64     `json:"bytes_recv_ps"`  // bytes received delta since previous sample
+	TotalSent     int64     `json:"total_sent"`     // cumulative bytes sent at this moment
+	TotalReceived int64     `json:"total_received"` // cumulative bytes received at this moment
 }
 
 // TrafficHistory maintains a fixed-size ring buffer of traffic samples.

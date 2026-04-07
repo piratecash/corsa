@@ -3,10 +3,10 @@ package rpc
 import (
 	"encoding/json"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/routing"
-	"corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 // NodeProvider abstracts access to the node service layer.

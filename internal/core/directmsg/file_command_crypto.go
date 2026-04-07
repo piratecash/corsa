@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
-	"corsa/internal/crypto/ecdhgcm"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/crypto/ecdhgcm"
 )
 
 // fileCommandKeyLabel is the domain-separation string for file command

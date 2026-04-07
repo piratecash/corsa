@@ -4,8 +4,8 @@ import (
 	"net"
 	"testing"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func TestLocalCapabilities(t *testing.T) {

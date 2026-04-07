@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // testV3Onion is a valid 56-char base32 onion host for use in SOCKS5/dial tests.

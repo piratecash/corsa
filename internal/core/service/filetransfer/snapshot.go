@@ -3,7 +3,7 @@ package filetransfer
 import (
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // ---------------------------------------------------------------------------

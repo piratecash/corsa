@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
-	"corsa/internal/crypto/ecdhgcm"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/crypto/ecdhgcm"
 )
 
 func TestEncryptDecryptFileCommandPayload(t *testing.T) {

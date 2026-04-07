@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	corsanode "corsa/internal/core/node"
+	corsanode "github.com/piratecash/corsa/internal/core/node"
 )
 
 type NodeRuntime struct {

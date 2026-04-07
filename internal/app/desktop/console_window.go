@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"corsa/internal/core/rpc"
-	"corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/service"
 
 	"gioui.org/app"
 	"gioui.org/font"

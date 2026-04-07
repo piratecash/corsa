@@ -1,7 +1,7 @@
 package rpc_test
 
 import (
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/protocol"
 	"testing"
 )
 

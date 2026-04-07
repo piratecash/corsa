@@ -10,8 +10,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 )
 
 // ---------------------------------------------------------------------------

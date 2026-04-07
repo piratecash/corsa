@@ -8,7 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // FileTransferBridge owns file transfer orchestration: preparing sender

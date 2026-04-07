@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/rpc"
 )
 
 // newTestConsoleWindow creates a ConsoleWindow backed by a CommandTable
@@ -353,13 +353,13 @@ func TestNewConsoleDonateEntries(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"PirateCash":               "PB2vfGqfagNb12DyYTZBYWGnreyt7E4Pug",
-		"Cosanta":                  "Cbbp3meofT1ESU5p4d9ucXpXw9pxKCMEyi",
+		"PirateCash":                "PB2vfGqfagNb12DyYTZBYWGnreyt7E4Pug",
+		"Cosanta":                   "Cbbp3meofT1ESU5p4d9ucXpXw9pxKCMEyi",
 		"PIRATE / COSANTA (BEP-20)": "0x52be29951B0D10d5eFa48D58363a25fE5Cc097e9",
-		"Bitcoin":                  "bc1q2ph64sryt6skegze6726fp98u44kjsc5exktap",
-		"Dash":                     "Xv7U37XKp5d4fjvbeuganwhqXN7Sm4JJkt",
-		"Zcash":                    "zs1hwyqs4mfrynq0ysjmhv8wuau5zam0gwpx8ujfv8epgyufkmmsp6t7cfk9y0th7qyx7fsc5azm08",
-		"Monero":                   "4AzdEoZxeGMFkdtAxaNLAZakqEVsWpVb2at4u6966WGDiXkS7ZPyi7haeThTGUAWXVKDTmQ9DYTWRHMjGVSBW82xRQqPxkg",
+		"Bitcoin":                   "bc1q2ph64sryt6skegze6726fp98u44kjsc5exktap",
+		"Dash":                      "Xv7U37XKp5d4fjvbeuganwhqXN7Sm4JJkt",
+		"Zcash":                     "zs1hwyqs4mfrynq0ysjmhv8wuau5zam0gwpx8ujfv8epgyufkmmsp6t7cfk9y0th7qyx7fsc5azm08",
+		"Monero":                    "4AzdEoZxeGMFkdtAxaNLAZakqEVsWpVb2at4u6966WGDiXkS7ZPyi7haeThTGUAWXVKDTmQ9DYTWRHMjGVSBW82xRQqPxkg",
 	}
 
 	for _, entry := range entries {

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // TestForgetRemovesContact verifies that forget deletes the contact from

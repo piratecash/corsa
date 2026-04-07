@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // PeerIdentity and PeerAddress are re-exported from domain so that

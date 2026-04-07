@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // ConversationCache holds the decrypted messages for the currently active

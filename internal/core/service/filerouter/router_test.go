@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // testNonceCache is a simple in-memory NonceCache for testing.

@@ -9,12 +9,12 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/directmsg"
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/routing"
-	"corsa/internal/core/service/filerouter"
-	"corsa/internal/core/service/filetransfer"
+	"github.com/piratecash/corsa/internal/core/directmsg"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/service/filerouter"
+	"github.com/piratecash/corsa/internal/core/service/filetransfer"
 )
 
 // initFileTransfer initializes the file transfer subsystem and wires it into

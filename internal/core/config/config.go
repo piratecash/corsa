@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 type App struct {

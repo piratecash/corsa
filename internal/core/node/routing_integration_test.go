@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // Valid 40-char hex identity constants for tests.

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // relayRateLimiter enforces per-peer relay fan-out rate limits using a

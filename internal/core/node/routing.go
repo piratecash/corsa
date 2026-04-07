@@ -1,8 +1,8 @@
 package node
 
 import (
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // RoutingDecision is a multi-strategy routing result. Each field represents an

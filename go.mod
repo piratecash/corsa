@@ -1,4 +1,4 @@
-module corsa
+module github.com/piratecash/corsa
 
 go 1.26.1
 

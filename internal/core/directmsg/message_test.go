@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 )
 
 func TestEncryptDecryptForSenderAndRecipient(t *testing.T) {

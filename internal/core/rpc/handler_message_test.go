@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func TestMessageFetchMessagesValidTopic(t *testing.T) {

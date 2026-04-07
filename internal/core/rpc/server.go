@@ -10,8 +10,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/config"
 	"github.com/gofiber/fiber/v3"
+	"github.com/piratecash/corsa/internal/core/config"
 )
 
 // rpcMaxBodyBytes is the maximum HTTP request body size accepted by the RPC

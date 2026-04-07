@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // FileCommandFrameType is the type identifier used in the unified Frame

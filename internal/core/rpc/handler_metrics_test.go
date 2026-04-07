@@ -3,10 +3,10 @@ package rpc_test
 import (
 	"testing"
 
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/rpc"
 
-	"corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config"
 )
 
 // mockMetricsProvider implements rpc.MetricsProvider for testing.

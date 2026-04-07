@@ -6,7 +6,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // TrafficSource provides current traffic totals.

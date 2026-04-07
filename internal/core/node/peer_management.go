@@ -14,12 +14,12 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/crashlog"
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/transport"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/transport"
 )
 
 func (s *Service) Peers() []transport.Peer {

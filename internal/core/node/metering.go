@@ -4,8 +4,8 @@ import (
 	"net"
 	"sort"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // liveTraffic holds real-time byte counters snapshot from active MeteredConn

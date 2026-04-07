@@ -3,7 +3,7 @@ package node
 import (
 	"net"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // localCapabilities returns the set of capability tokens this node advertises

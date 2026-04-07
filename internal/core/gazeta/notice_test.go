@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/identity"
 )
 
 func TestEncryptDecryptForRecipient(t *testing.T) {

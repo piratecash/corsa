@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 func makeSnap(peers map[domain.PeerIdentity]*service.RouterPeerState, reachable map[domain.PeerIdentity]bool) service.RouterSnapshot {
@@ -80,14 +80,14 @@ func TestSortSidebarPeers(t *testing.T) {
 	now := time.Now()
 	snap := makeSnap(
 		map[domain.PeerIdentity]*service.RouterPeerState{
-			"on-unread-5":    {Unread: 5, Preview: service.ConversationPreview{Timestamp: now.Add(-1 * time.Hour)}},
-			"on-unread-2":    {Unread: 2, Preview: service.ConversationPreview{Timestamp: now.Add(-2 * time.Hour)}},
-			"on-read-recent": {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-10 * time.Minute)}},
-			"on-read-old":    {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-3 * time.Hour)}},
-			"off-unread-7":   {Unread: 7, Preview: service.ConversationPreview{Timestamp: now.Add(-30 * time.Minute)}},
-			"off-unread-1":   {Unread: 1, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Minute)}},
+			"on-unread-5":     {Unread: 5, Preview: service.ConversationPreview{Timestamp: now.Add(-1 * time.Hour)}},
+			"on-unread-2":     {Unread: 2, Preview: service.ConversationPreview{Timestamp: now.Add(-2 * time.Hour)}},
+			"on-read-recent":  {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-10 * time.Minute)}},
+			"on-read-old":     {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-3 * time.Hour)}},
+			"off-unread-7":    {Unread: 7, Preview: service.ConversationPreview{Timestamp: now.Add(-30 * time.Minute)}},
+			"off-unread-1":    {Unread: 1, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Minute)}},
 			"off-read-recent": {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-20 * time.Minute)}},
-			"off-read-old":   {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Hour)}},
+			"off-read-old":    {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Hour)}},
 		},
 		map[domain.PeerIdentity]bool{
 			"on-unread-5":    true,

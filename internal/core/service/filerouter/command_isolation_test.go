@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // This file tests the architectural isolation of FileCommandFrame from the

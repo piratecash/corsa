@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 var errTrustConflict = errors.New("trusted contact conflict")

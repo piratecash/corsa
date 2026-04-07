@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/routing"
-	"corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/rpc"
 )
 
 // mockRoutingProvider implements rpc.RoutingProvider for tests.

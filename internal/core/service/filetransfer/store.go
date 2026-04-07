@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // FileStore manages content-addressed file storage in the transmit directory.

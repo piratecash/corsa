@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // dialPeer connects to the given address, routing overlay addresses (.onion,

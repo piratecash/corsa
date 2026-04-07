@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // TestInvalidSignatureDropped verifies that a frame with a wrong signature

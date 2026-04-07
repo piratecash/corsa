@@ -8,6 +8,7 @@ Current repository status:
 
 - current Corsa version: see `internal/core/config.CorsaVersion`
 - Go-based desktop and node foundation
+- public Go SDK in `corsa/sdk` for embedded nodes and bots
 - desktop chat-style UI with identity list and direct messaging
 - mesh-style peer sync between local nodes
 - node role model: `full` or `client`
@@ -38,8 +39,36 @@ Repository layout:
 
 - `cmd/corsa-desktop` — desktop application with embedded local node
 - `cmd/corsa-node` — standalone node process
+- `sdk` — public Go SDK for embedded nodes, command execution, and bots
+- `examples/sic-parvis-magna-bot` — minimal bot replying with `Sic Parvis Magna`
 - `internal/core` — protocol, identity, node, services
 - `docs` — architecture and protocol notes
+
+SDK and bots:
+
+- you can import this repository as a Go module and build your own bot on the live CORSA network
+- the SDK starts a node from Go code, without requiring environment-variable configuration
+- commands can be executed in-process through the same `CommandTable` used by the desktop console
+- add the dependency with `go get github.com/piratecash/corsa@latest`, then import `github.com/piratecash/corsa/sdk`
+- SDK docs: [docs/sdk.md](docs/sdk.md)
+- mini-bot example: [examples/sic-parvis-magna-bot/main.go](examples/sic-parvis-magna-bot/main.go)
+
+SDK example:
+
+```go
+cfg := sdk.DefaultConfig()
+cfg.Node.ListenAddress = ":64648"
+cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+
+runtime, err := sdk.New(cfg)
+if err != nil {
+	log.Fatal(err)
+}
+
+if err := runtime.Start(context.Background()); err != nil {
+	log.Fatal(err)
+}
+```
 
 Git hooks:
 
@@ -185,6 +214,7 @@ Source: [pirate.cash/en/donate](https://pirate.cash/en/donate/)
 
 - текущая версия Corsa: см. `internal/core/config.CorsaVersion`
 - Go-основа для desktop-приложения и ноды
+- публичный Go SDK в `corsa/sdk` для встраиваемых нод и ботов
 - desktop UI в формате чата: список identity слева и direct messaging справа
 - mesh-синхронизация между локальными узлами
 - модель ролей узла: `full` или `client`
@@ -214,8 +244,36 @@ Source: [pirate.cash/en/donate](https://pirate.cash/en/donate/)
 
 - `cmd/corsa-desktop` — desktop-приложение со встроенной локальной нодой
 - `cmd/corsa-node` — отдельный процесс ноды
+- `sdk` — публичный Go SDK для встраиваемых нод, выполнения команд и ботов
+- `examples/sic-parvis-magna-bot` — минимальный бот с ответом `Sic Parvis Magna`
 - `internal/core` — протокол, identity, нода, сервисы
 - `docs` — описание архитектуры и протокола
+
+SDK и боты:
+
+- этот репозиторий можно подключать как Go-модуль и строить поверх него собственного бота в сети CORSA
+- SDK поднимает ноду из Go-кода без обязательной конфигурации через `env`
+- команды можно выполнять in-process через тот же `CommandTable`, который использует desktop-консоль
+- зависимость добавляется через `go get github.com/piratecash/corsa@latest`, затем импортируется `github.com/piratecash/corsa/sdk`
+- документация по SDK: [docs/sdk.md](docs/sdk.md)
+- пример минибота: [examples/sic-parvis-magna-bot/main.go](examples/sic-parvis-magna-bot/main.go)
+
+Пример SDK:
+
+```go
+cfg := sdk.DefaultConfig()
+cfg.Node.ListenAddress = ":64648"
+cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+
+runtime, err := sdk.New(cfg)
+if err != nil {
+	log.Fatal(err)
+}
+
+if err := runtime.Start(context.Background()); err != nil {
+	log.Fatal(err)
+}
+```
 
 Git хуки:
 

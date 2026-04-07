@@ -1,6 +1,6 @@
 package transport
 
-import "corsa/internal/core/domain"
+import "github.com/piratecash/corsa/internal/core/domain"
 
 // Peer is a dial candidate known to the local node.
 // It stores the transport address together with the source tag that

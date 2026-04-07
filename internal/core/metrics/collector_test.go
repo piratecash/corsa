@@ -3,7 +3,7 @@ package metrics
 import (
 	"testing"
 
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // mockTrafficSource simulates node.Service for testing.

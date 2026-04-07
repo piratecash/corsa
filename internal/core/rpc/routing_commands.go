@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"corsa/internal/core/identity"
-	"corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // RegisterRoutingCommands registers RPC commands for routing table observability.

@@ -5,12 +5,12 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/identity"
-	"corsa/internal/core/metrics"
-	"corsa/internal/core/node"
-	"corsa/internal/core/rpc"
-	"corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/metrics"
+	"github.com/piratecash/corsa/internal/core/node"
+	"github.com/piratecash/corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 func Run() error {

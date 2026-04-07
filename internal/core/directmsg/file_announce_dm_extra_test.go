@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 )
 
 // TestFileAnnounceDMWithUserDescription verifies that a PlainMessage carrying

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // fileAttachResult holds the metadata for a file that has been

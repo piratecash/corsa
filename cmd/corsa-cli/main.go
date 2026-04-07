@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/rpc"
 )
 
 func main() {

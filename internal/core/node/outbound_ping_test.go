@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // TestHandlePeerSessionFrame_PingRespondsPong verifies that an outbound peer

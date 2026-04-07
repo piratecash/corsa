@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // ClassifyAddress returns the NetGroup for a host:port address string.

@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"corsa/internal/core/identity"
-	"corsa/internal/crypto/ecdhgcm"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/crypto/ecdhgcm"
 )
 
 type Notice struct {

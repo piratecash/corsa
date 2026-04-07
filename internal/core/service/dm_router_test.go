@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/chatlog"
-	"corsa/internal/core/directmsg"
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/chatlog"
+	"github.com/piratecash/corsa/internal/core/directmsg"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
 
 	_ "modernc.org/sqlite"
 )

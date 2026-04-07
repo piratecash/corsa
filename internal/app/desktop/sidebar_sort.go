@@ -3,8 +3,8 @@ package desktop
 import (
 	"sort"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 // sidebarPeerTier returns the sort tier for a peer based on reachability

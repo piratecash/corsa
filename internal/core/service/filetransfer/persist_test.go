@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // sha256Hex returns the hex-encoded SHA-256 of data. Used to generate valid

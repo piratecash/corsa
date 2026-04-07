@@ -1,9 +1,9 @@
 package node
 
 import (
-	"corsa/internal/core/domain"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // RoutingSnapshot returns an immutable point-in-time copy of the routing table.

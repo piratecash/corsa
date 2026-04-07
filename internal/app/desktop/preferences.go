@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 type Preferences struct {

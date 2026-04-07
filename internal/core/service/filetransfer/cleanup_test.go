@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // TestCleanupPeerTransfersSenderReleasesRef verifies that cleaning up a peer

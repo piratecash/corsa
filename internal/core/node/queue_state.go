@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // queueStateVersion tracks the queue-state file schema.  Bump this when the

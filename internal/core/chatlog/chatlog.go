@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 
 	"github.com/rs/zerolog/log"
 	_ "modernc.org/sqlite"

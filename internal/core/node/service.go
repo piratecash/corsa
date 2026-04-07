@@ -17,18 +17,18 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/crashlog"
-	"corsa/internal/core/directmsg"
-	"corsa/internal/core/gazeta"
-	"corsa/internal/core/identity"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/routing"
-	"corsa/internal/core/service/filerouter"
-	"corsa/internal/core/service/filetransfer"
-	"corsa/internal/core/transport"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/directmsg"
+	"github.com/piratecash/corsa/internal/core/gazeta"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/service/filerouter"
+	"github.com/piratecash/corsa/internal/core/service/filetransfer"
+	"github.com/piratecash/corsa/internal/core/transport"
 )
 
 // errIncompatibleProtocol is returned when a peer's protocol version is

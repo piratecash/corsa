@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/domain"
-	"corsa/internal/core/gazeta"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/gazeta"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // TestRespondToInboxRequestNilSession verifies that respondToInboxRequest

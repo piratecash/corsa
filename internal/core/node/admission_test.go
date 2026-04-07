@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/domain"
-	"corsa/internal/core/identity"
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func TestAdmitRelayFrame_CapabilityRequired(t *testing.T) {

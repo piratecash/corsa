@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // validV3Onion is a 56-char base32 string used as a valid Tor v3 .onion host in tests.

@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/domain"
-	"corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 func TestMergeRecipientOrder(t *testing.T) {

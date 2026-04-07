@@ -6,8 +6,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"corsa/internal/app/node"
-	"corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/app/node"
+	"github.com/piratecash/corsa/internal/core/crashlog"
 
 	"github.com/rs/zerolog/log"
 )

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config"
 
 	"github.com/rs/zerolog/log"
 )

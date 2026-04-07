@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"corsa/internal/core/config"
-	"corsa/internal/core/protocol"
-	"corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/rpc"
 )
 
 // mockDiagnosticProvider implements rpc.DiagnosticProvider for testing.

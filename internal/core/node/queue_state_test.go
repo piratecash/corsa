@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func TestLoadQueueStateReturnsEmptyForMissingFile(t *testing.T) {
