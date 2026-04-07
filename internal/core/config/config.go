@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -38,7 +39,7 @@ type Node struct {
 	TrustStorePath   string
 	QueueStatePath   string
 	PeersStatePath   string
-	ChatLogDir       string // directory for chatlog .jsonl files (defaults to ".corsa")
+	ChatLogDir       string // directory for chatlog/state files
 	DownloadDir      string // directory for downloaded files (defaults to "<DataDir>/downloads")
 	ProxyAddress     string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
 	Type             NodeType
@@ -225,25 +226,25 @@ func resolveStartupPath(path string) string {
 func defaultIdentityPath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
-	return filepath.Join(".corsa", "identity-"+port+".json")
+	return filepath.Join(defaultChatLogDir(), "identity-"+port+".json")
 }
 
 func defaultTrustStorePath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
-	return filepath.Join(".corsa", "trust-"+port+".json")
+	return filepath.Join(defaultChatLogDir(), "trust-"+port+".json")
 }
 
 func defaultQueueStatePath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
-	return filepath.Join(".corsa", "queue-"+port+".json")
+	return filepath.Join(defaultChatLogDir(), "queue-"+port+".json")
 }
 
 func defaultPeersStatePath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
-	return filepath.Join(".corsa", "peers-"+port+".json")
+	return filepath.Join(defaultChatLogDir(), "peers-"+port+".json")
 }
 
 func portSuffix(listenAddress string) string {
@@ -355,7 +356,7 @@ func maxOutgoingPeersFromEnv() int {
 }
 
 func defaultChatLogDir() string {
-	return ".corsa"
+	return appdata.DefaultDir()
 }
 
 func maxIncomingPeersFromEnv() int {

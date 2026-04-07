@@ -14,12 +14,12 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
 const (
-	dirName        = ".corsa"
 	logFileName    = "corsa.log"
 	stderrFileName = "stderr.log"
 	crashPrefix    = "crash-"
@@ -208,5 +208,5 @@ func logDir() string {
 	if d := os.Getenv("CORSA_CHATLOG_DIR"); d != "" {
 		return d
 	}
-	return dirName
+	return appdata.DefaultDir()
 }
