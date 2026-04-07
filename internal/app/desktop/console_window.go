@@ -269,7 +269,6 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameDownArrow},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameUpArrow},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameRightArrow},
-			key.Filter{Focus: &c.consoleEditor, Name: key.NameSpace},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameEscape},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameTab},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameEnter},
@@ -289,7 +288,7 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 		case key.NameUpArrow:
 			c.moveSuggestionSelection(-1, suggestions)
 			continue
-		case key.NameRightArrow, key.NameSpace:
+		case key.NameRightArrow:
 			if c.commitSuggestionForArguments(gtx, suggestions) {
 				continue
 			}
