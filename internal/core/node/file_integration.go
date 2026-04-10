@@ -96,7 +96,13 @@ func (s *Service) stopFileTransfer() {
 
 // handleFileCommandFrame is the entry point for inbound file_command frames
 // received from the network. Called from the main frame dispatcher.
-func (s *Service) handleFileCommandFrame(raw json.RawMessage) {
+//
+// incomingPeer is the identity of the immediate neighbor the frame arrived
+// from. It is propagated into the router so transit forwarding applies
+// split-horizon and never reflects the frame back to that neighbor. An
+// empty identity disables split-horizon (used for locally-injected frames
+// and tests).
+func (s *Service) handleFileCommandFrame(raw json.RawMessage, incomingPeer domain.PeerIdentity) {
 	s.mu.RLock()
 	router := s.fileRouter
 	s.mu.RUnlock()
@@ -106,7 +112,7 @@ func (s *Service) handleFileCommandFrame(raw json.RawMessage) {
 		return
 	}
 
-	router.HandleInbound(raw)
+	router.HandleInbound(raw, incomingPeer)
 }
 
 // handleLocalFileCommand decrypts and dispatches a file command that arrived

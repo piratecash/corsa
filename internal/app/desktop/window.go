@@ -125,13 +125,23 @@ type Window struct {
 
 	// File attachment state: when the user picks a file via the native dialog,
 	// these fields hold the selected file path and metadata until Send is pressed.
-	// attachedFile is only mutated on the UI goroutine — background goroutines
-	// deliver the selected path via pendingAttach (buffered channel, drained in
-	// handlePendingActions) and call window.Invalidate() to trigger a frame.
-	attachButton    widget.Clickable
-	attachedFile    string // absolute path to the selected file (empty = no attachment)
-	attachCancelBtn widget.Clickable
-	pendingAttach   chan string // delivers file path from ChooseFile goroutine → UI goroutine
+	// attachedFile and attachGeneration are only mutated on the UI goroutine —
+	// background goroutines deliver the selected path via pendingAttach
+	// (buffered channel, drained in handlePendingActions) and call
+	// window.Invalidate() to trigger a frame.
+	//
+	// attachGeneration is a monotonic counter bumped every time the composer's
+	// attachment slot transitions (new user pick, explicit cancel). triggerFileSend
+	// captures the current generation as sendGen and embeds it in restoreAttach's
+	// closure; the drain in handlePendingActions only honors a restore message
+	// when its generation still matches attachGeneration. This prevents a late
+	// async-send-failure from overwriting a newer user-selected attachment
+	// through the shared single-slot channel.
+	attachButton     widget.Clickable
+	attachedFile     string // absolute path to the selected file (empty = no attachment)
+	attachGeneration uint64 // bumped on every new pick / cancel to invalidate stale restore deliveries
+	attachCancelBtn  widget.Clickable
+	pendingAttach    chan pendingAttachMsg // delivers attach updates from background goroutines → UI goroutine
 
 	// File download buttons for incoming file cards (keyed by message ID).
 	fileDownloadBtns       map[string]*widget.Clickable
@@ -148,6 +158,53 @@ type Window struct {
 	consoleMu sync.Mutex
 
 	window *app.Window
+}
+
+// pendingAttachMsg is the payload delivered over the pendingAttach channel
+// from background goroutines to the UI goroutine drain. Two producers write
+// to this channel:
+//
+//   - triggerFileAttach (user picked a new file through the native dialog):
+//     restore=false. User picks unconditionally replace the composer
+//     attachment and bump the generation counter.
+//
+//   - restoreAttach inside triggerFileSend (async send failure — put the
+//     file back so the user can retry): restore=true with the generation
+//     captured at send start. The drain only honors the restore if
+//     generation still matches Window.attachGeneration. A mismatch means
+//     the user has already picked a different file or cancelled the
+//     attachment, and the stale restore must be dropped to avoid
+//     overwriting the newer selection.
+type pendingAttachMsg struct {
+	path       string
+	restore    bool
+	generation uint64
+}
+
+// restoreShouldYield decides whether an incoming message must yield its slot
+// in the pendingAttach channel to an already-queued message. It is pure and
+// reads no shared state so it is safe to call from a background goroutine
+// during the convergent drain loop in restoreAttach.
+//
+// Yield rules:
+//   - A user pick (existing.restore == false) always wins over any restore.
+//     The user is actively selecting a file and the UI must reflect that.
+//   - An adopted user pick (incoming.restore == false, carried forward from
+//     a previous drain iteration) never yields — once the loop adopts a
+//     user pick as its candidate, it dominates all subsequent comparisons.
+//   - Between two restore messages, the higher-generation one wins. Queued
+//     restores from later sends supersede older ones; re-queueing the newer
+//     message preserves the fix for cross-send failure ordering.
+func restoreShouldYield(existing, incoming pendingAttachMsg) bool {
+	if !incoming.restore {
+		// incoming is a user pick (or an adopted user pick from a prior
+		// drain iteration) — never yield.
+		return false
+	}
+	if !existing.restore {
+		return true
+	}
+	return existing.generation >= incoming.generation
 }
 
 const (
@@ -193,7 +250,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 		msgRightClick:       make(map[string]*rightClickState),
 		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
-		pendingAttach:       make(chan string, 1),
+		pendingAttach:       make(chan pendingAttachMsg, 1),
 	}
 	w.aliasEditor.SingleLine = true
 	w.aliasEditor.Submit = true
@@ -347,13 +404,38 @@ func (w *Window) handlePendingActions() {
 		w.recipientEditor.SetText(string(pa.RecipientText))
 	}
 
-	// Drain file path delivered by triggerFileAttach goroutine.
-	// This keeps all w.attachedFile mutations on the UI goroutine.
+	// Drain attachment update delivered by a background goroutine
+	// (triggerFileAttach for user picks, restoreAttach for async send
+	// failures). This keeps all w.attachedFile / w.attachGeneration
+	// mutations on the UI goroutine.
 	select {
-	case path := <-w.pendingAttach:
-		w.attachedFile = path
+	case msg := <-w.pendingAttach:
+		w.applyPendingAttach(msg)
 	default:
 	}
+}
+
+// applyPendingAttach commits a pendingAttachMsg to the composer. Must be
+// called on the UI goroutine.
+//
+// User picks always win: they unconditionally replace the current attachment
+// and bump attachGeneration, invalidating any in-flight restore from an
+// earlier send. Restores are conditional: they are honored only when the
+// generation they captured at send start still matches attachGeneration AND
+// the composer slot is currently empty. Either condition failing means the
+// user has already moved on (picked a different file, picked the same file
+// again, or explicitly cancelled), and replaying the old path would clobber
+// the newer state.
+func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
+	if !msg.restore {
+		w.attachedFile = msg.path
+		w.attachGeneration++
+		return
+	}
+	if msg.generation != w.attachGeneration || w.attachedFile != "" {
+		return
+	}
+	w.attachedFile = msg.path
 }
 
 func (w *Window) handleActions(gtx layout.Context) {
@@ -379,6 +461,11 @@ func (w *Window) handleActions(gtx layout.Context) {
 
 	for w.attachCancelBtn.Clicked(gtx) {
 		w.attachedFile = ""
+		// Bump generation so that any in-flight restoreAttach from a
+		// previously failing send is rejected by the drain — the user
+		// explicitly dismissed the attachment and must not see it
+		// reappear later.
+		w.attachGeneration++
 		if w.window != nil {
 			w.window.Invalidate()
 		}
@@ -596,17 +683,21 @@ func (w *Window) triggerFileAttach() {
 		}
 
 		// Deliver the path to the UI goroutine via buffered channel.
-		// Non-blocking send: if a previous pick hasn't been consumed yet
-		// (user picked twice very fast), the newer path wins.
+		// User picks are authoritative: they always win over any stale
+		// queued message (previous pick the UI hasn't drained yet, or a
+		// pending restore from an earlier failing send) — the drain
+		// unconditionally applies user picks and bumps the generation,
+		// invalidating any in-flight restore.
+		msg := pendingAttachMsg{path: f.Name(), restore: false}
 		select {
-		case w.pendingAttach <- f.Name():
+		case w.pendingAttach <- msg:
 		default:
 			// Channel full — drain stale value, then send the new one.
 			select {
 			case <-w.pendingAttach:
 			default:
 			}
-			w.pendingAttach <- f.Name()
+			w.pendingAttach <- msg
 		}
 		if w.window != nil {
 			w.window.Invalidate()
@@ -623,22 +714,64 @@ func (w *Window) triggerFileSend(to domain.PeerIdentity) {
 	}
 	srcPath := w.attachedFile
 	caption := w.messageEditor.Text() // capture before clearing
-	w.attachedFile = ""               // clear immediately so user cannot double-send
+	// Capture the attach generation BEFORE clearing. triggerFileSend does
+	// not bump the generation — it hands ownership of the current slot to
+	// the send goroutine, which may later restore if the send fails. Any
+	// user action after this point (new pick, cancel) bumps the generation
+	// and invalidates the pending restore.
+	sendGen := w.attachGeneration
+	w.attachedFile = "" // clear immediately so user cannot double-send
 	w.router.SetSendStatus(w.t("file.sending"))
 
 	// restoreAttach delivers the source path back to the UI goroutine via
 	// pendingAttach so the user can retry without re-picking the file.
 	// attachedFile is only mutated on the UI goroutine (handlePendingActions
 	// drains the channel each frame), preserving the thread-safety invariant.
+	//
+	// The restore message carries sendGen, captured above. The UI drain
+	// honours the restore only if attachGeneration still equals sendGen
+	// (no user pick or cancel happened while the send was in flight) and
+	// the composer slot is currently empty. Cross-send races are also
+	// handled here: if the channel already holds a newer message (a
+	// user pick or a restore from a later send), this restore yields the
+	// slot rather than overwriting it.
 	restoreAttach := func() {
-		select {
-		case w.pendingAttach <- srcPath:
-		default:
+		// Deliver the restore message to the UI goroutine via the
+		// pendingAttach channel (capacity 1). The loop converges
+		// because each iteration either succeeds (sends the winner)
+		// or makes progress by draining one message and picking the
+		// higher-priority survivor via restoreShouldYield.
+		//
+		// The previous drain-inspect-requeue approach had a TOCTOU
+		// race: between draining the existing message and requeueing
+		// it (non-blocking), another goroutine could fill the channel,
+		// causing the requeue to silently drop the existing message.
+		// When existing was a user pick, the composer ended up empty
+		// even though the user had just selected a replacement.
+		msg := pendingAttachMsg{path: srcPath, restore: true, generation: sendGen}
+		for {
 			select {
-			case <-w.pendingAttach:
+			case w.pendingAttach <- msg:
+				return
 			default:
 			}
-			w.pendingAttach <- srcPath
+			// Channel full — drain and decide which message survives.
+			select {
+			case existing := <-w.pendingAttach:
+				if restoreShouldYield(existing, msg) {
+					// existing wins — adopt it as our message so the
+					// next loop iteration requeues the winner instead
+					// of the stale restore. No non-blocking requeue
+					// that a concurrent producer could knock out.
+					msg = existing
+				}
+				// else: our msg wins over the drained message — loop
+				// will try to send msg on the next iteration.
+			default:
+				// Channel was drained between the two selects (UI
+				// goroutine or another producer). Loop back — the
+				// next iteration's send will likely succeed.
+			}
 		}
 	}
 

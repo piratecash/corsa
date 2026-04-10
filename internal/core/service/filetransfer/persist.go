@@ -42,9 +42,10 @@ type persistedTransferEntry struct {
 	CompletedAt time.Time           `json:"completed_at,omitempty"`
 
 	// Sender-specific.
-	BytesServed  uint64    `json:"bytes_served,omitempty"`
-	LastServedAt time.Time `json:"last_served_at,omitempty"`
-	TransmitPath string    `json:"transmit_path,omitempty"`
+	BytesServed   uint64    `json:"bytes_served,omitempty"`
+	LastServedAt  time.Time `json:"last_served_at,omitempty"`
+	TransmitPath  string    `json:"transmit_path,omitempty"`
+	PreServeState string    `json:"pre_serve_state,omitempty"`
 
 	// Receiver-specific.
 	BytesReceived    uint64        `json:"bytes_received,omitempty"`
@@ -56,6 +57,16 @@ type persistedTransferEntry struct {
 	RetryBackoff     time.Duration `json:"retry_backoff,omitempty"`
 	DownloadedSentAt time.Time     `json:"downloaded_sent_at,omitempty"`
 	CompletedPath    string        `json:"completed_path,omitempty"`
+
+	// Shared: epoch of the current serving run. For senders it is the
+	// monotonic counter bumped on every genuine transition into
+	// senderServing; for receivers it is the most recent value observed
+	// from a chunk_response (echoed back in file_downloaded). Must survive
+	// restart so that the epoch counter remains strictly monotonic across
+	// process lifetimes — otherwise a post-restart re-download could
+	// collide with a still-live stale file_downloaded from a prior run.
+	// Omitted when zero (legacy / never served).
+	ServingEpoch uint64 `json:"serving_epoch,omitempty"`
 }
 
 // persistedTransferFile is the top-level JSON structure written to disk.
@@ -73,19 +84,21 @@ const persistVersion = 1
 
 func senderMappingToEntry(m *senderFileMapping) persistedTransferEntry {
 	return persistedTransferEntry{
-		FileID:       m.FileID,
-		FileHash:     m.FileHash,
-		FileName:     m.FileName,
-		FileSize:     m.FileSize,
-		ContentType:  m.ContentType,
-		Peer:         m.Recipient,
-		Role:         "sender",
-		State:        string(m.State),
-		CreatedAt:    m.CreatedAt,
-		CompletedAt:  m.CompletedAt,
-		BytesServed:  m.BytesServed,
-		LastServedAt: m.LastServedAt,
-		TransmitPath: m.TransmitPath,
+		FileID:        m.FileID,
+		FileHash:      m.FileHash,
+		FileName:      m.FileName,
+		FileSize:      m.FileSize,
+		ContentType:   m.ContentType,
+		Peer:          m.Recipient,
+		Role:          "sender",
+		State:         string(m.State),
+		CreatedAt:     m.CreatedAt,
+		CompletedAt:   m.CompletedAt,
+		BytesServed:   m.BytesServed,
+		LastServedAt:  m.LastServedAt,
+		TransmitPath:  m.TransmitPath,
+		PreServeState: string(m.PreServeState),
+		ServingEpoch:  m.ServingEpoch,
 	}
 }
 
@@ -110,23 +123,26 @@ func receiverMappingToEntry(m *receiverFileMapping) persistedTransferEntry {
 		RetryBackoff:     m.DownloadedBackoff,
 		DownloadedSentAt: m.DownloadedSentAt,
 		CompletedPath:    m.CompletedPath,
+		ServingEpoch:     m.ServingEpoch,
 	}
 }
 
 func entryToSenderMapping(e persistedTransferEntry) *senderFileMapping {
 	return &senderFileMapping{
-		FileID:       e.FileID,
-		FileHash:     e.FileHash,
-		FileName:     e.FileName,
-		FileSize:     e.FileSize,
-		ContentType:  e.ContentType,
-		Recipient:    e.Peer,
-		State:        senderState(e.State),
-		CreatedAt:    e.CreatedAt,
-		CompletedAt:  e.CompletedAt,
-		BytesServed:  e.BytesServed,
-		LastServedAt: e.LastServedAt,
-		TransmitPath: e.TransmitPath,
+		FileID:        e.FileID,
+		FileHash:      e.FileHash,
+		FileName:      e.FileName,
+		FileSize:      e.FileSize,
+		ContentType:   e.ContentType,
+		Recipient:     e.Peer,
+		State:         senderState(e.State),
+		PreServeState: senderState(e.PreServeState),
+		CreatedAt:     e.CreatedAt,
+		CompletedAt:   e.CompletedAt,
+		BytesServed:   e.BytesServed,
+		LastServedAt:  e.LastServedAt,
+		TransmitPath:  e.TransmitPath,
+		ServingEpoch:  e.ServingEpoch,
 	}
 }
 
@@ -150,6 +166,7 @@ func entryToReceiverMapping(e persistedTransferEntry) *receiverFileMapping {
 		DownloadedBackoff: e.RetryBackoff,
 		DownloadedSentAt:  e.DownloadedSentAt,
 		CompletedPath:     e.CompletedPath,
+		ServingEpoch:      e.ServingEpoch,
 	}
 	normalizeReceiverMapping(rm)
 	return rm
@@ -248,6 +265,21 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 				continue
 			}
 
+			// Validate PreServeState: stall reclaim restores
+			// sm.State = sm.PreServeState, so an invalid value would
+			// move the mapping into an arbitrary state string. Clear
+			// it — the reclaim fallback treats empty as senderAnnounced.
+			if sm.PreServeState != "" {
+				if _, ok := validSenderStates[sm.PreServeState]; !ok {
+					log.Warn().
+						Str("file_id", string(sm.FileID)).
+						Str("pre_serve_state", string(sm.PreServeState)).
+						Msg("file_transfer: persisted sender entry has invalid pre_serve_state, clearing")
+					sm.PreServeState = ""
+					senderRepaired = true
+				}
+			}
+
 			// Validate hash before using it as a ref-count key or glob pattern.
 			if err := domain.ValidateFileHash(sm.FileHash); err != nil {
 				log.Warn().Err(err).
@@ -276,6 +308,9 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 						Str("prev_state", string(sm.State)).
 						Msg("file_transfer: sender mapping has no transmit file on disk, tombstoning")
 					sm.State = senderTombstone
+					// PreServeState is only meaningful for senderServing; a
+					// tombstone must not carry a stale serving origin around.
+					sm.PreServeState = ""
 					sm.CompletedAt = time.Now()
 					senderRepaired = true
 				} else {
@@ -291,6 +326,18 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 						Str("file_hash", sm.FileHash).
 						Msg("file_transfer: tombstone sender has transmit file on disk, resurrecting to completed")
 					sm.State = senderCompleted
+					// Same invariant: senderCompleted does not carry
+					// PreServeState; the next chunk_request will capture
+					// the pre-serve state under lock when promoting to
+					// senderServing.
+					sm.PreServeState = ""
+					// Reset CompletedAt to now so the 30-day tombstoneTTL
+					// in tickSenderMappings restarts from the resurrection
+					// moment. Without this, an old tombstone (CompletedAt
+					// weeks ago) resurrected at startup would be purged on
+					// the very next maintenance tick, defeating the
+					// resurrection path for older entries.
+					sm.CompletedAt = time.Now()
 					senderRepaired = true
 					activeHashes[sm.FileHash]++
 				}
@@ -443,6 +490,12 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 				partialSize = 0
 			}
 
+			// Clear any stale CompletedPath that may have been persisted or
+			// backfilled unconditionally: this branch established that no
+			// completed file exists on disk, so CompletedPath must not leak
+			// into later cleanup paths (e.g. CleanupPeerTransfers) where it
+			// could delete an unrelated file in the downloads directory.
+			rm.CompletedPath = ""
 			rm.State = receiverWaitingRoute
 			rm.NextOffset = partialSize
 			rm.BytesReceived = partialSize
@@ -454,6 +507,9 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 		}
 
 		// Case 3: neither file exists — unrecoverable without re-announce.
+		// Same rationale as Case 2: zero CompletedPath so stale backfilled
+		// state cannot be mistaken for a real completed download later.
+		rm.CompletedPath = ""
 		rm.State = receiverFailed
 		rm.CompletedAt = time.Now()
 		log.Warn().

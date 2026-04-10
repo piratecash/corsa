@@ -81,6 +81,16 @@ type receiverFileMapping struct {
 	// changed, preventing stale cleanup from deleting a freshly created
 	// .part file that belongs to a newer transfer attempt.
 	Generation uint64
+
+	// ServingEpoch is the sender's epoch observed on the most recent
+	// chunk_response for this FileID. It is echoed back in file_downloaded
+	// so the sender can reject stale replays from a prior serving run of
+	// the same FileID (re-downloads reuse the FileID but bump the sender
+	// epoch). A zero value means no epoch has been observed yet (legacy
+	// sender, or no chunk_response has arrived since the mapping was
+	// registered / reset); in that case file_downloaded carries Epoch=0
+	// and the sender falls back to the legacy (un-gated) accept path.
+	ServingEpoch uint64
 }
 
 // newReceiverMapping creates a receiverFileMapping with all domain invariants
@@ -302,6 +312,13 @@ func (m *Manager) HandleChunkResponse(
 
 // HandleFileDownloadedAck processes a file_downloaded_ack from the sender.
 // Transitions from waiting_ack → completed.
+//
+// Epoch gating: if the mapping observed a non-zero ServingEpoch during the
+// current run, the incoming ack must echo the same value. This rejects a
+// stale ack left over from a prior serving run of the same FileID (e.g.
+// cancel + restart cycle that rebound a new epoch). Epoch==0 on either
+// side is the legacy path and accepted unconditionally for wire
+// compatibility during rolling upgrades.
 func (m *Manager) HandleFileDownloadedAck(
 	senderIdentity domain.PeerIdentity,
 	ack domain.FileDownloadedAckPayload,
@@ -320,6 +337,18 @@ func (m *Manager) HandleFileDownloadedAck(
 
 	if mapping.State != receiverWaitingAck {
 		m.mu.Unlock()
+		return
+	}
+
+	if ack.Epoch != 0 && mapping.ServingEpoch != 0 && ack.Epoch != mapping.ServingEpoch {
+		currentEpoch := mapping.ServingEpoch
+		m.mu.Unlock()
+		log.Warn().
+			Str("file_id", string(ack.FileID)).
+			Str("sender", string(senderIdentity)).
+			Uint64("received_epoch", ack.Epoch).
+			Uint64("current_epoch", currentEpoch).
+			Msg("file_transfer: file_downloaded_ack epoch mismatch — dropping stale ack")
 		return
 	}
 
@@ -365,6 +394,12 @@ func (m *Manager) CancelDownload(fileID domain.FileID) error {
 	mapping.DownloadedRetries = 0
 	mapping.DownloadedBackoff = 0
 	mapping.DownloadedSentAt = time.Time{}
+	// Forget the stashed serving epoch: the next download is a new run
+	// and must learn the sender's current epoch from its next
+	// chunk_response. Leaving the previous epoch here would cause the
+	// receiver to echo it on completion, which the sender would reject
+	// as stale (its ServingEpoch is now strictly larger).
+	mapping.ServingEpoch = 0
 	m.nextGeneration++
 	mapping.Generation = m.nextGeneration
 	mapping.CompletedPath = ""
@@ -407,6 +442,12 @@ func (m *Manager) RestartDownload(fileID domain.FileID) error {
 	mapping.DownloadedRetries = 0
 	mapping.DownloadedBackoff = 0
 	mapping.DownloadedSentAt = time.Time{}
+	// Forget the stashed serving epoch: the next download is a new run
+	// and must learn the sender's current epoch from its next
+	// chunk_response. Leaving the previous epoch here would cause the
+	// receiver to echo it on completion, which the sender would reject
+	// as stale (its ServingEpoch is now strictly larger).
+	mapping.ServingEpoch = 0
 	m.nextGeneration++
 	mapping.Generation = m.nextGeneration
 	mapping.CompletedPath = ""
@@ -503,7 +544,8 @@ type resumeSnapshot struct {
 	prevBytesReceived uint64
 	startOffset       uint64
 	chunkSize         uint32
-	truncatePartial   bool // true when restarting from offset 0 with a stale .part on disk
+	truncatePartial   bool   // true when restarting from offset 0 with a stale .part on disk
+	generation        uint64 // mapping generation at snapshot time; rollback is skipped if it changed
 }
 
 // prepareResumeLocked validates the partial file, resets the offset when
@@ -566,6 +608,7 @@ func (m *Manager) prepareResumeLocked(
 		startOffset:       resumeOffset,
 		chunkSize:         rm.ChunkSize,
 		truncatePartial:   needTruncate,
+		generation:        rm.Generation,
 	}
 
 	rm.State = receiverDownloading
@@ -594,6 +637,11 @@ func (m *Manager) truncatePartialFile(snap resumeSnapshot) {
 // sendChunkWithRollback sends the initial chunk_request for a resume and
 // rolls back the mapping to its previous state on failure. Must be called
 // WITHOUT m.mu held.
+//
+// The rollback is guarded by both state AND generation: if CancelDownload
+// resets the mapping (bumping generation) and a new download reaches
+// receiverDownloading before the stale rollback runs, the generation
+// mismatch prevents the old snapshot from corrupting the new transfer.
 func (m *Manager) sendChunkWithRollback(snap resumeSnapshot) error {
 	err := m.requestNextChunk(snap.fileID, snap.sender, snap.startOffset, snap.chunkSize)
 	if err == nil {
@@ -601,7 +649,9 @@ func (m *Manager) sendChunkWithRollback(snap resumeSnapshot) error {
 	}
 
 	m.mu.Lock()
-	if rm, exists := m.receiverMaps[snap.fileID]; exists && rm.State == receiverDownloading {
+	if rm, exists := m.receiverMaps[snap.fileID]; exists &&
+		rm.State == receiverDownloading &&
+		rm.Generation == snap.generation {
 		rm.State = snap.prevState
 		rm.NextOffset = snap.prevOffset
 		rm.BytesReceived = snap.prevBytesReceived
@@ -706,12 +756,27 @@ func (m *Manager) validateChunkResponseLocked(
 		return chunkReceivePrep{}, fmt.Errorf("offset mismatch")
 	}
 
+	// Stash the sender's serving epoch so file_downloaded can echo it for
+	// replay defense. The cache must be strictly monotonic: a delayed
+	// chunk_response from an older serving run (lower epoch) must not
+	// overwrite a newer epoch already observed. Without this, the
+	// completion would echo the stale epoch and the sender would reject
+	// the legitimate file_downloaded as a replay.
+	//
+	// Zero is skipped entirely: a legacy sender (epoch=0) or a mid-upgrade
+	// sender regressing to zero must not erase a non-zero epoch that the
+	// receiver already learned from an earlier chunk in this run.
+	if resp.Epoch > mapping.ServingEpoch {
+		mapping.ServingEpoch = resp.Epoch
+	}
+
 	log.Info().
 		Str("file_id", string(resp.FileID)).
 		Uint64("offset", resp.Offset).
 		Int("chunk_bytes", len(chunkData)).
 		Uint64("bytes_received_so_far", mapping.BytesReceived+uint64(len(chunkData))).
 		Uint64("file_size", mapping.FileSize).
+		Uint64("serving_epoch", mapping.ServingEpoch).
 		Msg("file_transfer: chunk_response received")
 
 	prep := chunkReceivePrep{
@@ -942,23 +1007,71 @@ func (m *Manager) onDownloadComplete(
 		return
 	}
 
-	// Send file_downloaded only after the file is durably stored.
-	// Re-check that the mapping is still in receiverVerifying — a concurrent
-	// CancelDownload could have reset it to available while hash verification
-	// or rename was running. Transitioning a canceled mapping to waitingAck
-	// would resurrect a transfer the user already abandoned, and the sender
-	// may have already released the transmit file.
+	// Finalize the verified download: guard on state+generation, then
+	// transition to waitingAck and send file_downloaded. verifiedInfo is
+	// the pre-rename Fstat identity — since os.Rename preserves the inode,
+	// it also identifies the file now at completedPath and is used by the
+	// stale-cleanup branch to avoid deleting a different attempt's file
+	// that may have atomically overwritten completedPath.
+	if !m.finalizeVerifiedDownload(fileID, mapping, generation, completedPath, verifiedInfo, sender) {
+		return
+	}
+
+	log.Info().
+		Str("file_id", string(fileID)).
+		Str("path", completedPath).
+		Msg("file_transfer: file verified and stored")
+}
+
+// finalizeVerifiedDownload is the post-rename tail of onDownloadComplete.
+// It checks that the mapping is still owned by this verifier (state AND
+// generation), transitions to receiverWaitingAck, and sends file_downloaded.
+// Returns true if the transition and send were attempted, false if the
+// verifier is stale (cancelled or superseded by a restart of the same
+// fileID) and the completed file was cleaned up.
+//
+// Generation guard rationale: a concurrent CancelDownload resets the
+// mapping to available and bumps Generation; the user may then restart
+// the same fileID, and a new attempt can advance back to receiverVerifying.
+// Without this guard a stale verifier goroutine would see the matching
+// receiverVerifying state, overwrite CompletedPath with its old blob's
+// path, transition the NEW attempt to waitingAck, and send file_downloaded
+// for a file the user explicitly abandoned. The verify-failure path uses
+// the same combined state+generation check via markReceiverFailed.
+//
+// File-identity cleanup rationale: cancel+restart of the same fileID
+// resolves to the same completedPath (identical FileName+FileHash). If
+// the stale verifier reaches the mismatch branch after a NEW attempt has
+// already renamed its own verified file into place, a path-only unlink
+// would delete the new attempt's legitimate file. verifiedInfo captures
+// the inode identity of the file this verifier renamed; removeOwnedFile
+// uses os.SameFile to only unlink when completedPath still points at our
+// inode. If another attempt's atomic rename replaced our inode, we skip.
+func (m *Manager) finalizeVerifiedDownload(
+	fileID domain.FileID,
+	mapping *receiverFileMapping,
+	generation uint64,
+	completedPath string,
+	verifiedInfo os.FileInfo,
+	sender domain.PeerIdentity,
+) bool {
 	m.mu.Lock()
-	if mapping.State != receiverVerifying {
+	if mapping.State != receiverVerifying || mapping.Generation != generation {
+		currentState := mapping.State
+		currentGeneration := mapping.Generation
 		m.mu.Unlock()
 		log.Info().
 			Str("file_id", string(fileID)).
-			Str("state", string(mapping.State)).
-			Msg("file_transfer: verification completed but transfer was cancelled, aborting")
+			Str("state", string(currentState)).
+			Uint64("verifier_generation", generation).
+			Uint64("current_generation", currentGeneration).
+			Msg("file_transfer: verification completed but transfer was cancelled or restarted, aborting")
 		// The completed file was already renamed to completedPath. Clean it
-		// up since the transfer is no longer active.
-		m.safeRemoveInDownloadDir(completedPath, "post-verify cancel cleanup")
-		return
+		// up only if our inode is still there: a newer attempt may have
+		// atomically overwritten completedPath with its own legitimately
+		// verified file, in which case we must not delete it.
+		m.removeOwnedFileInDownloadDir(completedPath, verifiedInfo, "post-verify cancel cleanup")
+		return false
 	}
 	mapping.State = receiverWaitingAck
 	mapping.CompletedPath = completedPath
@@ -987,28 +1100,59 @@ func (m *Manager) onDownloadComplete(
 	m.mu.Unlock()
 
 	m.sendFileDownloaded(fileID, sender)
-
-	log.Info().
-		Str("file_id", string(fileID)).
-		Str("path", completedPath).
-		Msg("file_transfer: file verified and stored")
+	return true
 }
 
-// sendFileDownloaded sends a file_downloaded command to the sender.
+// sendFileDownloaded sends a file_downloaded command to the sender. It
+// attaches the ServingEpoch stashed on the receiver mapping from the most
+// recent chunk_response; the sender uses this to reject stale replays from
+// a prior serving run of the same FileID.
+//
+// The function verifies that the mapping is still in receiverWaitingAck
+// and marshals the wire payload in a single lock acquisition. This
+// guarantees that if CancelDownload (or any other state mutation) runs
+// concurrently, it either completes before the lock — causing the guard
+// to fail — or blocks until after the payload is committed. A generation
+// check is not needed because CancelDownload rejects receiverWaitingAck
+// (only downloading/verifying/waitingRoute are cancellable), so the state
+// alone is a sufficient guard.
+//
+// If no mapping exists for fileID (cleanup race), the command is not sent.
+// Epoch=0 is legal and means the receiver never observed a non-zero epoch
+// — the sender treats it as legacy.
 func (m *Manager) sendFileDownloaded(fileID domain.FileID, sender domain.PeerIdentity) {
-	dlData, err := json.Marshal(domain.FileDownloadedPayload{FileID: fileID})
+	m.mu.Lock()
+	mapping, ok := m.receiverMaps[fileID]
+	if !ok || mapping.State != receiverWaitingAck {
+		m.mu.Unlock()
+		return
+	}
+	epoch := mapping.ServingEpoch
+	gen := mapping.Generation
+
+	// Marshal under lock so the decision and the wire bytes are committed
+	// atomically — no TOCTOU gap for concurrent state mutations.
+	dlData, err := json.Marshal(domain.FileDownloadedPayload{
+		FileID: fileID,
+		Epoch:  epoch,
+	})
 	if err != nil {
+		m.mu.Unlock()
 		log.Error().Err(err).Msg("file_transfer: marshal file_downloaded failed")
 		return
 	}
-
 	payload := domain.FileCommandPayload{
 		Command: domain.FileActionDownloaded,
 		Data:    dlData,
 	}
+	m.mu.Unlock()
 
 	if err := m.sendCommand(sender, payload); err != nil {
-		log.Debug().Err(err).Str("file_id", string(fileID)).Msg("file_transfer: send file_downloaded failed")
+		log.Debug().Err(err).
+			Str("file_id", string(fileID)).
+			Uint64("serving_epoch", epoch).
+			Uint64("generation", gen).
+			Msg("file_transfer: send file_downloaded failed")
 	}
 }
 
@@ -1242,31 +1386,32 @@ func (m *Manager) tickReceiverMappings() {
 	m.mu.Unlock()
 
 	// Execute deferred I/O actions outside the lock.
-	// Each action carries requiredState — the receiver state that must still
-	// hold at execution time. A single guard at the top of the loop prevents
-	// stale actions from running after CancelDownload or CleanupPeerTransfers
-	// changed the mapping between the snapshot and execution.
+	// Each action carries requiredState+generation — the receiver state that
+	// must still hold at execution time. Each action kind has its own guard
+	// inside the dispatch method so the state check and the I/O commitment
+	// are in the same call, minimising the TOCTOU window between check and send.
 	for _, a := range actions {
-		if !m.receiverStateIs(a.fileID, a.requiredState, a.generation) {
-			continue
-		}
 		m.executeReceiverAction(a)
 	}
 }
 
 // executeReceiverAction dispatches a single deferred receiver tick action.
-// Called outside the lock, after the state guard has already confirmed the
-// mapping is in the expected state.
+// Called outside the lock after tickReceiverMappings has released m.mu.
+//
+// Actions that perform network I/O use guardedChunkRetry / guardedResume /
+// sendFileDownloaded — each of which checks state+generation AND marshals
+// the wire payload in a single lock acquisition, then sends outside the lock.
+// This eliminates the TOCTOU gap that existed when receiverStateIs and the
+// send were separate operations: CancelDownload can no longer sneak between
+// the decision and the I/O because the payload is committed before the lock
+// is released.
+//
+// actionCleanupFailed only touches a local file and is idempotent, so
+// it does not need a state guard.
 func (m *Manager) executeReceiverAction(a receiverTickAction) {
 	switch a.kind {
 	case actionRetryChunk:
-		log.Info().
-			Str("file_id", string(a.fileID)).
-			Uint64("offset", a.offset).
-			Msg("file_transfer: retrying stalled chunk request")
-		if err := m.requestNextChunk(a.fileID, a.sender, a.offset, a.chunkSize); err != nil {
-			log.Warn().Err(err).Str("file_id", string(a.fileID)).Msg("file_transfer: stalled chunk retry failed")
-		}
+		m.guardedChunkRetry(a)
 
 	case actionCleanupFailed:
 		log.Warn().Str("file_id", string(a.fileID)).Msg("file_transfer: download failed after max chunk retries")
@@ -1277,12 +1422,102 @@ func (m *Manager) executeReceiverAction(a receiverTickAction) {
 		m.sendFileDownloaded(a.fileID, a.sender)
 
 	case actionResume:
-		m.truncatePartialFile(a.snap)
-		if err := m.sendChunkWithRollback(a.snap); err != nil {
-			log.Warn().Err(err).
-				Str("file_id", string(a.fileID)).
-				Uint64("offset", a.snap.startOffset).
-				Msg("file_transfer: resume chunk request failed, rolled back to waiting_route")
-		}
+		m.guardedResume(a)
 	}
+}
+
+// guardedChunkRetry atomically validates receiver state+generation and
+// marshals the chunk_request payload in a single lock acquisition. The
+// network send happens after the lock is released, but the go/no-go
+// decision and the wire bytes are committed while the mapping cannot
+// change. This closes the TOCTOU that existed when receiverStateIs and
+// requestNextChunk were separate unlocked calls.
+func (m *Manager) guardedChunkRetry(a receiverTickAction) {
+	m.mu.Lock()
+	rm, ok := m.receiverMaps[a.fileID]
+	if !ok || rm.State != a.requiredState || rm.Generation != a.generation {
+		m.mu.Unlock()
+		return
+	}
+
+	// Marshal the payload while the lock guarantees state consistency.
+	payload, err := buildChunkRequestPayload(a.fileID, a.offset, a.chunkSize)
+	m.mu.Unlock()
+
+	if err != nil {
+		log.Warn().Err(err).Str("file_id", string(a.fileID)).Msg("file_transfer: marshal stalled chunk retry failed")
+		return
+	}
+
+	log.Info().
+		Str("file_id", string(a.fileID)).
+		Uint64("offset", a.offset).
+		Msg("file_transfer: retrying stalled chunk request")
+
+	if err := m.sendCommand(a.sender, payload); err != nil {
+		log.Warn().Err(err).Str("file_id", string(a.fileID)).Msg("file_transfer: stalled chunk retry failed")
+	}
+}
+
+// guardedResume atomically validates receiver state+generation and marshals
+// the chunk_request payload in a single lock acquisition, then sends outside
+// the lock. On send failure, the rollback is also generation-guarded.
+//
+// truncatePartialFile runs before the guarded send — it is idempotent local
+// I/O and safe to execute even if state changed (the file is already stale).
+func (m *Manager) guardedResume(a receiverTickAction) {
+	// Idempotent local I/O — safe without guard.
+	m.truncatePartialFile(a.snap)
+
+	m.mu.Lock()
+	rm, ok := m.receiverMaps[a.fileID]
+	if !ok || rm.State != a.requiredState || rm.Generation != a.generation {
+		m.mu.Unlock()
+		return
+	}
+
+	payload, err := buildChunkRequestPayload(a.snap.fileID, a.snap.startOffset, a.snap.chunkSize)
+	m.mu.Unlock()
+
+	if err != nil {
+		log.Warn().Err(err).Str("file_id", string(a.fileID)).Msg("file_transfer: marshal resume chunk request failed")
+		return
+	}
+
+	if sendErr := m.sendCommand(a.sender, payload); sendErr != nil {
+		// Rollback with generation guard — prevents stale rollback from
+		// corrupting a newer transfer that reuses the same FileID.
+		m.mu.Lock()
+		if rm, exists := m.receiverMaps[a.snap.fileID]; exists &&
+			rm.State == receiverDownloading &&
+			rm.Generation == a.snap.generation {
+			rm.State = a.snap.prevState
+			rm.NextOffset = a.snap.prevOffset
+			rm.BytesReceived = a.snap.prevBytesReceived
+			m.saveMappingsLocked()
+		}
+		m.mu.Unlock()
+
+		log.Warn().Err(sendErr).
+			Str("file_id", string(a.fileID)).
+			Uint64("offset", a.snap.startOffset).
+			Msg("file_transfer: resume chunk request failed, rolled back to waiting_route")
+	}
+}
+
+// buildChunkRequestPayload marshals a chunk_request FileCommandPayload.
+// Pure computation, safe to call under a mutex.
+func buildChunkRequestPayload(fileID domain.FileID, offset uint64, size uint32) (domain.FileCommandPayload, error) {
+	reqData, err := json.Marshal(domain.ChunkRequestPayload{
+		FileID: fileID,
+		Offset: offset,
+		Size:   size,
+	})
+	if err != nil {
+		return domain.FileCommandPayload{}, fmt.Errorf("marshal chunk request: %w", err)
+	}
+	return domain.FileCommandPayload{
+		Command: domain.FileActionChunkReq,
+		Data:    reqData,
+	}, nil
 }

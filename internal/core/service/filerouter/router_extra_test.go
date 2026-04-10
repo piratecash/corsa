@@ -33,7 +33,7 @@ func TestFileRouterUndeliverableDSTDropped(t *testing.T) {
 	frame := makeSignedFrame(senderID, unknownDST, 5, "unroutable-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// No local delivery — DST != localID.
 	if len(tr.localDeliveries()) != 0 {
@@ -96,7 +96,7 @@ func TestFileRouterTTLZeroAtRouterDropped(t *testing.T) {
 	}
 
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// No local delivery — frame dropped at step 3 (DecrementTTL fails).
 	if len(tr.localDeliveries()) != 0 {
@@ -144,7 +144,7 @@ func TestFileRouterStaleFrameDropped(t *testing.T) {
 	}
 
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// Stale frame must be rejected — no local delivery.
 	if len(tr.localDeliveries()) != 0 {
@@ -172,7 +172,7 @@ func TestFileRouterInvalidSignatureDropped(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "bad-sig-payload", wrongPriv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	if len(tr.localDeliveries()) != 0 {
 		t.Error("frame with invalid signature should not be delivered")
@@ -209,7 +209,7 @@ func TestFileRouterFullNodeRelays(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// Should be forwarded to relay1.
 	if len(tr.sentTo(relay1)) != 1 {
@@ -241,7 +241,7 @@ func TestFileRouterUnknownSenderKeyDropped(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "unknown-sender", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	if len(tr.localDeliveries()) != 0 {
 		t.Error("frame from unknown sender should not be delivered")
@@ -271,7 +271,7 @@ func TestFileRouterRejectsTTLInflation(t *testing.T) {
 	frame.TTL = frame.MaxTTL + 1
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	if len(tr.localDeliveries()) != 0 {
 		t.Error("frame with inflated TTL (MaxTTL+1) should be rejected, not delivered")
@@ -299,7 +299,7 @@ func TestFileRouterAcceptsValidTTLBelowMaxTTL(t *testing.T) {
 	frame.TTL = 3 // 2 hops already consumed
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	if len(tr.localDeliveries()) != 1 {
 		t.Errorf("valid frame with TTL < MaxTTL should be delivered, got %d deliveries", len(tr.localDeliveries()))

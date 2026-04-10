@@ -1168,7 +1168,10 @@ func (s *Service) handleJSONCommand(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		s.handleFileCommandFrame(json.RawMessage(line))
+		// Pass the inbound peer identity so the file router applies
+		// split-horizon forwarding and never reflects the frame back
+		// to the neighbor that just delivered it.
+		s.handleFileCommandFrame(json.RawMessage(line), s.inboundPeerIdentity(conn))
 		return true
 	case "fetch_reachable_ids":
 		s.writeJSONFrame(conn, s.reachableIDsFrame())

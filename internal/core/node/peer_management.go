@@ -1225,7 +1225,10 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			s.markPeerRead(session.address, frame)
 			s.markPeerUsefulReceive(session.address)
 			if s.sessionHasCapability(session.address, domain.CapFileTransferV1) {
-				s.handleFileCommandFrame(json.RawMessage(trimmed))
+				// Outbound session carries the peer identity directly;
+				// pass it so the file router can split-horizon forward
+				// and never reflect the frame back to this same peer.
+				s.handleFileCommandFrame(json.RawMessage(trimmed), session.peerIdentity)
 			}
 			continue
 		}

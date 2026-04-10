@@ -128,7 +128,7 @@ func TestFileRouterLocalDelivery(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "test-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	deliveries := tr.localDeliveries()
 	if len(deliveries) != 1 {
@@ -154,8 +154,8 @@ func TestFileRouterReplayRejection(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "test-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
-	tr.router.HandleInbound(json.RawMessage(raw)) // replay
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), "") // replay
 
 	deliveries := tr.localDeliveries()
 	if len(deliveries) != 1 {
@@ -201,7 +201,7 @@ func TestFileRouterForwardMultipleRoutes(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// Frame should have been forwarded to relay2 (first reachable, sorted by hops).
 	sentToRelay1 := tr.sentTo(relay1)
@@ -254,7 +254,7 @@ func TestFileRouterForwardAllRoutesFail(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// No frames should have been sent.
 	if len(tr.sentTo(relay1)) != 0 || len(tr.sentTo(relay2)) != 0 {
@@ -296,7 +296,7 @@ func TestFileRouterClientNodeNoRelay(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "client-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	if len(tr.sentTo(relay1)) != 0 {
 		t.Error("client node should not relay file commands")
@@ -334,7 +334,7 @@ func TestFileRouterSkipsSelfRoutes(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "test-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// Should forward via relay1, not self.
 	if len(tr.sentTo(relay1)) != 1 {
@@ -388,7 +388,7 @@ func TestFileRouterConcurrentDuplicateDelivery(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			router.HandleInbound(json.RawMessage(raw))
+			router.HandleInbound(json.RawMessage(raw), "")
 		}()
 	}
 
@@ -397,5 +397,139 @@ func TestFileRouterConcurrentDuplicateDelivery(t *testing.T) {
 
 	if d := deliveryCount.Load(); d != 1 {
 		t.Errorf("exactly 1 local delivery expected under concurrent duplicate frames, got %d", d)
+	}
+}
+
+// TestFileRouterSplitHorizonExcludesIncomingPeer verifies that when a
+// transit node forwards a FileCommandFrame, the route whose NextHop
+// equals the incomingPeer (the neighbor the frame arrived from) is
+// excluded from the candidate set. Without this split-horizon, the
+// transit node would reflect the frame straight back to the previous
+// hop, causing a bandwidth-wasting ping-pong loop that continues
+// until TTL expires.
+func TestFileRouterSplitHorizonExcludesIncomingPeer(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	neighborA := domain.PeerIdentity("neighbor-a-identity-1234567890a")
+	neighborB := domain.PeerIdentity("neighbor-b-identity-1234567890a")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				// neighborA is the shortest route but is also the
+				// incoming peer — must be excluded by split-horizon.
+				{Identity: dstID, NextHop: neighborA, Hops: 1, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, NextHop: neighborB, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	reachable := map[domain.PeerIdentity]bool{
+		neighborA: true,
+		neighborB: true,
+	}
+
+	tr := newTestFileRouter(localID, true, snap, keys, reachable)
+
+	frame := makeSignedFrame(senderID, dstID, 5, "split-horizon-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	// neighborA is the previous hop — must NOT receive the forwarded frame.
+	tr.router.HandleInbound(json.RawMessage(raw), neighborA)
+
+	if len(tr.sentTo(neighborA)) != 0 {
+		t.Error("split-horizon violation: frame was reflected back to incoming peer neighborA")
+	}
+	if len(tr.sentTo(neighborB)) != 1 {
+		t.Fatalf("expected frame forwarded to neighborB, got %d", len(tr.sentTo(neighborB)))
+	}
+}
+
+// TestFileRouterSplitHorizonAllRoutesExcluded verifies that when the only
+// available route is back through the incoming peer, the frame is silently
+// dropped rather than reflected.
+func TestFileRouterSplitHorizonAllRoutesExcluded(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	onlyNeighbor := domain.PeerIdentity("only-neighbor-identity-12345678")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, NextHop: onlyNeighbor, Hops: 1, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	reachable := map[domain.PeerIdentity]bool{onlyNeighbor: true}
+
+	tr := newTestFileRouter(localID, true, snap, keys, reachable)
+
+	frame := makeSignedFrame(senderID, dstID, 5, "dead-end-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	// The only route is via the incoming peer — frame must be dropped.
+	tr.router.HandleInbound(json.RawMessage(raw), onlyNeighbor)
+
+	if len(tr.sentTo(onlyNeighbor)) != 0 {
+		t.Error("frame must not be reflected back to the only neighbor when it is the incoming peer")
+	}
+	if len(tr.localDeliveries()) != 0 {
+		t.Error("should not deliver locally when DST != localID")
+	}
+}
+
+// TestFileRouterEmptyIncomingPeerDisablesSplitHorizon confirms that passing
+// an empty incomingPeer (locally-originated or test-injected frame) does
+// not exclude any route candidates.
+func TestFileRouterEmptyIncomingPeerDisablesSplitHorizon(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	neighborA := domain.PeerIdentity("neighbor-a-identity-1234567890a")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, NextHop: neighborA, Hops: 1, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	reachable := map[domain.PeerIdentity]bool{neighborA: true}
+
+	tr := newTestFileRouter(localID, true, snap, keys, reachable)
+
+	frame := makeSignedFrame(senderID, dstID, 5, "no-exclusion-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	// Empty incomingPeer → no split-horizon, neighborA should receive the frame.
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if len(tr.sentTo(neighborA)) != 1 {
+		t.Fatalf("empty incomingPeer should not exclude any route; expected 1 send to neighborA, got %d", len(tr.sentTo(neighborA)))
 	}
 }

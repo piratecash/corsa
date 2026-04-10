@@ -556,6 +556,108 @@ func TestReconcileVerifying_NoFilesOnDisk(t *testing.T) {
 	}
 }
 
+// TestReconcileVerifying_PartialFileClearsStaleCompletedPath verifies that
+// reconcile into receiverWaitingRoute zeroes any persisted CompletedPath.
+// Without this, a stale path (e.g. backfilled unconditionally on load) would
+// survive into the retry loop and later be consumed by CleanupPeerTransfers
+// as a real downloaded file, deleting an unrelated file in the downloads
+// directory.
+func TestReconcileVerifying_PartialFileClearsStaleCompletedPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	downloadDir := filepath.Join(dir, "downloads")
+	if err := os.MkdirAll(filepath.Join(downloadDir, "partial"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	fileID := domain.FileID("crash-stale-path-waiting-route")
+	fileHash := "e1e2e3e4e5e6e1e2e3e4e5e6e1e2e3e4e5e6e1e2e3e4e5e6e1e2e3e4e5e6e1e2"
+
+	// Write a partial file so reconcile takes the waiting_route branch.
+	partialPath := partialDownloadPath(downloadDir, fileID)
+	if err := os.WriteFile(partialPath, make([]byte, 2048), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stale completed path points at a sibling file in the same downloads
+	// directory. Reconcile must not carry this value forward — after repair
+	// the mapping no longer represents a completed download.
+	stalePath := filepath.Join(downloadDir, "some-unrelated-file.bin")
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  downloadDir,
+		stopCh:       make(chan struct{}),
+	}
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:        fileID,
+		FileHash:      fileHash,
+		FileName:      "data.bin",
+		FileSize:      100000,
+		Sender:        domain.PeerIdentity("sender-identity-1234567890abcd"),
+		State:         receiverVerifying,
+		CompletedPath: stalePath,
+		CreatedAt:     time.Now(),
+	}
+
+	m.reconcileVerifyingOnStartup()
+
+	rm := m.receiverMaps[fileID]
+	if rm.State != receiverWaitingRoute {
+		t.Fatalf("state = %s, want waiting_route", rm.State)
+	}
+	if rm.CompletedPath != "" {
+		t.Errorf("CompletedPath = %q, want empty after reconcile to waiting_route", rm.CompletedPath)
+	}
+}
+
+// TestReconcileVerifying_NoFilesClearsStaleCompletedPath verifies that
+// reconcile into receiverFailed zeroes any persisted CompletedPath.
+// Mirror of the waiting_route test — the failed branch also repairs a
+// mapping that has no completed file on disk, so CompletedPath must not
+// survive as a dangling reference into later cleanup paths.
+func TestReconcileVerifying_NoFilesClearsStaleCompletedPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	downloadDir := filepath.Join(dir, "downloads")
+	if err := os.MkdirAll(filepath.Join(downloadDir, "partial"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stalePath := filepath.Join(downloadDir, "another-unrelated-file.bin")
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  downloadDir,
+		stopCh:       make(chan struct{}),
+	}
+
+	fileID := domain.FileID("crash-stale-path-failed")
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:        fileID,
+		FileHash:      "f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2",
+		FileName:      "gone.txt",
+		FileSize:      1024,
+		Sender:        domain.PeerIdentity("sender-identity-1234567890abcd"),
+		State:         receiverVerifying,
+		CompletedPath: stalePath,
+		CreatedAt:     time.Now(),
+	}
+
+	m.reconcileVerifyingOnStartup()
+
+	rm := m.receiverMaps[fileID]
+	if rm.State != receiverFailed {
+		t.Fatalf("state = %s, want failed", rm.State)
+	}
+	if rm.CompletedPath != "" {
+		t.Errorf("CompletedPath = %q, want empty after reconcile to failed", rm.CompletedPath)
+	}
+}
+
 // TestReconcileVerifying_OversizedPartialFileResetsOffset verifies that a
 // receiverVerifying entry with a .part file larger than FileSize is recovered
 // to receiverWaitingRoute with NextOffset=0. An oversized partial indicates
@@ -823,6 +925,339 @@ func TestLoadMappings_AcceptsValidEntries(t *testing.T) {
 	}
 	if count := hashes[sHash]; count != 1 {
 		t.Errorf("expected sender hash ref count 1, got %d", count)
+	}
+}
+
+// TestLoadMappings_SenderPreServeStateRoundTrip verifies that a
+// senderServing mapping in the middle of a re-download keeps its
+// PreServeState across a persist → load cycle, and that a subsequent
+// stall reclaim on the reloaded mapping restores the correct pre-serve
+// state (senderCompleted) rather than defaulting to senderAnnounced.
+//
+// Regression: an earlier revision of the stall-reclaim fix stored
+// PreServeState only in memory. After a node restart during a
+// re-download, the reloaded mapping had an empty PreServeState and
+// tickSenderMappings reclaimed it to senderAnnounced — reintroducing
+// the same quota/UI/snapshot regression across restarts that the
+// in-memory fix was meant to eliminate.
+func TestLoadMappings_SenderPreServeStateRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transfers.json")
+
+	hash := sha256Hex([]byte("re-download-persist"))
+	// Last-served time is far in the past so the stall reclaim fires
+	// immediately when tickSenderMappings runs after load.
+	stalledAt := time.Now().Add(-2 * senderServingStallTimeout)
+
+	pf := persistedTransferFile{
+		Version:   persistVersion,
+		UpdatedAt: time.Now(),
+		Transfers: []persistedTransferEntry{
+			{
+				FileID:        "re-dl",
+				FileHash:      hash,
+				FileName:      "photo.jpg",
+				FileSize:      4096,
+				Peer:          "bob",
+				Role:          "sender",
+				State:         string(senderServing),
+				PreServeState: string(senderCompleted),
+				LastServedAt:  stalledAt,
+				// CompletedAt carried from the original completion — not
+				// touched by the re-download, not touched by reclaim.
+				CompletedAt: time.Now().Add(-time.Hour),
+			},
+		},
+	}
+	data, err := json.Marshal(pf)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Load with no FileStore attached: the blob-presence check in
+	// loadMappings is skipped, so the mapping stays in senderServing
+	// with its persisted PreServeState.
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: path,
+		stopCh:       make(chan struct{}),
+	}
+	m.loadMappings()
+
+	sm, ok := m.senderMaps["re-dl"]
+	if !ok {
+		t.Fatal("re-download sender mapping not loaded")
+	}
+	if sm.State != senderServing {
+		t.Fatalf("loaded State = %s, want senderServing", sm.State)
+	}
+	if sm.PreServeState != senderCompleted {
+		t.Fatalf("loaded PreServeState = %q, want %q (round-trip failed)",
+			sm.PreServeState, senderCompleted)
+	}
+
+	// Simulate the post-restart stall reclaim. This must restore to
+	// senderCompleted, not downgrade to senderAnnounced.
+	m.tickSenderMappings()
+
+	sm = m.senderMaps["re-dl"]
+	if sm == nil {
+		t.Fatal("mapping must not be removed on reclaim")
+	}
+	if sm.State != senderCompleted {
+		t.Errorf("post-reclaim State = %s, want senderCompleted (re-download origin must survive restart)", sm.State)
+	}
+	if sm.PreServeState != "" {
+		t.Errorf("post-reclaim PreServeState = %q, want empty", sm.PreServeState)
+	}
+}
+
+// TestSaveLoadSenderPreServeStateOmittedWhenEmpty verifies that a
+// senderServing mapping with no PreServeState (e.g. a first-time
+// download whose origin has already been cleared by a previous reclaim,
+// or a legacy entry) is faithfully round-tripped as empty. Combined
+// with the tickSenderMappings empty-fallback behaviour, this is what
+// keeps the loader backwards-compatible with JSON written by a version
+// before PreServeState existed.
+func TestSaveLoadSenderPreServeStateOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transfers.json")
+
+	hash := sha256Hex([]byte("first-dl-persist"))
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: path,
+	}
+	m.senderMaps["first-dl"] = &senderFileMapping{
+		FileID:       "first-dl",
+		FileHash:     hash,
+		FileName:     "first.bin",
+		FileSize:     1024,
+		Recipient:    "bob",
+		State:        senderServing,
+		LastServedAt: time.Now(),
+		// PreServeState intentionally zero-value.
+	}
+	m.saveMappingsLocked()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted file: %v", err)
+	}
+	if strings.Contains(string(raw), "pre_serve_state") {
+		t.Errorf("persisted JSON should omit empty pre_serve_state field:\n%s", raw)
+	}
+
+	m2 := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: path,
+	}
+	m2.loadMappings()
+	sm, ok := m2.senderMaps["first-dl"]
+	if !ok {
+		t.Fatal("first-dl sender mapping not loaded")
+	}
+	if sm.PreServeState != "" {
+		t.Errorf("PreServeState = %q, want empty", sm.PreServeState)
+	}
+}
+
+// TestLoadMappings_InvalidPreServeStateSanitised verifies that a persisted
+// sender entry with a tampered or corrupted pre_serve_state is loaded with
+// PreServeState cleared to empty. Without this validation, stall reclaim
+// would restore sm.State to the arbitrary string, violating the sender
+// state-machine invariants that validSenderStates is meant to protect.
+func TestLoadMappings_InvalidPreServeStateSanitised(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transfers.json")
+
+	hash := sha256Hex([]byte("pre-serve-tamper"))
+
+	// Write a JSON file with a valid State but a tampered PreServeState.
+	raw := fmt.Sprintf(`{
+  "version": 1,
+  "transfers": [
+    {
+      "role": "sender",
+      "file_id": "tampered-pre-serve",
+      "file_hash": "%s",
+      "file_name": "doc.bin",
+      "file_size": 512,
+      "peer": "bob",
+      "state": "serving",
+      "pre_serve_state": "corrupted_garbage",
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  ]
+}`, hash)
+
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write test JSON: %v", err)
+	}
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: path,
+	}
+	m.loadMappings()
+
+	sm, ok := m.senderMaps["tampered-pre-serve"]
+	if !ok {
+		t.Fatal("tampered-pre-serve sender mapping not loaded (should be loaded with cleared PreServeState)")
+	}
+	if sm.PreServeState != "" {
+		t.Errorf("PreServeState = %q, want empty (invalid value should have been cleared)", sm.PreServeState)
+	}
+	if sm.State != senderServing {
+		t.Errorf("State = %q, want senderServing (primary state should be preserved)", sm.State)
+	}
+}
+
+// TestSaveLoadServingEpochRoundTrip verifies that ServingEpoch survives
+// save+load for both sender and receiver mappings. This is essential for
+// the stale file_downloaded replay defense: the epoch counter must stay
+// strictly monotonic across process restarts so a post-restart re-download
+// (which bumps on transition into serving) lands on a larger epoch than
+// any still-cached file_downloaded from the prior run. Without persistence
+// the counter would reset to 0 on every startup and collide with old
+// values cached at the peer.
+func TestSaveLoadServingEpochRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transfers.json")
+
+	hash := sha256Hex([]byte("epoch-persist"))
+	transmitDir := filepath.Join(dir, "transmit")
+	if err := os.MkdirAll(transmitDir, 0o700); err != nil {
+		t.Fatalf("mkdir transmit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(transmitDir, hash+".bin"), []byte("epoch-persist"), 0o600); err != nil {
+		t.Fatalf("write transmit blob: %v", err)
+	}
+	store, err := NewFileStore(transmitDir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: path,
+		store:        store,
+	}
+	m.senderMaps["epoch-sender"] = &senderFileMapping{
+		FileID:       "epoch-sender",
+		FileHash:     hash,
+		FileName:     "x.bin",
+		FileSize:     13,
+		Recipient:    "bob",
+		State:        senderCompleted,
+		ServingEpoch: 42,
+		CreatedAt:    time.Now(),
+		CompletedAt:  time.Now(),
+	}
+	m.receiverMaps["epoch-receiver"] = &receiverFileMapping{
+		FileID:       "epoch-receiver",
+		FileHash:     hash,
+		FileName:     "x.bin",
+		FileSize:     13,
+		Sender:       "alice",
+		State:        receiverCompleted,
+		ServingEpoch: 42,
+		ChunkSize:    domain.DefaultChunkSize,
+		CreatedAt:    time.Now(),
+	}
+	m.saveMappingsLocked()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted file: %v", err)
+	}
+	if !strings.Contains(string(raw), `"serving_epoch": 42`) {
+		t.Errorf("persisted JSON missing serving_epoch=42:\n%s", raw)
+	}
+
+	m2 := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: path,
+		store:        store,
+	}
+	m2.loadMappings()
+
+	sm, ok := m2.senderMaps["epoch-sender"]
+	if !ok {
+		t.Fatal("epoch-sender mapping not loaded")
+	}
+	if sm.ServingEpoch != 42 {
+		t.Errorf("sender ServingEpoch = %d, want 42", sm.ServingEpoch)
+	}
+
+	rm, ok := m2.receiverMaps["epoch-receiver"]
+	if !ok {
+		t.Fatal("epoch-receiver mapping not loaded")
+	}
+	if rm.ServingEpoch != 42 {
+		t.Errorf("receiver ServingEpoch = %d, want 42", rm.ServingEpoch)
+	}
+}
+
+// TestSaveLoadServingEpochOmittedWhenZero verifies that a zero ServingEpoch
+// is omitted from the persisted JSON (json:"omitempty") so the on-disk
+// schema stays stable for legacy entries and for mappings that have never
+// served a chunk.
+func TestSaveLoadServingEpochOmittedWhenZero(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transfers.json")
+
+	hash := sha256Hex([]byte("epoch-zero-omit"))
+	transmitDir := filepath.Join(dir, "transmit")
+	if err := os.MkdirAll(transmitDir, 0o700); err != nil {
+		t.Fatalf("mkdir transmit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(transmitDir, hash+".bin"), []byte("epoch-zero-omit"), 0o600); err != nil {
+		t.Fatalf("write transmit blob: %v", err)
+	}
+	store, err := NewFileStore(transmitDir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: path,
+		store:        store,
+	}
+	m.senderMaps["never-served"] = &senderFileMapping{
+		FileID:    "never-served",
+		FileHash:  hash,
+		FileName:  "x.bin",
+		FileSize:  15,
+		Recipient: "bob",
+		State:     senderAnnounced,
+		CreatedAt: time.Now(),
+	}
+	m.saveMappingsLocked()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted file: %v", err)
+	}
+	if strings.Contains(string(raw), "serving_epoch") {
+		t.Errorf("persisted JSON should omit zero serving_epoch field:\n%s", raw)
 	}
 }
 
@@ -1200,6 +1635,93 @@ func TestLoadMappingsResurrectsTombstoneWhenBlobExists(t *testing.T) {
 	// The hash must be in activeHashes — resurrected mapping holds a ref.
 	if count, ok := activeHashes[hash]; !ok || count != 1 {
 		t.Errorf("activeHashes[%s] = %d, want 1 (resurrected mapping holds ref)", hash, count)
+	}
+}
+
+// TestResurrectedTombstoneResetsCompletedAt verifies that when loadMappings
+// promotes a senderTombstone back to senderCompleted (blob reappeared on
+// disk), CompletedAt is reset to approximately now so the 30-day
+// tombstoneTTL in tickSenderMappings restarts from the resurrection moment.
+//
+// Without this reset an old tombstone (CompletedAt weeks or months ago)
+// would be immediately purged by the very next tick, defeating the
+// resurrection path for older entries.
+func TestResurrectedTombstoneResetsCompletedAt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	transmitDir := filepath.Join(dir, "transmit")
+	store, err := NewFileStore(transmitDir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	hash := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+
+	// Blob on disk — enables resurrection.
+	if err := os.WriteFile(filepath.Join(transmitDir, hash+".bin"), []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tombstone with CompletedAt far in the past (60 days ago) —
+	// well beyond the 30-day tombstoneTTL.
+	oldCompletedAt := time.Now().Add(-60 * 24 * time.Hour)
+	mappingsPath := filepath.Join(dir, "transfers.json")
+	pf := persistedTransferFile{
+		Version:   persistVersion,
+		UpdatedAt: time.Now(),
+		Transfers: []persistedTransferEntry{
+			{
+				FileID:      "old-tombstone",
+				FileHash:    hash,
+				FileName:    "doc.pdf",
+				FileSize:    7,
+				ContentType: "application/pdf",
+				Peer:        "peer-identity-abcdef1234567890",
+				Role:        "sender",
+				State:       string(senderTombstone),
+				CreatedAt:   oldCompletedAt.Add(-time.Hour),
+				CompletedAt: oldCompletedAt,
+			},
+		},
+	}
+	if err := atomicWriteJSON(mappingsPath, pf); err != nil {
+		t.Fatalf("write test mappings: %v", err)
+	}
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		store:        store,
+		downloadDir:  filepath.Join(dir, "downloads"),
+		mappingsPath: mappingsPath,
+		stopCh:       make(chan struct{}),
+	}
+
+	beforeLoad := time.Now()
+	m.loadMappings()
+
+	sm, ok := m.senderMaps["old-tombstone"]
+	if !ok {
+		t.Fatal("mapping should be loaded")
+	}
+	if sm.State != senderCompleted {
+		t.Fatalf("state = %s, want senderCompleted (resurrection)", sm.State)
+	}
+
+	// CompletedAt must have been reset to approximately now, not the
+	// 60-day-old value. Allow a generous 10-second window.
+	if sm.CompletedAt.Before(beforeLoad) {
+		t.Errorf("CompletedAt = %v, want ≥ %v (must be reset on resurrection, was %v)",
+			sm.CompletedAt, beforeLoad, oldCompletedAt)
+	}
+
+	// Simulate tickSenderMappings: the resurrected mapping must NOT be
+	// purged because CompletedAt is fresh.
+	now := time.Now()
+	if now.Sub(sm.CompletedAt) > tombstoneTTL {
+		t.Errorf("resurrected mapping would be purged by tick: "+
+			"now.Sub(CompletedAt) = %v > tombstoneTTL = %v",
+			now.Sub(sm.CompletedAt), tombstoneTTL)
 	}
 }
 

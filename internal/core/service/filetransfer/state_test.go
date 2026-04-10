@@ -1,6 +1,7 @@
 package filetransfer
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -412,6 +413,55 @@ func TestSenderFileDownloadedFromNonRecipientIgnored(t *testing.T) {
 	}
 	if m.senderMaps[fileID].State != senderServing {
 		t.Errorf("state should remain serving, got %s", m.senderMaps[fileID].State)
+	}
+}
+
+// TestSenderFileDownloadedRejectedOutsideServingRun verifies that
+// HandleFileDownloaded rejects file_downloaded when the mapping is in
+// senderAnnounced or senderTombstone. Only senderServing (normal
+// completion) and senderCompleted (idempotent re-ack) should accept.
+func TestSenderFileDownloadedRejectedOutsideServingRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state senderState
+	}{
+		{"announced", senderAnnounced},
+		{"tombstone", senderTombstone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var acksSent int
+			m := &Manager{
+				senderMaps:   make(map[domain.FileID]*senderFileMapping),
+				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+					acksSent++
+					return nil
+				},
+				stopCh: make(chan struct{}),
+			}
+
+			receiver := domain.PeerIdentity("receiver-state-guard-01234")
+			fileID := domain.FileID("state-guard-file")
+
+			m.senderMaps[fileID] = &senderFileMapping{
+				FileID:    fileID,
+				FileHash:  "hash-state-guard",
+				FileName:  "doc.bin",
+				FileSize:  100,
+				Recipient: receiver,
+				State:     tc.state,
+				CreatedAt: time.Now(),
+			}
+
+			m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID})
+
+			if acksSent != 0 {
+				t.Errorf("file_downloaded in state %s should not trigger ack, got %d", tc.state, acksSent)
+			}
+			if m.senderMaps[fileID].State != tc.state {
+				t.Errorf("state should remain %s, got %s", tc.state, m.senderMaps[fileID].State)
+			}
+		})
 	}
 }
 
@@ -2413,5 +2463,878 @@ func TestWaitingAckCompletesLocallyAfterMaxRetriesWithOfflineSender(t *testing.T
 	}
 	if mapping.CompletedAt.IsZero() {
 		t.Error("CompletedAt should be set")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Serving epoch / stale file_downloaded replay defense
+// ---------------------------------------------------------------------------
+//
+// A re-download reuses the same FileID as the prior completed run. A delayed
+// file_downloaded from the prior run is therefore indistinguishable from a
+// legitimate completion of the current run by FileID alone. The sender
+// defends against this by bumping a monotonic ServingEpoch on every genuine
+// transition into senderServing and requiring incoming file_downloaded
+// messages to echo the current epoch. The tests below pin this invariant.
+
+// TestSenderValidateChunkRequestBumpsServingEpochOnTransition verifies that
+// the sender's ServingEpoch is bumped exactly once per genuine transition
+// into senderServing — not on continuation chunks of the same serving run.
+func TestSenderValidateChunkRequestBumpsServingEpochOnTransition(t *testing.T) {
+	dir := t.TempDir()
+	transmitDir := filepath.Join(dir, "transmit")
+	store, err := NewFileStore(transmitDir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	fileHash := sha256Hex([]byte("serving-epoch-bump"))
+	blobData := []byte("serving-epoch-bump-content")
+	if err := os.WriteFile(filepath.Join(transmitDir, fileHash+".bin"), blobData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.refs[fileHash] = 1
+	store.mu.Unlock()
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		store:        store,
+		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
+		stopCh:       make(chan struct{}),
+	}
+
+	receiver := domain.PeerIdentity("receiver-identity-epoch-bump-1")
+	fileID := domain.FileID("epoch-bump-file")
+
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:    fileID,
+		FileHash:  fileHash,
+		FileName:  "x.bin",
+		FileSize:  uint64(len(blobData)),
+		Recipient: receiver,
+		State:     senderAnnounced,
+		CreatedAt: time.Now(),
+	}
+
+	// Announced → Serving: epoch 0 → 1.
+	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{FileID: fileID, Offset: 0, Size: domain.DefaultChunkSize})
+	if got := m.senderMaps[fileID].ServingEpoch; got != 1 {
+		t.Fatalf("after first chunk_request: ServingEpoch = %d, want 1", got)
+	}
+
+	// Continuation (already serving): no bump.
+	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{FileID: fileID, Offset: 0, Size: domain.DefaultChunkSize})
+	if got := m.senderMaps[fileID].ServingEpoch; got != 1 {
+		t.Fatalf("after continuation chunk_request: ServingEpoch = %d, want 1 (no bump)", got)
+	}
+
+	// Force completion then trigger a re-download: epoch 1 → 2.
+	m.senderMaps[fileID].State = senderCompleted
+	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{FileID: fileID, Offset: 0, Size: domain.DefaultChunkSize})
+	if got := m.senderMaps[fileID].ServingEpoch; got != 2 {
+		t.Fatalf("after re-download chunk_request: ServingEpoch = %d, want 2", got)
+	}
+}
+
+// TestSenderChunkResponseCarriesCurrentEpoch verifies that the outgoing
+// chunk_response payload stamps the sender's current ServingEpoch so the
+// receiver can stash it and echo it later in file_downloaded.
+func TestSenderChunkResponseCarriesCurrentEpoch(t *testing.T) {
+	dir := t.TempDir()
+	transmitDir := filepath.Join(dir, "transmit")
+	store, err := NewFileStore(transmitDir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	fileHash := sha256Hex([]byte("chunk-epoch-wire"))
+	blobData := []byte("chunk-epoch-wire-data")
+	if err := os.WriteFile(filepath.Join(transmitDir, fileHash+".bin"), blobData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.refs[fileHash] = 1
+	store.mu.Unlock()
+
+	var sent []domain.ChunkResponsePayload
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		store:        store,
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command != domain.FileActionChunkResp {
+				return nil
+			}
+			var cr domain.ChunkResponsePayload
+			if err := json.Unmarshal(payload.Data, &cr); err != nil {
+				t.Fatalf("unmarshal chunk_response: %v", err)
+			}
+			sent = append(sent, cr)
+			return nil
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	receiver := domain.PeerIdentity("receiver-identity-chunk-wire-1")
+	fileID := domain.FileID("chunk-wire-file")
+
+	// Pre-set epoch to 7; the sender bumps on announced→serving so final
+	// observed wire epoch is 8.
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:       fileID,
+		FileHash:     fileHash,
+		FileName:     "x.bin",
+		FileSize:     uint64(len(blobData)),
+		Recipient:    receiver,
+		State:        senderAnnounced,
+		ServingEpoch: 7,
+		CreatedAt:    time.Now(),
+	}
+
+	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{FileID: fileID, Offset: 0, Size: domain.DefaultChunkSize})
+
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 chunk_response, got %d", len(sent))
+	}
+	if sent[0].Epoch != 8 {
+		t.Errorf("chunk_response.Epoch = %d, want 8 (was 7, bumped on transition)", sent[0].Epoch)
+	}
+}
+
+// TestSenderHandleFileDownloadedRejectsStaleEpochReplay is the core
+// regression for the bug: a delayed file_downloaded carrying an epoch from
+// a prior completed serving run must not flip the active re-download back
+// to senderCompleted, clear PreServeState, or trigger an ack.
+func TestSenderHandleFileDownloadedRejectsStaleEpochReplay(t *testing.T) {
+	var acksSent int
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command == domain.FileActionDownloadedAck {
+				acksSent++
+			}
+			return nil
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	receiver := domain.PeerIdentity("receiver-identity-stale-replay")
+	fileID := domain.FileID("stale-epoch-file")
+
+	// Active re-download: state=serving, ServingEpoch=5, origin=completed.
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:        fileID,
+		FileHash:      "deadbeef",
+		FileName:      "doc.bin",
+		FileSize:      100,
+		Recipient:     receiver,
+		State:         senderServing,
+		PreServeState: senderCompleted,
+		ServingEpoch:  5,
+		CreatedAt:     time.Now().Add(-time.Hour),
+		LastServedAt:  time.Now(),
+	}
+
+	// Stale file_downloaded from a prior run (epoch 4).
+	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: 4})
+
+	sm := m.senderMaps[fileID]
+	if sm.State != senderServing {
+		t.Errorf("state = %s, want senderServing (stale replay must not flip)", sm.State)
+	}
+	if sm.PreServeState != senderCompleted {
+		t.Errorf("PreServeState = %s, want senderCompleted (stale replay must not clear)", sm.PreServeState)
+	}
+	if sm.ServingEpoch != 5 {
+		t.Errorf("ServingEpoch = %d, want 5 (unchanged)", sm.ServingEpoch)
+	}
+	if !sm.CompletedAt.IsZero() {
+		t.Errorf("CompletedAt should remain zero on stale replay, got %v", sm.CompletedAt)
+	}
+	if acksSent != 0 {
+		t.Errorf("stale replay must not trigger ack, got %d acks", acksSent)
+	}
+
+	// Legitimate file_downloaded for the current epoch still completes.
+	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: 5})
+	sm = m.senderMaps[fileID]
+	if sm.State != senderCompleted {
+		t.Errorf("after matching-epoch file_downloaded: state = %s, want senderCompleted", sm.State)
+	}
+	if sm.PreServeState != "" {
+		t.Errorf("after matching-epoch completion: PreServeState = %s, want empty", sm.PreServeState)
+	}
+	if acksSent != 1 {
+		t.Errorf("after matching-epoch completion: acks = %d, want 1", acksSent)
+	}
+}
+
+// TestSenderHandleFileDownloadedLegacyZeroEpochAccepted verifies the
+// backwards-compatibility path: a pre-upgrade receiver that cannot stamp
+// an epoch (Epoch=0 on wire) is still accepted, preserving rolling-upgrade
+// wire compatibility.
+func TestSenderHandleFileDownloadedLegacyZeroEpochAccepted(t *testing.T) {
+	var acksSent int
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command == domain.FileActionDownloadedAck {
+				acksSent++
+			}
+			return nil
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	receiver := domain.PeerIdentity("receiver-identity-legacy-wire1")
+	fileID := domain.FileID("legacy-zero-epoch-file")
+
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:       fileID,
+		FileHash:     "cafebabe",
+		FileName:     "doc.bin",
+		FileSize:     100,
+		Recipient:    receiver,
+		State:        senderServing,
+		ServingEpoch: 3, // sender has epochs; wire value is 0 (legacy)
+		CreatedAt:    time.Now().Add(-time.Hour),
+		LastServedAt: time.Now(),
+	}
+
+	// Legacy wire: Epoch field absent → 0 after unmarshal.
+	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID})
+
+	sm := m.senderMaps[fileID]
+	if sm.State != senderCompleted {
+		t.Errorf("legacy (Epoch=0) file_downloaded must complete: state = %s, want senderCompleted", sm.State)
+	}
+	if acksSent != 1 {
+		t.Errorf("legacy path must still ack, got %d acks", acksSent)
+	}
+}
+
+// TestReceiverChunkResponseStashesServingEpoch verifies that the receiver
+// records the sender's epoch from each chunk_response so it can be echoed
+// later in file_downloaded.
+func TestReceiverChunkResponseStashesServingEpoch(t *testing.T) {
+	dir := t.TempDir()
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
+		stopCh:       make(chan struct{}),
+	}
+
+	sender := domain.PeerIdentity("sender-identity-epoch-stash-1")
+	fileID := domain.FileID("epoch-stash-file")
+	payload := []byte("epoch-stash-payload-some-bytes")
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:      fileID,
+		FileHash:    sha256Hex(payload),
+		FileName:    "doc.bin",
+		FileSize:    uint64(len(payload)),
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   domain.DefaultChunkSize,
+		NextOffset:  0,
+		CreatedAt:   time.Now(),
+		LastChunkAt: time.Now(),
+	}
+
+	// Send a chunk_response carrying epoch 42.
+	m.HandleChunkResponse(sender, domain.ChunkResponsePayload{
+		FileID: fileID,
+		Offset: 0,
+		Data:   base64.RawURLEncoding.EncodeToString(payload),
+		Epoch:  42,
+	})
+
+	if got := m.receiverMaps[fileID].ServingEpoch; got != 42 {
+		t.Fatalf("receiver ServingEpoch = %d, want 42", got)
+	}
+}
+
+// TestReceiverChunkResponseEpochMonotonic verifies that the receiver's
+// cached ServingEpoch never regresses. A delayed chunk_response from an
+// older serving run (lower non-zero epoch) must not overwrite a newer
+// epoch already observed. Without this guard, file_downloaded would echo
+// the stale epoch and the sender would reject the legitimate completion
+// as a replay.
+func TestReceiverChunkResponseEpochMonotonic(t *testing.T) {
+	dir := t.TempDir()
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
+		stopCh:       make(chan struct{}),
+	}
+
+	sender := domain.PeerIdentity("sender-epoch-mono-01")
+	fileID := domain.FileID("epoch-monotonic")
+
+	// Build a payload large enough for multiple chunks.
+	chunkA := []byte("aaaa")
+	chunkB := []byte("bbbb")
+	full := append(chunkA, chunkB...)
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:      fileID,
+		FileHash:    sha256Hex(full),
+		FileName:    "doc.bin",
+		FileSize:    uint64(len(full)),
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   uint32(len(chunkA)),
+		NextOffset:  0,
+		CreatedAt:   time.Now(),
+		LastChunkAt: time.Now(),
+	}
+
+	// First chunk arrives with epoch 5 (current serving run).
+	m.HandleChunkResponse(sender, domain.ChunkResponsePayload{
+		FileID: fileID,
+		Offset: 0,
+		Data:   base64.RawURLEncoding.EncodeToString(chunkA),
+		Epoch:  5,
+	})
+
+	if got := m.receiverMaps[fileID].ServingEpoch; got != 5 {
+		t.Fatalf("after chunk@0 epoch=5: ServingEpoch = %d, want 5", got)
+	}
+
+	// Second chunk arrives with epoch 3 (stale — delayed from an older run
+	// that happened to match the current NextOffset after a resume).
+	m.HandleChunkResponse(sender, domain.ChunkResponsePayload{
+		FileID: fileID,
+		Offset: uint64(len(chunkA)),
+		Data:   base64.RawURLEncoding.EncodeToString(chunkB),
+		Epoch:  3,
+	})
+
+	if got := m.receiverMaps[fileID].ServingEpoch; got != 5 {
+		t.Errorf("after chunk@4 epoch=3: ServingEpoch = %d, want 5 (must not regress)", got)
+	}
+}
+
+// TestReceiverSendFileDownloadedEchoesEpoch verifies that file_downloaded
+// emitted by the receiver carries the stashed ServingEpoch.
+func TestReceiverSendFileDownloadedEchoesEpoch(t *testing.T) {
+	var sent []domain.FileDownloadedPayload
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command != domain.FileActionDownloaded {
+				return nil
+			}
+			var dl domain.FileDownloadedPayload
+			if err := json.Unmarshal(payload.Data, &dl); err != nil {
+				t.Fatalf("unmarshal file_downloaded: %v", err)
+			}
+			sent = append(sent, dl)
+			return nil
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	sender := domain.PeerIdentity("sender-identity-echo-epoch-01")
+	fileID := domain.FileID("echo-epoch-file")
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:       fileID,
+		FileHash:     "deadbeef",
+		FileName:     "doc.bin",
+		FileSize:     100,
+		Sender:       sender,
+		State:        receiverWaitingAck,
+		ServingEpoch: 11,
+		CreatedAt:    time.Now(),
+	}
+
+	m.sendFileDownloaded(fileID, sender)
+
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 file_downloaded, got %d", len(sent))
+	}
+	if sent[0].Epoch != 11 {
+		t.Errorf("file_downloaded.Epoch = %d, want 11", sent[0].Epoch)
+	}
+	if sent[0].FileID != fileID {
+		t.Errorf("file_downloaded.FileID = %s, want %s", sent[0].FileID, fileID)
+	}
+}
+
+// TestReceiverHandleFileDownloadedAckRejectsStaleEpoch verifies that a
+// late ack carrying a prior-run epoch does not flip an active waiting_ack
+// mapping to completed. This is the receiver-side mirror of the sender's
+// stale-replay defense.
+func TestReceiverHandleFileDownloadedAckRejectsStaleEpoch(t *testing.T) {
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
+		stopCh:       make(chan struct{}),
+	}
+
+	sender := domain.PeerIdentity("sender-identity-stale-ack-01")
+	fileID := domain.FileID("stale-ack-file")
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:       fileID,
+		FileHash:     "deadbeef",
+		FileName:     "doc.bin",
+		FileSize:     100,
+		Sender:       sender,
+		State:        receiverWaitingAck,
+		ServingEpoch: 9,
+		CreatedAt:    time.Now(),
+	}
+
+	// Stale ack with prior-run epoch must not transition to completed.
+	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: 8})
+	if got := m.receiverMaps[fileID].State; got != receiverWaitingAck {
+		t.Fatalf("after stale ack: state = %s, want receiverWaitingAck", got)
+	}
+
+	// Matching ack transitions to completed.
+	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: 9})
+	if got := m.receiverMaps[fileID].State; got != receiverCompleted {
+		t.Fatalf("after matching ack: state = %s, want receiverCompleted", got)
+	}
+}
+
+// TestReceiverCancelDownloadResetsServingEpoch verifies that a cancel
+// clears the stashed epoch so the next download starts fresh and learns
+// the sender's current epoch from its first chunk_response.
+func TestReceiverCancelDownloadResetsServingEpoch(t *testing.T) {
+	dir := t.TempDir()
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
+		stopCh:       make(chan struct{}),
+	}
+
+	sender := domain.PeerIdentity("sender-identity-cancel-reset-1")
+	fileID := domain.FileID("cancel-reset-file")
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:       fileID,
+		FileHash:     "deadbeef",
+		FileName:     "doc.bin",
+		FileSize:     100,
+		Sender:       sender,
+		State:        receiverDownloading,
+		ChunkSize:    domain.DefaultChunkSize,
+		ServingEpoch: 13,
+		CreatedAt:    time.Now(),
+	}
+
+	if err := m.CancelDownload(fileID); err != nil {
+		t.Fatalf("CancelDownload: %v", err)
+	}
+	if got := m.receiverMaps[fileID].ServingEpoch; got != 0 {
+		t.Errorf("after CancelDownload: ServingEpoch = %d, want 0", got)
+	}
+}
+
+// TestSendFileDownloadedSuppressedAfterStateChange verifies that
+// sendFileDownloaded does NOT emit a file_downloaded command when the
+// mapping is no longer in receiverWaitingAck. This covers the TOCTOU
+// race where a concurrent state change (e.g. HandleFileDownloadedAck
+// completing the transfer, or CleanupPeerTransfers resetting it) happens
+// between the tick's action snapshot and sendFileDownloaded's own lock
+// acquisition.
+//
+// Note: CancelDownload explicitly rejects receiverWaitingAck (it is a
+// terminal-like state), so the race scenario is modelled by directly
+// transitioning the mapping to receiverCompleted — the same effect a
+// concurrent HandleFileDownloadedAck would produce.
+func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
+	dir := t.TempDir()
+	var sent int
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command == domain.FileActionDownloaded {
+				sent++
+			}
+			return nil
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	sender := domain.PeerIdentity("sender-identity-cancel-guard-01")
+	fileID := domain.FileID("cancel-guard-file")
+
+	// Start in receiverWaitingAck — the state that triggers ack retries.
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:       fileID,
+		FileHash:     "deadbeef",
+		FileName:     "doc.bin",
+		FileSize:     100,
+		Sender:       sender,
+		State:        receiverWaitingAck,
+		ChunkSize:    domain.DefaultChunkSize,
+		ServingEpoch: 7,
+		Generation:   1,
+		CreatedAt:    time.Now(),
+	}
+
+	// Sanity: sendFileDownloaded sends when mapping is in waitingAck.
+	m.sendFileDownloaded(fileID, sender)
+	if sent != 1 {
+		t.Fatalf("expected 1 send in waitingAck, got %d", sent)
+	}
+
+	// Simulate the race: HandleFileDownloadedAck (or similar) transitions
+	// the mapping to receiverCompleted between the tick snapshot and
+	// sendFileDownloaded's lock acquisition.
+	m.mu.Lock()
+	rm := m.receiverMaps[fileID]
+	rm.State = receiverCompleted
+	rm.CompletedAt = time.Now()
+	m.mu.Unlock()
+
+	// A deferred retry action from the old waitingAck tick would call
+	// sendFileDownloaded here. It must NOT send — the mapping is no
+	// longer in receiverWaitingAck.
+	m.sendFileDownloaded(fileID, sender)
+	if sent != 1 {
+		t.Errorf("expected no additional send after state change, got %d total", sent)
+	}
+}
+
+// TestSendFileDownloadedSuppressedWhenMappingMissing verifies that
+// sendFileDownloaded is a no-op when the mapping has been deleted
+// (e.g. CleanupPeerTransfers raced with a deferred action).
+func TestSendFileDownloadedSuppressedWhenMappingMissing(t *testing.T) {
+	var sent int
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			sent++
+			return nil
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	// No mapping exists — sendFileDownloaded must not panic or send.
+	m.sendFileDownloaded("nonexistent", "sender")
+	if sent != 0 {
+		t.Errorf("expected 0 sends for missing mapping, got %d", sent)
+	}
+}
+
+// TestDeferredChunkRetrySuppressedAfterCancel verifies that a deferred
+// actionRetryChunk does not emit a chunk_request when the mapping has been
+// canceled between the tick snapshot and executeReceiverAction dispatch.
+// The receiverStateIs guard inside executeReceiverAction detects the
+// generation bump from CancelDownload and suppresses the stale action.
+func TestDeferredChunkRetrySuppressedAfterCancel(t *testing.T) {
+	dir := t.TempDir()
+	var chunkReqs int
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command == domain.FileActionChunkReq {
+				chunkReqs++
+			}
+			return nil
+		},
+		stopCh:         make(chan struct{}),
+		nextGeneration: 1, // must match mapping Generation so CancelDownload bumps to 2
+	}
+
+	sender := domain.PeerIdentity("sender-deferred-chunk-guard-01")
+	fileID := domain.FileID("deferred-chunk-guard")
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:    fileID,
+		FileHash:  "deadbeef",
+		FileName:  "doc.bin",
+		FileSize:  100,
+		Sender:    sender,
+		State:     receiverDownloading,
+		ChunkSize: domain.DefaultChunkSize,
+		Generation: 1,
+		CreatedAt: time.Now(),
+	}
+
+	// Build a deferred action that the tick loop would have created.
+	action := receiverTickAction{
+		kind:          actionRetryChunk,
+		requiredState: receiverDownloading,
+		generation:    1,
+		fileID:        fileID,
+		sender:        sender,
+		offset:        0,
+		chunkSize:     domain.DefaultChunkSize,
+	}
+
+	// Simulate CancelDownload racing between the outer guard and dispatch.
+	if err := m.CancelDownload(fileID); err != nil {
+		t.Fatalf("CancelDownload: %v", err)
+	}
+
+	// The action's generation no longer matches — executeReceiverAction
+	// must skip the chunk_request.
+	m.executeReceiverAction(action)
+
+	if chunkReqs != 0 {
+		t.Errorf("expected 0 chunk_requests after cancel, got %d", chunkReqs)
+	}
+}
+
+// TestDeferredResumeSuppressedAfterCancel verifies that a deferred
+// actionResume does not emit a chunk_request or truncate the partial
+// file when the mapping has been canceled.
+func TestDeferredResumeSuppressedAfterCancel(t *testing.T) {
+	dir := t.TempDir()
+	var chunkReqs int
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command == domain.FileActionChunkReq {
+				chunkReqs++
+			}
+			return nil
+		},
+		stopCh:         make(chan struct{}),
+		nextGeneration: 1, // must match mapping Generation so CancelDownload bumps to 2
+	}
+
+	sender := domain.PeerIdentity("sender-deferred-resume-guard-01")
+	fileID := domain.FileID("deferred-resume-guard")
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:    fileID,
+		FileHash:  "deadbeef",
+		FileName:  "doc.bin",
+		FileSize:  100,
+		Sender:    sender,
+		State:     receiverWaitingRoute,
+		ChunkSize: domain.DefaultChunkSize,
+		Generation: 1,
+		CreatedAt: time.Now(),
+	}
+
+	action := receiverTickAction{
+		kind:          actionResume,
+		requiredState: receiverWaitingRoute,
+		generation:    1,
+		fileID:        fileID,
+		sender:        sender,
+		snap: resumeSnapshot{
+			fileID:      fileID,
+			sender:      sender,
+			startOffset: 0,
+			chunkSize:   domain.DefaultChunkSize,
+			prevState:   receiverWaitingRoute,
+			generation:  1,
+		},
+	}
+
+	// Cancel before the deferred action executes.
+	if err := m.CancelDownload(fileID); err != nil {
+		t.Fatalf("CancelDownload: %v", err)
+	}
+
+	m.executeReceiverAction(action)
+
+	if chunkReqs != 0 {
+		t.Errorf("expected 0 chunk_requests after cancel, got %d", chunkReqs)
+	}
+}
+
+// TestRollbackSkippedAfterGenerationBump verifies that sendChunkWithRollback
+// does not roll back a mapping when CancelDownload has bumped the generation
+// between the send attempt and the rollback path. Without the generation
+// guard, the stale rollback could corrupt a new download that reuses the same
+// FileID and has already reached receiverDownloading with a newer generation.
+func TestRollbackSkippedAfterGenerationBump(t *testing.T) {
+	dir := t.TempDir()
+
+	sendErr := fmt.Errorf("simulated network failure")
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand: func(_ domain.PeerIdentity, _ domain.FileCommandPayload) error {
+			return sendErr
+		},
+		stopCh:         make(chan struct{}),
+		nextGeneration: 1, // must match the mapping's Generation so CancelDownload bumps to 2
+	}
+
+	sender := domain.PeerIdentity("sender-rollback-gen-01")
+	fileID := domain.FileID("rollback-gen-guard")
+
+	// Set up a mapping at generation 1 in receiverDownloading.
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:     fileID,
+		FileHash:   "deadbeef",
+		FileName:   "doc.bin",
+		FileSize:   100,
+		Sender:     sender,
+		State:      receiverDownloading,
+		ChunkSize:  domain.DefaultChunkSize,
+		Generation: 1,
+		CreatedAt:  time.Now(),
+	}
+
+	// Snapshot taken at generation 1.
+	snap := resumeSnapshot{
+		fileID:            fileID,
+		sender:            sender,
+		prevState:         receiverWaitingRoute,
+		prevOffset:        0,
+		prevBytesReceived: 0,
+		startOffset:       0,
+		chunkSize:         domain.DefaultChunkSize,
+		generation:        1,
+	}
+
+	// Simulate CancelDownload + new download reaching receiverDownloading
+	// at generation 2 before the stale rollback runs.
+	if err := m.CancelDownload(fileID); err != nil {
+		t.Fatalf("CancelDownload: %v", err)
+	}
+	// Simulate a new download starting for the same FileID.
+	// CancelDownload already bumped generation (1 → 2) and reset to
+	// receiverAvailable. The new download transitions to receiverDownloading
+	// at the bumped generation, with fresh progress.
+	m.mu.Lock()
+	rm := m.receiverMaps[fileID]
+	rm.State = receiverDownloading
+	rm.NextOffset = 4096
+	rm.BytesReceived = 4096
+	m.mu.Unlock()
+
+	// sendChunkWithRollback fails (sendErr) and attempts rollback.
+	// The rollback must be skipped because generation no longer matches.
+	_ = m.sendChunkWithRollback(snap)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rmAfter := m.receiverMaps[fileID]
+
+	if rmAfter.State != receiverDownloading {
+		t.Errorf("expected state receiverDownloading, got %s", rmAfter.State)
+	}
+	if rmAfter.NextOffset != 4096 {
+		t.Errorf("expected NextOffset=4096 (new download progress preserved), got %d", rmAfter.NextOffset)
+	}
+	if rmAfter.BytesReceived != 4096 {
+		t.Errorf("expected BytesReceived=4096 (new download progress preserved), got %d", rmAfter.BytesReceived)
+	}
+}
+
+// TestGuardedResumeRollbackSkippedAfterGenerationBump verifies that
+// guardedResume (the deferred actionResume path) does not roll back a
+// mapping when send fails and the generation was bumped by CancelDownload.
+// This is the deferred-action counterpart to TestRollbackSkippedAfterGenerationBump
+// which tests the synchronous sendChunkWithRollback path.
+func TestGuardedResumeRollbackSkippedAfterGenerationBump(t *testing.T) {
+	dir := t.TempDir()
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand: func(_ domain.PeerIdentity, _ domain.FileCommandPayload) error {
+			return fmt.Errorf("simulated network failure")
+		},
+		stopCh:         make(chan struct{}),
+		nextGeneration: 1,
+	}
+
+	sender := domain.PeerIdentity("sender-guarded-resume-gen-01")
+	fileID := domain.FileID("guarded-resume-gen-guard")
+
+	// Mapping at generation 1, state receiverDownloading (resume already
+	// transitioned from waitingRoute → downloading in the tick).
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:     fileID,
+		FileHash:   "deadbeef",
+		FileName:   "doc.bin",
+		FileSize:   100,
+		Sender:     sender,
+		State:      receiverDownloading,
+		ChunkSize:  domain.DefaultChunkSize,
+		Generation: 1,
+		CreatedAt:  time.Now(),
+	}
+
+	action := receiverTickAction{
+		kind:          actionResume,
+		requiredState: receiverDownloading,
+		generation:    1,
+		fileID:        fileID,
+		sender:        sender,
+		snap: resumeSnapshot{
+			fileID:            fileID,
+			sender:            sender,
+			startOffset:       0,
+			chunkSize:         domain.DefaultChunkSize,
+			prevState:         receiverWaitingRoute,
+			prevOffset:        0,
+			prevBytesReceived: 0,
+			generation:        1,
+		},
+	}
+
+	// CancelDownload bumps generation 1 → 2, resets to receiverAvailable.
+	if err := m.CancelDownload(fileID); err != nil {
+		t.Fatalf("CancelDownload: %v", err)
+	}
+
+	// New download starts at generation 2, reaches receiverDownloading with progress.
+	m.mu.Lock()
+	rm := m.receiverMaps[fileID]
+	rm.State = receiverDownloading
+	rm.NextOffset = 8192
+	rm.BytesReceived = 8192
+	m.mu.Unlock()
+
+	// The stale deferred action fires. guardedResume's state check sees
+	// generation 2 ≠ 1 and suppresses the send entirely. Even if we force
+	// the state to match (both receiverDownloading), the generation mismatch
+	// prevents both the send and any rollback.
+	m.executeReceiverAction(action)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rmAfter := m.receiverMaps[fileID]
+
+	if rmAfter.State != receiverDownloading {
+		t.Errorf("expected state receiverDownloading, got %s", rmAfter.State)
+	}
+	if rmAfter.NextOffset != 8192 {
+		t.Errorf("expected NextOffset=8192 (new download progress preserved), got %d", rmAfter.NextOffset)
+	}
+	if rmAfter.BytesReceived != 8192 {
+		t.Errorf("expected BytesReceived=8192 (new download progress preserved), got %d", rmAfter.BytesReceived)
 	}
 }

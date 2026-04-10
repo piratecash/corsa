@@ -69,6 +69,15 @@ func NewRouter(cfg RouterConfig) *Router {
 // validation, signature verification, and anti-replay check, then routes
 // the frame locally or forwards it.
 //
+// incomingPeer is the identity of the neighbor the frame was received from
+// (the previous hop). It is used for split-horizon forwarding: the transit
+// node MUST NOT choose a next-hop equal to the previous hop, otherwise a
+// symmetric route would reflect the frame straight back where it came from
+// and both sides would ping-pong the same frame until TTL expires — a
+// waste of bandwidth and, on short TTLs, a failed delivery. Zero-value
+// incomingPeer (empty identity) disables the exclusion and is used for
+// locally-originated / test-injected frames.
+//
 // Processing pipeline (cheapest checks first for DDoS resistance):
 //  1. Anti-replay: nonce cache lookup — O(1).
 //  2. Deliverability check: DST == self OR route to DST exists — O(1).
@@ -83,8 +92,9 @@ func NewRouter(cfg RouterConfig) *Router {
 //  9. Relay restriction: only full nodes forward; client nodes drop
 //     DST ≠ self.
 //  10. Capability-aware forwarding: select best route whose next-hop
-//     has file_transfer_v1. TTL already decremented at step 3.
-func (r *Router) HandleInbound(raw json.RawMessage) {
+//     has file_transfer_v1 AND is not incomingPeer. TTL already
+//     decremented at step 3.
+func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIdentity) {
 	var frame protocol.FileCommandFrame
 	if err := json.Unmarshal(raw, &frame); err != nil {
 		log.Debug().Err(err).Msg("file_router: unmarshal failed")
@@ -167,7 +177,9 @@ func (r *Router) HandleInbound(raw json.RawMessage) {
 	}
 
 	// 10. Capability-aware forwarding (TTL already decremented at step 3).
-	r.forwardToNextHop(frame)
+	// Pass incomingPeer so forwardToNextHop applies split-horizon and
+	// never reflects the frame back to the neighbor that just delivered it.
+	r.forwardToNextHop(frame, incomingPeer)
 }
 
 // routeCandidate is a single viable next-hop for a destination, used by
@@ -181,7 +193,14 @@ type routeCandidate struct {
 // collectRouteCandidates returns active, non-self routes to dst sorted by
 // hops ascending. Expired, withdrawn, and self-referencing entries are
 // filtered out. Returns nil when no viable route exists.
-func (r *Router) collectRouteCandidates(dst domain.PeerIdentity) []routeCandidate {
+//
+// excludeVia removes routes whose NextHop matches the given identity.
+// This implements split-horizon forwarding on the transit path: a frame
+// received from neighbor X must never be forwarded back to X, otherwise
+// the two nodes ping-pong the same frame until TTL expires. Pass the
+// empty PeerIdentity to disable exclusion (locally-originated sends and
+// tests).
+func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []routeCandidate {
 	snap := r.routeSnap()
 
 	routes, ok := snap.Routes[dst]
@@ -196,6 +215,9 @@ func (r *Router) collectRouteCandidates(dst domain.PeerIdentity) []routeCandidat
 			continue
 		}
 		if re.NextHop == r.localID {
+			continue
+		}
+		if excludeVia != "" && re.NextHop == excludeVia {
 			continue
 		}
 		candidates = append(candidates, routeCandidate{nextHop: re.NextHop, hops: re.Hops})
@@ -229,10 +251,18 @@ func (r *Router) trySendToCandidates(dst domain.PeerIdentity, candidates []route
 // forwardToNextHop collects all active routes to DST sorted by hops and
 // tries each next-hop until one succeeds. TTL is already decremented at
 // step 3 of the pipeline — this function only selects the route and sends.
-func (r *Router) forwardToNextHop(frame protocol.FileCommandFrame) {
-	candidates := r.collectRouteCandidates(frame.DST)
+//
+// excludeVia is the previous-hop identity: the neighbor that handed us
+// this frame. It is filtered out of the candidate set so the transit
+// node cannot reflect the frame back where it came from (split-horizon).
+// Empty identity disables the filter.
+func (r *Router) forwardToNextHop(frame protocol.FileCommandFrame, excludeVia domain.PeerIdentity) {
+	candidates := r.collectRouteCandidates(frame.DST, excludeVia)
 	if len(candidates) == 0 {
-		log.Debug().Str("dst", string(frame.DST)).Msg("file_router: no active route to destination")
+		log.Debug().
+			Str("dst", string(frame.DST)).
+			Str("exclude_via", string(excludeVia)).
+			Msg("file_router: no active route to destination (after split-horizon)")
 		return
 	}
 
@@ -294,7 +324,9 @@ func (r *Router) SendFileCommand(
 	log.Debug().Str("dst", string(dst)).Msg("file_router: no direct session, trying route table")
 
 	// 2. Route table fallback: collect active routes sorted by hops.
-	candidates := r.collectRouteCandidates(dst)
+	// No split-horizon here — this is a locally-originated send, there
+	// is no previous hop to exclude.
+	candidates := r.collectRouteCandidates(dst, "")
 	if len(candidates) == 0 {
 		log.Warn().
 			Str("dst", string(dst)).

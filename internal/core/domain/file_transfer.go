@@ -137,18 +137,44 @@ type ChunkRequestPayload struct {
 }
 
 // ChunkResponsePayload is sent by the sender with the requested chunk data.
+//
+// Epoch carries the sender's current serving epoch — a monotonic counter on
+// the sender's mapping that is bumped on every genuine transition from a
+// non-serving state into senderServing. Re-downloads (senderCompleted →
+// senderServing for the same FileID) bump the epoch so the receiver can
+// distinguish the new serving run from stale traffic belonging to a prior
+// completed run. A zero Epoch means the sender is pre-epoch (legacy) and
+// the receiver should not gate on it.
 type ChunkResponsePayload struct {
 	FileID FileID `json:"file_id"`
 	Offset uint64 `json:"offset"`
-	Data   string `json:"data"` // base64-encoded chunk (max DefaultChunkSize raw bytes)
+	Data   string `json:"data"`            // base64-encoded chunk (max DefaultChunkSize raw bytes)
+	Epoch  uint64 `json:"epoch,omitempty"` // sender serving epoch; 0 means legacy/unset
 }
 
 // FileDownloadedPayload is sent by the receiver after SHA-256 verification.
+//
+// Epoch echoes back the most recent sender serving epoch observed in a
+// chunk_response for this FileID. The sender uses it to reject stale replays
+// from a previous completed serving run of the same FileID: if a delayed
+// file_downloaded carries an epoch that no longer matches the sender's
+// current ServingEpoch, the message is dropped. A zero Epoch is treated as
+// legacy (pre-upgrade receiver) and skips the epoch check for backwards
+// compatibility during rolling upgrades.
 type FileDownloadedPayload struct {
 	FileID FileID `json:"file_id"`
+	Epoch  uint64 `json:"epoch,omitempty"` // echoed sender serving epoch; 0 means legacy/unset
 }
 
 // FileDownloadedAckPayload is the sender's acknowledgement of file_downloaded.
+//
+// Epoch echoes back the epoch from the file_downloaded that this ack
+// completes. A receiver that has already advanced to a newer serving epoch
+// (via a cancel + restart cycle) can use this to ignore a late ack belonging
+// to a prior run, preventing a stale ack from flipping an active download to
+// completed. The struct is layout-compatible with FileDownloadedPayload so
+// the sender can construct the ack via type conversion.
 type FileDownloadedAckPayload struct {
 	FileID FileID `json:"file_id"`
+	Epoch  uint64 `json:"epoch,omitempty"` // echoed sender serving epoch; 0 means legacy/unset
 }

@@ -41,7 +41,7 @@ func deliverLocalFrame(t *testing.T, payload string) (tr *testFileRouter, sender
 
 	frame := makeSignedFrame(senderID, localID, 5, payload, priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	return tr, senderID
 }
@@ -108,7 +108,7 @@ func TestFileCommandNoPendingQueue(t *testing.T) {
 	frame := makeSignedFrame(senderID, unknownDST, 5, "no-pending-queue-test", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// Frame should be silently dropped — no delivery, no forwarding, no queue.
 	if len(tr.localDeliveries()) != 0 {
@@ -154,7 +154,7 @@ func TestFileCommandNoGossipFallback(t *testing.T) {
 	frame := makeSignedFrame(senderID, remoteDST, 5, "no-gossip-test", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw))
+	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	// No local delivery, no successful forward.
 	if len(tr.localDeliveries()) != 0 {

@@ -545,6 +545,258 @@ func TestCancelDuringVerifyDoesNotResurrectTransfer(t *testing.T) {
 	}
 }
 
+// TestFinalizeVerifiedDownloadStaleGenerationDoesNotResurrect verifies that a
+// stale verifier goroutine cannot promote a newly restarted download attempt
+// to waitingAck. The scenario:
+//
+//  1. Verifier A starts for fileID X, captures generation=G1, drops the lock
+//     for hash verification and os.Rename (the I/O gap).
+//  2. User cancels the download → state back to receiverAvailable, Generation
+//     bumped to G2.
+//  3. User immediately restarts the same fileID → a new attempt creates a
+//     fresh download that advances to receiverVerifying with Generation=G3.
+//  4. Verifier A re-acquires the lock for the final transition. The old
+//     state-only check (state == receiverVerifying) would match because the
+//     NEW verifier put it there. Without a generation guard, Verifier A
+//     would overwrite CompletedPath with the old blob's path, transition the
+//     new attempt to waitingAck, and send file_downloaded for a file the
+//     user already abandoned.
+//
+// The fix: finalizeVerifiedDownload checks both state AND generation. A
+// stale verifier with generation != mapping.Generation must abort and clean
+// up its renamed blob without touching the live mapping.
+func TestFinalizeVerifiedDownloadStaleGenerationDoesNotResurrect(t *testing.T) {
+	downloadDir := testDownloadDir(t)
+	cc := &commandCollector{}
+	m := newTestTransferManager(t, downloadDir, cc)
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("stale-verifier-race")
+
+	oldContent := []byte("old attempt's verified blob")
+	oldHash := hashContent(oldContent)
+	newContent := []byte("new attempt's in-flight content")
+	newHash := hashContent(newContent)
+
+	// Simulate post-rename state after Verifier A's successful rename.
+	// The mapping now reflects the NEW attempt (different hash, different
+	// generation), but Verifier A still holds a captured generation from
+	// the previous attempt and a completedPath pointing to the stale blob.
+	newGeneration := uint64(42)
+	rm := testReceiverMapping(fileID, sender, newHash, "file.bin", uint64(len(newContent)), 1024, receiverVerifying)
+	rm.Generation = newGeneration
+	m.receiverMaps[fileID] = rm
+
+	// Write the stale blob to the final downloads location, as if Verifier A
+	// had already completed os.Rename of its own .part file.
+	staleCompletedPath := completedDownloadPath(downloadDir, "file.bin", oldHash)
+	if err := os.MkdirAll(filepath.Dir(staleCompletedPath), 0o700); err != nil {
+		t.Fatalf("mkdir completed dir: %v", err)
+	}
+	if err := os.WriteFile(staleCompletedPath, oldContent, 0o600); err != nil {
+		t.Fatalf("write stale completed blob: %v", err)
+	}
+	staleInfo, err := os.Lstat(staleCompletedPath)
+	if err != nil {
+		t.Fatalf("lstat stale completed blob: %v", err)
+	}
+
+	// Verifier A's captured generation from before the cancel+restart race.
+	staleGeneration := newGeneration - 10
+
+	proceeded := m.finalizeVerifiedDownload(fileID, rm, staleGeneration, staleCompletedPath, staleInfo, sender)
+	if proceeded {
+		t.Fatal("finalizeVerifiedDownload must return false when generation is stale")
+	}
+
+	// New attempt's state must be preserved — NOT promoted to waitingAck.
+	m.mu.Lock()
+	finalState := rm.State
+	finalCompletedPath := rm.CompletedPath
+	finalGeneration := rm.Generation
+	m.mu.Unlock()
+
+	if finalState != receiverVerifying {
+		t.Errorf("state = %s, want verifying (new attempt must be preserved)", finalState)
+	}
+	if finalCompletedPath != "" {
+		t.Errorf("CompletedPath = %q, want empty (stale verifier must not overwrite new attempt's path)", finalCompletedPath)
+	}
+	if finalGeneration != newGeneration {
+		t.Errorf("Generation = %d, want %d (must not be touched by stale verifier)", finalGeneration, newGeneration)
+	}
+
+	// file_downloaded must NOT be sent for the stale blob.
+	if cc.hasSent(domain.FileActionDownloaded) {
+		t.Fatal("file_downloaded must not be sent by a stale verifier")
+	}
+
+	// The stale completed file must be cleaned up by the stale verifier so
+	// it does not leak into the downloads directory.
+	if _, err := os.Stat(staleCompletedPath); !os.IsNotExist(err) {
+		t.Errorf("stale completed blob should be removed, stat err = %v", err)
+	}
+}
+
+// TestFinalizeVerifiedDownloadHappyPath verifies that finalizeVerifiedDownload
+// completes normally when state and generation still match the verifier's
+// captured values — the common case after a successful hash verify + rename.
+func TestFinalizeVerifiedDownloadHappyPath(t *testing.T) {
+	downloadDir := testDownloadDir(t)
+	cc := &commandCollector{}
+	m := newTestTransferManager(t, downloadDir, cc)
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("finalize-happy-path")
+
+	content := []byte("happy path verified content")
+	hash := hashContent(content)
+
+	generation := uint64(7)
+	rm := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm.Generation = generation
+	m.receiverMaps[fileID] = rm
+
+	completedPath := completedDownloadPath(downloadDir, "file.bin", hash)
+	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
+		t.Fatalf("mkdir completed dir: %v", err)
+	}
+	if err := os.WriteFile(completedPath, content, 0o600); err != nil {
+		t.Fatalf("write completed blob: %v", err)
+	}
+	completedInfo, err := os.Lstat(completedPath)
+	if err != nil {
+		t.Fatalf("lstat completed blob: %v", err)
+	}
+
+	if !m.finalizeVerifiedDownload(fileID, rm, generation, completedPath, completedInfo, sender) {
+		t.Fatal("finalizeVerifiedDownload must return true on matching generation")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rm.State != receiverWaitingAck {
+		t.Errorf("state = %s, want waiting_ack", rm.State)
+	}
+	if rm.CompletedPath != completedPath {
+		t.Errorf("CompletedPath = %q, want %q", rm.CompletedPath, completedPath)
+	}
+	if !cc.hasSent(domain.FileActionDownloaded) {
+		t.Error("file_downloaded must be sent on happy path")
+	}
+	if _, err := os.Stat(completedPath); err != nil {
+		t.Errorf("completed blob must remain on disk, stat err = %v", err)
+	}
+}
+
+// TestFinalizeVerifiedDownloadStaleCleanupPreservesNewAttemptFile verifies
+// that when a stale verifier aborts on generation mismatch, it does NOT
+// delete a file at completedPath that belongs to a different attempt.
+//
+// The race: cancel+restart of the same fileID resolves to the same
+// completedPath because FileName and FileHash match. Sequence:
+//
+//  1. Verifier A hashes its .part and os.Renames it to completedPath
+//     (inode I_A). User cancels.
+//  2. User restarts the same fileID. A new attempt produces its own .part,
+//     Verifier B verifies it and os.Renames to the same completedPath —
+//     the rename atomically unlinks I_A and places inode I_B there.
+//  3. Verifier A finally enters finalizeVerifiedDownload, sees generation
+//     mismatch, and attempts to clean up "its" file at completedPath.
+//
+// Before the fix: Verifier A's cleanup unconditionally unlinked the path,
+// destroying the new attempt's legitimate file. After the fix: the stale
+// branch uses os.SameFile against the pre-rename Fstat identity captured
+// by verifyPartialIntegrity — the inodes differ, so the stale verifier
+// leaves the file alone.
+func TestFinalizeVerifiedDownloadStaleCleanupPreservesNewAttemptFile(t *testing.T) {
+	downloadDir := testDownloadDir(t)
+	cc := &commandCollector{}
+	m := newTestTransferManager(t, downloadDir, cc)
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("stale-cleanup-preserves-new")
+
+	fileName := "shared.bin"
+	hash := "d0c0ffee0000d0c0ffee0000d0c0ffee0000d0c0ffee0000d0c0ffee00000123"
+	completedPath := completedDownloadPath(downloadDir, fileName, hash)
+	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
+		t.Fatalf("mkdir completed dir: %v", err)
+	}
+
+	// Step 1: Verifier A writes its file at completedPath, captures identity.
+	oldContent := []byte("old attempt's verified bytes")
+	if err := os.WriteFile(completedPath, oldContent, 0o600); err != nil {
+		t.Fatalf("write old file: %v", err)
+	}
+	staleVerifierInfo, err := os.Lstat(completedPath)
+	if err != nil {
+		t.Fatalf("lstat old file: %v", err)
+	}
+
+	// Step 2: New attempt atomically replaces the file via a tmp + rename,
+	// which is exactly what os.Rename from a .part file does. This unlinks
+	// Verifier A's inode and places a new inode at completedPath.
+	newContent := []byte("new attempt's legitimately verified bytes")
+	tmpPath := completedPath + ".tmp-new-attempt"
+	if err := os.WriteFile(tmpPath, newContent, 0o600); err != nil {
+		t.Fatalf("write new tmp: %v", err)
+	}
+	if err := os.Rename(tmpPath, completedPath); err != nil {
+		t.Fatalf("atomic rename new over old: %v", err)
+	}
+	newInfo, err := os.Lstat(completedPath)
+	if err != nil {
+		t.Fatalf("lstat new file: %v", err)
+	}
+	// Sanity: the new attempt really did change the inode. On some
+	// filesystems os.Rename over an existing target may reuse the inode;
+	// if that ever happens this test becomes a no-op and we surface it.
+	if os.SameFile(staleVerifierInfo, newInfo) {
+		t.Skip("filesystem reused inode across rename; cannot exercise this race here")
+	}
+
+	// The mapping reflects the NEW attempt — verifying with a fresh
+	// generation. The stale verifier holds an older generation.
+	newGeneration := uint64(77)
+	rm := testReceiverMapping(fileID, sender, hash, fileName, uint64(len(newContent)), 1024, receiverVerifying)
+	rm.Generation = newGeneration
+	m.receiverMaps[fileID] = rm
+
+	staleGeneration := newGeneration - 5
+
+	// Step 3: Verifier A enters finalize with its own pre-rename Fstat
+	// identity — the stale branch must NOT delete the new attempt's file.
+	proceeded := m.finalizeVerifiedDownload(fileID, rm, staleGeneration, completedPath, staleVerifierInfo, sender)
+	if proceeded {
+		t.Fatal("finalizeVerifiedDownload must return false when generation is stale")
+	}
+
+	// The new attempt's file must survive untouched.
+	survived, err := os.ReadFile(completedPath)
+	if err != nil {
+		t.Fatalf("new attempt's file was deleted by stale verifier: %v", err)
+	}
+	if string(survived) != string(newContent) {
+		t.Errorf("file content = %q, want %q (stale verifier corrupted it)", survived, newContent)
+	}
+
+	// State must be unchanged and file_downloaded must not be sent.
+	m.mu.Lock()
+	finalState := rm.State
+	finalGen := rm.Generation
+	m.mu.Unlock()
+	if finalState != receiverVerifying {
+		t.Errorf("state = %s, want verifying (stale verifier must not touch new attempt)", finalState)
+	}
+	if finalGen != newGeneration {
+		t.Errorf("Generation = %d, want %d (must not be touched)", finalGen, newGeneration)
+	}
+	if cc.hasSent(domain.FileActionDownloaded) {
+		t.Fatal("file_downloaded must not be sent by a stale verifier")
+	}
+}
+
 // TestMarkReceiverFailedRespectsCancel verifies that markReceiverFailed does
 // not overwrite a cancelled (available) state with failed. Before the fix,
 // markReceiverFailed blindly set receiverFailed regardless of current state.

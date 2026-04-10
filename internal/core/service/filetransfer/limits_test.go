@@ -847,6 +847,270 @@ func TestTombstoneCleanupAfterTTL(t *testing.T) {
 	}
 }
 
+// TestTickSenderMappingsTombstoneTTLDoesNotReleaseRef verifies that when
+// tickSenderMappings expires a tombstone mapping, it does NOT call Release on
+// the store. Tombstones are ref-less by construction: RemoveSenderMapping
+// explicitly skips Release for them, and load-time tombstones created for
+// missing blobs are inserted without contributing to activeHashes. If the TTL
+// path releases a tombstone, it decrements another live mapping's ref for the
+// same hash (e.g. a re-send that reintroduced the content), leading to
+// premature blob deletion.
+func TestTickSenderMappingsTombstoneTTLDoesNotReleaseRef(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	hash := "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222"
+	if err := writeTestFile(filepath.Join(dir, hash+".bin"), []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	// Single live ref — owned by the active sender mapping below.
+	store.mu.Lock()
+	store.refs[hash] = 1
+	store.mu.Unlock()
+
+	m := NewFileTransferManager(Config{
+		Store:       store,
+		DownloadDir: dir,
+	})
+
+	expiredTime := time.Now().Add(-(tombstoneTTL + time.Hour))
+
+	// Expired tombstone for the same hash — must NOT release when removed.
+	tombstoneID := domain.FileID("expired-tombstone")
+	// Active mapping that owns the single live ref — must keep its ref.
+	activeID := domain.FileID("active-serving")
+
+	m.mu.Lock()
+	m.senderMaps[tombstoneID] = &senderFileMapping{
+		FileID:      tombstoneID,
+		FileHash:    hash,
+		FileName:    "resurrected.txt",
+		FileSize:    4,
+		Recipient:   "bob",
+		State:       senderTombstone,
+		CompletedAt: expiredTime,
+	}
+	m.senderMaps[activeID] = &senderFileMapping{
+		FileID:       activeID,
+		FileHash:     hash,
+		FileName:     "resurrected.txt",
+		FileSize:     4,
+		Recipient:    "carol",
+		State:        senderServing,
+		LastServedAt: time.Now(),
+	}
+	m.mu.Unlock()
+
+	m.tickSenderMappings()
+
+	// Expired tombstone must be removed from the map.
+	m.mu.Lock()
+	_, tombstoneStillPresent := m.senderMaps[tombstoneID]
+	_, activeStillPresent := m.senderMaps[activeID]
+	m.mu.Unlock()
+
+	if tombstoneStillPresent {
+		t.Error("expired tombstone should have been removed by tickSenderMappings")
+	}
+	if !activeStillPresent {
+		t.Error("active serving mapping must NOT be removed")
+	}
+
+	// Ref count must remain 1 — the tombstone never owned a ref, so its
+	// expiry must not decrement the live mapping's ref.
+	store.mu.Lock()
+	refCount := store.refs[hash]
+	store.mu.Unlock()
+	if refCount != 1 {
+		t.Fatalf("ref count should be 1 (tombstone TTL must not release), got %d", refCount)
+	}
+
+	// Blob must still exist on disk — the live mapping still needs it.
+	if _, err := os.Stat(filepath.Join(dir, hash+".bin")); os.IsNotExist(err) {
+		t.Fatal("blob should survive — active mapping still holds a ref")
+	}
+}
+
+// TestTickSenderMappingsCompletedTTLReleasesRef verifies that tickSenderMappings
+// DOES release the ref for an expired senderCompleted mapping. Completed
+// mappings own a transmit ref (they held the blob until recipient ack), and
+// the TTL expiry path must return that ref to the store so the blob can be
+// deleted when no other mapping holds it.
+func TestTickSenderMappingsCompletedTTLReleasesRef(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	hash := "bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333"
+	if err := writeTestFile(filepath.Join(dir, hash+".bin"), []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.refs[hash] = 1
+	store.mu.Unlock()
+
+	m := NewFileTransferManager(Config{
+		Store:       store,
+		DownloadDir: dir,
+	})
+
+	expiredTime := time.Now().Add(-(tombstoneTTL + time.Hour))
+	completedID := domain.FileID("expired-completed")
+
+	m.mu.Lock()
+	m.senderMaps[completedID] = &senderFileMapping{
+		FileID:      completedID,
+		FileHash:    hash,
+		FileName:    "done.txt",
+		FileSize:    4,
+		Recipient:   "bob",
+		State:       senderCompleted,
+		CompletedAt: expiredTime,
+	}
+	m.mu.Unlock()
+
+	m.tickSenderMappings()
+
+	// Ref must be released → 0 → blob deleted.
+	store.mu.Lock()
+	refCount := store.refs[hash]
+	store.mu.Unlock()
+	if refCount != 0 {
+		t.Fatalf("ref count should be 0 (completed TTL must release), got %d", refCount)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, hash+".bin")); !os.IsNotExist(err) {
+		t.Fatal("blob should be deleted after completed mapping TTL expiry released the last ref")
+	}
+}
+
+// TestTickSenderMappingsStallReclaimRestoresPreServeStateForReDownload
+// verifies that when a stalled senderServing slot is reclaimed, the mapping
+// is restored to its pre-serve state — senderCompleted for a re-download
+// whose serving run originated from senderCompleted — not unconditionally
+// downgraded to senderAnnounced. Downgrading would visibly change
+// semantics: the mapping would start counting against the live sender
+// quota, reappear in active snapshots/UI, and lose the information that
+// the original transfer had already completed.
+func TestTickSenderMappingsStallReclaimRestoresPreServeStateForReDownload(t *testing.T) {
+	t.Parallel()
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		stopCh:       make(chan struct{}),
+	}
+
+	fileID := domain.FileID("re-download-stalled")
+	// A re-download in progress: the mapping is senderServing now, and
+	// PreServeState records that it was senderCompleted before the current
+	// chunk_request promoted it. LastServedAt is well beyond the stall
+	// timeout so tickSenderMappings will reclaim the slot.
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:        fileID,
+		FileHash:      "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222",
+		FileName:      "photo.jpg",
+		FileSize:      1024,
+		Recipient:     domain.PeerIdentity("bob"),
+		State:         senderServing,
+		PreServeState: senderCompleted,
+		CompletedAt:   time.Now().Add(-time.Hour), // original completion
+		LastServedAt:  time.Now().Add(-2 * senderServingStallTimeout),
+	}
+
+	m.tickSenderMappings()
+
+	sm := m.senderMaps[fileID]
+	if sm == nil {
+		t.Fatal("mapping must not be removed on reclaim")
+	}
+	if sm.State != senderCompleted {
+		t.Errorf("State = %s, want senderCompleted (re-download must return to completed, not announced)", sm.State)
+	}
+	if sm.PreServeState != "" {
+		t.Errorf("PreServeState = %s, want empty after reclaim (next chunk_request re-captures origin)", sm.PreServeState)
+	}
+}
+
+// TestTickSenderMappingsStallReclaimFirstDownloadFallsBackToAnnounced
+// verifies the preserved behaviour for first-time downloads: when a
+// stalled serving slot has PreServeState == senderAnnounced (set by
+// validateChunkRequest on promotion from announced), reclaim restores
+// senderAnnounced. This is the historical behaviour and remains the
+// correct one for first-time downloads.
+func TestTickSenderMappingsStallReclaimFirstDownloadFallsBackToAnnounced(t *testing.T) {
+	t.Parallel()
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		stopCh:       make(chan struct{}),
+	}
+
+	fileID := domain.FileID("first-download-stalled")
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:        fileID,
+		FileHash:      "bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333",
+		FileName:      "first.bin",
+		FileSize:      1024,
+		Recipient:     domain.PeerIdentity("bob"),
+		State:         senderServing,
+		PreServeState: senderAnnounced,
+		LastServedAt:  time.Now().Add(-2 * senderServingStallTimeout),
+	}
+
+	m.tickSenderMappings()
+
+	sm := m.senderMaps[fileID]
+	if sm == nil {
+		t.Fatal("mapping must not be removed on reclaim")
+	}
+	if sm.State != senderAnnounced {
+		t.Errorf("State = %s, want senderAnnounced", sm.State)
+	}
+	if sm.PreServeState != "" {
+		t.Errorf("PreServeState = %s, want empty", sm.PreServeState)
+	}
+}
+
+// TestTickSenderMappingsStallReclaimEmptyPreServeStateDefaultsToAnnounced
+// verifies backwards compatibility: a senderServing mapping loaded from
+// older persisted JSON will have an empty PreServeState. Reclaim must
+// fall back to senderAnnounced rather than leaving the mapping in an
+// invalid empty-state value.
+func TestTickSenderMappingsStallReclaimEmptyPreServeStateDefaultsToAnnounced(t *testing.T) {
+	t.Parallel()
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		stopCh:       make(chan struct{}),
+	}
+
+	fileID := domain.FileID("legacy-stalled")
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:       fileID,
+		FileHash:     "cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333dddd4444",
+		FileName:     "legacy.bin",
+		FileSize:     1024,
+		Recipient:    domain.PeerIdentity("bob"),
+		State:        senderServing,
+		// PreServeState intentionally empty (simulates legacy JSON)
+		LastServedAt: time.Now().Add(-2 * senderServingStallTimeout),
+	}
+
+	m.tickSenderMappings()
+
+	sm := m.senderMaps[fileID]
+	if sm.State != senderAnnounced {
+		t.Errorf("State = %s, want senderAnnounced (legacy fallback)", sm.State)
+	}
+}
+
 // TestCommitDuplicateFileIDRejected verifies that committing a token with
 // a FileID that already exists in senderMaps returns an error.
 func TestCommitDuplicateFileIDRejected(t *testing.T) {

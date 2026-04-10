@@ -43,18 +43,46 @@ var validSenderStates = map[senderState]struct{}{
 
 // senderFileMapping tracks a file being sent to a specific recipient.
 type senderFileMapping struct {
-	FileID       domain.FileID
-	FileHash     string
-	FileName     string
-	FileSize     uint64
-	ContentType  string
-	Recipient    domain.PeerIdentity
-	State        senderState
-	CreatedAt    time.Time
-	CompletedAt  time.Time
-	BytesServed  uint64    // cumulative bytes sent via chunk_response
-	LastServedAt time.Time // last time a chunk was successfully served
-	TransmitPath string    // internal-only, never exposed in RPC/protocol
+	FileID      domain.FileID
+	FileHash    string
+	FileName    string
+	FileSize    uint64
+	ContentType string
+	Recipient   domain.PeerIdentity
+	State       senderState
+	// PreServeState is the state the mapping was in immediately before it
+	// transitioned into senderServing for the current request. It is used
+	// by tickSenderMappings to correctly restore the pre-serve state when
+	// a stalled serving slot is reclaimed. Without it, a re-download that
+	// started from senderCompleted would be downgraded to senderAnnounced
+	// on stall reclaim — changing semantics visibly (live sender quota
+	// accounting, active snapshots/UI) and losing the fact that the
+	// original transfer had already completed.
+	//
+	// Only meaningful while State == senderServing. Reset (to empty string)
+	// on every transition away from senderServing (completed/tombstone/
+	// reclaim). An empty PreServeState on a senderServing mapping — e.g.
+	// from older persisted JSON — is treated as senderAnnounced for
+	// backwards compatibility.
+	PreServeState senderState
+	CreatedAt     time.Time
+	CompletedAt   time.Time
+	BytesServed   uint64    // cumulative bytes sent via chunk_response
+	LastServedAt  time.Time // last time a chunk was successfully served
+	TransmitPath  string    // internal-only, never exposed in RPC/protocol
+
+	// ServingEpoch is a monotonic counter identifying the current serving
+	// run of this FileID. It is bumped by validateChunkRequest on every
+	// genuine transition from a non-serving state into senderServing and
+	// is echoed in every outgoing chunk_response. When a delayed
+	// file_downloaded from a previous completed run arrives during a
+	// re-download (which reuses the same FileID), it carries the prior
+	// epoch and HandleFileDownloaded rejects it — preventing the stale
+	// replay from flipping the active re-download back to senderCompleted,
+	// acking prematurely, and freeing the serving slot. A zero value means
+	// the mapping has never served (or was restored from pre-epoch
+	// persisted JSON) and is treated as "no gating" on ingress.
+	ServingEpoch uint64
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +394,10 @@ type chunkServePrep struct {
 	offset    uint64
 	prevState senderState
 	recipient domain.PeerIdentity
+	// epoch is the sender's ServingEpoch captured at validation time. It is
+	// written verbatim into the outgoing chunk_response so the receiver can
+	// stash it and later echo it in file_downloaded for replay defense.
+	epoch uint64
 }
 
 // validateChunkRequest performs all pre-I/O validation for a chunk_request.
@@ -404,6 +436,11 @@ func (m *Manager) validateChunkRequest(
 			Str("file_hash", mapping.FileHash).
 			Msg("file_transfer: tombstone sender has blob on disk, resurrecting to completed")
 		mapping.State = senderCompleted
+		// Reset CompletedAt so the 30-day tombstoneTTL in
+		// tickSenderMappings restarts from the resurrection moment.
+		// Without this, an old tombstone resurrected at runtime would
+		// be purged on the next tick.
+		mapping.CompletedAt = time.Now()
 		m.saveMappingsLocked()
 	}
 
@@ -428,6 +465,22 @@ func (m *Manager) validateChunkRequest(
 	// --- Validation passed — transition to serving. ---
 
 	prevState := mapping.State
+	// Persist the pre-serve state on the mapping so tickSenderMappings can
+	// restore it on stall reclaim. Only record it on genuine transitions
+	// into serving — if the mapping was already senderServing this is a
+	// continuation of the same re-download and PreServeState must not be
+	// overwritten (otherwise the first in-flight chunk's senderCompleted
+	// origin would be lost on the second chunk's self-transition).
+	//
+	// ServingEpoch is bumped on the same condition: a genuine transition
+	// into serving starts a new serving run and must be distinguishable
+	// from prior runs of the same FileID. Continuations (chunk N+1 of the
+	// same run) keep the existing epoch so the receiver's echoed value
+	// stays consistent across chunks.
+	if prevState != senderServing {
+		mapping.PreServeState = prevState
+		mapping.ServingEpoch++
+	}
 	mapping.State = senderServing
 	mapping.LastServedAt = time.Now()
 
@@ -448,6 +501,7 @@ func (m *Manager) validateChunkRequest(
 		offset:    req.Offset,
 		prevState: prevState,
 		recipient: senderIdentity,
+		epoch:     mapping.ServingEpoch,
 	}, nil
 }
 
@@ -476,6 +530,15 @@ func (m *Manager) HandleChunkRequest(
 		m.mu.Lock()
 		if sm, ok := m.senderMaps[req.FileID]; ok && sm.State == senderServing {
 			sm.State = prep.prevState
+			// Only clear PreServeState if we are actually transitioning out
+			// of serving. For an in-flight continuation (prep.prevState ==
+			// senderServing, i.e. chunk N+1 of the same re-download failed)
+			// the serving run is still live and its original pre-serve
+			// origin (e.g. senderCompleted) must be preserved so a later
+			// stall reclaim still restores the correct state.
+			if prep.prevState != senderServing {
+				sm.PreServeState = ""
+			}
 			m.saveMappingsLocked()
 		}
 		m.mu.Unlock()
@@ -500,6 +563,7 @@ func (m *Manager) HandleChunkRequest(
 		FileID: req.FileID,
 		Offset: prep.offset,
 		Data:   base64.RawURLEncoding.EncodeToString(data),
+		Epoch:  prep.epoch,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("file_transfer: marshal chunk response failed")
@@ -531,6 +595,21 @@ func (m *Manager) HandleChunkRequest(
 
 // HandleFileDownloaded processes a file_downloaded from the receiver.
 // Marks the mapping as completed and sends file_downloaded_ack.
+//
+// Epoch gating: a re-download reuses the same FileID as the prior completed
+// run, so a delayed file_downloaded from that prior run (retry, buffered
+// frame, etc.) would otherwise be indistinguishable from a legitimate
+// completion of the current run and could prematurely flip the active
+// serving back to senderCompleted, ack, and free the slot. To defend
+// against this replay, every chunk_response carries the sender's
+// ServingEpoch (bumped on every genuine transition into senderServing) and
+// the receiver echoes that epoch in file_downloaded. Here we require the
+// echoed epoch to match the sender's current ServingEpoch before acting.
+//
+// Legacy fallback: if the receiver sends Epoch=0 (pre-upgrade client) the
+// check is skipped — this preserves wire compatibility during rolling
+// upgrades. Fully-upgraded deployments have both ends stamping non-zero
+// epochs and gain full replay protection.
 func (m *Manager) HandleFileDownloaded(
 	senderIdentity domain.PeerIdentity,
 	downloaded domain.FileDownloadedPayload,
@@ -547,10 +626,51 @@ func (m *Manager) HandleFileDownloaded(
 		return
 	}
 
+	// State guard: file_downloaded is the completion edge of a serving run.
+	// Accept only from senderServing (normal completion) or senderCompleted
+	// (idempotent re-ack when the receiver retries because it missed the ack).
+	// Reject from senderAnnounced (no chunk was served yet — a premature
+	// file_downloaded would hide a still-unsent transfer) and senderTombstone
+	// (blob gone, cannot confirm anything meaningful).
+	if mapping.State != senderServing && mapping.State != senderCompleted {
+		currentState := mapping.State
+		m.mu.Unlock()
+		log.Warn().
+			Str("file_id", string(downloaded.FileID)).
+			Str("recipient", string(senderIdentity)).
+			Str("state", string(currentState)).
+			Msg("file_transfer: file_downloaded rejected — sender not in serving or completed state")
+		return
+	}
+
+	// Epoch gating: reject stale replays from a prior serving run of the
+	// same FileID. Epoch==0 on the wire is the legacy path and is
+	// accepted unconditionally. A non-zero wire epoch must exactly match
+	// the current ServingEpoch; strictly-lesser values are the replay
+	// case this defense targets, strictly-greater values are defensively
+	// dropped (they indicate state corruption or a spoofed future epoch).
+	if downloaded.Epoch != 0 && mapping.ServingEpoch != 0 && downloaded.Epoch != mapping.ServingEpoch {
+		currentEpoch := mapping.ServingEpoch
+		currentState := mapping.State
+		m.mu.Unlock()
+		log.Warn().
+			Str("file_id", string(downloaded.FileID)).
+			Str("recipient", string(senderIdentity)).
+			Uint64("received_epoch", downloaded.Epoch).
+			Uint64("current_epoch", currentEpoch).
+			Str("current_state", string(currentState)).
+			Msg("file_transfer: file_downloaded epoch mismatch — dropping stale replay")
+		return
+	}
+
 	// Idempotent: re-send ack without side effects on duplicate.
 	wasAlreadyCompleted := mapping.State == senderCompleted
 	if !wasAlreadyCompleted {
 		mapping.State = senderCompleted
+		// Clear the pre-serve origin: the current serving run reached a
+		// clean completion, so any later stall reclaim (which anyway
+		// cannot fire from senderCompleted) has nothing to restore.
+		mapping.PreServeState = ""
 		mapping.CompletedAt = time.Now()
 		m.saveMappingsLocked()
 
@@ -563,7 +683,10 @@ func (m *Manager) HandleFileDownloaded(
 	}
 	m.mu.Unlock()
 
-	// Send file_downloaded_ack.
+	// Send file_downloaded_ack — echoes the same epoch back so the
+	// receiver can also ignore stale acks from prior runs. The direct
+	// type conversion relies on FileDownloadedAckPayload being layout-
+	// compatible with FileDownloadedPayload (both carry FileID + Epoch).
 	ackData, err := json.Marshal(domain.FileDownloadedAckPayload(downloaded))
 	if err != nil {
 		log.Error().Err(err).Msg("file_transfer: marshal file_downloaded_ack failed")
@@ -603,6 +726,56 @@ func (m *Manager) safeRemoveInDownloadDir(path, context string) {
 	if err := ensureWithinDir(m.downloadDir, path); err != nil {
 		log.Warn().Err(err).Str("path", path).
 			Msgf("file_transfer: %s skipped — path escapes download dir", context)
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Warn().Err(err).Str("path", path).
+			Msgf("file_transfer: %s failed", context)
+	}
+}
+
+// removeOwnedFileInDownloadDir removes a file only if it is still the same
+// inode as the caller's captured identity. This is the file-identity-aware
+// counterpart to safeRemoveInDownloadDir and is required whenever the same
+// on-disk path may be rewritten by a concurrent attempt (e.g. cancel+restart
+// of a receiver transfer resolves to the same completedPath for matching
+// FileName+FileHash).
+//
+// If path currently points at a file with a different inode — because
+// another goroutine's atomic os.Rename replaced ours — this helper logs and
+// skips the unlink rather than deleting the replacement. If the file is
+// already gone, it is a no-op. expected must be the os.FileInfo captured
+// from the fd the caller verified and renamed; os.Rename preserves inode on
+// POSIX so this identity matches whatever the caller's rename produced.
+func (m *Manager) removeOwnedFileInDownloadDir(path string, expected os.FileInfo, context string) {
+	if path == "" || expected == nil {
+		return
+	}
+	if err := ensureWithinDir(m.downloadDir, path); err != nil {
+		log.Warn().Err(err).Str("path", path).
+			Msgf("file_transfer: %s skipped — path escapes download dir", context)
+		return
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Warn().Err(err).Str("path", path).
+				Msgf("file_transfer: %s stat failed", context)
+		}
+		return
+	}
+	// Symlink at this location means somebody put something there that is
+	// not a regular file we own. Never follow, never delete.
+	if current.Mode()&os.ModeSymlink != 0 {
+		log.Warn().Str("path", path).
+			Msgf("file_transfer: %s skipped — path is a symlink", context)
+		return
+	}
+	if !os.SameFile(expected, current) {
+		// Another attempt's atomic rename replaced our inode. Skip — the
+		// file at this path is not ours to delete.
+		log.Info().Str("path", path).
+			Msgf("file_transfer: %s skipped — file identity changed (another attempt owns this path)", context)
 		return
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -666,24 +839,43 @@ func (m *Manager) tickSenderMappings() {
 		switch sm.State {
 		case senderServing:
 			// Reclaim abandoned slots: if no chunk was served within the
-			// stall timeout, the receiver likely disappeared. Revert to
-			// announced so new chunk_request messages can re-acquire it.
+			// stall timeout, the receiver likely disappeared. Restore the
+			// state the mapping was in before the current serving run
+			// started so a re-download that originated from senderCompleted
+			// returns to senderCompleted (not senderAnnounced) — preserving
+			// live sender quota accounting, active snapshot semantics, and
+			// the fact that the original transfer had already completed.
+			//
+			// PreServeState is cleared on reclaim: the next chunk_request
+			// will re-capture the correct origin state under lock. An empty
+			// PreServeState (e.g. from older persisted JSON before this
+			// field existed) falls back to senderAnnounced, matching the
+			// prior behaviour for non-re-download cases.
 			if now.Sub(sm.LastServedAt) >= senderServingStallTimeout {
-				sm.State = senderAnnounced
+				reclaimedState := sm.PreServeState
+				if reclaimedState == "" {
+					reclaimedState = senderAnnounced
+				}
+				sm.State = reclaimedState
+				sm.PreServeState = ""
 				changed = true
 				log.Info().
 					Str("file_id", string(sm.FileID)).
 					Str("recipient", string(sm.Recipient)).
+					Str("restored_state", string(reclaimedState)).
 					Dur("stalled_for", now.Sub(sm.LastServedAt)).
-					Msg("file_transfer: reclaimed stalled serving slot → announced")
+					Msg("file_transfer: reclaimed stalled serving slot")
 			}
 
 		case senderTombstone, senderCompleted:
 			if now.Sub(sm.CompletedAt) > tombstoneTTL {
-				// Release the transmit file ref when the mapping expires.
-				// The blob is deleted only if no other mapping holds a ref
-				// for the same hash (e.g. re-send of the same content).
-				if m.store != nil {
+				// Only senderCompleted owns a transmit file ref. Tombstones
+				// are ref-less by construction: RemoveSenderMapping skips
+				// Release for tombstones, and load-time tombstones created
+				// for missing blobs are not added to activeHashes. Releasing
+				// a tombstone here would decrement the ref count of another
+				// live mapping that reintroduced the same hash via a new send.
+				if m.store != nil && sm.State == senderCompleted {
 					m.store.Release(sm.FileHash)
 				}
 				delete(m.senderMaps, id)
