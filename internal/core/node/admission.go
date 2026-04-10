@@ -12,7 +12,7 @@ import (
 
 // admission.go centralizes relay frame admission control and documents the
 // relay subsystem invariants. The admitRelayFrame function is called from both
-// handleJSONCommand (inbound TCP) and handlePeerSessionFrame (peer sessions)
+// dispatchNetworkFrame (inbound TCP) and dispatchPeerSessionFrame (peer sessions)
 // to enforce uniform capability and frame-size checks.
 
 // Relay invariants — canonical definitions live in docs/protocol/relay.md.
@@ -117,7 +117,7 @@ const maxPendingFramesPerPeer = 200
 const maxPendingFramesTotal = 2_000
 
 // admitRelayFrame validates a frame against relay admission rules. Called
-// from both handleJSONCommand (inbound TCP) and handlePeerSessionFrame
+// from both dispatchNetworkFrame (inbound TCP) and dispatchPeerSessionFrame
 // (peer sessions) to enforce uniform capability and size checks.
 //
 // hasCapability abstracts the transport-specific capability check:

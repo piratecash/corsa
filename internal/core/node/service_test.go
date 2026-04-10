@@ -146,7 +146,7 @@ func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
 
 // TestInboundIncompatibleProtocolBlacklistsIP verifies that a single
 // incompatible hello immediately blacklists the remote IP for 24 hours
-// and closes the connection (return false from handleJSONCommand).
+// and closes the connection (return false from dispatchNetworkFrame).
 func TestInboundIncompatibleProtocolBlacklistsIP(t *testing.T) {
 	t.Parallel()
 
@@ -5637,7 +5637,7 @@ func TestProtocolTraceLogging(t *testing.T) {
 		t.Fatalf("expected error for unknown command, got %q", resp.Type)
 	}
 
-	// --- Test TCP path (handleJSONCommand) ---
+	// --- Test TCP path (dispatchNetworkFrame) ---
 	_ = exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 		protocol.Frame{Type: "get_peers"},
@@ -6935,10 +6935,10 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 	svc.mu.Lock()
 	// Register inbound connection + peer info with a different overlay address.
 	svc.inboundConns[server] = struct{}{}
-	pc := newPeerConn(connID(1), server, Inbound, PeerConnOpts{
+	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
 	})
-	svc.inboundPeerConns[server] = pc
+	svc.inboundNetCores[server] = pc
 
 	hosts := svc.connectedHostsLocked()
 	svc.mu.Unlock()
@@ -7667,11 +7667,11 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 	// old enough to be considered stale.
 	svc.mu.Lock()
 	svc.inboundConns[server] = struct{}{}
-	pc := newPeerConn(connID(1), server, Inbound, PeerConnOpts{
+	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
 		Address:      peerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.inboundPeerConns[server] = pc
+	svc.inboundNetCores[server] = pc
 	svc.mu.Unlock()
 
 	// Verify the connection is in inboundConns before eviction.
@@ -7732,11 +7732,11 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 
 	svc.mu.Lock()
 	svc.inboundConns[server] = struct{}{}
-	pc := newPeerConn(connID(1), server, Inbound, PeerConnOpts{
+	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
 		Address:      peerAddr,
 		LastActivity: time.Now(), // recent activity — should not be evicted
 	})
-	svc.inboundPeerConns[server] = pc
+	svc.inboundNetCores[server] = pc
 	svc.mu.Unlock()
 
 	svc.evictStaleInboundConns()
@@ -7799,11 +7799,11 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 		delete(svc.inboundConns, c)
 	}
 	svc.inboundConns[server1] = struct{}{}
-	pc := newPeerConn(connID(1), server1, Inbound, PeerConnOpts{
+	pc := newNetCore(connID(1), server1, Inbound, NetCoreOpts{
 		Address:      stalledPeerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.inboundPeerConns[server1] = pc
+	svc.inboundNetCores[server1] = pc
 
 	// Also add an outbound session as control.
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
@@ -8078,11 +8078,11 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	defer func() { _ = staleConn.Close() }()
 	defer func() { _ = staleRemote.Close() }()
 	svc.mu.Lock()
-	pc := newPeerConn(connID(99), staleConn, Inbound, PeerConnOpts{
+	pc := newNetCore(connID(99), staleConn, Inbound, NetCoreOpts{
 		Address:  peerAddr,
 		Identity: domain.PeerIdentity("stale-identity"),
 	})
-	svc.inboundPeerConns[staleConn] = pc
+	svc.inboundNetCores[staleConn] = pc
 	svc.mu.Unlock()
 
 	frames := svc.peerHealthFrames()

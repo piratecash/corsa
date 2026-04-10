@@ -65,7 +65,7 @@ func (s *Service) sessionHasCapability(address domain.PeerAddress, capability do
 // capability in its negotiated set (stored during the hello handshake).
 func (s *Service) connHasCapability(conn net.Conn, capability domain.Capability) bool {
 	s.mu.RLock()
-	pc := s.inboundPeerConns[conn]
+	pc := s.inboundNetCores[conn]
 	s.mu.RUnlock()
 	if pc == nil {
 		return false

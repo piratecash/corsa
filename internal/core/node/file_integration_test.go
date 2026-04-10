@@ -184,11 +184,11 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 	defer func() { _ = pipeLocal.Close() }()
 	defer func() { _ = pipeRemote.Close() }()
 
-	pc := newPeerConn(connID(1), pipeLocal, Inbound, PeerConnOpts{
+	pc := newNetCore(connID(1), pipeLocal, Inbound, NetCoreOpts{
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	})
-	svc.inboundPeerConns[pipeLocal] = pc
+	svc.inboundNetCores[pipeLocal] = pc
 
 	if !svc.isPeerReachable(idPeerB) {
 		t.Fatal("peer with inbound file_transfer_v1 connection should be reachable")

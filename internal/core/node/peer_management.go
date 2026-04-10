@@ -286,7 +286,7 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 // For inbound connections the actual TCP remote IP is used instead of the
 // peer's self-reported overlay address.  A NATed peer or a peer that
 // advertises a different endpoint would not reserve its real host if we
-// relied on PeerConn.Address(), allowing a second outbound connection
+// relied on NetCore.Address(), allowing a second outbound connection
 // to the same machine.
 // Caller must hold s.mu at least for read.
 func (s *Service) connectedHostsLocked() map[string]struct{} {
@@ -307,7 +307,7 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
 	for conn := range s.inboundConns {
-		if pc := s.inboundPeerConns[conn]; pc != nil {
+		if pc := s.inboundNetCores[conn]; pc != nil {
 			if la := pc.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
 				continue
 			}
@@ -431,7 +431,7 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 // state. Returns the number of contacts successfully imported.
 //
 // A fresh connection is used instead of reusing the active session
-// because syncPeer is called from handlePeerSessionFrame when a
+// because syncPeer is called from dispatchPeerSessionFrame when a
 // push_message fails with ErrCodeUnknownSenderKey. That handler runs
 // inline inside peerSessionRequest. Reusing the session would call
 // syncPeerSession → peerSessionRequest on the same inboxCh, consuming
@@ -768,7 +768,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			return err
 		case frame := <-session.inboxCh:
 			s.markPeerRead(session.address, frame)
-			s.handlePeerSessionFrame(session.address, frame)
+			s.dispatchPeerSessionFrame(session.address, frame)
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
 				log.Warn().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
@@ -1219,7 +1219,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// file_command frames use their own wire format (FileCommandFrame)
 		// and require the raw JSON for decryption and routing. Dispatch them
 		// directly to the file router instead of going through the
-		// inboxCh → handlePeerSessionFrame path, which only has access to
+		// inboxCh → dispatchPeerSessionFrame path, which only has access to
 		// the parsed protocol.Frame (missing src/dst/payload fields).
 		if frame.Type == "file_command" {
 			s.markPeerRead(session.address, frame)
@@ -1292,27 +1292,27 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				continue
 			}
 			if incoming.Type == "push_message" {
-				s.handlePeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, incoming)
 				continue
 			}
 			if incoming.Type == "push_delivery_receipt" {
-				s.handlePeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, incoming)
 				continue
 			}
 			if incoming.Type == "announce_peer" {
-				s.handlePeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, incoming)
 				continue
 			}
 			if incoming.Type == "request_inbox" {
-				s.handlePeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, incoming)
 				continue
 			}
 			if incoming.Type == "subscribe_inbox" {
-				s.handlePeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, incoming)
 				continue
 			}
 			if incoming.Type == "relay_hop_ack" {
-				s.handlePeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, incoming)
 				continue
 			}
 			if expectedType == "" || incoming.Type == expectedType {
@@ -1379,7 +1379,7 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 // The syncSession parameter, when non-nil, is used directly instead of
 // looking up a session by address. Callers pass nil when the only candidate
 // session is currently inside a peerSessionRequest read loop (e.g.,
-// handlePeerSessionFrame dispatched during a ping), because the
+// dispatchPeerSessionFrame dispatched during a ping), because the
 // single-reader constraint on inboxCh would cause a deadlock.
 func (s *Service) syncSenderKeys(senderAddress domain.PeerAddress, syncSession *peerSession) int {
 	if syncSession != nil {
@@ -1399,7 +1399,7 @@ func (s *Service) syncSenderKeys(senderAddress domain.PeerAddress, syncSession *
 	return s.syncPeer(ctx, senderAddress)
 }
 
-func (s *Service) handlePeerSessionFrame(address domain.PeerAddress, frame protocol.Frame) {
+func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, frame protocol.Frame) {
 	// Respond to inbound pings on outbound sessions so the remote
 	// heartbeat monitor receives a timely pong. Without this the
 	// remote side closes the connection after pongStallTimeout.
@@ -1771,7 +1771,7 @@ func (s *Service) nextConnIDLocked() uint64 {
 // Must be called with s.mu held (read lock).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
-	for _, pc := range s.inboundPeerConns {
+	for _, pc := range s.inboundNetCores {
 		if pc != nil && pc.Address() == address {
 			ids = append(ids, pc.ConnIDNum())
 		}
@@ -1909,13 +1909,13 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 
 // peerCapabilitiesLocked returns the negotiated capabilities for a peer
 // as wire-format strings for PeerHealthFrame.  Checks outbound sessions
-// first, then falls back to inbound PeerConns.
+// first, then falls back to inbound NetCores.
 // Must be called while holding s.mu at least for read.
 func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 	if session, ok := s.sessions[address]; ok && len(session.capabilities) > 0 {
 		return domain.CapabilityStrings(session.capabilities)
 	}
-	for _, pc := range s.inboundPeerConns {
+	for _, pc := range s.inboundNetCores {
 		if pc.Address() == address && len(pc.Capabilities()) > 0 {
 			return domain.CapabilityStrings(pc.Capabilities())
 		}
@@ -2238,7 +2238,7 @@ func (s *Service) evictStaleInboundConns() {
 	s.mu.RLock()
 	var stale []net.Conn
 	for conn := range s.inboundConns {
-		pc := s.inboundPeerConns[conn]
+		pc := s.inboundNetCores[conn]
 		if pc == nil {
 			continue
 		}
@@ -2256,7 +2256,7 @@ func (s *Service) evictStaleInboundConns() {
 		var addr domain.PeerAddress
 		var ident domain.PeerIdentity
 		s.mu.RLock()
-		if pc := s.inboundPeerConns[conn]; pc != nil {
+		if pc := s.inboundNetCores[conn]; pc != nil {
 			addr = pc.Address()
 			ident = pc.Identity()
 		}
@@ -2269,7 +2269,7 @@ func (s *Service) evictStaleInboundConns() {
 // touchConnActivity updates the per-connection last activity timestamp.
 func (s *Service) touchConnActivity(conn net.Conn) {
 	s.mu.RLock()
-	pc := s.inboundPeerConns[conn]
+	pc := s.inboundNetCores[conn]
 	s.mu.RUnlock()
 	if pc != nil {
 		pc.SetLastActivity(time.Now().UTC())

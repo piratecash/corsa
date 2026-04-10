@@ -57,7 +57,7 @@ func TestHandlePeerSessionFrame_PingRespondsPong(t *testing.T) {
 		resultCh <- readResult{frame: f, err: err}
 	}()
 
-	svc.handlePeerSessionFrame(peerAddr, protocol.Frame{Type: "ping"})
+	svc.dispatchPeerSessionFrame(peerAddr, protocol.Frame{Type: "ping"})
 
 	res := <-resultCh
 	if res.err != nil {

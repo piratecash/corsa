@@ -366,8 +366,8 @@ func (s *Service) persistRelayState() {
 // handleRelayMessage processes an incoming relay_message frame and returns the
 // semantic hop-ack status. The caller is responsible for delivering the ack to
 // the sender — this function does NOT send an ack itself, because the delivery
-// mechanism depends on context (direct conn write in handleJSONCommand vs
-// enqueuePeerFrame in handlePeerSessionFrame).
+// mechanism depends on context (direct conn write in dispatchNetworkFrame vs
+// enqueuePeerFrame in dispatchPeerSessionFrame).
 //
 // Return values:
 //   - "delivered" — this node is the final recipient, message accepted and stored locally
@@ -894,7 +894,7 @@ func (s *Service) countCapablePeers(cap domain.Capability) int {
 		}
 	}
 
-	for _, pc := range s.inboundPeerConns {
+	for _, pc := range s.inboundNetCores {
 		if _, dup := seen[pc.Identity()]; dup {
 			continue
 		}

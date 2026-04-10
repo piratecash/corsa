@@ -284,6 +284,15 @@ as a follow-up migration after Phase 1 is stable.
 
 - [ ] Without routing table, network continues delivery via gossip fallback
 
+**Connection Manager — remove deprecated `get_peers` RPC fields:**
+
+- [ ] Remove `connected`, `pending`, `known_only` fields from `ConsolePeersJSON()` response (deprecated after CM rollout)
+- [ ] Remove categorization logic in `buildConsolePeersPayload()` — connected/pending/known_only split
+- [ ] Simplify `get_peers` RPC response to `{type, count, total, peers}` — single list of connected + pending + Candidates
+- [ ] Migrate Desktop UI (`buildConsolePeersPayload`) to read only `peers`, group on client side by `State`/`Connected`
+- [ ] Migrate CLI to same pattern
+- [ ] Protocol `get_peers` (remote) — no changes (`Frame{Peers: []string}`)
+
 ---
 
 <a id="iter-1-5"></a>

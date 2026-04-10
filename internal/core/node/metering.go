@@ -36,11 +36,11 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *Meter
 
 // isConnTrafficTrustedLocked returns true when the connection's claimed
 // peer address can be trusted for traffic attribution.  On the session-auth
-// path PeerConn.auth exists and we require Verified==true; on the legacy
+// path NetCore.auth exists and we require Verified==true; on the legacy
 // (no-session-auth) path auth is nil and attribution is allowed.
 // Caller must hold s.mu (read or write).
 func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
-	pc := s.inboundPeerConns[conn]
+	pc := s.inboundNetCores[conn]
 	if pc == nil {
 		return false
 	}
@@ -50,7 +50,7 @@ func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
 
 // accumulateInboundTraffic adds byte counters from an inbound MeteredConn
 // to the peer's cumulative traffic totals. The peer address is resolved
-// from the PeerConn populated during the hello handshake.
+// from the NetCore populated during the hello handshake.
 // Traffic is only attributed when the connection's identity has been
 // verified (or no session-auth was required), preventing unauthenticated
 // clients from spoofing another peer's traffic counters.
@@ -67,7 +67,7 @@ func (s *Service) accumulateInboundTraffic(mc *MeteredConn) {
 	if !s.isConnTrafficTrustedLocked(mc) {
 		return
 	}
-	pc := s.inboundPeerConns[mc]
+	pc := s.inboundNetCores[mc]
 	if pc == nil || pc.Address() == "" {
 		return
 	}
@@ -101,7 +101,7 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 		if !s.isConnTrafficTrustedLocked(conn) {
 			continue
 		}
-		pc := s.inboundPeerConns[conn]
+		pc := s.inboundNetCores[conn]
 		if pc == nil || pc.Address() == "" {
 			continue
 		}

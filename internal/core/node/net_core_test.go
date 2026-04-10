@@ -11,7 +11,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// mockConn is a minimal net.Conn for testing PeerConn writer behavior.
+// mockConn is a minimal net.Conn for testing NetCore writer behavior.
 type mockConn struct {
 	mu      sync.Mutex
 	buf     bytes.Buffer
@@ -53,11 +53,11 @@ func (m *mockConn) IsClosed() bool {
 	return m.closed
 }
 
-// TestPeerConnSendWritesToSocket verifies that Send() routes a frame through
+// TestNetCoreSendWritesToSocket verifies that Send() routes a frame through
 // the writer goroutine to the underlying socket.
-func TestPeerConnSendWritesToSocket(t *testing.T) {
+func TestNetCoreSendWritesToSocket(t *testing.T) {
 	conn := &mockConn{}
-	pc := newPeerConn(1, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(1, conn, Inbound, NetCoreOpts{})
 	defer pc.Close()
 
 	frame := protocol.Frame{Type: "ping"}
@@ -77,11 +77,11 @@ func TestPeerConnSendWritesToSocket(t *testing.T) {
 	}
 }
 
-// TestPeerConnSendSyncBlocksUntilWrite verifies that SendSync() blocks until
+// TestNetCoreSendSyncBlocksUntilWrite verifies that SendSync() blocks until
 // the writer goroutine has flushed the frame to the socket.
-func TestPeerConnSendSyncBlocksUntilWrite(t *testing.T) {
+func TestNetCoreSendSyncBlocksUntilWrite(t *testing.T) {
 	conn := &mockConn{}
-	pc := newPeerConn(2, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(2, conn, Inbound, NetCoreOpts{})
 	defer pc.Close()
 
 	frame := protocol.Frame{Type: "pong"}
@@ -96,9 +96,9 @@ func TestPeerConnSendSyncBlocksUntilWrite(t *testing.T) {
 	}
 }
 
-// TestPeerConnSendReturnsFalseWhenQueueFull verifies that Send() returns false
+// TestNetCoreSendReturnsFalseWhenQueueFull verifies that Send() returns false
 // instead of blocking when the write channel is full.
-func TestPeerConnSendReturnsFalseWhenQueueFull(t *testing.T) {
+func TestNetCoreSendReturnsFalseWhenQueueFull(t *testing.T) {
 	// writerStarted signals that the writer goroutine has pulled the first
 	// item off the channel and is blocked in writeFn. Without this
 	// synchronization the test may fill the channel before the writer
@@ -113,7 +113,7 @@ func TestPeerConnSendReturnsFalseWhenQueueFull(t *testing.T) {
 			return len(b), nil
 		},
 	}
-	pc := newPeerConn(3, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(3, conn, Inbound, NetCoreOpts{})
 	defer func() {
 		close(blocker)
 		pc.Close()
@@ -139,11 +139,11 @@ func TestPeerConnSendReturnsFalseWhenQueueFull(t *testing.T) {
 	}
 }
 
-// TestPeerConnCloseIdemponent verifies that Close() can be called multiple
+// TestNetCoreCloseIdemponent verifies that Close() can be called multiple
 // times without panicking.
-func TestPeerConnCloseIdempotent(t *testing.T) {
+func TestNetCoreCloseIdempotent(t *testing.T) {
 	conn := &mockConn{}
-	pc := newPeerConn(4, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(4, conn, Inbound, NetCoreOpts{})
 
 	pc.Close()
 	pc.Close() // must not panic
@@ -153,22 +153,22 @@ func TestPeerConnCloseIdempotent(t *testing.T) {
 	}
 }
 
-// TestPeerConnSendAfterCloseReturnsFalse verifies that Send() on a closed
-// PeerConn returns false without panicking.
-func TestPeerConnSendAfterCloseReturnsFalse(t *testing.T) {
+// TestNetCoreSendAfterCloseReturnsFalse verifies that Send() on a closed
+// NetCore returns false without panicking.
+func TestNetCoreSendAfterCloseReturnsFalse(t *testing.T) {
 	conn := &mockConn{}
-	pc := newPeerConn(5, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(5, conn, Inbound, NetCoreOpts{})
 	pc.Close()
 
 	if pc.Send(protocol.Frame{Type: "ping"}) == sendOK {
-		t.Fatal("Send on closed PeerConn should not return sendOK")
+		t.Fatal("Send on closed NetCore should not return sendOK")
 	}
 }
 
-// TestPeerConnHasCapability verifies capability lookup.
-func TestPeerConnHasCapability(t *testing.T) {
+// TestNetCoreHasCapability verifies capability lookup.
+func TestNetCoreHasCapability(t *testing.T) {
 	conn := &mockConn{}
-	pc := newPeerConn(6, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(6, conn, Inbound, NetCoreOpts{})
 	defer pc.Close()
 
 	pc.SetCapabilities([]domain.Capability{domain.CapFileTransferV1, domain.CapMeshRelayV1})
@@ -184,10 +184,10 @@ func TestPeerConnHasCapability(t *testing.T) {
 	}
 }
 
-// TestPeerConnIdentityLifecycle verifies the identity set/get flow.
-func TestPeerConnIdentityLifecycle(t *testing.T) {
+// TestNetCoreIdentityLifecycle verifies the identity set/get flow.
+func TestNetCoreIdentityLifecycle(t *testing.T) {
 	conn := &mockConn{}
-	pc := newPeerConn(7, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(7, conn, Inbound, NetCoreOpts{})
 	defer pc.Close()
 
 	if pc.Identity() != "" {
@@ -200,11 +200,11 @@ func TestPeerConnIdentityLifecycle(t *testing.T) {
 	}
 }
 
-// TestPeerConnConcurrentSendNoRace runs multiple goroutines calling Send()
+// TestNetCoreConcurrentSendNoRace runs multiple goroutines calling Send()
 // concurrently to verify there are no data races.
-func TestPeerConnConcurrentSendNoRace(t *testing.T) {
+func TestNetCoreConcurrentSendNoRace(t *testing.T) {
 	conn := &mockConn{}
-	pc := newPeerConn(8, conn, Inbound, PeerConnOpts{})
+	pc := newNetCore(8, conn, Inbound, NetCoreOpts{})
 	defer pc.Close()
 
 	var wg sync.WaitGroup
@@ -216,4 +216,51 @@ func TestPeerConnConcurrentSendNoRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestSendStatusStringCoversAllValues verifies that every sendStatus constant
+// has a human-readable label and that the zero value is clearly marked invalid.
+func TestSendStatusStringCoversAllValues(t *testing.T) {
+	cases := []struct {
+		s    sendStatus
+		want string
+	}{
+		{sendStatusInvalid, "INVALID(zero)"},
+		{sendOK, "ok"},
+		{sendBufferFull, "buffer_full"},
+		{sendWriterDone, "writer_done"},
+		{sendTimeout, "timeout"},
+		{sendChanClosed, "chan_closed"},
+		{sendMarshalError, "marshal_error"},
+	}
+	for _, tc := range cases {
+		if got := tc.s.String(); got != tc.want {
+			t.Errorf("sendStatus(%d).String() = %q, want %q", int(tc.s), got, tc.want)
+		}
+	}
+
+	// Uninitialised variable must resolve to the invalid sentinel.
+	var zero sendStatus
+	if zero != sendStatusInvalid {
+		t.Fatalf("zero-value sendStatus = %d, want sendStatusInvalid (%d)", int(zero), int(sendStatusInvalid))
+	}
+	if zero.String() != "INVALID(zero)" {
+		t.Fatalf("zero-value String() = %q, want %q", zero.String(), "INVALID(zero)")
+	}
+}
+
+// TestNetCoreIsLocal verifies IsLocal/SetLocal behavior.
+func TestNetCoreIsLocal(t *testing.T) {
+	conn := &mockConn{}
+	nc := newNetCore(1, conn, Inbound, NetCoreOpts{})
+	defer nc.Close()
+
+	if nc.IsLocal() {
+		t.Fatal("new NetCore should not be local by default")
+	}
+
+	nc.SetLocal(true)
+	if !nc.IsLocal() {
+		t.Fatal("IsLocal should return true after SetLocal(true)")
+	}
 }

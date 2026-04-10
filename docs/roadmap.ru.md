@@ -293,6 +293,15 @@ TCP-сокетов.
 
 - [ ] Без routing table сеть продолжает доставку через gossip fallback
 
+**Connection Manager — удаление deprecated полей `get_peers` RPC:**
+
+- [ ] Удалить поля `connected`, `pending`, `known_only` из ответа `ConsolePeersJSON()` (deprecated после внедрения CM)
+- [ ] Удалить логику категоризации в `buildConsolePeersPayload()` — разделение на connected/pending/known_only
+- [ ] Упростить ответ `get_peers` RPC до `{type, count, total, peers}` — единственный список connected + pending + Candidates
+- [ ] Мигрировать Desktop UI (`buildConsolePeersPayload`) на чтение только `peers`, группировку делать на клиенте по полю `State`/`Connected`
+- [ ] Мигрировать CLI на аналогичную схему
+- [ ] Протокольный `get_peers` (remote) — без изменений (`Frame{Peers: []string}`)
+
 ---
 
 <a id="iter-1-5"></a>

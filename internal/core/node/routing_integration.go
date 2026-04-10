@@ -20,13 +20,13 @@ import (
 
 // inboundPeerIdentity returns the peer identity (Ed25519 fingerprint)
 // for an inbound connection, derived from the hello frame's Address field.
-// This is distinct from PeerConn.Address() which stores the listen
+// This is distinct from NetCore.Address() which stores the listen
 // address (transport) for health tracking. NATed peers advertise a
 // non-routable listen address (e.g. 127.0.0.1:64646) that must never
 // be used as a routing identity.
 func (s *Service) inboundPeerIdentity(conn net.Conn) domain.PeerIdentity {
 	s.mu.RLock()
-	pc := s.inboundPeerConns[conn]
+	pc := s.inboundNetCores[conn]
 	s.mu.RUnlock()
 	if pc == nil {
 		return ""
@@ -180,10 +180,10 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 	case enqueueSent:
 		return true
 	case enqueueUnregistered:
-		// Tracked inbound connection MUST have a PeerConn. If it doesn't,
+		// Tracked inbound connection MUST have a NetCore. If it doesn't,
 		// the state is inconsistent — fail closed rather than bypassing
-		// the PeerConn writer with a raw conn.Write.
-		log.Warn().Str("peer", remoteAddr).Msg("frame_inbound_unregistered: tracked conn missing PeerConn — state inconsistency")
+		// the NetCore writer with a raw conn.Write.
+		log.Warn().Str("peer", remoteAddr).Msg("frame_inbound_unregistered: tracked conn missing NetCore — state inconsistency")
 		return false
 	default:
 		// enqueueDropped — buffer full or conn closing.
@@ -239,7 +239,7 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	// Inbound connections — only if identity not already covered by an
 	// outbound session above (dedup by identity).
 	for conn := range s.inboundTracked {
-		pc := s.inboundPeerConns[conn]
+		pc := s.inboundNetCores[conn]
 		if pc == nil || pc.Identity() == "" {
 			continue
 		}
@@ -814,7 +814,7 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 
 	// Inbound connections — synchronous write path.
 	for conn := range s.inboundTracked {
-		pc := s.inboundPeerConns[conn]
+		pc := s.inboundNetCores[conn]
 		if pc == nil || pc.Identity() != peerIdentity {
 			continue
 		}
@@ -850,7 +850,7 @@ func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.P
 
 	// Inbound connections.
 	for conn := range s.inboundTracked {
-		pc := s.inboundPeerConns[conn]
+		pc := s.inboundNetCores[conn]
 		if pc == nil || pc.Identity() != peerIdentity {
 			continue
 		}
@@ -1003,7 +1003,7 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	}
 
 	// Inbound connection: match on the connection's transport address.
-	for conn, pc := range s.inboundPeerConns {
+	for conn, pc := range s.inboundNetCores {
 		if pc != nil && conn.RemoteAddr().String() == string(address) {
 			return pc.Identity()
 		}

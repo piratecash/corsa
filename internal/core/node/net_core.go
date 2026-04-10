@@ -10,7 +10,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// PeerConn owns a single network connection and is the single source of
+// NetCore owns a single network connection and is the single source of
 // truth for inbound connection state: identity, address, capabilities,
 // networks, auth, and traffic metering.
 //
@@ -22,13 +22,13 @@ import (
 //
 // Mutable fields (identity, address, caps, networks, auth, lastActivity)
 // are protected by an internal RWMutex. Callers do not need to hold s.mu
-// to read or write PeerConn state — the accessors handle locking.
+// to read or write NetCore state — the accessors handle locking.
 //
 // Current scope: wraps inbound connections only. Outbound sessions continue
 // to use peerSession until Phase 3, because servePeerSession owns both
 // read and write and has request-reply semantics that require a different
 // migration path.
-type PeerConn struct {
+type NetCore struct {
 	id        connID
 	direction Direction
 
@@ -51,6 +51,10 @@ type PeerConn struct {
 	// Diagnostics — updated on every received frame.
 	lastActivity time.Time
 
+	// isLocal is true when the remote end is a loopback address
+	// (127.0.0.0/8, ::1). Set once at registration time, immutable after.
+	isLocal bool
+
 	// Writer goroutine state.
 	sendCh     chan sendItem
 	writerDone chan struct{}
@@ -58,7 +62,7 @@ type PeerConn struct {
 	// Metering.
 	metered *MeteredConn
 
-	// Private — never exposed outside PeerConn methods.
+	// Private — never exposed outside NetCore methods.
 	rawConn   net.Conn
 	closeOnce sync.Once
 
@@ -96,11 +100,11 @@ const (
 // genuinely unresponsive peers promptly.
 const sendChBuffer = 128
 
-// PeerConnOpts carries the peer state to populate at construction time.
+// NetCoreOpts carries the peer state to populate at construction time.
 // All fields are optional — omitted fields stay at zero value. Using a
 // single struct instead of scattered Set* calls ensures that the peer
 // state is configured atomically and nothing is forgotten.
-type PeerConnOpts struct {
+type NetCoreOpts struct {
 	Address      domain.PeerAddress
 	Identity     domain.PeerIdentity
 	Caps         []domain.Capability
@@ -108,15 +112,15 @@ type PeerConnOpts struct {
 	LastActivity time.Time
 }
 
-// newPeerConn creates a PeerConn, applies opts, and starts the writer
+// newNetCore creates a NetCore, applies opts, and starts the writer
 // goroutine. The caller must eventually call Close() to release resources.
 //
-// Caps and Networks are cloned so the caller cannot mutate PeerConn state
+// Caps and Networks are cloned so the caller cannot mutate NetCore state
 // through the original references.
-func newPeerConn(id connID, rawConn net.Conn, dir Direction, opts PeerConnOpts) *PeerConn {
+func newNetCore(id connID, rawConn net.Conn, dir Direction, opts NetCoreOpts) *NetCore {
 	metered, _ := rawConn.(*MeteredConn)
 
-	pc := &PeerConn{
+	pc := &NetCore{
 		id:           id,
 		direction:    dir,
 		address:      opts.Address,
@@ -137,7 +141,7 @@ func newPeerConn(id connID, rawConn net.Conn, dir Direction, opts PeerConnOpts) 
 // writerLoop is the single goroutine that drains sendCh and writes to
 // rawConn. It exits when sendCh is closed (by Close()), draining any
 // remaining buffered frames first.
-func (pc *PeerConn) writerLoop() {
+func (pc *NetCore) writerLoop() {
 	defer crashlog.DeferRecover()
 	defer close(pc.writerDone)
 	for item := range pc.sendCh {
@@ -172,11 +176,33 @@ const (
 	sendMarshalError                    // frame serialisation failed — caller's data is bad
 )
 
+// String returns a human-readable label for diagnostics and logging.
+func (s sendStatus) String() string {
+	switch s {
+	case sendStatusInvalid:
+		return "INVALID(zero)"
+	case sendOK:
+		return "ok"
+	case sendBufferFull:
+		return "buffer_full"
+	case sendWriterDone:
+		return "writer_done"
+	case sendTimeout:
+		return "timeout"
+	case sendChanClosed:
+		return "chan_closed"
+	case sendMarshalError:
+		return "marshal_error"
+	default:
+		return "unknown"
+	}
+}
+
 // Send enqueues a protocol frame for writing. Non-blocking — returns sendOK
 // on success, sendBufferFull if the write queue is full, sendChanClosed
 // if the connection is shutting down, or sendMarshalError if the frame
 // cannot be serialised.
-func (pc *PeerConn) Send(frame protocol.Frame) sendStatus {
+func (pc *NetCore) Send(frame protocol.Frame) sendStatus {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		return sendMarshalError
@@ -185,7 +211,7 @@ func (pc *PeerConn) Send(frame protocol.Frame) sendStatus {
 }
 
 // sendRaw enqueues pre-serialized bytes for writing. Non-blocking.
-func (pc *PeerConn) sendRaw(data []byte) (result sendStatus) {
+func (pc *NetCore) sendRaw(data []byte) (result sendStatus) {
 	// Catch send-on-closed-channel: Close() may close sendCh between
 	// our check and the actual send below.
 	defer func() {
@@ -204,7 +230,7 @@ func (pc *PeerConn) sendRaw(data []byte) (result sendStatus) {
 
 // SendSync enqueues a frame and blocks until the writer goroutine flushes
 // it to the socket.
-func (pc *PeerConn) SendSync(frame protocol.Frame) sendStatus {
+func (pc *NetCore) SendSync(frame protocol.Frame) sendStatus {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		return sendMarshalError
@@ -213,7 +239,7 @@ func (pc *PeerConn) SendSync(frame protocol.Frame) sendStatus {
 }
 
 // sendRawSync enqueues pre-serialized bytes and waits for write completion.
-func (pc *PeerConn) sendRawSync(data []byte) (result sendStatus) {
+func (pc *NetCore) sendRawSync(data []byte) (result sendStatus) {
 	ack := make(chan struct{})
 
 	defer func() {
@@ -240,14 +266,14 @@ func (pc *PeerConn) sendRawSync(data []byte) (result sendStatus) {
 }
 
 // HasCapability returns true if the peer negotiated the given capability.
-func (pc *PeerConn) HasCapability(cap domain.Capability) bool {
+func (pc *NetCore) HasCapability(cap domain.Capability) bool {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return hasCapability(pc.caps, cap)
 }
 
 // Identity returns the peer's Ed25519 fingerprint. Empty before handshake.
-func (pc *PeerConn) Identity() domain.PeerIdentity {
+func (pc *NetCore) Identity() domain.PeerIdentity {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return pc.identity
@@ -255,23 +281,23 @@ func (pc *PeerConn) Identity() domain.PeerIdentity {
 
 // SetIdentity is called once during handshake when the peer's identity
 // is established.
-func (pc *PeerConn) SetIdentity(id domain.PeerIdentity) {
+func (pc *NetCore) SetIdentity(id domain.PeerIdentity) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.identity = id
 }
 
 // SetCapabilities records the negotiated capability set.
-// The slice is cloned — the caller retains no write path into PeerConn state.
-func (pc *PeerConn) SetCapabilities(caps []domain.Capability) {
+// The slice is cloned — the caller retains no write path into NetCore state.
+func (pc *NetCore) SetCapabilities(caps []domain.Capability) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.caps = cloneCaps(caps)
 }
 
 // SetNetworks records the peer's reachable network groups.
-// The map is cloned — the caller retains no write path into PeerConn state.
-func (pc *PeerConn) SetNetworks(nets map[domain.NetGroup]struct{}) {
+// The map is cloned — the caller retains no write path into NetCore state.
+func (pc *NetCore) SetNetworks(nets map[domain.NetGroup]struct{}) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.networks = cloneNetworks(nets)
@@ -279,14 +305,14 @@ func (pc *PeerConn) SetNetworks(nets map[domain.NetGroup]struct{}) {
 
 // Address returns the overlay address declared during the hello handshake.
 // Empty before the hello frame is processed.
-func (pc *PeerConn) Address() domain.PeerAddress {
+func (pc *NetCore) Address() domain.PeerAddress {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return pc.address
 }
 
 // SetAddress records the peer's overlay address during hello processing.
-func (pc *PeerConn) SetAddress(addr domain.PeerAddress) {
+func (pc *NetCore) SetAddress(addr domain.PeerAddress) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.address = addr
@@ -294,7 +320,7 @@ func (pc *PeerConn) SetAddress(addr domain.PeerAddress) {
 
 // ConnIDNum returns the monotonic connection identifier as a plain uint64,
 // suitable for diagnostics and logging. Immutable — no lock needed.
-func (pc *PeerConn) ConnIDNum() uint64 {
+func (pc *NetCore) ConnIDNum() uint64 {
 	return pc.connIDNum
 }
 
@@ -302,28 +328,28 @@ func (pc *PeerConn) ConnIDNum() uint64 {
 // connections. The returned pointer is a snapshot — connAuthState is never
 // mutated in place after creation, so the caller can safely read its fields
 // without holding any lock.
-func (pc *PeerConn) Auth() *connAuthState {
+func (pc *NetCore) Auth() *connAuthState {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return pc.auth
 }
 
 // SetAuth stores the auth state for this connection.
-func (pc *PeerConn) SetAuth(state *connAuthState) {
+func (pc *NetCore) SetAuth(state *connAuthState) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.auth = state
 }
 
 // ClearAuth removes the auth state from this connection.
-func (pc *PeerConn) ClearAuth() {
+func (pc *NetCore) ClearAuth() {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.auth = nil
 }
 
 // LastActivity returns the timestamp of the last received frame.
-func (pc *PeerConn) LastActivity() time.Time {
+func (pc *NetCore) LastActivity() time.Time {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return pc.lastActivity
@@ -331,7 +357,7 @@ func (pc *PeerConn) LastActivity() time.Time {
 
 // SetLastActivity sets the last-activity timestamp explicitly (e.g. during
 // hello processing when UTC is required).
-func (pc *PeerConn) SetLastActivity(t time.Time) {
+func (pc *NetCore) SetLastActivity(t time.Time) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.lastActivity = t
@@ -339,7 +365,7 @@ func (pc *PeerConn) SetLastActivity(t time.Time) {
 
 // Networks returns a snapshot copy of the peer's reachable network groups.
 // The returned map is safe to iterate and retain after the call returns.
-func (pc *PeerConn) Networks() map[domain.NetGroup]struct{} {
+func (pc *NetCore) Networks() map[domain.NetGroup]struct{} {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return cloneNetworks(pc.networks)
@@ -347,20 +373,20 @@ func (pc *PeerConn) Networks() map[domain.NetGroup]struct{} {
 
 // Capabilities returns a snapshot copy of the negotiated capability set.
 // The returned slice is safe to iterate and retain after the call returns.
-func (pc *PeerConn) Capabilities() []domain.Capability {
+func (pc *NetCore) Capabilities() []domain.Capability {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return cloneCaps(pc.caps)
 }
 
-// ApplyOpts overwrites PeerConn state from an opts struct. This is the
-// post-handshake counterpart of newPeerConn's opts: the PeerConn is created
+// ApplyOpts overwrites NetCore state from an opts struct. This is the
+// post-handshake counterpart of newNetCore's opts: the NetCore is created
 // at accept time with empty opts (identity unknown yet), and ApplyOpts fills
 // in the peer state once the hello frame arrives.
 //
 // Only non-zero fields in opts are applied — zero values are skipped so that
 // a partial update (e.g. only Caps) does not blank out existing fields.
-func (pc *PeerConn) ApplyOpts(opts PeerConnOpts) {
+func (pc *NetCore) ApplyOpts(opts NetCoreOpts) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	if opts.Address != "" {
@@ -403,13 +429,25 @@ func cloneNetworks(src map[domain.NetGroup]struct{}) map[domain.NetGroup]struct{
 }
 
 // RemoteAddr returns the remote address string (for logging only).
-func (pc *PeerConn) RemoteAddr() string {
+func (pc *NetCore) RemoteAddr() string {
 	return pc.rawConn.RemoteAddr().String()
 }
 
 // Dir returns the connection direction.
-func (pc *PeerConn) Dir() Direction {
+func (pc *NetCore) Dir() Direction {
 	return pc.direction
+}
+
+// IsLocal reports whether the connection originates from a loopback address.
+// Immutable after registration — no lock required.
+func (pc *NetCore) IsLocal() bool {
+	return pc.isLocal
+}
+
+// SetLocal marks the connection as local (loopback). Called once during
+// registration; must not be changed afterwards.
+func (pc *NetCore) SetLocal(v bool) {
+	pc.isLocal = v
 }
 
 // TouchActivity updates the last-activity timestamp to time.Now().
@@ -418,7 +456,7 @@ func (pc *PeerConn) Dir() Direction {
 // clock abstraction. Introducing one here alone would be inconsistent with
 // the 40+ other time.Now() call sites in the package. Tracked as tech debt
 // for a dedicated clock-migration task.
-func (pc *PeerConn) TouchActivity() {
+func (pc *NetCore) TouchActivity() {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.lastActivity = time.Now()
@@ -433,7 +471,7 @@ func (pc *PeerConn) TouchActivity() {
 //     discarded on write error) before the method returns.
 //
 // Idempotent — safe to call multiple times.
-func (pc *PeerConn) Close() {
+func (pc *NetCore) Close() {
 	pc.closeOnce.Do(func() {
 		_ = pc.rawConn.Close()
 		close(pc.sendCh)
@@ -442,6 +480,6 @@ func (pc *PeerConn) Close() {
 }
 
 // Metered returns the MeteredConn wrapper, or nil if not metered.
-func (pc *PeerConn) Metered() *MeteredConn {
+func (pc *NetCore) Metered() *MeteredConn {
 	return pc.metered
 }

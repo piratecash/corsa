@@ -380,12 +380,12 @@ func TestMaxAnnouncePeersValue(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Runtime-path tests: verify that admission limits wired into
-// handlePeerSessionFrame actually reject/truncate at the service level,
+// dispatchPeerSessionFrame actually reject/truncate at the service level,
 // not just at the helper level.
 // ---------------------------------------------------------------------------
 
 // TestHandlePeerSessionFrame_PushMessageBodyCapRejectsOversized verifies that
-// handlePeerSessionFrame silently drops a push_message whose Item.Body exceeds
+// dispatchPeerSessionFrame silently drops a push_message whose Item.Body exceeds
 // maxPeerCommandBodyBytes. This is the runtime-path counterpart to the
 // constant-value test — it proves the branch stays wired into the handler.
 func TestHandlePeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.T) {
@@ -407,7 +407,7 @@ func TestHandlePeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.T)
 		Topic: "dm",
 	}
 
-	svc.handlePeerSessionFrame("10.0.0.99:1234", frame)
+	svc.dispatchPeerSessionFrame("10.0.0.99:1234", frame)
 
 	// Verify the message was NOT stored.
 	svc.mu.RLock()
@@ -447,7 +447,7 @@ func TestHandlePeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T) 
 	// a retry — both of which are harmless in a test with no live peers.
 	// The key assertion: no panic, and the message is NOT stored (because
 	// the sender key is unknown, not because of the body cap).
-	svc.handlePeerSessionFrame("10.0.0.99:1234", frame)
+	svc.dispatchPeerSessionFrame("10.0.0.99:1234", frame)
 
 	svc.mu.RLock()
 	count := len(svc.topics["dm"])
@@ -460,7 +460,7 @@ func TestHandlePeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T) 
 }
 
 // TestHandlePeerSessionFrame_AnnouncePeerTruncation verifies that
-// handlePeerSessionFrame truncates an announce_peer peer list to
+// dispatchPeerSessionFrame truncates an announce_peer peer list to
 // maxAnnouncePeers entries. This is the runtime-path proof that the
 // truncation stays wired into the handler.
 func TestHandlePeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
@@ -482,7 +482,7 @@ func TestHandlePeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
 		Peers:    peers,
 	}
 
-	svc.handlePeerSessionFrame("10.0.0.99:1234", frame)
+	svc.dispatchPeerSessionFrame("10.0.0.99:1234", frame)
 
 	svc.mu.RLock()
 	// newTestService starts with zero peers (no bootstrap).
@@ -517,7 +517,7 @@ func TestHandlePeerSessionFrame_AnnouncePeerUnderLimitPassesAll(t *testing.T) {
 		Peers:    peers,
 	}
 
-	svc.handlePeerSessionFrame("10.0.0.99:1234", frame)
+	svc.dispatchPeerSessionFrame("10.0.0.99:1234", frame)
 
 	svc.mu.RLock()
 	learnedCount := len(svc.peers)
@@ -543,7 +543,7 @@ func TestHandlePeerSessionFrame_ErrorFrameDoesNotPanic(t *testing.T) {
 	}
 
 	// Must not panic or leave dangling state.
-	svc.handlePeerSessionFrame("10.0.0.99:1234", frame)
+	svc.dispatchPeerSessionFrame("10.0.0.99:1234", frame)
 }
 
 // ---------------------------------------------------------------------------

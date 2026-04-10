@@ -199,7 +199,7 @@ func (s *Service) isPeerReachable(peer domain.PeerIdentity) bool {
 		}
 	}
 
-	for _, pc := range s.inboundPeerConns {
+	for _, pc := range s.inboundNetCores {
 		if pc == nil {
 			continue
 		}

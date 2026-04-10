@@ -218,7 +218,7 @@ func (s *Service) initMaps() {
 	s.subs = make(map[string]map[string]*subscriber)
 	s.receipts = make(map[string][]protocol.DeliveryReceipt)
 	s.notices = make(map[string]gazeta.Notice)
-	s.inboundPeerConns = make(map[net.Conn]*PeerConn)
+	s.inboundNetCores = make(map[net.Conn]*NetCore)
 	s.pending = make(map[domain.PeerAddress][]pendingFrame)
 	s.pendingKeys = make(map[string]struct{})
 	s.orphaned = make(map[domain.PeerAddress][]pendingFrame)
