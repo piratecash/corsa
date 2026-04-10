@@ -540,7 +540,7 @@ snapRecipients()
 - **Серый** — маршрутов нет (identity недоступен)
 - **Серый контур** — данные о достижимости недоступны (probe не удался или нода не подключена)
 
-Данные о достижимости заполняются при каждом цикле `ProbeNode`. В embedded-режиме `buildReachableIDs()` вызывает `node.Service.RoutingSnapshot()` напрямую (без RPC round-trip) и извлекает все identity с живым `BestRoute`. В remote TCP режиме (`localNode == nil`) используется fallback через фрейм `fetch_reachable_ids`, который выполняет ту же логику на стороне ноды. Набор достижимых identity строится из всей routing table — не только из `fetch_identities` — поэтому sidebar peers, попавшие через chatlog или DM headers, тоже получают корректный статус. Результат хранится в `NodeStatus.ReachableIDs` и проходит через стандартный pipeline `RouterSnapshot` до UI.
+Данные о достижимости заполняются при каждом цикле `ProbeNode`. `buildReachableIDs()` вызывает `node.Service.RoutingSnapshot()` напрямую через embedded node (без RPC round-trip) и извлекает все identity с живым `BestRoute`. Набор достижимых identity строится из всей routing table — не только из `fetch_identities` — поэтому sidebar peers, попавшие через chatlog или DM headers, тоже получают корректный статус. Результат хранится в `NodeStatus.ReachableIDs` и проходит через стандартный pipeline `RouterSnapshot` до UI.
 
 ### Архитектура RPC
 

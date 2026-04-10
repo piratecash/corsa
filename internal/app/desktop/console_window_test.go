@@ -213,9 +213,10 @@ func TestExecuteCommandHelpReturnsHumanReadable(t *testing.T) {
 		t.Error("expected usage hint '<to> <body>' in help text")
 	}
 
-	// Should contain the raw JSON hint.
-	if !strings.Contains(result, "raw JSON") {
-		t.Error("expected 'raw JSON' hint in help text")
+	// Should contain the registered-only raw JSON hint (not the old
+	// unrestricted "raw JSON protocol frame" wording).
+	if !strings.Contains(result, "raw JSON frame for any registered command") {
+		t.Error("expected 'raw JSON frame for any registered command' hint in help text")
 	}
 }
 

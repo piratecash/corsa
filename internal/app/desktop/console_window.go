@@ -1213,24 +1213,17 @@ func (c *ConsoleWindow) layoutPeersContent(gtx layout.Context, connectedPeers, p
 }
 
 // executeCommand parses console input and dispatches it through CommandTable.
-// Falls back to DesktopClient.ExecuteConsoleCommand if CommandTable is unavailable.
+// CommandTable is the single dispatch point — no fallback to legacy
+// ExecuteConsoleCommand, which would bypass command registration and RBAC.
 func (c *ConsoleWindow) executeCommand(input string) (string, error) {
 	if c.parent.cmdTable == nil {
-		return c.parent.client.ExecuteConsoleCommand(input)
+		return "", fmt.Errorf("command table not initialized")
 	}
 
-	trimmed := strings.TrimSpace(input)
-
-	// Raw JSON frames are routed directly through ExecuteConsoleCommand,
-	// which preserves all wire fields via protocol.ParseFrameLine. Going
-	// through CommandTable would lose caller-supplied fields (e.g. a hello
-	// frame's Client/ClientVersion) because handlers rebuild frames from args.
-	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
-		if c.parent.client != nil {
-			return c.parent.client.ExecuteConsoleCommand(input)
-		}
-	}
-
+	// All input (named commands, key=value, raw JSON frames) is parsed
+	// and dispatched through CommandTable. Previously raw JSON frames were
+	// routed through the legacy ExecuteConsoleCommand path which bypassed
+	// command registration. CommandTable is now the single dispatch point.
 	req, err := rpc.ParseConsoleInput(input)
 	if err != nil {
 		return "", err
@@ -1248,14 +1241,6 @@ func (c *ConsoleWindow) executeCommand(input string) (string, error) {
 	}
 
 	resp := c.parent.cmdTable.Execute(req)
-
-	// Unknown command fallback: forward raw input to the old
-	// ExecuteConsoleCommand path, which can pass arbitrary JSON frames
-	// through to HandleLocalFrame. This preserves passthrough for
-	// named command types not registered in CommandTable.
-	if resp.ErrorKind == rpc.ErrNotFound && c.parent.client != nil {
-		return c.parent.client.ExecuteConsoleCommand(input)
-	}
 
 	if resp.Error != nil {
 		return "", resp.Error
@@ -1363,7 +1348,7 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 		"  topic for fetch_pending_messages/fetch_inbox: dm",
 		"  recipient: "+selfAddress,
 		"",
-		"You can also paste a raw JSON protocol frame.",
+		"You can also paste a raw JSON frame for any registered command.",
 	)
 
 	return strings.Join(lines, "\n")

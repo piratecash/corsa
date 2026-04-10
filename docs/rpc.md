@@ -31,7 +31,7 @@ graph TB
         subgraph HTTP["HTTP Wrapper — Fiber v3<br/>127.0.0.1:46464"]
             AUTH["Auth Middleware<br/>HTTP Basic Auth (optional)"]
             EXEC["POST /rpc/v1/exec<br/>(universal dispatch)"]
-            FRAME["POST /rpc/v1/frame<br/>(frame dispatch + fallback)"]
+            FRAME["POST /rpc/v1/frame<br/>(frame dispatch, registered only)"]
             LEGACY["Legacy Routes<br/>/system/* /network/* ..."]
         end
 
@@ -58,7 +58,7 @@ graph TB
     AUTH --> FRAME
     AUTH --> LEGACY
     EXEC --> CT
-    FRAME -->|"CommandTable first,<br/>fallback HandleLocalFrame"| CT
+    FRAME -->|"CommandTable only,<br/>unknown types rejected 400"| CT
     LEGACY --> CT
 
     CT --> NP
@@ -236,7 +236,7 @@ rpc.RegisterDesktopOverrides(table, desktopClient, nodeService)
 resp := table.Execute(rpc.CommandRequest{Name: "ping"})
 
 // HTTP server wraps the same table for external access.
-// Pass nodeService to enable /rpc/v1/frame (frame dispatch + fallback).
+// Pass nodeService to enable /rpc/v1/frame (registered frame types only).
 server, _ := rpc.NewServer(cfg, table, nodeService)
 ```
 
@@ -245,12 +245,12 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | Category | Commands | Condition |
 |---|---|---|
 | **system** | help, ping, hello, version | Always registered |
-| **network** | get_peers, fetch_peer_health, fetch_network_stats, add_peer | Always registered |
-| **identity** | fetch_identities, fetch_contacts, fetch_trusted_contacts | Always registered |
-| **message** | fetch_messages, fetch_message_ids, fetch_message, fetch_inbox, fetch_pending_messages, fetch_delivery_receipts, fetch_dm_headers | Always registered |
+| **network** | get_peers, fetch_peer_health, fetch_network_stats, add_peer, fetch_reachable_ids | Always registered |
+| **identity** | fetch_identities, fetch_contacts, fetch_trusted_contacts, delete_trusted_contact, import_contacts | Always registered |
+| **message** | fetch_messages, fetch_message_ids, fetch_message, fetch_inbox, fetch_pending_messages, fetch_delivery_receipts, fetch_dm_headers, send_message, import_message, send_delivery_receipt | Always registered |
 | **message** | send_dm | Always registered; unavailable (503, hidden from help) when DMRouter is nil |
 | **chatlog** | fetch_chatlog, fetch_chatlog_previews, fetch_conversations | Always registered; unavailable (503, hidden from help) when ChatlogProvider is nil |
-| **notice** | fetch_notices | Always registered |
+| **notice** | fetch_notices, publish_notice | Always registered |
 | **mesh** | fetch_relay_status | Always registered |
 | **metrics** | fetch_traffic_history | Always registered; unavailable (503, hidden from help) when MetricsProvider is nil |
 | **routing** | fetch_route_table, fetch_route_summary, fetch_route_lookup | Always registered; unavailable (503, hidden from help) when RoutingProvider is nil |
@@ -381,7 +381,7 @@ The standalone node creates a `CommandTable` and calls `RegisterAllCommands` wit
 
 #### Go Client (rpc.Client)
 
-`rpc.Client` is the exported HTTP client for the RPC server. `ExecuteCommand(input)` routes input based on format: raw JSON frames (starting with `{`) are sent to `POST /rpc/v1/frame` where the server applies CommandTable dispatch (registered commands may normalize or rebuild the frame; only unregistered types preserve all wire fields via HandleLocalFrame fallback); named commands are parsed via `ParseConsoleInput` into `{command, args}` and sent to `POST /rpc/v1/exec`. No legacy route logic — `ParseConsoleInput` is the single source of truth for positional-to-named arg mapping.
+`rpc.Client` is the exported HTTP client for the RPC server. `ExecuteCommand(input)` routes input based on format: raw JSON frames (starting with `{`) are sent to `POST /rpc/v1/frame` where the server applies CommandTable dispatch (registered commands may normalize or rebuild the frame; unregistered types are rejected with 400 Bad Request); named commands are parsed via `ParseConsoleInput` into `{command, args}` and sent to `POST /rpc/v1/exec`. No legacy route logic — `ParseConsoleInput` is the single source of truth for positional-to-named arg mapping.
 
 #### ParseConsoleInput
 
@@ -398,7 +398,7 @@ The standalone node creates a `CommandTable` and calls `RegisterAllCommands` wit
 
 #### UI Console
 
-The UI console executes commands directly through `CommandTable` — no HTTP round-trip. Command suggestions are loaded synchronously from `CommandTable.Commands()` at initialization. Two special behaviors differ from the API path: `help` renders a human-readable categorized text (with defaults and self-address) instead of machine JSON, and unknown commands fall back to `ExecuteConsoleCommand` for raw protocol frame passthrough to `HandleLocalFrame`.
+The UI console executes commands directly through `CommandTable` — no HTTP round-trip. Command suggestions are loaded synchronously from `CommandTable.Commands()` at initialization. One behavior differs from the API path: `help` renders a human-readable categorized text (with defaults and self-address) instead of machine JSON. Unknown commands return an error — there is no fallback to `ExecuteConsoleCommand` or `HandleLocalFrame`.
 
 ### Testing
 
@@ -458,7 +458,7 @@ graph TB
         subgraph HTTP["HTTP-обёртка — Fiber v3<br/>127.0.0.1:46464"]
             AUTH["Авторизация<br/>HTTP Basic Auth (опционально)"]
             EXEC["POST /rpc/v1/exec<br/>(универсальная диспетчеризация)"]
-            FRAME["POST /rpc/v1/frame<br/>(диспетчеризация фреймов + fallback)"]
+            FRAME["POST /rpc/v1/frame<br/>(только зарегистрированные фреймы)"]
             LEGACY["Legacy-маршруты<br/>/system/* /network/* ..."]
         end
 
@@ -485,7 +485,7 @@ graph TB
     AUTH --> FRAME
     AUTH --> LEGACY
     EXEC --> CT
-    FRAME -->|"CommandTable первый,<br/>fallback HandleLocalFrame"| CT
+    FRAME -->|"только CommandTable,<br/>неизвестные типы → 400"| CT
     LEGACY --> CT
 
     CT --> NP
@@ -663,7 +663,7 @@ rpc.RegisterDesktopOverrides(table, desktopClient, nodeService)
 resp := table.Execute(rpc.CommandRequest{Name: "ping"})
 
 // HTTP сервер оборачивает ту же таблицу для внешнего доступа.
-// nodeService включает /rpc/v1/frame (диспетчеризация фреймов + fallback).
+// nodeService включает /rpc/v1/frame (только зарегистрированные типы фреймов).
 server, _ := rpc.NewServer(cfg, table, nodeService)
 ```
 
@@ -672,12 +672,12 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | Категория | Команды | Условие |
 |---|---|---|
 | **system** | help, ping, hello, version | Всегда зарегистрированы |
-| **network** | get_peers, fetch_peer_health, fetch_network_stats, add_peer | Всегда зарегистрированы |
-| **identity** | fetch_identities, fetch_contacts, fetch_trusted_contacts | Всегда зарегистрированы |
-| **message** | fetch_messages, fetch_message_ids, fetch_message, fetch_inbox, fetch_pending_messages, fetch_delivery_receipts, fetch_dm_headers | Всегда зарегистрированы |
+| **network** | get_peers, fetch_peer_health, fetch_network_stats, add_peer, fetch_reachable_ids | Всегда зарегистрированы |
+| **identity** | fetch_identities, fetch_contacts, fetch_trusted_contacts, delete_trusted_contact, import_contacts | Всегда зарегистрированы |
+| **message** | fetch_messages, fetch_message_ids, fetch_message, fetch_inbox, fetch_pending_messages, fetch_delivery_receipts, fetch_dm_headers, send_message, import_message, send_delivery_receipt | Всегда зарегистрированы |
 | **message** | send_dm | Всегда зарегистрирована; недоступна (503, скрыта из help) при DMRouter = nil |
 | **chatlog** | fetch_chatlog, fetch_chatlog_previews, fetch_conversations | Всегда зарегистрированы; недоступны (503, скрыты из help) при ChatlogProvider = nil |
-| **notice** | fetch_notices | Всегда зарегистрированы |
+| **notice** | fetch_notices, publish_notice | Всегда зарегистрированы |
 | **mesh** | fetch_relay_status | Всегда зарегистрированы |
 | **metrics** | fetch_traffic_history | Всегда зарегистрирована; недоступна (503, скрыта из help) при MetricsProvider = nil |
 | **routing** | fetch_route_table, fetch_route_summary, fetch_route_lookup | Всегда зарегистрированы; недоступны (503, скрыты из help) при RoutingProvider = nil |
@@ -808,7 +808,7 @@ Standalone нода создаёт `CommandTable` и вызывает `RegisterA
 
 #### Go-клиент (rpc.Client)
 
-`rpc.Client` — экспортируемый HTTP-клиент RPC сервера. `ExecuteCommand(input)` маршрутизирует ввод по формату: сырые JSON-фреймы (начинающиеся с `{`) отправляются на `POST /rpc/v1/frame`, где сервер применяет dispatch через CommandTable (зарегистрированные команды могут нормализовать или пересобрать фрейм; только незарегистрированные типы сохраняют все wire-поля через fallback в HandleLocalFrame); именованные команды разбираются через `ParseConsoleInput` в `{command, args}` и отправляются на `POST /rpc/v1/exec`. Никакой логики legacy-маршрутов — `ParseConsoleInput` является единственным источником истины для маппинга позиционных аргументов в именованные.
+`rpc.Client` — экспортируемый HTTP-клиент RPC сервера. `ExecuteCommand(input)` маршрутизирует ввод по формату: сырые JSON-фреймы (начинающиеся с `{`) отправляются на `POST /rpc/v1/frame`, где сервер применяет dispatch через CommandTable (зарегистрированные команды могут нормализовать или пересобрать фрейм; незарегистрированные типы отклоняются с 400 Bad Request); именованные команды разбираются через `ParseConsoleInput` в `{command, args}` и отправляются на `POST /rpc/v1/exec`. Никакой логики legacy-маршрутов — `ParseConsoleInput` является единственным источником истины для маппинга позиционных аргументов в именованные.
 
 #### ParseConsoleInput
 
@@ -825,7 +825,7 @@ Standalone нода создаёт `CommandTable` и вызывает `RegisterA
 
 #### UI консоль
 
-UI консоль выполняет команды напрямую через `CommandTable` — без HTTP round-trip. Подсказки команд загружаются синхронно из `CommandTable.Commands()` при инициализации. Два поведения отличаются от API-пути: `help` рендерит человекочитаемый категоризированный текст (с дефолтами и self-address) вместо машинного JSON, а неизвестные команды делают fallback на `ExecuteConsoleCommand` для passthrough сырых протокольных фреймов в `HandleLocalFrame`.
+UI консоль выполняет команды напрямую через `CommandTable` — без HTTP round-trip. Подсказки команд загружаются синхронно из `CommandTable.Commands()` при инициализации. Одно поведение отличается от API-пути: `help` рендерит человекочитаемый категоризированный текст (с дефолтами и self-address) вместо машинного JSON. Неизвестные команды возвращают ошибку — fallback на `ExecuteConsoleCommand` или `HandleLocalFrame` отсутствует.
 
 ### Тестирование
 

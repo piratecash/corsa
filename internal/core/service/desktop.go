@@ -1076,7 +1076,7 @@ func consoleHelpText(selfAddress string) string {
 		"  topic for fetch_pending_messages/fetch_inbox: dm",
 		"  recipient: " + selfAddress,
 		"",
-		"You can also paste a raw JSON protocol frame.",
+		"You can also paste a raw JSON frame for any registered command.",
 	}, "\n")
 }
 
@@ -1471,12 +1471,11 @@ func (c *DesktopClient) localAddress() string {
 	return c.nodeCfg.ListenAddress
 }
 
-func (c *DesktopClient) openLocalSession(ctx context.Context) (net.Conn, *bufio.Reader, protocol.Frame, error) {
-	if c.localNode != nil {
-		return nil, nil, protocol.Frame{}, fmt.Errorf("local TCP session is disabled for embedded node mode")
-	}
-	return c.openSessionAt(ctx, c.localAddress(), "desktop")
-}
+// openLocalSession was removed: console passthrough must not fall back to
+// the TCP data port. All local command dispatch goes through the embedded
+// localNode (HandleLocalFrame). Remote-peer TCP sessions (openSessionAt)
+// are unaffected — they serve legitimate P2P operations like ping and
+// message sync.
 
 func (c *DesktopClient) openSessionAt(ctx context.Context, address, clientKind string) (net.Conn, *bufio.Reader, protocol.Frame, error) {
 	dialer := net.Dialer{Timeout: 2 * time.Second}
@@ -1565,42 +1564,38 @@ func (c *DesktopClient) localRequestFrame(request protocol.Frame) (protocol.Fram
 	return c.localRequestFrameCtx(context.Background(), request)
 }
 
-// localRequestFrameCtx is a context-aware variant of localRequestFrame.
-// For TCP mode, ctx is propagated to the dialer so caller-imposed deadlines
-// are fully respected. For embedded mode (localNode != nil), ctx.Err() is
-// checked before and after HandleLocalFrame as a best-effort cancellation
-// check — HandleLocalFrame itself is synchronous and cannot be interrupted
-// mid-execution, so a stuck handler will block until it returns regardless
-// of ctx cancellation.
+// localRequestFrameCtx dispatches a command frame through the embedded node.
+// ctx.Err() is checked before and after HandleLocalFrame as a best-effort
+// cancellation check — HandleLocalFrame itself is synchronous and cannot be
+// interrupted mid-execution, so a stuck handler will block until it returns
+// regardless of ctx cancellation.
+//
+// TCP fallback to the data port was removed: local command dispatch must go
+// through the in-process embedded node exclusively. Sending console commands
+// over the TCP data port bypassed RPC CommandTable and RBAC enforcement.
 func (c *DesktopClient) localRequestFrameCtx(ctx context.Context, request protocol.Frame) (protocol.Frame, error) {
 	if err := ctx.Err(); err != nil {
 		return protocol.Frame{}, err
 	}
 
-	if c.localNode != nil {
-		frame := c.localNode.HandleLocalFrame(request)
-		if err := ctx.Err(); err != nil {
-			return protocol.Frame{}, err
-		}
-		if frame.Type == "error" {
-			if frame.Code != "" {
-				return protocol.Frame{}, protocol.ErrorFromCode(frame.Code)
-			}
-			if frame.Error != "" {
-				return protocol.Frame{}, fmt.Errorf("%s", frame.Error)
-			}
-			return protocol.Frame{}, protocol.ErrProtocol
-		}
-		return frame, nil
+	if c.localNode == nil {
+		return protocol.Frame{}, fmt.Errorf("localRequestFrame: embedded node is required, TCP fallback removed")
 	}
 
-	conn, reader, _, err := c.openLocalSession(ctx)
-	if err != nil {
+	frame := c.localNode.HandleLocalFrame(request)
+	if err := ctx.Err(); err != nil {
 		return protocol.Frame{}, err
 	}
-	defer func() { _ = conn.Close() }()
-
-	return c.requestFrame(conn, reader, request)
+	if frame.Type == "error" {
+		if frame.Code != "" {
+			return protocol.Frame{}, protocol.ErrorFromCode(frame.Code)
+		}
+		if frame.Error != "" {
+			return protocol.Frame{}, fmt.Errorf("%s", frame.Error)
+		}
+		return protocol.Frame{}, protocol.ErrProtocol
+	}
+	return frame, nil
 }
 
 func readJSONFrame(reader *bufio.Reader) (protocol.Frame, error) {

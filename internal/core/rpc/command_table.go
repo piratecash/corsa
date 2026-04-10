@@ -246,6 +246,28 @@ func numericArg(args map[string]interface{}, key string) (int, bool) {
 	}
 }
 
+// frameFromArgs reconstructs a protocol.Frame from CommandRequest.Args.
+// When raw JSON is pasted into the console, parseJSONFrame puts all fields
+// into the args map. This helper round-trips through JSON to populate the
+// typed Frame struct, preserving all wire fields without per-field mapping.
+// The "type" field is set explicitly to ensure it matches the registered
+// command name (args may contain a different-cased or absent "type").
+func frameFromArgs(commandType string, args map[string]interface{}) (protocol.Frame, error) {
+	if args == nil {
+		return protocol.Frame{Type: commandType}, nil
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return protocol.Frame{}, fmt.Errorf("marshal args: %w", err)
+	}
+	var frame protocol.Frame
+	if err := json.Unmarshal(data, &frame); err != nil {
+		return protocol.Frame{}, fmt.Errorf("unmarshal frame: %w", err)
+	}
+	frame.Type = commandType
+	return frame, nil
+}
+
 // --- Registration helpers for common patterns ---
 
 // helpSchemaVersion is the version of the help response format.
@@ -301,7 +323,7 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 	)
 }
 
-// RegisterNetworkCommands registers get_peers, fetch_peer_health, add_peer.
+// RegisterNetworkCommands registers get_peers, fetch_peer_health, add_peer, fetch_reachable_ids.
 func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "get_peers", Description: "Get list of connected peers", Category: "network"},
@@ -339,6 +361,13 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 				Peers: []string{address},
 			})
 			return frameResponse(reply)
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "fetch_reachable_ids", Description: "Get identities reachable via mesh routing", Category: "network"},
+		func(req CommandRequest) CommandResponse {
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"}))
 		},
 	)
 }
@@ -409,6 +438,20 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "delete_trusted_contact", Address: address})
 			return frameResponse(reply)
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "import_contacts", Description: "Import contacts from a list of address/pubkey/boxkey entries", Category: "identity"},
+		func(req CommandRequest) CommandResponse {
+			frame, err := frameFromArgs("import_contacts", req.Args)
+			if err != nil {
+				return validationError(err)
+			}
+			if len(frame.Contacts) == 0 {
+				return validationError(fmt.Errorf("contacts array is required"))
+			}
+			return frameResponse(node.HandleLocalFrame(frame))
 		},
 	)
 }
@@ -576,6 +619,42 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	} else {
 		t.RegisterUnavailable(sendDMInfo)
 	}
+
+	// Low-level message storage commands. These accept raw protocol frame fields
+	// and delegate directly to HandleLocalFrame. Used by internal tooling and
+	// raw JSON console input; normal users should prefer send_dm.
+	t.Register(
+		CommandInfo{Name: "send_message", Description: "Store an incoming message (raw frame)", Category: "message"},
+		func(req CommandRequest) CommandResponse {
+			frame, err := frameFromArgs("send_message", req.Args)
+			if err != nil {
+				return validationError(err)
+			}
+			return frameResponse(node.HandleLocalFrame(frame))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "import_message", Description: "Import a message without delivery side-effects (raw frame)", Category: "message"},
+		func(req CommandRequest) CommandResponse {
+			frame, err := frameFromArgs("import_message", req.Args)
+			if err != nil {
+				return validationError(err)
+			}
+			return frameResponse(node.HandleLocalFrame(frame))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "send_delivery_receipt", Description: "Store a delivery receipt (raw frame)", Category: "message"},
+		func(req CommandRequest) CommandResponse {
+			frame, err := frameFromArgs("send_delivery_receipt", req.Args)
+			if err != nil {
+				return validationError(err)
+			}
+			return frameResponse(node.HandleLocalFrame(frame))
+		},
+	)
 }
 
 // registerFileAnnounceCommand registers the send_file_announce RPC command.
@@ -844,6 +923,23 @@ func RegisterNoticeCommands(t *CommandTable, node NodeProvider) {
 		CommandInfo{Name: "fetch_notices", Description: "Fetch all notices", Category: "notice"},
 		func(req CommandRequest) CommandResponse {
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_notices"}))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "publish_notice", Description: "Publish an encrypted notice with TTL (raw frame)", Category: "notice"},
+		func(req CommandRequest) CommandResponse {
+			frame, err := frameFromArgs("publish_notice", req.Args)
+			if err != nil {
+				return validationError(err)
+			}
+			if strings.TrimSpace(frame.Ciphertext) == "" {
+				return validationError(fmt.Errorf("ciphertext is required"))
+			}
+			if frame.TTLSeconds <= 0 {
+				return validationError(fmt.Errorf("ttl_seconds must be positive"))
+			}
+			return frameResponse(node.HandleLocalFrame(frame))
 		},
 	)
 }

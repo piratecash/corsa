@@ -16,8 +16,10 @@ import (
 )
 
 // Client is an HTTP client for the RPC server.
-// All commands go through POST /rpc/v1/exec — the same universal dispatch
-// endpoint used by corsa-cli and external tools.
+// Named commands go through POST /rpc/v1/exec; raw JSON frames go through
+// POST /rpc/v1/frame, which dispatches through CommandTable and rejects
+// unregistered frame types with 400. Both endpoints are used by corsa-cli
+// and external tools.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -67,8 +69,9 @@ func (c *Client) FetchCommands() ([]CommandInfo, error) {
 // ExecuteCommand sends a console command string to the RPC server and returns
 // the JSON response as a formatted string.
 //
-// Raw JSON frames (input starting with '{') are sent verbatim to
-// POST /rpc/v1/frame, which preserves all caller-supplied wire fields.
+// Raw JSON frames (input starting with '{') are sent to POST /rpc/v1/frame,
+// which dispatches through CommandTable. Registered commands may normalize
+// or rebuild frame fields; unregistered frame types are rejected with 400.
 // Named commands are parsed by ParseConsoleInput into {command, args}
 // and dispatched through POST /rpc/v1/exec.
 func (c *Client) ExecuteCommand(input string) (string, error) {
@@ -79,7 +82,7 @@ func (c *Client) ExecuteCommand(input string) (string, error) {
 	var err error
 
 	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
-		// Raw JSON frame → forward verbatim to /frame endpoint.
+		// Raw JSON frame → dispatch through /frame endpoint (CommandTable).
 		var frameBody map[string]interface{}
 		if jsonErr := json.Unmarshal([]byte(trimmed), &frameBody); jsonErr != nil {
 			return "", fmt.Errorf("invalid JSON frame: %w", jsonErr)

@@ -76,8 +76,9 @@ func NewServer(cfg config.RPC, table *CommandTable, node ...NodeProvider) (*Serv
 	rpcGroup := app.Group("/rpc/v1")
 	rpcGroup.Post("/exec", server.handleExec)
 
-	// Raw frame passthrough: preserves all wire fields by forwarding
-	// directly to HandleLocalFrame, bypassing CommandTable handlers.
+	// Raw frame dispatch: parses "type" from JSON, normalizes wire field
+	// names, then dispatches through CommandTable. Unregistered frame types
+	// are rejected with 400 — no bypass to HandleLocalFrame.
 	if server.node != nil {
 		rpcGroup.Post("/frame", server.handleFrame)
 	}

@@ -8,7 +8,7 @@ import (
 )
 
 // TestClientExecuteCommandUsesExecEndpoint verifies that ExecuteCommand sends
-// all requests to /rpc/v1/exec with {command, args} JSON body.
+// named commands to /rpc/v1/exec with {command, args} JSON body.
 func TestClientExecuteCommandUsesExecEndpoint(t *testing.T) {
 	var receivedPath string
 	var receivedBody map[string]interface{}
@@ -233,7 +233,9 @@ func TestClientNoAuthWhenNotConfigured(t *testing.T) {
 }
 
 // TestClientRawJSONUsesFrameEndpoint verifies that raw JSON input
-// is sent to /rpc/v1/frame verbatim instead of being parsed into {command, args}.
+// is sent to /rpc/v1/frame for CommandTable dispatch instead of being parsed
+// into {command, args}. The server may normalize or rebuild fields for
+// registered frame types; unregistered types are rejected with 400.
 func TestClientRawJSONUsesFrameEndpoint(t *testing.T) {
 	var receivedPath string
 	var receivedBody map[string]interface{}
@@ -260,7 +262,7 @@ func TestClientRawJSONUsesFrameEndpoint(t *testing.T) {
 		t.Errorf("expected path /rpc/v1/frame for raw JSON, got %q", receivedPath)
 	}
 
-	// The frame should be sent verbatim — all fields preserved.
+	// The client sends all fields; server-side CommandTable may normalize them.
 	if receivedBody["type"] != "hello" {
 		t.Errorf("expected type=hello, got %v", receivedBody["type"])
 	}
@@ -269,6 +271,34 @@ func TestClientRawJSONUsesFrameEndpoint(t *testing.T) {
 	}
 	if receivedBody["client_version"] != "1.0" {
 		t.Errorf("expected client_version=1.0, got %v", receivedBody["client_version"])
+	}
+}
+
+// TestClientRawJSONFrameRejection verifies that when /rpc/v1/frame returns 400
+// for an unregistered frame type, the client surfaces the error with the
+// documented "rpc error: unknown frame type: <name>" format. This protects the
+// hardened contract: callers must see which type was rejected.
+func TestClientRawJSONFrameRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"unknown frame type: not_a_real_command"}`))
+	}))
+	defer server.Close()
+
+	client := &Client{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	_, err := client.ExecuteCommand(`{"type":"not_a_real_command","client":"test"}`)
+	if err == nil {
+		t.Fatal("expected error for unregistered frame type, got nil")
+	}
+
+	expected := "rpc error: unknown frame type: not_a_real_command"
+	if err.Error() != expected {
+		t.Errorf("expected %q, got %q", expected, err.Error())
 	}
 }
 

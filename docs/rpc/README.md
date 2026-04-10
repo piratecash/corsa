@@ -9,12 +9,12 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | Group | Commands | File |
 |---|---|---|
 | [System](system.md) | `help`, `ping`, `hello`, `version` | [system.md](system.md) |
-| [Network](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [network.md](network.md) |
-| [Identity](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [identity.md](identity.md) |
-| [Message](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [message.md](message.md) |
+| [Network](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer`, `fetch_reachable_ids` | [network.md](network.md) |
+| [Identity](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts`, `delete_trusted_contact`, `import_contacts` | [identity.md](identity.md) |
+| [Message](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm`, `send_message`, `import_message`, `send_delivery_receipt` | [message.md](message.md) |
 | [File Transfer](file.md) | `send_file_announce`, `fetch_file_transfers`, `fetch_file_mapping`, `retry_file_chunk`, `start_file_download`, `cancel_file_download` | [file.md](file.md) |
 | [Chatlog](chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [chatlog.md](chatlog.md) |
-| [Notice](notice.md) | `fetch_notices` | [notice.md](notice.md) |
+| [Notice](notice.md) | `fetch_notices`, `publish_notice` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
 | [Metrics](metrics.md) | `fetch_traffic_history` | [metrics.md](metrics.md) |
 | [Routing](routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [routing.md](routing.md) |
@@ -32,7 +32,7 @@ Response: command-specific JSON.
 
 ### Raw Frame Dispatch
 
-**POST /rpc/v1/frame** — accept a raw JSON protocol frame and dispatch it through `CommandTable`, falling back to `HandleLocalFrame` for unregistered frame types.
+**POST /rpc/v1/frame** — accept a raw JSON protocol frame and dispatch it through `CommandTable`. Only registered frame types are accepted; unregistered types are rejected with 400 Bad Request.
 
 Request: a raw protocol frame JSON object with a `type` field:
 ```json
@@ -45,7 +45,7 @@ Dispatch logic:
 
 1. The frame's `type` is extracted as the command name, wire field names are normalized to RPC arg names via `normalizeFrameArgs`.
 2. If the command is registered in `CommandTable`, it is dispatched there.
-3. If the command is not found in `CommandTable`, the raw frame is forwarded to `HandleLocalFrame` with all caller-supplied wire fields preserved.
+3. If the command is not found in `CommandTable`, the request is rejected with 400 Bad Request (`unknown frame type: <name>`).
 
 This endpoint is only available when the server is created with a `NodeProvider`.
 
@@ -60,12 +60,12 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | Группа | Команды | Файл |
 |---|---|---|
 | [Системные](system.md) | `help`, `ping`, `hello`, `version` | [system.md](system.md) |
-| [Сеть](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [network.md](network.md) |
-| [Идентификация](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [identity.md](identity.md) |
-| [Сообщения](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [message.md](message.md) |
+| [Сеть](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer`, `fetch_reachable_ids` | [network.md](network.md) |
+| [Идентификация](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts`, `delete_trusted_contact`, `import_contacts` | [identity.md](identity.md) |
+| [Сообщения](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm`, `send_message`, `import_message`, `send_delivery_receipt` | [message.md](message.md) |
 | [Файловый трансфер](file.md) | `send_file_announce`, `fetch_file_transfers`, `fetch_file_mapping`, `retry_file_chunk`, `start_file_download`, `cancel_file_download` | [file.md](file.md) |
 | [История чатов](chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [chatlog.md](chatlog.md) |
-| [Уведомления](notice.md) | `fetch_notices` | [notice.md](notice.md) |
+| [Уведомления](notice.md) | `fetch_notices`, `publish_notice` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
 | [Метрики](metrics.md) | `fetch_traffic_history` | [metrics.md](metrics.md) |
 | [Маршрутизация](routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [routing.md](routing.md) |
@@ -83,7 +83,7 @@ This endpoint is only available when the server is created with a `NodeProvider`
 
 ### Диспетчеризация фреймов
 
-**POST /rpc/v1/frame** — принимает сырой JSON-фрейм протокола и диспетчеризует его через `CommandTable`, с fallback на `HandleLocalFrame` для незарегистрированных типов фреймов.
+**POST /rpc/v1/frame** — принимает сырой JSON-фрейм протокола и диспетчеризует его через `CommandTable`. Только зарегистрированные типы фреймов принимаются; незарегистрированные типы отклоняются с 400 Bad Request.
 
 Запрос: сырой JSON-объект фрейма протокола с полем `type`:
 ```json
@@ -96,6 +96,6 @@ This endpoint is only available when the server is created with a `NodeProvider`
 
 1. Из фрейма извлекается `type` как имя команды, wire-имена полей нормализуются в RPC-аргументы через `normalizeFrameArgs`.
 2. Если команда зарегистрирована в `CommandTable`, она диспетчеризуется туда.
-3. Если команда не найдена в `CommandTable`, сырой фрейм пересылается в `HandleLocalFrame` с сохранением всех wire-полей отправителя.
+3. Если команда не найдена в `CommandTable`, запрос отклоняется с 400 Bad Request (`unknown frame type: <name>`).
 
 Эндпоинт доступен только когда сервер создан с `NodeProvider`.

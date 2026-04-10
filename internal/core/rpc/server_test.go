@@ -680,13 +680,28 @@ func TestFrameEndpointRejectsUnknownType(t *testing.T) {
 	}
 	server := setupTestServerWithNode(t, node)
 
-	code, _ := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
+	code, body := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
 		"type":           "custom_frame_type",
 		"client":         "external-tool",
 		"client_version": "5.0",
 	})
 
 	expectStatusCode(t, code, 400)
+
+	// Verify the error payload includes the frame type so callers can
+	// diagnose which type was rejected. The documented contract is
+	// "unknown frame type: <name>" — assert both the prefix and the
+	// submitted type name to catch wording drift.
+	errMsg, ok := body["error"].(string)
+	if !ok {
+		t.Fatal("expected 'error' key in response body")
+	}
+	if !strings.Contains(errMsg, "unknown frame type") {
+		t.Errorf("error should contain 'unknown frame type', got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "custom_frame_type") {
+		t.Errorf("error should echo the rejected type name 'custom_frame_type', got: %s", errMsg)
+	}
 }
 
 // TestFrameEndpointChatlogDispatch verifies that chatlog frame types are dispatched
