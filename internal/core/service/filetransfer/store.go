@@ -295,6 +295,12 @@ func (fs *FileStore) HasFile(fileHash string) bool {
 	return err == nil
 }
 
+// ResolvePath finds the transmit file for a given hash (any extension).
+// Returns the full path to the content-addressed file on disk.
+func (fs *FileStore) ResolvePath(fileHash string) (string, error) {
+	return fs.resolvePath(fileHash)
+}
+
 // resolvePath finds the transmit file for a given hash (any extension).
 func (fs *FileStore) resolvePath(fileHash string) (string, error) {
 	fs.mu.RLock()

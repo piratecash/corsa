@@ -1118,3 +1118,41 @@ func (m *Manager) ReceiverProgress(fileID domain.FileID) (bytesReceived, totalSi
 	}
 	return mapping.BytesReceived, mapping.FileSize, string(mapping.State), true
 }
+
+// SenderFilePath returns the on-disk path of a file being served (sender side).
+// Returns empty string if the file ID is unknown or the store cannot resolve
+// the hash. The path points to the content-addressed blob in the transmit
+// directory.
+func (m *Manager) SenderFilePath(fileID domain.FileID) string {
+	m.mu.Lock()
+	mapping, ok := m.senderMaps[fileID]
+	if !ok {
+		m.mu.Unlock()
+		return ""
+	}
+	hash := mapping.FileHash
+	m.mu.Unlock()
+
+	if m.store == nil {
+		return ""
+	}
+	path, err := m.store.ResolvePath(hash)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+// ReceiverFilePath returns the on-disk path of a completed download (receiver
+// side). Returns empty string if the file ID is unknown, the download is not
+// completed, or the CompletedPath is not set.
+func (m *Manager) ReceiverFilePath(fileID domain.FileID) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	mapping, ok := m.receiverMaps[fileID]
+	if !ok {
+		return ""
+	}
+	return mapping.CompletedPath
+}

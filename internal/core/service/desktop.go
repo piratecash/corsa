@@ -1343,6 +1343,16 @@ func (c *DesktopClient) FileTransferProgress(
 	return c.localNode.FileTransferProgress(fileID, isSender)
 }
 
+// FileTransferFilePath returns the on-disk path for a transferred file.
+// For the sender it resolves the transmit blob; for the receiver it returns
+// the completed download path. Returns empty string if unavailable.
+func (c *DesktopClient) FileTransferFilePath(fileID domain.FileID, isSender bool) string {
+	if c.localNode == nil {
+		return ""
+	}
+	return c.localNode.FileTransferFilePath(fileID, isSender)
+}
+
 // CleanupPeerTransfers removes all file transfer mappings and files associated
 // with the given peer identity.
 func (c *DesktopClient) CleanupPeerTransfers(peer domain.PeerIdentity) {

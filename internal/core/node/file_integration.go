@@ -313,6 +313,21 @@ func (s *Service) FileTransferProgress(fileID domain.FileID, isSender bool) (byt
 	return manager.ReceiverProgress(fileID)
 }
 
+// FileTransferFilePath returns the on-disk path for a transferred file.
+// For the sender it resolves to the content-addressed blob in the transmit
+// directory; for the receiver it returns the CompletedPath of the download.
+// Returns empty string if the file is not found or not yet available.
+func (s *Service) FileTransferFilePath(fileID domain.FileID, isSender bool) string {
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return ""
+	}
+	if isSender {
+		return manager.SenderFilePath(fileID)
+	}
+	return manager.ReceiverFilePath(fileID)
+}
+
 // RegisterIncomingFileTransfer registers a receiver-side file mapping after
 // a file_announce DM has been received and decrypted. Does not start
 // downloading — call StartFileDownload when the user accepts. Returns an

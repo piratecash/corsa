@@ -142,6 +142,13 @@ func (b *FileTransferBridge) Progress(fileID domain.FileID, isSender bool) (byte
 	return b.client.FileTransferProgress(fileID, isSender)
 }
 
+// FilePath returns the on-disk path for a transferred file. For the sender
+// it points to the transmit blob; for the receiver to the completed download.
+// Returns empty string if the file is not available on disk.
+func (b *FileTransferBridge) FilePath(fileID domain.FileID, isSender bool) string {
+	return b.client.FileTransferFilePath(fileID, isSender)
+}
+
 // CleanupPeer removes all file transfer mappings for the given peer.
 // Called when a peer is removed from the sidebar.
 func (b *FileTransferBridge) CleanupPeer(peer domain.PeerIdentity) {

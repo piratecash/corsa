@@ -147,6 +147,8 @@ var messages = map[string]map[string]string{
 		"file.download":                "Download",
 		"file.restart":                 "Restart",
 		"file.invalid":                 "Invalid file data",
+		"file.show_in_folder":          "Show in Folder",
+		"file.open_file":               "Open",
 	},
 	"ru": {
 		"app.title":                    "Corsa Desktop",
@@ -275,6 +277,8 @@ var messages = map[string]map[string]string{
 		"file.download":                "Скачать",
 		"file.restart":                 "Перезапустить",
 		"file.invalid":                 "Некорректные данные файла",
+		"file.show_in_folder":          "Показать в папке",
+		"file.open_file":               "Открыть",
 	},
 	"es": {
 		"app.title":                    "Corsa Desktop",
@@ -403,6 +407,8 @@ var messages = map[string]map[string]string{
 		"file.download":                "Descargar",
 		"file.restart":                 "Reiniciar",
 		"file.invalid":                 "Datos de archivo inválidos",
+		"file.show_in_folder":          "Mostrar en carpeta",
+		"file.open_file":               "Abrir",
 	},
 	"fr": {
 		"app.title":                    "Corsa Desktop",
@@ -531,6 +537,8 @@ var messages = map[string]map[string]string{
 		"file.download":                "Télécharger",
 		"file.restart":                 "Redémarrer",
 		"file.invalid":                 "Données de fichier invalides",
+		"file.show_in_folder":          "Afficher dans le dossier",
+		"file.open_file":               "Ouvrir",
 	},
 	"ar": {
 		"app.title":                    "Corsa Desktop",
@@ -659,6 +667,8 @@ var messages = map[string]map[string]string{
 		"file.download":                "تحميل",
 		"file.restart":                 "إعادة التشغيل",
 		"file.invalid":                 "بيانات ملف غير صالحة",
+		"file.show_in_folder":          "عرض في المجلد",
+		"file.open_file":               "فتح",
 	},
 	"zh": {
 		"app.title":                    "Corsa Desktop",
@@ -787,6 +797,8 @@ var messages = map[string]map[string]string{
 		"file.download":                "下载",
 		"file.restart":                 "重新开始",
 		"file.invalid":                 "无效的文件数据",
+		"file.show_in_folder":          "在文件夹中显示",
+		"file.open_file":               "打开",
 	},
 }
 

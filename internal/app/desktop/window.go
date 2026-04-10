@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,6 +148,14 @@ type Window struct {
 	fileDownloadBtns       map[string]*widget.Clickable
 	fileCancelDownloadBtns map[string]*widget.Clickable
 	fileRestartBtns        map[string]*widget.Clickable
+
+	// Image thumbnail cache for file transfer preview in chat bubbles.
+	thumbCache     thumbnailCache
+	thumbClickBtns map[string]*widget.Clickable // keyed by message ID — click to open image
+
+	// File action buttons for completed transfers (keyed by message ID).
+	fileRevealBtns map[string]*widget.Clickable // "Show in Folder"
+	fileOpenBtns   map[string]*widget.Clickable // "Open" with system viewer
 
 	// Native file dialog via gioui.org/x/explorer. Initialized once in Run()
 	// together with the app.Window. ChooseFile is blocking and must be called
@@ -1633,6 +1642,63 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 			)
 		}
 
+		// Image thumbnail preview (only for image content types when file
+		// is available on disk). Click on thumbnail opens the file with the
+		// system default viewer.
+		if isImageContentType(payload.ContentType) {
+			filePath := w.router.FileBridge().FilePath(fileID, isMine)
+			// get() returns non-nil only when the image is decoded and
+			// ready (thumbReady). While decoding is in progress or if
+			// it failed, nil is returned and we skip the thumbnail.
+			entry := w.thumbCache.get(filePath, w.window)
+			if entry != nil {
+				imgOp := entry.op
+				imgBounds := entry.bounds
+				openPath := filePath
+
+				// Ensure clickable widget exists for this message.
+				if w.thumbClickBtns == nil {
+					w.thumbClickBtns = make(map[string]*widget.Clickable)
+				}
+				thumbBtn, ok := w.thumbClickBtns[message.ID]
+				if !ok {
+					thumbBtn = new(widget.Clickable)
+					w.thumbClickBtns[message.ID] = thumbBtn
+				}
+
+				for thumbBtn.Clicked(gtx) {
+					if openPath != "" {
+						go openFile(openPath)
+					}
+				}
+
+				children = append(children,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return thumbBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							dispW, dispH := thumbnailDisplaySize(
+								imgBounds.X, imgBounds.Y,
+								gtx.Dp(unit.Dp(thumbnailMaxWidth)),
+								gtx.Dp(unit.Dp(thumbnailMaxHeight)),
+							)
+
+							// Apply rounded clip before rendering the image.
+							size := image.Pt(dispW, dispH)
+							defer clip.UniformRRect(image.Rectangle{Max: size}, gtx.Dp(unit.Dp(6))).Push(gtx.Ops).Pop()
+
+							imgWidget := widget.Image{
+								Src:      imgOp,
+								Fit:      widget.ScaleDown,
+								Position: layout.NW,
+							}
+							gtx.Constraints = layout.Exact(size)
+							return imgWidget.Layout(gtx)
+						})
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+				)
+			}
+		}
+
 		// File icon + name.
 		children = append(children,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1744,6 +1810,19 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 					lbl := material.Caption(w.theme, labelText)
 					lbl.Color = labelColor
 					return lbl.Layout(gtx)
+				}),
+			)
+		}
+
+		// "Show in Folder" + "Open" action buttons for completed transfers
+		// where the file is available on disk.
+		fileOnDisk := w.router.FileBridge().FilePath(fileID, isMine)
+		if fileOnDisk != "" {
+			revealPath := fileOnDisk
+			children = append(children,
+				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return w.layoutFileActionButtons(gtx, message.ID, revealPath)
 				}),
 			)
 		}
@@ -1919,6 +1998,69 @@ func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) l
 	return layout.Flex{}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(100))
+			return matBtn.Layout(gtx)
+		}),
+	)
+}
+
+// layoutFileActionButtons renders "Show in Folder" and "Open" buttons for
+// completed file transfers where the file exists on disk. Both buttons are
+// displayed in a horizontal row.
+func (w *Window) layoutFileActionButtons(gtx layout.Context, messageID, filePath string) layout.Dimensions {
+	// Ensure button maps are initialised.
+	if w.fileRevealBtns == nil {
+		w.fileRevealBtns = make(map[string]*widget.Clickable)
+	}
+	if w.fileOpenBtns == nil {
+		w.fileOpenBtns = make(map[string]*widget.Clickable)
+	}
+
+	revealBtn, ok := w.fileRevealBtns[messageID]
+	if !ok {
+		revealBtn = new(widget.Clickable)
+		w.fileRevealBtns[messageID] = revealBtn
+	}
+	openBtn, ok := w.fileOpenBtns[messageID]
+	if !ok {
+		openBtn = new(widget.Clickable)
+		w.fileOpenBtns[messageID] = openBtn
+	}
+
+	revealPath := filePath
+	for revealBtn.Clicked(gtx) {
+		go revealFileInDir(revealPath)
+	}
+	for openBtn.Clicked(gtx) {
+		go openFile(revealPath)
+	}
+
+	btnBg := color.NRGBA{R: 50, G: 60, B: 80, A: 255}
+	btnFg := color.NRGBA{R: 180, G: 200, B: 230, A: 255}
+
+	return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceStart}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			matBtn := material.Button(w.theme, revealBtn, w.t("file.show_in_folder"))
+			matBtn.Background = btnBg
+			matBtn.Color = btnFg
+			matBtn.Inset = layout.Inset{
+				Top: unit.Dp(3), Bottom: unit.Dp(3),
+				Left: unit.Dp(8), Right: unit.Dp(8),
+			}
+			matBtn.CornerRadius = unit.Dp(5)
+			matBtn.TextSize = unit.Sp(11)
+			return matBtn.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			matBtn := material.Button(w.theme, openBtn, w.t("file.open_file"))
+			matBtn.Background = btnBg
+			matBtn.Color = btnFg
+			matBtn.Inset = layout.Inset{
+				Top: unit.Dp(3), Bottom: unit.Dp(3),
+				Left: unit.Dp(8), Right: unit.Dp(8),
+			}
+			matBtn.CornerRadius = unit.Dp(5)
+			matBtn.TextSize = unit.Sp(11)
 			return matBtn.Layout(gtx)
 		}),
 	)
@@ -2502,6 +2644,60 @@ func openBrowser(url string) {
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	default:
 		cmd = exec.Command("xdg-open", url)
+	}
+	_ = cmd.Start()
+}
+
+// openFile opens a local file with the system default application.
+// On macOS: open, on Windows: rundll32, on Linux: xdg-open.
+func openFile(path string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	_ = cmd.Start()
+}
+
+// revealFileInDir opens the system file manager with the file selected
+// (highlighted). On macOS Finder selects the file via "open -R". On
+// Windows Explorer selects via "/select,". On Linux there is no universal
+// "select file" protocol, so we open the containing directory and, as a
+// best-effort, try dbus-based file selection (Nautilus/Dolphin/Thunar)
+// before falling back to xdg-open on the parent directory.
+func revealFileInDir(path string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		// -R = reveal in Finder and select the file.
+		cmd = exec.Command("open", "-R", path)
+	case "windows":
+		// /select, highlights the file in Explorer.
+		cmd = exec.Command("explorer", "/select,", path)
+	default:
+		// Best-effort: try dbus-send to org.freedesktop.FileManager1 which
+		// is supported by Nautilus, Dolphin, Thunar, and other modern file
+		// managers. If it fails, fall back to opening the directory.
+		//
+		// Build a properly escaped file:// URI via net/url so that paths
+		// with spaces, #, %, Cyrillic, and other special characters are
+		// transmitted correctly over D-Bus.
+		fileURI := (&url.URL{Scheme: "file", Path: path}).String()
+		dbusCmd := exec.Command("dbus-send", "--print-reply",
+			"--dest=org.freedesktop.FileManager1",
+			"/org/freedesktop/FileManager1",
+			"org.freedesktop.FileManager1.ShowItems",
+			"array:string:"+fileURI, "string:")
+		if err := dbusCmd.Start(); err == nil {
+			_ = dbusCmd.Wait()
+			return
+		}
+		// Fallback: open the containing directory.
+		cmd = exec.Command("xdg-open", filepath.Dir(path))
 	}
 	_ = cmd.Start()
 }
