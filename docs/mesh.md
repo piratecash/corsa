@@ -143,7 +143,7 @@ peer's reputation to prevent cooldown bypass.
 1. `handleConn()` reads the peer's `hello` frame.
 2. Sends `welcome` with a fresh challenge.
 3. Waits for `auth_session` and verifies.
-4. Commands are routed through `handlePeerSessionFrame()`.
+4. Commands are routed through `dispatchPeerSessionFrame()`.
 
 ### Connection handshake (detail)
 
@@ -524,7 +524,7 @@ sequenceDiagram
 
     loop Read commands
         Socket->>Reader: ReadString('\n')
-        Reader->>Reader: handleJSONCommand()
+        Reader->>Reader: dispatchNetworkFrame()
         Reader->>SendCh: enqueueFrame(response bytes)
         SendCh->>Writer: data := <-sendCh
         Writer->>Socket: conn.Write(data) with 30s deadline
@@ -547,7 +547,7 @@ difference is how the caller interacts with the channel:
 
 ```mermaid
 flowchart TD
-    subgraph "Success responses (handleJSONCommand)"
+    subgraph "Success responses (dispatchNetworkFrame)"
         CMD["Any command:<br/>hello, ping, get_peers,<br/>store_message, fetch_inbox,<br/>subscribe_inbox, ..."]
         WJF["writeJSONFrame()<br/>(async, fire-and-forget)"]
     end
@@ -782,7 +782,7 @@ sequenceDiagram
 1. `handleConn()` читает `hello` peer'а.
 2. Отправляет `welcome` со свежим challenge.
 3. Ожидает `auth_session` и верифицирует.
-4. Команды маршрутизируются через `handlePeerSessionFrame()`.
+4. Команды маршрутизируются через `dispatchPeerSessionFrame()`.
 
 ### Хендшейк соединения (подробнее)
 
@@ -1168,7 +1168,7 @@ sequenceDiagram
 
     loop Чтение команд
         Socket->>Reader: ReadString('\n')
-        Reader->>Reader: handleJSONCommand()
+        Reader->>Reader: dispatchNetworkFrame()
         Reader->>SendCh: enqueueFrame(байты ответа)
         SendCh->>Writer: data := <-sendCh
         Writer->>Socket: conn.Write(data) с дедлайном 30с
@@ -1191,7 +1191,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    subgraph "Успешные ответы (handleJSONCommand)"
+    subgraph "Успешные ответы (dispatchNetworkFrame)"
         CMD["Любая команда:<br/>hello, ping, get_peers,<br/>store_message, fetch_inbox,<br/>subscribe_inbox, ..."]
         WJF["writeJSONFrame()<br/>(async, fire-and-forget)"]
     end

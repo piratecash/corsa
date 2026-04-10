@@ -11,11 +11,11 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// TestHandlePeerSessionFrame_PingRespondsPong verifies that an outbound peer
+// TestDispatchPeerSessionFrame_PingRespondsPong verifies that an outbound peer
 // session correctly responds with a pong frame when the remote side sends a
 // ping. Without this, the remote inboundHeartbeat monitor closes the
 // connection after pongStallTimeout because it never receives a pong.
-func TestHandlePeerSessionFrame_PingRespondsPong(t *testing.T) {
+func TestDispatchPeerSessionFrame_PingRespondsPong(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 

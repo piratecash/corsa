@@ -384,11 +384,11 @@ func TestMaxAnnouncePeersValue(t *testing.T) {
 // not just at the helper level.
 // ---------------------------------------------------------------------------
 
-// TestHandlePeerSessionFrame_PushMessageBodyCapRejectsOversized verifies that
+// TestDispatchPeerSessionFrame_PushMessageBodyCapRejectsOversized verifies that
 // dispatchPeerSessionFrame silently drops a push_message whose Item.Body exceeds
 // maxPeerCommandBodyBytes. This is the runtime-path counterpart to the
 // constant-value test — it proves the branch stays wired into the handler.
-func TestHandlePeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.T) {
+func TestDispatchPeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
@@ -418,11 +418,11 @@ func TestHandlePeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.T)
 	}
 }
 
-// TestHandlePeerSessionFrame_PushMessageBodyAtLimitIsProcessed is a boundary
+// TestDispatchPeerSessionFrame_PushMessageBodyAtLimitIsProcessed is a boundary
 // check: a push_message with body exactly at maxPeerCommandBodyBytes must NOT
 // be rejected by the size guard. (It may still fail later due to missing sender
 // keys, but it must pass the body-size gate.)
-func TestHandlePeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T) {
+func TestDispatchPeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
@@ -459,11 +459,11 @@ func TestHandlePeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T) 
 	}
 }
 
-// TestHandlePeerSessionFrame_AnnouncePeerTruncation verifies that
+// TestDispatchPeerSessionFrame_AnnouncePeerTruncation verifies that
 // dispatchPeerSessionFrame truncates an announce_peer peer list to
 // maxAnnouncePeers entries. This is the runtime-path proof that the
 // truncation stays wired into the handler.
-func TestHandlePeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
+func TestDispatchPeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
@@ -499,9 +499,9 @@ func TestHandlePeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
 	}
 }
 
-// TestHandlePeerSessionFrame_AnnouncePeerUnderLimitPassesAll verifies that
+// TestDispatchPeerSessionFrame_AnnouncePeerUnderLimitPassesAll verifies that
 // an announce_peer list smaller than maxAnnouncePeers is NOT truncated.
-func TestHandlePeerSessionFrame_AnnouncePeerUnderLimitPassesAll(t *testing.T) {
+func TestDispatchPeerSessionFrame_AnnouncePeerUnderLimitPassesAll(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
@@ -528,11 +528,11 @@ func TestHandlePeerSessionFrame_AnnouncePeerUnderLimitPassesAll(t *testing.T) {
 	}
 }
 
-// TestHandlePeerSessionFrame_ErrorFrameDoesNotPanic verifies that an inbound
+// TestDispatchPeerSessionFrame_ErrorFrameDoesNotPanic verifies that an inbound
 // error frame (e.g. code=rate-limited sent by the remote before closing the
 // connection) is handled gracefully without panicking. The handler logs at Warn
 // level so the disconnect reason is visible in the logs.
-func TestHandlePeerSessionFrame_ErrorFrameDoesNotPanic(t *testing.T) {
+func TestDispatchPeerSessionFrame_ErrorFrameDoesNotPanic(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
