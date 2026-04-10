@@ -3,8 +3,6 @@ package node
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +18,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/gazeta"
@@ -96,6 +95,7 @@ type Service struct {
 	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
 	inboundNetCores      map[net.Conn]*NetCore     // inbound conn → NetCore (single source of truth for connection state)
+	scope                *connauth.Scope           // RBAC command gating (delegates auth lookups to this Service via AuthStore)
 	connIDCounter         uint64                     // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
@@ -188,12 +188,6 @@ type outboundDelivery struct {
 	LastAttemptAt time.Time
 	Retries       int
 	Error         string
-}
-
-type connAuthState struct {
-	Hello     protocol.Frame
-	Challenge string
-	Verified  bool
 }
 
 type banEntry struct {
@@ -480,6 +474,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		svc,
 		svc.routingCapablePeers,
 	)
+
+	svc.scope = connauth.NewScope(svc)
 
 	svc.relayStates = newRelayStateStore()
 	svc.relayStates.restore(queueState.RelayForwardStates)
@@ -807,7 +803,32 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		return false
 	}
 
-	if !s.isCommandAllowedForConn(conn, frame.Type) {
+	// RBAC enforcement gate: every inbound frame on the data port is checked
+	// against connauth.Commands before dispatch. The role is derived from
+	// server-side auth state (connauth.AuthStore), never from frame.Client
+	// which the attacker controls — eliminating the old requiresSessionAuth
+	// bypass where an empty Client field skipped authentication entirely.
+	//
+	// Data-only commands (send_message, fetch_messages, delete_trusted_contact,
+	// etc.) are absent from connauth.Commands by design, so they cannot be
+	// reached from the network regardless of the caller's role.
+	//
+	// Three outcomes:
+	//   - Unknown:   command not in connauth.Commands → ErrCodeUnknownCommand
+	//   - Forbidden: command exists but role insufficient → ErrCodeAuthRequired
+	//   - Allowed:   proceed to the command switch below
+	switch s.scope.CheckCommand(conn, frame.Type) {
+	case connauth.Unknown:
+		log.Debug().
+			Str("protocol", "json/tcp").
+			Str("addr", conn.RemoteAddr().String()).
+			Str("direction", "recv").
+			Str("command", frame.Type).
+			Bool("accepted", false).
+			Msg("protocol_trace")
+		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		return false
+	case connauth.Forbidden:
 		log.Debug().
 			Str("protocol", "json/tcp").
 			Str("addr", conn.RemoteAddr().String()).
@@ -850,6 +871,23 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		return true
 	case "hello":
+		// Reject re-hello once auth has been initiated (challenge issued)
+		// or completed (Verified). Without this guard a second hello
+		// between challenge issuance and auth_session would overwrite
+		// NetCore identity/address/caps via rememberConnPeerAddr while
+		// handleAuthSession still verifies against the original
+		// state.Hello — allowing an attacker to authenticate as identity A
+		// but bind the connection to an unverified address B, poisoning
+		// health tracking and capability context.
+		if s.scope.AuthInitiated(conn) {
+			accepted = false
+			s.writeJSONFrameSync(conn, protocol.Frame{
+				Type:  "error",
+				Code:  protocol.ErrCodeHelloAfterAuth,
+				Error: "re-hello rejected: authentication in progress or completed",
+			})
+			return true
+		}
 		if err := validateProtocolHandshake(frame); err != nil {
 			accepted = false
 			log.Warn().Err(err).Str("addr", conn.RemoteAddr().String()).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
@@ -874,49 +912,39 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			}
 			return true
 		}
-		if requiresSessionAuth(frame) {
-			challenge, err := s.prepareConnAuth(conn, frame)
+		// Determine auth path by checking server-verifiable identity fields
+		// (Address, PubKey, BoxKey, BoxSig), NOT frame.Client which the
+		// attacker controls. This eliminates GAP-0.
+		if connauth.HasIdentityFields(frame) {
+			authState, err := connauth.PrepareAuth(frame)
 			if err != nil {
 				accepted = false
 				s.addBanScore(conn, banIncrementInvalidSig)
 				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
+			s.SetConnAuthState(conn, authState)
 			s.rememberConnPeerAddr(conn, frame)
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
-			s.writeJSONFrame(conn, s.welcomeFrame(challenge, remoteIP(conn.RemoteAddr())))
+			s.writeJSONFrame(conn, s.welcomeFrame(authState.Challenge, remoteIP(conn.RemoteAddr())))
 			return true
 		}
-		s.learnPeerFromFrame(conn.RemoteAddr().String(), frame)
-		s.registerHelloRoute(conn, frame)
+		// No identity fields → unauthenticated peer. It stays
+		// RoleUnauthPeer with access limited to handshake commands and
+		// read-only queries (see connauth.Commands for the full list).
+		// State-changing writes, relay injection, and identity-bound
+		// reads are blocked until auth_session completes.
 		s.rememberConnPeerAddr(conn, frame)
-		if frame.Client == "node" || frame.Client == "desktop" {
-			log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
-		}
-		if addr := s.inboundPeerAddress(conn); addr != "" {
-			// Log duplicate but allow: when both sides dial each other
-			// simultaneously, the loser of the race has no outbound
-			// session and cannot forward gossip to this peer. Allowing
-			// both connections ensures bidirectional message flow; the
-			// routing and health layers already deduplicate by identity.
-			if s.hasOutboundSessionForInbound(addr) {
-				log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_connection_allowed")
-			}
-			s.addPeerID(addr, domain.PeerIdentity(frame.Address))
-			s.trackInboundConnect(conn, addr, domain.PeerIdentity(frame.Address))
-			// Store version/build by the health-tracking address so that
-			// peerHealthFrames can find them. learnPeerFromFrame only
-			// stores these when listenerEnabled, which excludes peers
-			// that omit the listen field.
-			s.addPeerVersion(addr, frame.ClientVersion)
-			s.addPeerBuild(addr, frame.ClientBuild)
-		}
+		log.Debug().
+			Str("client", frame.Client).
+			Str("addr", conn.RemoteAddr().String()).
+			Msg("hello_without_identity_fields")
 		s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
 	case "auth_session":
-		reply, ok := s.handleAuthSessionFrame(conn, frame)
+		reply, ok := s.handleAuthSession(conn, frame)
 		if !ok {
 			accepted = false
 			s.writeJSONFrameSync(conn, reply)
@@ -997,15 +1025,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, s.fetchDeliveryReceiptsFrame(frame.Recipient))
 		return true
 	case "subscribe_inbox":
-		// subscribe_inbox requires an authenticated session. Without this
-		// gate, any unauthenticated client could subscribe to an arbitrary
-		// recipient's inbox and receive all their DMs (encrypted bodies +
-		// metadata: sender, timestamps, message IDs).
-		if !s.isConnAuthenticated(conn) {
-			accepted = false
-			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
-			return true
-		}
+		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
 		// Identity binding: the authenticated peer may only subscribe to
 		// its own identity. Without this check, an authenticated peer could
 		// subscribe to a different identity's inbox and receive their messages.
@@ -1059,16 +1079,13 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, s.fetchNoticesFrame())
 		return true
 	case "announce_peer":
+		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
+		// Only authenticated peers may announce, so we always promote.
 		nodeType := frame.NodeType
 		if !isKnownNodeType(nodeType) {
 			s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 			return true
 		}
-		// Only promote (add + reset cooldown/failures) when the sender is
-		// authenticated. Dial order is never changed. Unauthenticated
-		// connections can still learn new peers but must not reset
-		// cooldowns on existing ones.
-		authenticated := s.isConnAuthenticated(conn)
 		peers := frame.Peers
 		if len(peers) > maxAnnouncePeers {
 			peers = peers[:maxAnnouncePeers]
@@ -1077,22 +1094,12 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
-			if authenticated {
-				s.promotePeerAddress(domain.PeerAddress(peer), nodeType)
-			} else {
-				s.addPeerAddress(domain.PeerAddress(peer), nodeType, "")
-			}
+			s.promotePeerAddress(domain.PeerAddress(peer), nodeType)
 		}
 		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 		return true
 	case "relay_message":
-		// Relay frames require an authenticated session (INV-9). Without
-		// this gate, any unauthenticated client could advertise
-		// mesh_relay_v1 in its hello frame and inject relay traffic.
-		if !s.isConnAuthenticated(conn) {
-			accepted = false
-			return true
-		}
+		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required, INV-9).
 		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
@@ -1122,10 +1129,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		return true
 	case "relay_hop_ack":
-		if !s.isConnAuthenticated(conn) {
-			accepted = false
-			return true
-		}
+		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
 		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
@@ -1136,10 +1140,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		return true
 	case "announce_routes":
-		if !s.isConnAuthenticated(conn) {
-			accepted = false
-			return true
-		}
+		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
 		if !s.connHasCapability(conn, domain.CapMeshRoutingV1) {
 			accepted = false
 			return true
@@ -1156,14 +1157,8 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		s.handleAnnounceRoutes(senderIdentity, frame)
 		return true
 	case "file_command":
-		// File command frames require an authenticated session and
-		// file_transfer_v1 capability. The frame uses its own wire format
-		// (FileCommandFrame) — we pass the raw JSON line to the file router
-		// for separate parsing and validation.
-		if !s.isConnAuthenticated(conn) {
-			accepted = false
-			return true
-		}
+		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
+		// Capability check remains: file_transfer_v1 must be negotiated.
 		if !s.connHasCapability(conn, domain.CapFileTransferV1) {
 			accepted = false
 			return true
@@ -1497,123 +1492,49 @@ func validateProtocolHandshake(frame protocol.Frame) error {
 	return nil
 }
 
-func requiresSessionAuth(frame protocol.Frame) bool {
-	return strings.TrimSpace(frame.Client) == "node" || strings.TrimSpace(frame.Client) == "desktop"
-}
-
 // isConnAuthenticated returns true when the connection has completed
 // session auth (auth_session verified). Connections that never initiated
 // auth (NetCore.auth is nil) are considered unauthenticated — they may
-// still issue commands, but they should not trigger high-trust side effects
-// such as peer promotion.
+// still issue commands within their role's scope, but they should not
+// trigger high-trust side effects such as peer promotion.
 func (s *Service) isConnAuthenticated(conn net.Conn) bool {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
-	if pc == nil {
-		return false
-	}
-	state := pc.Auth()
-	return state != nil && state.Verified
-}
-
-func (s *Service) isCommandAllowedForConn(conn net.Conn, command string) bool {
-	if command == "hello" || command == "ping" || command == "pong" || command == "auth_session" {
-		return true
-	}
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
-	if pc == nil {
-		return true
-	}
-	state := pc.Auth()
-	return state == nil || state.Verified
-}
-
-func (s *Service) prepareConnAuth(conn net.Conn, hello protocol.Frame) (string, error) {
-	if strings.TrimSpace(hello.Address) == "" || strings.TrimSpace(hello.PubKey) == "" || strings.TrimSpace(hello.BoxKey) == "" || strings.TrimSpace(hello.BoxSig) == "" {
-		return "", fmt.Errorf("missing identity fields for authenticated session")
-	}
-	if err := identity.VerifyBoxKeyBinding(hello.Address, hello.PubKey, hello.BoxKey, hello.BoxSig); err != nil {
-		return "", err
-	}
-	challenge, err := randomChallenge()
-	if err != nil {
-		return "", err
-	}
-	s.mu.Lock()
-	pc := s.inboundNetCores[conn]
-	s.mu.Unlock()
-	if pc == nil {
-		return "", fmt.Errorf("connection not registered")
-	}
-	pc.SetAuth(&connAuthState{
-		Hello:     hello,
-		Challenge: challenge,
-	})
-	return challenge, nil
-}
-
-func randomChallenge() (string, error) {
-	buf := make([]byte, 24)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
-}
-
-func sessionAuthPayload(challenge, address string) []byte {
-	return []byte("corsa-session-auth-v1|" + challenge + "|" + address)
+	return s.scope.ConnectionRole(conn) == domain.RoleAuthPeer
 }
 
 func ackDeletePayload(address, ackType, id, status string) []byte {
 	return []byte("corsa-ack-delete-v1|" + address + "|" + ackType + "|" + id + "|" + status)
 }
 
-func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
-	s.mu.Lock()
-	pc := s.inboundNetCores[conn]
-	s.mu.Unlock()
-	if pc == nil {
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
+// handleAuthSession verifies the auth_session frame's Ed25519 signature via
+// connauth.VerifyAuthSession, then applies post-auth side effects (peer
+// learning, route registration, peer announcement, health tracking).
+//
+// Ban scoring for invalid signatures is applied here because it depends on
+// the connection rate limiter which lives in Service.
+func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
+	state := s.ConnAuthState(conn)
+	verified, reply, ok := connauth.VerifyAuthSession(state, frame)
+	if !ok {
+		if reply.Code == protocol.ErrCodeInvalidAuthSignature {
+			s.addBanScore(conn, banIncrementInvalidSig)
+		}
+		return reply, false
 	}
-	state := pc.Auth()
-	if state == nil {
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
-	}
-	if state.Verified {
-		return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
-	}
-	if strings.TrimSpace(frame.Address) != strings.TrimSpace(state.Hello.Address) {
-		s.addBanScore(conn, banIncrementInvalidSig)
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: "authenticated address mismatch"}, false
-	}
-	if err := identity.VerifyPayload(state.Hello.Address, state.Hello.PubKey, sessionAuthPayload(state.Challenge, state.Hello.Address), frame.Signature); err != nil {
-		s.addBanScore(conn, banIncrementInvalidSig)
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()}, false
+	// Already verified — idempotent re-auth returns success immediately.
+	if state != nil && state.Verified {
+		return reply, true
 	}
 
-	// Replace the auth state with a verified copy instead of mutating
-	// the existing struct in place. Readers that obtained the old pointer
-	// via pc.Auth() see a consistent pre-verification snapshot; new
-	// readers see the verified state. This preserves the "connAuthState
-	// is never mutated after creation" invariant that makes the
-	// NetCore.mu snapshot-based locking safe.
-	verified := &connAuthState{
-		Hello:    state.Hello,
-		Verified: true,
-	}
-	pc.SetAuth(verified)
+	s.SetConnAuthState(conn, verified)
 
 	s.learnPeerFromFrame(conn.RemoteAddr().String(), verified.Hello)
-	s.registerHelloRoute(conn, state.Hello)
+	s.registerHelloRoute(conn, verified.Hello)
 
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
 	// addresses are excluded to avoid leaking private network topology.
-	if addr := peerListenAddress(state.Hello); addr != "" && classifyAddress(domain.PeerAddress(addr)) != domain.NetGroupLocal {
-		go s.announcePeerToSessions(addr, state.Hello.NodeType)
+	if addr := peerListenAddress(verified.Hello); addr != "" && classifyAddress(domain.PeerAddress(addr)) != domain.NetGroupLocal {
+		go s.announcePeerToSessions(addr, verified.Hello.NodeType)
 	}
 
 	if addr := s.inboundPeerAddress(conn); addr != "" {
@@ -1623,13 +1544,13 @@ func (s *Service) handleAuthSessionFrame(conn net.Conn, frame protocol.Frame) (p
 		if s.hasOutboundSessionForInbound(addr) {
 			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
-		s.addPeerID(addr, domain.PeerIdentity(state.Hello.Address))
-		s.trackInboundConnect(conn, addr, domain.PeerIdentity(state.Hello.Address))
-		s.addPeerVersion(addr, state.Hello.ClientVersion)
-		s.addPeerBuild(addr, state.Hello.ClientBuild)
+		s.addPeerID(addr, domain.PeerIdentity(verified.Hello.Address))
+		s.trackInboundConnect(conn, addr, domain.PeerIdentity(verified.Hello.Address))
+		s.addPeerVersion(addr, verified.Hello.ClientVersion)
+		s.addPeerBuild(addr, verified.Hello.ClientBuild)
 	}
 
-	return protocol.Frame{Type: "auth_ok", Address: state.Hello.Address, Status: "ok"}, true
+	return reply, true
 }
 
 func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bool) {
@@ -1652,6 +1573,30 @@ func (s *Service) clearConnAuth(conn net.Conn) {
 	s.mu.RUnlock()
 	if pc != nil {
 		pc.ClearAuth()
+	}
+}
+
+// ConnAuthState implements connauth.AuthStore. Returns the auth state for
+// the connection, or nil if the connection is not registered or has no
+// auth state.
+func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
+	s.mu.RLock()
+	pc := s.inboundNetCores[conn]
+	s.mu.RUnlock()
+	if pc == nil {
+		return nil
+	}
+	return pc.Auth()
+}
+
+// SetConnAuthState implements connauth.AuthStore. Stores auth state for
+// the connection. The connection must already be registered.
+func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
+	s.mu.RLock()
+	pc := s.inboundNetCores[conn]
+	s.mu.RUnlock()
+	if pc != nil {
+		pc.SetAuth(state)
 	}
 }
 
@@ -1804,21 +1749,39 @@ func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]str
 		return nil
 	}
 
-	// If the peer declared its networks, validate against advertised address.
-	if nets := pc.Networks(); len(nets) > 0 {
-		return validateDeclaredNetworks(nets, pc.Address())
+	// Authenticated peers: trust declared networks and advertised address
+	// from the hello frame — the identity behind these claims has been
+	// verified by auth_session.
+	if s.scope.ConnectionRole(conn) == domain.RoleAuthPeer {
+		if nets := pc.Networks(); len(nets) > 0 {
+			return validateDeclaredNetworks(nets, pc.Address())
+		}
+		if addr := pc.Address(); addr != "" {
+			g := classifyAddress(addr)
+			if g != domain.NetGroupUnknown && g != domain.NetGroupLocal {
+				return peerReachableGroups(addr)
+			}
+		}
+		return nil
 	}
 
-	// Infer from advertised address if it classifies to a known routable group.
-	if addr := pc.Address(); addr != "" {
-		g := classifyAddress(addr)
-		if g != domain.NetGroupUnknown && g != domain.NetGroupLocal {
-			return peerReachableGroups(addr)
+	// Unauthenticated peers: do NOT trust hello-declared networks or
+	// advertised address — both are attacker-controlled. An unauth peer
+	// could claim .onion/.i2p reachability to extract overlay addresses
+	// it has no proven right to access. Instead, classify by the actual
+	// TCP remote address.
+	if remote := conn.RemoteAddr(); remote != nil {
+		host, _, err := net.SplitHostPort(remote.String())
+		if err == nil {
+			g := classifyAddress(domain.PeerAddress(host))
+			if g != domain.NetGroupUnknown && g != domain.NetGroupLocal {
+				return peerReachableGroups(domain.PeerAddress(host))
+			}
 		}
 	}
 
-	// No meaningful address (fingerprint or empty).  Return nil so
-	// peersFrame includes all routable addresses.
+	// Cannot determine network from TCP endpoint (e.g. Tor circuit,
+	// localhost). Return nil so peersFrame includes all routable addresses.
 	return nil
 }
 

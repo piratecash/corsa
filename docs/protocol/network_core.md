@@ -10,7 +10,7 @@ state across 9 separate maps keyed by `net.Conn`:
 | `inboundConns` | `map[net.Conn]struct{}` | All active inbound connections |
 | `inboundMetered` | `map[net.Conn]*MeteredConn` | Inbound conn → metered wrapper |
 | `inboundTracked` | `map[net.Conn]struct{}` | Promoted connections (auth complete) |
-| `connAuth` | `map[net.Conn]*connAuthState` | Authentication state |
+| `connAuth` | `map[net.Conn]*connauth.State` | Authentication state |
 | `connPeerInfo` | `map[net.Conn]*connPeerHello` | Identity, capabilities, staleness |
 | `connSendCh` | `map[net.Conn]chan sendItem` | Per-connection write channel |
 | `connWriterDone` | `map[net.Conn]chan struct{}` | Writer goroutine exit signal |
@@ -55,7 +55,7 @@ type PeerConn struct {
     errCh      chan error           // outbound sessions only
 
     // Auth state (inbound only, nil for outbound).
-    auth       *connAuthState
+    auth       *connauth.State
 
     // Metering.
     metered    *MeteredConn
@@ -250,7 +250,7 @@ the write queue is a compile error, not a code review finding.
 | `inboundConns` | `map[net.Conn]struct{}` | Все активные входящие соединения |
 | `inboundMetered` | `map[net.Conn]*MeteredConn` | Входящее соед. → обёртка для метрик |
 | `inboundTracked` | `map[net.Conn]struct{}` | Промотированные соединения (auth complete) |
-| `connAuth` | `map[net.Conn]*connAuthState` | Состояние аутентификации |
+| `connAuth` | `map[net.Conn]*connauth.State` | Состояние аутентификации |
 | `connPeerInfo` | `map[net.Conn]*connPeerHello` | Identity, capabilities, staleness |
 | `connSendCh` | `map[net.Conn]chan sendItem` | Канал записи для каждого соединения |
 | `connWriterDone` | `map[net.Conn]chan struct{}` | Сигнал выхода writer-горутины |
@@ -295,7 +295,7 @@ type PeerConn struct {
     errCh      chan error           // только для исходящих сессий
 
     // Состояние авторизации (только для входящих, nil для исходящих).
-    auth       *connAuthState
+    auth       *connauth.State
 
     // Метрики.
     metered    *MeteredConn

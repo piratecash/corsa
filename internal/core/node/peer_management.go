@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -466,7 +467,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress) int 
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
 			Address:   s.identity.Address,
-			Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
+			Signature: identity.SignPayload(s.identity, connauth.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
 		})
 		if err != nil {
 			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_marshal_failed")
@@ -816,7 +817,7 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 	reply, err := s.peerSessionRequest(session, protocol.Frame{
 		Type:      "auth_session",
 		Address:   s.identity.Address,
-		Signature: identity.SignPayload(s.identity, sessionAuthPayload(welcome.Challenge, s.identity.Address)),
+		Signature: identity.SignPayload(s.identity, connauth.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
 	}, "auth_ok", false)
 	if err != nil {
 		return err

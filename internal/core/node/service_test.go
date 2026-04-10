@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/gazeta"
@@ -46,12 +47,10 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	})
 	defer stop()
 
+	// Handshake + read-only queries over unauthenticated TCP connection.
 	frames := exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 		protocol.Frame{Type: "get_peers"},
-		sendMessageFrame("global", "msg-1", svc.Address(), "*", "immutable", ts, 0, "hello"),
-		protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
 	)
 
 	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
@@ -63,13 +62,21 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	if got := frames[1]; got.Type != "peers" || got.Count != 0 {
 		t.Fatalf("unexpected peers: %#v", got)
 	}
-	if got := frames[2]; got.Type != "message_stored" || got.ID != "msg-1" {
-		t.Fatalf("unexpected stored frame: %#v", got)
+
+	// State-changing + sensitive-read commands via local RPC (requires
+	// RoleAuthPeer on the data port; HandleLocalFrame is the trusted
+	// local operator path).
+	stored := svc.HandleLocalFrame(sendMessageFrame("global", "msg-1", svc.Address(), "*", "immutable", ts, 0, "hello"))
+	if stored.Type != "message_stored" || stored.ID != "msg-1" {
+		t.Fatalf("unexpected stored frame: %#v", stored)
 	}
-	assertMessageFrame(t, frames[3], "messages", "global", 1, protocol.MessageFrame{
+
+	messages := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	assertMessageFrame(t, messages, "messages", "global", 1, protocol.MessageFrame{
 		ID: "msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello",
 	})
-	assertMessageFrame(t, frames[4], "inbox", "global", 1, protocol.MessageFrame{
+	inbox := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()})
+	assertMessageFrame(t, inbox, "inbox", "global", 1, protocol.MessageFrame{
 		ID: "msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello",
 	})
 }
@@ -496,12 +503,9 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 	})
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("global", "client-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "client-message"),
-	)
-	if got := frames[1]; got.Type != "message_stored" {
-		t.Fatalf("unexpected client store response: %#v", got)
+	stored := nodeA.HandleLocalFrame(sendMessageFrame("global", "client-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "client-message"))
+	if stored.Type != "message_stored" {
+		t.Fatalf("unexpected client store response: %#v", stored)
 	}
 
 	time.Sleep(1500 * time.Millisecond)
@@ -527,20 +531,16 @@ func TestDuplicateSendMessageIsDeduplicated(t *testing.T) {
 	})
 	defer stop()
 
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"),
-		sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"),
-		protocol.Frame{Type: "fetch_messages", Topic: "global"},
-	)
-
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected first store response: %#v", frames[1])
+	first := svc.HandleLocalFrame(sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"))
+	if first.Type != "message_stored" {
+		t.Fatalf("unexpected first store response: %#v", first)
 	}
-	if got := frames[2]; got.Type != "message_known" || got.ID != "dup-msg-1" {
-		t.Fatalf("unexpected duplicate response: %#v", got)
+	dup := svc.HandleLocalFrame(sendMessageFrame("global", "dup-msg-1", svc.Address(), "*", "immutable", ts, 0, "same"))
+	if dup.Type != "message_known" || dup.ID != "dup-msg-1" {
+		t.Fatalf("unexpected duplicate response: %#v", dup)
 	}
-	assertMessageFrame(t, frames[3], "messages", "global", 1, protocol.MessageFrame{
+	messages := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	assertMessageFrame(t, messages, "messages", "global", 1, protocol.MessageFrame{
 		ID: "dup-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "same",
 	})
 }
@@ -556,32 +556,34 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 	})
 	defer stop()
 
-	timestampA := time.Now().UTC().Format(time.RFC3339)
-	singleConnection := exchangeFrames(t, svc.externalListenAddress(),
+	// Part 1: read-only queries over TCP, state-changing via RPC.
+	tcpFrames := exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 		protocol.Frame{Type: "get_peers"},
 		protocol.Frame{Type: "fetch_contacts"},
-		sendMessageFrame("global", "series-msg-1", svc.Address(), "*", "immutable", timestampA, 0, "hello-series"),
-		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
 	)
 
-	if got := singleConnection[0]; got.Type != "welcome" || got.Address != svc.Address() {
-		t.Fatalf("unexpected welcome over single connection: %#v", got)
+	if got := tcpFrames[0]; got.Type != "welcome" || got.Address != svc.Address() {
+		t.Fatalf("unexpected welcome: %#v", got)
 	}
-	if got := singleConnection[1]; got.Type != "peers" || got.Count != 0 {
-		t.Fatalf("unexpected peers over single connection: %#v", got)
+	if got := tcpFrames[1]; got.Type != "peers" || got.Count != 0 {
+		t.Fatalf("unexpected peers: %#v", got)
 	}
-	if got := singleConnection[2]; got.Type != "contacts" || got.Count == 0 {
-		t.Fatalf("unexpected contacts over single connection: %#v", got)
+	if got := tcpFrames[2]; got.Type != "contacts" || got.Count == 0 {
+		t.Fatalf("unexpected contacts: %#v", got)
 	}
-	if got := singleConnection[3]; got.Type != "message_stored" || got.ID != "series-msg-1" {
-		t.Fatalf("unexpected store reply over single connection: %#v", got)
+
+	timestampA := time.Now().UTC().Format(time.RFC3339)
+	stored := svc.HandleLocalFrame(sendMessageFrame("global", "series-msg-1", svc.Address(), "*", "immutable", timestampA, 0, "hello-series"))
+	if stored.Type != "message_stored" || stored.ID != "series-msg-1" {
+		t.Fatalf("unexpected store reply: %#v", stored)
 	}
-	assertMessageFrame(t, singleConnection[4], "inbox", "global", 1, protocol.MessageFrame{
+	inbox := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()})
+	assertMessageFrame(t, inbox, "inbox", "global", 1, protocol.MessageFrame{
 		ID: "series-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: timestampA, TTLSeconds: 0, Body: "hello-series",
 	})
 
-	timestampB := time.Now().UTC().Format(time.RFC3339)
+	// Part 2: same operations via separate TCP + RPC calls.
 	step1 := exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 	)
@@ -593,14 +595,6 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 		protocol.Frame{Type: "fetch_contacts"},
 	)
-	step4 := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("global", "series-msg-2", svc.Address(), "*", "immutable", timestampB, 0, "hello-separate"),
-	)
-	step5 := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
-	)
 
 	if got := step1[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome over separate connection: %#v", got)
@@ -611,13 +605,16 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 	if got := step3[1]; got.Type != "contacts" || got.Count == 0 {
 		t.Fatalf("unexpected contacts over separate connection: %#v", got)
 	}
-	if got := step4[1]; got.Type != "message_stored" || got.ID != "series-msg-2" {
-		t.Fatalf("unexpected store reply over separate connection: %#v", got)
+
+	timestampB := time.Now().UTC().Format(time.RFC3339)
+	stored2 := svc.HandleLocalFrame(sendMessageFrame("global", "series-msg-2", svc.Address(), "*", "immutable", timestampB, 0, "hello-separate"))
+	if stored2.Type != "message_stored" || stored2.ID != "series-msg-2" {
+		t.Fatalf("unexpected store reply: %#v", stored2)
 	}
 
-	finalInbox := step5[1]
+	finalInbox := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()})
 	if finalInbox.Type != "inbox" || finalInbox.Count != 2 {
-		t.Fatalf("unexpected final inbox after separate connections: %#v", finalInbox)
+		t.Fatalf("unexpected final inbox: %#v", finalInbox)
 	}
 	if len(finalInbox.Messages) != 2 {
 		t.Fatalf("expected 2 messages in final inbox, got %#v", finalInbox)
@@ -1134,12 +1131,9 @@ func TestQueuedMeshMessageFlushesAfterPeerReconnect(t *testing.T) {
 	defer stopA()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("global", "queued-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "hello-after-reconnect"),
-	)
-	if got := frames[1]; got.Type != "message_stored" {
-		t.Fatalf("unexpected nodeA store response: %#v", got)
+	stored := nodeA.HandleLocalFrame(sendMessageFrame("global", "queued-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "hello-after-reconnect"))
+	if stored.Type != "message_stored" {
+		t.Fatalf("unexpected nodeA store response: %#v", stored)
 	}
 
 	nodeB, stopB := startTestNode(t, config.Node{
@@ -1260,12 +1254,9 @@ func TestMeshMessagePropagation(t *testing.T) {
 	})
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("global", "mesh-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "hello-from-a"),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected nodeA store response: %#v", frames[1])
+	stored := nodeA.HandleLocalFrame(sendMessageFrame("global", "mesh-msg-1", nodeA.Address(), "*", "immutable", ts, 0, "hello-from-a"))
+	if stored.Type != "message_stored" {
+		t.Fatalf("unexpected nodeA store response: %#v", stored)
 	}
 
 	waitForCondition(t, 5*time.Second, func() bool {
@@ -1336,12 +1327,9 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("dm", "dm-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, ciphertext),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected nodeA direct store response: %#v", frames[1])
+	stored := nodeA.HandleLocalFrame(sendMessageFrame("dm", "dm-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, ciphertext))
+	if stored.Type != "message_stored" {
+		t.Fatalf("unexpected nodeA direct store response: %#v", stored)
 	}
 
 	// Wait for nodeB to receive and store the pushed message via local
@@ -1386,12 +1374,9 @@ messageReceived:
 		t.Fatalf("dm-msg-1 not found in messages: %#v", inboxB[1].Messages)
 	}
 
-	inboxA := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeA.Address()},
-	)
-	if got := inboxA[1]; got.Type != "inbox" || got.Count != 0 {
-		t.Fatalf("unexpected nodeA inbox: %#v", got)
+	inboxA := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeA.Address()})
+	if inboxA.Type != "inbox" || inboxA.Count != 0 {
+		t.Fatalf("unexpected nodeA inbox: %#v", inboxA)
 	}
 
 	dmIDs := exchangeFrames(t, nodeB.externalListenAddress(),
@@ -1465,12 +1450,9 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("dm", "push-dm-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, ciphertext),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected nodeA direct store response: %#v", frames[1])
+	stored := nodeA.HandleLocalFrame(sendMessageFrame("dm", "push-dm-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, ciphertext))
+	if stored.Type != "message_stored" {
+		t.Fatalf("unexpected nodeA direct store response: %#v", stored)
 	}
 
 	// Message delivery involves relay retries with back-off and may traverse
@@ -1478,19 +1460,13 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 	// use 10s to avoid flakiness while still catching real regressions
 	// (a stuck relay would hang for minutes, not seconds).
 	waitForCondition(t, 10*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "push-dm-1"
+		reply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+		return reply.Type == "messages" && len(reply.Messages) == 1 && reply.Messages[0].ID == "push-dm-1"
 	})
 
 	waitForCondition(t, 10*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeA.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_delivery_receipts", Recipient: nodeA.Address()},
-		)
-		return reply[1].Type == "delivery_receipts" && len(reply[1].Receipts) == 1 && reply[1].Receipts[0].MessageID == "push-dm-1"
+		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_delivery_receipts", Recipient: nodeA.Address()})
+		return reply.Type == "delivery_receipts" && len(reply.Receipts) == 1 && reply.Receipts[0].MessageID == "push-dm-1"
 	})
 }
 
@@ -1598,12 +1574,9 @@ func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 
 	tampered := ciphertext[:len(ciphertext)-1] + "A"
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("dm", "tampered-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, tampered),
-	)
-	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeInvalidDirectMessageSig {
-		t.Fatalf("unexpected invalid signature response: %#v", got)
+	reply := nodeA.HandleLocalFrame(sendMessageFrame("dm", "tampered-msg-1", nodeA.Address(), nodeB.Address(), "sender-delete", ts, 0, tampered))
+	if reply.Type != "error" || reply.Code != protocol.ErrCodeInvalidDirectMessageSig {
+		t.Fatalf("unexpected invalid signature response: %#v", reply)
 	}
 }
 
@@ -1620,13 +1593,9 @@ func TestNodeRejectsMessageOutsideAllowedClockDrift(t *testing.T) {
 	defer stop()
 
 	oldTimestamp := time.Now().UTC().Add(-11 * time.Minute).Format(time.RFC3339)
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("global", "old-msg-1", svc.Address(), "*", "immutable", oldTimestamp, 0, "too-old"),
-	)
-
-	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeMessageTimestampOutOfRange {
-		t.Fatalf("unexpected stale timestamp response: %#v", got)
+	reply := svc.HandleLocalFrame(sendMessageFrame("global", "old-msg-1", svc.Address(), "*", "immutable", oldTimestamp, 0, "too-old"))
+	if reply.Type != "error" || reply.Code != protocol.ErrCodeMessageTimestampOutOfRange {
+		t.Fatalf("unexpected stale timestamp response: %#v", reply)
 	}
 }
 
@@ -1643,26 +1612,22 @@ func TestImportMessageAllowsHistoricalTimestamp(t *testing.T) {
 	defer stop()
 
 	oldTimestamp := time.Now().UTC().Add(-11 * time.Minute).Format(time.RFC3339)
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{
-			Type:       "import_message",
-			Topic:      "global",
-			ID:         "historic-msg-1",
-			Address:    svc.Address(),
-			Recipient:  "*",
-			Flag:       "immutable",
-			CreatedAt:  oldTimestamp,
-			TTLSeconds: 0,
-			Body:       "historic",
-		},
-		protocol.Frame{Type: "fetch_messages", Topic: "global"},
-	)
-
-	if got := frames[1]; got.Type != "message_stored" || got.ID != "historic-msg-1" {
-		t.Fatalf("unexpected import response: %#v", got)
+	imported := svc.HandleLocalFrame(protocol.Frame{
+		Type:       "import_message",
+		Topic:      "global",
+		ID:         "historic-msg-1",
+		Address:    svc.Address(),
+		Recipient:  "*",
+		Flag:       "immutable",
+		CreatedAt:  oldTimestamp,
+		TTLSeconds: 0,
+		Body:       "historic",
+	})
+	if imported.Type != "message_stored" || imported.ID != "historic-msg-1" {
+		t.Fatalf("unexpected import response: %#v", imported)
 	}
-	assertMessageFrame(t, frames[2], "messages", "global", 1, protocol.MessageFrame{
+	messages := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	assertMessageFrame(t, messages, "messages", "global", 1, protocol.MessageFrame{
 		ID: "historic-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: oldTimestamp, TTLSeconds: 0, Body: "historic",
 	})
 }
@@ -1697,13 +1662,9 @@ func TestDirectMessageAllowsHistoricalTimestampWithoutTTL(t *testing.T) {
 	}
 
 	oldTimestamp := time.Now().UTC().Add(-11 * time.Minute).Format(time.RFC3339)
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("dm", "late-dm-1", svc.Address(), recipientID.Address, "sender-delete", oldTimestamp, 0, ciphertext),
-	)
-
-	if got := frames[1]; (got.Type != "message_stored" && got.Type != "message_known") || got.ID != "late-dm-1" {
-		t.Fatalf("unexpected historical dm response: %#v", got)
+	reply := svc.HandleLocalFrame(sendMessageFrame("dm", "late-dm-1", svc.Address(), recipientID.Address, "sender-delete", oldTimestamp, 0, ciphertext))
+	if (reply.Type != "message_stored" && reply.Type != "message_known") || reply.ID != "late-dm-1" {
+		t.Fatalf("unexpected historical dm response: %#v", reply)
 	}
 }
 
@@ -1737,13 +1698,9 @@ func TestDirectMessageRejectsExpiredTTL(t *testing.T) {
 	}
 
 	oldTimestamp := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339)
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("dm", "expired-dm-1", svc.Address(), recipientID.Address, "sender-delete", oldTimestamp, 30, ciphertext),
-	)
-
-	if got := frames[1]; got.Type != "error" || got.Code != protocol.ErrCodeMessageTimestampOutOfRange {
-		t.Fatalf("unexpected expired ttl dm response: %#v", got)
+	reply := svc.HandleLocalFrame(sendMessageFrame("dm", "expired-dm-1", svc.Address(), recipientID.Address, "sender-delete", oldTimestamp, 30, ciphertext))
+	if reply.Type != "error" || reply.Code != protocol.ErrCodeMessageTimestampOutOfRange {
+		t.Fatalf("unexpected expired ttl dm response: %#v", reply)
 	}
 }
 
@@ -1759,32 +1716,24 @@ func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {
 	defer stop()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("global", "ttl-msg-1", svc.Address(), "*", "auto-delete-ttl", ts, 1, "burn-after-read"),
-		protocol.Frame{Type: "fetch_messages", Topic: "global"},
-	)
-
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected ttl store response: %#v", frames[1])
+	storedTTL := svc.HandleLocalFrame(sendMessageFrame("global", "ttl-msg-1", svc.Address(), "*", "auto-delete-ttl", ts, 1, "burn-after-read"))
+	if storedTTL.Type != "message_stored" {
+		t.Fatalf("unexpected ttl store response: %#v", storedTTL)
 	}
-	assertMessageFrame(t, frames[2], "messages", "global", 1, protocol.MessageFrame{
+	msgBefore := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	assertMessageFrame(t, msgBefore, "messages", "global", 1, protocol.MessageFrame{
 		ID: "ttl-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "auto-delete-ttl", CreatedAt: ts, TTLSeconds: 1, Body: "burn-after-read",
 	})
 
 	time.Sleep(1500 * time.Millisecond)
 
-	final := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()},
-	)
-
-	if got := final[1]; got.Type != "messages" || got.Count != 0 {
-		t.Fatalf("expected ttl message to expire from log, got %#v", got)
+	msgAfter := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	if msgAfter.Type != "messages" || msgAfter.Count != 0 {
+		t.Fatalf("expected ttl message to expire from log, got %#v", msgAfter)
 	}
-	if got := final[2]; got.Type != "inbox" || got.Count != 0 {
-		t.Fatalf("expected ttl message to expire from inbox, got %#v", got)
+	inboxAfter := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "global", Recipient: svc.Address()})
+	if inboxAfter.Type != "inbox" || inboxAfter.Count != 0 {
+		t.Fatalf("expected ttl message to expire from inbox, got %#v", inboxAfter)
 	}
 }
 
@@ -1830,12 +1779,9 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 		t.Fatalf("EncryptForRecipient failed: %v", err)
 	}
 
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "publish_notice", TTLSeconds: 30, Ciphertext: ciphertext},
-	)
-	if got := frames[1]; got.Type != "notice_stored" {
-		t.Fatalf("unexpected notice store response: %#v", got)
+	noticeReply := nodeA.HandleLocalFrame(protocol.Frame{Type: "publish_notice", TTLSeconds: 30, Ciphertext: ciphertext})
+	if noticeReply.Type != "notice_stored" {
+		t.Fatalf("unexpected notice store response: %#v", noticeReply)
 	}
 
 	waitForCondition(t, 5*time.Second, func() bool {
@@ -1965,12 +1911,9 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("dm", "retry-dm-1", nodeA.Address(), idB.Address, "sender-delete", ts, 0, ciphertext),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected nodeA direct store response: %#v", frames[1])
+	retryStored := nodeA.HandleLocalFrame(sendMessageFrame("dm", "retry-dm-1", nodeA.Address(), idB.Address, "sender-delete", ts, 0, ciphertext))
+	if retryStored.Type != "message_stored" {
+		t.Fatalf("unexpected nodeA direct store response: %#v", retryStored)
 	}
 
 	time.Sleep(2500 * time.Millisecond)
@@ -2024,12 +1967,9 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 
-	frames := exchangeFrames(t, fullNode.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		sendMessageFrame("dm", "backlog-dm-1", fullNode.Address(), idClient.Address, "sender-delete", ts, 0, ciphertext),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected full-node direct store response: %#v", frames[1])
+	backlogStored := fullNode.HandleLocalFrame(sendMessageFrame("dm", "backlog-dm-1", fullNode.Address(), idClient.Address, "sender-delete", ts, 0, ciphertext))
+	if backlogStored.Type != "message_stored" {
+		t.Fatalf("unexpected full-node direct store response: %#v", backlogStored)
 	}
 
 	clientNode, stopClient := startTestNodeWithIdentity(t, config.Node{
@@ -5643,6 +5583,65 @@ func TestProtocolTraceLogging(t *testing.T) {
 		protocol.Frame{Type: "get_peers"},
 	)
 
+	// --- Test hello-after-auth rejection trace ---
+	// Re-hello on an authenticated connection must be logged with accepted=false.
+	// This covers the ErrCodeHelloAfterAuth path added to prevent mid-session
+	// identity spoofing.
+	func() {
+		id, err := identity.Generate()
+		if err != nil {
+			t.Fatalf("identity.Generate: %v", err)
+		}
+		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 3*time.Second)
+		if err != nil {
+			t.Fatalf("dial for re-hello test: %v", err)
+		}
+		defer conn.Close() //nolint:errcheck
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		reader := bufio.NewReader(conn)
+
+		// Complete auth handshake.
+		helloFrame := protocol.Frame{
+			Type:                   "hello",
+			Version:                config.ProtocolVersion,
+			MinimumProtocolVersion: config.MinimumProtocolVersion,
+			Client:                 "node",
+			ClientVersion:          config.CorsaWireVersion,
+			Address:                id.Address,
+			PubKey:                 identity.PublicKeyBase64(id.PublicKey),
+			BoxKey:                 identity.BoxPublicKeyBase64(id.BoxPublicKey),
+			BoxSig:                 identity.SignBoxKeyBinding(id),
+			Listen:                 "10.0.0.88:64646",
+		}
+		writeJSONFrame(t, conn, helloFrame)
+		welcome := readJSONTestFrame(t, reader)
+		if welcome.Type != "welcome" || welcome.Challenge == "" {
+			t.Fatalf("re-hello test: expected welcome with challenge, got %#v", welcome)
+		}
+		writeJSONFrame(t, conn, protocol.Frame{
+			Type:      "auth_session",
+			Address:   id.Address,
+			Signature: identity.SignPayload(id, connauth.SessionAuthPayload(welcome.Challenge, id.Address)),
+		})
+		authOK := readJSONTestFrame(t, reader)
+		if authOK.Type != "auth_ok" {
+			t.Fatalf("re-hello test: expected auth_ok, got %#v", authOK)
+		}
+
+		// Send re-hello — should be rejected with hello-after-auth.
+		writeJSONFrame(t, conn, protocol.Frame{
+			Type:                   "hello",
+			Version:                config.ProtocolVersion,
+			MinimumProtocolVersion: config.MinimumProtocolVersion,
+			Client:                 "node",
+			ClientVersion:          config.CorsaWireVersion,
+		})
+		errResp := readJSONTestFrame(t, reader)
+		if errResp.Type != "error" || errResp.Code != protocol.ErrCodeHelloAfterAuth {
+			t.Fatalf("re-hello test: expected hello-after-auth error, got %#v", errResp)
+		}
+	}()
+
 	// --- Test non-JSON inbound line (P3: handleCommand before JSON parse) ---
 	func() {
 		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 3*time.Second)
@@ -5769,6 +5768,22 @@ func TestProtocolTraceLogging(t *testing.T) {
 	if !foundNonJSON {
 		t.Error("expected protocol_trace for non-json inbound line (recv, accepted=false)")
 	}
+
+	// Verify re-hello after auth was traced with accepted=false.
+	// This covers the ErrCodeHelloAfterAuth rejection path. Without this
+	// check, a regression that logs accepted=true (as happened before the
+	// P3 fix) would go undetected — the functional test passes but the
+	// audit trail is wrong.
+	foundReHelloRejected := false
+	for _, tr := range traces {
+		if tr.Protocol == "json/tcp" && tr.Command == "hello" && tr.Direction == "recv" && !tr.Accepted {
+			foundReHelloRejected = true
+			break
+		}
+	}
+	if !foundReHelloRejected {
+		t.Error("expected protocol_trace for re-hello after auth (recv, accepted=false)")
+	}
 }
 
 func TestComputePeerStateThresholds(t *testing.T) {
@@ -5863,16 +5878,16 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	})
 	defer stop()
 
+	// announce_peer requires RoleAuthPeer (connauth.Commands), so we must
+	// complete the full auth handshake before sending it.
+	conn, reader, _ := authenticatedConn(t, svc)
+	defer func() { _ = conn.Close() }()
+
 	// Send announce_peer with a public address via the TCP protocol path.
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "announce_peer", Peers: []string{"83.172.44.178:64646"}, NodeType: "full"},
-	)
-	if frames[0].Type != "welcome" {
-		t.Fatalf("expected welcome, got %q", frames[0].Type)
-	}
-	if frames[1].Type != "announce_peer_ack" {
-		t.Fatalf("expected announce_peer_ack, got %q", frames[1].Type)
+	writeJSONFrame(t, conn, protocol.Frame{Type: "announce_peer", Peers: []string{"83.172.44.178:64646"}, NodeType: "full"})
+	ack := readJSONTestFrame(t, reader)
+	if ack.Type != "announce_peer_ack" {
+		t.Fatalf("expected announce_peer_ack, got %q (%s)", ack.Type, ack.Code)
 	}
 
 	// Verify the announced address was added to the peer dial list.
@@ -5892,12 +5907,13 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	}
 
 	// Announce a local address — it should be ignored.
-	frames2 := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "announce_peer", Peers: []string{"192.168.1.100:64646"}, NodeType: "full"},
-	)
-	if frames2[1].Type != "announce_peer_ack" {
-		t.Fatalf("expected announce_peer_ack for local address, got %q", frames2[1].Type)
+	conn2, reader2, _ := authenticatedConn(t, svc)
+	defer func() { _ = conn2.Close() }()
+
+	writeJSONFrame(t, conn2, protocol.Frame{Type: "announce_peer", Peers: []string{"192.168.1.100:64646"}, NodeType: "full"})
+	ack2 := readJSONTestFrame(t, reader2)
+	if ack2.Type != "announce_peer_ack" {
+		t.Fatalf("expected announce_peer_ack for local address, got %q", ack2.Type)
 	}
 
 	svc.mu.RLock()
@@ -6301,7 +6317,7 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 		})
 	}
 
-	// --- sender connection: sends messages concurrently ---
+	// --- sender connection: authenticates then sends messages concurrently ---
 	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial sender: %v", err)
@@ -6311,12 +6327,27 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	senderReader := bufio.NewReader(senderConn)
 
 	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type: "hello", Version: config.ProtocolVersion,
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "test-sender", ClientVersion: config.CorsaWireVersion,
+		Client:                 "node",
+		ClientVersion:          config.CorsaWireVersion,
+		Address:                senderID.Address,
+		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(senderID),
 	})
-	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
-		t.Fatalf("sender expected welcome, got %s", f.Type)
+	senderWelcome := readJSONTestFrame(t, senderReader)
+	if senderWelcome.Type != "welcome" || senderWelcome.Challenge == "" {
+		t.Fatalf("sender expected welcome with challenge, got %s", senderWelcome.Type)
+	}
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   senderID.Address,
+		Signature: identity.SignPayload(senderID, connauth.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
+	})
+	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
+		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
 	}
 
 	// Concurrently: sender sends DMs AND subscriber sends ping requests.
@@ -7081,7 +7112,7 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 		})
 	}
 
-	// --- Sender sends DM through relay ---
+	// --- Sender sends DM through relay (must authenticate first) ---
 	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial sender: %v", err)
@@ -7091,12 +7122,27 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 	senderReader := bufio.NewReader(senderConn)
 
 	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type: "hello", Version: config.ProtocolVersion,
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "test-sender", ClientVersion: config.CorsaWireVersion,
+		Client:                 "node",
+		ClientVersion:          config.CorsaWireVersion,
+		Address:                senderID.Address,
+		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(senderID),
 	})
-	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
-		t.Fatalf("sender expected welcome, got %s", f.Type)
+	senderWelcome := readJSONTestFrame(t, senderReader)
+	if senderWelcome.Type != "welcome" || senderWelcome.Challenge == "" {
+		t.Fatalf("sender expected welcome with challenge, got %s", senderWelcome.Type)
+	}
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   senderID.Address,
+		Signature: identity.SignPayload(senderID, connauth.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
+	})
+	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
+		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
 	}
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -7237,9 +7283,10 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 	_ = recipConn1.Close()
 	time.Sleep(50 * time.Millisecond) // let cleanup run
 
-	// Step 2: sender sends DM. The stale subscriber snapshot may be taken
-	// but the push will fail (conn closed). Gossip was skipped because
-	// snapshot was non-empty. The message must still be in topics/backlog.
+	// Step 2: sender sends DM (must authenticate first). The stale
+	// subscriber snapshot may be taken but the push will fail (conn
+	// closed). Gossip was skipped because snapshot was non-empty. The
+	// message must still be in topics/backlog.
 	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial sender: %v", err)
@@ -7249,12 +7296,27 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 	senderReader := bufio.NewReader(senderConn)
 
 	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type: "hello", Version: config.ProtocolVersion,
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "test-sender", ClientVersion: config.CorsaWireVersion,
+		Client:                 "node",
+		ClientVersion:          config.CorsaWireVersion,
+		Address:                senderID.Address,
+		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(senderID),
 	})
-	if f := readJSONTestFrame(t, senderReader); f.Type != "welcome" {
-		t.Fatalf("sender expected welcome, got %s", f.Type)
+	senderWelcome := readJSONTestFrame(t, senderReader)
+	if senderWelcome.Type != "welcome" || senderWelcome.Challenge == "" {
+		t.Fatalf("sender expected welcome with challenge, got %s", senderWelcome.Type)
+	}
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   senderID.Address,
+		Signature: identity.SignPayload(senderID, connauth.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
+	})
+	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
+		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
 	}
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -7415,7 +7477,7 @@ func TestMixedVersionNodeWithoutCapabilitiesField(t *testing.T) {
 // skipping auth_session) must NOT be able to send relay_message frames, even
 // if it advertises mesh_relay_v1 capability.
 //
-// Before the fix, isCommandAllowedForConn returned true for nil connAuth,
+// Before the fix, the scope check returned true for nil connAuth,
 // and connHasCapability + inboundPeerAddress were populated from the
 // unauthenticated hello frame, allowing anyone to inject relay traffic.
 func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {

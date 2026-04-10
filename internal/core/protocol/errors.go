@@ -30,6 +30,7 @@ const (
 	ErrCodeFrameTooLarge              = "frame-too-large"
 	ErrCodeDuplicateConnection        = "duplicate-connection"
 	ErrCodeRateLimited                = "rate-limited"
+	ErrCodeHelloAfterAuth             = "hello-after-auth"
 )
 
 var (
@@ -60,6 +61,7 @@ var (
 	ErrFrameTooLarge              = errors.New(ErrCodeFrameTooLarge)
 	ErrDuplicateConnection        = errors.New(ErrCodeDuplicateConnection)
 	ErrRateLimited                = errors.New(ErrCodeRateLimited)
+	ErrHelloAfterAuth             = errors.New(ErrCodeHelloAfterAuth)
 )
 
 func ErrorCode(err error) string {
@@ -118,6 +120,8 @@ func ErrorCode(err error) string {
 		return ErrCodeDuplicateConnection
 	case errors.Is(err, ErrRateLimited):
 		return ErrCodeRateLimited
+	case errors.Is(err, ErrHelloAfterAuth):
+		return ErrCodeHelloAfterAuth
 	default:
 		return ErrCodeProtocol
 	}
@@ -177,6 +181,8 @@ func ErrorFromCode(code string) error {
 		return ErrDuplicateConnection
 	case ErrCodeRateLimited:
 		return ErrRateLimited
+	case ErrCodeHelloAfterAuth:
+		return ErrHelloAfterAuth
 	default:
 		return ErrProtocol
 	}

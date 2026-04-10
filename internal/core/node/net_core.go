@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -45,8 +46,8 @@ type NetCore struct {
 
 	// Auth state (inbound only, nil for outbound).
 	// The pointer is swapped atomically via SetAuth/ClearAuth;
-	// connAuthState is never mutated in place after creation.
-	auth *connAuthState
+	// connauth.State is never mutated in place after creation.
+	auth *connauth.State
 
 	// Diagnostics — updated on every received frame.
 	lastActivity time.Time
@@ -325,17 +326,17 @@ func (pc *NetCore) ConnIDNum() uint64 {
 }
 
 // Auth returns the connection's auth state, or nil for unauthenticated
-// connections. The returned pointer is a snapshot — connAuthState is never
-// mutated in place after creation, so the caller can safely read its fields
-// without holding any lock.
-func (pc *NetCore) Auth() *connAuthState {
+// connections. The returned pointer is a snapshot — connauth.State is
+// never mutated in place after creation, so the caller can safely read
+// its fields without holding any lock.
+func (pc *NetCore) Auth() *connauth.State {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	return pc.auth
 }
 
 // SetAuth stores the auth state for this connection.
-func (pc *NetCore) SetAuth(state *connAuthState) {
+func (pc *NetCore) SetAuth(state *connauth.State) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.auth = state

@@ -111,18 +111,12 @@ func TestRelayChain4NodesDMDelivery(t *testing.T) {
 		t.Fatalf("encrypt DM: %v", err)
 	}
 
-	// Inject the DM into nodeA via inbound TCP.
+	// Inject the DM into nodeA via local RPC (send_message requires auth on TCP).
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{
-			Type: "hello", Version: config.ProtocolVersion,
-			Client: "test", ClientVersion: config.CorsaWireVersion,
-		},
-		sendMessageFrame("dm", "chain-dm-1", senderID.Address, recipientID.Address,
-			string(protocol.MessageFlagImmutable), ts, 0, ciphertext),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("expected message_stored from nodeA, got %s: %s", frames[1].Type, frames[1].Error)
+	storeReply := nodeA.HandleLocalFrame(sendMessageFrame("dm", "chain-dm-1", senderID.Address, recipientID.Address,
+		string(protocol.MessageFlagImmutable), ts, 0, ciphertext))
+	if storeReply.Type != "message_stored" {
+		t.Fatalf("expected message_stored from nodeA, got %s: %s", storeReply.Type, storeReply.Error)
 	}
 
 	// Wait for the DM to propagate to nodeC via relay/gossip chain.
@@ -251,18 +245,12 @@ func TestMixedNetworkLegacyNodeReceivesViaGossip(t *testing.T) {
 		return len(nodeFull.Peers()) >= 1 && len(nodeLegacy.Peers()) >= 1
 	})
 
-	// Store a global message on nodeFull and verify it propagates to nodeLegacy.
+	// Store a global message on nodeFull via local RPC (send_message requires auth on TCP).
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeFull.externalListenAddress(),
-		protocol.Frame{
-			Type: "hello", Version: config.ProtocolVersion,
-			Client: "test", ClientVersion: config.CorsaWireVersion,
-		},
-		sendMessageFrame("global", "mixed-msg-1", nodeFull.Address(), "*",
-			"immutable", ts, 0, "hello-from-full"),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("unexpected store response: %#v", frames[1])
+	storeReply := nodeFull.HandleLocalFrame(sendMessageFrame("global", "mixed-msg-1", nodeFull.Address(), "*",
+		"immutable", ts, 0, "hello-from-full"))
+	if storeReply.Type != "message_stored" {
+		t.Fatalf("unexpected store response: %#v", storeReply)
 	}
 
 	// Verify gossip delivers the message to the legacy node.
@@ -321,18 +309,12 @@ func TestMixedVersionNewToOldFallsBackToGossip(t *testing.T) {
 		return len(nodeNew.Peers()) >= 1 && len(nodeOld.Peers()) >= 1
 	})
 
-	// Store a global message on the new node.
+	// Store a global message on the new node via local RPC (send_message requires auth on TCP).
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeNew.externalListenAddress(),
-		protocol.Frame{
-			Type: "hello", Version: config.ProtocolVersion,
-			Client: "test", ClientVersion: config.CorsaWireVersion,
-		},
-		sendMessageFrame("global", "compat-msg-1", senderID.Address, "*",
-			"immutable", ts, 0, "gossip-works"),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("store failed: %#v", frames[1])
+	storeReply := nodeNew.HandleLocalFrame(sendMessageFrame("global", "compat-msg-1", senderID.Address, "*",
+		"immutable", ts, 0, "gossip-works"))
+	if storeReply.Type != "message_stored" {
+		t.Fatalf("store failed: %#v", storeReply)
 	}
 
 	// Old node receives via gossip.
@@ -380,16 +362,10 @@ func TestMixedVersionOldToNewContinuesToWork(t *testing.T) {
 	})
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeOld.externalListenAddress(),
-		protocol.Frame{
-			Type: "hello", Version: config.ProtocolVersion,
-			Client: "test", ClientVersion: config.CorsaWireVersion,
-		},
-		sendMessageFrame("global", "reverse-compat-1", nodeOld.Address(), "*",
-			"immutable", ts, 0, "from-old-node"),
-	)
-	if frames[1].Type != "message_stored" {
-		t.Fatalf("store failed: %#v", frames[1])
+	storeReply := nodeOld.HandleLocalFrame(sendMessageFrame("global", "reverse-compat-1", nodeOld.Address(), "*",
+		"immutable", ts, 0, "from-old-node"))
+	if storeReply.Type != "message_stored" {
+		t.Fatalf("store failed: %#v", storeReply)
 	}
 
 	waitForCondition(t, 15*time.Second, func() bool {
@@ -636,16 +612,10 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 	}
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	frames := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{
-			Type: "hello", Version: config.ProtocolVersion,
-			Client: "test", ClientVersion: config.CorsaWireVersion,
-		},
-		sendMessageFrame("dm", "live-route-1", senderID.Address, recipientID.Address,
-			string(protocol.MessageFlagImmutable), ts, 0, ciphertext),
-	)
-	if frames[1].Type != "message_stored" && frames[1].Type != "message_known" {
-		t.Fatalf("expected message_stored or message_known, got %s: %s", frames[1].Type, frames[1].Error)
+	storeReply := nodeA.HandleLocalFrame(sendMessageFrame("dm", "live-route-1", senderID.Address, recipientID.Address,
+		string(protocol.MessageFlagImmutable), ts, 0, ciphertext))
+	if storeReply.Type != "message_stored" && storeReply.Type != "message_known" {
+		t.Fatalf("expected message_stored or message_known, got %s: %s", storeReply.Type, storeReply.Error)
 	}
 
 	// Read push_message on recipient connection.
