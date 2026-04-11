@@ -8,10 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/transport"
 )
 
 // Valid 40-char hex identity constants for tests.
@@ -693,7 +695,7 @@ func newTestServiceWithRouting(localIdentity string) *Service {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:      make(map[net.Conn]*NetCore),
+		inboundNetCores:       make(map[net.Conn]*NetCore),
 		inboundTracked:        make(map[net.Conn]struct{}),
 		done:                  make(chan struct{}),
 	}
@@ -2082,7 +2084,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:      make(map[net.Conn]*NetCore),
+		inboundNetCores:       make(map[net.Conn]*NetCore),
 		inboundTracked:        make(map[net.Conn]struct{}),
 	}
 	svc.routingTable = routing.NewTable(
@@ -2972,13 +2974,13 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 func TestDrainPendingForIdentities_SkipsReceipt(t *testing.T) {
 	svc := newTestServiceWithPendingDrain(idNodeA)
 
-	// Queue a send_delivery_receipt targeting idTargetX.
+	// Queue a relay_delivery_receipt targeting idTargetX.
 	// Receipts are not route-recoverable — they use relayStates hop chain,
 	// not the routing table. Drain must leave them untouched.
 	addrA := domain.PeerAddress("10.0.0.1:9000")
 	now := time.Now().UTC()
 	frame := protocol.Frame{
-		Type:        "send_delivery_receipt",
+		Type:        "relay_delivery_receipt",
 		ID:          "msg-receipt-skip",
 		Address:     idNodeA,
 		Recipient:   idTargetX,
@@ -3183,7 +3185,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:      make(map[net.Conn]*NetCore),
+		inboundNetCores:       make(map[net.Conn]*NetCore),
 		inboundTracked:        make(map[net.Conn]struct{}),
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
@@ -3343,7 +3345,7 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:      make(map[net.Conn]*NetCore),
+		inboundNetCores:       make(map[net.Conn]*NetCore),
 		inboundTracked:        make(map[net.Conn]struct{}),
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
@@ -3722,5 +3724,62 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	svc.mu.RUnlock()
 	if pendingRemaining != 1 {
 		t.Fatalf("expected pending untouched after rejected (stale) announce, got %d", pendingRemaining)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// routingTargetsFiltered deduplication via fallback-port alias
+// ---------------------------------------------------------------------------
+
+// TestRoutingTargetsDeduplicatesFallbackPort verifies that when a session is
+// connected via a fallback port (e.g. host:64646 instead of the canonical
+// host:7777), the same physical host is not counted twice — once as an active
+// session and again as a pending peer under its canonical address. Without
+// deduplication, a fanout slot would be wasted on a duplicate target.
+func TestRoutingTargetsDeduplicatesFallbackPort(t *testing.T) {
+	t.Parallel()
+
+	canonical := domain.PeerAddress("1.2.3.4:7777")
+	fallback := domain.PeerAddress("1.2.3.4:64646")
+
+	svc := &Service{
+		identity: &identity.Identity{Address: idNodeA},
+		cfg:      config.Node{ListenAddress: "0.0.0.0:9999", AdvertiseAddress: "10.0.0.99:9999"},
+	}
+	svc.initMaps()
+
+	// Active session under fallback address, with dialOrigin mapping back.
+	svc.sessions[fallback] = &peerSession{
+		address:      fallback,
+		peerIdentity: "peer-identity-A",
+		authOK:       true,
+	}
+	svc.dialOrigin[fallback] = canonical
+	svc.health[canonical] = &peerHealth{
+		Connected:       true,
+		LastPongAt:      time.Now().UTC(),
+		LastConnectedAt: time.Now().UTC(),
+	}
+	svc.peerTypes[canonical] = domain.NodeTypeFull
+	svc.peerIDs[canonical] = "peer-identity-A"
+
+	// Canonical peer in peer list (no session under this key).
+	svc.peers = []transport.Peer{
+		{Address: canonical, Source: domain.PeerSourceBootstrap},
+	}
+
+	targets := svc.routingTargets()
+
+	// Count how many times the same host appears.
+	hostCount := make(map[string]int)
+	for _, addr := range targets {
+		host, _, _ := splitHostPort(string(addr))
+		hostCount[host]++
+	}
+	if hostCount["1.2.3.4"] > 1 {
+		t.Fatalf("host 1.2.3.4 appears %d times in routing targets — expected deduplication to 1", hostCount["1.2.3.4"])
+	}
+	if len(targets) != 1 {
+		t.Fatalf("expected exactly 1 target, got %d: %v", len(targets), targets)
 	}
 }

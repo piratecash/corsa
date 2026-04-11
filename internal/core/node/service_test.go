@@ -24,6 +24,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/transport"
 )
 
 // candidateAddresses extracts the dial addresses from peerDialCandidate results.
@@ -1175,6 +1176,81 @@ func TestRoutingTargetsPreferBestHealthySessions(t *testing.T) {
 	}
 }
 
+// TestRoutingTargetsIncludeNonSessionPeers verifies that routingTargets
+// merges active session targets with known peers that don't have sessions yet.
+// This prevents the timing hole where a message arriving before all sessions
+// are up gets gossipped only backwards to the sender.
+func TestRoutingTargetsIncludeNonSessionPeers(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		sessions:  map[domain.PeerAddress]*peerSession{},
+		health:    map[domain.PeerAddress]*peerHealth{},
+		peerTypes: map[domain.PeerAddress]domain.NodeType{},
+		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
+	}
+
+	now := time.Now().UTC()
+
+	// Session to nodeA — active and healthy.
+	addrA := domain.PeerAddress("nodeA:1")
+	svc.sessions[addrA] = &peerSession{address: addrA}
+	svc.health[addrA] = &peerHealth{Address: addrA, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+
+	// nodeB is a known peer but has no active session yet.
+	addrB := domain.PeerAddress("nodeB:1")
+	svc.mu.Lock()
+	svc.peers = append(svc.peers, transport.Peer{Address: addrB})
+	svc.mu.Unlock()
+
+	targets := svc.routingTargets()
+
+	// Both nodeA (session) and nodeB (pending peer) should be in targets.
+	found := map[domain.PeerAddress]bool{}
+	for _, addr := range targets {
+		found[addr] = true
+	}
+	if !found[addrA] {
+		t.Fatalf("session peer should be in targets: %v", targets)
+	}
+	if !found[addrB] {
+		t.Fatalf("non-session known peer should be in targets: %v", targets)
+	}
+}
+
+// TestRoutingTargetsSessionOnlyWhenAllPeersHaveSessions verifies that when
+// all known peers already have sessions, no duplicates appear.
+func TestRoutingTargetsSessionOnlyWhenAllPeersHaveSessions(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		sessions:  map[domain.PeerAddress]*peerSession{},
+		health:    map[domain.PeerAddress]*peerHealth{},
+		peerTypes: map[domain.PeerAddress]domain.NodeType{},
+		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
+	}
+
+	now := time.Now().UTC()
+	addrA := domain.PeerAddress("nodeA:1")
+	svc.sessions[addrA] = &peerSession{address: addrA}
+	svc.health[addrA] = &peerHealth{Address: addrA, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+
+	// Same address in peers — should not create a duplicate.
+	svc.mu.Lock()
+	svc.peers = append(svc.peers, transport.Peer{Address: addrA})
+	svc.mu.Unlock()
+
+	targets := svc.routingTargets()
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target (no duplicates), got %v", targets)
+	}
+	if targets[0] != addrA {
+		t.Fatalf("expected %s, got %s", addrA, targets[0])
+	}
+}
+
 func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 	t.Parallel()
 
@@ -1774,10 +1850,14 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	t.Helper()
 
-	// Isolate peer state so tests never load a real peers.json that
-	// happens to match the randomly-assigned port.
+	// Isolate peer and queue state so tests never load leftover files
+	// from a previous run that happened to bind the same port.
+	tmpDir := t.TempDir()
 	if cfg.PeersStatePath == "" {
-		cfg.PeersStatePath = filepath.Join(t.TempDir(), "peers.json")
+		cfg.PeersStatePath = filepath.Join(tmpDir, "peers.json")
+	}
+	if cfg.QueueStatePath == "" {
+		cfg.QueueStatePath = filepath.Join(tmpDir, "queue.json")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	id, err := identity.Generate()
@@ -1792,9 +1872,14 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Identity) (*Service, func()) {
 	t.Helper()
 
-	// Isolate peer state so tests never load a real peers.json.
+	// Isolate peer and queue state so tests never load leftover files
+	// from a previous run that happened to bind the same port.
+	tmpDir := t.TempDir()
 	if cfg.PeersStatePath == "" {
-		cfg.PeersStatePath = filepath.Join(t.TempDir(), "peers.json")
+		cfg.PeersStatePath = filepath.Join(tmpDir, "peers.json")
+	}
+	if cfg.QueueStatePath == "" {
+		cfg.QueueStatePath = filepath.Join(tmpDir, "queue.json")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1831,6 +1916,18 @@ func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFu
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("timed out waiting for node shutdown")
+		}
+		// Wait for fire-and-forget goroutines (persistQueueState, etc.)
+		// to finish so TempDir cleanup does not race with async disk writes.
+		bgDone := make(chan struct{})
+		go func() {
+			svc.WaitBackground()
+			close(bgDone)
+		}()
+		select {
+		case <-bgDone:
+		case <-time.After(3 * time.Second):
+			t.Logf("WaitBackground timed out — some background goroutines may still be running")
 		}
 	}
 
@@ -2054,9 +2151,22 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 		t.Fatalf("unexpected sender direct store response: %#v", reply)
 	}
 
-	waitForConditionMsg(t, 30*time.Second, "message did not propagate from sender to full node via gossip", func() bool {
+	waitForConditionMsg(t, 10*time.Second, "message did not propagate from sender to full node via gossip", func() bool {
 		fullReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: idRecipient.Address})
 		return fullReply.Type == "inbox" && len(fullReply.Messages) == 1 && fullReply.Messages[0].ID == "client-offline-dm-1"
+	})
+
+	// Verify sender has an active, healthy connection to the full node.
+	// fetch_identities alone is insufficient — the peer session must be
+	// fully established so that gossip and relay delivery paths are active.
+	waitForConditionMsg(t, 6*time.Second, "sender peer health not connected to full node", func() bool {
+		reply := senderNode.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+		for _, ph := range reply.PeerHealth {
+			if ph.Connected {
+				return true
+			}
+		}
+		return false
 	})
 
 	recipientNode, stopRecipient := startTestNodeWithIdentity(t, config.Node{
@@ -2067,7 +2177,20 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	}, idRecipient)
 	defer stopRecipient()
 
-	waitForConditionMsg(t, 30*time.Second, "recipient did not receive stored DM after connecting to full node", func() bool {
+	// Wait for recipient to establish peer session with the full node
+	// before checking messages — this ensures initPeerSession (subscribe_inbox
+	// + sync) has completed and the single backlog delivery path has fired.
+	waitForConditionMsg(t, 6*time.Second, "recipient peer health not connected to full node", func() bool {
+		reply := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
+		for _, ph := range reply.PeerHealth {
+			if ph.Connected {
+				return true
+			}
+		}
+		return false
+	})
+
+	waitForConditionMsg(t, 10*time.Second, "recipient did not receive stored DM after connecting to full node", func() bool {
 		messages := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
 		return messages.Type == "messages" && len(messages.Messages) == 1 && messages.Messages[0].ID == "client-offline-dm-1"
 	})
@@ -2238,7 +2361,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("198.51.100.2:64646"), frame)] = struct{}{}
 	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("198.51.100.2:64647"), frame)] = struct{}{}
 	receiptFrame := protocol.Frame{
-		Type:        "send_delivery_receipt",
+		Type:        "relay_delivery_receipt",
 		ID:          frame.ID,
 		Address:     "peer-recipient",
 		Recipient:   id.Address,
@@ -2585,7 +2708,7 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 	svc.mu.RUnlock()
 
 	svc.clearRelayRetryForOutbound(protocol.Frame{
-		Type:      "send_delivery_receipt",
+		Type:      "relay_delivery_receipt",
 		ID:        string(receipt.MessageID),
 		Recipient: receipt.Recipient,
 		Status:    receipt.Status,
@@ -2628,7 +2751,7 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 	svc.mu.Unlock()
 	svc.trackRelayReceipt(receipt)
 	svc.clearRelayRetryForOutbound(protocol.Frame{
-		Type:      "send_delivery_receipt",
+		Type:      "relay_delivery_receipt",
 		ID:        string(receipt.MessageID),
 		Recipient: receipt.Recipient,
 		Status:    receipt.Status,
@@ -6311,18 +6434,26 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	// Both cause writes to subConn (push_message + pong response).
 	var wg sync.WaitGroup
 
-	// goroutine 1: sender fires encrypted DMs
+	// goroutine 1: sender fires encrypted DMs via push_message (P2P wire command).
+	// push_message on inbound TCP is fire-and-forget — no reply is read.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < messageCount; i++ {
 			msgID := fmt.Sprintf("race-msg-%d", i)
-			writeJSONFrame(t, senderConn, sendMessageFrame("dm", msgID, senderID.Address, recipientAddr, "sender-delete", ts, 0, ciphertexts[i]))
-			reply := readJSONTestFrame(t, senderReader)
-			if reply.Type == "error" {
-				t.Errorf("send_message %d returned error: %s (code=%s)", i, reply.Error, reply.Code)
-				return
-			}
+			writeJSONFrame(t, senderConn, protocol.Frame{
+				Type:      "push_message",
+				Topic:     "dm",
+				Recipient: recipientAddr,
+				Item: &protocol.MessageFrame{
+					ID:        msgID,
+					Sender:    senderID.Address,
+					Recipient: recipientAddr,
+					Flag:      "sender-delete",
+					CreatedAt: ts,
+					Body:      ciphertexts[i],
+				},
+			})
 		}
 	}()
 
@@ -7069,7 +7200,10 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 		})
 	}
 
-	// --- Sender sends DM through relay (must authenticate first) ---
+	// --- Sender authenticates on TCP and submits DM via push_message ---
+	// push_message is the P2P wire command for delivering messages between
+	// authenticated peers. send_message is local-only (RPC / HandleLocalFrame)
+	// and does not exist on the TCP wire.
 	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial sender: %v", err)
@@ -7103,11 +7237,23 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 	}
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	writeJSONFrame(t, senderConn, sendMessageFrame("dm", "transit-live-1", senderID.Address, recipientAddr, "sender-delete", ts, 0, ct))
-	storeReply := readJSONTestFrame(t, senderReader)
-	if storeReply.Type != "message_stored" && storeReply.Type != "message_known" {
-		t.Fatalf("expected message_stored or message_known, got %s: %s", storeReply.Type, storeReply.Error)
-	}
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type:      "push_message",
+		Topic:     "dm",
+		Recipient: recipientAddr,
+		Item: &protocol.MessageFrame{
+			ID:        "transit-live-1",
+			Sender:    senderID.Address,
+			Recipient: recipientAddr,
+			Flag:      "sender-delete",
+			CreatedAt: ts,
+			Body:      ct,
+		},
+	})
+	// push_message on inbound TCP is fire-and-forget: handleInboundPushMessage
+	// stores the message and triggers the live inbox push, but does not write
+	// a response on the inbound connection (ack_delete goes via outbound session).
+	// Delivery is verified by the recipient assertion below.
 
 	// --- Verify: recipient receives push_message via the live inbox route ---
 	pushed := readJSONTestFrame(t, recipReader)
@@ -7276,12 +7422,25 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
 	}
 
+	// push_message is the correct P2P wire command for delivering messages
+	// between authenticated peers. send_message is local-only (RPC/HandleLocalFrame).
 	ts := time.Now().UTC().Format(time.RFC3339)
-	writeJSONFrame(t, senderConn, sendMessageFrame("dm", "backlog-msg-1", senderID.Address, recipientAddr, "sender-delete", ts, 0, ct))
-	storeReply := readJSONTestFrame(t, senderReader)
-	if storeReply.Type != "message_stored" && storeReply.Type != "message_known" {
-		t.Fatalf("expected message_stored or message_known, got %s: %s", storeReply.Type, storeReply.Error)
-	}
+	writeJSONFrame(t, senderConn, protocol.Frame{
+		Type:      "push_message",
+		Topic:     "dm",
+		Recipient: recipientAddr,
+		Item: &protocol.MessageFrame{
+			ID:        "backlog-msg-1",
+			Sender:    senderID.Address,
+			Recipient: recipientAddr,
+			Flag:      "sender-delete",
+			CreatedAt: ts,
+			Body:      ct,
+		},
+	})
+	// push_message on inbound TCP is fire-and-forget: the relay stores the
+	// message internally. Give it a moment to complete the async store.
+	time.Sleep(100 * time.Millisecond)
 
 	// Step 3: new recipient connection subscribes — should get the message
 	// via backlog even though the push to the old connection failed.
@@ -8696,84 +8855,8 @@ func TestSubscribeInboxAllowsOwnIdentity(t *testing.T) {
 	}
 }
 
-// TestFetchInboxRejectsIdentityMismatch verifies that an authenticated peer
-// cannot fetch a different identity's inbox.
-func TestFetchInboxRejectsIdentityMismatch(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	nodeID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate node identity: %v", err)
-	}
-	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-	}, nodeID)
-	defer stop()
-
-	attackerID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate attacker identity: %v", err)
-	}
-	attackerBoxSig := identity.SignBoxKeyBinding(attackerID)
-
-	svc.HandleLocalFrame(protocol.Frame{
-		Type: "import_contacts",
-		Contacts: []protocol.ContactFrame{{
-			Address: attackerID.Address,
-			PubKey:  identity.PublicKeyBase64(attackerID.PublicKey),
-			BoxKey:  identity.BoxPublicKeyBase64(attackerID.BoxPublicKey),
-			BoxSig:  attackerBoxSig,
-		}},
-	})
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	// hello + auth as attacker
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
-		Address:                attackerID.Address,
-		PubKey:                 identity.PublicKeyBase64(attackerID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(attackerID.BoxPublicKey),
-		BoxSig:                 attackerBoxSig,
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %s", welcome.Type)
-	}
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   attackerID.Address,
-		Signature: identity.SignPayload(attackerID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+attackerID.Address)),
-	})
-	authReply := readJSONTestFrame(t, reader)
-	if authReply.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %s: %s", authReply.Type, authReply.Error)
-	}
-
-	// Try fetch_inbox for a DIFFERENT identity (the node's address).
-	victimAddr := svc.Address()
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type: "fetch_inbox", Topic: "dm", Recipient: victimAddr,
-	})
-	reply := readJSONTestFrame(t, reader)
-	if reply.Type != "error" {
-		t.Fatalf("expected error for fetch_inbox identity mismatch, got %s", reply.Type)
-	}
-	if reply.Code != protocol.ErrCodeAuthRequired {
-		t.Errorf("expected code %s, got %s", protocol.ErrCodeAuthRequired, reply.Code)
-	}
-}
+// NOTE: TestFetchInboxRejectsIdentityMismatch was removed — fetch_inbox is a
+// data-only command not available on the TCP wire (covered by
+// TestDataCommandViaTCP_UnknownCommand_SnakeCase). The equivalent identity-
+// binding test for subscribe_inbox already exists as
+// TestSubscribeInboxRejectsIdentityMismatch above (line ~8506).

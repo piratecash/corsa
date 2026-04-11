@@ -57,7 +57,7 @@ func New(cfg Config) (*Runtime, error) {
 	metricsCollector := metrics.NewCollector(nodeService)
 
 	cmdTable := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector, nodeService)
+	rpc.RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector)
 	rpc.RegisterDesktopOverrides(cmdTable, client, nodeService)
 
 	var rpcServer *rpc.Server

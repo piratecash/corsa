@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -94,7 +95,7 @@ type Service struct {
 	inboundTracked        map[net.Conn]struct{}      // connections promoted via trackInboundConnect (auth complete or auth not required)
 	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
-	inboundNetCores      map[net.Conn]*NetCore     // inbound conn → NetCore (single source of truth for connection state)
+	inboundNetCores       map[net.Conn]*NetCore      // inbound conn → NetCore (single source of truth for connection state)
 	connIDCounter         uint64                     // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
@@ -122,6 +123,16 @@ type Service struct {
 	drainDone             func()                                    // test hook: called after drainPendingForIdentities completes; nil in production
 	done                  chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
 
+	// runCtx is the context passed to Run(). Stored so that callbacks
+	// (e.g. onCMSessionEstablished) can start goroutines bound to the
+	// Service lifecycle instead of context.Background().
+	runCtx context.Context
+
+	// Connection management subsystem (Stage 3 integration).
+	peerProvider *PeerProvider                   // single source of dial candidates — replaces peers[] + peerDialCandidates()
+	connManager  *ConnectionManager              // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
+	bannedIPSet  map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
+
 	// File transfer subsystem (Iteration 21).
 	fileStore    *filetransfer.FileStore // content-addressed file storage in transmit dir
 	fileTransfer *filetransfer.Manager   // sender/receiver state machines
@@ -146,6 +157,29 @@ type peerSession struct {
 	version      int
 	authOK       bool
 	capabilities []domain.Capability // intersection of local and remote capabilities negotiated during handshake
+
+	// welcomeMeta carries handshake metadata that must NOT be applied to
+	// Service-level maps until the CM generation check passes. Stale dials
+	// (generation mismatch) are discarded without activating side-effects;
+	// only onCMSessionEstablished writes these into shared state.
+	welcomeMeta *peerWelcomeMeta
+}
+
+// peerWelcomeMeta holds welcome-frame data deferred until CM activation.
+type peerWelcomeMeta struct {
+	welcome         protocol.Frame // raw welcome frame for learnIdentityFromWelcome
+	clientVersion   string
+	clientBuild     int
+	observedAddress string
+}
+
+// Close shuts down the TCP connection underlying this session.
+// Safe to call multiple times — subsequent calls return the same error.
+func (ps *peerSession) Close() error {
+	if ps == nil || ps.conn == nil {
+		return nil
+	}
+	return ps.conn.Close()
 }
 
 type peerHealth struct {
@@ -369,6 +403,13 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 			seen[string(msg.ID)] = struct{}{}
 		}
 	}
+	if len(queueState.RelayMessages) > 0 {
+		ids := make([]string, len(queueState.RelayMessages))
+		for i, m := range queueState.RelayMessages {
+			ids[i] = string(m.ID)
+		}
+		log.Info().Str("path", queueStatePath).Int("count", len(queueState.RelayMessages)).Strs("ids", ids).Msg("restored relay messages from queue state")
+	}
 	receipts := make(map[string][]protocol.DeliveryReceipt)
 	seenReceipts := make(map[string]struct{})
 	for _, receipt := range queueState.RelayReceipts {
@@ -455,13 +496,126 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		inboundMetered:        make(map[net.Conn]*MeteredConn),
 		inboundHealthRefs:     make(map[domain.PeerAddress]int),
 		inboundTracked:        make(map[net.Conn]struct{}),
-		inboundNetCores:      make(map[net.Conn]*NetCore),
+		inboundNetCores:       make(map[net.Conn]*NetCore),
 		bans:                  make(map[string]banEntry),
 		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
+		bannedIPSet:           make(map[string]domain.BannedIPEntry),
 		done:                  make(chan struct{}),
 	}
+
+	// Initialize PeerProvider (Stage 3: connection management integration).
+	svc.peerProvider = NewPeerProvider(PeerProviderConfig{
+		HealthFn: func(addr domain.PeerAddress) *PeerHealthView {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			addr = svc.resolveHealthAddress(addr)
+			h := svc.health[addr]
+			if h == nil {
+				return nil
+			}
+			return &PeerHealthView{
+				Score:               h.Score,
+				ConsecutiveFailures: h.ConsecutiveFailures,
+				LastDisconnectedAt:  h.LastDisconnectedAt,
+				BannedUntil:         h.BannedUntil,
+				Connected:           h.Connected,
+			}
+		},
+		ConnectedFn: func() map[string]struct{} {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			return svc.connectedHostsLocked()
+		},
+		QueuedFn: func() map[string]struct{} {
+			if svc.connManager == nil {
+				return make(map[string]struct{})
+			}
+			return svc.connManager.QueuedIPs()
+		},
+		ForbiddenFn:   svc.isForbiddenDialIP,
+		IsSelfAddress: svc.isSelfAddress,
+		NetworksFn: func() map[domain.NetGroup]struct{} {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			groups := make(map[domain.NetGroup]struct{}, len(svc.reachableGroups))
+			for g := range svc.reachableGroups {
+				groups[g] = struct{}{}
+			}
+			return groups
+		},
+		BannedIPsFn: func() map[string]domain.BannedIPEntry {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			result := make(map[string]domain.BannedIPEntry, len(svc.bannedIPSet))
+			for ip, entry := range svc.bannedIPSet {
+				result[ip] = entry
+			}
+			return result
+		},
+		ListenAddr:  domain.ListenAddress(cfg.ListenAddress),
+		DefaultPort: config.DefaultPeerPort,
+	})
+
+	// Load persisted peers into PeerProvider.
+	for _, entry := range peerState.Peers {
+		svc.peerProvider.Restore(domain.RestoreEntry{
+			Address: entry.Address,
+			Source:  entry.Source,
+			AddedAt: func() time.Time {
+				if entry.AddedAt != nil {
+					return *entry.AddedAt
+				}
+				return time.Now().UTC()
+			}(),
+			Network: entry.Network,
+		})
+	}
+	// Add bootstrap peers (merge: Source updated, AddedAt/Network preserved).
+	for _, addr := range cfg.BootstrapPeers {
+		svc.peerProvider.Add(domain.PeerAddress(addr), domain.PeerSourceBootstrap)
+	}
+
+	// Restore IP-wide bans from persisted state. Expired entries are
+	// silently dropped — they would be filtered anyway by BannedIPsFn.
+	now := time.Now().UTC()
+	for _, b := range peerState.BannedIPs {
+		if b.BannedUntil.After(now) {
+			affected := make([]domain.PeerAddress, len(b.AffectedPeers))
+			for i, a := range b.AffectedPeers {
+				affected[i] = domain.PeerAddress(a)
+			}
+			svc.bannedIPSet[b.IP] = domain.BannedIPEntry{
+				IP:            b.IP,
+				BannedUntil:   b.BannedUntil,
+				BanOrigin:     domain.PeerAddress(b.BanOrigin),
+				BanReason:     b.BanReason,
+				AffectedPeers: affected,
+			}
+		}
+	}
+
+	// Initialize ConnectionManager (Stage 3: connection management integration).
+	svc.connManager = NewConnectionManager(ConnectionManagerConfig{
+		MaxSlotsFn: func() int { return svc.cfg.EffectiveMaxOutgoingPeers() },
+		Provider:   svc.peerProvider,
+		DialFn: func(ctx context.Context, addresses []domain.PeerAddress) (DialResult, error) {
+			return svc.dialForCM(ctx, addresses)
+		},
+		OnSessionEstablished: func(info SessionInfo) {
+			svc.onCMSessionEstablished(info)
+		},
+		OnSessionTeardown: func(info SessionInfo) {
+			svc.onCMSessionTeardown(info)
+		},
+		OnStaleSession: func(session *peerSession) {
+			svc.onCMStaleSession(session)
+		},
+		OnDialFailed: func(address domain.PeerAddress, err error, incompatible bool) {
+			svc.onCMDialFailed(address, err, incompatible)
+		},
+	})
 
 	// Initialize distance-vector routing table (Phase 1.2).
 	svc.routingTable = routing.NewTable(
@@ -491,6 +645,10 @@ func (s *Service) RegisterMessageStore(store MessageStore) {
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	// Store context so CM callbacks can start goroutines bound to the
+	// Service lifecycle (see onCMSessionEstablished).
+	s.runCtx = ctx
+
 	// Signal drain goroutines to stop when Run exits. Drain goroutines
 	// launched by onPeerSessionEstablished and handleAnnounceRoutes check
 	// this channel before doing any work — prevents them from running
@@ -530,6 +688,16 @@ func (s *Service) Run(ctx context.Context) error {
 		s.connWg.Wait()
 	}()
 
+	// Start ConnectionManager event loop (Stage 3).
+	cmDone := make(chan struct{})
+	go func() {
+		defer crashlog.DeferRecover()
+		s.connManager.Run(ctx)
+		close(cmDone)
+	}()
+	// Wait for CM event loop to be ready before starting bootstrap.
+	<-s.connManager.Ready()
+
 	bootstrapDone := make(chan struct{})
 	go func() {
 		defer crashlog.DeferRecover()
@@ -540,6 +708,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if !s.cfg.EffectiveListenerEnabled() {
 		<-ctx.Done()
 		<-bootstrapDone
+		<-cmDone
 		return nil
 	}
 
@@ -564,6 +733,7 @@ func (s *Service) Run(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				<-bootstrapDone
+				<-cmDone
 				return nil
 			default:
 			}
@@ -954,10 +1124,19 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 	case "get_peers":
 		// P2P peer discovery: authenticated peers request the peer list
 		// for network synchronization (syncPeer, syncPeerSession).
-		// Non-routable addresses are filtered out for remote callers;
-		// network group filtering prevents leaking clearnet addresses
+		// Merges active CM slots with PeerProvider candidates, deduplicated
+		// by IP. Network group filtering prevents leaking clearnet addresses
 		// to Tor/I2P peers and vice versa.
-		s.writeJSONFrame(conn, s.peersFrame(s.connPeerReachableGroups(conn), false))
+		exchanged := s.buildPeerExchangeResponse(s.connPeerReachableGroups(conn))
+		peers := make([]string, len(exchanged))
+		for i, a := range exchanged {
+			peers[i] = string(a)
+		}
+		s.writeJSONFrame(conn, protocol.Frame{
+			Type:  "peers",
+			Count: len(peers),
+			Peers: peers,
+		})
 		return true
 	case "fetch_contacts":
 		// P2P contact sync: authenticated peers fetch the contact list
@@ -1020,6 +1199,21 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		return true
 	case "push_delivery_receipt":
 		s.handleInboundPushDeliveryReceipt(conn, frame)
+		return true
+	case "relay_delivery_receipt":
+		// Gossip receipt path: a peer forwards a delivery receipt via
+		// the flat-field format (ID, Address, Recipient, Status,
+		// DeliveredAt) rather than the ReceiptFrame used by push.
+		// Without this handler the frame hits unknown_command and
+		// kills the connection — breaking receipt delivery for client
+		// nodes whose only return path is gossip through a full node.
+		//
+		// Deliberately separated from "send_delivery_receipt" (local-only
+		// RPC command) to maintain the command-isolation boundary.
+		s.handleInboundRelayDeliveryReceipt(conn, frame)
+		return true
+	case "push_notice":
+		s.handleInboundPushNotice(frame)
 		return true
 	case "announce_peer":
 		// Auth gate enforced above. Only authenticated peers may announce,
@@ -1123,18 +1317,20 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 // distinguish "command exists but you need auth" (→ auth_required) from
 // "command does not exist on this port" (→ unknown_command).
 var p2pWireCommands = map[string]bool{
-	"get_peers":             true,
-	"fetch_contacts":        true,
-	"ack_delete":            true,
-	"subscribe_inbox":       true,
-	"subscribed":            true,
-	"push_message":          true,
-	"push_delivery_receipt": true,
-	"announce_peer":         true,
-	"relay_message":         true,
-	"relay_hop_ack":         true,
-	"announce_routes":       true,
-	"file_command":          true,
+	"get_peers":              true,
+	"fetch_contacts":         true,
+	"ack_delete":             true,
+	"subscribe_inbox":        true,
+	"subscribed":             true,
+	"push_message":           true,
+	"push_delivery_receipt":  true,
+	"relay_delivery_receipt": true,
+	"push_notice":            true,
+	"announce_peer":          true,
+	"relay_message":          true,
+	"relay_hop_ack":          true,
+	"announce_routes":        true,
+	"file_command":           true,
 }
 
 // isP2PWireCommand returns true if the command name belongs to the
@@ -1172,7 +1368,18 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	case "ping":
 		return protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
 	case "get_peers":
-		return s.peersFrame(nil, true) // local command — unfiltered
+		// Local RPC: unfiltered merge of active CM slots + PeerProvider
+		// candidates, no network group filtering.
+		exchanged := s.buildPeerExchangeResponse(nil)
+		peers := make([]string, len(exchanged))
+		for i, a := range exchanged {
+			peers[i] = string(a)
+		}
+		return protocol.Frame{
+			Type:  "peers",
+			Count: len(peers),
+			Peers: peers,
+		}
 	case "fetch_identities":
 		return s.identitiesFrame()
 	case "fetch_contacts":
@@ -1647,6 +1854,8 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 	s.inboundTracked[conn] = struct{}{}
 	s.mu.Unlock()
 
+	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
+
 	if first {
 		s.markPeerConnected(resolved, peerDirectionInbound)
 	}
@@ -1664,6 +1873,14 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 	if s.connHasCapability(conn, domain.CapMeshRoutingV1) && s.connHasCapability(conn, domain.CapMeshRelayV1) {
 		s.sendFullTableSyncToInbound(conn, peerIdentity)
 	}
+
+	// Drain fire-and-forget frames (push_message, push_notice) that were
+	// queued for this peer before the inbound connection was authenticated.
+	// The outbound session might not exist (CM slot full), but the inbound
+	// conn can carry these frames. Only fire-and-forget frames are safe to
+	// send on the inbound conn because they don't expect a response that
+	// would interleave with the peer's request/reply traffic.
+	s.flushPendingFireAndForget(conn, resolved)
 }
 
 // trackInboundDisconnect decrements the inbound connection reference count
@@ -1692,6 +1909,14 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddre
 
 	if last {
 		s.markPeerDisconnected(resolved, nil)
+
+		// Notify the ConnectionManager that an inbound slot freed up.
+		// This is a hint (non-blocking, safe to drop) — CM may choose
+		// to backfill the lost inbound with an outgoing dial.
+		if s.connManager != nil {
+			ip, _, _ := splitHostPort(string(resolved))
+			s.connManager.EmitHint(InboundClosed{IP: ip, Identity: peerIdentity})
+		}
 	}
 
 	// Routing table: deregister direct peer when the last relay-capable
@@ -1896,40 +2121,6 @@ func (s *Service) addBanScore(conn net.Conn, delta int) {
 	s.mu.Unlock()
 	if !entry.Blacklisted.IsZero() {
 		log.Warn().Str("ip", ip).Int("score", entry.Score).Time("until", entry.Blacklisted).Msg("blacklist")
-	}
-}
-
-// peersFrame builds a "peers" response.  When localCaller is true the
-// full unfiltered peer list is returned (operator / CLI).  For remote
-// peers non-routable addresses (local, unknown) are always stripped —
-// they must never be relayed.  When remoteGroups is non-nil the result
-// is further narrowed to groups the remote peer can reach.
-func (s *Service) peersFrame(remoteGroups map[domain.NetGroup]struct{}, localCaller bool) protocol.Frame {
-	peers := s.Peers()
-	addresses := make([]string, 0, len(peers))
-
-	for _, peer := range peers {
-		if !localCaller {
-			g := classifyAddress(peer.Address)
-			// Non-routable addresses (local/unknown) are never relayed
-			// to remote peers.
-			if !g.IsRoutable() {
-				continue
-			}
-			// When the remote peer's reachable groups are known, skip
-			// groups it cannot reach.
-			if remoteGroups != nil {
-				if _, ok := remoteGroups[g]; !ok {
-					continue
-				}
-			}
-		}
-		addresses = append(addresses, string(peer.Address))
-	}
-	return protocol.Frame{
-		Type:  "peers",
-		Count: len(addresses),
-		Peers: addresses,
 	}
 }
 
@@ -2247,6 +2438,14 @@ func (s *Service) removeSubscriberConnLocked(recipient string, conn net.Conn) {
 }
 
 func (s *Service) refreshKnowledgeFromPeers() {
+	// When ConnectionManager is active it owns the outbound session
+	// lifecycle — slots are filled continuously via the event loop.
+	// Calling the legacy ensurePeerSessions here would bypass CM slot
+	// accounting, retry/backoff and generation guards.
+	if s.connManager != nil {
+		return
+	}
+
 	s.mu.RLock()
 	lastSync := s.lastSync
 	s.mu.RUnlock()
@@ -2335,7 +2534,7 @@ func (s *Service) handleAckDeleteFrame(conn net.Conn, frame protocol.Frame) (pro
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "unknown ack type"}, false
 	}
-	log.Info().Str("address", frame.Address).Str("type", frame.AckType).Str("id", frame.ID).Str("status", frame.Status).Int("removed", count).Msg("ack_delete_applied")
+	log.Info().Str("node", s.identity.Address).Str("address", frame.Address).Str("type", frame.AckType).Str("id", frame.ID).Str("status", frame.Status).Int("removed", count).Msg("ack_delete_applied")
 	return protocol.Frame{Type: "ack_deleted", AckType: frame.AckType, ID: frame.ID, Count: count, Status: "ok"}, true
 }
 
@@ -2353,6 +2552,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		senderBoxSig := s.boxSigs[msg.Sender]
 		s.mu.RUnlock()
 		if senderPubKey == "" {
+			log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Msg("storeIncomingMessage: unknown sender key")
 			return false, 0, protocol.ErrCodeUnknownSenderKey
 		}
 		// Verify boxkey binding signature at ingest as required by encryption.md.
@@ -2369,13 +2569,24 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	s.cleanupExpiredMessages()
 
 	s.mu.Lock()
-	s.known[msg.Sender] = struct{}{}
+	// DM senders are cryptographically verified above (VerifyEnvelope),
+	// so they are safe to register as known identities unconditionally.
+	// Non-DM senders are only registered when the node already holds
+	// their public key — this prevents an attacker from injecting
+	// arbitrary strings into the known-identities set via forged
+	// sender fields on non-DM messages.
+	if msg.Topic == "dm" {
+		s.known[msg.Sender] = struct{}{}
+	} else if _, hasPK := s.pubKeys[msg.Sender]; hasPK {
+		s.known[msg.Sender] = struct{}{}
+	}
 	if msg.Recipient != "*" {
 		s.known[msg.Recipient] = struct{}{}
 	}
 	if _, ok := s.seen[string(msg.ID)]; ok {
 		count := len(s.topics[msg.Topic])
 		s.mu.Unlock()
+		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_dedup")
 		return false, count, ""
 	}
 	s.seen[string(msg.ID)] = struct{}{}
@@ -2426,10 +2637,18 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// already persisted in chatlog, and adding it here would cause
 	// fetchDMHeadersFrame() to include it in DMHeaders, which lets
 	// repairUnreadFromHeaders() re-increment unread counts on the UI.
+	beforeCount := len(s.topics[msg.Topic])
 	if storeResult != StoreDuplicate {
 		s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
 	}
 	count := len(s.topics[msg.Topic])
+	// Collect existing IDs for duplicate diagnostics.
+	var existingIDs []string
+	if count > 1 {
+		for _, e := range s.topics[msg.Topic] {
+			existingIDs = append(existingIDs, string(e.ID))
+		}
+	}
 	s.mu.Unlock()
 
 	// Only notify the desktop UI for messages this node participates in.
@@ -2449,7 +2668,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		})
 	}
 
-	log.Info().Str("topic", msg.Topic).Str("id", string(msg.ID)).Str("from", msg.Sender).Str("to", msg.Recipient).Str("flag", string(msg.Flag)).Msg("stored message")
+	_, callerFile, callerLine, _ := runtime.Caller(1)
+	log.Info().Str("node", s.identity.Address).Str("topic", msg.Topic).Str("id", string(msg.ID)).Str("from", msg.Sender).Str("to", msg.Recipient).Str("flag", string(msg.Flag)).Int("before_count", beforeCount).Int("topic_count", count).Bool("is_local", isLocal).Str("caller", fmt.Sprintf("%s:%d", callerFile, callerLine)).Strs("topic_ids", existingIDs).Msg("stored message")
 
 	// Push and gossip are independent delivery mechanisms:
 	//
@@ -2633,7 +2853,7 @@ func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipi
 	for address, items := range s.pending {
 		remaining := items[:0]
 		for _, item := range items {
-			if item.Frame.Type == "send_delivery_receipt" &&
+			if item.Frame.Type == "relay_delivery_receipt" &&
 				item.Frame.ID == string(messageID) &&
 				item.Frame.Recipient == recipient &&
 				item.Frame.Status == status {
@@ -2663,6 +2883,14 @@ func (s *Service) fetchMessagesFrame(topic string) protocol.Frame {
 	items := make([]protocol.MessageFrame, 0, len(messages))
 	for _, msg := range messages {
 		items = append(items, messageFrame(msg))
+	}
+
+	if len(items) > 0 {
+		ids := make([]string, len(items))
+		for i, m := range items {
+			ids[i] = m.ID
+		}
+		log.Debug().Str("node", s.identity.Address).Str("topic", topic).Int("count", len(items)).Strs("ids", ids).Msg("fetch_messages_result")
 	}
 
 	return protocol.Frame{Type: "messages", Topic: topic, Count: len(items), Messages: items}
@@ -2876,6 +3104,7 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 	}
 
 	inbox := s.fetchInboxFrame("dm", sub.recipient)
+	log.Info().Str("node", s.identity.Address).Str("recipient", sub.recipient).Int("backlog_count", len(inbox.Messages)).Msg("pushBacklogToSubscriber")
 	for _, item := range inbox.Messages {
 		if createdAt, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil && s.messageDeliveryExpired(createdAt.UTC(), item.TTLSeconds) {
 			continue
@@ -3149,10 +3378,47 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 	}
 }
 
+// isVerifiedSender checks whether the given sender address corresponds to
+// a known, cryptographically authenticated identity. The sender is accepted
+// when any of these conditions is true:
+//
+//  1. sender is this node's own identity (local authorship)
+//  2. sender matches the relay peer's authenticated identity (direct authorship)
+//  3. sender has a registered public key in s.pubKeys (previously authenticated
+//     through identity exchange — hello/welcome, fetch_contacts, or trust store)
+//
+// This prevents arbitrary sender strings from entering the message store
+// and poisoning s.known. For DM messages, storeIncomingMessage enforces
+// VerifyEnvelope independently, so this gate targets non-DM topics only.
+func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerIdentity) bool {
+	if sender == s.identity.Address {
+		return true
+	}
+	if relayPeerIdentity != "" && sender == string(relayPeerIdentity) {
+		return true
+	}
+	s.mu.RLock()
+	_, hasPubKey := s.pubKeys[sender]
+	s.mu.RUnlock()
+	return hasPubKey
+}
+
 // handleInboundPushMessage processes a push_message frame received on an
-// inbound connection. This happens when the remote peer responds to our
-// request_inbox with messages destined for this node. The peer identity
-// is implicit — already established during authentication.
+// authenticated inbound TCP connection. Two delivery paths converge here:
+//
+//  1. Backlog push — remote peer responds to subscribe_inbox with stored
+//     messages for this node's identity.
+//  2. Gossip push — remote peer forwards a message as part of epidemic
+//     dissemination (sender ≠ relay peer, same as Bitcoin's tx relay).
+//
+// Sender spoofing protection:
+//   - DM messages: VerifyEnvelope validates the cryptographic signature
+//     against the sender's public key — spoofing is impossible without
+//     the private key.
+//   - Non-DM messages: the sender must be a verified identity — either
+//     the relay peer itself, this node, or a peer whose public key was
+//     previously exchanged through the identity protocol. Unverified
+//     senders are rejected and the relay peer's ban score is incremented.
 func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) {
 	if frame.Item == nil {
 		return
@@ -3173,6 +3439,24 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 	}
 
 	peerAddr := s.inboundPeerAddress(conn)
+	peerIdentity := s.inboundPeerIdentity(conn)
+
+	// Non-DM sender verification: reject messages whose sender is not a
+	// known identity. DM messages have their own cryptographic verification
+	// in storeIncomingMessage (VerifyEnvelope), so this gate targets only
+	// non-DM topics where no per-message signature exists.
+	if msg.Topic != "dm" && !s.isVerifiedSender(msg.Sender, peerIdentity) {
+		log.Warn().
+			Str("node", s.identity.Address).
+			Str("peer", string(peerAddr)).
+			Str("relay_identity", string(peerIdentity)).
+			Str("id", string(msg.ID)).
+			Str("sender", msg.Sender).
+			Str("topic", msg.Topic).
+			Msg("push_message rejected: non-DM sender identity not verified")
+		s.addBanScore(conn, banIncrementInvalidSig)
+		return
+	}
 
 	stored, _, errCode := s.storeIncomingMessage(msg, true)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
@@ -3183,17 +3467,32 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 			stored, _, _ = s.storeIncomingMessage(msg, true)
 		}
 	}
-	if stored {
-		s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
-	} else {
-		log.Warn().Str("peer", string(peerAddr)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete_inbound")
+	if stored && msg.Topic == "dm" {
+		// Prefer the outbound session for ack_delete (single write queue,
+		// no interleaving risk). Fall back to the inbound conn when no
+		// outbound session exists — this is the fix for the case where the
+		// remote peer connected to us but we haven't dialed them back.
+		if session := s.peerSession(peerAddr); session != nil && session.authOK {
+			s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
+		} else {
+			s.sendAckDeleteOnConn(conn, "dm", msg.ID, "")
+		}
+	} else if !stored {
+		log.Warn().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", string(peerIdentity)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed")
 	}
-	log.Info().Str("peer", string(peerAddr)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message (inbound request_inbox)")
+	log.Info().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", string(peerIdentity)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("topic", msg.Topic).Bool("stored", stored).Msg("received pushed message (inbound)")
 }
 
 // handleInboundPushDeliveryReceipt processes a push_delivery_receipt frame
 // received on an inbound connection. This happens when the remote peer
-// responds to our request_inbox with delivery receipts destined for this node.
+// responds to our subscribe_inbox with delivery receipts destined for this
+// node's identity.
+//
+// Identity binding: the receipt's Recipient (the DM sender who should receive
+// the delivery confirmation) must match either our own identity or an identity
+// we actively subscribe to via the inbound peer. Without this check an
+// authenticated peer could push a receipt with arbitrary Sender/Recipient and
+// corrupt the delivery state for a conversation it does not participate in.
 func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol.Frame) {
 	if frame.Receipt == nil {
 		return
@@ -3202,10 +3501,101 @@ func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol
 	if err != nil {
 		return
 	}
-	s.storeDeliveryReceipt(receipt)
+
 	peerAddr := s.inboundPeerAddress(conn)
-	s.sendAckDeleteToPeer(peerAddr, "receipt", receipt.MessageID, receipt.Status)
-	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound request_inbox)")
+
+	// Identity gate: accept only receipts whose Recipient matches our own
+	// identity or an identity with an active inbound subscriber (full-node
+	// relay holding receipts for connected clients).
+	if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
+		log.Warn().
+			Str("peer", string(peerAddr)).
+			Str("message_id", string(receipt.MessageID)).
+			Str("receipt_recipient", receipt.Recipient).
+			Str("local_identity", s.identity.Address).
+			Msg("push_delivery_receipt rejected: recipient does not match local identity or active subscriber")
+		s.addBanScore(conn, banIncrementInvalidSig)
+		return
+	}
+
+	s.storeDeliveryReceipt(receipt)
+	if session := s.peerSession(peerAddr); session != nil && session.authOK {
+		s.sendAckDeleteToPeer(peerAddr, "receipt", receipt.MessageID, receipt.Status)
+	} else {
+		s.sendAckDeleteOnConn(conn, "receipt", receipt.MessageID, receipt.Status)
+	}
+	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound)")
+}
+
+// handleInboundRelayDeliveryReceipt processes a relay_delivery_receipt frame
+// received on an inbound TCP connection. This is the gossip receipt path:
+// the remote peer forwards a receipt using flat Frame fields (ID, Address,
+// Recipient, Status, DeliveredAt) rather than the nested ReceiptFrame used
+// by push_delivery_receipt.
+//
+// This command is intentionally named differently from the local-only
+// "send_delivery_receipt" to enforce command-isolation: local RPC commands
+// must never be callable from the P2P wire (see docs/command-isolation.md).
+//
+// Identity binding: same gate as push_delivery_receipt — the receipt's
+// Recipient must match this node's identity or an active subscriber.
+// Without this, any authenticated peer could inject a forged receipt and
+// advance another conversation's delivery state via storeDeliveryReceipt
+// (which clears pending outbound state and updates MessageStore).
+func (s *Service) handleInboundRelayDeliveryReceipt(conn net.Conn, frame protocol.Frame) {
+	receipt, err := receiptFromFrame(frame)
+	if err != nil {
+		return
+	}
+
+	peerAddr := s.inboundPeerAddress(conn)
+
+	if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
+		log.Warn().
+			Str("peer", string(peerAddr)).
+			Str("message_id", string(receipt.MessageID)).
+			Str("receipt_recipient", receipt.Recipient).
+			Str("local_identity", s.identity.Address).
+			Msg("relay_delivery_receipt rejected: recipient does not match local identity or active subscriber")
+		s.addBanScore(conn, banIncrementInvalidSig)
+		return
+	}
+
+	s.storeDeliveryReceipt(receipt)
+	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt (inbound)")
+}
+
+// handleInboundPushNotice processes a push_notice frame received on an
+// authenticated P2P connection (inbound TCP or outbound session). The remote
+// peer gossips an encrypted notice; we store it locally and re-gossip to our
+// own routing targets if new. Deduplication via notice ID prevents infinite
+// loops.
+func (s *Service) handleInboundPushNotice(frame protocol.Frame) {
+	ttl := time.Duration(frame.TTLSeconds) * time.Second
+	if ttl <= 0 || strings.TrimSpace(frame.Ciphertext) == "" {
+		return
+	}
+
+	s.cleanupExpiredNotices()
+
+	id := gazeta.ID(frame.Ciphertext)
+	expiresAt := time.Now().UTC().Add(ttl)
+
+	s.mu.Lock()
+	if existing, ok := s.notices[id]; ok && existing.ExpiresAt.After(time.Now().UTC()) {
+		s.mu.Unlock()
+		return
+	}
+	s.notices[id] = gazeta.Notice{
+		ID:         id,
+		Ciphertext: frame.Ciphertext,
+		ExpiresAt:  expiresAt,
+	}
+	s.mu.Unlock()
+
+	if s.CanForward() {
+		go s.gossipNotice(ttl, frame.Ciphertext)
+	}
 }
 
 func expectedReplyType(requestType string) string {
@@ -3223,8 +3613,18 @@ func expectedReplyType(requestType string) string {
 // the peer session without waiting for a response. These frames are delivered
 // on a best-effort basis; the remote side may send an ack asynchronously, but
 // the sender must not block the session waiting for it.
+//
+// push_message, push_notice, and relay_delivery_receipt are fire-and-forget
+// because the gossip path writes them via enqueuePeerFrame → sendCh, and
+// the remote dispatcher stores the payload without writing a response frame.
+// Blocking the session on a reply that never comes would stall gossip delivery.
 func isFireAndForgetFrame(frameType string) bool {
-	return isRelayFrame(frameType) || frameType == "announce_routes" || frameType == protocol.FileCommandFrameType
+	switch frameType {
+	case "announce_routes", "push_message", "push_notice", "relay_delivery_receipt":
+		return true
+	default:
+		return isRelayFrame(frameType) || frameType == protocol.FileCommandFrameType
+	}
 }
 
 // heartbeatInterval is the base interval between ping/pong heartbeats.
@@ -3246,6 +3646,16 @@ func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
 		subs = append(subs, sub)
 	}
 	return subs
+}
+
+// hasSubscriber returns true if at least one active subscriber exists for
+// the given recipient identity. Used by push_delivery_receipt identity
+// binding to allow a full-node relay to accept receipts for identities it
+// serves (i.e., identities with active subscribe_inbox subscriptions).
+func (s *Service) hasSubscriber(recipient string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.subs[recipient]) > 0
 }
 
 func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
@@ -3324,6 +3734,7 @@ func (s *Service) cleanupExpiredMessages() {
 			if message.Flag == protocol.MessageFlagAutoDeleteTTL && message.TTLSeconds > 0 {
 				expiresAt := message.CreatedAt.Add(time.Duration(message.TTLSeconds) * time.Second)
 				if !expiresAt.After(now) {
+					log.Debug().Str("node", s.identity.Address).Str("topic", topic).Str("id", string(message.ID)).Msg("cleanupExpiredMessages: removing expired")
 					continue
 				}
 			}

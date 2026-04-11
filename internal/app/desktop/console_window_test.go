@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/rpc"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 // newTestConsoleWindow creates a ConsoleWindow backed by a CommandTable
@@ -380,5 +381,74 @@ func TestNewConsoleDonateEntries(t *testing.T) {
 
 	if consoleDonateURL != "https://pirate.cash/donate/" {
 		t.Fatalf("consoleDonateURL = %q, want https://pirate.cash/donate/", consoleDonateURL)
+	}
+}
+
+func TestActivePeerHealth_FiltersCorrectly(t *testing.T) {
+	peers := []service.PeerHealth{
+		{Address: "1.2.3.4:9000", Connected: true, SlotState: "active"},         // CM slot + connected → include
+		{Address: "1.2.3.5:9000", Connected: false, SlotState: "queued"},        // CM slot queued → include
+		{Address: "1.2.3.6:9000", Connected: false, SlotState: "dialing"},       // CM slot dialing → include
+		{Address: "1.2.3.7:9000", Connected: false, SlotState: "retry_wait"},    // CM slot retry_wait → include
+		{Address: "1.2.3.8:9000", Connected: true, SlotState: ""},               // inbound connected, no slot → include
+		{Address: "1.2.3.9:9000", Connected: false, SlotState: "active"},        // CM slot active, not connected yet → include
+		{Address: "1.2.3.10:9000", Connected: false, SlotState: "reconnecting"}, // CM slot reconnecting → include
+		{Address: "1.2.3.11:9000", Connected: false, SlotState: ""},             // no slot, not connected → exclude (known-only)
+	}
+
+	active := activePeerHealth(peers)
+
+	// All peers with SlotState or Connected should be included;
+	// only 1.2.3.11 (no slot, not connected) should be excluded.
+	if len(active) != 7 {
+		t.Fatalf("expected 7 active peers, got %d", len(active))
+	}
+
+	addresses := make(map[string]bool)
+	for _, p := range active {
+		addresses[p.Address] = true
+	}
+
+	want := []string{
+		"1.2.3.4:9000", "1.2.3.5:9000", "1.2.3.6:9000", "1.2.3.7:9000",
+		"1.2.3.8:9000", "1.2.3.9:9000", "1.2.3.10:9000",
+	}
+	for _, addr := range want {
+		if !addresses[addr] {
+			t.Errorf("expected %s in active peers", addr)
+		}
+	}
+
+	if addresses["1.2.3.11:9000"] {
+		t.Error("did not expect known-only peer 1.2.3.11:9000 in active peers")
+	}
+}
+
+func TestActivePeerHealth_EmptyInput(t *testing.T) {
+	active := activePeerHealth(nil)
+	if len(active) != 0 {
+		t.Fatalf("expected 0 active peers for nil input, got %d", len(active))
+	}
+}
+
+func TestActivePeerSummary_Fallback(t *testing.T) {
+	peers := []service.PeerHealth{
+		{State: "healthy", BytesReceived: 1024, BytesSent: 512},
+		{State: "healthy", BytesReceived: 2048, BytesSent: 1024},
+		{State: "degraded", BytesReceived: 100, BytesSent: 50},
+	}
+
+	// activePeerSummary with nil parent.t will hit the fallback path
+	// because parent.t("node.active_peer.summary", ...) returns the key itself.
+	summary := activePeerSummary(&Window{}, peers)
+
+	if !strings.Contains(summary, "Healthy: 2") {
+		t.Errorf("expected 'Healthy: 2' in summary, got: %s", summary)
+	}
+	if !strings.Contains(summary, "Degraded: 1") {
+		t.Errorf("expected 'Degraded: 1' in summary, got: %s", summary)
+	}
+	if !strings.Contains(summary, "Stalled: 0") {
+		t.Errorf("expected 'Stalled: 0' in summary, got: %s", summary)
 	}
 }

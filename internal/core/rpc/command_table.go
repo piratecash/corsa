@@ -233,9 +233,12 @@ func (t *CommandTable) AllNames() []string {
 // Pass nil for chatlog, dmRouter, or metricsProvider to simulate standalone
 // node mode — those commands are registered as unavailable (503, hidden from help).
 //
+// If node additionally implements RoutingProvider or ConnectionDiagnosticProvider,
+// the corresponding command groups are registered; otherwise they become 503.
+//
 // All commands use camelCase names. Snake_case aliases are registered for
 // backward compatibility and will be removed after 2 releases.
-func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider, routingProvider RoutingProvider) {
+func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider) {
 	RegisterSystemCommands(t, node)
 	RegisterNetworkCommands(t, node)
 	RegisterMeshCommands(t, node)
@@ -245,7 +248,22 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 	RegisterChatlogCommands(t, chatlog)
 	RegisterNoticeCommands(t, node)
 	RegisterMetricsCommands(t, metricsProvider)
-	RegisterRoutingCommands(t, routingProvider)
+
+	// Node optionally implements RoutingProvider and ConnectionDiagnosticProvider.
+	// Extract via type assertion — nil means the feature is unavailable and
+	// the corresponding commands are registered as 503.
+	var rp RoutingProvider
+	if r, ok := node.(RoutingProvider); ok {
+		rp = r
+	}
+	RegisterRoutingCommands(t, rp)
+
+	var cd ConnectionDiagnosticProvider
+	if c, ok := node.(ConnectionDiagnosticProvider); ok {
+		cd = c
+	}
+	RegisterConnectionCommands(t, cd)
+
 	registerSnakeCaseAliases(t)
 }
 
@@ -292,6 +310,9 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_route_table":       "fetchRouteTable",
 		"fetch_route_summary":     "fetchRouteSummary",
 		"fetch_route_lookup":      "fetchRouteLookup",
+		"get_active_peers":        "getActivePeers",
+		"list_peers":              "listPeers",
+		"list_banned":             "listBanned",
 	}
 	for old, canonical := range aliases {
 		t.RegisterAlias(old, canonical)
@@ -474,6 +495,53 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 		CommandInfo{Name: "fetchReachableIds", Description: "Get identities reachable via mesh routing", Category: "network"},
 		func(req CommandRequest) CommandResponse {
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"}))
+		},
+	)
+}
+
+// RegisterConnectionCommands registers getActivePeers, listPeers, listBanned.
+// When the ConnectionDiagnosticProvider is nil (CM/PP not wired), commands
+// are registered as unavailable — hidden from help/autocomplete and returning
+// 503 on execution.
+func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider) {
+	activePeersInfo := CommandInfo{Name: "getActivePeers", Description: "Get ConnectionManager slot snapshot", Category: "network"}
+	listPeersInfo := CommandInfo{Name: "listPeers", Description: "Get all known peers with exclude reasons", Category: "network"}
+	listBannedInfo := CommandInfo{Name: "listBanned", Description: "Get banned IPs with reasons", Category: "network"}
+
+	if cd == nil {
+		t.RegisterUnavailable(activePeersInfo)
+		t.RegisterUnavailable(listPeersInfo)
+		t.RegisterUnavailable(listBannedInfo)
+		return
+	}
+
+	t.Register(activePeersInfo,
+		func(req CommandRequest) CommandResponse {
+			data, err := cd.ActivePeersJSON()
+			if err != nil {
+				return internalError(fmt.Errorf("active peers: %w", err))
+			}
+			return CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(listPeersInfo,
+		func(req CommandRequest) CommandResponse {
+			data, err := cd.ListPeersJSON()
+			if err != nil {
+				return internalError(fmt.Errorf("list peers: %w", err))
+			}
+			return CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(listBannedInfo,
+		func(req CommandRequest) CommandResponse {
+			data, err := cd.ListBannedJSON()
+			if err != nil {
+				return internalError(fmt.Errorf("list banned: %w", err))
+			}
+			return CommandResponse{Data: data}
 		},
 	)
 }

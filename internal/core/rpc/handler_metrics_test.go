@@ -78,7 +78,7 @@ func TestMetricsTrafficHistoryNilProvider(t *testing.T) {
 
 func TestMetricsCommandHiddenWhenProviderNil(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil, nil)
+	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil)
 
 	for _, cmd := range table.Commands() {
 		if cmd.Name == "fetchTrafficHistory" {
@@ -98,7 +98,7 @@ func TestMetricsCommandVisibleWhenProviderSet(t *testing.T) {
 	metrics := &mockMetricsProvider{
 		snapshot: protocol.Frame{Type: "traffic_history", TrafficHistory: &protocol.TrafficHistoryFrame{}},
 	}
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, metrics, nil)
+	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, metrics)
 
 	found := false
 	for _, cmd := range table.Commands() {

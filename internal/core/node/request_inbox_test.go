@@ -3,14 +3,30 @@ package node
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/gazeta"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
+
+// drainPipe creates a net.Pipe and starts a goroutine that drains reads on
+// the remote end so that writes to the returned conn never block.  The
+// remote end is closed automatically when the test finishes.
+func drainPipe(t *testing.T) net.Conn {
+	t.Helper()
+	conn, remote := net.Pipe()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = remote.Close()
+	})
+	go func() { _, _ = io.Copy(io.Discard, remote) }()
+	return conn
+}
 
 // TestRespondToInboxRequestNilSession verifies that respondToInboxRequest
 // does not panic when called with a nil session.
@@ -243,4 +259,237 @@ func (s *Service) initMaps() {
 	s.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
 	s.observedAddrs = make(map[domain.PeerIdentity]string)
 	s.reachableGroups = make(map[domain.NetGroup]struct{})
+	s.relayStates = newRelayStateStore()
+}
+
+// ---------------------------------------------------------------------------
+// push_delivery_receipt identity binding tests
+// ---------------------------------------------------------------------------
+
+// TestPushDeliveryReceiptRejectsUnrelatedRecipient verifies that
+// handleInboundPushDeliveryReceipt drops a receipt whose Recipient does
+// not match the local identity and has no active subscriber. This prevents
+// an authenticated peer from spoofing delivery state for foreign conversations.
+func TestPushDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "local-identity-aaa"}
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	receiptFrame := protocol.ReceiptFrame{
+		MessageID:   "msg-1",
+		Sender:      "foreign-sender",
+		Recipient:   "foreign-recipient",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	svc.handleInboundPushDeliveryReceipt(conn, protocol.Frame{
+		Type:    "push_delivery_receipt",
+		Receipt: &receiptFrame,
+	})
+
+	svc.mu.RLock()
+	count := len(svc.receipts["foreign-recipient"])
+	svc.mu.RUnlock()
+	if count != 0 {
+		t.Fatalf("receipt with unrelated Recipient should not be stored, got %d", count)
+	}
+}
+
+// TestPushDeliveryReceiptAcceptsOwnIdentity verifies that
+// handleInboundPushDeliveryReceipt stores a receipt whose Recipient matches
+// the local node identity.
+func TestPushDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = id
+
+	conn := drainPipe(t)
+
+	receiptFrame := protocol.ReceiptFrame{
+		MessageID:   "msg-2",
+		Sender:      "some-sender",
+		Recipient:   id.Address,
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	svc.handleInboundPushDeliveryReceipt(conn, protocol.Frame{
+		Type:    "push_delivery_receipt",
+		Receipt: &receiptFrame,
+	})
+
+	svc.mu.RLock()
+	count := len(svc.receipts[id.Address])
+	svc.mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("receipt for own identity should be stored, got %d", count)
+	}
+}
+
+// TestPushDeliveryReceiptAcceptsActiveSubscriber verifies that a full-node
+// relay accepts a receipt whose Recipient matches an active subscriber
+// identity, even if it differs from the local node identity.
+func TestPushDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = id
+
+	// Register a subscriber for a client identity.
+	clientID := "client-identity-bbb"
+	subConn := drainPipe(t)
+	svc.subs[clientID] = map[string]*subscriber{
+		"sub-1": {id: "sub-1", recipient: clientID, conn: subConn},
+	}
+
+	conn := drainPipe(t)
+
+	receiptFrame := protocol.ReceiptFrame{
+		MessageID:   "msg-3",
+		Sender:      "some-sender",
+		Recipient:   clientID,
+		Status:      "seen",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	svc.handleInboundPushDeliveryReceipt(conn, protocol.Frame{
+		Type:    "push_delivery_receipt",
+		Receipt: &receiptFrame,
+	})
+
+	svc.mu.RLock()
+	count := len(svc.receipts[clientID])
+	svc.mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("receipt for active subscriber should be stored, got %d", count)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// relay_delivery_receipt identity binding tests
+// ---------------------------------------------------------------------------
+
+// TestRelayDeliveryReceiptRejectsUnrelatedRecipient verifies that
+// handleInboundRelayDeliveryReceipt drops a relay receipt whose Recipient
+// does not match the local identity and has no active subscriber.
+func TestRelayDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "local-identity-aaa"}
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	svc.handleInboundRelayDeliveryReceipt(conn, protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-relay-1",
+		Address:     "foreign-sender",
+		Recipient:   "foreign-recipient",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	svc.mu.RLock()
+	count := len(svc.receipts["foreign-recipient"])
+	svc.mu.RUnlock()
+	if count != 0 {
+		t.Fatalf("relay receipt with unrelated Recipient should not be stored, got %d", count)
+	}
+}
+
+// TestRelayDeliveryReceiptAcceptsOwnIdentity verifies that
+// handleInboundRelayDeliveryReceipt stores a relay receipt whose
+// Recipient matches the local node identity.
+func TestRelayDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = id
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	svc.handleInboundRelayDeliveryReceipt(conn, protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-relay-2",
+		Address:     "some-sender",
+		Recipient:   id.Address,
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	svc.mu.RLock()
+	count := len(svc.receipts[id.Address])
+	svc.mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("relay receipt for own identity should be stored, got %d", count)
+	}
+}
+
+// TestRelayDeliveryReceiptAcceptsActiveSubscriber verifies that a full-node
+// relay accepts a relay receipt whose Recipient matches an active subscriber.
+func TestRelayDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = id
+
+	clientID := "client-identity-ccc"
+	subConn, _ := net.Pipe()
+	defer func() { _ = subConn.Close() }()
+	svc.subs[clientID] = map[string]*subscriber{
+		"sub-1": {id: "sub-1", recipient: clientID, conn: subConn},
+	}
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	svc.handleInboundRelayDeliveryReceipt(conn, protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-relay-3",
+		Address:     "some-sender",
+		Recipient:   clientID,
+		Status:      "seen",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	svc.mu.RLock()
+	count := len(svc.receipts[clientID])
+	svc.mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("relay receipt for active subscriber should be stored, got %d", count)
+	}
 }

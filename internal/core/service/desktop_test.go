@@ -867,6 +867,196 @@ func TestBuildConsolePeersPayloadIncludesPeerIdentity(t *testing.T) {
 	}
 }
 
+func TestBuildConsolePeersPayloadIPDedup(t *testing.T) {
+	t.Parallel()
+
+	// Two addresses share the same IP (10.0.0.1) but different ports.
+	// 10.0.0.1:9333 is in peers[] (from buildPeerExchangeResponse).
+	// 10.0.0.1:9334 is health-only (inbound connection, different port).
+	// The Peers field should contain only ONE entry per IP.
+	payload := buildConsolePeersPayload(
+		[]string{"10.0.0.1:9333", "10.0.0.2:9333"},
+		[]PeerHealth{
+			{Address: "10.0.0.1:9333", State: "healthy", Connected: true},
+			{Address: "10.0.0.1:9334", State: "healthy", Connected: true}, // same IP, health-only
+			{Address: "10.0.0.2:9333", State: "reconnecting", Connected: false},
+		},
+	)
+
+	type peersPayload struct {
+		Total     int                 `json:"total"`
+		Count     int                 `json:"count"`
+		Peers     []ConsolePeerStatus `json:"peers"`
+		Connected []ConsolePeerStatus `json:"connected"`
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	var result peersPayload
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+
+	// IP-deduped: 10.0.0.1 (one entry) + 10.0.0.2 = 2 entries in Peers.
+	if result.Total != 2 {
+		t.Fatalf("expected total=2 (IP-deduped), got %d; peers: %+v", result.Total, result.Peers)
+	}
+	if len(result.Peers) != 2 {
+		t.Fatalf("expected 2 peers (IP-deduped), got %d", len(result.Peers))
+	}
+
+	// Deprecated connected[] should still have both connected entries (exact-address semantics).
+	if result.Count != 2 {
+		t.Fatalf("expected count=2 (connected, exact-address), got %d", result.Count)
+	}
+}
+
+func TestBuildConsolePeersPayloadIPDedupConnectedBeatsKnown(t *testing.T) {
+	t.Parallel()
+
+	// 10.0.0.1:9333 is in peers[] but NOT connected (known-only, no health).
+	// 10.0.0.1:9334 is health-only but connected.
+	// The Peers field should keep the connected one for IP 10.0.0.1.
+	payload := buildConsolePeersPayload(
+		[]string{"10.0.0.1:9333"},
+		[]PeerHealth{
+			{Address: "10.0.0.1:9334", State: "healthy", Connected: true},
+		},
+	)
+
+	type peersPayload struct {
+		Total int                 `json:"total"`
+		Peers []ConsolePeerStatus `json:"peers"`
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	var result peersPayload
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+
+	if result.Total != 1 {
+		t.Fatalf("expected total=1 (IP-deduped), got %d", result.Total)
+	}
+	if len(result.Peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(result.Peers))
+	}
+	// The connected health-only entry should win over the known-only peer.
+	if result.Peers[0].Address != "10.0.0.1:9334" {
+		t.Errorf("expected connected address 10.0.0.1:9334 to win, got %q", result.Peers[0].Address)
+	}
+	if !result.Peers[0].Connected {
+		t.Error("expected winning entry to be connected")
+	}
+}
+
+func TestBuildConsolePeersPayloadIPDedupPendingBeatsCandidate(t *testing.T) {
+	t.Parallel()
+
+	// 10.0.0.1:9333 is in peers[] but has no health → candidate (priority 0).
+	// 10.0.0.1:9334 is health-only, NOT connected → pending (priority 1).
+	// The pending entry must replace the candidate for IP 10.0.0.1.
+	payload := buildConsolePeersPayload(
+		[]string{"10.0.0.1:9333"},
+		[]PeerHealth{
+			{Address: "10.0.0.1:9334", State: "reconnecting", Connected: false},
+		},
+	)
+
+	type peersPayload struct {
+		Total int                 `json:"total"`
+		Peers []ConsolePeerStatus `json:"peers"`
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	var result peersPayload
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+
+	if result.Total != 1 {
+		t.Fatalf("expected total=1 (IP-deduped), got %d", result.Total)
+	}
+	if len(result.Peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(result.Peers))
+	}
+	// Pending health-only entry must win over the candidate.
+	if result.Peers[0].Address != "10.0.0.1:9334" {
+		t.Errorf("expected pending address 10.0.0.1:9334 to win over candidate, got %q", result.Peers[0].Address)
+	}
+	if result.Peers[0].Status != "pending" {
+		t.Errorf("expected status='pending', got %q", result.Peers[0].Status)
+	}
+	if result.Peers[0].Connected {
+		t.Error("expected winning entry to NOT be connected (pending, not candidate)")
+	}
+}
+
+func TestBuildConsolePeersPayloadStatusDiscriminator(t *testing.T) {
+	t.Parallel()
+
+	// Three entries: one connected, one pending (has health but not connected),
+	// one candidate (in peers[] but no health entry).
+	payload := buildConsolePeersPayload(
+		[]string{"10.0.0.1:9333", "10.0.0.2:9333", "10.0.0.3:9333"},
+		[]PeerHealth{
+			{Address: "10.0.0.1:9333", State: "healthy", Connected: true},
+			{Address: "10.0.0.2:9333", State: "reconnecting", Connected: false},
+		},
+	)
+
+	type peersPayload struct {
+		Peers     []ConsolePeerStatus `json:"peers"`
+		Connected []ConsolePeerStatus `json:"connected"`
+		Pending   []ConsolePeerStatus `json:"pending"`
+		KnownOnly []string            `json:"known_only"`
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	var result peersPayload
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+
+	if len(result.Peers) != 3 {
+		t.Fatalf("expected 3 peers, got %d", len(result.Peers))
+	}
+
+	// Verify status discriminator for each entry.
+	statusByAddr := make(map[string]string, len(result.Peers))
+	for _, p := range result.Peers {
+		statusByAddr[p.Address] = p.Status
+	}
+
+	if got := statusByAddr["10.0.0.1:9333"]; got != "connected" {
+		t.Errorf("connected peer: expected status='connected', got %q", got)
+	}
+	if got := statusByAddr["10.0.0.2:9333"]; got != "pending" {
+		t.Errorf("pending peer: expected status='pending', got %q", got)
+	}
+	if got := statusByAddr["10.0.0.3:9333"]; got != "candidate" {
+		t.Errorf("candidate peer: expected status='candidate', got %q", got)
+	}
+
+	// Deprecated fields should also carry the discriminator.
+	if len(result.Connected) != 1 || result.Connected[0].Status != "connected" {
+		t.Errorf("deprecated connected[]: expected status='connected', got %v", result.Connected)
+	}
+	if len(result.Pending) != 1 || result.Pending[0].Status != "pending" {
+		t.Errorf("deprecated pending[]: expected status='pending', got %v", result.Pending)
+	}
+	if len(result.KnownOnly) != 1 || result.KnownOnly[0] != "10.0.0.3:9333" {
+		t.Errorf("known_only: expected [10.0.0.3:9333], got %v", result.KnownOnly)
+	}
+}
+
 func TestConsolePingPayloadShape(t *testing.T) {
 	t.Parallel()
 

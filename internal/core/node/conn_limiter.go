@@ -104,11 +104,11 @@ func (cl *connRateLimiter) cleanup(maxAge time.Duration) {
 // ---------------------------------------------------------------------------
 
 // commandRateLimiter enforces per-connection rate limits on command frames
-// (send_message, publish_notice, announce_peer, etc.). Relay frames have
+// (push_message, push_notice, announce_peer, etc.). Relay frames have
 // their own dedicated limiter (relayRateLimiter); this covers everything else.
 //
 // Without this, an authenticated peer could flood the node with thousands of
-// send_message or publish_notice frames per second, consuming CPU for JSON
+// push_message or push_notice frames per second, consuming CPU for JSON
 // parsing, signature verification, and fan-out — even though each individual
 // frame passes all validation checks.
 type commandRateLimiter struct {

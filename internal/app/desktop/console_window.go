@@ -65,6 +65,15 @@ type consoleSuggestion struct {
 	Insert string
 }
 
+// peerCardSelectables holds widget.Selectable instances for each text field
+// in a peer health card, enabling mouse text selection and copy.
+type peerCardSelectables struct {
+	Address widget.Selectable
+	Version widget.Selectable
+	Meta    widget.Selectable
+	Error   widget.Selectable
+}
+
 type consoleDonateEntry struct {
 	Label      string
 	Address    string
@@ -82,6 +91,7 @@ type ConsoleWindow struct {
 	closed            chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
 	peerList          widget.List
 	peerSectionList   widget.List
+	peerSelectables   map[string]*peerCardSelectables // keyed by peer address; lazily created
 	historyList       widget.List
 	suggestList       widget.List
 	donateList        widget.List
@@ -135,6 +145,7 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 		donateList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
+		peerSelectables: make(map[string]*peerCardSelectables),
 		suggestButtons:  make(map[string]*widget.Clickable),
 		selectedSuggest: -1,
 		donateEntries:   newConsoleDonateEntries(),
@@ -420,11 +431,9 @@ func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
 }
 
 func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	connectedPeers := connectedPeerHealth(status.PeerHealth)
-	pendingPeers := nonConnectedPeerHealth(status.PeerHealth)
-	knownOnlyPeers := knownOnlyPeers(status.Peers, status.PeerHealth)
+	activePeers := activePeerHealth(status.PeerHealth)
 	rows := []string{
-		c.parent.t("node.connected_peers", len(connectedPeers)),
+		c.parent.t("node.connected_peers", len(activePeers)),
 	}
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -433,7 +442,7 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeSt
 			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.peers_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
-			summary := material.Body1(c.theme, peerHealthSummary(c.parent, status))
+			summary := material.Body1(c.theme, activePeerSummary(c.parent, activePeers))
 			summary.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -446,12 +455,12 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeSt
 				layout.Rigid(summary.Layout),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					if len(connectedPeers) == 0 && len(pendingPeers) == 0 && len(knownOnlyPeers) == 0 {
+					if len(activePeers) == 0 {
 						label := material.Body1(c.theme, c.parent.t("console.peers_empty"))
 						label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 						return label.Layout(gtx)
 					}
-					return c.layoutPeersContent(gtx, connectedPeers, pendingPeers, knownOnlyPeers)
+					return c.layoutActivePeersContent(gtx, activePeers)
 				}),
 			)
 		})
@@ -1175,41 +1184,123 @@ func (c *ConsoleWindow) layoutInfoRows(gtx layout.Context, rows []string) layout
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
-func (c *ConsoleWindow) layoutPeersContent(gtx layout.Context, connectedPeers, pendingPeers []service.PeerHealth, knownOnlyPeers []string) layout.Dimensions {
+// peerSelectablesFor returns or creates the set of Selectable widgets for a peer address.
+func (c *ConsoleWindow) peerSelectablesFor(address string) *peerCardSelectables {
+	sel, ok := c.peerSelectables[address]
+	if !ok {
+		sel = &peerCardSelectables{}
+		c.peerSelectables[address] = sel
+	}
+	return sel
+}
+
+// peerSlotGroup defines the display order and label for a CM slot group.
+// Peers are sorted into groups by effectiveSlotState and rendered top-to-bottom
+// in the order defined here: active first, then dialing, reconnecting, etc.
+var peerSlotGroups = []struct {
+	state string
+	label string
+}{
+	{"active", "Active"},
+	{"dialing", "Dialing"},
+	{"reconnecting", "Reconnecting"},
+	{"queued", "Queued"},
+	{"retry_wait", "Retry Wait"},
+	{"", "Inbound"},
+}
+
+// effectiveSlotState returns the grouping key for a peer.
+// CM-managed peers use SlotState; inbound-only peers (Connected, no slot)
+// return "" which maps to the "Inbound" group.
+func effectiveSlotState(p service.PeerHealth) string {
+	if p.SlotState != "" {
+		return p.SlotState
+	}
+	return ""
+}
+
+// layoutActivePeersContent groups peers by CM slot state and renders each
+// group as a titled section. Groups appear in a fixed priority order:
+// Active → Dialing → Reconnecting → Queued → Retry Wait → Inbound.
+func (c *ConsoleWindow) layoutActivePeersContent(gtx layout.Context, peers []service.PeerHealth) layout.Dimensions {
+	grouped := make(map[string][]service.PeerHealth, len(peerSlotGroups))
+	for _, p := range peers {
+		key := effectiveSlotState(p)
+		grouped[key] = append(grouped[key], p)
+	}
+
 	type section struct {
 		top    unit.Dp
 		render func(layout.Context) layout.Dimensions
 	}
-
-	sections := make([]section, 0, 3)
-	if len(connectedPeers) > 0 {
+	sections := make([]section, 0, len(peerSlotGroups))
+	for _, g := range peerSlotGroups {
+		items := grouped[g.state]
+		if len(items) == 0 {
+			continue
+		}
+		top := unit.Dp(14)
+		if len(sections) == 0 {
+			top = 0
+		}
+		label := fmt.Sprintf("%s (%d)", g.label, len(items))
+		groupItems := items // capture for closure
 		sections = append(sections, section{
+			top: top,
 			render: func(gtx layout.Context) layout.Dimensions {
-				return c.layoutPeerSection(gtx, c.parent.t("console.peers.connected", len(connectedPeers)), connectedPeers)
-			},
-		})
-	}
-	if len(pendingPeers) > 0 {
-		sections = append(sections, section{
-			top: unit.Dp(14),
-			render: func(gtx layout.Context) layout.Dimensions {
-				return c.layoutPeerSection(gtx, c.parent.t("console.peers.pending", len(pendingPeers)), pendingPeers)
-			},
-		})
-	}
-	if len(knownOnlyPeers) > 0 {
-		sections = append(sections, section{
-			top: unit.Dp(14),
-			render: func(gtx layout.Context) layout.Dimensions {
-				return c.layoutKnownPeersSection(gtx, knownOnlyPeers)
+				return c.layoutPeerSection(gtx, label, groupItems)
 			},
 		})
 	}
 
-	return c.peerSectionList.Layout(gtx, len(sections), func(gtx layout.Context, index int) layout.Dimensions {
+	list := material.List(c.theme, &c.peerSectionList)
+	return list.Layout(gtx, len(sections), func(gtx layout.Context, index int) layout.Dimensions {
 		item := sections[index]
 		return layout.Inset{Top: item.top}.Layout(gtx, item.render)
 	})
+}
+
+// activePeerSummary builds a one-line status summary for the active peer list.
+// Counts both health states (healthy/degraded/stalled) and CM slot states
+// (dialing/queued/retry_wait) so the user sees the full connection picture.
+func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
+	healthy := 0
+	degraded := 0
+	stalled := 0
+	dialing := 0
+	queued := 0
+	retryWait := 0
+	var totalIn, totalOut int64
+	for _, item := range peers {
+		switch item.State {
+		case "healthy":
+			healthy++
+		case "degraded":
+			degraded++
+		case "stalled":
+			stalled++
+		}
+		switch item.SlotState {
+		case "dialing":
+			dialing++
+		case "queued":
+			queued++
+		case "retry_wait":
+			retryWait++
+		}
+		totalIn += item.BytesReceived
+		totalOut += item.BytesSent
+	}
+	summary := parent.t("node.active_peer.summary", healthy, degraded, stalled)
+	if summary == "node.active_peer.summary" {
+		base := fmt.Sprintf("Healthy: %d, Degraded: %d, Stalled: %d", healthy, degraded, stalled)
+		if dialing > 0 || queued > 0 || retryWait > 0 {
+			base += fmt.Sprintf(" | Dialing: %d, Queued: %d, RetryWait: %d", dialing, queued, retryWait)
+		}
+		base += fmt.Sprintf(" | In: %s, Out: %s", formatBytes(totalIn), formatBytes(totalOut))
+		return base
+	}
+	return summary
 }
 
 // executeCommand parses console input and dispatches it through CommandTable.
@@ -1354,17 +1445,6 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 	return strings.Join(lines, "\n")
 }
 
-func stringItemsToChildren(values []string, render func(layout.Context, string) layout.Dimensions) []layout.FlexChild {
-	children := make([]layout.FlexChild, 0, len(values))
-	for _, value := range values {
-		value := value
-		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return render(gtx, value)
-		}))
-	}
-	return children
-}
-
 func countConnectedPeers(peers []service.PeerHealth) int {
 	count := 0
 	for _, item := range peers {
@@ -1375,73 +1455,20 @@ func countConnectedPeers(peers []service.PeerHealth) int {
 	return count
 }
 
-func connectedPeerHealth(peers []service.PeerHealth) []service.PeerHealth {
-	connected := make([]service.PeerHealth, 0, len(peers))
+// activePeerHealth returns peers that the ConnectionManager is actively
+// managing (any SlotState: queued, dialing, active, reconnecting, retry_wait)
+// plus inbound peers that are Connected but have no CM slot.
+// This matches the scope of the getActivePeers RPC command — all CM slots
+// plus live inbound connections — and excludes "known-only" peers that
+// have a health entry but no slot and no active TCP connection.
+func activePeerHealth(peers []service.PeerHealth) []service.PeerHealth {
+	active := make([]service.PeerHealth, 0, len(peers))
 	for _, item := range peers {
-		if item.Connected {
-			connected = append(connected, item)
+		if item.SlotState != "" || item.Connected {
+			active = append(active, item)
 		}
 	}
-	return connected
-}
-
-func nonConnectedPeerHealth(peers []service.PeerHealth) []service.PeerHealth {
-	pending := make([]service.PeerHealth, 0, len(peers))
-	for _, item := range peers {
-		if item.Connected {
-			continue
-		}
-		pending = append(pending, item)
-	}
-	return pending
-}
-
-func knownOnlyPeers(peers []string, health []service.PeerHealth) []string {
-	seen := make(map[string]struct{}, len(health))
-	for _, item := range health {
-		seen[strings.TrimSpace(item.Address)] = struct{}{}
-	}
-
-	out := make([]string, 0, len(peers))
-	for _, peer := range peers {
-		peer = strings.TrimSpace(peer)
-		if peer == "" {
-			continue
-		}
-		if _, ok := seen[peer]; ok {
-			continue
-		}
-		out = append(out, peer)
-	}
-	return out
-}
-
-func peerHealthSummary(parent *Window, status service.NodeStatus) string {
-	healthy := 0
-	degraded := 0
-	stalled := 0
-	reconnecting := 0
-	pending := 0
-
-	for _, item := range status.PeerHealth {
-		switch item.State {
-		case "healthy":
-			healthy++
-		case "degraded":
-			degraded++
-		case "stalled":
-			stalled++
-		case "reconnecting":
-			reconnecting++
-		}
-		pending += item.PendingCount
-	}
-
-	summary := parent.t("node.peer_health.summary", healthy, degraded, stalled, reconnecting, pending)
-	if summary == "node.peer_health.summary" {
-		return fmt.Sprintf("Healthy: %d, Degraded: %d, Stalled: %d, Reconnecting: %d, Pending: %d", healthy, degraded, stalled, reconnecting, pending)
-	}
-	return summary
+	return active
 }
 
 func (c *ConsoleWindow) layoutPeerSection(gtx layout.Context, title string, peers []service.PeerHealth) layout.Dimensions {
@@ -1472,31 +1499,8 @@ func (c *ConsoleWindow) layoutPeerSection(gtx layout.Context, title string, peer
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
-func (c *ConsoleWindow) layoutKnownPeersSection(gtx layout.Context, peers []string) layout.Dimensions {
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			label := material.Body1(c.theme, c.parent.t("console.peers.known_only", len(peers)))
-			label.Color = color.NRGBA{R: 232, G: 237, B: 247, A: 255}
-			label.Font.Weight = 600
-			return label.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, stringItemsToChildren(peers, func(gtx layout.Context, peer string) layout.Dimensions {
-				return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
-					return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						label := material.Body2(c.theme, peer)
-						label.Color = color.NRGBA{R: 208, G: 216, B: 228, A: 255}
-						return label.Layout(gtx)
-					})
-				})
-			})...)
-		}),
-	)
-}
-
 func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.PeerHealth) layout.Dimensions {
+	sel := c.peerSelectablesFor(item.Address)
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
 		return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -1515,12 +1519,16 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 							})
 						}),
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							label := material.Body1(c.theme, item.Address)
-							label.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-							return label.Layout(gtx)
+							return c.layoutSelectableText(gtx, &sel.Address, item.Address, color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return c.layoutStateBadge(gtx, item.State)
+							// Prefer CM slot state for badge when available;
+							// fall back to health-derived state for inbound-only peers.
+							badgeState := item.State
+							if item.SlotState != "" {
+								badgeState = item.SlotState
+							}
+							return c.layoutStateBadge(gtx, badgeState)
 						}),
 					)
 				}),
@@ -1529,29 +1537,23 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 					if strings.TrimSpace(item.ClientVersion) == "" {
 						return layout.Dimensions{}
 					}
+					versionText := item.ClientVersion
+					if item.ProtocolVersion > 0 {
+						versionText = fmt.Sprintf("%s (proto v%d)", item.ClientVersion, item.ProtocolVersion)
+					}
 					return layout.Inset{Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						versionText := item.ClientVersion
-						if item.ProtocolVersion > 0 {
-							versionText = fmt.Sprintf("%s (proto v%d)", item.ClientVersion, item.ProtocolVersion)
-						}
-						label := material.Caption(c.theme, versionText)
-						label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
-						return label.Layout(gtx)
+						return c.layoutSelectableText(gtx, &sel.Version, versionText, color.NRGBA{R: 167, G: 179, B: 196, A: 255})
 					})
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Caption(c.theme, c.peerHealthMeta(item))
-					label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
-					return label.Layout(gtx)
+					return c.layoutSelectableText(gtx, &sel.Meta, c.peerHealthMeta(item), color.NRGBA{R: 196, G: 205, B: 218, A: 255})
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					if strings.TrimSpace(item.LastError) == "" {
 						return layout.Dimensions{}
 					}
 					return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						label := material.Caption(c.theme, item.LastError)
-						label.Color = color.NRGBA{R: 255, G: 168, B: 168, A: 255}
-						return label.Layout(gtx)
+						return c.layoutSelectableText(gtx, &sel.Error, item.LastError, color.NRGBA{R: 255, G: 168, B: 168, A: 255})
 					})
 				}),
 			)
@@ -1599,11 +1601,24 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 	if item.Connected && item.LastConnectedAt != nil {
 		uptime = formatUptime(time.Since(*item.LastConnectedAt))
 	}
+
+	// Build slot suffix for CM-managed outbound peers.
+	slotSuffix := ""
+	if item.SlotState != "" {
+		slotSuffix = fmt.Sprintf(" | slot %s", item.SlotState)
+		if item.SlotRetryCount > 0 {
+			slotSuffix += fmt.Sprintf(" retry %d", item.SlotRetryCount)
+		}
+		if item.SlotConnectedAddr != "" && item.SlotConnectedAddr != item.Address {
+			slotSuffix += fmt.Sprintf(" via %s", item.SlotConnectedAddr)
+		}
+	}
+
 	text := c.parent.t("node.peer_health.meta", connected+dirLabel, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
 	if text == "node.peer_health.meta" {
-		return fmt.Sprintf("%s%s | uptime %s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s", connected, dirLabel, uptime, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent))
+		return fmt.Sprintf("%s%s | uptime %s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s%s", connected, dirLabel, uptime, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent), slotSuffix)
 	}
-	return text + " | uptime " + uptime
+	return text + " | uptime " + uptime + slotSuffix
 }
 
 // formatBytes formats a byte count into a human-readable string (B, KB, MB, GB, TB).
@@ -2211,12 +2226,14 @@ func peerDirectionColor(direction string) color.NRGBA {
 
 func peerStateColors(state string) (color.NRGBA, color.NRGBA) {
 	switch state {
-	case "healthy":
+	case "healthy", "active":
 		return color.NRGBA{R: 36, G: 92, B: 63, A: 255}, color.NRGBA{R: 231, G: 255, B: 239, A: 255}
-	case "degraded":
+	case "degraded", "reconnecting":
 		return color.NRGBA{R: 110, G: 82, B: 25, A: 255}, color.NRGBA{R: 255, G: 244, B: 210, A: 255}
-	case "stalled":
+	case "stalled", "retry_wait":
 		return color.NRGBA{R: 118, G: 50, B: 37, A: 255}, color.NRGBA{R: 255, G: 225, B: 220, A: 255}
+	case "dialing", "queued":
+		return color.NRGBA{R: 40, G: 70, B: 110, A: 255}, color.NRGBA{R: 210, G: 230, B: 255, A: 255}
 	default:
 		return color.NRGBA{R: 57, G: 67, B: 84, A: 255}, color.NRGBA{R: 231, G: 237, B: 246, A: 255}
 	}

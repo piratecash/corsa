@@ -514,11 +514,14 @@ func TestIsFireAndForgetFrame(t *testing.T) {
 	}{
 		{"relay_message", true},
 		{"relay_hop_ack", true},
+		{"push_message", true},
+		{"push_notice", true},
+		{"relay_delivery_receipt", true},
+		{"send_delivery_receipt", false},
 		{"send_message", false},
 		{"publish_notice", false},
 		{"ping", false},
 		{"subscribe_inbox", false},
-		{"push_message", false},
 		{"", false},
 	}
 
@@ -1898,7 +1901,7 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 
 	svc.retryRelayDeliveries()
 
-	// Check that the receipt was sent via the relay chain (send_delivery_receipt
+	// Check that the receipt was sent via the relay chain (relay_delivery_receipt
 	// frame on the peer's sendCh), not just via gossip.
 	time.Sleep(50 * time.Millisecond)
 
@@ -1906,7 +1909,7 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 	for {
 		select {
 		case frame := <-sendCh:
-			if frame.Type == "send_delivery_receipt" && frame.ID == "receipt-retry-1" {
+			if frame.Type == "relay_delivery_receipt" && frame.ID == "receipt-retry-1" {
 				found = true
 			}
 		default:

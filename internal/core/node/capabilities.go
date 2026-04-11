@@ -49,7 +49,7 @@ func intersectCapabilities(local []domain.Capability, remote []string) []domain.
 func (s *Service) sessionHasCapability(address domain.PeerAddress, capability domain.Capability) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	session := s.sessions[address]
+	session := s.resolveSessionLocked(address)
 	if session == nil {
 		return false
 	}

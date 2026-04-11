@@ -1059,7 +1059,7 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 func (s *Service) sendReceiptToPeer(address domain.PeerAddress, receipt protocol.DeliveryReceipt) bool {
 	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
-		Type:        "send_delivery_receipt",
+		Type:        "relay_delivery_receipt",
 		ID:          string(receipt.MessageID),
 		Address:     receipt.Sender,
 		Recipient:   receipt.Recipient,
@@ -1085,8 +1085,13 @@ func (s *Service) retryRelayDeliveries() {
 
 	now := time.Now().UTC()
 	for _, msg := range s.retryableRelayMessages(now) {
-		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", s.noteRelayAttempt(relayMessageKey(msg.ID), now)).Msg("relay_retry_message")
+		attempts := s.noteRelayAttempt(relayMessageKey(msg.ID), now)
 		decision := s.router.Route(msg)
+		targets := make([]string, len(decision.GossipTargets))
+		for i, t := range decision.GossipTargets {
+			targets[i] = string(t)
+		}
+		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", attempts).Strs("gossip_targets", targets).Msg("relay_retry_message")
 		go s.executeGossipTargets(msg, decision.GossipTargets)
 		// Table-directed relay (Phase 1.2): mirror the logic in
 		// storeIncomingMessage — use the routing table when a next-hop
@@ -1308,6 +1313,7 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 		s.mu.Unlock()
 		return 0
 	}
+	log.Debug().Str("node", s.identity.Address).Str("recipient", recipient).Str("id", string(messageID)).Int("before", before).Int("after", len(filtered)).Int("removed", removed).Msg("deleteBacklogMessageForRecipient")
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
@@ -1535,7 +1541,7 @@ func (s *Service) clearOutboundQueuedLocked(messageID string) {
 }
 
 func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
-	if frame.Type != "send_delivery_receipt" || frame.ID == "" || frame.Recipient == "" || frame.Status == "" {
+	if frame.Type != "relay_delivery_receipt" || frame.ID == "" || frame.Recipient == "" || frame.Status == "" {
 		return
 	}
 

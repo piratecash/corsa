@@ -150,7 +150,7 @@ func (m *mockDMRouterProvider) SendFileAnnounce(to domain.PeerIdentity, msg doma
 // (503, hidden from help).
 func buildTestTable(nodeProvider rpc.NodeProvider, chatlogProvider rpc.ChatlogProvider, dmRouter rpc.DMRouterProvider, metricsProvider rpc.MetricsProvider) *rpc.CommandTable {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter, metricsProvider, nil)
+	rpc.RegisterAllCommands(table, nodeProvider, chatlogProvider, dmRouter, metricsProvider)
 	return table
 }
 

@@ -235,9 +235,11 @@ func TestMixedNetworkLegacyNodeReceivesViaGossip(t *testing.T) {
 	})
 	defer stopLegacy()
 
-	// Wait for peer connections.
-	waitForCondition(t, 5*time.Second, func() bool {
-		return len(nodeFull.Peers()) >= 1 && len(nodeLegacy.Peers()) >= 1
+	// Wait for nodeFull to have an outbound session — gossip targets require
+	// health.Connected which is set only after initPeerSession completes.
+	// Peers() >= 1 is insufficient: it only checks the bootstrap list.
+	waitForConditionMsg(t, 10*time.Second, "nodeFull never established outbound session", func() bool {
+		return hasOutboundSession(nodeFull)
 	})
 
 	// Store a global message on nodeFull via local RPC (send_message requires auth on TCP).
@@ -250,7 +252,7 @@ func TestMixedNetworkLegacyNodeReceivesViaGossip(t *testing.T) {
 
 	// Verify gossip delivers the message to the legacy node.
 	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
-	waitForCondition(t, 8*time.Second, func() bool {
+	waitForConditionMsg(t, 10*time.Second, "gossip did not deliver message to legacy node", func() bool {
 		reply := nodeLegacy.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
 		return reply.Type == "messages" && len(reply.Messages) == 1 &&
 			reply.Messages[0].ID == "mixed-msg-1"
@@ -295,8 +297,10 @@ func TestMixedVersionNewToOldFallsBackToGossip(t *testing.T) {
 	registerContact(t, nodeNew, senderID)
 	registerContact(t, nodeOld, senderID)
 
-	waitForCondition(t, 5*time.Second, func() bool {
-		return len(nodeNew.Peers()) >= 1 && len(nodeOld.Peers()) >= 1
+	// Wait for nodeNew to have an outbound session — gossip targets require
+	// health.Connected, not just a bootstrap entry in Peers().
+	waitForConditionMsg(t, 10*time.Second, "nodeNew never established outbound session", func() bool {
+		return hasOutboundSession(nodeNew)
 	})
 
 	// Store a global message on the new node via local RPC (send_message requires auth on TCP).
@@ -309,7 +313,7 @@ func TestMixedVersionNewToOldFallsBackToGossip(t *testing.T) {
 
 	// Old node receives via gossip.
 	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
-	waitForCondition(t, 8*time.Second, func() bool {
+	waitForConditionMsg(t, 10*time.Second, "gossip did not deliver message to old node", func() bool {
 		reply := nodeOld.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
 		return reply.Type == "messages" && len(reply.Messages) == 1
 	})
@@ -342,8 +346,12 @@ func TestMixedVersionOldToNewContinuesToWork(t *testing.T) {
 	})
 	defer stopNew()
 
-	waitForCondition(t, 5*time.Second, func() bool {
-		return len(nodeOld.Peers()) >= 1 && len(nodeNew.Peers()) >= 1
+	// Wait for nodeOld to have an outbound session — gossip targets require
+	// health.Connected, not just a bootstrap entry in Peers().
+	// Global topic gossip is fire-once at store time; without an active session
+	// the message has no targets and is never retried.
+	waitForConditionMsg(t, 10*time.Second, "nodeOld never established outbound session", func() bool {
+		return hasOutboundSession(nodeOld)
 	})
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -354,7 +362,7 @@ func TestMixedVersionOldToNewContinuesToWork(t *testing.T) {
 	}
 
 	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
-	waitForCondition(t, 15*time.Second, func() bool {
+	waitForConditionMsg(t, 10*time.Second, "gossip did not deliver message from old to new node", func() bool {
 		reply := nodeNew.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
 		return reply.Type == "messages" && len(reply.Messages) == 1
 	})

@@ -31,6 +31,7 @@ const (
 	ErrCodeDuplicateConnection        = "duplicate-connection"
 	ErrCodeRateLimited                = "rate-limited"
 	ErrCodeHelloAfterAuth             = "hello-after-auth"
+	ErrCodeSenderIdentityNotVerified  = "sender-identity-not-verified"
 )
 
 var (
@@ -62,6 +63,7 @@ var (
 	ErrDuplicateConnection        = errors.New(ErrCodeDuplicateConnection)
 	ErrRateLimited                = errors.New(ErrCodeRateLimited)
 	ErrHelloAfterAuth             = errors.New(ErrCodeHelloAfterAuth)
+	ErrSenderIdentityNotVerified  = errors.New(ErrCodeSenderIdentityNotVerified)
 )
 
 func ErrorCode(err error) string {
@@ -122,6 +124,8 @@ func ErrorCode(err error) string {
 		return ErrCodeRateLimited
 	case errors.Is(err, ErrHelloAfterAuth):
 		return ErrCodeHelloAfterAuth
+	case errors.Is(err, ErrSenderIdentityNotVerified):
+		return ErrCodeSenderIdentityNotVerified
 	default:
 		return ErrCodeProtocol
 	}
@@ -183,6 +187,8 @@ func ErrorFromCode(code string) error {
 		return ErrRateLimited
 	case ErrCodeHelloAfterAuth:
 		return ErrHelloAfterAuth
+	case ErrCodeSenderIdentityNotVerified:
+		return ErrSenderIdentityNotVerified
 	default:
 		return ErrProtocol
 	}

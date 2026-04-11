@@ -28,11 +28,18 @@ func (m *mockRoutingProvider) PeerTransport(peerIdentity domain.PeerIdentity) (d
 	return domain.PeerAddress(t[0]), domain.NetGroup(t[1])
 }
 
+// nodeWithRouting combines NodeProvider + RoutingProvider for RegisterAllCommands tests.
+// Type assertion inside RegisterAllCommands discovers the RoutingProvider capability.
+type nodeWithRouting struct {
+	mockNodeProvider
+	mockRoutingProvider
+}
+
 // --- Tests ---
 
 func TestRoutingCommandsUnavailableWhenProviderNil(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil, nil)
+	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil)
 
 	commands := []string{"fetchRouteTable", "fetchRouteSummary", "fetchRouteLookup"}
 	for _, cmd := range commands {
@@ -52,15 +59,17 @@ func TestRoutingCommandsUnavailableWhenProviderNil(t *testing.T) {
 }
 
 func TestRoutingCommandsVisibleWhenProviderSet(t *testing.T) {
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
-			TakenAt: time.Now(),
+	node := &nodeWithRouting{
+		mockRoutingProvider: mockRoutingProvider{
+			snapshot: routing.Snapshot{
+				Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
+				TakenAt: time.Now(),
+			},
 		},
 	}
 
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil, provider)
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
 	expected := map[string]bool{
 		"fetchRouteTable":   false,
@@ -767,17 +776,17 @@ func TestConsoleParserRoutingCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "fetch_route_table" {
-		t.Errorf("expected command 'fetch_route_table', got %q", req.Name)
+	if req.Name != "fetchRouteTable" {
+		t.Errorf("expected command 'fetchRouteTable', got %q", req.Name)
 	}
 
-	// fetch_route_summary — no args
+	// fetch_route_summary — no args (canonicalized to camelCase)
 	req, err = rpc.ParseConsoleInput("fetch_route_summary")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "fetch_route_summary" {
-		t.Errorf("expected command 'fetch_route_summary', got %q", req.Name)
+	if req.Name != "fetchRouteSummary" {
+		t.Errorf("expected command 'fetchRouteSummary', got %q", req.Name)
 	}
 
 	// fetch_route_lookup with identity arg (snake_case still works, canonicalized to camelCase)

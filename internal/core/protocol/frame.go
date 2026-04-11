@@ -137,6 +137,10 @@ type PeerHealthFrame struct {
 	BytesReceived       int64    `json:"bytes_received"`
 	TotalTraffic        int64    `json:"total_traffic"`
 	Capabilities        []string `json:"capabilities,omitempty"`
+	SlotState           string   `json:"slot_state,omitempty"`             // CM slot lifecycle state (queued/dialing/active/reconnecting/retry_wait)
+	SlotRetryCount      int      `json:"slot_retry_count,omitempty"`       // how many consecutive dial retries the slot has performed
+	SlotGeneration      uint64   `json:"slot_generation,omitempty"`        // monotonic generation counter for stale-event suppression
+	SlotConnectedAddr   string   `json:"slot_connected_address,omitempty"` // actual TCP address used for the active connection
 }
 
 // NetworkStatsFrame provides aggregated traffic statistics for the entire node.

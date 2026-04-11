@@ -1049,92 +1049,156 @@ func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddr
 
 func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool) []domain.PeerAddress {
 	s.mu.RLock()
-	if len(s.sessions) > 0 {
-		type scoredTarget struct {
-			address domain.PeerAddress
-			score   int64
-		}
-		scored := make([]scoredTarget, 0, len(s.sessions))
-		for address := range s.sessions {
-			if address == "" || s.isSelfAddress(address) {
-				continue
-			}
-			primaryAddr := s.resolveHealthAddress(address)
-			peerType := s.peerTypeForAddressLocked(primaryAddr)
-			peerID := s.peerIDs[primaryAddr]
-			if !allow(address, peerType, peerID) {
-				continue
-			}
-			health := s.health[primaryAddr]
-			if health == nil || !health.Connected {
-				continue
-			}
-			if s.computePeerStateLocked(health) == peerStateStalled {
-				continue
-			}
-			scored = append(scored, scoredTarget{
-				address: address,
-				score:   scorePeerTargetLocked(health),
-			})
-		}
-		if len(scored) > 0 {
-			s.mu.RUnlock()
-			sort.Slice(scored, func(i, j int) bool {
-				if scored[i].score == scored[j].score {
-					return string(scored[i].address) < string(scored[j].address)
-				}
-				return scored[i].score > scored[j].score
-			})
-			limit := min(3, len(scored))
-			targets := make([]domain.PeerAddress, 0, limit)
-			for _, item := range scored[:limit] {
-				targets = append(targets, item.address)
-			}
-			return targets
-		}
+
+	// Phase 1: collect scored session targets (preferred — health-checked,
+	// low-latency delivery via enqueuePeerFrame).
+	type scoredTarget struct {
+		address domain.PeerAddress
+		score   int64
 	}
+	sessionSeen := make(map[domain.PeerAddress]struct{}, len(s.sessions)*2)
+	scored := make([]scoredTarget, 0, len(s.sessions))
+	for address := range s.sessions {
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		sessionSeen[address] = struct{}{}
+		primaryAddr := s.resolveHealthAddress(address)
+		// Also mark the canonical (primary) address as seen. When the
+		// session connected via a fallback port (e.g. host:64646 instead of
+		// host:7777), the session key and the canonical peer address differ.
+		// Without this, Phase 2 treats the canonical peer as "no session"
+		// and adds it as a pending target — wasting a fanout slot on the
+		// same physical host that already has an active session.
+		if primaryAddr != address {
+			sessionSeen[primaryAddr] = struct{}{}
+		}
+		peerType := s.peerTypeForAddressLocked(primaryAddr)
+		peerID := s.peerIDs[primaryAddr]
+		if !allow(address, peerType, peerID) {
+			continue
+		}
+		health := s.health[primaryAddr]
+		if health == nil || !health.Connected {
+			continue
+		}
+		if s.computePeerStateLocked(health) == peerStateStalled {
+			continue
+		}
+		scored = append(scored, scoredTarget{
+			address: address,
+			score:   scorePeerTargetLocked(health),
+		})
+	}
+
+	// Phase 2: collect non-session peers that pass the filter. These peers
+	// don't have an active outbound session yet, but sendMessageToPeer can
+	// still reach them via queuePeerFrame → pending queue → drain on session
+	// establishment. Without this, a message arriving before all sessions
+	// are up gets gossipped only to existing sessions (possibly back to the
+	// sender) and never reaches peers whose sessions haven't started yet.
+	peers := s.peersSnapshotLocked()
 	s.mu.RUnlock()
 
-	targets := make([]domain.PeerAddress, 0, len(s.Peers()))
-	for _, peer := range s.Peers() {
+	var pendingPeers []domain.PeerAddress
+	for _, peer := range peers {
 		if peer.Address == "" || s.isSelfAddress(peer.Address) {
+			continue
+		}
+		if _, ok := sessionSeen[peer.Address]; ok {
 			continue
 		}
 		if !allow(peer.Address, s.peerTypeForAddress(peer.Address), s.peerIdentityForAddress(peer.Address)) {
 			continue
 		}
-		targets = append(targets, peer.Address)
+		pendingPeers = append(pendingPeers, peer.Address)
 	}
-	sort.Slice(targets, func(i, j int) bool {
-		return string(targets[i]) < string(targets[j])
+
+	// Phase 3: merge — session targets first (scored), then pending peers
+	// (alphabetical, lower priority).
+	//
+	// When session targets exist, cap total at 3 (gossip fanout limit).
+	// When no sessions exist at all, return all matching peers uncapped
+	// (bootstrap scenario — identical to the pre-merge behavior).
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return string(scored[i].address) < string(scored[j].address)
+		}
+		return scored[i].score > scored[j].score
 	})
+	sort.Slice(pendingPeers, func(i, j int) bool {
+		return string(pendingPeers[i]) < string(pendingPeers[j])
+	})
+
+	if len(scored) > 0 {
+		// Session targets exist — cap at gossip fanout limit, fill remaining
+		// slots with pending peers so messages reach not-yet-connected nodes.
+		const maxTargets = 3
+		targets := make([]domain.PeerAddress, 0, maxTargets)
+		for _, item := range scored {
+			if len(targets) >= maxTargets {
+				break
+			}
+			targets = append(targets, item.address)
+		}
+		for _, addr := range pendingPeers {
+			if len(targets) >= maxTargets {
+				break
+			}
+			targets = append(targets, addr)
+		}
+		return targets
+	}
+
+	// No active sessions — return all matching peers uncapped (bootstrap).
+	targets := make([]domain.PeerAddress, 0, len(pendingPeers))
+	targets = append(targets, pendingPeers...)
 	return targets
 }
 
 func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Envelope) {
 	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
-		Type:       "send_message",
-		Topic:      msg.Topic,
-		ID:         string(msg.ID),
-		Address:    msg.Sender,
-		Recipient:  msg.Recipient,
-		Flag:       string(msg.Flag),
-		CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
-		TTLSeconds: msg.TTLSeconds,
-		Body:       string(msg.Payload),
+		Type:  "push_message",
+		Topic: msg.Topic,
+		Item: &protocol.MessageFrame{
+			ID:         string(msg.ID),
+			Sender:     msg.Sender,
+			Recipient:  msg.Recipient,
+			Flag:       string(msg.Flag),
+			CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
+			TTLSeconds: msg.TTLSeconds,
+			Body:       string(msg.Payload),
+		},
 	}
 	if s.enqueuePeerFrame(address, frame) {
-		s.clearOutboundQueued(frame.ID)
-		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "session").Msg("route_message_attempt")
+		log.Info().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "session").Msg("gossip_message_attempt")
 		return
 	}
+
+	// No outbound session — try writing directly to an authenticated inbound
+	// connection from this peer. This covers the common case where the peer
+	// has connected to us (inbound) but we have no outbound session (CM slot
+	// full). push_message is fire-and-forget so it is safe to interleave on
+	// the inbound conn without disrupting request/reply traffic.
+	resolved := s.resolveHealthAddress(address)
+	s.mu.RLock()
+	inConn := s.inboundConnForAddressLocked(resolved)
+	s.mu.RUnlock()
+	if inConn != nil {
+		s.writeJSONFrame(inConn, frame)
+		log.Info().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "inbound_direct").Msg("gossip_message_attempt")
+		return
+	}
+
 	if s.queuePeerFrame(address, frame) {
-		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "queued").Msg("route_message_attempt")
+		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "queued").Msg("gossip_message_attempt")
 		return
 	}
-	s.markOutboundTerminal(frame, "failed", "unable to queue outbound frame")
-	log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "dropped").Msg("route_message_attempt")
+	// No outbound delivery tracking for gossip: push_message is fire-and-forget
+	// relay, not a locally initiated send. The local send_message path has its
+	// own outbound tracking via markOutboundTerminal/clearOutboundQueued.
+	log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "dropped").Msg("gossip_message_attempt")
 }
 
 func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
@@ -1150,11 +1214,21 @@ func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
 func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration, ciphertext string) {
 	defer crashlog.DeferRecover()
 	frame := protocol.Frame{
-		Type:       "publish_notice",
+		Type:       "push_notice",
 		TTLSeconds: int(ttl.Seconds()),
 		Ciphertext: ciphertext,
 	}
 	if s.enqueuePeerFrame(address, frame) {
+		return
+	}
+
+	// Try authenticated inbound connection before expensive TCP dial.
+	resolved := s.resolveHealthAddress(address)
+	s.mu.RLock()
+	inConn := s.inboundConnForAddressLocked(resolved)
+	s.mu.RUnlock()
+	if inConn != nil {
+		s.writeJSONFrame(inConn, frame)
 		return
 	}
 
@@ -1218,7 +1292,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 // Only send_message is drained — other frame types are not route-recoverable:
 //   - relay_message, announce_peer: other peers' traffic, handled by relay
 //     retry loop and peer session flush respectively.
-//   - send_delivery_receipt: delivered via relayStates hop chain
+//   - relay_delivery_receipt: delivered via relayStates hop chain
 //     (lookupReceiptForwardTo), not via the routing table. A new route to
 //     the receipt's Recipient does not create a delivery path for the receipt.
 //     Receipts are retried through flushPendingPeerFrames (peer reconnect)
@@ -1241,6 +1315,23 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 // intermediate writes to queue-*.json occur while extracted frames are
 // absent from s.pending.
 //
+// recipientFromPendingFrame extracts the recipient from a queued frame.
+// send_message uses flat Frame.Recipient; push_message keeps it in Item.
+// Returns "" for frame types that are not identity-addressed.
+func recipientFromPendingFrame(frame protocol.Frame) string {
+	switch frame.Type {
+	case "send_message":
+		return frame.Recipient
+	case "push_message":
+		if frame.Item != nil {
+			return frame.Item.Recipient
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
 // Called from servePeerSession (direct peer connect, inboxCh is actively
 // read so Lock contention cannot cause overflow) and handleAnnounceRoutes
 // (transit route learned) to minimize delivery latency.
@@ -1291,11 +1382,12 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 		var kept []pendingFrame
 		var meta *addrExtractMeta
 		for i, item := range frames {
-			if item.Frame.Type != "send_message" {
+			recipient := recipientFromPendingFrame(item.Frame)
+			if recipient == "" {
 				kept = append(kept, item)
 				continue
 			}
-			if _, ok := identities[domain.PeerIdentity(item.Frame.Recipient)]; !ok {
+			if _, ok := identities[domain.PeerIdentity(recipient)]; !ok {
 				kept = append(kept, item)
 				continue
 			}
@@ -1366,7 +1458,16 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			continue
 		}
 
-		delivered, attempted := s.drainSendMessage(m.item.Frame, m.peerAddr)
+		// push_message (gossip) drain: try enqueuePeerFrame directly.
+		// Gossip doesn't need table-directed relay — just push to the
+		// original peer address.
+		var delivered, attempted bool
+		if m.item.Frame.Type == "push_message" {
+			delivered = s.enqueuePeerFrame(m.peerAddr, m.item.Frame)
+			attempted = delivered
+		} else {
+			delivered, attempted = s.drainSendMessage(m.item.Frame, m.peerAddr)
+		}
 		if !delivered {
 			// Only increment retry counter when a real delivery attempt was
 			// made (route existed, address resolved, send was tried). When

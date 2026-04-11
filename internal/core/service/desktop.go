@@ -84,6 +84,10 @@ type PeerHealth struct {
 	BytesSent           int64
 	BytesReceived       int64
 	TotalTraffic        int64
+	SlotState           string // CM slot lifecycle: queued, dialing, active, reconnecting, retry_wait
+	SlotRetryCount      int
+	SlotGeneration      uint64
+	SlotConnectedAddr   string // actual TCP address for the active connection
 }
 
 type DirectMessage struct {
@@ -126,19 +130,20 @@ type PendingMessage struct {
 
 type ConsolePeerStatus struct {
 	Address       string `json:"address"`
+	Status        string `json:"status"` // discriminator: "connected", "pending", or "candidate"
 	Identity      string `json:"identity,omitempty"`
 	ConnID        uint64 `json:"conn_id,omitempty"`
 	Network       string `json:"network,omitempty"`
 	Direction     string `json:"direction,omitempty"`
-	ClientVersion string `json:"client_version"`
-	ClientBuild   int    `json:"client_build"`
-	State         string `json:"state"`
-	Connected     bool   `json:"connected"`
+	ClientVersion string `json:"client_version,omitempty"`
+	ClientBuild   int    `json:"client_build,omitempty"`
+	State         string `json:"state,omitempty"`
+	Connected     bool   `json:"connected,omitempty"`
 	PendingCount  int    `json:"pending_count,omitempty"`
 	LastError     string `json:"last_error,omitempty"`
-	BytesSent     int64  `json:"bytes_sent"`
-	BytesReceived int64  `json:"bytes_received"`
-	TotalTraffic  int64  `json:"total_traffic"`
+	BytesSent     int64  `json:"bytes_sent,omitempty"`
+	BytesReceived int64  `json:"bytes_received,omitempty"`
+	TotalTraffic  int64  `json:"total_traffic,omitempty"`
 }
 
 type ConsolePingStatus struct {
@@ -546,6 +551,10 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			BytesSent:           item.BytesSent,
 			BytesReceived:       item.BytesReceived,
 			TotalTraffic:        item.TotalTraffic,
+			SlotState:           item.SlotState,
+			SlotRetryCount:      item.SlotRetryCount,
+			SlotGeneration:      item.SlotGeneration,
+			SlotConnectedAddr:   item.SlotConnectedAddr,
 		})
 	}
 	return items
@@ -852,30 +861,56 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		byAddress[strings.TrimSpace(item.Address)] = item
 	}
 
+	// allPeers is IP-deduped: one entry per IP, priority connected > pending > candidate.
+	// seenIPs tracks which IP already has an entry in allPeers and at which index,
+	// so a later entry with higher priority replaces an earlier one for the same IP.
+	//
+	// Priority levels: 0 = candidate (no health), 1 = pending (health, not connected),
+	// 2 = connected (health, connected). Higher value wins.
+	type ipEntry struct {
+		index    int // position in allPeers
+		priority int // 0=candidate, 1=pending, 2=connected
+	}
 	allPeers := make([]ConsolePeerStatus, 0, len(peers)+len(health))
+	seenIPs := make(map[string]ipEntry, len(peers))
+
+	// Deprecated fields — exact-address semantics, no IP dedup.
 	connected := make([]ConsolePeerStatus, 0, len(peers))
 	knownWithState := make([]ConsolePeerStatus, 0, len(health))
 	knownOnly := make([]string, 0, len(peers))
 
 	// Track addresses we've already processed so we can pick up
 	// health-only peers (e.g. inbound-only connections) in a second pass.
-	seen := make(map[string]struct{}, len(peers))
+	seenAddr := make(map[string]struct{}, len(peers))
 
 	for _, address := range peers {
 		address = strings.TrimSpace(address)
 		if address == "" {
 			continue
 		}
-		seen[address] = struct{}{}
+		seenAddr[address] = struct{}{}
 		item, ok := byAddress[address]
 		if !ok {
 			knownOnly = append(knownOnly, address)
-			allPeers = append(allPeers, ConsolePeerStatus{Address: address, Network: node.ClassifyAddress(address).String(), State: "known"})
+			status := ConsolePeerStatus{Address: address, Status: "candidate", Network: node.ClassifyAddress(address).String()}
+			ip, _, _ := net.SplitHostPort(address)
+			if ip == "" {
+				ip = address
+			}
+			if _, exists := seenIPs[ip]; !exists {
+				seenIPs[ip] = ipEntry{index: len(allPeers), priority: 0}
+				allPeers = append(allPeers, status)
+			}
 			continue
 		}
 
+		statusDisc := "pending"
+		if item.Connected {
+			statusDisc = "connected"
+		}
 		status := ConsolePeerStatus{
 			Address:       address,
+			Status:        statusDisc,
 			Identity:      item.PeerID,
 			ConnID:        item.ConnID,
 			Network:       node.ClassifyAddress(address).String(),
@@ -893,7 +928,25 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 		if strings.TrimSpace(item.State) != "" {
 			status.State = item.State
 		}
-		allPeers = append(allPeers, status)
+
+		// IP-level dedup for allPeers: connected > pending > candidate.
+		prio := 1 // pending
+		if item.Connected {
+			prio = 2 // connected
+		}
+		ip, _, _ := net.SplitHostPort(address)
+		if ip == "" {
+			ip = address
+		}
+		if existing, exists := seenIPs[ip]; !exists {
+			seenIPs[ip] = ipEntry{index: len(allPeers), priority: prio}
+			allPeers = append(allPeers, status)
+		} else if prio > existing.priority {
+			allPeers[existing.index] = status
+			seenIPs[ip] = ipEntry{index: existing.index, priority: prio}
+		}
+
+		// Deprecated fields: append unconditionally (exact-address semantics).
 		if item.Connected {
 			connected = append(connected, status)
 		} else {
@@ -907,7 +960,7 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 	// Collect and sort addresses for deterministic output order.
 	healthOnlyAddrs := make([]string, 0, len(byAddress))
 	for addr := range byAddress {
-		if _, ok := seen[addr]; !ok {
+		if _, ok := seenAddr[addr]; !ok {
 			healthOnlyAddrs = append(healthOnlyAddrs, addr)
 		}
 	}
@@ -915,8 +968,13 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 
 	for _, addr := range healthOnlyAddrs {
 		item := byAddress[addr]
+		statusDisc := "pending"
+		if item.Connected {
+			statusDisc = "connected"
+		}
 		status := ConsolePeerStatus{
 			Address:       addr,
+			Status:        statusDisc,
 			Identity:      item.PeerID,
 			ConnID:        item.ConnID,
 			Network:       node.ClassifyAddress(addr).String(),
@@ -931,7 +989,25 @@ func buildConsolePeersPayload(peers []string, health []PeerHealth) any {
 			BytesReceived: item.BytesReceived,
 			TotalTraffic:  item.TotalTraffic,
 		}
-		allPeers = append(allPeers, status)
+
+		// IP-level dedup for allPeers: connected > pending > candidate.
+		prio := 1 // pending
+		if item.Connected {
+			prio = 2 // connected
+		}
+		ip, _, _ := net.SplitHostPort(addr)
+		if ip == "" {
+			ip = addr
+		}
+		if existing, exists := seenIPs[ip]; !exists {
+			seenIPs[ip] = ipEntry{index: len(allPeers), priority: prio}
+			allPeers = append(allPeers, status)
+		} else if prio > existing.priority {
+			allPeers[existing.index] = status
+			seenIPs[ip] = ipEntry{index: existing.index, priority: prio}
+		}
+
+		// Deprecated fields: append unconditionally (exact-address semantics).
 		if item.Connected {
 			connected = append(connected, status)
 		} else {

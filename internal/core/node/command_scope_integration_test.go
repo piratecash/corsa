@@ -152,8 +152,8 @@ func TestDataCommandViaTCP_UnknownCommand_SnakeCase(t *testing.T) {
 		{"import_contacts", protocol.Frame{Type: "import_contacts"}},
 		{"send_message", protocol.Frame{Type: "send_message", Topic: "global", ID: "msg-1", Address: "addr", Recipient: "*", Body: "test"}},
 		{"import_message", protocol.Frame{Type: "import_message", Topic: "global", ID: "msg-2", Address: "addr", Recipient: "*", Body: "test"}},
-		{"send_delivery_receipt", protocol.Frame{Type: "send_delivery_receipt", ID: "msg-1", Recipient: "addr"}},
 		{"publish_notice", protocol.Frame{Type: "publish_notice", TTLSeconds: 30, Ciphertext: "test"}},
+		{"send_delivery_receipt", protocol.Frame{Type: "send_delivery_receipt", ID: "msg-1", Address: "addr", Recipient: "rcpt", Status: "delivered", DeliveredAt: "2026-01-01T00:00:00Z"}},
 	}
 
 	for _, tc := range dataSnakeCase {
@@ -218,7 +218,6 @@ func TestDataCommandViaTCP_UnknownCommand_CamelCase(t *testing.T) {
 		"importContacts",
 		"sendMessage",
 		"importMessage",
-		"sendDeliveryReceipt",
 		"publishNotice",
 	}
 
@@ -283,7 +282,6 @@ func TestDataCommandViaTCP_UnknownCommand_KebabCase(t *testing.T) {
 		"import-contacts",
 		"send-message",
 		"import-message",
-		"send-delivery-receipt",
 		"publish-notice",
 	}
 

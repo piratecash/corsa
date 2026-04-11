@@ -67,8 +67,10 @@ var requiredP2PWireCommands = map[string]bool{
 	"subscribed":      true,
 
 	// Realtime message delivery
-	"push_message":          true,
-	"push_delivery_receipt": true,
+	"push_message":           true,
+	"push_delivery_receipt":  true,
+	"relay_delivery_receipt": true,
+	"push_notice":            true,
 
 	// Acknowledgment
 	"ack_delete": true,

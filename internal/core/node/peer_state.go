@@ -25,14 +25,27 @@ type peerEntry struct {
 	BannedUntil         *time.Time         `json:"banned_until,omitempty"` // peer is not dialled until this time expires
 }
 
+// bannedIPEntry is the on-disk representation of an IP-wide ban.
+// Stored separately from per-peer entries because banned IPs must
+// survive the top-500 trimming — a trimmed peer should not become
+// dialable just because it fell off the peer list.
+type bannedIPStateEntry struct {
+	IP            string    `json:"ip"`
+	BannedUntil   time.Time `json:"banned_until"`
+	BanOrigin     string    `json:"ban_origin,omitempty"`
+	BanReason     string    `json:"ban_reason,omitempty"`
+	AffectedPeers []string  `json:"affected_peers,omitempty"` // addresses on this IP at ban time; survives top-500 trim
+}
+
 type peerStateFile struct {
-	Version   int         `json:"version"`
-	UpdatedAt time.Time   `json:"updated_at"`
-	Peers     []peerEntry `json:"peers"`
+	Version   int                  `json:"version"`
+	UpdatedAt time.Time            `json:"updated_at"`
+	Peers     []peerEntry          `json:"peers"`
+	BannedIPs []bannedIPStateEntry `json:"banned_ips,omitempty"`
 }
 
 const (
-	peerStateVersion     = 1
+	peerStateVersion     = 2              // v2: added banned_ips section with ban_origin/ban_reason
 	peerScoreConnect     = 10             // awarded on successful TCP handshake
 	peerScoreDisconnect  = -2             // applied on clean disconnect
 	peerScoreFailure     = -5             // applied on dial/protocol failure
@@ -124,14 +137,22 @@ func clampScore(score int) int {
 	return score
 }
 
+// sortPeerEntries orders entries the same way PeerProvider.Candidates()
+// does: score descending → AddedAt ascending (older peers first) →
+// address lexicographic. This ensures that the top-500 trim evicts the
+// same peers the dialer would have ranked lowest, making persistence
+// deterministic relative to the live candidate order.
 func sortPeerEntries(entries []peerEntry) {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Score != entries[j].Score {
 			return entries[i].Score > entries[j].Score
 		}
-		ti := peerTime(entries[i].LastConnectedAt)
-		tj := peerTime(entries[j].LastConnectedAt)
-		return ti.After(tj)
+		ai := peerTime(entries[i].AddedAt)
+		aj := peerTime(entries[j].AddedAt)
+		if !ai.Equal(aj) {
+			return ai.Before(aj)
+		}
+		return entries[i].Address < entries[j].Address
 	})
 }
 

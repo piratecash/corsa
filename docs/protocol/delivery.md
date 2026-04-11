@@ -6,7 +6,7 @@ Delivery receipts provide end-to-end confirmation that direct messages have reac
 
 ## Commands
 
-> **Transport scope:** All commands in this section are **LOCAL ONLY** — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port; a remote peer receives `unknown_command`. For P2P receipt delivery between nodes, see the realtime path (`push_delivery_receipt` P2P wire command).
+> **Transport scope:** All commands in this section are **LOCAL ONLY** — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port; a remote peer receives `unknown_command`. For P2P receipt delivery between nodes, see the realtime path (`push_delivery_receipt` and `relay_delivery_receipt` P2P wire commands).
 
 ### send_delivery_receipt
 

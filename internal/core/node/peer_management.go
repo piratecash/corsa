@@ -51,7 +51,10 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	s.ensurePeerSessions(ctx)
+	// Signal ConnectionManager that bootstrap loading is complete.
+	// CM will call fill() on receipt, triggering the first outbound dials.
+	s.connManager.NotifyBootstrapReady()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -62,7 +65,6 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.cleanupExpiredNotices()
 			s.evictStalePeers()
 			s.evictStaleInboundConns()
-			s.ensurePeerSessions(ctx)
 			s.retryRelayDeliveries()
 			s.relayLimiter.cleanup(5 * time.Minute)
 			s.maybeSavePeerState()
@@ -88,14 +90,34 @@ func (s *Service) flushPeerState() {
 	s.mu.Lock()
 	entries := s.buildPeerEntriesLocked()
 	path := s.peersStatePath
+
+	// Snapshot IP-wide bans, filtering out expired entries.
+	now := time.Now().UTC()
+	var bannedIPs []bannedIPStateEntry
+	for ip, entry := range s.bannedIPSet {
+		if entry.BannedUntil.After(now) {
+			affected := make([]string, len(entry.AffectedPeers))
+			for i, a := range entry.AffectedPeers {
+				affected[i] = string(a)
+			}
+			bannedIPs = append(bannedIPs, bannedIPStateEntry{
+				IP:            ip,
+				BannedUntil:   entry.BannedUntil,
+				BanOrigin:     string(entry.BanOrigin),
+				BanReason:     entry.BanReason,
+				AffectedPeers: affected,
+			})
+		}
+	}
 	s.mu.Unlock()
 
 	sortPeerEntries(entries)
 	entries = trimPeerEntries(entries)
 
 	state := peerStateFile{
-		Version: peerStateVersion,
-		Peers:   entries,
+		Version:   peerStateVersion,
+		Peers:     entries,
+		BannedIPs: bannedIPs,
 	}
 	if err := savePeerState(path, state); err != nil {
 		log.Error().Str("path", path).Err(err).Msg("peer state save failed")
@@ -121,8 +143,10 @@ func (s *Service) evictStalePeers() {
 	}
 
 	now := time.Now()
+
+	var evicted []domain.PeerAddress
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.lastPeerEvict = now
 
 	kept := make([]transport.Peer, 0, len(s.peers))
@@ -165,12 +189,22 @@ func (s *Service) evictStalePeers() {
 				delete(s.peerVersions, peer.Address)
 				delete(s.peerBuilds, peer.Address)
 				delete(s.persistedMeta, peer.Address)
+				evicted = append(evicted, peer.Address)
 				continue
 			}
 		}
 		kept = append(kept, peer)
 	}
 	s.peers = kept
+	s.mu.Unlock()
+
+	// Remove evicted peers from PeerProvider so they no longer
+	// appear in Candidates() and stop consuming dial attempts.
+	if s.peerProvider != nil {
+		for _, addr := range evicted {
+			s.peerProvider.Remove(addr)
+		}
+	}
 }
 
 // buildPeerEntriesLocked snapshots all known peers with their health metadata.
@@ -193,6 +227,7 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 			entry = peerEntry{
 				Address:  peer.Address,
 				NodeType: pm.NodeType,
+				Network:  pm.Network,
 				Source:   pm.Source,
 				AddedAt:  pm.AddedAt,
 			}
@@ -201,11 +236,24 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 			if rt := s.peerTypes[peer.Address]; rt != "" {
 				entry.NodeType = rt
 			}
+			// PeerProvider is the runtime authority for Source and AddedAt.
+			// Add(bootstrap) upgrades Source; Promote() refreshes both
+			// Source and AddedAt. persistedMeta still holds the on-disk
+			// values, so we prefer the provider's copy to ensure
+			// promotions round-trip through peers.json.
+			if s.peerProvider != nil {
+				if kp := s.peerProvider.KnownPeerStatic(peer.Address); kp != nil {
+					entry.Source = kp.Source
+					t := kp.AddedAt
+					entry.AddedAt = &t
+				}
+			}
 		} else {
 			// New peer discovered at runtime — derive from live state.
 			entry = peerEntry{
 				Address:  peer.Address,
 				NodeType: s.peerTypes[peer.Address],
+				Network:  classifyAddress(peer.Address),
 				Source:   peer.Source,
 				AddedAt:  &now,
 			}
@@ -230,7 +278,13 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 				entry.BannedUntil = &t
 			}
 		}
-		entry.Network = classifyAddress(entry.Address)
+		// Fall back to runtime classification only when persisted Network
+		// is absent (new peer or pre-Network peers.json). Persisted value
+		// takes priority — it may have been set by PeerProvider or restored
+		// from a migration.
+		if entry.Network == "" {
+			entry.Network = classifyAddress(entry.Address)
+		}
 		entries = append(entries, entry)
 	}
 	return entries
@@ -741,10 +795,12 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 }
 
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
+	log.Debug().Str("node", s.identity.Address).Str("peer", string(session.address)).Int("inbox_buffered", len(session.inboxCh)).Msg("servePeerSession: entering Phase 3 main loop")
+
 	// Event-driven pending queue drain: a direct route was added by
 	// onPeerSessionEstablished before we entered the main loop. Now that
 	// inboxCh is actively read (preventing overflow), drain any pending
-	// send_message frames that target this peer's identity.
+	// frames (push_message, etc.) that target this peer's identity.
 	if session.peerIdentity != "" {
 		s.mu.RLock()
 		hasPending := len(s.pending) > 0
@@ -769,7 +825,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			return err
 		case frame := <-session.inboxCh:
 			s.markPeerRead(session.address, frame)
-			s.dispatchPeerSessionFrame(session.address, frame)
+			s.dispatchPeerSessionFrame(session.address, session, frame)
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
 				log.Warn().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
@@ -998,10 +1054,43 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 		h.BannedUntil = time.Time{}
 	}
 
+	// Also clear the IP-wide ban — without this, buildBannedIPsSet still
+	// excludes the peer from Candidates() even though per-address health
+	// is unbanned.
+	if ip, _, ok := splitHostPort(string(peerAddress)); ok {
+		delete(s.bannedIPSet, ip)
+	}
+
 	s.mu.Unlock()
 
 	// Flush immediately so the manual peer survives a crash.
 	s.flushPeerState()
+
+	// Register in PeerProvider so the CM can pick it up as a candidate.
+	// Promote (not just Add) so that an already-known peer gets Source=manual
+	// and a refreshed AddedAt, moving it to the front of Candidates().
+	if s.peerProvider != nil {
+		s.peerProvider.Promote(peerAddress, domain.PeerSourceManual)
+	}
+	// Enqueue an immediate dial — ManualPeerRequested creates a slot directly,
+	// bypassing the Candidates() round-trip that NewPeersDiscovered would use.
+	// Uses EmitSlot (blocking) to guarantee delivery.
+	//
+	// Build the same primary+fallback dial address list that Candidates()
+	// would produce. Without this, a manual add of a non-default-port peer
+	// (e.g. 1.2.3.4:7777) would never attempt the standard fallback port
+	// (1.2.3.4:64646), making manual recovery strictly weaker than ordinary
+	// candidate dialing.
+	if s.connManager != nil {
+		dialAddrs := []domain.PeerAddress{peerAddress}
+		if s.peerProvider != nil {
+			dialAddrs = s.peerProvider.BuildDialAddresses(peerAddress)
+		}
+		s.connManager.EmitSlot(ManualPeerRequested{
+			Address:       peerAddress,
+			DialAddresses: dialAddrs,
+		})
+	}
 
 	action := "added"
 	if found {
@@ -1019,6 +1108,11 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, peerID domain.PeerIdentity) {
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return
+	}
+
+	// Register in PeerProvider for CM-based dial candidate selection.
+	if s.peerProvider != nil {
+		s.peerProvider.Add(address, domain.PeerSourcePeerExchange)
 	}
 
 	s.mu.Lock()
@@ -1073,6 +1167,11 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress, nodeType string
 		return
 	}
 
+	// Register in PeerProvider for CM-based dial candidate selection.
+	if s.peerProvider != nil {
+		s.peerProvider.Add(address, domain.PeerSourceAnnounce)
+	}
+
 	peerType := normalizePeerNodeType(nodeType)
 
 	s.mu.Lock()
@@ -1121,6 +1220,17 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress, nodeType string
 			h.ConsecutiveFailures = 0
 			h.LastDisconnectedAt = time.Time{}
 			h.BannedUntil = time.Time{}
+		}
+	}
+
+	// Clear IP-wide bans for both primary and announced addresses so
+	// that buildBannedIPsSet does not re-exclude the promoted peer.
+	if ip, _, ok := splitHostPort(string(healthAddr)); ok {
+		delete(s.bannedIPSet, ip)
+	}
+	if healthAddr != address {
+		if ip, _, ok := splitHostPort(string(address)); ok {
+			delete(s.bannedIPSet, ip)
 		}
 	}
 }
@@ -1293,27 +1403,31 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				continue
 			}
 			if incoming.Type == "push_message" {
-				s.dispatchPeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
 			if incoming.Type == "push_delivery_receipt" {
-				s.dispatchPeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
+				continue
+			}
+			if incoming.Type == "push_notice" {
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
 			if incoming.Type == "announce_peer" {
-				s.dispatchPeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
 			if incoming.Type == "request_inbox" {
-				s.dispatchPeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
 			if incoming.Type == "subscribe_inbox" {
-				s.dispatchPeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
 			if incoming.Type == "relay_hop_ack" {
-				s.dispatchPeerSessionFrame(session.address, incoming)
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
 			if expectedType == "" || incoming.Type == expectedType {
@@ -1332,6 +1446,11 @@ func (s *Service) syncPeerSession(session *peerSession) error {
 	}
 	for _, peer := range peersFrame.Peers {
 		s.addPeerAddress(domain.PeerAddress(peer), "", "")
+	}
+
+	// Notify CM that new peers were discovered from peer exchange.
+	if len(peersFrame.Peers) > 0 && s.connManager != nil {
+		s.connManager.EmitHint(NewPeersDiscovered{Count: len(peersFrame.Peers)})
 	}
 
 	_, err = s.syncContactsViaSession(session)
@@ -1400,15 +1519,12 @@ func (s *Service) syncSenderKeys(senderAddress domain.PeerAddress, syncSession *
 	return s.syncPeer(ctx, senderAddress)
 }
 
-func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, frame protocol.Frame) {
+func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *peerSession, frame protocol.Frame) {
 	// Respond to inbound pings on outbound sessions so the remote
 	// heartbeat monitor receives a timely pong. Without this the
 	// remote side closes the connection after pongStallTimeout.
 	// Pings are not "useful" application traffic, only keep-alive.
 	if frame.Type == "ping" {
-		s.mu.RLock()
-		session := s.sessions[address]
-		s.mu.RUnlock()
 		if session != nil {
 			_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
 			pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
@@ -1443,21 +1559,49 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, frame pro
 			return
 		}
 
+		// Non-DM sender verification: reject messages whose sender is not
+		// a known identity. DM messages have cryptographic verification in
+		// storeIncomingMessage (VerifyEnvelope); this gate targets non-DM
+		// topics where no per-message signature exists.
+		peerID := domain.PeerIdentity("")
+		if session != nil {
+			peerID = session.peerIdentity
+		}
+		if msg.Topic != "dm" && !s.isVerifiedSender(msg.Sender, peerID) {
+			log.Warn().
+				Str("node", s.identity.Address).
+				Str("peer", string(address)).
+				Str("id", string(msg.ID)).
+				Str("sender", msg.Sender).
+				Str("topic", msg.Topic).
+				Msg("push_message rejected: non-DM sender identity not verified (outbound)")
+			return
+		}
+
 		stored, _, errCode := s.storeIncomingMessage(msg, true)
 		if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 			// Pass nil for syncSession: this handler runs on the outbound
 			// session event loop and may be inside peerSessionRequest
 			// (single-reader constraint). syncSenderKeys falls back to a
 			// fresh TCP dial.
-			s.syncSenderKeys(address, nil)
-			stored, _, _ = s.storeIncomingMessage(msg, true)
+			imported := s.syncSenderKeys(address, nil)
+			stored, _, errCode = s.storeIncomingMessage(msg, true)
+			if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
+				log.Warn().
+					Str("peer", string(address)).
+					Str("id", string(msg.ID)).
+					Str("sender", msg.Sender).
+					Str("recipient", msg.Recipient).
+					Int("keys_imported", imported).
+					Msg("push_message: sender key still unknown after sync — message dropped")
+			}
 		}
 		if stored {
-			s.sendAckDeleteToPeer(address, "dm", msg.ID, "")
+			s.enqueueAckDeleteOnSession(session, address, "dm", msg.ID, "")
 		} else {
-			log.Warn().Str("peer", string(address)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("push_message_store_failed_no_ack_delete")
+			log.Warn().Str("node", s.identity.Address).Str("peer", string(address)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed_no_ack_delete")
 		}
-		log.Info().Str("peer", string(address)).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message")
+		log.Info().Str("node", s.identity.Address).Str("peer", string(address)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message")
 	case "push_delivery_receipt":
 		if frame.Receipt == nil {
 			return
@@ -1466,18 +1610,47 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, frame pro
 		if err != nil {
 			return
 		}
+		// Identity gate: the pushed receipt's Recipient must match our own
+		// identity or an identity we actively subscribe to (full-node relay).
+		// Without this check a peer could push a receipt with arbitrary
+		// Sender/Recipient and corrupt delivery state for foreign conversations.
+		if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
+			log.Warn().
+				Str("peer", string(address)).
+				Str("message_id", string(receipt.MessageID)).
+				Str("receipt_recipient", receipt.Recipient).
+				Str("local_identity", s.identity.Address).
+				Msg("push_delivery_receipt rejected: recipient does not match local identity or active subscriber")
+			return
+		}
 		s.storeDeliveryReceipt(receipt)
-		s.sendAckDeleteToPeer(address, "receipt", receipt.MessageID, receipt.Status)
+		s.enqueueAckDeleteOnSession(session, address, "receipt", receipt.MessageID, receipt.Status)
 		log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
+	case "relay_delivery_receipt":
+		// Gossip receipt path using flat Frame fields (mirrors the inbound
+		// TCP handler handleInboundRelayDeliveryReceipt).
+		receipt, err := receiptFromFrame(frame)
+		if err != nil {
+			return
+		}
+		// Identity gate: same as push_delivery_receipt — the receipt's
+		// Recipient must match our identity or an active subscriber.
+		if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
+			log.Warn().
+				Str("peer", string(address)).
+				Str("message_id", string(receipt.MessageID)).
+				Str("receipt_recipient", receipt.Recipient).
+				Str("local_identity", s.identity.Address).
+				Msg("relay_delivery_receipt rejected: recipient does not match local identity or active subscriber")
+			return
+		}
+		s.storeDeliveryReceipt(receipt)
+		log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt")
+	case "push_notice":
+		s.handleInboundPushNotice(frame)
 	case "request_inbox":
-		s.mu.RLock()
-		session := s.sessions[address]
-		s.mu.RUnlock()
 		s.respondToInboxRequest(session)
 	case "subscribe_inbox":
-		s.mu.RLock()
-		session := s.sessions[address]
-		s.mu.RUnlock()
 		if session != nil {
 			reply, sub := s.subscribeInboxFrame(session.conn, frame)
 			s.writeJSONFrame(session.conn, reply)
@@ -1494,12 +1667,18 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, frame pro
 		if len(peers) > maxAnnouncePeers {
 			peers = peers[:maxAnnouncePeers]
 		}
+		added := 0
 		for _, peer := range peers {
 			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
 			s.promotePeerAddress(domain.PeerAddress(peer), nodeType)
+			added++
 			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", string(address)).Msg("learned peer from announce")
+		}
+		// Notify CM that new peers were discovered from announce.
+		if added > 0 && s.connManager != nil {
+			s.connManager.EmitHint(NewPeersDiscovered{Count: added})
 		}
 	case "relay_message":
 		if admit := admitRelayFrame(s.sessionHasCapability(address, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
@@ -1590,14 +1769,7 @@ func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string
 	if session == nil || !session.authOK {
 		return
 	}
-	frame := protocol.Frame{
-		Type:      "ack_delete",
-		Address:   s.identity.Address,
-		AckType:   ackType,
-		ID:        string(id),
-		Status:    status,
-		Signature: identity.SignPayload(s.identity, ackDeletePayload(s.identity.Address, ackType, string(id), status)),
-	}
+	frame := s.buildAckDeleteFrame(ackType, id, status)
 	if s.enqueuePeerFrame(address, frame) {
 		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session").Msg("ack_delete_send")
 		return
@@ -1605,6 +1777,54 @@ func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string
 	if s.queuePeerFrame(address, frame) {
 		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
 	}
+}
+
+// enqueueAckDeleteOnSession writes an ack_delete frame directly to the
+// session's sendCh, bypassing the s.sessions lookup used by
+// sendAckDeleteToPeer. This is needed because dispatchPeerSessionFrame
+// processes frames during initPeerSession (Phase 1), before the session
+// is registered in s.sessions (Phase 2). Using sendAckDeleteToPeer in
+// that window silently drops the ack because peerSession(address)
+// returns nil.
+func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain.PeerAddress, ackType string, id protocol.MessageID, status string) {
+	if session == nil {
+		return
+	}
+	frame := s.buildAckDeleteFrame(ackType, id, status)
+	select {
+	case session.sendCh <- frame:
+		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session_direct").Msg("ack_delete_send")
+	default:
+		// sendCh full — fall back to pending queue for later drain.
+		if s.queuePeerFrame(address, frame) {
+			log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
+		}
+	}
+}
+
+// buildAckDeleteFrame constructs a signed ack_delete frame. Extracted from
+// sendAckDeleteToPeer so the same frame can be sent on either an outbound
+// session (enqueuePeerFrame) or an inbound connection (sendAckDeleteOnConn).
+func (s *Service) buildAckDeleteFrame(ackType string, id protocol.MessageID, status string) protocol.Frame {
+	return protocol.Frame{
+		Type:      "ack_delete",
+		Address:   s.identity.Address,
+		AckType:   ackType,
+		ID:        string(id),
+		Status:    status,
+		Signature: identity.SignPayload(s.identity, ackDeletePayload(s.identity.Address, ackType, string(id), status)),
+	}
+}
+
+// sendAckDeleteOnConn writes an ack_delete frame directly on the given
+// connection (typically an inbound TCP conn). This is the inbound-path
+// counterpart of sendAckDeleteToPeer: when we receive a push_message on
+// an inbound connection and there is no outbound session to that peer,
+// we acknowledge on the same conn that delivered the message.
+func (s *Service) sendAckDeleteOnConn(conn net.Conn, ackType string, id protocol.MessageID, status string) {
+	frame := s.buildAckDeleteFrame(ackType, id, status)
+	s.writeJSONFrame(conn, frame)
+	log.Debug().Str("addr", conn.RemoteAddr().String()).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "inbound_conn").Msg("ack_delete_send")
 }
 
 // hasOutboundSessionForInbound checks whether an active outbound session
@@ -1655,6 +1875,13 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	health.ConsecutiveFailures = 0
 	health.BannedUntil = time.Time{} // successful handshake proves compatibility
 	health.Score = clampScore(health.Score + peerScoreConnect)
+
+	// A completed handshake proves the peer (and its IP) is compatible.
+	// Clear the IP-wide ban so sibling ports are also unblocked in
+	// Candidates() and list_banned no longer reports a stale entry.
+	if ip, _, ok := splitHostPort(string(address)); ok {
+		delete(s.bannedIPSet, ip)
+	}
 }
 
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
@@ -1695,6 +1922,28 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress) {
 	health.LastError = "protocol version too old"
 	bannedUntil := time.Now().UTC().Add(peerBanIncompatible)
 	health.BannedUntil = bannedUntil
+
+	// Propagate ban to the IP level so that other ports on the same
+	// host are also excluded from dial candidates.
+	if ip, _, ok := splitHostPort(string(address)); ok {
+		// Snapshot affected peer addresses at ban time so the list
+		// round-trips through peers.json even if peers are later
+		// trimmed from the top-500 list.
+		var affected []domain.PeerAddress
+		for _, p := range s.peers {
+			if pIP, _, ok2 := splitHostPort(string(p.Address)); ok2 && pIP == ip {
+				affected = append(affected, p.Address)
+			}
+		}
+		s.bannedIPSet[ip] = domain.BannedIPEntry{
+			IP:            ip,
+			BannedUntil:   bannedUntil,
+			BanOrigin:     address,
+			BanReason:     "incompatible_protocol",
+			AffectedPeers: affected,
+		}
+	}
+
 	log.Info().Str("peer", string(address)).Time("banned_until", bannedUntil).Msg("peer_banned_incompatible_protocol")
 }
 
@@ -1780,6 +2029,22 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	return ids
 }
 
+// inboundConnForAddressLocked returns an authenticated inbound TCP connection
+// for the given overlay address, or nil if none exists. When multiple
+// connections are active, any one of them is returned (all are equally valid
+// for fire-and-forget writes). Must be called with s.mu held (read lock).
+func (s *Service) inboundConnForAddressLocked(address domain.PeerAddress) net.Conn {
+	for conn, pc := range s.inboundNetCores {
+		if pc == nil || pc.Address() != address {
+			continue
+		}
+		if _, tracked := s.inboundTracked[conn]; tracked {
+			return conn
+		}
+	}
+	return nil
+}
+
 func (s *Service) ensurePeerHealthLocked(address domain.PeerAddress) *peerHealth {
 	health := s.health[address]
 	if health == nil {
@@ -1803,6 +2068,29 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 }
 
 func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
+	// Collect CM slot snapshots before taking s.mu to avoid nested locking
+	// (connManager.Slots() acquires cm.mu independently).
+	type slotSnapshot struct {
+		State         string
+		RetryCount    int
+		Generation    uint64
+		ConnectedAddr string
+	}
+	slotByAddr := make(map[domain.PeerAddress]slotSnapshot)
+	if s.connManager != nil {
+		for _, si := range s.connManager.Slots() {
+			snap := slotSnapshot{
+				State:      si.State,
+				RetryCount: si.RetryCount,
+				Generation: si.Generation,
+			}
+			if si.ConnectedAddress != nil {
+				snap.ConnectedAddr = string(*si.ConnectedAddress)
+			}
+			slotByAddr[si.Address] = snap
+		}
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1852,6 +2140,13 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 				phf.ConnID = session.connID
 				break
 			}
+		}
+		// Enrich with CM slot lifecycle data if this peer has an outbound slot.
+		if snap, ok := slotByAddr[health.Address]; ok {
+			phf.SlotState = snap.State
+			phf.SlotRetryCount = snap.RetryCount
+			phf.SlotGeneration = snap.Generation
+			phf.SlotConnectedAddr = snap.ConnectedAddr
 		}
 		// When an outbound session exists, emit a single row with the
 		// outbound ConnID — even if inbound connections coexist (both
@@ -1913,7 +2208,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 // first, then falls back to inbound NetCores.
 // Must be called while holding s.mu at least for read.
 func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
-	if session, ok := s.sessions[address]; ok && len(session.capabilities) > 0 {
+	if session := s.resolveSessionLocked(address); session != nil && len(session.capabilities) > 0 {
 		return domain.CapabilityStrings(session.capabilities)
 	}
 	for _, pc := range s.inboundNetCores {
@@ -2063,8 +2358,21 @@ func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) string {
 	switch frame.Type {
 	case "send_message":
 		return string(address) + "|send_message|" + frame.ID + "|" + frame.Recipient
-	case "send_delivery_receipt":
-		return string(address) + "|send_delivery_receipt|" + frame.ID + "|" + frame.Recipient + "|" + frame.Status
+	case "push_message":
+		// Gossip path: fields live in Item, not flat Frame fields.
+		if frame.Item == nil {
+			return ""
+		}
+		return string(address) + "|push_message|" + frame.Item.ID + "|" + frame.Item.Recipient
+	case "relay_delivery_receipt":
+		return string(address) + "|relay_delivery_receipt|" + frame.ID + "|" + frame.Recipient + "|" + frame.Status
+	case "ack_delete":
+		// ack_delete must be queueable so that sendAckDeleteToPeer's
+		// fallback to queuePeerFrame works when the session's sendCh is
+		// full. Without this, a transient channel back-pressure silently
+		// drops the ack, the remote peer never clears its backlog, and
+		// the receipt is re-pushed on every reconnect.
+		return string(address) + "|ack_delete|" + frame.AckType + "|" + frame.ID + "|" + frame.Status
 	case "announce_peer":
 		if len(frame.Peers) > 0 {
 			return string(address) + "|announce_peer|" + frame.Peers[0]
@@ -2135,16 +2443,77 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	s.persistQueueState(snapshot)
 }
 
+// flushPendingFireAndForget drains fire-and-forget frames (push_message,
+// push_notice) from the pending queue for the given address and writes them
+// directly to the provided inbound connection.
+//
+// This is the inbound-path counterpart of flushPendingPeerFrames (which
+// uses outbound sessions). When a node has no outbound session to a peer
+// (e.g. CM slot full), queued fire-and-forget frames would sit forever in
+// s.pending. This function writes them on the inbound conn established by
+// the peer, ensuring gossip propagation across the relay chain even without
+// a symmetric outbound session.
+//
+// Only fire-and-forget frames are flushed here — request/reply frames
+// (send_message, relay_message) must go through the outbound session to
+// avoid interleaving with the peer's inbound request dispatch loop.
+func (s *Service) flushPendingFireAndForget(conn net.Conn, address domain.PeerAddress) {
+	// If there is already an active outbound session, let flushPendingPeerFrames
+	// handle it to avoid double delivery.
+	if session, ok := s.activePeerSession(address); ok && session != nil {
+		return
+	}
+
+	s.mu.Lock()
+	frames := s.pending[address]
+	if len(frames) == 0 {
+		s.mu.Unlock()
+		return
+	}
+
+	// Extract only gossip fire-and-forget frames; leave others in place.
+	// Only push_message and push_notice are safe to flush here — they have
+	// no external retry mechanisms that could cause double delivery. Relay
+	// frames (relay_message, relay_hop_ack) have their own relayRetryLoop.
+	var toSend []pendingFrame
+	remaining := make([]pendingFrame, 0, len(frames))
+	for _, item := range frames {
+		if item.Frame.Type == "push_message" || item.Frame.Type == "push_notice" {
+			toSend = append(toSend, item)
+			delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
+		} else {
+			remaining = append(remaining, item)
+		}
+	}
+	if len(toSend) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	if len(remaining) > 0 {
+		s.pending[address] = remaining
+	} else {
+		delete(s.pending, address)
+	}
+	snapshot := s.queueStateSnapshotLocked()
+	s.mu.Unlock()
+	s.persistQueueState(snapshot)
+
+	for _, item := range toSend {
+		s.writeJSONFrame(conn, item.Frame)
+		log.Debug().Str("addr", conn.RemoteAddr().String()).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
+	}
+}
+
 func (s *Service) peerSession(address domain.PeerAddress) *peerSession {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.sessions[address]
+	return s.resolveSessionLocked(address)
 }
 
 func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	session := s.sessions[address]
+	session := s.resolveSessionLocked(address)
 	if session == nil {
 		return nil, false
 	}
@@ -2510,4 +2879,632 @@ func (s *Service) resolveHealthAddress(address domain.PeerAddress) domain.PeerAd
 		return origin
 	}
 	return address
+}
+
+// resolveSessionLocked finds the peerSession for address, handling
+// fallback-port aliases. Direct lookup by exact key is tried first;
+// if that misses, the caller may be using the canonical (primary)
+// address while the session is stored under a fallback dial address.
+// In that case we scan dialOrigin (fallback→primary) to find the
+// reverse mapping.
+// Must be called with s.mu held (read lock sufficient).
+func (s *Service) resolveSessionLocked(address domain.PeerAddress) *peerSession {
+	if session := s.sessions[address]; session != nil {
+		return session
+	}
+	// Reverse lookup: address is the primary, session keyed by fallback.
+	for dialAddr, primary := range s.dialOrigin {
+		if primary == address {
+			if session := s.sessions[dialAddr]; session != nil {
+				return session
+			}
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionManager integration callbacks (Stage 3)
+// ---------------------------------------------------------------------------
+
+// dialForCM performs TCP connect + handshake for a ConnectionManager dial worker.
+// It tries addresses in order (primary, then fallback) and returns the session
+// and the actual address that succeeded.
+//
+// When a fallback address succeeds, dialOrigin[fallback] = primary is
+// registered so resolveHealthAddress maps all health/metering operations
+// back to the single canonical entry. The legacy path (ensurePeerSessions)
+// does the same registration; without it markPeerConnected, peerHealthFrames
+// and ActiveSessionLost would all operate on the wrong key.
+func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress) (DialResult, error) {
+	if len(addresses) == 0 {
+		return DialResult{}, errors.New("no addresses to dial")
+	}
+
+	primary := addresses[0]
+	var lastErr error
+	for _, address := range addresses {
+		session, err := s.openPeerSessionForCM(ctx, address)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		// Register fallback→primary mapping so that resolveHealthAddress
+		// collapses health updates onto one entry regardless of which port
+		// the TCP connection used.
+		if address != primary {
+			s.mu.Lock()
+			s.dialOrigin[address] = primary
+			s.mu.Unlock()
+		}
+		return DialResult{
+			Session:          session,
+			ConnectedAddress: address,
+		}, nil
+	}
+	return DialResult{}, lastErr
+}
+
+// openPeerSessionForCM opens a TCP connection, performs the protocol
+// handshake (hello/welcome) and authentication, then returns the
+// transport-ready session WITHOUT registering it in Service maps or
+// running any application-level exchanges (subscribe_inbox, sync).
+//
+// All side-effects — session registration, metadata writes, subscribe,
+// sync, routing — are deferred to onCMSessionEstablished which runs
+// only AFTER the CM event loop validates the slot generation. This
+// ensures a stale dial (generation mismatch) is discarded with zero
+// externally visible mutations.
+func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerAddress) (*peerSession, error) {
+	rawConn, err := s.dialPeer(ctx, address, dialTimeout)
+	if err != nil {
+		return nil, err
+	}
+	conn := NewMeteredConn(rawConn)
+
+	// Guard goroutine: close the connection if the parent context is cancelled
+	// during the handshake phase, or if we signal abort via closeConn.
+	// On success we close the abort channel WITHOUT closing conn — the CM
+	// event loop takes ownership.
+	abort := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-abort:
+			// Handshake completed (success or handled error).
+			// Do NOT close conn — caller manages lifetime.
+		}
+	}()
+
+	// closeOnError closes the connection and stops the guard goroutine.
+	// Must be called on every error return path.
+	closeOnError := func() {
+		_ = conn.Close()
+		close(abort)
+	}
+
+	enableTCPKeepAlive(rawConn)
+
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	reader := bufio.NewReader(conn)
+	s.mu.Lock()
+	cid := s.nextConnIDLocked()
+	s.mu.Unlock()
+	session := &peerSession{
+		address:      address,
+		peerIdentity: "",
+		connID:       cid,
+		conn:         conn,
+		metered:      conn,
+		sendCh:       make(chan protocol.Frame, 64),
+		inboxCh:      make(chan protocol.Frame, 64),
+		errCh:        make(chan error, 1),
+	}
+	go s.readPeerSession(reader, session)
+
+	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
+	if err != nil {
+		closeOnError()
+		return nil, err
+	}
+	if err := validateProtocolHandshake(welcome); err != nil {
+		closeOnError()
+		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
+		// Do NOT call penalizeOldProtocolPeer here — the caller (CM dial worker)
+		// propagates errIncompatibleProtocol to onCMDialFailed, which applies the
+		// penalty exactly once.
+		return nil, fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
+	}
+	session.version = welcome.Version
+	session.peerIdentity = domain.PeerIdentity(welcome.Address)
+	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
+
+	// Stash welcome metadata for deferred application in
+	// onCMSessionEstablished after the generation check passes.
+	session.welcomeMeta = &peerWelcomeMeta{
+		welcome:         welcome,
+		clientVersion:   welcome.ClientVersion,
+		clientBuild:     welcome.ClientBuild,
+		observedAddress: welcome.ObservedAddress,
+	}
+
+	if err := s.authenticatePeerSession(session, welcome); err != nil {
+		closeOnError()
+		return nil, err
+	}
+
+	// Handshake succeeded — stop the guard goroutine without closing conn.
+	// From here on, the CM event loop owns session lifetime.
+	// NOTE: session is NOT registered in s.sessions and no subscribe/sync
+	// has run. readPeerSession goroutine buffers incoming frames in
+	// inboxCh (capacity 64) until onCMSessionEstablished drains them.
+	close(abort)
+
+	return session, nil
+}
+
+// onCMSessionEstablished is called by ConnectionManager when a slot
+// transitions to Active — i.e., AFTER the generation check passes.
+//
+// The callback runs in the CM event loop, so it MUST NOT perform any
+// blocking I/O. All socket-level work (subscribe_inbox, syncPeerSession,
+// servePeerSession) is launched in a dedicated goroutine.
+//
+// openPeerSessionForCM intentionally performs ONLY TCP handshake + auth
+// and returns a transport-ready session with no Service-level mutations.
+// If the generation check rejects the session, CM closes it with zero
+// side-effects.
+func (s *Service) onCMSessionEstablished(info SessionInfo) {
+	session := info.Session
+	if session == nil {
+		return
+	}
+	// dialAddress is the actual TCP address used for the connection (may be
+	// a fallback port). slotAddress is the CM slot's canonical address.
+	// When a fallback port was used, dialOrigin[dialAddress]=slotAddress
+	// was registered by dialForCM so resolveHealthAddress collapses to the
+	// canonical entry. ActiveSessionLost must use slotAddress so CM can
+	// match the event back to its slot.
+	dialAddress := session.address
+	slotAddress := info.Address
+
+	// A completed handshake proves the peer speaks the current protocol.
+	// Clear the IP-wide compatibility ban immediately — even if the later
+	// application-level setup (initPeerSession) fails, the protocol is
+	// compatible. Without this, a subscribe/sync failure would leave sibling
+	// ports on the same host incorrectly excluded from Candidates().
+	if ip, _, ok := splitHostPort(string(dialAddress)); ok {
+		s.mu.Lock()
+		delete(s.bannedIPSet, ip)
+		s.mu.Unlock()
+	}
+
+	// Apply welcome metadata — pure map writes, no I/O.
+	// Session is NOT yet registered in s.sessions / s.upstream — that
+	// happens only after initPeerSession succeeds (Phase 2).
+	// The CM slot is in slotStateInitializing (not Active) until
+	// SessionInitReady is emitted, so Slots(), ActiveCount(), and
+	// buildPeerExchangeResponse() do not expose this peer during setup.
+	if wm := session.welcomeMeta; wm != nil {
+		s.learnIdentityFromWelcome(wm.welcome)
+		s.mu.RLock()
+		healthKey := s.resolveHealthAddress(dialAddress)
+		s.mu.RUnlock()
+		s.addPeerID(healthKey, session.peerIdentity)
+		s.addPeerVersion(healthKey, wm.clientVersion)
+		s.addPeerBuild(healthKey, wm.clientBuild)
+		s.recordObservedAddress(session.peerIdentity, wm.observedAddress)
+		session.welcomeMeta = nil // release for GC
+	}
+
+	// Launch the session goroutine. All blocking I/O (subscribe, sync,
+	// serve loop) runs here, never in the CM event loop.
+	savedGen := info.SlotGeneration
+	go func() {
+		defer crashlog.DeferRecover()
+
+		// --- Phase 1: application-level setup (blocking I/O) ---
+		if err := s.initPeerSession(session); err != nil {
+			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("cm_session_setup_failed")
+			// Session was never registered in s.sessions / s.upstream, so
+			// only dialOrigin (set by dialForCM for fallback ports) needs cleanup.
+			s.mu.Lock()
+			delete(s.dialOrigin, dialAddress)
+			s.mu.Unlock()
+			_ = session.Close()
+			// Notify CM so it can reconnect with backoff.
+			s.connManager.EmitSlot(ActiveSessionLost{
+				Address:        slotAddress,
+				Identity:       session.peerIdentity,
+				Error:          err,
+				WasHealthy:     false,
+				SlotGeneration: savedGen,
+			})
+			return
+		}
+
+		// --- Phase 2: session is fully operational ---
+		// Promote CM slot from Initializing → Active so Slots(),
+		// ActiveCount(), and buildPeerExchangeResponse() start exposing
+		// this peer. Until this event, the slot is invisible to peer
+		// exchange and diagnostics.
+		s.connManager.EmitSlot(SessionInitReady{
+			Address:        slotAddress,
+			SlotGeneration: savedGen,
+		})
+
+		// Register session in Service maps. This is the first point where
+		// the session becomes visible to routingTargets, enqueuePeerFrame,
+		// connectedHostsLocked, and other lookups.
+		s.mu.Lock()
+		s.sessions[dialAddress] = session
+		s.upstream[dialAddress] = struct{}{}
+		s.mu.Unlock()
+
+		s.markPeerConnected(dialAddress, peerDirectionOutbound)
+		s.flushPendingPeerFrames(dialAddress)
+
+		// Routing table: register direct peer.
+		s.onPeerSessionEstablished(session.peerIdentity, s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1))
+
+		// Send full table sync to the new peer (Phase 1.2).
+		if session.peerIdentity != "" && s.sessionHasCapability(dialAddress, domain.CapMeshRoutingV1) && s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1) {
+			routes := s.routingTable.AnnounceTo(session.peerIdentity)
+			if len(routes) > 0 {
+				if !s.SendAnnounceRoutes(dialAddress, routes) {
+					log.Warn().
+						Str("peer", string(session.peerIdentity)).
+						Str("address", string(dialAddress)).
+						Int("routes", len(routes)).
+						Msg("routing_outbound_full_sync_failed")
+				}
+			}
+		}
+
+		// --- Phase 3: main session loop ---
+		err := s.servePeerSession(s.runCtx, session)
+
+		// servePeerSession already called markPeerDisconnected on some paths.
+		// Clean up session from Service maps — but only if the map entry
+		// still belongs to THIS session. A replacement session for the same
+		// dial address may have been registered by a concurrent reconnect
+		// before this goroutine finished unwinding.
+		//
+		// ownedCleanup tracks whether THIS goroutine won the race to remove
+		// the session entry. The winner is responsible for routing
+		// deregistration (onPeerSessionClosed). If onCMSessionTeardown
+		// already deleted the entry (CM-initiated close), the goroutine
+		// must NOT call onPeerSessionClosed a second time — that would
+		// double-decrement the identity session counter and could remove
+		// a live route belonging to a replacement session.
+		s.mu.Lock()
+		ownedCleanup := s.sessions[dialAddress] == session
+		if ownedCleanup {
+			delete(s.sessions, dialAddress)
+			delete(s.upstream, dialAddress)
+			delete(s.dialOrigin, dialAddress)
+		}
+		s.mu.Unlock()
+
+		// Routing table: deregister direct peer only if this goroutine
+		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
+		if ownedCleanup && session.peerIdentity != "" {
+			hadRelay := sessionHasCap(session.capabilities, domain.CapMeshRelayV1)
+			s.onPeerSessionClosed(session.peerIdentity, hadRelay)
+		}
+
+		// Accumulate traffic metrics from the metered connection.
+		if session.metered != nil {
+			s.accumulateSessionTraffic(dialAddress, session.metered)
+		}
+
+		// Emit ActiveSessionLost using the slot's canonical address so
+		// CM.findSlotLocked can match it. When a fallback port was used,
+		// dialAddress != slotAddress; using dialAddress here would cause
+		// CM to treat the event as unknown and never reconnect.
+		s.connManager.EmitSlot(ActiveSessionLost{
+			Address:        slotAddress,
+			Identity:       session.peerIdentity,
+			Error:          err,
+			WasHealthy:     true,
+			SlotGeneration: savedGen,
+		})
+	}()
+}
+
+// onCMSessionTeardown is called by ConnectionManager when an active slot
+// is deactivated (replace or shutdown). Cleans up Service-level state.
+// Note: the CM has already closed the TCP transport at this point, so
+// servePeerSession will detect EOF and exit — it calls markPeerDisconnected
+// itself, so we must NOT call it here (that would be a double penalty).
+// The goroutine emits a stale ActiveSessionLost that the generation guard
+// suppresses.
+func (s *Service) onCMSessionTeardown(info SessionInfo) {
+	// Session is registered under DialAddress (the actual TCP address used,
+	// which may be a fallback port). Use DialAddress for cleanup, falling
+	// back to the canonical Address when DialAddress is empty (pre-activation
+	// teardown paths where no session was established).
+	addr := info.DialAddress
+	if addr == "" {
+		addr = info.Address
+	}
+
+	// Whoever removes the session entry from s.sessions owns routing
+	// deregistration. When a peer-initiated EOF causes servePeerSession to
+	// exit, the goroutine cleanup may win this race and delete the entry
+	// before onCMSessionTeardown runs (via the stale ActiveSessionLost →
+	// deactivateSlot path). In that case the goroutine already called
+	// onPeerSessionClosed, and calling it again here would double-decrement
+	// the identity session counter.
+	s.mu.Lock()
+	ownedCleanup := info.Session != nil && s.sessions[addr] == info.Session
+	if ownedCleanup {
+		delete(s.sessions, addr)
+		delete(s.upstream, addr)
+		delete(s.dialOrigin, addr)
+	}
+	s.mu.Unlock()
+
+	// Routing table: deregister direct peer only if we owned the entry.
+	// Pointer-compare ensures we don't accidentally delete or deregister
+	// a replacement session that was registered for the same address
+	// between deactivateSlotLocked and this callback.
+	if ownedCleanup && info.Identity != "" {
+		hadRelay := sessionHasCap(info.Capabilities, domain.CapMeshRelayV1)
+		s.onPeerSessionClosed(info.Identity, hadRelay)
+	}
+}
+
+// initPeerSession performs the application-level setup for an already
+// authenticated session: subscribes to the peer's inbox relay and runs
+// the initial sync (get_peers + fetch_contacts). This is the blocking
+// I/O phase that must NOT run in the CM event loop — call it from a
+// dedicated goroutine only.
+//
+// On success the session is ready for the servePeerSession read loop.
+// On error the caller is responsible for session cleanup and CM notification.
+func (s *Service) initPeerSession(session *peerSession) error {
+	if _, err := s.peerSessionRequest(session, protocol.Frame{
+		Type:       "subscribe_inbox",
+		Topic:      "dm",
+		Recipient:  s.identity.Address,
+		Subscriber: s.cfg.AdvertiseAddress,
+	}, "subscribed", false); err != nil {
+		return fmt.Errorf("subscribe_inbox: %w", err)
+	}
+	_ = session.conn.SetDeadline(time.Time{})
+	log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
+
+	if err := s.syncPeerSession(session); err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+	return nil
+}
+
+// onCMStaleSession is called by ConnectionManager when handleDialSucceeded
+// detects a generation mismatch and discards the session.
+//
+// After the refactor, openPeerSessionForCM no longer registers the session
+// in s.sessions (that happens in onCMSessionEstablished, which never runs
+// for stale generations). However, dialForCM still registers
+// dialOrigin[fallback]=primary BEFORE the generation check. This callback
+// cleans up that leaked entry.
+func (s *Service) onCMStaleSession(session *peerSession) {
+	s.mu.Lock()
+	// Clean up dialOrigin if it was registered for this address.
+	// No pointer-compare needed — dialOrigin maps addresses, not sessions.
+	delete(s.dialOrigin, session.address)
+	s.mu.Unlock()
+}
+
+// onCMDialFailed is called by ConnectionManager when a dial attempt fails.
+// Updates health/ban state BEFORE fill() re-queries Candidates().
+func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompatible bool) {
+	if incompatible {
+		s.penalizeOldProtocolPeer(address)
+	} else {
+		s.markPeerDisconnected(address, err)
+	}
+}
+
+// buildPeerExchangeResponse merges CM Active slots and PeerProvider Candidates,
+// deduplicates by IP (active has priority), and optionally filters by caller's
+// network groups. Used for both remote peer exchange and local RPC enrichment.
+// ActivePeersJSON returns a JSON-encoded snapshot of ConnectionManager slots.
+// Implements rpc.ConnectionDiagnosticProvider.
+func (s *Service) ActivePeersJSON() (json.RawMessage, error) {
+	type response struct {
+		Slots    []SlotInfo `json:"slots"`
+		Count    int        `json:"count"`
+		MaxSlots int        `json:"max_slots"`
+	}
+
+	var slots []SlotInfo
+	if s.connManager != nil {
+		slots = s.connManager.Slots()
+	}
+	resp := response{
+		Slots:    slots,
+		Count:    len(slots),
+		MaxSlots: s.cfg.EffectiveMaxOutgoingPeers(),
+	}
+	return json.Marshal(resp)
+}
+
+// ListPeersJSON returns a JSON-encoded list of all known peers from
+// PeerProvider with ExcludeReasons for diagnostic purposes.
+// Implements rpc.ConnectionDiagnosticProvider.
+func (s *Service) ListPeersJSON() (json.RawMessage, error) {
+	type peerEntry struct {
+		Address        string                 `json:"address"`
+		Source         string                 `json:"source"`
+		AddedAt        string                 `json:"added_at"`
+		Network        string                 `json:"network"`
+		Score          int                    `json:"score"`
+		Failures       int                    `json:"failures"`
+		BannedUntil    string                 `json:"banned_until,omitempty"`
+		Connected      bool                   `json:"connected"`
+		ExcludeReasons []domain.ExcludeReason `json:"exclude_reasons,omitempty"`
+	}
+	type response struct {
+		Peers []peerEntry `json:"peers"`
+		Count int         `json:"count"`
+	}
+
+	var known []domain.KnownPeerInfo
+	if s.peerProvider != nil {
+		known = s.peerProvider.KnownPeers()
+	}
+	entries := make([]peerEntry, 0, len(known))
+	for _, k := range known {
+		e := peerEntry{
+			Address:        string(k.Address),
+			Source:         string(k.Source),
+			AddedAt:        k.AddedAt.UTC().Format(time.RFC3339),
+			Network:        k.Network.String(),
+			Score:          k.Score,
+			Failures:       k.Failures,
+			Connected:      k.Connected,
+			ExcludeReasons: k.ExcludeReasons,
+		}
+		if !k.BannedUntil.IsZero() {
+			e.BannedUntil = k.BannedUntil.UTC().Format(time.RFC3339)
+		}
+		entries = append(entries, e)
+	}
+
+	resp := response{Peers: entries, Count: len(entries)}
+	return json.Marshal(resp)
+}
+
+// ListBannedJSON returns a JSON-encoded list of banned IPs from
+// PeerProvider for diagnostic purposes.
+// Implements rpc.ConnectionDiagnosticProvider.
+func (s *Service) ListBannedJSON() (json.RawMessage, error) {
+	type bannedEntry struct {
+		IP            string   `json:"ip"`
+		BannedUntil   string   `json:"banned_until"`
+		BanOrigin     string   `json:"ban_origin"`
+		BanReason     string   `json:"ban_reason"`
+		AffectedPeers []string `json:"affected_peers"`
+	}
+	type response struct {
+		BannedIPs []bannedEntry `json:"banned_ips"`
+		Count     int           `json:"count"`
+	}
+
+	var banned []domain.BannedIPInfo
+	if s.peerProvider != nil {
+		banned = s.peerProvider.BannedIPs()
+	}
+	entries := make([]bannedEntry, 0, len(banned))
+	for _, b := range banned {
+		affected := make([]string, len(b.AffectedPeers))
+		for i, a := range b.AffectedPeers {
+			affected[i] = string(a)
+		}
+		entries = append(entries, bannedEntry{
+			IP:            b.IP,
+			BannedUntil:   b.BannedUntil.UTC().Format(time.RFC3339),
+			BanOrigin:     string(b.BanOrigin),
+			BanReason:     b.BanReason,
+			AffectedPeers: affected,
+		})
+	}
+
+	resp := response{BannedIPs: entries, Count: len(entries)}
+	return json.Marshal(resp)
+}
+
+func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]struct{}) []domain.PeerAddress {
+	seenIPs := make(map[string]struct{})
+
+	// 1. Active connections first — verified by live TCP, highest priority.
+	var active []domain.PeerAddress
+	if s.connManager != nil {
+		for _, slot := range s.connManager.Slots() {
+			if slot.State != "active" {
+				continue
+			}
+			addr := slot.Address
+			if slot.ConnectedAddress != nil {
+				addr = *slot.ConnectedAddress
+			}
+			ip, _, ok := splitHostPort(string(addr))
+			if ok {
+				if _, exists := seenIPs[ip]; !exists {
+					seenIPs[ip] = struct{}{}
+					active = append(active, addr)
+				}
+			}
+		}
+	}
+
+	// 2. Inbound-only peers — authenticated but not in CM (CM tracks outbound).
+	// Without this, live inbound peers would be invisible to get_peers because
+	// Candidates() excludes connected IPs via ConnectedFn.
+	var inbound []domain.PeerAddress
+	s.mu.RLock()
+	for addr, h := range s.health {
+		if h.Direction != peerDirectionInbound || !h.Connected {
+			continue
+		}
+		ip, _, ok := splitHostPort(string(addr))
+		if ok {
+			if _, exists := seenIPs[ip]; !exists {
+				seenIPs[ip] = struct{}{}
+				inbound = append(inbound, addr)
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	// 3. Supplement with candidates from PeerProvider (already sorted by
+	// score descending inside Candidates()).
+	var candidates []domain.PeerAddress
+	if s.peerProvider != nil {
+		for _, candidate := range s.peerProvider.Candidates() {
+			ip, _, ok := splitHostPort(string(candidate.Address))
+			if ok {
+				if _, exists := seenIPs[ip]; !exists {
+					seenIPs[ip] = struct{}{}
+					candidates = append(candidates, candidate.Address)
+				}
+			}
+		}
+	}
+
+	// 4. Filter by caller's network groups and build final result:
+	// active outbound first, then inbound, then candidates (preserving score order).
+	filterFn := func(addr domain.PeerAddress) bool {
+		if callerGroups == nil {
+			return true
+		}
+		g := classifyAddress(addr)
+		if !g.IsRoutable() {
+			return false
+		}
+		_, ok := callerGroups[g]
+		return ok
+	}
+
+	var addresses []domain.PeerAddress
+	for _, addr := range active {
+		if filterFn(addr) {
+			addresses = append(addresses, addr)
+		}
+	}
+	for _, addr := range inbound {
+		if filterFn(addr) {
+			addresses = append(addresses, addr)
+		}
+	}
+	for _, addr := range candidates {
+		if filterFn(addr) {
+			addresses = append(addresses, addr)
+		}
+	}
+
+	return addresses
 }

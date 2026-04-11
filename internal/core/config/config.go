@@ -68,7 +68,7 @@ const (
 	CorsaVersion           = "0.31 alpha"
 	CorsaWireVersion       = "0.31-alpha"
 	ClientBuild            = 31
-	ProtocolVersion        = 7
+	ProtocolVersion        = 8
 	MinimumProtocolVersion = 4
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"

@@ -715,7 +715,7 @@ func TestFrameEndpointChatlogDispatch(t *testing.T) {
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, chatlog, nil, nil, nil)
+	rpc.RegisterAllCommands(table, node, chatlog, nil, nil)
 	server, err := rpc.NewServer(cfg, table, node)
 	if err != nil {
 		t.Fatalf("create server: %v", err)
@@ -749,7 +749,7 @@ func TestFrameEndpointUnavailableChatlog(t *testing.T) {
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, node, nil, nil, nil, nil) // chatlog=nil
+	rpc.RegisterAllCommands(table, node, nil, nil, nil) // chatlog=nil
 	server, err := rpc.NewServer(cfg, table, node)
 	if err != nil {
 		t.Fatalf("create server: %v", err)

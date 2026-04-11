@@ -88,6 +88,24 @@ type RoutingProvider interface {
 	PeerTransport(peerIdentity domain.PeerIdentity) (address domain.PeerAddress, network domain.NetGroup)
 }
 
+// ConnectionDiagnosticProvider exposes ConnectionManager and PeerProvider
+// data for RPC observability. When nil (CM/PP not wired), commands are
+// registered as unavailable.
+type ConnectionDiagnosticProvider interface {
+	// ActivePeersJSON returns a JSON-encoded snapshot of CM slots:
+	// {"slots": [...], "count": N, "max_slots": M}
+	ActivePeersJSON() (json.RawMessage, error)
+
+	// ListPeersJSON returns a JSON-encoded list of all known peers
+	// from PeerProvider with ExcludeReasons:
+	// {"peers": [...], "count": N}
+	ListPeersJSON() (json.RawMessage, error)
+
+	// ListBannedJSON returns a JSON-encoded list of banned IPs:
+	// {"banned_ips": [...], "count": N}
+	ListBannedJSON() (json.RawMessage, error)
+}
+
 // DiagnosticProvider abstracts access to desktop-level diagnostic commands.
 // Only the desktop client implements this; standalone node uses the base
 // handlers from RegisterSystemCommands.

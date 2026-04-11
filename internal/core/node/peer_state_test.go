@@ -182,26 +182,24 @@ func TestSortPeerEntries(t *testing.T) {
 	now := time.Now().UTC()
 	past1h := now.Add(-1 * time.Hour)
 	past2h := now.Add(-2 * time.Hour)
+
+	// Sorting matches PeerProvider.Candidates() ordering:
+	// score descending → AddedAt ascending (older first) → address lexicographic.
 	entries := []peerEntry{
-		{Address: "low", Score: -10, LastConnectedAt: &now},
-		{Address: "high", Score: 50, LastConnectedAt: &past1h},
-		{Address: "mid", Score: 10, LastConnectedAt: &now},
-		{Address: "mid-old", Score: 10, LastConnectedAt: &past2h},
+		{Address: "low:1", Score: -10, AddedAt: &now},
+		{Address: "high:1", Score: 50, AddedAt: &past1h},
+		{Address: "mid-new:1", Score: 10, AddedAt: &now},
+		{Address: "mid-old:1", Score: 10, AddedAt: &past2h},
+		{Address: "mid-old:2", Score: 10, AddedAt: &past2h}, // same score + AddedAt → address tiebreak
 	}
 
 	sortPeerEntries(entries)
 
-	if entries[0].Address != "high" {
-		t.Fatalf("expected 'high' first, got %s", entries[0].Address)
-	}
-	if entries[1].Address != "mid" {
-		t.Fatalf("expected 'mid' second (more recent), got %s", entries[1].Address)
-	}
-	if entries[2].Address != "mid-old" {
-		t.Fatalf("expected 'mid-old' third, got %s", entries[2].Address)
-	}
-	if entries[3].Address != "low" {
-		t.Fatalf("expected 'low' last, got %s", entries[3].Address)
+	expected := []domain.PeerAddress{"high:1", "mid-old:1", "mid-old:2", "mid-new:1", "low:1"}
+	for i, want := range expected {
+		if entries[i].Address != want {
+			t.Fatalf("entries[%d]: expected %q, got %q", i, want, entries[i].Address)
+		}
 	}
 }
 
