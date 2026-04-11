@@ -6,6 +6,8 @@ Delivery receipts provide end-to-end confirmation that direct messages have reac
 
 ## Commands
 
+> **Transport scope:** All commands in this section are **LOCAL ONLY** — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port; a remote peer receives `unknown_command`. For P2P receipt delivery between nodes, see the realtime path (`push_delivery_receipt` P2P wire command).
+
 ### send_delivery_receipt
 
 Sends a delivery or read receipt back to the original message sender.
@@ -175,6 +177,8 @@ sequenceDiagram
 Квитанции доставки предоставляют сквозное подтверждение того, что прямые сообщения достигли предполагаемых получателей и были просмотрены. Протокол поддерживает два состояния подтверждения: `delivered` (сообщение достигло узла получателя) и `seen` (получатель открыл сообщение в чате).
 
 ## Команды
+
+> **Область транспорта:** Все команды в этом разделе доступны **ТОЛЬКО ЛОКАЛЬНО** — через RPC HTTP и `handleLocalFrameDispatch`. Недоступны на TCP data port; удалённый пир получит `unknown_command`. Для P2P-доставки квитанций между узлами см. realtime-путь (P2P wire-команда `push_delivery_receipt`).
 
 ### send_delivery_receipt
 

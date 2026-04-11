@@ -6,6 +6,8 @@ Gazeta is an anonymous encrypted bulletin board system. Nodes publish encrypted 
 
 ## Commands
 
+> **Transport scope:** All commands in this section are **LOCAL ONLY** — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port; a remote peer receives `unknown_command`. Notices propagate between nodes via the gossip protocol, not through direct command invocation.
+
 ### publish_notice
 
 Publishes an encrypted notice to the network with a specified TTL.
@@ -192,6 +194,8 @@ stateDiagram-v2
 Газета - это система анонимной зашифрованной доски объявлений. Узлы публикуют зашифрованные уведомления с указанным временем жизни (TTL), которые передаются через сеть-сетку через протокол слухов и автоматически истекают. Система обеспечивает конфиденциальность, позволяя публиковать уведомления без идентификационной информации, при этом все содержимое шифруется сквозным образом.
 
 ## Команды
+
+> **Область транспорта:** Все команды в этом разделе доступны **ТОЛЬКО ЛОКАЛЬНО** — через RPC HTTP и `handleLocalFrameDispatch`. Недоступны на TCP data port; удалённый пир получит `unknown_command`. Уведомления распространяются между узлами через gossip-протокол, а не через прямой вызов команд.
 
 ### publish_notice
 

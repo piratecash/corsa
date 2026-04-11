@@ -35,7 +35,7 @@ For `incompatible-protocol-version` errors, additional fields are included:
 | `protocol-error` | Generic protocol violation not covered by specific codes | 400 Bad Request | Frame structure invalid, envelope malformed, or unclassified violation |
 | `invalid-json` | Frame is not valid JSON | 400 Bad Request | Payload cannot be parsed as JSON; may be truncated or corrupted |
 | `encode-failed` | Response serialization failed on server | 500 Internal Server Error | Server failed to encode response frame to JSON; internal state issue |
-| `unknown-command` | Unrecognized frame type in `type` field | 400 Bad Request | `type` field does not match any known command (e.g., `"foobar"`) |
+| `unknown-command` | Unrecognized or transport-mismatched frame type in `type` field | 400 Bad Request | Returned in two cases: (1) `type` field does not match any known command (e.g., `"foobar"`); (2) `type` is a known data-only command (e.g., `send_message`, `fetch_messages`) but was sent on the TCP data port, where only P2P wire commands are accepted (Stage 7 isolation). In both cases the server returns the same error code; clients should not distinguish the two by error text |
 | `invalid-send-message` | Missing or invalid fields in `send_message` request | 400 Bad Request | Required fields missing, invalid fingerprints, invalid UUIDs, invalid signatures, or malformed envelope |
 | `invalid-import-message` | Missing or invalid fields in `import_message` request | 400 Bad Request | Topic, sender, or ciphertext missing; signature verification failed |
 | `invalid-fetch-messages` | Missing topic in `fetch_messages` request | 400 Bad Request | `topic` field not provided or invalid |
@@ -174,7 +174,15 @@ Server returns: unknown-message-id
 Action: Verify message was previously stored; may have expired or been deleted
 ```
 
-**Scenario 6: Simultaneous connection (duplicate — now allowed)**
+**Scenario 6: Data command on TCP data port (transport mismatch)**
+```
+Client sends send_message over the TCP data port
+Server returns: unknown-command (send_message is data-only, not a P2P wire command)
+Action: Use the RPC HTTP endpoint for data-only commands; TCP data port
+accepts only P2P wire commands (get_peers, fetch_contacts, push_message, etc.)
+```
+
+**Scenario 7: Simultaneous connection (duplicate — now allowed)**
 ```
 Node A dials Node B (outbound A→B established)
 Node B dials Node A (inbound to A with hello declaring B's address)
@@ -265,7 +273,7 @@ graph TB
 | `protocol-error` | Общее нарушение протокола, не охватываемое конкретными кодами | 400 Bad Request | Структура кадра недействительна, конверт неправильно сформирован или неклассифицированное нарушение |
 | `invalid-json` | Кадр не является действительным JSON | 400 Bad Request | Полезная нагрузка не может быть проанализирована как JSON; может быть усечена или повреждена |
 | `encode-failed` | Сериализация ответа не удалась на сервере | 500 Internal Server Error | Сервер не смог закодировать кадр ответа в JSON; проблема внутреннего состояния |
-| `unknown-command` | Неизвестный тип кадра в поле `type` | 400 Bad Request | Поле `type` не соответствует ни одной известной команде (например, `"foobar"`) |
+| `unknown-command` | Неизвестный или несовместимый по транспорту тип кадра в поле `type` | 400 Bad Request | Возвращается в двух случаях: (1) поле `type` не соответствует ни одной известной команде (например, `"foobar"`); (2) `type` является известной data-only командой (например, `send_message`, `fetch_messages`), но отправлена на TCP data port, где принимаются только P2P wire-команды (изоляция Stage 7). В обоих случаях сервер возвращает один и тот же код ошибки; клиенты не должны различать эти два случая по тексту ошибки |
 | `invalid-send-message` | Отсутствуют или неверные поля в запросе `send_message` | 400 Bad Request | Обязательные поля отсутствуют, неверные отпечатки, неверные UUID, неверные подписи или неправильно сформированный конверт |
 | `invalid-import-message` | Отсутствуют или неверные поля в запросе `import_message` | 400 Bad Request | Тема, отправитель или шифротекст отсутствуют; проверка подписи не удалась |
 | `invalid-fetch-messages` | Отсутствует тема в запросе `fetch_messages` | 400 Bad Request | Поле `topic` не предоставлено или неверно |
@@ -404,7 +412,15 @@ IP-адрес клиента делает много неверных запро
 Действие: Проверьте, было ли сообщение ранее сохранено; может быть истекло или удалено
 ```
 
-**Сценарий 6: Одновременное подключение (дубликат — теперь разрешено)**
+**Сценарий 6: Data-команда на TCP data port (несовпадение транспорта)**
+```
+Клиент отправляет send_message через TCP data port
+Сервер возвращает: unknown-command (send_message — data-only команда, не P2P wire)
+Действие: Используйте RPC HTTP endpoint для data-only команд; TCP data port
+принимает только P2P wire-команды (get_peers, fetch_contacts, push_message и т.д.)
+```
+
+**Сценарий 7: Одновременное подключение (дубликат — теперь разрешено)**
 ```
 Нода A подключается к ноде B (outbound A→B установлен)
 Нода B подключается к ноде A (inbound к A с hello, объявляющим адрес B)

@@ -140,6 +140,8 @@ Manually adds one or more peer addresses to the local peer list (LOCAL ONLY).
 
 ### fetch_peer_health
 
+**Scope:** LOCAL ONLY — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port; a remote peer sending this command receives `unknown_command`.
+
 Retrieves detailed health and connectivity information for all known peers.
 
 **Request Format:**
@@ -233,6 +235,8 @@ Retrieves detailed health and connectivity information for all known peers.
 - `reconnecting`: Attempting to re-establish connection after failure
 
 ### fetch_network_stats
+
+**Scope:** LOCAL ONLY — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port.
 
 Retrieves aggregated network traffic statistics for the entire node.
 
@@ -614,6 +618,8 @@ graph TB
 
 ### fetch_peer_health
 
+**Область:** ТОЛЬКО ЛОКАЛЬНО — доступна через RPC HTTP и `handleLocalFrameDispatch`. Недоступна на TCP data port; удалённый пир получит `unknown_command`.
+
 Получает подробную информацию о здоровье и подключаемости для всех известных одноранговых узлов.
 
 **Формат запроса:**
@@ -707,6 +713,8 @@ graph TB
 - `reconnecting`: Попытка восстановления подключения после сбоя
 
 ### fetch_network_stats
+
+**Область:** ТОЛЬКО ЛОКАЛЬНО — доступна через RPC HTTP и `handleLocalFrameDispatch`. Недоступна на TCP data port.
 
 Получает совокупную статистику сетевого трафика для всего узла.
 

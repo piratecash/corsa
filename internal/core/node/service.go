@@ -95,7 +95,6 @@ type Service struct {
 	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
 	inboundNetCores      map[net.Conn]*NetCore     // inbound conn → NetCore (single source of truth for connection state)
-	scope                *connauth.Scope           // RBAC command gating (delegates auth lookups to this Service via AuthStore)
 	connIDCounter         uint64                     // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
@@ -475,8 +474,6 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		svc.routingCapablePeers,
 	)
 
-	svc.scope = connauth.NewScope(svc)
-
 	svc.relayStates = newRelayStateStore()
 	svc.relayStates.restore(queueState.RelayForwardStates)
 	svc.relayLimiter = newRelayRateLimiter()
@@ -803,42 +800,16 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		return false
 	}
 
-	// RBAC enforcement gate: every inbound frame on the data port is checked
-	// against connauth.Commands before dispatch. The role is derived from
-	// server-side auth state (connauth.AuthStore), never from frame.Client
-	// which the attacker controls — eliminating the old requiresSessionAuth
-	// bypass where an empty Client field skipped authentication entirely.
+	// Auth guard for P2P commands. Handshake commands (hello, ping, pong,
+	// auth_session) are available to all connections. Every other command
+	// on the data port is part of the authenticated P2P wire protocol and
+	// requires a completed auth_session. Data-only commands (fetch_messages,
+	// send_message, etc.) are not handled here at all — they live
+	// exclusively in handleLocalFrameDispatch / RPC HTTP.
 	//
-	// Data-only commands (send_message, fetch_messages, delete_trusted_contact,
-	// etc.) are absent from connauth.Commands by design, so they cannot be
-	// reached from the network regardless of the caller's role.
-	//
-	// Three outcomes:
-	//   - Unknown:   command not in connauth.Commands → ErrCodeUnknownCommand
-	//   - Forbidden: command exists but role insufficient → ErrCodeAuthRequired
-	//   - Allowed:   proceed to the command switch below
-	switch s.scope.CheckCommand(conn, frame.Type) {
-	case connauth.Unknown:
-		log.Debug().
-			Str("protocol", "json/tcp").
-			Str("addr", conn.RemoteAddr().String()).
-			Str("direction", "recv").
-			Str("command", frame.Type).
-			Bool("accepted", false).
-			Msg("protocol_trace")
-		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
-		return false
-	case connauth.Forbidden:
-		log.Debug().
-			Str("protocol", "json/tcp").
-			Str("addr", conn.RemoteAddr().String()).
-			Str("direction", "recv").
-			Str("command", frame.Type).
-			Bool("accepted", false).
-			Msg("protocol_trace")
-		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
-		return false
-	}
+	// The role is derived from server-side auth state (ConnAuthState),
+	// never from frame.Client which the attacker controls — eliminating
+	// GAP-0.
 
 	accepted := true
 	defer func() {
@@ -854,6 +825,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 	// Update per-connection last activity timestamp for staleness checks.
 	s.touchConnActivity(conn)
 
+	// --- Handshake commands (no auth required) ---
 	switch frame.Type {
 	case "ping":
 		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
@@ -879,7 +851,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// state.Hello — allowing an attacker to authenticate as identity A
 		// but bind the connection to an unverified address B, poisoning
 		// health tracking and capability context.
-		if s.scope.AuthInitiated(conn) {
+		if s.isAuthInitiated(conn) {
 			accepted = false
 			s.writeJSONFrameSync(conn, protocol.Frame{
 				Type:  "error",
@@ -932,10 +904,9 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			return true
 		}
 		// No identity fields → unauthenticated peer. It stays
-		// RoleUnauthPeer with access limited to handshake commands and
-		// read-only queries (see connauth.Commands for the full list).
-		// State-changing writes, relay injection, and identity-bound
-		// reads are blocked until auth_session completes.
+		// unauthenticated with access limited to handshake commands
+		// (hello, ping, pong, auth_session). All P2P wire commands
+		// are blocked until auth_session completes.
 		s.rememberConnPeerAddr(conn, frame)
 		log.Debug().
 			Str("client", frame.Client).
@@ -952,6 +923,47 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		s.writeJSONFrame(conn, reply)
 		return true
+
+	default:
+		// --- P2P wire protocol (auth required) ---
+		//
+		// Everything below requires a completed auth_session. The role is
+		// derived from server-side auth state, never from frame.Client
+		// (GAP-0). Data commands (fetch_messages, send_message, etc.) are
+		// not handled here — they live exclusively in
+		// handleLocalFrameDispatch / RPC HTTP and fall through to the
+		// unknown_command response at the bottom.
+	}
+
+	// Auth gate for P2P commands. Handshake commands returned above;
+	// everything reaching this point is either a P2P command or unknown.
+	if !s.isConnAuthenticated(conn) {
+		// Check whether the command is a known P2P command before deciding
+		// on the error code: known P2P → auth_required, unknown → unknown_command.
+		if isP2PWireCommand(frame.Type) {
+			accepted = false
+			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
+			return false
+		}
+		accepted = false
+		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		return false
+	}
+
+	switch frame.Type {
+	case "get_peers":
+		// P2P peer discovery: authenticated peers request the peer list
+		// for network synchronization (syncPeer, syncPeerSession).
+		// Non-routable addresses are filtered out for remote callers;
+		// network group filtering prevents leaking clearnet addresses
+		// to Tor/I2P peers and vice versa.
+		s.writeJSONFrame(conn, s.peersFrame(s.connPeerReachableGroups(conn), false))
+		return true
+	case "fetch_contacts":
+		// P2P contact sync: authenticated peers fetch the contact list
+		// for key material synchronization (syncPeer, syncContactsViaSession).
+		s.writeJSONFrame(conn, s.contactsFrame())
+		return true
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(conn, frame)
 		if !ok {
@@ -961,72 +973,9 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		s.writeJSONFrame(conn, reply)
 		return true
-	case "get_peers":
-		s.writeJSONFrame(conn, s.peersFrame(s.connPeerReachableGroups(conn), false))
-		return true
-	case "fetch_identities":
-		s.writeJSONFrame(conn, s.identitiesFrame())
-		return true
-	case "fetch_contacts":
-		s.writeJSONFrame(conn, s.contactsFrame())
-		return true
-	case "fetch_trusted_contacts":
-		s.writeJSONFrame(conn, s.trustedContactsFrame())
-		return true
-	case "delete_trusted_contact":
-		s.writeJSONFrame(conn, s.deleteTrustedContactFrame(domain.PeerIdentity(frame.Address)))
-		return true
-	case "fetch_peer_health":
-		s.writeJSONFrame(conn, s.peerHealthFrame())
-		return true
-	case "fetch_network_stats":
-		s.writeJSONFrame(conn, s.networkStatsFrame())
-		return true
-	case "fetch_pending_messages":
-		s.writeJSONFrame(conn, s.pendingMessagesFrame(frame.Topic))
-		return true
-	case "import_contacts":
-		s.writeJSONFrame(conn, s.importContactsFrame(frame.Contacts))
-		return true
-	case "send_message":
-		s.writeJSONFrame(conn, s.storeMessageFrame(frame))
-		return true
-	case "import_message":
-		s.writeJSONFrame(conn, s.importMessageFrame(frame))
-		return true
-	case "send_delivery_receipt":
-		s.writeJSONFrame(conn, s.storeDeliveryReceiptFrame(frame))
-		return true
-	case "fetch_messages":
-		s.writeJSONFrame(conn, s.fetchMessagesFrame(frame.Topic))
-		return true
-	case "fetch_message_ids":
-		s.writeJSONFrame(conn, s.fetchMessageIDsFrame(frame.Topic))
-		return true
-	case "fetch_message":
-		s.writeJSONFrame(conn, s.fetchMessageFrame(frame.Topic, frame.ID))
-		return true
-	case "fetch_inbox":
-		// For authenticated remote peers, restrict fetch_inbox to their own
-		// identity. Without this, an authenticated peer could fetch any
-		// recipient's inbox and see encrypted DMs + metadata.
-		if s.isConnAuthenticated(conn) {
-			peerID := s.inboundPeerIdentity(conn)
-			requestedRecipient := strings.TrimSpace(frame.Recipient)
-			if requestedRecipient != "" && requestedRecipient != string(peerID) {
-				accepted = false
-				s.writeJSONFrame(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "fetch_inbox: recipient must match authenticated identity"})
-				return true
-			}
-		}
-		s.writeJSONFrame(conn, s.fetchInboxFrame(frame.Topic, frame.Recipient))
-		return true
-	case "fetch_delivery_receipts":
-		s.writeJSONFrame(conn, s.fetchDeliveryReceiptsFrame(frame.Recipient))
-		return true
 	case "subscribe_inbox":
-		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
-		// Identity binding: the authenticated peer may only subscribe to
+		// Auth gate enforced above. Identity binding: the authenticated
+		// peer may only subscribe to
 		// its own identity. Without this check, an authenticated peer could
 		// subscribe to a different identity's inbox and receive their messages.
 		peerIdentity := s.inboundPeerIdentity(conn)
@@ -1072,15 +1021,9 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 	case "push_delivery_receipt":
 		s.handleInboundPushDeliveryReceipt(conn, frame)
 		return true
-	case "publish_notice":
-		s.writeJSONFrame(conn, s.publishNoticeFrame(frame))
-		return true
-	case "fetch_notices":
-		s.writeJSONFrame(conn, s.fetchNoticesFrame())
-		return true
 	case "announce_peer":
-		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
-		// Only authenticated peers may announce, so we always promote.
+		// Auth gate enforced above. Only authenticated peers may announce,
+		// so we always promote.
 		nodeType := frame.NodeType
 		if !isKnownNodeType(nodeType) {
 			s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
@@ -1099,7 +1042,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 		return true
 	case "relay_message":
-		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required, INV-9).
+		// Auth gate enforced above (INV-9).
 		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
@@ -1129,7 +1072,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		return true
 	case "relay_hop_ack":
-		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
+		// Auth gate enforced above.
 		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
@@ -1140,7 +1083,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		return true
 	case "announce_routes":
-		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
+		// Auth gate enforced above.
 		if !s.connHasCapability(conn, domain.CapMeshRoutingV1) {
 			accepted = false
 			return true
@@ -1157,8 +1100,8 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		s.handleAnnounceRoutes(senderIdentity, frame)
 		return true
 	case "file_command":
-		// Auth gate is enforced by connauth.Commands (RoleAuthPeer required).
-		// Capability check remains: file_transfer_v1 must be negotiated.
+		// Auth gate enforced above. Capability check: file_transfer_v1 must
+		// be negotiated.
 		if !s.connHasCapability(conn, domain.CapFileTransferV1) {
 			accepted = false
 			return true
@@ -1168,14 +1111,36 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// to the neighbor that just delivered it.
 		s.handleFileCommandFrame(json.RawMessage(line), s.inboundPeerIdentity(conn))
 		return true
-	case "fetch_reachable_ids":
-		s.writeJSONFrame(conn, s.reachableIDsFrame())
-		return true
 	default:
 		accepted = false
 		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
+}
+
+// p2pWireCommands is the set of commands that belong to the authenticated
+// P2P wire protocol. Used by the auth gate in dispatchNetworkFrame to
+// distinguish "command exists but you need auth" (→ auth_required) from
+// "command does not exist on this port" (→ unknown_command).
+var p2pWireCommands = map[string]bool{
+	"get_peers":             true,
+	"fetch_contacts":        true,
+	"ack_delete":            true,
+	"subscribe_inbox":       true,
+	"subscribed":            true,
+	"push_message":          true,
+	"push_delivery_receipt": true,
+	"announce_peer":         true,
+	"relay_message":         true,
+	"relay_hop_ack":         true,
+	"announce_routes":       true,
+	"file_command":          true,
+}
+
+// isP2PWireCommand returns true if the command name belongs to the
+// authenticated P2P wire protocol handled by dispatchNetworkFrame.
+func isP2PWireCommand(cmd string) bool {
+	return p2pWireCommands[cmd]
 }
 
 func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
@@ -1495,10 +1460,19 @@ func validateProtocolHandshake(frame protocol.Frame) error {
 // isConnAuthenticated returns true when the connection has completed
 // session auth (auth_session verified). Connections that never initiated
 // auth (NetCore.auth is nil) are considered unauthenticated — they may
-// still issue commands within their role's scope, but they should not
-// trigger high-trust side effects such as peer promotion.
+// still issue handshake commands, but they should not trigger high-trust
+// side effects such as peer promotion.
 func (s *Service) isConnAuthenticated(conn net.Conn) bool {
-	return s.scope.ConnectionRole(conn) == domain.RoleAuthPeer
+	state := s.ConnAuthState(conn)
+	return state != nil && state.Verified
+}
+
+// isAuthInitiated returns true if the connection has started (challenge
+// issued, Verified=false) or completed (Verified=true) the auth handshake.
+// Used by the re-hello guard to block identity/address overwrites once
+// PrepareAuth has recorded the initial hello and challenge.
+func (s *Service) isAuthInitiated(conn net.Conn) bool {
+	return s.ConnAuthState(conn) != nil
 }
 
 func ackDeletePayload(address, ackType, id, status string) []byte {
@@ -1752,7 +1726,7 @@ func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]str
 	// Authenticated peers: trust declared networks and advertised address
 	// from the hello frame — the identity behind these claims has been
 	// verified by auth_session.
-	if s.scope.ConnectionRole(conn) == domain.RoleAuthPeer {
+	if s.isConnAuthenticated(conn) {
 		if nets := pc.Networks(); len(nets) > 0 {
 			return validateDeclaredNetworks(nets, pc.Address())
 		}

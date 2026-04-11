@@ -120,18 +120,13 @@ func TestRelayChain4NodesDMDelivery(t *testing.T) {
 	}
 
 	// Wait for the DM to propagate to nodeC via relay/gossip chain.
+	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
 	waitForCondition(t, 15*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeC.externalListenAddress(),
-			protocol.Frame{
-				Type: "hello", Version: config.ProtocolVersion,
-				Client: "test", ClientVersion: config.CorsaWireVersion,
-			},
-			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
-		)
-		if reply[1].Type != "messages" {
+		reply := nodeC.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+		if reply.Type != "messages" {
 			return false
 		}
-		for _, msg := range reply[1].Messages {
+		for _, msg := range reply.Messages {
 			if msg.ID == "chain-dm-1" && msg.Recipient == recipientID.Address {
 				return true
 			}
@@ -254,16 +249,11 @@ func TestMixedNetworkLegacyNodeReceivesViaGossip(t *testing.T) {
 	}
 
 	// Verify gossip delivers the message to the legacy node.
+	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
 	waitForCondition(t, 8*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeLegacy.externalListenAddress(),
-			protocol.Frame{
-				Type: "hello", Version: config.ProtocolVersion,
-				Client: "test", ClientVersion: config.CorsaWireVersion,
-			},
-			protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 &&
-			reply[1].Messages[0].ID == "mixed-msg-1"
+		reply := nodeLegacy.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+		return reply.Type == "messages" && len(reply.Messages) == 1 &&
+			reply.Messages[0].ID == "mixed-msg-1"
 	})
 }
 
@@ -318,15 +308,10 @@ func TestMixedVersionNewToOldFallsBackToGossip(t *testing.T) {
 	}
 
 	// Old node receives via gossip.
+	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
 	waitForCondition(t, 8*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeOld.externalListenAddress(),
-			protocol.Frame{
-				Type: "hello", Version: config.ProtocolVersion,
-				Client: "test", ClientVersion: config.CorsaWireVersion,
-			},
-			protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1
+		reply := nodeOld.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+		return reply.Type == "messages" && len(reply.Messages) == 1
 	})
 }
 
@@ -368,15 +353,10 @@ func TestMixedVersionOldToNewContinuesToWork(t *testing.T) {
 		t.Fatalf("store failed: %#v", storeReply)
 	}
 
+	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
 	waitForCondition(t, 15*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeNew.externalListenAddress(),
-			protocol.Frame{
-				Type: "hello", Version: config.ProtocolVersion,
-				Client: "test", ClientVersion: config.CorsaWireVersion,
-			},
-			protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1
+		reply := nodeNew.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+		return reply.Type == "messages" && len(reply.Messages) == 1
 	})
 }
 

@@ -18,6 +18,10 @@ File transfer operations other than the announce use a separate protocol frame (
 
 ## Commands
 
+> **Transport scope:** All commands in this section are **LOCAL ONLY** — available through RPC HTTP (`/rpc/v1/exec`) and `handleLocalFrameDispatch`. They are not available on the TCP data port; a remote peer sending any of these commands receives `unknown_command`. For P2P message delivery between peers, see the [Realtime delivery](realtime.md) protocol (`push_message`, `subscribe_inbox`).
+>
+> **Область транспорта:** Все команды в этой секции доступны **ТОЛЬКО ЛОКАЛЬНО** — через RPC HTTP (`/rpc/v1/exec`) и `handleLocalFrameDispatch`. Они недоступны на TCP data port; удалённый пир получит `unknown_command`. Для P2P-доставки сообщений между пирами см. [Realtime delivery](realtime.md) (`push_message`, `subscribe_inbox`).
+
 ### send_message
 
 Publish a new message to the network. The sender's signature is validated, and the message is deduplicated by UUID. Clock drift is checked against a configurable threshold (default 600 seconds).

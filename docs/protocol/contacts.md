@@ -61,6 +61,8 @@ Retrieves all contacts known to the local node, including untrusted entries.
 
 Retrieves only verified and trusted contacts (subset of `fetch_contacts` where validation succeeded).
 
+**Scope:** LOCAL ONLY — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port; a remote peer sending this command receives `unknown_command`. For P2P contact sync between peers, use `fetch_contacts` instead.
+
 **Request Format:**
 ```json
 {
@@ -72,6 +74,8 @@ Retrieves only verified and trusted contacts (subset of `fetch_contacts` where v
 Same as `fetch_contacts`, but filtered to verified entries only.
 
 ### import_contacts
+
+**Scope:** LOCAL ONLY — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port.
 
 Imports one or more contact entries into the local node.
 
@@ -117,6 +121,8 @@ Imports one or more contact entries into the local node.
 
 ### delete_trusted_contact
 
+**Scope:** LOCAL ONLY — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port.
+
 Removes a contact from the trust store. Also drops all pending outbound messages addressed to the deleted contact and clears their outbound delivery tracking, so queued messages are never delivered after the user explicitly removes an identity.
 
 **Request Format:**
@@ -144,6 +150,8 @@ Removes a contact from the trust store. Also drops all pending outbound messages
 - Idempotent: returns `ok` even if the address was not in the trust store
 
 ### fetch_identities
+
+**Scope:** LOCAL ONLY — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port.
 
 Retrieves the list of all known identity addresses. This includes the local node and every peer whose identity has been learned through contact exchange or direct connection.
 
@@ -350,6 +358,8 @@ sequenceDiagram
 
 Получает только проверенные и доверенные контакты (подмножество `fetch_contacts`, где валидация успешна).
 
+**Область:** ТОЛЬКО ЛОКАЛЬНО — доступна через RPC HTTP и `handleLocalFrameDispatch`. Недоступна на TCP data port; удалённый пир получит `unknown_command`. Для P2P-синхронизации контактов между пирами используется `fetch_contacts`.
+
 **Формат запроса:**
 ```json
 {
@@ -361,6 +371,8 @@ sequenceDiagram
 Аналогичен `fetch_contacts`, но отфильтрован только проверенные записи.
 
 ### import_contacts
+
+**Область:** ТОЛЬКО ЛОКАЛЬНО — доступна через RPC HTTP и `handleLocalFrameDispatch`. Недоступна на TCP data port.
 
 Импортирует одну или несколько записей контактов в локальный узел.
 
@@ -406,6 +418,8 @@ sequenceDiagram
 
 ### delete_trusted_contact
 
+**Область:** ТОЛЬКО ЛОКАЛЬНО — доступна через RPC HTTP и `handleLocalFrameDispatch`. Недоступна на TCP data port.
+
 Удаляет контакт из хранилища доверия. Также удаляет все ожидающие исходящие сообщения, адресованные удалённому контакту, и очищает трекинг доставки, чтобы поставленные в очередь сообщения не были доставлены после того, как пользователь явно удалил identity.
 
 **Формат запроса:**
@@ -433,6 +447,8 @@ sequenceDiagram
 - Идемпотентен: возвращает `ok` даже если адрес не был в хранилище доверия
 
 ### fetch_identities
+
+**Область:** ТОЛЬКО ЛОКАЛЬНО — доступна через RPC HTTP и `handleLocalFrameDispatch`. Недоступна на TCP data port.
 
 Возвращает список всех известных identity-адресов. Включает локальную ноду и каждый пир, чей identity был получен через обмен контактами или прямое подключение.
 

@@ -37,44 +37,60 @@ Every frame carries a `type` field that determines the command. Commands are gro
 
 ### Handler scope
 
-Not every command is available on every connection type:
+Not every command is available on every connection type. Commands are split across two dispatchers: `dispatchNetworkFrame` handles the TCP data port (handshake + P2P wire protocol), `handleLocalFrameDispatch` handles local/RPC commands. Data-only commands are never accepted on the TCP data port — a remote peer sending them receives `unknown_command` (see [command-isolation.md](../command-isolation.md)).
+
+**Handshake commands** (no auth required):
 
 | Command | Local (RPC/UI) | Remote (inbound peer) | Outbound peer session |
 |---|---|---|---|
 | `hello` / `welcome` | yes | yes | — |
 | `auth_session` / `auth_ok` | — | yes | — |
-| `ping` / `pong` | yes | yes | — |
-| `send_message` | yes | yes | — |
-| `import_message` | yes | yes | — |
-| `fetch_messages` | yes | yes | — |
-| `fetch_message` | yes | yes | — |
-| `fetch_message_ids` | yes | yes | — |
-| `fetch_inbox` | yes | yes | — |
-| `fetch_pending_messages` | yes | yes | — |
+| `ping` / `pong` | yes | yes | yes |
+
+**P2P wire commands** (auth required — unauthenticated peer receives `auth_required`):
+
+| Command | Local (RPC/UI) | Remote (inbound peer) | Outbound peer session |
+|---|---|---|---|
+| `get_peers` | yes | yes | yes (syncPeerSession) |
+| `fetch_contacts` | yes | yes | yes (syncContactsViaSession) |
 | `subscribe_inbox` | — | yes | yes |
 | `subscribed` | — | yes | — |
 | `push_message` | — | yes | yes |
 | `push_delivery_receipt` | — | yes | yes |
 | `ack_delete` | — | yes | — |
 | `request_inbox` | — | — | yes |
-| `send_delivery_receipt` | yes | yes | — |
-| `fetch_delivery_receipts` | yes | yes | — |
-| `fetch_contacts` | yes | yes | — |
-| `fetch_trusted_contacts` | yes | yes | — |
-| `import_contacts` | yes | yes | — |
-| `fetch_identities` | yes | yes | — |
-| `fetch_dm_headers` | yes | — | — |
-| `get_peers` | yes | yes | — |
 | `announce_peer` | — | yes | yes |
-| `add_peer` | yes | — | — |
-| `fetch_peer_health` | yes | yes | — |
-| `fetch_network_stats` | yes | yes | — |
-| `fetch_traffic_history` | yes | — | — |
 | `relay_message` | — | yes (capability-gated) | yes (capability-gated) |
 | `relay_hop_ack` | — | yes (capability-gated) | yes (capability-gated) |
+| `announce_routes` | — | yes (capability-gated) | yes (capability-gated) |
+| `file_command` | — | yes (capability-gated) | — |
+
+**Data-only commands** (local/RPC only — remote peer receives `unknown_command`):
+
+| Command | Local (RPC/UI) | Remote (inbound peer) | Outbound peer session |
+|---|---|---|---|
+| `send_message` | yes | — | — |
+| `import_message` | yes | — | — |
+| `fetch_messages` | yes | — | — |
+| `fetch_message` | yes | — | — |
+| `fetch_message_ids` | yes | — | — |
+| `fetch_inbox` | yes | — | — |
+| `fetch_pending_messages` | yes | — | — |
+| `send_delivery_receipt` | yes | — | — |
+| `fetch_delivery_receipts` | yes | — | — |
+| `fetch_trusted_contacts` | yes | — | — |
+| `import_contacts` | yes | — | — |
+| `fetch_identities` | yes | — | — |
+| `fetch_dm_headers` | yes | — | — |
+| `add_peer` | yes | — | — |
+| `fetch_peer_health` | yes | — | — |
+| `fetch_network_stats` | yes | — | — |
+| `fetch_traffic_history` | yes | — | — |
 | `fetch_relay_status` | yes | — | — |
-| `publish_notice` | yes | yes | — |
-| `fetch_notices` | yes | yes | — |
+| `publish_notice` | yes | — | — |
+| `fetch_notices` | yes | — | — |
+| `fetch_reachable_ids` | yes | — | — |
+| `delete_trusted_contact` | yes | — | — |
 
 ### Network config
 
@@ -185,44 +201,60 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 
 ### Область видимости обработчиков
 
-Не каждая команда доступна на каждом типе соединения:
+Не каждая команда доступна на каждом типе соединения. Команды разделены между двумя диспетчерами: `dispatchNetworkFrame` обрабатывает TCP data port (handshake + P2P wire протокол), `handleLocalFrameDispatch` обрабатывает локальные/RPC команды. Data-only команды никогда не принимаются на TCP data port — удалённый пир получает `unknown_command` (см. [command-isolation.md](../command-isolation.md)).
+
+**Handshake команды** (авторизация не требуется):
 
 | Команда | Локальный (RPC/UI) | Удалённый (входящий пир) | Исходящая peer session |
 |---|---|---|---|
 | `hello` / `welcome` | да | да | — |
 | `auth_session` / `auth_ok` | — | да | — |
-| `ping` / `pong` | да | да | — |
-| `send_message` | да | да | — |
-| `import_message` | да | да | — |
-| `fetch_messages` | да | да | — |
-| `fetch_message` | да | да | — |
-| `fetch_message_ids` | да | да | — |
-| `fetch_inbox` | да | да | — |
-| `fetch_pending_messages` | да | да | — |
+| `ping` / `pong` | да | да | да |
+
+**P2P wire команды** (требуется авторизация — неаутентифицированный пир получает `auth_required`):
+
+| Команда | Локальный (RPC/UI) | Удалённый (входящий пир) | Исходящая peer session |
+|---|---|---|---|
+| `get_peers` | да | да | да (syncPeerSession) |
+| `fetch_contacts` | да | да | да (syncContactsViaSession) |
 | `subscribe_inbox` | — | да | да |
 | `subscribed` | — | да | — |
 | `push_message` | — | да | да |
 | `push_delivery_receipt` | — | да | да |
 | `ack_delete` | — | да | — |
 | `request_inbox` | — | — | да |
-| `send_delivery_receipt` | да | да | — |
-| `fetch_delivery_receipts` | да | да | — |
-| `fetch_contacts` | да | да | — |
-| `fetch_trusted_contacts` | да | да | — |
-| `import_contacts` | да | да | — |
-| `fetch_identities` | да | да | — |
-| `fetch_dm_headers` | да | — | — |
-| `get_peers` | да | да | — |
 | `announce_peer` | — | да | да |
-| `add_peer` | да | — | — |
-| `fetch_peer_health` | да | да | — |
-| `fetch_network_stats` | да | да | — |
-| `fetch_traffic_history` | да | — | — |
 | `relay_message` | — | да (capability-gated) | да (capability-gated) |
 | `relay_hop_ack` | — | да (capability-gated) | да (capability-gated) |
+| `announce_routes` | — | да (capability-gated) | да (capability-gated) |
+| `file_command` | — | да (capability-gated) | — |
+
+**Data-only команды** (только локально/RPC — удалённый пир получает `unknown_command`):
+
+| Команда | Локальный (RPC/UI) | Удалённый (входящий пир) | Исходящая peer session |
+|---|---|---|---|
+| `send_message` | да | — | — |
+| `import_message` | да | — | — |
+| `fetch_messages` | да | — | — |
+| `fetch_message` | да | — | — |
+| `fetch_message_ids` | да | — | — |
+| `fetch_inbox` | да | — | — |
+| `fetch_pending_messages` | да | — | — |
+| `send_delivery_receipt` | да | — | — |
+| `fetch_delivery_receipts` | да | — | — |
+| `fetch_trusted_contacts` | да | — | — |
+| `import_contacts` | да | — | — |
+| `fetch_identities` | да | — | — |
+| `fetch_dm_headers` | да | — | — |
+| `add_peer` | да | — | — |
+| `fetch_peer_health` | да | — | — |
+| `fetch_network_stats` | да | — | — |
+| `fetch_traffic_history` | да | — | — |
 | `fetch_relay_status` | да | — | — |
-| `publish_notice` | да | да | — |
-| `fetch_notices` | да | да | — |
+| `publish_notice` | да | — | — |
+| `fetch_notices` | да | — | — |
+| `fetch_reachable_ids` | да | — | — |
+| `delete_trusted_contact` | да | — | — |
 
 ### Сетевой конфиг
 

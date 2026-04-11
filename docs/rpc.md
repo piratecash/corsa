@@ -427,6 +427,26 @@ go test ./internal/core/rpc/... -run TestClient -v
 
 Tests use Fiber `app.Test()` for HTTP-layer tests. CommandTable can be tested directly without HTTP. CLI tests cover `parseArgs` (JSON, key=value, positional) and `execRPC` (endpoint, auth). Client tests use `httptest.NewServer` to verify routing: named commands → `/rpc/v1/exec`, raw JSON frames → `/rpc/v1/frame`.
 
+#### Data Port Isolation: Mandatory Test for New Commands
+
+RPC commands and TCP data port commands have separate dispatchers (`CommandTable`/`handleLocalFrameDispatch` vs `dispatchNetworkFrame`), but this separation alone does not guarantee that a new command won't accidentally appear on the TCP data port. To prevent regression, every new RPC/data-only command **must** be covered by the data port isolation test suite in `internal/core/node/command_scope_integration_test.go`.
+
+The test suite has three layers, all required:
+
+1. **Protocol oracle** (`requiredP2PWireCommands` in `command_scope_test.go`): a hardcoded list of every P2P wire command that the protocol specification requires on the TCP data port. `TestRequiredP2PCommandsPresent` asserts each oracle entry has a case in `dispatchNetworkFrame` and an entry in `p2pWireCommands`. This is the only layer that catches accidental removal of a wire command — the AST-derived tests below validate the implementation against itself and silently reclassify removed commands as data-only.
+
+2. **AST-derived invariants** (`TestP2PWireCommandsMatchesDispatch`, `TestNoDataCommandsInNetworkDispatch`): automatically detect new commands and verify structural consistency between `dispatchNetworkFrame`, `handleLocalFrameDispatch`, and `p2pWireCommands`. These catch accidental additions (a data-only command leaking onto the wire) but cannot catch accidental removals.
+
+3. **Integration tests** (`TestDataCommandViaTCP_UnknownCommand_*`, `TestAuthPeerCan*`, `TestUnauthPeerCannot*`): end-to-end confirmation over real TCP connections that the data port rejects data-only commands and accepts P2P wire commands with correct auth gating.
+
+When adding a new command:
+
+1. **Data-only command** (RPC/local only, e.g. `fetch_messages`, `send_message`): add the command to `handleLocalFrameDispatch` in `service.go`. The AST-based tests will automatically detect it. Additionally, add the command's snake_case, camelCase, and kebab-case forms to the test lists in `TestDataCommandViaTCP_UnknownCommand_SnakeCase`, `TestDataCommandViaTCP_UnknownCommand_CamelCase`, and `TestDataCommandViaTCP_UnknownCommand_KebabCase`.
+
+2. **P2P wire command** (used between peers, e.g. `push_message`, `get_peers`): add the command to `dispatchNetworkFrame`, the `p2pWireCommands` map, **and** the `requiredP2PWireCommands` oracle in `command_scope_test.go`. Add an unauthenticated peer test (expect `auth_required`) and an authenticated peer test (expect success) in `command_scope_integration_test.go`. Omitting the oracle entry means `TestRequiredP2PCommandsPresent` will flag the new command as unregistered.
+
+See `docs/command-isolation.md` section 10 for the full test specification.
+
 ---
 
 ## Русский
@@ -855,3 +875,23 @@ go test ./internal/core/rpc/... -run TestClient -v
 ```
 
 Тесты используют Fiber `app.Test()` для тестирования HTTP-слоя. CommandTable можно тестировать напрямую без HTTP. CLI-тесты покрывают `parseArgs` (JSON, key=value, positional) и `execRPC` (эндпоинт, авторизация). Тесты клиента используют `httptest.NewServer` для проверки маршрутизации: именованные команды → `/rpc/v1/exec`, сырые JSON-фреймы → `/rpc/v1/frame`.
+
+#### Изоляция data port: обязательный тест для новых команд
+
+Хотя RPC-команды и TCP data port используют раздельные диспетчеры (`CommandTable`/`handleLocalFrameDispatch` vs `dispatchNetworkFrame`), одного лишь разделения кода недостаточно для гарантии, что новая команда не попадёт случайно на TCP data port. Для предотвращения регрессии каждая новая RPC/data-only команда **обязана** быть покрыта тестами изоляции в `internal/core/node/command_scope_integration_test.go`.
+
+Тестовая система имеет три уровня, все обязательны:
+
+1. **Протокольный оракул** (`requiredP2PWireCommands` в `command_scope_test.go`): захардкоженный список всех P2P wire-команд, которые спецификация протокола требует на TCP data port. `TestRequiredP2PCommandsPresent` проверяет, что каждая запись оракула имеет case в `dispatchNetworkFrame` и запись в `p2pWireCommands`. Это единственный уровень, который ловит случайное удаление wire-команды — AST-тесты ниже валидируют реализацию саму о себе и молча переклассифицируют удалённые команды как data-only.
+
+2. **AST-инварианты** (`TestP2PWireCommandsMatchesDispatch`, `TestNoDataCommandsInNetworkDispatch`): автоматически обнаруживают новые команды и проверяют структурную согласованность между `dispatchNetworkFrame`, `handleLocalFrameDispatch` и `p2pWireCommands`. Ловят случайные добавления (data-only команда утекла на wire), но не ловят случайные удаления.
+
+3. **Интеграционные тесты** (`TestDataCommandViaTCP_UnknownCommand_*`, `TestAuthPeerCan*`, `TestUnauthPeerCannot*`): сквозное подтверждение через реальные TCP-соединения, что data port отклоняет data-only команды и принимает P2P wire-команды с правильной проверкой аутентификации.
+
+При добавлении новой команды:
+
+1. **Data-only команда** (только RPC/local, например `fetch_messages`, `send_message`): добавить команду в `handleLocalFrameDispatch` в `service.go`. AST-тесты автоматически обнаружат её. Дополнительно добавить snake_case, camelCase и kebab-case формы в тестовые списки `TestDataCommandViaTCP_UnknownCommand_SnakeCase`, `TestDataCommandViaTCP_UnknownCommand_CamelCase` и `TestDataCommandViaTCP_UnknownCommand_KebabCase`.
+
+2. **P2P wire команда** (используется между пирами, например `push_message`, `get_peers`): добавить команду в `dispatchNetworkFrame`, в map `p2pWireCommands` **и** в оракул `requiredP2PWireCommands` в `command_scope_test.go`. Добавить тест для неаутентифицированного пира (ожидать `auth_required`) и тест для аутентифицированного пира (ожидать успех) в `command_scope_integration_test.go`. Если запись в оракул не добавлена, `TestRequiredP2PCommandsPresent` отметит новую команду как незарегистрированную.
+
+См. `docs/command-isolation.md` секция 10 для полной спецификации тестов.

@@ -47,10 +47,9 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	})
 	defer stop()
 
-	// Handshake + read-only queries over unauthenticated TCP connection.
+	// Handshake over unauthenticated TCP connection.
 	frames := exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "get_peers"},
 	)
 
 	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
@@ -59,12 +58,15 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	if got := frames[0]; got.Listener != "1" || got.Listen != normalizeAddress(address) {
 		t.Fatalf("unexpected welcome listener fields: %#v", got)
 	}
-	if got := frames[1]; got.Type != "peers" || got.Count != 0 {
-		t.Fatalf("unexpected peers: %#v", got)
+
+	// Query local state via HandleLocalFrame (no peers expected initially).
+	peers := svc.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
+	if peers.Type != "peers" || peers.Count != 0 {
+		t.Fatalf("unexpected peers: %#v", peers)
 	}
 
 	// State-changing + sensitive-read commands via local RPC (requires
-	// RoleAuthPeer on the data port; HandleLocalFrame is the trusted
+	// authenticated peer on the data port; HandleLocalFrame is the trusted
 	// local operator path).
 	stored := svc.HandleLocalFrame(sendMessageFrame("global", "msg-1", svc.Address(), "*", "immutable", ts, 0, "hello"))
 	if stored.Type != "message_stored" || stored.ID != "msg-1" {
@@ -103,12 +105,10 @@ func TestClientWithoutListenerAnnouncesIdentityButNotDialAddress(t *testing.T) {
 	})
 	defer stopClient()
 
+	// Use HandleLocalFrame to query the full node's local state directly.
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeFrames(t, fullNode.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_identities"},
-		)
-		for _, address := range reply[1].Identities {
+		reply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_identities"})
+		for _, address := range reply.Identities {
 			if address == clientNode.Address() {
 				return true
 			}
@@ -116,14 +116,10 @@ func TestClientWithoutListenerAnnouncesIdentityButNotDialAddress(t *testing.T) {
 		return false
 	})
 
-	reply := exchangeFrames(t, fullNode.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "get_peers"},
-	)
-
-	for _, peer := range reply[1].Peers {
+	peersReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
+	for _, peer := range peersReply.Peers {
 		if peer == normalizeAddress(addressClient) {
-			t.Fatalf("listener-disabled client should not be advertised as dialable peer: %#v", reply[1].Peers)
+			t.Fatalf("listener-disabled client should not be advertised as dialable peer: %#v", peersReply.Peers)
 		}
 	}
 }
@@ -237,10 +233,11 @@ func TestV2NodeHandshakeRequiresSignedAuth(t *testing.T) {
 		t.Fatalf("expected auth_ok, got %#v", authOK)
 	}
 
-	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
-	peers := readJSONTestFrame(t, reader)
-	if peers.Type != "peers" {
-		t.Fatalf("expected peers after auth, got %#v", peers)
+	// Verify authenticated connection works with a handshake command.
+	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
+	pong := readJSONTestFrame(t, reader)
+	if pong.Type != "pong" {
+		t.Fatalf("expected pong after auth, got %#v", pong)
 	}
 }
 
@@ -510,12 +507,10 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 
 	time.Sleep(1500 * time.Millisecond)
 
-	final := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_messages", Topic: "global"},
-	)
-	if got := final[1]; got.Type != "messages" || got.Count != 0 {
-		t.Fatalf("expected empty message log on full node, got %#v", got)
+	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
+	final := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	if final.Type != "messages" || final.Count != 0 {
+		t.Fatalf("expected empty message log on full node, got %#v", final)
 	}
 }
 
@@ -556,21 +551,22 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 	})
 	defer stop()
 
-	// Part 1: read-only queries over TCP, state-changing via RPC.
+	// Part 1: TCP handshake + data-only queries via HandleLocalFrame.
 	tcpFrames := exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "get_peers"},
-		protocol.Frame{Type: "fetch_contacts"},
 	)
-
 	if got := tcpFrames[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome: %#v", got)
 	}
-	if got := tcpFrames[1]; got.Type != "peers" || got.Count != 0 {
-		t.Fatalf("unexpected peers: %#v", got)
+
+	// Query local state via HandleLocalFrame (in-process path).
+	peersA := svc.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
+	if peersA.Type != "peers" || peersA.Count != 0 {
+		t.Fatalf("unexpected peers: %#v", peersA)
 	}
-	if got := tcpFrames[2]; got.Type != "contacts" || got.Count == 0 {
-		t.Fatalf("unexpected contacts: %#v", got)
+	contactsA := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_contacts"})
+	if contactsA.Type != "contacts" || contactsA.Count == 0 {
+		t.Fatalf("unexpected contacts: %#v", contactsA)
 	}
 
 	timestampA := time.Now().UTC().Format(time.RFC3339)
@@ -583,27 +579,21 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 		ID: "series-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: timestampA, TTLSeconds: 0, Body: "hello-series",
 	})
 
-	// Part 2: same operations via separate TCP + RPC calls.
+	// Part 2: separate TCP handshake + repeated local queries.
 	step1 := exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
 	)
-	step2 := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "get_peers"},
-	)
-	step3 := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_contacts"},
-	)
-
 	if got := step1[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome over separate connection: %#v", got)
 	}
-	if got := step2[1]; got.Type != "peers" || got.Count != 0 {
-		t.Fatalf("unexpected peers over separate connection: %#v", got)
+
+	peersB := svc.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
+	if peersB.Type != "peers" || peersB.Count != 0 {
+		t.Fatalf("unexpected peers over separate call: %#v", peersB)
 	}
-	if got := step3[1]; got.Type != "contacts" || got.Count == 0 {
-		t.Fatalf("unexpected contacts over separate connection: %#v", got)
+	contactsB := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_contacts"})
+	if contactsB.Type != "contacts" || contactsB.Count == 0 {
+		t.Fatalf("unexpected contacts over separate call: %#v", contactsB)
 	}
 
 	timestampB := time.Now().UTC().Format(time.RFC3339)
@@ -1081,7 +1071,7 @@ func TestKnownPeersIncludesNonListenerClients(t *testing.T) {
 	}
 
 	// Exchange a frame to generate some traffic.
-	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
+	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
 	_ = readJSONTestFrame(t, reader)
 
 	// Verify: the non-listener peer should appear in peer_traffic,
@@ -1143,12 +1133,10 @@ func TestQueuedMeshMessageFlushesAfterPeerReconnect(t *testing.T) {
 	})
 	defer stopB()
 
+	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
 	waitForCondition(t, 8*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "queued-msg-1"
+		reply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+		return reply.Type == "messages" && len(reply.Messages) == 1 && reply.Messages[0].ID == "queued-msg-1"
 	})
 }
 
@@ -1259,28 +1247,19 @@ func TestMeshMessagePropagation(t *testing.T) {
 		t.Fatalf("unexpected nodeA store response: %#v", stored)
 	}
 
+	// fetch_messages is data-only (Stage 7) — query via HandleLocalFrame.
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].Body == "hello-from-a"
+		reply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+		return reply.Type == "messages" && len(reply.Messages) == 1 && reply.Messages[0].Body == "hello-from-a"
 	})
 
-	final := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_messages", Topic: "global"},
-		protocol.Frame{Type: "get_peers"},
-	)
-	assertMessageFrame(t, final[1], "messages", "global", 1, protocol.MessageFrame{
+	finalMessages := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	assertMessageFrame(t, finalMessages, "messages", "global", 1, protocol.MessageFrame{
 		ID: "mesh-msg-1", Sender: nodeA.Address(), Recipient: "*", Flag: "immutable", CreatedAt: ts, TTLSeconds: 0, Body: "hello-from-a",
 	})
-	// The remote get_peers response must not contain local/non-routable
-	// addresses.  Both test nodes listen on 127.0.0.1, so the filtered
-	// response is expected to be empty.  The actual peer knowledge was
-	// already verified above via nodeB.Peers().
-	if got := final[2]; got.Type != "peers" {
-		t.Fatalf("expected peers frame, got %#v", got)
+	finalPeers := nodeB.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
+	if finalPeers.Type != "peers" {
+		t.Fatalf("expected peers frame, got %#v", finalPeers)
 	}
 }
 
@@ -1347,21 +1326,19 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	}
 messageReceived:
 
-	inboxB := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_messages", Topic: "dm"},
-	)
+	// fetch_messages, fetch_message_ids, fetch_message are data-only (Stage 7).
+	inboxBReply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
 	// Parallel tests may gossip stray DMs into nodeB's "dm" topic through
 	// port reuse, so we assert the expected message exists rather than
 	// requiring an exact message count.
-	if got := inboxB[1]; got.Type != "messages" || got.Topic != "dm" {
-		t.Fatalf("unexpected message frame envelope: %#v", got)
+	if inboxBReply.Type != "messages" || inboxBReply.Topic != "dm" {
+		t.Fatalf("unexpected message frame envelope: %#v", inboxBReply)
 	}
 	expectedMsg := protocol.MessageFrame{
 		ID: "dm-msg-1", Sender: nodeA.Address(), Recipient: nodeB.Address(), Flag: "sender-delete", CreatedAt: ts, TTLSeconds: 0, Body: ciphertext,
 	}
 	foundDM := false
-	for _, msg := range inboxB[1].Messages {
+	for _, msg := range inboxBReply.Messages {
 		if msg.ID == "dm-msg-1" {
 			if msg != expectedMsg {
 				t.Fatalf("dm-msg-1 content mismatch: got %#v want %#v", msg, expectedMsg)
@@ -1371,7 +1348,7 @@ messageReceived:
 		}
 	}
 	if !foundDM {
-		t.Fatalf("dm-msg-1 not found in messages: %#v", inboxB[1].Messages)
+		t.Fatalf("dm-msg-1 not found in messages: %#v", inboxBReply.Messages)
 	}
 
 	inboxA := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: nodeA.Address()})
@@ -1379,30 +1356,24 @@ messageReceived:
 		t.Fatalf("unexpected nodeA inbox: %#v", inboxA)
 	}
 
-	dmIDs := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_message_ids", Topic: "dm"},
-	)
-	if got := dmIDs[1]; got.Type != "message_ids" {
-		t.Fatalf("unexpected dm id list type: %#v", got)
+	dmIDsReply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
+	if dmIDsReply.Type != "message_ids" {
+		t.Fatalf("unexpected dm id list type: %#v", dmIDsReply)
 	}
 	foundID := false
-	for _, id := range dmIDs[1].IDs {
+	for _, id := range dmIDsReply.IDs {
 		if id == "dm-msg-1" {
 			foundID = true
 			break
 		}
 	}
 	if !foundID {
-		t.Fatalf("dm-msg-1 not found in message IDs: %v", dmIDs[1].IDs)
+		t.Fatalf("dm-msg-1 not found in message IDs: %v", dmIDsReply.IDs)
 	}
 
-	single := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_message", Topic: "dm", ID: "dm-msg-1"},
-	)
-	if got := single[1]; got.Type != "message" || got.Item == nil || got.Item.ID != "dm-msg-1" {
-		t.Fatalf("unexpected single dm fetch: %#v", got)
+	singleReply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_message", Topic: "dm", ID: "dm-msg-1"})
+	if singleReply.Type != "message" || singleReply.Item == nil || singleReply.Item.ID != "dm-msg-1" {
+		t.Fatalf("unexpected single dm fetch: %#v", singleReply)
 	}
 }
 
@@ -1490,15 +1461,14 @@ func TestFetchTrustedContactsDoesNotIncludeNetworkDiscoveredContacts(t *testing.
 	})
 	defer stopB()
 
+	// fetch_trusted_contacts is data-only (Stage 7); fetch_contacts is
+	// available on both TCP (P2P wire) and local — query via HandleLocalFrame.
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeA.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_contacts"},
-		)
-		if reply[1].Type != "contacts" || reply[1].Count == 0 {
+		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_contacts"})
+		if reply.Type != "contacts" || reply.Count == 0 {
 			return false
 		}
-		for _, contact := range reply[1].Contacts {
+		for _, contact := range reply.Contacts {
 			if contact.Address == nodeB.Address() && contact.BoxSig != "" {
 				return true
 			}
@@ -1506,12 +1476,9 @@ func TestFetchTrustedContactsDoesNotIncludeNetworkDiscoveredContacts(t *testing.
 		return false
 	})
 
-	networkReply := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_contacts"},
-	)
+	networkReply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_contacts"})
 	foundNetworkContact := false
-	for _, contact := range networkReply[1].Contacts {
+	for _, contact := range networkReply.Contacts {
 		if contact.Address == nodeB.Address() {
 			foundNetworkContact = true
 			if contact.BoxSig == "" {
@@ -1520,14 +1487,10 @@ func TestFetchTrustedContactsDoesNotIncludeNetworkDiscoveredContacts(t *testing.
 		}
 	}
 	if !foundNetworkContact {
-		t.Fatalf("expected fetch_contacts to include network-discovered contact %s, got %#v", nodeB.Address(), networkReply[1].Contacts)
+		t.Fatalf("expected fetch_contacts to include network-discovered contact %s, got %#v", nodeB.Address(), networkReply.Contacts)
 	}
 
-	reply := exchangeFrames(t, nodeA.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_trusted_contacts"},
-	)
-	got := reply[1]
+	got := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
 	if got.Type != "contacts" || got.Count != 1 || len(got.Contacts) != 1 {
 		t.Fatalf("expected only self trusted contact, got %#v", got)
 	}
@@ -1784,23 +1747,18 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 		t.Fatalf("unexpected notice store response: %#v", noticeReply)
 	}
 
+	// fetch_notices is a data-only command (Stage 7) — use HandleLocalFrame.
 	waitForCondition(t, 5*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_notices"},
-		)
-		return reply[1].Type == "notices" && len(reply[1].Notices) > 0
+		reply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_notices"})
+		return reply.Type == "notices" && len(reply.Notices) > 0
 	})
 
-	replyB := exchangeFrames(t, nodeB.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "fetch_notices"},
-	)
-	if len(replyB[1].Notices) == 0 {
+	replyB := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_notices"})
+	if len(replyB.Notices) == 0 {
 		t.Fatal("expected nodeB to have at least one notice")
 	}
 
-	plain, err := gazeta.DecryptForIdentity(nodeB.identity, replyB[1].Notices[0].Ciphertext)
+	plain, err := gazeta.DecryptForIdentity(nodeB.identity, replyB.Notices[0].Ciphertext)
 	if err != nil {
 		t.Fatalf("expected nodeB to decrypt notice: %v", err)
 	}
@@ -1808,7 +1766,7 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 		t.Fatalf("unexpected gazeta body: %q", plain.Body)
 	}
 
-	if _, err := gazeta.DecryptForIdentity(nodeA.identity, replyB[1].Notices[0].Ciphertext); err == nil {
+	if _, err := gazeta.DecryptForIdentity(nodeA.identity, replyB.Notices[0].Ciphertext); err == nil {
 		t.Fatal("expected sender nodeA not to decrypt recipient notice")
 	}
 }
@@ -1927,11 +1885,10 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	defer stopB()
 
 	waitForCondition(t, 40*time.Second, func() bool {
-		reply := exchangeFrames(t, nodeB.externalListenAddress(),
-			protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-			protocol.Frame{Type: "fetch_messages", Topic: "dm"},
-		)
-		return reply[1].Type == "messages" && len(reply[1].Messages) == 1 && reply[1].Messages[0].ID == "retry-dm-1"
+		// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame
+		// instead of TCP data port.
+		reply := nodeB.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
+		return reply.Type == "messages" && len(reply.Messages) == 1 && reply.Messages[0].ID == "retry-dm-1"
 	})
 }
 
@@ -5580,7 +5537,7 @@ func TestProtocolTraceLogging(t *testing.T) {
 	// --- Test TCP path (dispatchNetworkFrame) ---
 	_ = exchangeFrames(t, svc.externalListenAddress(),
 		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
-		protocol.Frame{Type: "get_peers"},
+		protocol.Frame{Type: "ping"},
 	)
 
 	// --- Test hello-after-auth rejection trace ---
@@ -5878,8 +5835,8 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	})
 	defer stop()
 
-	// announce_peer requires RoleAuthPeer (connauth.Commands), so we must
-	// complete the full auth handshake before sending it.
+	// announce_peer requires authenticated peer, so we must complete
+	// the full auth handshake before sending it.
 	conn, reader, _ := authenticatedConn(t, svc)
 	defer func() { _ = conn.Close() }()
 
@@ -7470,6 +7427,98 @@ func TestMixedVersionNodeWithoutCapabilitiesField(t *testing.T) {
 		t.Fatalf("expected protocol version %d, got %d", config.ProtocolVersion, welcome.Version)
 	}
 	// Handshake must succeed — a missing capabilities field is not an error.
+}
+
+// TestMixedVersionLegacyPeerExchange verifies that a legacy node (no
+// capabilities field) can complete the full peer-exchange phase after
+// authentication: hello → welcome → auth_session → auth_ok → get_peers →
+// fetch_contacts. This is the exact sequence that syncPeer/syncPeerSession
+// execute on every peer session. Without this test, the handshake-only
+// coverage in TestMixedVersionNodeWithoutCapabilitiesField would pass
+// even if the post-handshake P2P protocol was broken.
+func TestMixedVersionLegacyPeerExchange(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddress(t)
+	tempDir := t.TempDir()
+
+	nodeID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    addr,
+		AdvertiseAddress: addr,
+		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		Type:             domain.NodeTypeFull,
+	}, nodeID)
+	svc.disableRateLimiting = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	svc, stop := startTestService(t, ctx, cancel, svc)
+	defer stop()
+
+	// Generate identity for the "legacy" peer.
+	legacyID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	// Phase 1: hello WITHOUT capabilities — simulates legacy node.
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:                   "hello",
+		Version:                config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client:                 "node",
+		ClientVersion:          "0.9.0",
+		Address:                legacyID.Address,
+		PubKey:                 identity.PublicKeyBase64(legacyID.PublicKey),
+		BoxKey:                 identity.BoxPublicKeyBase64(legacyID.BoxPublicKey),
+		BoxSig:                 identity.SignBoxKeyBinding(legacyID),
+		Listen:                 "10.0.0.42:12345",
+		// Capabilities intentionally omitted — legacy node.
+	})
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" || welcome.Challenge == "" {
+		t.Fatalf("expected welcome with challenge, got %#v", welcome)
+	}
+
+	// Phase 2: auth_session — legacy node authenticates.
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:      "auth_session",
+		Address:   legacyID.Address,
+		Signature: identity.SignPayload(legacyID, connauth.SessionAuthPayload(welcome.Challenge, legacyID.Address)),
+	})
+	authReply := readJSONTestFrame(t, reader)
+	if authReply.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got type=%q code=%s error=%q", authReply.Type, authReply.Code, authReply.Error)
+	}
+
+	// Phase 3: get_peers — the first step of syncPeer/syncPeerSession.
+	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
+	peersReply := readJSONTestFrame(t, reader)
+	if peersReply.Type != "peers" {
+		t.Fatalf("legacy peer-exchange: get_peers should return peers, got type=%q code=%s error=%q",
+			peersReply.Type, peersReply.Code, peersReply.Error)
+	}
+
+	// Phase 4: fetch_contacts — the second step of syncPeer/syncPeerSession.
+	writeJSONFrame(t, conn, protocol.Frame{Type: "fetch_contacts"})
+	contactsReply := readJSONTestFrame(t, reader)
+	if contactsReply.Type != "contacts" {
+		t.Fatalf("legacy peer-exchange: fetch_contacts should return contacts, got type=%q code=%s error=%q",
+			contactsReply.Type, contactsReply.Code, contactsReply.Error)
+	}
 }
 
 // TestUnauthenticatedPeerCannotSendRelayMessage verifies the trust boundary:
