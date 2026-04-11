@@ -34,7 +34,7 @@ func testTable() *rpc.CommandTable {
 	)
 
 	t.Register(
-		rpc.CommandInfo{Name: "send_dm", Description: "Send DM", Category: "message", Usage: "<to> <body>"},
+		rpc.CommandInfo{Name: "sendDm", Description: "Send DM", Category: "message", Usage: "<to> <body>"},
 		func(req rpc.CommandRequest) rpc.CommandResponse {
 			data, _ := json.Marshal(req.Args)
 			return rpc.CommandResponse{Data: data}
@@ -42,7 +42,7 @@ func testTable() *rpc.CommandTable {
 	)
 
 	t.Register(
-		rpc.CommandInfo{Name: "fetch_traffic_history", Description: "Traffic history", Category: "metrics"},
+		rpc.CommandInfo{Name: "fetchTrafficHistory", Description: "Traffic history", Category: "metrics"},
 		func(req rpc.CommandRequest) rpc.CommandResponse {
 			data, _ := json.Marshal(map[string]string{"status": "ok"})
 			return rpc.CommandResponse{Data: data}
@@ -50,7 +50,7 @@ func testTable() *rpc.CommandTable {
 	)
 
 	t.Register(
-		rpc.CommandInfo{Name: "fetch_route_table", Description: "Full routing table snapshot", Category: "routing"},
+		rpc.CommandInfo{Name: "fetchRouteTable", Description: "Full routing table snapshot", Category: "routing"},
 		func(req rpc.CommandRequest) rpc.CommandResponse {
 			data, _ := json.Marshal(map[string]string{"status": "ok"})
 			return rpc.CommandResponse{Data: data}
@@ -58,7 +58,7 @@ func testTable() *rpc.CommandTable {
 	)
 
 	t.Register(
-		rpc.CommandInfo{Name: "fetch_route_summary", Description: "Routing table summary", Category: "routing"},
+		rpc.CommandInfo{Name: "fetchRouteSummary", Description: "Routing table summary", Category: "routing"},
 		func(req rpc.CommandRequest) rpc.CommandResponse {
 			data, _ := json.Marshal(map[string]string{"status": "ok"})
 			return rpc.CommandResponse{Data: data}
@@ -66,7 +66,7 @@ func testTable() *rpc.CommandTable {
 	)
 
 	t.Register(
-		rpc.CommandInfo{Name: "fetch_route_lookup", Description: "Lookup routes for identity", Category: "routing", Usage: "<identity>"},
+		rpc.CommandInfo{Name: "fetchRouteLookup", Description: "Lookup routes for identity", Category: "routing", Usage: "<identity>"},
 		func(req rpc.CommandRequest) rpc.CommandResponse {
 			data, _ := json.Marshal(req.Args)
 			return rpc.CommandResponse{Data: data}
@@ -74,7 +74,7 @@ func testTable() *rpc.CommandTable {
 	)
 
 	t.RegisterUnavailable(
-		rpc.CommandInfo{Name: "fetch_chatlog", Description: "Unavailable in test mode", Category: "chatlog"},
+		rpc.CommandInfo{Name: "fetchChatlog", Description: "Unavailable in test mode", Category: "chatlog"},
 	)
 
 	return t
@@ -96,7 +96,7 @@ func TestExecuteCommandDispatchesViaCommandTable(t *testing.T) {
 func TestExecuteCommandWithArgs(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	result, err := cw.executeCommand("send_dm peer-abc hello world")
+	result, err := cw.executeCommand("sendDm peer-abc hello world")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestExecuteCommandJSONFrame(t *testing.T) {
 func TestExecuteCommandUnavailableReturnsError(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	_, err := cw.executeCommand("fetch_chatlog")
+	_, err := cw.executeCommand("fetchChatlog")
 	if err == nil {
 		t.Fatal("expected error for unavailable command")
 	}
@@ -164,8 +164,8 @@ func TestLoadCommandsPopulatesSuggestions(t *testing.T) {
 
 	// Unavailable commands should be excluded.
 	for _, s := range suggestions {
-		if s.Insert == "fetch_chatlog" {
-			t.Error("unavailable command fetch_chatlog should not appear in suggestions")
+		if s.Insert == "fetchChatlog" {
+			t.Error("unavailable command fetchChatlog should not appear in suggestions")
 		}
 	}
 
@@ -177,8 +177,8 @@ func TestLoadCommandsPopulatesSuggestions(t *testing.T) {
 	if !found["ping"] {
 		t.Error("expected ping in suggestions")
 	}
-	if !found["send_dm"] {
-		t.Error("expected send_dm in suggestions")
+	if !found["sendDm"] {
+		t.Error("expected sendDm in suggestions")
 	}
 }
 
@@ -204,8 +204,8 @@ func TestExecuteCommandHelpReturnsHumanReadable(t *testing.T) {
 	if !strings.Contains(result, "ping") {
 		t.Error("expected 'ping' in help text")
 	}
-	if !strings.Contains(result, "send_dm") {
-		t.Error("expected 'send_dm' in help text")
+	if !strings.Contains(result, "sendDm") {
+		t.Error("expected 'sendDm' in help text")
 	}
 
 	// Should contain usage hints for argument-taking commands.
@@ -244,36 +244,36 @@ func TestConsoleHelpTextGroupsByCategory(t *testing.T) {
 	}
 
 	// Unavailable commands should not appear.
-	if strings.Contains(text, "fetch_chatlog") {
-		t.Error("unavailable command fetch_chatlog should not appear in console help")
+	if strings.Contains(text, "fetchChatlog") {
+		t.Error("unavailable command fetchChatlog should not appear in console help")
 	}
 
 	// Metrics category must be present with its command.
 	if !strings.Contains(text, "== Metrics ==") {
 		t.Error("expected '== Metrics ==' section in console help")
 	}
-	if !strings.Contains(text, "fetch_traffic_history") {
-		t.Error("expected fetch_traffic_history in console help")
+	if !strings.Contains(text, "fetchTrafficHistory") {
+		t.Error("expected fetchTrafficHistory in console help")
 	}
 
 	// Routing category must be present with its commands.
 	if !strings.Contains(text, "== Routing ==") {
 		t.Error("expected '== Routing ==' section in console help")
 	}
-	if !strings.Contains(text, "fetch_route_table") {
-		t.Error("expected fetch_route_table in console help")
+	if !strings.Contains(text, "fetchRouteTable") {
+		t.Error("expected fetchRouteTable in console help")
 	}
-	if !strings.Contains(text, "fetch_route_summary") {
-		t.Error("expected fetch_route_summary in console help")
+	if !strings.Contains(text, "fetchRouteSummary") {
+		t.Error("expected fetchRouteSummary in console help")
 	}
-	if !strings.Contains(text, "fetch_route_lookup") {
-		t.Error("expected fetch_route_lookup in console help")
+	if !strings.Contains(text, "fetchRouteLookup") {
+		t.Error("expected fetchRouteLookup in console help")
 	}
 }
 
 func TestCommandInfoToSuggestionsUsage(t *testing.T) {
 	commands := []rpc.CommandInfo{
-		{Name: "send_dm", Description: "Send DM", Category: "message", Usage: "<to> <body>"},
+		{Name: "sendDm", Description: "Send DM", Category: "message", Usage: "<to> <body>"},
 		{Name: "ping", Description: "Pong", Category: "system"},
 	}
 
@@ -285,9 +285,9 @@ func TestCommandInfoToSuggestionsUsage(t *testing.T) {
 
 	// With Usage: Label includes usage, Insert is just the name.
 	for _, s := range suggestions {
-		if s.Label == "send_dm <to> <body>" {
-			if s.Insert != "send_dm" {
-				t.Errorf("expected insert 'send_dm', got %q", s.Insert)
+		if s.Label == "sendDm <to> <body>" {
+			if s.Insert != "sendDm" {
+				t.Errorf("expected insert 'sendDm', got %q", s.Insert)
 			}
 		}
 		if s.Label == "ping" {
@@ -299,24 +299,24 @@ func TestCommandInfoToSuggestionsUsage(t *testing.T) {
 }
 
 func TestCommandInfoToSuggestionsPrefill(t *testing.T) {
-	// fetch_chatlog should prefill the default topic "dm" on autocomplete,
+	// fetchChatlog should prefill the default topic "dm" on autocomplete,
 	// preserving the old desktop console UX shortcut.
 	commands := []rpc.CommandInfo{
-		{Name: "fetch_chatlog", Description: "Fetch chatlog", Category: "chatlog", Usage: "[topic] [peer_address]"},
+		{Name: "fetchChatlog", Description: "Fetch chatlog", Category: "chatlog", Usage: "[topic] [peer_address]"},
 		{Name: "ping", Description: "Pong", Category: "system"},
 	}
 
 	suggestions := commandInfoToSuggestions(commands)
 
 	for _, s := range suggestions {
-		if s.Label == "fetch_chatlog [topic] [peer_address]" {
-			if s.Insert != "fetch_chatlog dm" {
-				t.Errorf("expected insert 'fetch_chatlog dm', got %q", s.Insert)
+		if s.Label == "fetchChatlog [topic] [peer_address]" {
+			if s.Insert != "fetchChatlog dm" {
+				t.Errorf("expected insert 'fetchChatlog dm', got %q", s.Insert)
 			}
 			return
 		}
 	}
-	t.Error("fetch_chatlog suggestion not found")
+	t.Error("fetchChatlog suggestion not found")
 }
 
 func TestFormatUptime(t *testing.T) {

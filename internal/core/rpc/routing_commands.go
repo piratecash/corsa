@@ -16,17 +16,17 @@ import (
 // and returning 503 on execution, consistent with other mode-gated commands.
 func RegisterRoutingCommands(t *CommandTable, rp RoutingProvider) {
 	tableInfo := CommandInfo{
-		Name:        "fetch_route_table",
+		Name:        "fetchRouteTable",
 		Description: "Get full routing table snapshot with all entries",
 		Category:    "routing",
 	}
 	summaryInfo := CommandInfo{
-		Name:        "fetch_route_summary",
+		Name:        "fetchRouteSummary",
 		Description: "Get routing table summary: total/active entries, destinations, flap state",
 		Category:    "routing",
 	}
 	lookupInfo := CommandInfo{
-		Name:        "fetch_route_lookup",
+		Name:        "fetchRouteLookup",
 		Description: "Lookup routes for a specific destination identity",
 		Category:    "routing",
 		Usage:       "<identity>",

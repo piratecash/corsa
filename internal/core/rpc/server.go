@@ -153,8 +153,9 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 	if req.Command == "" {
 		return ErrorResponse(c, fiber.StatusBadRequest, "command is required")
 	}
-	req.Command = strings.ToLower(req.Command)
 
+	// CommandTable.Execute resolves camelCase, snake_case, and case-insensitive
+	// input transparently — no need to lowercase here.
 	resp := s.table.Execute(CommandRequest{Name: req.Command, Args: req.Args})
 	if resp.Error != nil {
 		return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
@@ -217,6 +218,7 @@ func (s *Server) handleFrame(c fiber.Ctx) error {
 
 // registerLegacyRoutes maps old per-endpoint paths to CommandTable dispatch.
 // This keeps corsa-cli and external tools working without changes.
+// Commands are dispatched by their canonical camelCase names.
 func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	// System
 	rpc.Post("/system/help", s.legacyHandler("help"))
@@ -225,47 +227,47 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	rpc.Post("/system/version", s.legacyHandler("version"))
 
 	// Network
-	rpc.Post("/network/peers", s.legacyHandler("get_peers"))
-	rpc.Post("/network/health", s.legacyHandler("fetch_peer_health"))
-	rpc.Post("/network/stats", s.legacyHandler("fetch_network_stats"))
-	rpc.Post("/network/add_peer", s.legacyArgHandler("add_peer"))
+	rpc.Post("/network/peers", s.legacyHandler("getPeers"))
+	rpc.Post("/network/health", s.legacyHandler("fetchPeerHealth"))
+	rpc.Post("/network/stats", s.legacyHandler("fetchNetworkStats"))
+	rpc.Post("/network/add_peer", s.legacyArgHandler("addPeer"))
 
 	// Metrics
-	rpc.Post("/metrics/traffic_history", s.legacyHandler("fetch_traffic_history"))
+	rpc.Post("/metrics/traffic_history", s.legacyHandler("fetchTrafficHistory"))
 
 	// Identity
-	rpc.Post("/identity/identities", s.legacyHandler("fetch_identities"))
-	rpc.Post("/identity/contacts", s.legacyHandler("fetch_contacts"))
-	rpc.Post("/identity/trusted_contacts", s.legacyHandler("fetch_trusted_contacts"))
+	rpc.Post("/identity/identities", s.legacyHandler("fetchIdentities"))
+	rpc.Post("/identity/contacts", s.legacyHandler("fetchContacts"))
+	rpc.Post("/identity/trusted_contacts", s.legacyHandler("fetchTrustedContacts"))
 
 	// Message
-	rpc.Post("/message/list", s.legacyArgHandler("fetch_messages"))
-	rpc.Post("/message/ids", s.legacyArgHandler("fetch_message_ids"))
-	rpc.Post("/message/get", s.legacyArgHandler("fetch_message"))
-	rpc.Post("/message/inbox", s.legacyArgHandler("fetch_inbox"))
-	rpc.Post("/message/pending", s.legacyArgHandler("fetch_pending_messages"))
-	rpc.Post("/message/receipts", s.legacyArgHandler("fetch_delivery_receipts"))
-	rpc.Post("/message/dm_headers", s.legacyHandler("fetch_dm_headers"))
-	rpc.Post("/message/send_dm", s.legacyArgHandler("send_dm"))
+	rpc.Post("/message/list", s.legacyArgHandler("fetchMessages"))
+	rpc.Post("/message/ids", s.legacyArgHandler("fetchMessageIds"))
+	rpc.Post("/message/get", s.legacyArgHandler("fetchMessage"))
+	rpc.Post("/message/inbox", s.legacyArgHandler("fetchInbox"))
+	rpc.Post("/message/pending", s.legacyArgHandler("fetchPendingMessages"))
+	rpc.Post("/message/receipts", s.legacyArgHandler("fetchDeliveryReceipts"))
+	rpc.Post("/message/dm_headers", s.legacyHandler("fetchDmHeaders"))
+	rpc.Post("/message/send_dm", s.legacyArgHandler("sendDm"))
 
 	// Chatlog
-	rpc.Post("/chatlog/entries", s.legacyArgHandler("fetch_chatlog"))
-	rpc.Post("/chatlog/previews", s.legacyHandler("fetch_chatlog_previews"))
-	rpc.Post("/chatlog/conversations", s.legacyHandler("fetch_conversations"))
+	rpc.Post("/chatlog/entries", s.legacyArgHandler("fetchChatlog"))
+	rpc.Post("/chatlog/previews", s.legacyHandler("fetchChatlogPreviews"))
+	rpc.Post("/chatlog/conversations", s.legacyHandler("fetchConversations"))
 
 	// Notice
-	rpc.Post("/notice/list", s.legacyHandler("fetch_notices"))
+	rpc.Post("/notice/list", s.legacyHandler("fetchNotices"))
 
 	// Mesh
-	rpc.Post("/mesh/relay_status", s.legacyHandler("fetch_relay_status"))
+	rpc.Post("/mesh/relay_status", s.legacyHandler("fetchRelayStatus"))
 
 	// File Transfer
-	rpc.Post("/file/send_file_announce", s.legacyArgHandler("send_file_announce"))
-	rpc.Post("/file/transfers", s.legacyHandler("fetch_file_transfers"))
-	rpc.Post("/file/mapping", s.legacyHandler("fetch_file_mapping"))
-	rpc.Post("/file/retry_chunk", s.legacyArgHandler("retry_file_chunk"))
-	rpc.Post("/file/start_download", s.legacyArgHandler("start_file_download"))
-	rpc.Post("/file/cancel_download", s.legacyArgHandler("cancel_file_download"))
+	rpc.Post("/file/send_file_announce", s.legacyArgHandler("sendFileAnnounce"))
+	rpc.Post("/file/transfers", s.legacyHandler("fetchFileTransfers"))
+	rpc.Post("/file/mapping", s.legacyHandler("fetchFileMapping"))
+	rpc.Post("/file/retry_chunk", s.legacyArgHandler("retryFileChunk"))
+	rpc.Post("/file/start_download", s.legacyArgHandler("startFileDownload"))
+	rpc.Post("/file/cancel_download", s.legacyArgHandler("cancelFileDownload"))
 }
 
 // legacyHandler creates a Fiber handler for a no-args command.

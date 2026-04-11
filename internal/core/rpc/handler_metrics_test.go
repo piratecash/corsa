@@ -81,13 +81,13 @@ func TestMetricsCommandHiddenWhenProviderNil(t *testing.T) {
 	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil, nil)
 
 	for _, cmd := range table.Commands() {
-		if cmd.Name == "fetch_traffic_history" {
+		if cmd.Name == "fetchTrafficHistory" {
 			t.Fatal("fetch_traffic_history should be hidden from Commands() when MetricsProvider is nil")
 		}
 	}
 
 	// Verify it still returns 503 on execution (registered as unavailable, not missing).
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_traffic_history"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchTrafficHistory"})
 	if resp.ErrorKind != rpc.ErrUnavailable {
 		t.Errorf("expected ErrUnavailable, got %v", resp.ErrorKind)
 	}
@@ -102,7 +102,7 @@ func TestMetricsCommandVisibleWhenProviderSet(t *testing.T) {
 
 	found := false
 	for _, cmd := range table.Commands() {
-		if cmd.Name == "fetch_traffic_history" {
+		if cmd.Name == "fetchTrafficHistory" {
 			found = true
 			break
 		}

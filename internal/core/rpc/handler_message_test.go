@@ -662,16 +662,16 @@ func TestMessageCommandsHiddenWithoutDMRouter(t *testing.T) {
 		}
 		name, _ := cmdMap["name"].(string)
 		// send_dm requires DMRouter — should be hidden
-		if name == "send_dm" {
+		if name == "sendDm" {
 			t.Errorf("command %q should be hidden when dmRouter is nil", name)
 		}
-		// fetch_dm_headers uses only NodeProvider — should be visible
-		if name == "fetch_dm_headers" {
+		// fetchDmHeaders uses only NodeProvider — should be visible
+		if name == "fetchDmHeaders" {
 			foundDMHeaders = true
 		}
 	}
 	if !foundDMHeaders {
-		t.Error("fetch_dm_headers should be visible even without dmRouter (uses only NodeProvider)")
+		t.Error("fetchDmHeaders should be visible even without dmRouter (uses only NodeProvider)")
 	}
 }
 
@@ -688,7 +688,7 @@ func TestMessageCommandsVisibleWithDMRouter(t *testing.T) {
 		t.Fatalf("expected commands to be array, got %T", result["commands"])
 	}
 
-	found := map[string]bool{"send_dm": false, "fetch_dm_headers": false}
+	found := map[string]bool{"sendDm": false, "fetchDmHeaders": false}
 	for _, cmd := range commands {
 		cmdMap, ok := cmd.(map[string]interface{})
 		if !ok {

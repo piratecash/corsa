@@ -68,7 +68,7 @@ graph TB
 
     NP --> NODE
     MP --> MC
-    MC -->|"fetch_network_stats"| NODE
+    MC -->|"fetchNetworkStats"| NODE
     CP --> DC
     DP --> DMR
     DMR --> NODE
@@ -77,7 +77,7 @@ graph TB
 ```
 *Diagram 1 — Overall architecture.*
 
-Core Node layer is always present and includes CommandTable, NodeProvider, MetricsProvider, and HTTP wrapper. Desktop Providers (ChatlogProvider, DMRouterProvider) are optional — on standalone node they are nil, their commands return 503 and are hidden from help. MetricsProvider (metrics.Collector) collects traffic samples from node.Service via `fetch_network_stats` and stores them in a ring buffer for `fetch_traffic_history`.
+Core Node layer is always present and includes CommandTable, NodeProvider, MetricsProvider, and HTTP wrapper. Desktop Providers (ChatlogProvider, DMRouterProvider) are optional — on standalone node they are nil, their commands return 503 and are hidden from help. MetricsProvider (metrics.Collector) collects traffic samples from node.Service via `fetchNetworkStats` and stores them in a ring buffer for `fetchTrafficHistory`.
 
 #### Request Processing Flow
 
@@ -89,7 +89,7 @@ sequenceDiagram
     participant NS as node.Service
 
     Note over UI,CT: Desktop UI — direct call (no HTTP)
-    UI->>CT: Execute({name: "get_peers"})
+    UI->>CT: Execute({name: "getPeers"})
     CT->>N: HandleLocalFrame({type: "get_peers"})
     N->>NS: HandleLocalFrame(frame)
     NS-->>N: Frame{type: "peers", peers: [...]}
@@ -101,9 +101,9 @@ sequenceDiagram
     participant S as Fiber HTTP Server
     participant A as Auth Middleware
 
-    C->>S: POST /rpc/v1/exec {command: "get_peers"}
+    C->>S: POST /rpc/v1/exec {command: "getPeers"}
     S->>A: Auth check
-    A->>CT: Execute({name: "get_peers"})
+    A->>CT: Execute({name: "getPeers"})
     CT->>N: HandleLocalFrame({type: "get_peers"})
     N-->>CT: CommandResponse
     CT-->>A: CommandResponse
@@ -168,14 +168,14 @@ graph TD
     TABLE["CommandTable<br/>(single source of truth)"]
 
     REG_SYS["RegisterSystemCommands<br/>help · ping · hello · version"]
-    REG_NET["RegisterNetworkCommands<br/>get_peers · fetch_peer_health · fetch_network_stats · add_peer"]
-    REG_IDN["RegisterIdentityCommands<br/>fetch_identities · fetch_contacts · fetch_trusted_contacts"]
-    REG_MSG["RegisterMessageCommands<br/>fetch_messages · fetch_message_ids · fetch_message<br/>fetch_inbox · fetch_pending_messages · fetch_delivery_receipts<br/>fetch_dm_headers · send_dm*"]
-    REG_CHT["RegisterChatlogCommands<br/>fetch_chatlog · fetch_chatlog_previews · fetch_conversations*"]
-    REG_NTC["RegisterNoticeCommands<br/>fetch_notices"]
-    REG_MSH["RegisterMeshCommands<br/>fetch_relay_status"]
-    REG_MET["RegisterMetricsCommands<br/>fetch_traffic_history"]
-    REG_RTE["RegisterRoutingCommands<br/>fetch_route_table · fetch_route_summary · fetch_route_lookup*"]
+    REG_NET["RegisterNetworkCommands<br/>getPeers · fetchPeerHealth · fetchNetworkStats · addPeer"]
+    REG_IDN["RegisterIdentityCommands<br/>fetchIdentities · fetchContacts · fetchTrustedContacts"]
+    REG_MSG["RegisterMessageCommands<br/>fetchMessages · fetchMessageIds · fetchMessage<br/>fetchInbox · fetchPendingMessages · fetchDeliveryReceipts<br/>fetchDmHeaders · sendDm*"]
+    REG_CHT["RegisterChatlogCommands<br/>fetchChatlog · fetchChatlogPreviews · fetchConversations*"]
+    REG_NTC["RegisterNoticeCommands<br/>fetchNotices"]
+    REG_MSH["RegisterMeshCommands<br/>fetchRelayStatus"]
+    REG_MET["RegisterMetricsCommands<br/>fetchTrafficHistory"]
+    REG_RTE["RegisterRoutingCommands<br/>fetchRouteTable · fetchRouteSummary · fetchRouteLookup*"]
 
     REG_SYS -->|"Register()"| TABLE
     REG_NET -->|"Register()"| TABLE
@@ -196,7 +196,7 @@ graph TD
 ```
 *Diagram 4 — Command registration.*
 
-Commands marked with `*` are mode-gated: when their provider is nil (standalone node), they are registered as unavailable via `RegisterUnavailable()` — returning 503 and hidden from help. `send_dm` requires DMRouterProvider; chatlog commands require ChatlogProvider; `fetch_traffic_history` requires MetricsProvider; routing commands require RoutingProvider.
+Commands marked with `*` are mode-gated: when their provider is nil (standalone node), they are registered as unavailable via `RegisterUnavailable()` — returning 503 and hidden from help. `sendDm` requires DMRouterProvider; chatlog commands require ChatlogProvider; `fetchTrafficHistory` requires MetricsProvider; routing commands require RoutingProvider.
 
 ### Configuration
 
@@ -227,7 +227,7 @@ The architecture separates command execution from transport:
 table := rpc.NewCommandTable()
 rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector, routingProvider)
 
-// Desktop: replace base ping/get_peers with diagnostic-enriched versions,
+// Desktop: replace base ping/getPeers with diagnostic-enriched versions,
 // and hello with desktop identity (Client: "desktop").
 // Accepts DiagnosticProvider + NodeProvider; nil diag is a safe no-op.
 rpc.RegisterDesktopOverrides(table, desktopClient, nodeService)
@@ -245,15 +245,17 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | Category | Commands | Condition |
 |---|---|---|
 | **system** | help, ping, hello, version | Always registered |
-| **network** | get_peers, fetch_peer_health, fetch_network_stats, add_peer, fetch_reachable_ids | Always registered |
-| **identity** | fetch_identities, fetch_contacts, fetch_trusted_contacts, delete_trusted_contact, import_contacts | Always registered |
-| **message** | fetch_messages, fetch_message_ids, fetch_message, fetch_inbox, fetch_pending_messages, fetch_delivery_receipts, fetch_dm_headers, send_message, import_message, send_delivery_receipt | Always registered |
-| **message** | send_dm | Always registered; unavailable (503, hidden from help) when DMRouter is nil |
-| **chatlog** | fetch_chatlog, fetch_chatlog_previews, fetch_conversations | Always registered; unavailable (503, hidden from help) when ChatlogProvider is nil |
-| **notice** | fetch_notices, publish_notice | Always registered |
-| **mesh** | fetch_relay_status | Always registered |
-| **metrics** | fetch_traffic_history | Always registered; unavailable (503, hidden from help) when MetricsProvider is nil |
-| **routing** | fetch_route_table, fetch_route_summary, fetch_route_lookup | Always registered; unavailable (503, hidden from help) when RoutingProvider is nil |
+| **network** | getPeers, fetchPeerHealth, fetchNetworkStats, addPeer, fetchReachableIds | Always registered |
+| **identity** | fetchIdentities, fetchContacts, fetchTrustedContacts, deleteTrustedContact, importContacts | Always registered |
+| **message** | fetchMessages, fetchMessageIds, fetchMessage, fetchInbox, fetchPendingMessages, fetchDeliveryReceipts, fetchDmHeaders, sendMessage, importMessage, sendDeliveryReceipt | Always registered |
+| **message** | sendDm | Always registered; unavailable (503, hidden from help) when DMRouter is nil |
+| **chatlog** | fetchChatlog, fetchChatlogPreviews, fetchConversations | Always registered; unavailable (503, hidden from help) when ChatlogProvider is nil |
+| **notice** | fetchNotices, publishNotice | Always registered |
+| **mesh** | fetchRelayStatus | Always registered |
+| **metrics** | fetchTrafficHistory | Always registered; unavailable (503, hidden from help) when MetricsProvider is nil |
+| **routing** | fetchRouteTable, fetchRouteSummary, fetchRouteLookup | Always registered; unavailable (503, hidden from help) when RoutingProvider is nil |
+**Backward compatibility:** snake_case aliases (e.g., `get_peers`, `send_dm`) remain active for 2 releases. New integrations should use camelCase names exclusively.
+
 
 #### Dependency Injection
 
@@ -299,18 +301,18 @@ Per-command documentation is in the [rpc/](rpc/) folder. See [rpc/README.md](rpc
 | Group | Commands | File |
 |---|---|---|
 | [System](rpc/system.md) | `help`, `ping`, `hello`, `version` | [rpc/system.md](rpc/system.md) |
-| [Network](rpc/network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [rpc/network.md](rpc/network.md) |
-| [Identity](rpc/identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [rpc/identity.md](rpc/identity.md) |
-| [Message](rpc/message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [rpc/message.md](rpc/message.md) |
-| [Chatlog](rpc/chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [rpc/chatlog.md](rpc/chatlog.md) |
-| [Notice](rpc/notice.md) | `fetch_notices` | [rpc/notice.md](rpc/notice.md) |
-| [Mesh](rpc/mesh.md) | `fetch_relay_status` | [rpc/mesh.md](rpc/mesh.md) |
-| [Metrics](rpc/metrics.md) | `fetch_traffic_history` | [rpc/metrics.md](rpc/metrics.md) |
-| [Routing](rpc/routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [rpc/routing.md](rpc/routing.md) |
+| [Network](rpc/network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer` | [rpc/network.md](rpc/network.md) |
+| [Identity](rpc/identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts` | [rpc/identity.md](rpc/identity.md) |
+| [Message](rpc/message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm` | [rpc/message.md](rpc/message.md) |
+| [Chatlog](rpc/chatlog.md) | `fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations` | [rpc/chatlog.md](rpc/chatlog.md) |
+| [Notice](rpc/notice.md) | `fetchNotices` | [rpc/notice.md](rpc/notice.md) |
+| [Mesh](rpc/mesh.md) | `fetchRelayStatus` | [rpc/mesh.md](rpc/mesh.md) |
+| [Metrics](rpc/metrics.md) | `fetchTrafficHistory` | [rpc/metrics.md](rpc/metrics.md) |
+| [Routing](rpc/routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [rpc/routing.md](rpc/routing.md) |
 
 ### corsa-cli
 
-Thin console client for the RPC server. No local command table, no aliases — passes the command name and arguments directly to `POST /rpc/v1/exec`. The server is the single source of truth. `corsa-cli help` fetches the command list from the server.
+Thin console client for the RPC server. No local command table — positional arguments are parsed via the shared `ParseConsoleInput`, which normalizes command names to canonical camelCase before sending `{command, args}` to `POST /rpc/v1/exec`. The server is the single source of truth. `corsa-cli help` fetches the command list from the server. Both camelCase and snake_case input are accepted (normalization is transparent).
 
 #### Build
 
@@ -327,32 +329,32 @@ corsa-cli help
 # Simple commands (no arguments)
 corsa-cli ping
 corsa-cli version
-corsa-cli get_peers
-corsa-cli fetch_peer_health
+corsa-cli getPeers
+corsa-cli fetchPeerHealth
 
 # Positional arguments (matches help output syntax)
-corsa-cli add_peer 1.2.3.4:8080
-corsa-cli send_dm peer-addr hello world
-corsa-cli fetch_chatlog dm abc123
+corsa-cli addPeer 1.2.3.4:8080
+corsa-cli sendDm peer-addr hello world
+corsa-cli fetchChatlog dm abc123
 
 # Named arguments (key=value)
-corsa-cli add_peer address=1.2.3.4:8080
-corsa-cli send_dm to=peer-addr body="hello world"
-corsa-cli fetch_messages topic=dm
-corsa-cli fetch_chatlog topic=dm peer_address=abc123
+corsa-cli addPeer address=1.2.3.4:8080
+corsa-cli sendDm to=peer-addr body="hello world"
+corsa-cli fetchMessages topic=dm
+corsa-cli fetchChatlog topic=dm peer_address=abc123
 
 # JSON argument (single quoted JSON object)
-corsa-cli add_peer '{"address": "1.2.3.4:8080"}'
-corsa-cli send_dm '{"to": "peer-addr", "body": "hello world"}'
+corsa-cli addPeer '{"address": "1.2.3.4:8080"}'
+corsa-cli sendDm '{"to": "peer-addr", "body": "hello world"}'
 
 # With -named flag (explicit key=value mode)
-corsa-cli -named fetch_inbox topic=dm recipient=peer-addr
+corsa-cli -named fetchInbox topic=dm recipient=peer-addr
 
 # Authentication
-corsa-cli --username admin --password secret get_peers
+corsa-cli --username admin --password secret getPeers
 
 # Remote host
-corsa-cli --host 192.168.1.100 --port 46464 get_peers
+corsa-cli --host 192.168.1.100 --port 46464 getPeers
 ```
 
 #### Flags
@@ -373,11 +375,11 @@ corsa-cli --host 192.168.1.100 --port 46464 get_peers
 
 #### Desktop Application
 
-The desktop application creates a `CommandTable`, calls `RegisterAllCommands` with all providers, then calls `RegisterDesktopOverrides(table, client, client)` to replace base `ping`, `get_peers`, and `hello` handlers with desktop-enriched versions. The enriched `ping` opens TCP sessions to every connected peer and reports per-peer status. The enriched `get_peers` merges the raw peer list with health data and categorizes peers into connected/pending/known_only. The enriched `hello` identifies as `Client: "desktop"` with the desktop application version instead of the generic `Client: "rpc"`. `RegisterDesktopOverrides` accepts a `DiagnosticProvider` and a `NodeProvider` — passing `nil` diag is a no-op. The resulting table is passed to both the Fiber HTTP server (for external access) and the Window (for direct UI access). All 6 command categories are registered, including chatlog and DM commands.
+The desktop application creates a `CommandTable`, calls `RegisterAllCommands` with all providers, then calls `RegisterDesktopOverrides(table, client, client)` to replace base `ping`, `getPeers`, and `hello` handlers with desktop-enriched versions. The enriched `ping` opens TCP sessions to every connected peer and reports per-peer status. The enriched `getPeers` merges the raw peer list with health data and categorizes peers into connected/pending/known_only. The enriched `hello` identifies as `Client: "desktop"` with the desktop application version instead of the generic `Client: "rpc"`. `RegisterDesktopOverrides` accepts a `DiagnosticProvider` and a `NodeProvider` — passing `nil` diag is a no-op. The resulting table is passed to both the Fiber HTTP server (for external access) and the Window (for direct UI access). All 6 command categories are registered, including chatlog and DM commands.
 
 #### Standalone Node (corsa-node)
 
-The standalone node creates a `CommandTable` and calls `RegisterAllCommands` with nil providers for chatlog, DMRouter, and metricsProvider. Commands that require unavailable providers (`fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations`, `send_dm`, `fetch_traffic_history`) are registered as unavailable — they return 503 via both `/rpc/v1/exec` and legacy endpoints, but do not appear in help output. Note: `fetch_dm_headers` is always registered because it uses only `NodeProvider`.
+The standalone node creates a `CommandTable` and calls `RegisterAllCommands` with nil providers for chatlog, DMRouter, and metricsProvider. Commands that require unavailable providers (`fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations`, `sendDm`, `fetchTrafficHistory`) are registered as unavailable — they return 503 via both `/rpc/v1/exec` and legacy endpoints, but do not appear in help output. Note: `fetchDmHeaders` is always registered because it uses only `NodeProvider`.
 
 #### Go Client (rpc.Client)
 
@@ -385,15 +387,15 @@ The standalone node creates a `CommandTable` and calls `RegisterAllCommands` wit
 
 #### ParseConsoleInput
 
-`ParseConsoleInput` accepts three input formats: positional commands (`send_dm addr hello world`), key=value pairs (`send_dm to=addr body=hello reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e`), and raw JSON frames (`{"type":"ping"}`). Key=value mode is auto-detected when every token after the command contains `=` with a non-empty key; otherwise input is treated as positional. Command names are case-insensitive. For JSON input, the `type` field becomes the command name and all fields are passed as args. Used by both the UI console (in-process) and `rpc.Client` (over HTTP).
+`ParseConsoleInput` accepts three input formats: positional commands (`sendDm addr hello world`), key=value pairs (`sendDm to=addr body=hello reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e`), and raw JSON frames (`{"type":"ping"}`). Key=value mode is auto-detected when every token after the command contains `=` with a non-empty key; otherwise input is treated as positional. Command names are case-insensitive. For JSON input, the `type` field becomes the command name and all fields are passed as args. Used by both the UI console (in-process) and `rpc.Client` (over HTTP).
 
 **Frame field normalization.** Protocol wire frames use different field names than RPC handlers. `normalizeFrameArgs` bridges the gap so pasting real wire frames into the console works. Aliases are applied only when the RPC-expected field is absent; if both are present, the RPC field wins.
 
 | Command | Wire field | RPC field | Transformation |
 |---|---|---|---|
-| `add_peer` | `peers` (array) | `address` (string) | `peers[0]` → `address` |
-| `send_dm` | `recipient` | `to` | rename |
-| `fetch_chatlog` | `address` | `peer_address` | rename |
+| `addPeer` | `peers` (array) | `address` (string) | `peers[0]` → `address` |
+| `sendDm` | `recipient` | `to` | rename |
+| `fetchChatlog` | `address` | `peer_address` | rename |
 | *(pagination)* | `count` | `offset` | rename (all commands) |
 
 #### UI Console
@@ -495,7 +497,7 @@ graph TB
 
     NP --> NODE
     MP --> MC
-    MC -->|"fetch_network_stats"| NODE
+    MC -->|"fetchNetworkStats"| NODE
     CP --> DC
     DP --> DMR
     DMR --> NODE
@@ -504,7 +506,7 @@ graph TB
 ```
 *Диаграмма 1 — Общая архитектура.*
 
-Слой ядра ноды всегда присутствует и включает CommandTable, NodeProvider, MetricsProvider и HTTP-обёртку. Desktop-провайдеры (ChatlogProvider, DMRouterProvider) опциональны — на standalone-ноде они равны nil, их команды возвращают 503 и скрыты из help. MetricsProvider (metrics.Collector) собирает сэмплы трафика от node.Service через `fetch_network_stats` и хранит их в кольцевом буфере для `fetch_traffic_history`.
+Слой ядра ноды всегда присутствует и включает CommandTable, NodeProvider, MetricsProvider и HTTP-обёртку. Desktop-провайдеры (ChatlogProvider, DMRouterProvider) опциональны — на standalone-ноде они равны nil, их команды возвращают 503 и скрыты из help. MetricsProvider (metrics.Collector) собирает сэмплы трафика от node.Service через `fetchNetworkStats` и хранит их в кольцевом буфере для `fetchTrafficHistory`.
 
 #### Поток обработки запроса
 
@@ -516,7 +518,7 @@ sequenceDiagram
     participant NS as node.Service
 
     Note over UI,CT: Desktop UI — прямой вызов (без HTTP)
-    UI->>CT: Execute({name: "get_peers"})
+    UI->>CT: Execute({name: "getPeers"})
     CT->>N: HandleLocalFrame({type: "get_peers"})
     N->>NS: HandleLocalFrame(frame)
     NS-->>N: Frame{type: "peers", peers: [...]}
@@ -528,9 +530,9 @@ sequenceDiagram
     participant S as Fiber HTTP сервер
     participant A as Авторизация
 
-    C->>S: POST /rpc/v1/exec {command: "get_peers"}
+    C->>S: POST /rpc/v1/exec {command: "getPeers"}
     S->>A: Проверка авторизации
-    A->>CT: Execute({name: "get_peers"})
+    A->>CT: Execute({name: "getPeers"})
     CT->>N: HandleLocalFrame({type: "get_peers"})
     N-->>CT: CommandResponse
     CT-->>A: CommandResponse
@@ -595,14 +597,14 @@ graph TD
     TABLE["CommandTable<br/>(единственный источник истины)"]
 
     REG_SYS["RegisterSystemCommands<br/>help · ping · hello · version"]
-    REG_NET["RegisterNetworkCommands<br/>get_peers · fetch_peer_health · fetch_network_stats · add_peer"]
-    REG_IDN["RegisterIdentityCommands<br/>fetch_identities · fetch_contacts · fetch_trusted_contacts"]
-    REG_MSG["RegisterMessageCommands<br/>fetch_messages · fetch_message_ids · fetch_message<br/>fetch_inbox · fetch_pending_messages · fetch_delivery_receipts<br/>fetch_dm_headers · send_dm*"]
-    REG_CHT["RegisterChatlogCommands<br/>fetch_chatlog · fetch_chatlog_previews · fetch_conversations*"]
-    REG_NTC["RegisterNoticeCommands<br/>fetch_notices"]
-    REG_MSH["RegisterMeshCommands<br/>fetch_relay_status"]
-    REG_MET["RegisterMetricsCommands<br/>fetch_traffic_history"]
-    REG_RTE["RegisterRoutingCommands<br/>fetch_route_table · fetch_route_summary · fetch_route_lookup*"]
+    REG_NET["RegisterNetworkCommands<br/>getPeers · fetchPeerHealth · fetchNetworkStats · addPeer"]
+    REG_IDN["RegisterIdentityCommands<br/>fetchIdentities · fetchContacts · fetchTrustedContacts"]
+    REG_MSG["RegisterMessageCommands<br/>fetchMessages · fetchMessageIds · fetchMessage<br/>fetchInbox · fetchPendingMessages · fetchDeliveryReceipts<br/>fetchDmHeaders · sendDm*"]
+    REG_CHT["RegisterChatlogCommands<br/>fetchChatlog · fetchChatlogPreviews · fetchConversations*"]
+    REG_NTC["RegisterNoticeCommands<br/>fetchNotices"]
+    REG_MSH["RegisterMeshCommands<br/>fetchRelayStatus"]
+    REG_MET["RegisterMetricsCommands<br/>fetchTrafficHistory"]
+    REG_RTE["RegisterRoutingCommands<br/>fetchRouteTable · fetchRouteSummary · fetchRouteLookup*"]
 
     REG_SYS -->|"Register()"| TABLE
     REG_NET -->|"Register()"| TABLE
@@ -623,7 +625,7 @@ graph TD
 ```
 *Диаграмма 4 — Регистрация команд.*
 
-Команды с `*` являются mode-gated: при nil-провайдере (standalone нода) они регистрируются как недоступные через `RegisterUnavailable()` — возвращают 503 и скрыты из help. `send_dm` требует DMRouterProvider; chatlog-команды требуют ChatlogProvider; `fetch_traffic_history` требует MetricsProvider; routing-команды требуют RoutingProvider.
+Команды с `*` являются mode-gated: при nil-провайдере (standalone нода) они регистрируются как недоступные через `RegisterUnavailable()` — возвращают 503 и скрыты из help. `sendDm` требует DMRouterProvider; chatlog-команды требуют ChatlogProvider; `fetchTrafficHistory` требует MetricsProvider; routing-команды требуют RoutingProvider.
 
 ### Конфигурация
 
@@ -654,7 +656,7 @@ graph TD
 table := rpc.NewCommandTable()
 rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector, routingProvider)
 
-// Desktop: замена базовых ping/get_peers на диагностически обогащённые версии,
+// Desktop: замена базовых ping/getPeers на диагностически обогащённые версии,
 // а также hello на desktop-идентификацию (Client: "desktop").
 // Принимает DiagnosticProvider + NodeProvider; nil diag — безопасный no-op.
 rpc.RegisterDesktopOverrides(table, desktopClient, nodeService)
@@ -672,15 +674,17 @@ server, _ := rpc.NewServer(cfg, table, nodeService)
 | Категория | Команды | Условие |
 |---|---|---|
 | **system** | help, ping, hello, version | Всегда зарегистрированы |
-| **network** | get_peers, fetch_peer_health, fetch_network_stats, add_peer, fetch_reachable_ids | Всегда зарегистрированы |
-| **identity** | fetch_identities, fetch_contacts, fetch_trusted_contacts, delete_trusted_contact, import_contacts | Всегда зарегистрированы |
-| **message** | fetch_messages, fetch_message_ids, fetch_message, fetch_inbox, fetch_pending_messages, fetch_delivery_receipts, fetch_dm_headers, send_message, import_message, send_delivery_receipt | Всегда зарегистрированы |
-| **message** | send_dm | Всегда зарегистрирована; недоступна (503, скрыта из help) при DMRouter = nil |
-| **chatlog** | fetch_chatlog, fetch_chatlog_previews, fetch_conversations | Всегда зарегистрированы; недоступны (503, скрыты из help) при ChatlogProvider = nil |
-| **notice** | fetch_notices, publish_notice | Всегда зарегистрированы |
-| **mesh** | fetch_relay_status | Всегда зарегистрированы |
-| **metrics** | fetch_traffic_history | Всегда зарегистрирована; недоступна (503, скрыта из help) при MetricsProvider = nil |
-| **routing** | fetch_route_table, fetch_route_summary, fetch_route_lookup | Всегда зарегистрированы; недоступны (503, скрыты из help) при RoutingProvider = nil |
+| **network** | getPeers, fetchPeerHealth, fetchNetworkStats, addPeer, fetchReachableIds | Всегда зарегистрированы |
+| **identity** | fetchIdentities, fetchContacts, fetchTrustedContacts, deleteTrustedContact, importContacts | Всегда зарегистрированы |
+| **message** | fetchMessages, fetchMessageIds, fetchMessage, fetchInbox, fetchPendingMessages, fetchDeliveryReceipts, fetchDmHeaders, sendMessage, importMessage, sendDeliveryReceipt | Всегда зарегистрированы |
+| **message** | sendDm | Всегда зарегистрирована; недоступна (503, скрыта из help) при DMRouter = nil |
+| **chatlog** | fetchChatlog, fetchChatlogPreviews, fetchConversations | Всегда зарегистрированы; недоступны (503, скрыты из help) при ChatlogProvider = nil |
+| **notice** | fetchNotices, publishNotice | Всегда зарегистрированы |
+| **mesh** | fetchRelayStatus | Всегда зарегистрированы |
+| **metrics** | fetchTrafficHistory | Всегда зарегистрирована; недоступна (503, скрыта из help) при MetricsProvider = nil |
+| **routing** | fetchRouteTable, fetchRouteSummary, fetchRouteLookup | Всегда зарегистрированы; недоступны (503, скрыты из help) при RoutingProvider = nil |
+**Обратная совместимость:** алиасы snake_case (например, `get_peers`, `send_dm`) остаются активными в течение 2 релизов. Новые интеграции должны использовать исключительно имена в стиле camelCase.
+
 
 #### Внедрение зависимостей
 
@@ -726,18 +730,18 @@ Mode-gated команды регистрируются через `RegisterUnava
 | Группа | Команды | Файл |
 |---|---|---|
 | [Системные](rpc/system.md) | `help`, `ping`, `hello`, `version` | [rpc/system.md](rpc/system.md) |
-| [Сеть](rpc/network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer` | [rpc/network.md](rpc/network.md) |
-| [Идентификация](rpc/identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts` | [rpc/identity.md](rpc/identity.md) |
-| [Сообщения](rpc/message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm` | [rpc/message.md](rpc/message.md) |
-| [История чатов](rpc/chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [rpc/chatlog.md](rpc/chatlog.md) |
-| [Уведомления](rpc/notice.md) | `fetch_notices` | [rpc/notice.md](rpc/notice.md) |
-| [Mesh](rpc/mesh.md) | `fetch_relay_status` | [rpc/mesh.md](rpc/mesh.md) |
-| [Метрики](rpc/metrics.md) | `fetch_traffic_history` | [rpc/metrics.md](rpc/metrics.md) |
-| [Маршрутизация](rpc/routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [rpc/routing.md](rpc/routing.md) |
+| [Сеть](rpc/network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer` | [rpc/network.md](rpc/network.md) |
+| [Идентификация](rpc/identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts` | [rpc/identity.md](rpc/identity.md) |
+| [Сообщения](rpc/message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm` | [rpc/message.md](rpc/message.md) |
+| [История чатов](rpc/chatlog.md) | `fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations` | [rpc/chatlog.md](rpc/chatlog.md) |
+| [Уведомления](rpc/notice.md) | `fetchNotices` | [rpc/notice.md](rpc/notice.md) |
+| [Mesh](rpc/mesh.md) | `fetchRelayStatus` | [rpc/mesh.md](rpc/mesh.md) |
+| [Метрики](rpc/metrics.md) | `fetchTrafficHistory` | [rpc/metrics.md](rpc/metrics.md) |
+| [Маршрутизация](rpc/routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [rpc/routing.md](rpc/routing.md) |
 
 ### corsa-cli
 
-Тонкий консольный клиент RPC сервера. Без локальной таблицы команд, без алиасов — передаёт имя команды и аргументы напрямую в `POST /rpc/v1/exec`. Сервер является единственным источником истины. `corsa-cli help` получает список команд с сервера.
+Тонкий консольный клиент RPC сервера. Без локальной таблицы команд — позиционные аргументы разбираются через общий `ParseConsoleInput`, который нормализует имена команд в каноническое camelCase перед отправкой `{command, args}` в `POST /rpc/v1/exec`. Сервер является единственным источником истины. `corsa-cli help` получает список команд с сервера. Принимается как camelCase, так и snake_case ввод (нормализация прозрачна).
 
 #### Сборка
 
@@ -754,32 +758,32 @@ corsa-cli help
 # Простые команды (без аргументов)
 corsa-cli ping
 corsa-cli version
-corsa-cli get_peers
-corsa-cli fetch_peer_health
+corsa-cli getPeers
+corsa-cli fetchPeerHealth
 
 # Позиционные аргументы (совпадают с синтаксисом help)
-corsa-cli add_peer 1.2.3.4:8080
-corsa-cli send_dm peer-addr hello world
-corsa-cli fetch_chatlog dm abc123
+corsa-cli addPeer 1.2.3.4:8080
+corsa-cli sendDm peer-addr hello world
+corsa-cli fetchChatlog dm abc123
 
 # Именованные аргументы (key=value)
-corsa-cli add_peer address=1.2.3.4:8080
-corsa-cli send_dm to=peer-addr body="hello world"
-corsa-cli fetch_messages topic=dm
-corsa-cli fetch_chatlog topic=dm peer_address=abc123
+corsa-cli addPeer address=1.2.3.4:8080
+corsa-cli sendDm to=peer-addr body="hello world"
+corsa-cli fetchMessages topic=dm
+corsa-cli fetchChatlog topic=dm peer_address=abc123
 
 # JSON аргумент (один JSON-объект в кавычках)
-corsa-cli add_peer '{"address": "1.2.3.4:8080"}'
-corsa-cli send_dm '{"to": "peer-addr", "body": "hello world"}'
+corsa-cli addPeer '{"address": "1.2.3.4:8080"}'
+corsa-cli sendDm '{"to": "peer-addr", "body": "hello world"}'
 
 # С флагом -named (явный режим key=value)
-corsa-cli -named fetch_inbox topic=dm recipient=peer-addr
+corsa-cli -named fetchInbox topic=dm recipient=peer-addr
 
 # Авторизация
-corsa-cli --username admin --password secret get_peers
+corsa-cli --username admin --password secret getPeers
 
 # Удалённый хост
-corsa-cli --host 192.168.1.100 --port 46464 get_peers
+corsa-cli --host 192.168.1.100 --port 46464 getPeers
 ```
 
 #### Флаги
@@ -800,11 +804,11 @@ corsa-cli --host 192.168.1.100 --port 46464 get_peers
 
 #### Desktop приложение
 
-Desktop приложение создаёт `CommandTable`, вызывает `RegisterAllCommands` со всеми провайдерами, затем вызывает `RegisterDesktopOverrides(table, client, client)` для замены базовых обработчиков `ping`, `get_peers` и `hello` на desktop-обогащённые версии. Обогащённый `ping` открывает TCP-сессии ко всем подключённым пирам и сообщает статус по каждому. Обогащённый `get_peers` объединяет список пиров с данными о здоровье и категоризирует пиров на connected/pending/known_only. Обогащённый `hello` идентифицируется как `Client: "desktop"` с версией desktop-приложения вместо генерического `Client: "rpc"`. `RegisterDesktopOverrides` принимает `DiagnosticProvider` и `NodeProvider` — передача `nil` diag является no-op. Результирующая таблица передаётся и Fiber HTTP серверу (для внешнего доступа), и Window (для прямого доступа UI). Все 6 категорий команд регистрируются, включая chatlog и DM.
+Desktop приложение создаёт `CommandTable`, вызывает `RegisterAllCommands` со всеми провайдерами, затем вызывает `RegisterDesktopOverrides(table, client, client)` для замены базовых обработчиков `ping`, `getPeers` и `hello` на desktop-обогащённые версии. Обогащённый `ping` открывает TCP-сессии ко всем подключённым пирам и сообщает статус по каждому. Обогащённый `getPeers` объединяет список пиров с данными о здоровье и категоризирует пиров на connected/pending/known_only. Обогащённый `hello` идентифицируется как `Client: "desktop"` с версией desktop-приложения вместо генерического `Client: "rpc"`. `RegisterDesktopOverrides` принимает `DiagnosticProvider` и `NodeProvider` — передача `nil` diag является no-op. Результирующая таблица передаётся и Fiber HTTP серверу (для внешнего доступа), и Window (для прямого доступа UI). Все 6 категорий команд регистрируются, включая chatlog и DM.
 
 #### Standalone нода (corsa-node)
 
-Standalone нода создаёт `CommandTable` и вызывает `RegisterAllCommands` с nil-провайдерами для chatlog, DMRouter и metricsProvider. Команды, требующие недоступных провайдеров (`fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations`, `send_dm`, `fetch_traffic_history`), регистрируются как недоступные — возвращают 503 через `/rpc/v1/exec` и legacy эндпоинты, но не отображаются в help. Примечание: `fetch_dm_headers` всегда зарегистрирована, т.к. использует только `NodeProvider`.
+Standalone нода создаёт `CommandTable` и вызывает `RegisterAllCommands` с nil-провайдерами для chatlog, DMRouter и metricsProvider. Команды, требующие недоступных провайдеров (`fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations`, `sendDm`, `fetchTrafficHistory`), регистрируются как недоступные — возвращают 503 через `/rpc/v1/exec` и legacy эндпоинты, но не отображаются в help. Примечание: `fetchDmHeaders` всегда зарегистрирована, т.к. использует только `NodeProvider`.
 
 #### Go-клиент (rpc.Client)
 
@@ -812,15 +816,15 @@ Standalone нода создаёт `CommandTable` и вызывает `RegisterA
 
 #### ParseConsoleInput
 
-`ParseConsoleInput` принимает три формата ввода: позиционные команды (`send_dm addr hello world`), пары key=value (`send_dm to=addr body=hello reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e`) и сырые JSON-фреймы (`{"type":"ping"}`). Режим key=value определяется автоматически — если все токены после команды содержат `=` с непустым ключом; иначе ввод обрабатывается как позиционный. Имена команд регистронезависимы. Для JSON-ввода поле `type` становится именем команды, все поля передаются как args. Используется и UI-консолью (in-process), и `rpc.Client` (через HTTP).
+`ParseConsoleInput` принимает три формата ввода: позиционные команды (`sendDm addr hello world`), пары key=value (`sendDm to=addr body=hello reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e`) и сырые JSON-фреймы (`{"type":"ping"}`). Режим key=value определяется автоматически — если все токены после команды содержат `=` с непустым ключом; иначе ввод обрабатывается как позиционный. Имена команд регистронезависимы. Для JSON-ввода поле `type` становится именем команды, все поля передаются как args. Используется и UI-консолью (in-process), и `rpc.Client` (через HTTP).
 
 **Нормализация полей фрейма.** Проводные фреймы протокола используют другие имена полей, чем RPC-обработчики. `normalizeFrameArgs` устраняет разрыв, чтобы вставка реальных wire-фреймов в консоль работала. Алиасы применяются только если RPC-поле отсутствует; если присутствуют оба — RPC-поле имеет приоритет.
 
 | Команда | Wire-поле | RPC-поле | Трансформация |
 |---|---|---|---|
-| `add_peer` | `peers` (массив) | `address` (строка) | `peers[0]` → `address` |
-| `send_dm` | `recipient` | `to` | переименование |
-| `fetch_chatlog` | `address` | `peer_address` | переименование |
+| `addPeer` | `peers` (массив) | `address` (строка) | `peers[0]` → `address` |
+| `sendDm` | `recipient` | `to` | переименование |
+| `fetchChatlog` | `address` | `peer_address` | переименование |
 | *(пагинация)* | `count` | `offset` | переименование (все команды) |
 
 #### UI консоль

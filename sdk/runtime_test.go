@@ -47,12 +47,12 @@ func TestRuntimeExecuteHelp(t *testing.T) {
 
 	hasSendDM := false
 	for _, command := range result.Commands {
-		if command.Name == "send_dm" {
+		if command.Name == "sendDm" {
 			hasSendDM = true
 			break
 		}
 	}
 	if !hasSendDM {
-		t.Fatal("expected SDK runtime to expose send_dm")
+		t.Fatal("expected SDK runtime to expose sendDm")
 	}
 }

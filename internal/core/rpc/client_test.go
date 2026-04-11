@@ -62,8 +62,8 @@ func TestClientExecuteCommandWithArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if receivedBody["command"] != "send_dm" {
-		t.Errorf("expected command=send_dm, got %v", receivedBody["command"])
+	if receivedBody["command"] != "sendDm" {
+		t.Errorf("expected command=sendDm, got %v", receivedBody["command"])
 	}
 
 	args, ok := receivedBody["args"].(map[string]interface{})
@@ -331,12 +331,12 @@ func TestClientNamedCommandStillUsesExec(t *testing.T) {
 func TestClientNoLegacyRoutes(t *testing.T) {
 	commands := []string{
 		"ping", "help", "version", "hello",
-		"get_peers", "fetch_peer_health", "fetch_network_stats",
-		"add_peer 1.2.3.4:8080",
-		"fetch_messages dm",
-		"fetch_dm_headers",
-		"fetch_notices",
-		"fetch_traffic_history",
+		"getPeers", "fetchPeerHealth", "fetchNetworkStats",
+		"addPeer 1.2.3.4:8080",
+		"fetchMessages dm",
+		"fetchDmHeaders",
+		"fetchNotices",
+		"fetchTrafficHistory",
 	}
 
 	for _, cmd := range commands {

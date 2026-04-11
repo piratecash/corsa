@@ -1272,9 +1272,9 @@ func (c *ConsoleWindow) getCommands() []consoleSuggestion {
 
 // defaultPrefills maps command names to default argument templates
 // that should be inserted on autocomplete selection. This preserves
-// the old desktop console UX where fetch_chatlog prefilled "dm" as topic.
+// the old desktop console UX where fetchChatlog prefilled "dm" as topic.
 var defaultPrefills = map[string]string{
-	"fetch_chatlog": "fetch_chatlog dm",
+	"fetchChatlog": "fetchChatlog dm",
 }
 
 func commandInfoToSuggestions(commands []rpc.CommandInfo) []consoleSuggestion {
@@ -1672,7 +1672,7 @@ func (c *ConsoleWindow) loadTrafficHistory() {
 		c.resetTrafficState()
 		return
 	}
-	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetch_traffic_history"})
+	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetchTrafficHistory"})
 	if resp.Error != nil {
 		c.resetTrafficState()
 		return
@@ -1777,7 +1777,7 @@ func (c *ConsoleWindow) sampleTraffic() {
 	if c.parent.cmdTable == nil {
 		return
 	}
-	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetch_network_stats"})
+	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetchNetworkStats"})
 	if resp.Error != nil {
 		return
 	}

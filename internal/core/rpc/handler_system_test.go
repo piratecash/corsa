@@ -195,7 +195,7 @@ func TestDesktopOverrideGetPeersReplaces(t *testing.T) {
 	}
 	rpc.RegisterDesktopOverrides(table, diag, node)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "get_peers"})
+	resp := table.Execute(rpc.CommandRequest{Name: "getPeers"})
 	if resp.Error != nil {
 		t.Fatalf("desktop get_peers error: %v", resp.Error)
 	}
@@ -396,13 +396,13 @@ func TestSystemHelpUsagePresent(t *testing.T) {
 
 	// Commands that take arguments and MUST have Usage set.
 	requireUsage := map[string]bool{
-		"add_peer":                true,
-		"fetch_messages":          true,
-		"fetch_message_ids":       true,
-		"fetch_message":           true,
-		"fetch_inbox":             true,
-		"fetch_pending_messages":  true,
-		"fetch_delivery_receipts": true,
+		"addPeer":               true,
+		"fetchMessages":         true,
+		"fetchMessageIds":       true,
+		"fetchMessage":          true,
+		"fetchInbox":            true,
+		"fetchPendingMessages":  true,
+		"fetchDeliveryReceipts": true,
 	}
 
 	found := 0
@@ -422,9 +422,9 @@ func TestSystemHelpUsagePresent(t *testing.T) {
 	// No-arg commands must NOT have Usage (keeps help clean).
 	noArgCommands := map[string]bool{
 		"help": true, "ping": true, "hello": true, "version": true,
-		"get_peers": true, "fetch_peer_health": true,
-		"fetch_identities": true, "fetch_contacts": true, "fetch_trusted_contacts": true,
-		"fetch_notices": true, "fetch_dm_headers": true,
+		"getPeers": true, "fetchPeerHealth": true,
+		"fetchIdentities": true, "fetchContacts": true, "fetchTrustedContacts": true,
+		"fetchNotices": true, "fetchDmHeaders": true,
 	}
 
 	for _, cmd := range commands {
@@ -447,8 +447,8 @@ func TestSystemHelpUsageModeGatedCommands(t *testing.T) {
 	commands := table.Commands()
 
 	modeGatedWithUsage := map[string]bool{
-		"send_dm":       true,
-		"fetch_chatlog": true,
+		"sendDm":       true,
+		"fetchChatlog": true,
 	}
 
 	found := 0

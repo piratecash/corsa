@@ -144,7 +144,7 @@ func TestParseArgsNullLikeValueIsString(t *testing.T) {
 // --- execRPC tests ---
 
 func TestExecRPCAlwaysUsesExecEndpoint(t *testing.T) {
-	commands := []string{"ping", "help", "get_peers", "send_dm", "fetch_chatlog"}
+	commands := []string{"ping", "help", "getPeers", "sendDm", "fetchChatlog"}
 
 	for _, cmd := range commands {
 		var receivedPath string
@@ -175,13 +175,13 @@ func TestExecRPCSendsCommandAndArgs(t *testing.T) {
 	defer server.Close()
 
 	args := map[string]interface{}{"to": "peer", "body": "hello"}
-	_, _, err := execRPC(server.URL, "send_dm", args, "", "")
+	_, _, err := execRPC(server.URL, "sendDm", args, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if receivedBody["command"] != "send_dm" {
-		t.Errorf("expected command=send_dm, got %v", receivedBody["command"])
+	if receivedBody["command"] != "sendDm" {
+		t.Errorf("expected command=sendDm, got %v", receivedBody["command"])
 	}
 	receivedArgs, ok := receivedBody["args"].(map[string]interface{})
 	if !ok {

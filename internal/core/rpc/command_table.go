@@ -81,7 +81,8 @@ type CommandTable struct {
 	mu          sync.RWMutex
 	handlers    map[string]CommandHandler
 	metadata    map[string]CommandInfo
-	unavailable map[string]bool // mode-gated commands registered as unavailable
+	unavailable map[string]bool   // mode-gated commands registered as unavailable
+	aliases     map[string]string // alias → canonical name (deprecated snake_case → camelCase)
 }
 
 // NewCommandTable creates an empty command table.
@@ -90,6 +91,7 @@ func NewCommandTable() *CommandTable {
 		handlers:    make(map[string]CommandHandler),
 		metadata:    make(map[string]CommandInfo),
 		unavailable: make(map[string]bool),
+		aliases:     make(map[string]string),
 	}
 }
 
@@ -101,6 +103,19 @@ func (t *CommandTable) Register(info CommandInfo, handler CommandHandler) {
 	t.handlers[info.Name] = handler
 	t.metadata[info.Name] = info
 	delete(t.unavailable, info.Name)
+}
+
+// RegisterAlias maps a deprecated command name to its canonical replacement.
+// Execute() resolves aliases transparently — callers using the old name get
+// the same handler as the new name. Aliases do NOT appear in Commands() or
+// AllNames() to keep help output clean. Has() returns true for aliases.
+//
+// Intended for the snake_case → camelCase migration: old names are kept as
+// aliases for 2 releases, then removed.
+func (t *CommandTable) RegisterAlias(oldName, canonicalName string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.aliases[oldName] = canonicalName
 }
 
 // RegisterUnavailable registers a command that exists but is not available in this
@@ -119,10 +134,46 @@ func (t *CommandTable) RegisterUnavailable(info CommandInfo) {
 	t.unavailable[info.Name] = true
 }
 
+// resolveHandler looks up a handler by exact name, then by alias, then by
+// case-insensitive match against registered names. Returns the handler and
+// the canonical name, or nil if not found.
+//
+// Caller must hold at least t.mu.RLock().
+func (t *CommandTable) resolveHandler(name string) (CommandHandler, string, bool) {
+	// 1. Exact match (fast path for correctly-cased callers).
+	if h, ok := t.handlers[name]; ok {
+		return h, name, true
+	}
+	// 2. Alias (snake_case backward compat).
+	if canonical, ok := t.aliases[name]; ok {
+		if h, ok := t.handlers[canonical]; ok {
+			return h, canonical, true
+		}
+	}
+	// 3. Case-insensitive fallback — handles lowercased console input matching
+	//    camelCase command names (e.g. "getpeers" → "getPeers").
+	lower := strings.ToLower(name)
+	for n, h := range t.handlers {
+		if strings.ToLower(n) == lower {
+			return h, n, true
+		}
+	}
+	// 4. Case-insensitive alias lookup.
+	for old, canonical := range t.aliases {
+		if strings.ToLower(old) == lower {
+			if h, ok := t.handlers[canonical]; ok {
+				return h, canonical, true
+			}
+		}
+	}
+	return nil, "", false
+}
+
 // Execute runs a command by name and returns the response.
+// Aliases and case-insensitive names are resolved transparently.
 func (t *CommandTable) Execute(req CommandRequest) CommandResponse {
 	t.mu.RLock()
-	handler, exists := t.handlers[req.Name]
+	handler, canonical, exists := t.resolveHandler(req.Name)
 	t.mu.RUnlock()
 
 	if !exists {
@@ -131,6 +182,7 @@ func (t *CommandTable) Execute(req CommandRequest) CommandResponse {
 			ErrorKind: ErrNotFound,
 		}
 	}
+	req.Name = canonical
 	return handler(req)
 }
 
@@ -153,11 +205,12 @@ func (t *CommandTable) Commands() []CommandInfo {
 	return cmds
 }
 
-// Has returns true if the command is registered.
+// Has returns true if the command is registered (directly, via alias, or
+// case-insensitive match).
 func (t *CommandTable) Has(name string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	_, exists := t.handlers[name]
+	_, _, exists := t.resolveHandler(name)
 	return exists
 }
 
@@ -179,6 +232,9 @@ func (t *CommandTable) AllNames() []string {
 // and by tests that need a fully populated CommandTable.
 // Pass nil for chatlog, dmRouter, or metricsProvider to simulate standalone
 // node mode — those commands are registered as unavailable (503, hidden from help).
+//
+// All commands use camelCase names. Snake_case aliases are registered for
+// backward compatibility and will be removed after 2 releases.
 func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider, routingProvider RoutingProvider) {
 	RegisterSystemCommands(t, node)
 	RegisterNetworkCommands(t, node)
@@ -190,6 +246,56 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 	RegisterNoticeCommands(t, node)
 	RegisterMetricsCommands(t, metricsProvider)
 	RegisterRoutingCommands(t, routingProvider)
+	registerSnakeCaseAliases(t)
+}
+
+// registerSnakeCaseAliases maps deprecated snake_case command names to their
+// canonical camelCase replacements. Kept for 2 releases to give clients time
+// to migrate. Remove after v0.18.
+func registerSnakeCaseAliases(t *CommandTable) {
+	aliases := map[string]string{
+		"get_peers":               "getPeers",
+		"fetch_peer_health":       "fetchPeerHealth",
+		"fetch_network_stats":     "fetchNetworkStats",
+		"add_peer":                "addPeer",
+		"fetch_reachable_ids":     "fetchReachableIds",
+		"fetch_relay_status":      "fetchRelayStatus",
+		"fetch_identities":        "fetchIdentities",
+		"fetch_contacts":          "fetchContacts",
+		"fetch_trusted_contacts":  "fetchTrustedContacts",
+		"delete_trusted_contact":  "deleteTrustedContact",
+		"import_contacts":         "importContacts",
+		"fetch_messages":          "fetchMessages",
+		"fetch_message_ids":       "fetchMessageIds",
+		"fetch_message":           "fetchMessage",
+		"fetch_inbox":             "fetchInbox",
+		"fetch_pending_messages":  "fetchPendingMessages",
+		"fetch_delivery_receipts": "fetchDeliveryReceipts",
+		"fetch_dm_headers":        "fetchDmHeaders",
+		"send_dm":                 "sendDm",
+		"send_message":            "sendMessage",
+		"import_message":          "importMessage",
+		"send_delivery_receipt":   "sendDeliveryReceipt",
+		"send_file_announce":      "sendFileAnnounce",
+		"fetch_file_transfers":    "fetchFileTransfers",
+		"fetch_file_mapping":      "fetchFileMapping",
+		"retry_file_chunk":        "retryFileChunk",
+		"start_file_download":     "startFileDownload",
+		"cancel_file_download":    "cancelFileDownload",
+		"restart_file_download":   "restartFileDownload",
+		"fetch_chatlog":           "fetchChatlog",
+		"fetch_chatlog_previews":  "fetchChatlogPreviews",
+		"fetch_conversations":     "fetchConversations",
+		"fetch_notices":           "fetchNotices",
+		"publish_notice":          "publishNotice",
+		"fetch_traffic_history":   "fetchTrafficHistory",
+		"fetch_route_table":       "fetchRouteTable",
+		"fetch_route_summary":     "fetchRouteSummary",
+		"fetch_route_lookup":      "fetchRouteLookup",
+	}
+	for old, canonical := range aliases {
+		t.RegisterAlias(old, canonical)
+	}
 }
 
 // --- Helper constructors for building responses ---
@@ -323,10 +429,10 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 	)
 }
 
-// RegisterNetworkCommands registers get_peers, fetch_peer_health, add_peer, fetch_reachable_ids.
+// RegisterNetworkCommands registers getPeers, fetchPeerHealth, addPeer, fetchReachableIds.
 func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
-		CommandInfo{Name: "get_peers", Description: "Get list of connected peers", Category: "network"},
+		CommandInfo{Name: "getPeers", Description: "Get list of connected peers", Category: "network"},
 		func(req CommandRequest) CommandResponse {
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
 			return frameResponse(reply)
@@ -334,7 +440,7 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_peer_health", Description: "Get peer health status", Category: "network"},
+		CommandInfo{Name: "fetchPeerHealth", Description: "Get peer health status", Category: "network"},
 		func(req CommandRequest) CommandResponse {
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
 			return frameResponse(reply)
@@ -342,7 +448,7 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_network_stats", Description: "Get aggregated network traffic statistics per peer and total", Category: "network"},
+		CommandInfo{Name: "fetchNetworkStats", Description: "Get aggregated network traffic statistics per peer and total", Category: "network"},
 		func(req CommandRequest) CommandResponse {
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
 			return frameResponse(reply)
@@ -350,7 +456,7 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "add_peer", Description: "Add a new peer by address", Category: "network", Usage: "<address>"},
+		CommandInfo{Name: "addPeer", Description: "Add a new peer by address", Category: "network", Usage: "<address>"},
 		func(req CommandRequest) CommandResponse {
 			address, _ := req.Args["address"].(string)
 			if strings.TrimSpace(address) == "" {
@@ -365,7 +471,7 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_reachable_ids", Description: "Get identities reachable via mesh routing", Category: "network"},
+		CommandInfo{Name: "fetchReachableIds", Description: "Get identities reachable via mesh routing", Category: "network"},
 		func(req CommandRequest) CommandResponse {
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"}))
 		},
@@ -375,7 +481,7 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 // RegisterMeshCommands registers relay and routing diagnostic commands.
 func RegisterMeshCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
-		CommandInfo{Name: "fetch_relay_status", Description: "Get hop-by-hop relay subsystem status (active states, capable peers)", Category: "mesh"},
+		CommandInfo{Name: "fetchRelayStatus", Description: "Get hop-by-hop relay subsystem status (active states, capable peers)", Category: "mesh"},
 		func(req CommandRequest) CommandResponse {
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_relay_status"})
 			return frameResponse(reply)
@@ -388,7 +494,7 @@ func RegisterMeshCommands(t *CommandTable, node NodeProvider) {
 // the command is registered as unavailable — hidden from help/autocomplete
 // and returning 503 on execution, consistent with other mode-gated commands.
 func RegisterMetricsCommands(t *CommandTable, m MetricsProvider) {
-	trafficHistoryInfo := CommandInfo{Name: "fetch_traffic_history", Description: "Get rolling traffic history (1 sample/sec, 1 hour window)", Category: "metrics"}
+	trafficHistoryInfo := CommandInfo{Name: "fetchTrafficHistory", Description: "Get rolling traffic history (1 sample/sec, 1 hour window)", Category: "metrics"}
 
 	if m == nil {
 		t.RegisterUnavailable(trafficHistoryInfo)
@@ -403,10 +509,10 @@ func RegisterMetricsCommands(t *CommandTable, m MetricsProvider) {
 	)
 }
 
-// RegisterIdentityCommands registers fetch_identities, fetch_contacts, fetch_trusted_contacts.
+// RegisterIdentityCommands registers fetchIdentities, fetchContacts, fetchTrustedContacts.
 func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
-		CommandInfo{Name: "fetch_identities", Description: "Fetch all known identities", Category: "identity"},
+		CommandInfo{Name: "fetchIdentities", Description: "Fetch all known identities", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_identities"})
 			return frameResponse(reply)
@@ -414,7 +520,7 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_contacts", Description: "Fetch all contacts", Category: "identity"},
+		CommandInfo{Name: "fetchContacts", Description: "Fetch all contacts", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_contacts"})
 			return frameResponse(reply)
@@ -422,7 +528,7 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_trusted_contacts", Description: "Fetch trusted contacts", Category: "identity"},
+		CommandInfo{Name: "fetchTrustedContacts", Description: "Fetch trusted contacts", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
 			return frameResponse(reply)
@@ -430,7 +536,7 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "delete_trusted_contact", Description: "Remove a trusted contact by address", Category: "identity", Usage: "<address>"},
+		CommandInfo{Name: "deleteTrustedContact", Description: "Remove a trusted contact by address", Category: "identity", Usage: "<address>"},
 		func(req CommandRequest) CommandResponse {
 			address, _ := req.Args["address"].(string)
 			if strings.TrimSpace(address) == "" {
@@ -442,7 +548,7 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "import_contacts", Description: "Import contacts from a list of address/pubkey/boxkey entries", Category: "identity"},
+		CommandInfo{Name: "importContacts", Description: "Import contacts from a list of address/pubkey/boxkey entries", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
 			frame, err := frameFromArgs("import_contacts", req.Args)
 			if err != nil {
@@ -462,7 +568,7 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 // synchronously against the conversation history before queueing.
 func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterProvider, chatlog ChatlogProvider) {
 	t.Register(
-		CommandInfo{Name: "fetch_messages", Description: "Fetch messages from a topic (supports limit, offset via JSON)", Category: "message", Usage: "[topic]"},
+		CommandInfo{Name: "fetchMessages", Description: "Fetch messages from a topic (supports limit, offset via JSON)", Category: "message", Usage: "[topic]"},
 		func(req CommandRequest) CommandResponse {
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
@@ -480,7 +586,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_message_ids", Description: "Fetch message IDs from a topic (supports limit, offset via JSON)", Category: "message", Usage: "[topic]"},
+		CommandInfo{Name: "fetchMessageIds", Description: "Fetch message IDs from a topic (supports limit, offset via JSON)", Category: "message", Usage: "[topic]"},
 		func(req CommandRequest) CommandResponse {
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
@@ -498,7 +604,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_message", Description: "Fetch a specific message", Category: "message", Usage: "<topic> <id>"},
+		CommandInfo{Name: "fetchMessage", Description: "Fetch a specific message", Category: "message", Usage: "<topic> <id>"},
 		func(req CommandRequest) CommandResponse {
 			topic, _ := req.Args["topic"].(string)
 			id, _ := req.Args["id"].(string)
@@ -517,7 +623,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_inbox", Description: "Fetch inbox for a recipient (defaults to self; supports limit, offset via JSON)", Category: "message", Usage: "[topic] [recipient]"},
+		CommandInfo{Name: "fetchInbox", Description: "Fetch inbox for a recipient (defaults to self; supports limit, offset via JSON)", Category: "message", Usage: "[topic] [recipient]"},
 		func(req CommandRequest) CommandResponse {
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
@@ -539,7 +645,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_pending_messages", Description: "Fetch pending messages", Category: "message", Usage: "[topic]"},
+		CommandInfo{Name: "fetchPendingMessages", Description: "Fetch pending messages", Category: "message", Usage: "[topic]"},
 		func(req CommandRequest) CommandResponse {
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
@@ -553,7 +659,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	)
 
 	t.Register(
-		CommandInfo{Name: "fetch_delivery_receipts", Description: "Fetch delivery receipts (defaults to self)", Category: "message", Usage: "[recipient]"},
+		CommandInfo{Name: "fetchDeliveryReceipts", Description: "Fetch delivery receipts (defaults to self)", Category: "message", Usage: "[recipient]"},
 		func(req CommandRequest) CommandResponse {
 			recipient, _ := req.Args["recipient"].(string)
 			if strings.TrimSpace(recipient) == "" {
@@ -568,7 +674,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 
 	// fetch_dm_headers uses only node.HandleLocalFrame — always available.
 	t.Register(
-		CommandInfo{Name: "fetch_dm_headers", Description: "Fetch direct message headers", Category: "message"},
+		CommandInfo{Name: "fetchDmHeaders", Description: "Fetch direct message headers", Category: "message"},
 		func(req CommandRequest) CommandResponse {
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{
 				Type: "fetch_dm_headers",
@@ -576,7 +682,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 		},
 	)
 
-	sendDMInfo := CommandInfo{Name: "send_dm", Description: "Send a direct message", Category: "message", Usage: "<to> <body>"}
+	sendDMInfo := CommandInfo{Name: "sendDm", Description: "Send a direct message", Category: "message", Usage: "<to> <body>"}
 	if dmRouter != nil {
 		t.Register(sendDMInfo,
 			func(req CommandRequest) CommandResponse {
@@ -624,7 +730,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	// and delegate directly to HandleLocalFrame. Used by internal tooling and
 	// raw JSON console input; normal users should prefer send_dm.
 	t.Register(
-		CommandInfo{Name: "send_message", Description: "Store an incoming message (raw frame)", Category: "message"},
+		CommandInfo{Name: "sendMessage", Description: "Store an incoming message (raw frame)", Category: "message"},
 		func(req CommandRequest) CommandResponse {
 			frame, err := frameFromArgs("send_message", req.Args)
 			if err != nil {
@@ -635,7 +741,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	)
 
 	t.Register(
-		CommandInfo{Name: "import_message", Description: "Import a message without delivery side-effects (raw frame)", Category: "message"},
+		CommandInfo{Name: "importMessage", Description: "Import a message without delivery side-effects (raw frame)", Category: "message"},
 		func(req CommandRequest) CommandResponse {
 			frame, err := frameFromArgs("import_message", req.Args)
 			if err != nil {
@@ -646,7 +752,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	)
 
 	t.Register(
-		CommandInfo{Name: "send_delivery_receipt", Description: "Store a delivery receipt (raw frame)", Category: "message"},
+		CommandInfo{Name: "sendDeliveryReceipt", Description: "Store a delivery receipt (raw frame)", Category: "message"},
 		func(req CommandRequest) CommandResponse {
 			frame, err := frameFromArgs("send_delivery_receipt", req.Args)
 			if err != nil {
@@ -663,7 +769,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 // metadata (name, size, hash, content type) inside the encrypted envelope.
 func registerFileAnnounceCommand(t *CommandTable, node NodeProvider, dmRouter DMRouterProvider) {
 	info := CommandInfo{
-		Name:        "send_file_announce",
+		Name:        "sendFileAnnounce",
 		Description: "Announce a file for transfer (sends file_announce DM)",
 		Category:    "file",
 		Usage:       "<to> <file_name> <file_size> <file_hash> [content_type] [body]",
@@ -775,12 +881,12 @@ func parseUint64Arg(v interface{}) (uint64, error) {
 func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterProvider) {
 	registerFileAnnounceCommand(t, node, dmRouter)
 
-	transfersInfo := CommandInfo{Name: "fetch_file_transfers", Description: "List all active/pending file transfers", Category: "file"}
-	mappingInfo := CommandInfo{Name: "fetch_file_mapping", Description: "Show sender FileMapping table (no TransmitPath)", Category: "file"}
-	retryInfo := CommandInfo{Name: "retry_file_chunk", Description: "Force retry current pending chunk request", Category: "file", Usage: "<file_id>"}
-	startInfo := CommandInfo{Name: "start_file_download", Description: "Start downloading a previously announced file", Category: "file", Usage: "<file_id>"}
-	cancelInfo := CommandInfo{Name: "cancel_file_download", Description: "Cancel an active download and delete partial data", Category: "file", Usage: "<file_id>"}
-	restartInfo := CommandInfo{Name: "restart_file_download", Description: "Reset a failed download back to available for re-download", Category: "file", Usage: "<file_id>"}
+	transfersInfo := CommandInfo{Name: "fetchFileTransfers", Description: "List all active/pending file transfers", Category: "file"}
+	mappingInfo := CommandInfo{Name: "fetchFileMapping", Description: "Show sender FileMapping table (no TransmitPath)", Category: "file"}
+	retryInfo := CommandInfo{Name: "retryFileChunk", Description: "Force retry current pending chunk request", Category: "file", Usage: "<file_id>"}
+	startInfo := CommandInfo{Name: "startFileDownload", Description: "Start downloading a previously announced file", Category: "file", Usage: "<file_id>"}
+	cancelInfo := CommandInfo{Name: "cancelFileDownload", Description: "Cancel an active download and delete partial data", Category: "file", Usage: "<file_id>"}
+	restartInfo := CommandInfo{Name: "restartFileDownload", Description: "Reset a failed download back to available for re-download", Category: "file", Usage: "<file_id>"}
 
 	if node == nil {
 		t.RegisterUnavailable(transfersInfo)
@@ -868,9 +974,9 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 // RegisterChatlogCommands registers chatlog-related commands.
 // When chatlog provider is nil, commands are registered as unavailable (503).
 func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
-	chatlogInfo := CommandInfo{Name: "fetch_chatlog", Description: "Fetch chatlog entries (defaults: topic=dm, all peers)", Category: "chatlog", Usage: "[topic] [peer_address]"}
-	previewsInfo := CommandInfo{Name: "fetch_chatlog_previews", Description: "Fetch chatlog previews", Category: "chatlog"}
-	conversationsInfo := CommandInfo{Name: "fetch_conversations", Description: "Fetch conversations", Category: "chatlog"}
+	chatlogInfo := CommandInfo{Name: "fetchChatlog", Description: "Fetch chatlog entries (defaults: topic=dm, all peers)", Category: "chatlog", Usage: "[topic] [peer_address]"}
+	previewsInfo := CommandInfo{Name: "fetchChatlogPreviews", Description: "Fetch chatlog previews", Category: "chatlog"}
+	conversationsInfo := CommandInfo{Name: "fetchConversations", Description: "Fetch conversations", Category: "chatlog"}
 
 	if chatlog == nil {
 		t.RegisterUnavailable(chatlogInfo)
@@ -920,14 +1026,14 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 // RegisterNoticeCommands registers notice-related commands.
 func RegisterNoticeCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
-		CommandInfo{Name: "fetch_notices", Description: "Fetch all notices", Category: "notice"},
+		CommandInfo{Name: "fetchNotices", Description: "Fetch all notices", Category: "notice"},
 		func(req CommandRequest) CommandResponse {
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_notices"}))
 		},
 	)
 
 	t.Register(
-		CommandInfo{Name: "publish_notice", Description: "Publish an encrypted notice with TTL (raw frame)", Category: "notice"},
+		CommandInfo{Name: "publishNotice", Description: "Publish an encrypted notice with TTL (raw frame)", Category: "notice"},
 		func(req CommandRequest) CommandResponse {
 			frame, err := frameFromArgs("publish_notice", req.Args)
 			if err != nil {
@@ -980,7 +1086,7 @@ func RegisterDesktopOverrides(t *CommandTable, diag DiagnosticProvider, node Nod
 	)
 
 	t.Register(
-		CommandInfo{Name: "get_peers", Description: "Get peers with health status and categorization", Category: "network"},
+		CommandInfo{Name: "getPeers", Description: "Get peers with health status and categorization", Category: "network"},
 		func(req CommandRequest) CommandResponse {
 			output, err := diag.ConsolePeersJSON()
 			if err != nil {

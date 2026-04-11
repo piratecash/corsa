@@ -34,7 +34,7 @@ func TestRoutingCommandsUnavailableWhenProviderNil(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil, nil)
 
-	commands := []string{"fetch_route_table", "fetch_route_summary", "fetch_route_lookup"}
+	commands := []string{"fetchRouteTable", "fetchRouteSummary", "fetchRouteLookup"}
 	for _, cmd := range commands {
 		// Should not appear in help.
 		for _, info := range table.Commands() {
@@ -63,9 +63,9 @@ func TestRoutingCommandsVisibleWhenProviderSet(t *testing.T) {
 	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil, provider)
 
 	expected := map[string]bool{
-		"fetch_route_table":   false,
-		"fetch_route_summary": false,
-		"fetch_route_lookup":  false,
+		"fetchRouteTable":   false,
+		"fetchRouteSummary": false,
+		"fetchRouteLookup":  false,
 	}
 
 	for _, cmd := range table.Commands() {
@@ -121,7 +121,7 @@ func TestFetchRouteTable(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_table"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteTable"})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -176,7 +176,7 @@ func TestFetchRouteTableNextHopObject(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_table"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteTable"})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -234,7 +234,7 @@ func TestFetchRouteTableNextHopDisconnected(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_table"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteTable"})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -300,7 +300,7 @@ func TestFetchRouteSummary(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_summary"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -377,7 +377,7 @@ func TestFetchRouteLookup(t *testing.T) {
 	rpc.RegisterRoutingCommands(table, provider)
 
 	resp := table.Execute(rpc.CommandRequest{
-		Name: "fetch_route_lookup",
+		Name: "fetchRouteLookup",
 		Args: map[string]interface{}{"identity": "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"},
 	})
 	if resp.Error != nil {
@@ -413,7 +413,7 @@ func TestFetchRouteLookupRequiresIdentity(t *testing.T) {
 	rpc.RegisterRoutingCommands(table, provider)
 
 	resp := table.Execute(rpc.CommandRequest{
-		Name: "fetch_route_lookup",
+		Name: "fetchRouteLookup",
 		Args: map[string]interface{}{},
 	})
 	if resp.ErrorKind != rpc.ErrValidation {
@@ -441,7 +441,7 @@ func TestFetchRouteLookupRejectsMalformedIdentity(t *testing.T) {
 
 	for _, id := range malformed {
 		resp := table.Execute(rpc.CommandRequest{
-			Name: "fetch_route_lookup",
+			Name: "fetchRouteLookup",
 			Args: map[string]interface{}{"identity": id},
 		})
 		if resp.ErrorKind != rpc.ErrValidation {
@@ -462,7 +462,7 @@ func TestFetchRouteLookupNoRoutes(t *testing.T) {
 	rpc.RegisterRoutingCommands(table, provider)
 
 	resp := table.Execute(rpc.CommandRequest{
-		Name: "fetch_route_lookup",
+		Name: "fetchRouteLookup",
 		Args: map[string]interface{}{"identity": "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00"},
 	})
 	if resp.Error != nil {
@@ -506,7 +506,7 @@ func TestFetchRouteTableUsesSnapshotTime(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_table"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteTable"})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -561,7 +561,7 @@ func TestFetchRouteSummaryUsesSnapshotTime(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_summary"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
@@ -606,7 +606,7 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 	rpc.RegisterRoutingCommands(table, provider)
 
 	resp := table.Execute(rpc.CommandRequest{
-		Name: "fetch_route_lookup",
+		Name: "fetchRouteLookup",
 		Args: map[string]interface{}{"identity": string(targetID)},
 	})
 	if resp.Error != nil {
@@ -665,7 +665,7 @@ func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 	rpc.RegisterRoutingCommands(table, provider)
 
 	resp := table.Execute(rpc.CommandRequest{
-		Name: "fetch_route_lookup",
+		Name: "fetchRouteLookup",
 		Args: map[string]interface{}{"identity": string(targetID)},
 	})
 	if resp.Error != nil {
@@ -733,7 +733,7 @@ func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 	rpc.RegisterRoutingCommands(table, provider)
 
 	resp := table.Execute(rpc.CommandRequest{
-		Name: "fetch_route_lookup",
+		Name: "fetchRouteLookup",
 		Args: map[string]interface{}{"identity": string(targetID)},
 	})
 	if resp.Error != nil {
@@ -780,22 +780,22 @@ func TestConsoleParserRoutingCommands(t *testing.T) {
 		t.Errorf("expected command 'fetch_route_summary', got %q", req.Name)
 	}
 
-	// fetch_route_lookup with identity arg
+	// fetch_route_lookup with identity arg (snake_case still works, canonicalized to camelCase)
 	req, err = rpc.ParseConsoleInput("fetch_route_lookup peer-abc123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "fetch_route_lookup" {
-		t.Errorf("expected command 'fetch_route_lookup', got %q", req.Name)
+	if req.Name != "fetchRouteLookup" {
+		t.Errorf("expected command 'fetchRouteLookup', got %q", req.Name)
 	}
 	if id, _ := req.Args["identity"].(string); id != "peer-abc123" {
 		t.Errorf("expected identity='peer-abc123', got %q", id)
 	}
 
-	// fetch_route_lookup without arg — should error
-	_, err = rpc.ParseConsoleInput("fetch_route_lookup")
+	// fetchRouteLookup without arg — should error (camelCase input)
+	_, err = rpc.ParseConsoleInput("fetchRouteLookup")
 	if err == nil {
-		t.Error("expected error for fetch_route_lookup without identity")
+		t.Error("expected error for fetchRouteLookup without identity")
 	}
 }
 
@@ -841,7 +841,7 @@ func TestFetchRouteSummaryExcludesSelfRoute(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
-	resp := table.Execute(rpc.CommandRequest{Name: "fetch_route_summary"})
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}

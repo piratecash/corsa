@@ -43,25 +43,29 @@ func TestParseConsoleInputUnterminatedQuote(t *testing.T) {
 }
 
 func TestParseConsoleInputSimpleCommand(t *testing.T) {
-	tests := []string{
-		"ping", "help", "hello", "version",
-		"get_peers", "fetch_peer_health",
-		"fetch_identities", "fetch_contacts", "fetch_trusted_contacts",
-		"fetch_notices", "fetch_chatlog_previews", "fetch_conversations",
-		"fetch_dm_headers",
+	tests := []struct {
+		input    string
+		wantName string
+	}{
+		{"ping", "ping"}, {"help", "help"}, {"hello", "hello"}, {"version", "version"},
+		{"get_peers", "getPeers"}, {"fetch_peer_health", "fetchPeerHealth"},
+		{"fetch_identities", "fetchIdentities"}, {"fetch_contacts", "fetchContacts"},
+		{"fetch_trusted_contacts", "fetchTrustedContacts"},
+		{"fetch_notices", "fetchNotices"}, {"fetch_chatlog_previews", "fetchChatlogPreviews"},
+		{"fetch_conversations", "fetchConversations"}, {"fetch_dm_headers", "fetchDmHeaders"},
 	}
 
-	for _, cmd := range tests {
-		req, err := ParseConsoleInput(cmd)
+	for _, tt := range tests {
+		req, err := ParseConsoleInput(tt.input)
 		if err != nil {
-			t.Errorf("ParseConsoleInput(%q): unexpected error: %v", cmd, err)
+			t.Errorf("ParseConsoleInput(%q): unexpected error: %v", tt.input, err)
 			continue
 		}
-		if req.Name != cmd {
-			t.Errorf("ParseConsoleInput(%q): expected name %q, got %q", cmd, cmd, req.Name)
+		if req.Name != tt.wantName {
+			t.Errorf("ParseConsoleInput(%q): expected name %q, got %q", tt.input, tt.wantName, req.Name)
 		}
 		if req.Args != nil {
-			t.Errorf("ParseConsoleInput(%q): expected nil args, got %v", cmd, req.Args)
+			t.Errorf("ParseConsoleInput(%q): expected nil args, got %v", tt.input, req.Args)
 		}
 	}
 }
@@ -71,8 +75,8 @@ func TestParseConsoleInputAddPeer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "add_peer" {
-		t.Errorf("expected name add_peer, got %s", req.Name)
+	if req.Name != "addPeer" {
+		t.Errorf("expected name addPeer, got %s", req.Name)
 	}
 	if req.Args["address"] != "192.168.1.1:9000" {
 		t.Errorf("expected address 192.168.1.1:9000, got %v", req.Args["address"])
@@ -221,10 +225,10 @@ func TestParseConsoleInputCaseInsensitive(t *testing.T) {
 	}{
 		{"HELP", "help"},
 		{"Ping", "ping"},
-		{"GET_PEERS", "get_peers"},
-		{"Fetch_Peer_Health", "fetch_peer_health"},
-		{"Send_DM peer hello", "send_dm"},
-		{"ADD_PEER 1.2.3.4:8080", "add_peer"},
+		{"GET_PEERS", "getPeers"},
+		{"Fetch_Peer_Health", "fetchPeerHealth"},
+		{"Send_DM peer hello", "sendDm"},
+		{"ADD_PEER 1.2.3.4:8080", "addPeer"},
 	}
 
 	for _, tt := range tests {
@@ -256,8 +260,8 @@ func TestParseConsoleInputJSONFrameWithArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "fetch_messages" {
-		t.Errorf("expected name fetch_messages, got %s", req.Name)
+	if req.Name != "fetchMessages" {
+		t.Errorf("expected name fetchMessages, got %s", req.Name)
 	}
 	if req.Args["topic"] != "dm" {
 		t.Errorf("expected topic=dm, got %v", req.Args["topic"])
@@ -290,8 +294,8 @@ func TestParseConsoleInputJSONFrameCaseInsensitive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "get_peers" {
-		t.Errorf("expected name get_peers, got %s", req.Name)
+	if req.Name != "getPeers" {
+		t.Errorf("expected name getPeers, got %s", req.Name)
 	}
 }
 
@@ -305,8 +309,8 @@ func TestParseConsoleInputJSONFrameAddPeerFromWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "add_peer" {
-		t.Errorf("expected name add_peer, got %s", req.Name)
+	if req.Name != "addPeer" {
+		t.Errorf("expected name addPeer, got %s", req.Name)
 	}
 	addr, ok := req.Args["address"].(string)
 	if !ok || addr != "192.168.1.1:9000" {
@@ -344,8 +348,8 @@ func TestParseConsoleInputJSONFrameSendDMFromWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "send_dm" {
-		t.Errorf("expected name send_dm, got %s", req.Name)
+	if req.Name != "sendDm" {
+		t.Errorf("expected name sendDm, got %s", req.Name)
 	}
 	to, ok := req.Args["to"].(string)
 	if !ok || to != "peer-addr" {
@@ -375,8 +379,8 @@ func TestParseConsoleInputJSONFrameFetchChatlogFromWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "fetch_chatlog" {
-		t.Errorf("expected name fetch_chatlog, got %s", req.Name)
+	if req.Name != "fetchChatlog" {
+		t.Errorf("expected name fetchChatlog, got %s", req.Name)
 	}
 	pa, ok := req.Args["peer_address"].(string)
 	if !ok || pa != "abc123" {
@@ -425,8 +429,8 @@ func TestParseConsoleInputKeyValueSendDMWithReplyTo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "send_dm" {
-		t.Errorf("expected command send_dm, got %s", req.Name)
+	if req.Name != "sendDm" {
+		t.Errorf("expected command sendDm, got %s", req.Name)
 	}
 	if req.Args["to"] != "peer-addr" {
 		t.Errorf("expected to=peer-addr, got %v", req.Args["to"])
@@ -444,8 +448,8 @@ func TestParseConsoleInputKeyValueQuotedMultiWordBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Name != "send_dm" {
-		t.Errorf("expected command send_dm, got %s", req.Name)
+	if req.Name != "sendDm" {
+		t.Errorf("expected command sendDm, got %s", req.Name)
 	}
 	if req.Args["to"] != "peer-addr" {
 		t.Errorf("expected to=peer-addr, got %v", req.Args["to"])

@@ -534,8 +534,8 @@ func TestUniversalExecUnavailableCommand(t *testing.T) {
 		command string
 		args    map[string]interface{}
 	}{
-		{"fetch_chatlog", map[string]interface{}{"topic": "dm", "peer_address": "addr"}},
-		{"fetch_traffic_history", map[string]interface{}{}},
+		{"fetchChatlog", map[string]interface{}{"topic": "dm", "peer_address": "addr"}},
+		{"fetchTrafficHistory", map[string]interface{}{}},
 	}
 
 	for _, tc := range unavailableCases {
@@ -555,7 +555,7 @@ func TestUniversalExecUnavailableSendDM(t *testing.T) {
 	server := setupTestServer(t, node, nil) // dmRouter=nil
 
 	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
-		"command": "send_dm",
+		"command": "sendDm",
 		"args":    map[string]interface{}{"to": "addr", "body": "hello"},
 	})
 
@@ -571,11 +571,11 @@ func TestCommandsExcludesUnavailable(t *testing.T) {
 
 	commands := table.Commands()
 	unavailableNames := map[string]bool{
-		"fetch_chatlog":          true,
-		"fetch_chatlog_previews": true,
-		"fetch_conversations":    true,
-		"send_dm":                true,
-		"fetch_traffic_history":  true,
+		"fetchChatlog":         true,
+		"fetchChatlogPreviews": true,
+		"fetchConversations":   true,
+		"sendDm":               true,
+		"fetchTrafficHistory":  true,
 	}
 
 	for _, cmd := range commands {
@@ -592,8 +592,8 @@ func TestHasReturnsTrueForUnavailable(t *testing.T) {
 	table := buildTestTable(node, nil, nil, nil) // chatlog=nil, dmRouter=nil
 
 	unavailableNames := []string{
-		"fetch_chatlog", "fetch_chatlog_previews", "fetch_conversations", "send_dm",
-		"fetch_traffic_history",
+		"fetchChatlog", "fetchChatlogPreviews", "fetchConversations", "sendDm",
+		"fetchTrafficHistory",
 	}
 
 	for _, name := range unavailableNames {
@@ -614,7 +614,7 @@ func TestExecAndLegacyConsistency(t *testing.T) {
 
 	// Via /exec
 	execCode, _ := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
-		"command": "fetch_chatlog_previews",
+		"command": "fetchChatlogPreviews",
 	})
 
 	if legacyCode != execCode {

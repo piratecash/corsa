@@ -39,7 +39,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	command := strings.ToLower(args[0])
+	command := args[0]
 	cmdArgs, err := parseArgs(command, args[1:], *named)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

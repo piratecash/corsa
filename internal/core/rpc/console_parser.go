@@ -6,6 +6,101 @@ import (
 	"strings"
 )
 
+// canonicalNames maps lowercased command tokens to their canonical camelCase form.
+// ParseConsoleInput lowercases user input for case-insensitive matching, then
+// normalizes via this table so that callers (rpc.Client, desktop console, CLI)
+// always emit the canonical name — not a deprecated snake_case alias.
+//
+// Commands absent from this map (e.g., "help", "ping") are already lowercase-canonical.
+var canonicalNames = map[string]string{
+	"getpeers":             "getPeers",
+	"fetchpeerhealth":      "fetchPeerHealth",
+	"fetchnetworkstats":    "fetchNetworkStats",
+	"addpeer":              "addPeer",
+	"fetchreachableids":    "fetchReachableIds",
+	"fetchrelaystatus":     "fetchRelayStatus",
+	"fetchidentities":      "fetchIdentities",
+	"fetchcontacts":        "fetchContacts",
+	"fetchtrustedcontacts": "fetchTrustedContacts",
+	"deletetrustedcontact": "deleteTrustedContact",
+	"importcontacts":       "importContacts",
+	"fetchmessages":        "fetchMessages",
+	"fetchmessageids":      "fetchMessageIds",
+	"fetchmessage":         "fetchMessage",
+	"fetchinbox":           "fetchInbox",
+	"fetchpendingmessages": "fetchPendingMessages",
+	"fetchdeliveryreceipts": "fetchDeliveryReceipts",
+	"fetchdmheaders":       "fetchDmHeaders",
+	"senddm":               "sendDm",
+	"sendmessage":          "sendMessage",
+	"importmessage":        "importMessage",
+	"senddeliveryreceipt":  "sendDeliveryReceipt",
+	"sendfileannounce":     "sendFileAnnounce",
+	"fetchfiletransfers":   "fetchFileTransfers",
+	"fetchfilemapping":     "fetchFileMapping",
+	"retryfilechunk":       "retryFileChunk",
+	"startfiledownload":    "startFileDownload",
+	"cancelfiledownload":   "cancelFileDownload",
+	"restartfiledownload":  "restartFileDownload",
+	"fetchchatlog":         "fetchChatlog",
+	"fetchchatlogpreviews": "fetchChatlogPreviews",
+	"fetchconversations":   "fetchConversations",
+	"fetchnotices":         "fetchNotices",
+	"publishnotice":        "publishNotice",
+	"fetchtraffichistory":  "fetchTrafficHistory",
+	"fetchroutetable":      "fetchRouteTable",
+	"fetchroutesummary":    "fetchRouteSummary",
+	"fetchroutelookup":     "fetchRouteLookup",
+	// snake_case input (already lowercase) → canonical camelCase.
+	"get_peers":              "getPeers",
+	"fetch_peer_health":      "fetchPeerHealth",
+	"fetch_network_stats":    "fetchNetworkStats",
+	"add_peer":               "addPeer",
+	"fetch_reachable_ids":    "fetchReachableIds",
+	"fetch_relay_status":     "fetchRelayStatus",
+	"fetch_identities":       "fetchIdentities",
+	"fetch_contacts":         "fetchContacts",
+	"fetch_trusted_contacts": "fetchTrustedContacts",
+	"delete_trusted_contact": "deleteTrustedContact",
+	"import_contacts":        "importContacts",
+	"fetch_messages":         "fetchMessages",
+	"fetch_message_ids":      "fetchMessageIds",
+	"fetch_message":          "fetchMessage",
+	"fetch_inbox":            "fetchInbox",
+	"fetch_pending_messages": "fetchPendingMessages",
+	"fetch_delivery_receipts": "fetchDeliveryReceipts",
+	"fetch_dm_headers":       "fetchDmHeaders",
+	"send_dm":                "sendDm",
+	"send_message":           "sendMessage",
+	"import_message":         "importMessage",
+	"send_delivery_receipt":  "sendDeliveryReceipt",
+	"send_file_announce":     "sendFileAnnounce",
+	"fetch_file_transfers":   "fetchFileTransfers",
+	"fetch_file_mapping":     "fetchFileMapping",
+	"retry_file_chunk":       "retryFileChunk",
+	"start_file_download":    "startFileDownload",
+	"cancel_file_download":   "cancelFileDownload",
+	"restart_file_download":  "restartFileDownload",
+	"fetch_chatlog":          "fetchChatlog",
+	"fetch_chatlog_previews": "fetchChatlogPreviews",
+	"fetch_conversations":    "fetchConversations",
+	"fetch_notices":          "fetchNotices",
+	"publish_notice":         "publishNotice",
+	"fetch_traffic_history":  "fetchTrafficHistory",
+	"fetch_route_table":      "fetchRouteTable",
+	"fetch_route_summary":    "fetchRouteSummary",
+	"fetch_route_lookup":     "fetchRouteLookup",
+}
+
+// canonicalize returns the canonical camelCase form of a lowercased command name.
+// If the name is not in the lookup table (e.g. "help", "ping"), it is returned as-is.
+func canonicalize(lowered string) string {
+	if canonical, ok := canonicalNames[lowered]; ok {
+		return canonical
+	}
+	return lowered
+}
+
 // ParseConsoleInput converts a raw console command string (e.g. "send_dm addr hello world")
 // into a CommandRequest with named args that CommandTable can execute directly.
 // Used by both the UI console (in-process) and rpc.Client (over HTTP via /exec).
@@ -40,10 +135,11 @@ func ParseConsoleInput(input string) (CommandRequest, error) {
 	if len(allTokens) == 0 {
 		return CommandRequest{}, fmt.Errorf("empty command")
 	}
-	command := strings.ToLower(strings.TrimSpace(allTokens[0]))
-	if command == "" {
+	lowered := strings.ToLower(strings.TrimSpace(allTokens[0]))
+	if lowered == "" {
 		return CommandRequest{}, fmt.Errorf("empty command")
 	}
+	command := canonicalize(lowered)
 	quotedTokens := allTokens[1:]
 
 	if args, ok := tryParseKeyValue(quotedTokens); ok {
@@ -55,7 +151,8 @@ func ParseConsoleInput(input string) (CommandRequest, error) {
 	fields := strings.Fields(trimmed)
 	positional := fields[1:]
 
-	args, err := mapPositionalArgs(command, positional)
+	// mapPositionalArgs uses lowercased tokens for switch matching.
+	args, err := mapPositionalArgs(lowered, positional)
 	if err != nil {
 		return CommandRequest{}, err
 	}
@@ -164,11 +261,11 @@ func parseJSONFrame(input string) (CommandRequest, error) {
 		return CommandRequest{}, fmt.Errorf("JSON frame requires a 'type' field")
 	}
 
-	name := strings.ToLower(frameType)
-	normalizeFrameArgs(name, fields)
+	lowered := strings.ToLower(frameType)
+	normalizeFrameArgs(lowered, fields)
 
 	return CommandRequest{
-		Name: name,
+		Name: canonicalize(lowered),
 		Args: fields,
 	}, nil
 }
@@ -186,8 +283,10 @@ func parseJSONFrame(input string) (CommandRequest, error) {
 //   - If both the frame field and the RPC field are present, the RPC field wins.
 //   - The "count" → "offset" alias applies to all commands that support pagination.
 func normalizeFrameArgs(command string, args map[string]interface{}) {
-	switch command {
-	case "add_peer":
+	// Match both camelCase (canonical) and snake_case (deprecated alias).
+	cmd := strings.ToLower(command)
+	switch cmd {
+	case "addpeer", "add_peer":
 		// Wire: {"peers": ["host:port"]}  →  RPC: {"address": "host:port"}
 		if _, has := args["address"]; !has {
 			if peers, ok := args["peers"]; ok {
@@ -199,7 +298,7 @@ func normalizeFrameArgs(command string, args map[string]interface{}) {
 			}
 		}
 
-	case "send_dm":
+	case "senddm", "send_dm":
 		// Wire: {"recipient": "addr"}  →  RPC: {"to": "addr"}
 		if _, has := args["to"]; !has {
 			if recipient, ok := args["recipient"].(string); ok {
@@ -207,7 +306,7 @@ func normalizeFrameArgs(command string, args map[string]interface{}) {
 			}
 		}
 
-	case "fetch_chatlog":
+	case "fetchchatlog", "fetch_chatlog":
 		// Wire: {"address": "addr"}  →  RPC: {"peer_address": "addr"}
 		if _, has := args["peer_address"]; !has {
 			if addr, ok := args["address"].(string); ok {
@@ -226,51 +325,66 @@ func normalizeFrameArgs(command string, args map[string]interface{}) {
 
 // mapPositionalArgs converts positional CLI arguments to a named args map
 // based on the command's expected parameter layout.
+//
+// Command names are matched case-insensitively to support both camelCase
+// (canonical) and snake_case (deprecated alias) input from the console.
 func mapPositionalArgs(command string, args []string) (map[string]interface{}, error) {
+	// Normalize to lowercase for matching — camelCase and snake_case both work.
+	cmd := strings.ToLower(command)
+
 	noArgCommands := map[string]bool{
 		"help": true, "ping": true, "hello": true, "version": true,
+		// camelCase (lowered)
+		"getpeers": true, "fetchpeerhealth": true, "fetchnetworkstats": true,
+		"fetchidentities": true, "fetchcontacts": true, "fetchtrustedcontacts": true,
+		"fetchnotices": true, "fetchchatlogpreviews": true, "fetchconversations": true,
+		"fetchdmheaders": true, "fetchrelaystatus": true,
+		"fetchroutetable": true, "fetchroutesummary": true,
+		"fetchtraffichistory": true, "fetchreachableids": true,
+		// snake_case (deprecated, kept for 2 releases)
 		"get_peers": true, "fetch_peer_health": true, "fetch_network_stats": true,
 		"fetch_identities": true, "fetch_contacts": true, "fetch_trusted_contacts": true,
 		"fetch_notices": true, "fetch_chatlog_previews": true, "fetch_conversations": true,
 		"fetch_dm_headers": true, "fetch_relay_status": true,
 		"fetch_route_table": true, "fetch_route_summary": true,
+		"fetch_traffic_history": true, "fetch_reachable_ids": true,
 	}
 
-	if noArgCommands[command] {
+	if noArgCommands[cmd] {
 		if len(args) > 0 {
 			return nil, fmt.Errorf("%s takes no arguments", command)
 		}
 		return nil, nil
 	}
 
-	switch command {
-	case "add_peer":
+	switch cmd {
+	case "addpeer", "add_peer":
 		if len(args) < 1 {
-			return nil, fmt.Errorf("add_peer requires address argument")
+			return nil, fmt.Errorf("addPeer requires address argument")
 		}
 		return map[string]interface{}{"address": args[0]}, nil
 
-	case "delete_trusted_contact":
+	case "deletetrustedcontact", "delete_trusted_contact":
 		if len(args) < 1 {
-			return nil, fmt.Errorf("delete_trusted_contact requires address argument")
+			return nil, fmt.Errorf("deleteTrustedContact requires address argument")
 		}
 		return map[string]interface{}{"address": args[0]}, nil
 
-	case "fetch_messages":
+	case "fetchmessages", "fetch_messages":
 		topic := stringArgOrDefault(args, 0, "global")
 		return map[string]interface{}{"topic": topic}, nil
 
-	case "fetch_message_ids":
+	case "fetchmessageids", "fetch_message_ids":
 		topic := stringArgOrDefault(args, 0, "global")
 		return map[string]interface{}{"topic": topic}, nil
 
-	case "fetch_message":
+	case "fetchmessage", "fetch_message":
 		if len(args) < 2 {
-			return nil, fmt.Errorf("fetch_message requires topic and id arguments")
+			return nil, fmt.Errorf("fetchMessage requires topic and id arguments")
 		}
 		return map[string]interface{}{"topic": args[0], "id": strings.Join(args[1:], " ")}, nil
 
-	case "fetch_inbox":
+	case "fetchinbox", "fetch_inbox":
 		topic := stringArgOrDefault(args, 0, "dm")
 		result := map[string]interface{}{"topic": topic}
 		if len(args) > 1 {
@@ -278,18 +392,18 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		}
 		return result, nil
 
-	case "fetch_pending_messages":
+	case "fetchpendingmessages", "fetch_pending_messages":
 		topic := stringArgOrDefault(args, 0, "dm")
 		return map[string]interface{}{"topic": topic}, nil
 
-	case "fetch_delivery_receipts":
+	case "fetchdeliveryreceipts", "fetch_delivery_receipts":
 		result := map[string]interface{}{}
 		if len(args) > 0 {
 			result["recipient"] = args[0]
 		}
 		return result, nil
 
-	case "fetch_chatlog":
+	case "fetchchatlog", "fetch_chatlog":
 		topic := stringArgOrDefault(args, 0, "dm")
 		result := map[string]interface{}{"topic": topic}
 		if len(args) > 1 {
@@ -297,18 +411,18 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		}
 		return result, nil
 
-	case "send_dm":
+	case "senddm", "send_dm":
 		if len(args) < 2 {
-			return nil, fmt.Errorf("send_dm requires to and body arguments")
+			return nil, fmt.Errorf("sendDm requires to and body arguments")
 		}
 		return map[string]interface{}{"to": args[0], "body": strings.Join(args[1:], " ")}, nil
 
-	case "fetch_route_lookup":
+	case "fetchroutelookup", "fetch_route_lookup":
 		if len(args) < 1 {
-			return nil, fmt.Errorf("fetch_route_lookup requires identity argument")
+			return nil, fmt.Errorf("fetchRouteLookup requires identity argument")
 		}
 		if len(args) > 1 {
-			return nil, fmt.Errorf("fetch_route_lookup takes exactly one argument")
+			return nil, fmt.Errorf("fetchRouteLookup takes exactly one argument")
 		}
 		return map[string]interface{}{"identity": args[0]}, nil
 	}

@@ -189,9 +189,9 @@ func TestChatlogCommandsHiddenWithNilProvider(t *testing.T) {
 	}
 
 	chatlogCommands := map[string]bool{
-		"fetch_chatlog":          true,
-		"fetch_chatlog_previews": true,
-		"fetch_conversations":    true,
+		"fetchChatlog":         true,
+		"fetchChatlogPreviews": true,
+		"fetchConversations":   true,
 	}
 
 	for _, cmd := range commands {
@@ -220,9 +220,9 @@ func TestChatlogCommandsVisibleWithProvider(t *testing.T) {
 	}
 
 	found := map[string]bool{
-		"fetch_chatlog":          false,
-		"fetch_chatlog_previews": false,
-		"fetch_conversations":    false,
+		"fetchChatlog":         false,
+		"fetchChatlogPreviews": false,
+		"fetchConversations":   false,
 	}
 
 	for _, cmd := range commands {

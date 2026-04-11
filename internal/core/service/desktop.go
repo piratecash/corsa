@@ -976,9 +976,11 @@ func parseConsoleCommand(input, selfAddress, clientVersion string) (protocol.Fra
 	}
 
 	fields := strings.Fields(trimmed)
-	command := strings.ToLower(fields[0])
+	cmd := strings.ToLower(fields[0])
 
-	switch command {
+	// Wire frame types stay snake_case — map lowered input to the canonical wire name.
+	// Both camelCase and snake_case user input resolve to the same wire type.
+	switch cmd {
 	case "help":
 		return protocol.Frame{}, consoleHelpText(selfAddress), nil
 	case "ping":
@@ -991,43 +993,70 @@ func parseConsoleCommand(input, selfAddress, clientVersion string) (protocol.Fra
 			ClientVersion: strings.ReplaceAll(clientVersion, " ", "-"),
 			ClientBuild:   config.ClientBuild,
 		}, "", nil
-	case "add_peer":
+	case "addpeer", "add_peer":
 		if len(fields) < 2 {
-			return protocol.Frame{}, "", fmt.Errorf("usage: add_peer <host:port>")
+			return protocol.Frame{}, "", fmt.Errorf("usage: addPeer <host:port>")
 		}
 		return protocol.Frame{Type: "add_peer", Peers: []string{fields[1]}}, "", nil
-	case "fetch_chatlog":
+	case "fetchchatlog", "fetch_chatlog":
 		topic := commandArg(fields, 1, "dm")
 		addr := commandArg(fields, 2, "")
 		return protocol.Frame{Type: "fetch_chatlog", Topic: topic, Address: addr}, "", nil
-	case "fetch_conversations":
+	case "fetchconversations", "fetch_conversations":
 		return protocol.Frame{Type: "fetch_conversations"}, "", nil
-	case "fetch_chatlog_previews":
+	case "fetchchatlogpreviews", "fetch_chatlog_previews":
 		return protocol.Frame{Type: "fetch_chatlog_previews"}, "", nil
-	case "fetch_dm_headers":
+	case "fetchdmheaders", "fetch_dm_headers":
 		return protocol.Frame{Type: "fetch_dm_headers"}, "", nil
-	case "get_peers", "fetch_identities", "fetch_contacts", "fetch_trusted_contacts", "fetch_peer_health", "fetch_notices":
-		return protocol.Frame{Type: command}, "", nil
-	case "fetch_pending_messages":
-		return protocol.Frame{Type: command, Topic: commandArg(fields, 1, "dm")}, "", nil
-	case "fetch_messages", "fetch_message_ids":
-		return protocol.Frame{Type: command, Topic: commandArg(fields, 1, "global")}, "", nil
-	case "fetch_message":
+	case "getpeers", "get_peers",
+		"fetchidentities", "fetch_identities",
+		"fetchcontacts", "fetch_contacts",
+		"fetchtrustedcontacts", "fetch_trusted_contacts",
+		"fetchpeerhealth", "fetch_peer_health",
+		"fetchnotices", "fetch_notices":
+		// Map lowered camelCase back to the wire snake_case type.
+		wireType := legacyWireType(cmd)
+		return protocol.Frame{Type: wireType}, "", nil
+	case "fetchpendingmessages", "fetch_pending_messages":
+		return protocol.Frame{Type: "fetch_pending_messages", Topic: commandArg(fields, 1, "dm")}, "", nil
+	case "fetchmessages", "fetch_messages", "fetchmessageids", "fetch_message_ids":
+		wireType := legacyWireType(cmd)
+		return protocol.Frame{Type: wireType, Topic: commandArg(fields, 1, "global")}, "", nil
+	case "fetchmessage", "fetch_message":
 		if len(fields) < 3 {
-			return protocol.Frame{}, "", fmt.Errorf("usage: fetch_message <topic> <id>")
+			return protocol.Frame{}, "", fmt.Errorf("usage: fetchMessage <topic> <id>")
 		}
-		return protocol.Frame{Type: command, Topic: fields[1], ID: strings.Join(fields[2:], " ")}, "", nil
-	case "fetch_inbox":
+		return protocol.Frame{Type: "fetch_message", Topic: fields[1], ID: strings.Join(fields[2:], " ")}, "", nil
+	case "fetchinbox", "fetch_inbox":
 		return protocol.Frame{
-			Type:      command,
+			Type:      "fetch_inbox",
 			Topic:     commandArg(fields, 1, "dm"),
 			Recipient: commandArg(fields, 2, selfAddress),
 		}, "", nil
-	case "fetch_delivery_receipts":
-		return protocol.Frame{Type: command, Recipient: commandArg(fields, 1, selfAddress)}, "", nil
+	case "fetchdeliveryreceipts", "fetch_delivery_receipts":
+		return protocol.Frame{Type: "fetch_delivery_receipts", Recipient: commandArg(fields, 1, selfAddress)}, "", nil
 	default:
 		return protocol.Frame{}, "", fmt.Errorf("unknown console command: %s", fields[0])
 	}
+}
+
+// legacyWireType maps lowered command input to the protocol wire type.
+// Wire frame types are always snake_case regardless of user input format.
+func legacyWireType(lowered string) string {
+	wireTypes := map[string]string{
+		"getpeers": "get_peers", "get_peers": "get_peers",
+		"fetchidentities": "fetch_identities", "fetch_identities": "fetch_identities",
+		"fetchcontacts": "fetch_contacts", "fetch_contacts": "fetch_contacts",
+		"fetchtrustedcontacts": "fetch_trusted_contacts", "fetch_trusted_contacts": "fetch_trusted_contacts",
+		"fetchpeerhealth": "fetch_peer_health", "fetch_peer_health": "fetch_peer_health",
+		"fetchnotices": "fetch_notices", "fetch_notices": "fetch_notices",
+		"fetchmessages": "fetch_messages", "fetch_messages": "fetch_messages",
+		"fetchmessageids": "fetch_message_ids", "fetch_message_ids": "fetch_message_ids",
+	}
+	if wt, ok := wireTypes[lowered]; ok {
+		return wt
+	}
+	return lowered
 }
 
 func commandArg(fields []string, index int, fallback string) string {
@@ -1045,37 +1074,38 @@ func consoleHelpText(selfAddress string) string {
 		"hello",
 		"",
 		"== Network ==",
-		"add_peer <host:port>",
-		"get_peers",
-		"fetch_peer_health",
+		"addPeer <host:port>",
+		"getPeers",
+		"fetchPeerHealth",
 		"",
 		"== Identity & Contacts ==",
-		"fetch_identities",
-		"fetch_contacts",
-		"fetch_trusted_contacts",
+		"fetchIdentities",
+		"fetchContacts",
+		"fetchTrustedContacts",
 		"",
 		"== Messages ==",
-		"fetch_pending_messages [topic]",
-		"fetch_messages [topic]",
-		"fetch_message_ids [topic]",
-		"fetch_message <topic> <id>",
-		"fetch_inbox <topic> [recipient]",
-		"fetch_delivery_receipts [recipient]",
+		"fetchPendingMessages [topic]",
+		"fetchMessages [topic]",
+		"fetchMessageIds [topic]",
+		"fetchMessage <topic> <id>",
+		"fetchInbox <topic> [recipient]",
+		"fetchDeliveryReceipts [recipient]",
 		"",
 		"== Chat History ==",
-		"fetch_chatlog [topic] <peer_address>",
-		"fetch_chatlog_previews",
-		"fetch_dm_headers",
-		"fetch_conversations",
+		"fetchChatlog [topic] <peer_address>",
+		"fetchChatlogPreviews",
+		"fetchDmHeaders",
+		"fetchConversations",
 		"",
 		"== Notices ==",
-		"fetch_notices",
+		"fetchNotices",
 		"",
 		"Defaults:",
-		"  topic for fetch_messages/fetch_message_ids: global",
-		"  topic for fetch_pending_messages/fetch_inbox: dm",
+		"  topic for fetchMessages/fetchMessageIds: global",
+		"  topic for fetchPendingMessages/fetchInbox: dm",
 		"  recipient: " + selfAddress,
 		"",
+		"Both camelCase and snake_case input accepted.",
 		"You can also paste a raw JSON frame for any registered command.",
 	}, "\n")
 }
