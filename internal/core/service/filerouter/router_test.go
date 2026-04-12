@@ -65,6 +65,9 @@ func newTestFileRouter(
 		LocalID:    localID,
 		IsFullNode: func() bool { return isFullNode },
 		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerUsableAt: func(id domain.PeerIdentity) (time.Time, bool) {
+			return time.Now(), true
+		},
 		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
 			k, ok := senderPubKeys[id]
 			return k, ok
@@ -531,5 +534,277 @@ func TestFileRouterEmptyIncomingPeerDisablesSplitHorizon(t *testing.T) {
 
 	if len(tr.sentTo(neighborA)) != 1 {
 		t.Fatalf("empty incomingPeer should not exclude any route; expected 1 send to neighborA, got %d", len(tr.sentTo(neighborA)))
+	}
+}
+
+func TestFileRouterEqualHopsPrefersLongestConnectedPeer(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	relayOld := domain.PeerIdentity("relay-old-identity-1234567890ab")
+	relayNew := domain.PeerIdentity("relay-new-identity-1234567890ab")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, NextHop: relayNew, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, NextHop: relayOld, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	connectedAt := map[domain.PeerIdentity]time.Time{
+		relayOld: now.Add(-10 * time.Minute),
+		relayNew: now.Add(-1 * time.Minute),
+	}
+
+	tr := &testFileRouter{
+		sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+	}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: newTestNonceCache(),
+		LocalID:    localID,
+		IsFullNode: func() bool { return true },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerUsableAt: func(id domain.PeerIdentity) (time.Time, bool) {
+			ts, ok := connectedAt[id]
+			return ts, ok
+		},
+		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
+			k, ok := keys[id]
+			return k, ok
+		},
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+			return true
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {},
+	})
+
+	frame := makeSignedFrame(senderID, dstID, 5, "tie-break-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if len(tr.sentTo(relayOld)) != 1 {
+		t.Fatalf("expected file router to prefer longer-connected equal-hop peer relayOld, got %d sends", len(tr.sentTo(relayOld)))
+	}
+	if len(tr.sentTo(relayNew)) != 0 {
+		t.Fatalf("expected relayNew not to be used after stable equal-hop route succeeded, got %d sends", len(tr.sentTo(relayNew)))
+	}
+}
+
+func TestFileRouterSkipsUnusablePeerFromPeerUsableAt(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	stalledRelay := domain.PeerIdentity("relay-stalled-identity-123456789")
+	healthyRelay := domain.PeerIdentity("relay-healthy-identity-123456789")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, NextHop: stalledRelay, Hops: 1, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, NextHop: healthyRelay, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+
+	tr := &testFileRouter{
+		sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+	}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: newTestNonceCache(),
+		LocalID:    localID,
+		IsFullNode: func() bool { return true },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerUsableAt: func(id domain.PeerIdentity) (time.Time, bool) {
+			if id == stalledRelay {
+				return time.Time{}, false
+			}
+			if id == healthyRelay {
+				return now.Add(-5 * time.Minute), true
+			}
+			return time.Time{}, false
+		},
+		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
+			k, ok := keys[id]
+			return k, ok
+		},
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+			return true
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {},
+	})
+
+	frame := makeSignedFrame(senderID, dstID, 5, "skip-stalled-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if len(tr.sentTo(stalledRelay)) != 0 {
+		t.Fatalf("stalled relay must be filtered out before send attempt, got %d sends", len(tr.sentTo(stalledRelay)))
+	}
+	if len(tr.sentTo(healthyRelay)) != 1 {
+		t.Fatalf("healthy relay should receive the frame after stalled route is filtered, got %d sends", len(tr.sentTo(healthyRelay)))
+	}
+}
+
+func TestSendFileCommandRouteTableFallbackPrefersLongestConnectedEqualHop(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	relayOld := domain.PeerIdentity("relay-old-identity-1234567890ab")
+	relayNew := domain.PeerIdentity("relay-new-identity-1234567890ab")
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, NextHop: relayNew, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, NextHop: relayOld, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	connectedAt := map[domain.PeerIdentity]time.Time{
+		relayOld: now.Add(-10 * time.Minute),
+		relayNew: now.Add(-1 * time.Minute),
+	}
+
+	tr := &testFileRouter{
+		sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+	}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: newTestNonceCache(),
+		LocalID:    localID,
+		IsFullNode: func() bool { return true },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerUsableAt: func(id domain.PeerIdentity) (time.Time, bool) {
+			ts, ok := connectedAt[id]
+			return ts, ok
+		},
+		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
+			return nil, false
+		},
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			if dst == dstID {
+				return false
+			}
+			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+			return true
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {},
+	})
+
+	err := tr.router.SendFileCommand(
+		dstID,
+		"recipient-box-key",
+		domain.FileCommandPayload{Command: domain.FileActionChunkReq},
+		priv,
+		func(_ string, payload domain.FileCommandPayload) (string, error) {
+			return string(payload.Command), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("SendFileCommand returned error: %v", err)
+	}
+
+	if len(tr.sentTo(dstID)) != 0 {
+		t.Fatalf("direct destination send should fail and fall back to route table, got %d direct sends", len(tr.sentTo(dstID)))
+	}
+	if len(tr.sentTo(relayOld)) != 1 {
+		t.Fatalf("expected route-table fallback to prefer relayOld, got %d sends", len(tr.sentTo(relayOld)))
+	}
+	if len(tr.sentTo(relayNew)) != 0 {
+		t.Fatalf("expected relayNew not to be used after relayOld succeeded, got %d sends", len(tr.sentTo(relayNew)))
+	}
+}
+
+func TestFileRouterDeduplicatesCandidatesByNextHop(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	relayA := domain.PeerIdentity("relay-a-identity-1234567890ab")
+	relayB := domain.PeerIdentity("relay-b-identity-1234567890ab")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, Origin: relayA, NextHop: relayA, Hops: 1, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, Origin: relayB, NextHop: relayA, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, Origin: relayB, NextHop: relayB, Hops: 3, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	attempts := make(map[domain.PeerIdentity]int)
+	tr := &testFileRouter{
+		sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+	}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: newTestNonceCache(),
+		LocalID:    localID,
+		IsFullNode: func() bool { return true },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerUsableAt: func(id domain.PeerIdentity) (time.Time, bool) {
+			return now.Add(-time.Minute), true
+		},
+		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
+			k, ok := keys[id]
+			return k, ok
+		},
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			attempts[dst]++
+			return false
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {},
+	})
+
+	frame := makeSignedFrame(senderID, dstID, 5, "dedup-next-hop-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if attempts[relayA] != 1 {
+		t.Fatalf("expected relayA to be attempted once despite duplicate next-hop routes, got %d", attempts[relayA])
+	}
+	if attempts[relayB] != 1 {
+		t.Fatalf("expected relayB to be attempted once, got %d", attempts[relayB])
 	}
 }

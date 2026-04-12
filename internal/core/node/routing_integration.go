@@ -1049,6 +1049,7 @@ func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddr
 
 func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool) []domain.PeerAddress {
 	s.mu.RLock()
+	now := time.Now().UTC()
 
 	// Phase 1: collect scored session targets (preferred — health-checked,
 	// low-latency delivery via enqueuePeerFrame).
@@ -1082,7 +1083,7 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 		if health == nil || !health.Connected {
 			continue
 		}
-		if s.computePeerStateLocked(health) == peerStateStalled {
+		if s.computePeerStateAtLocked(health, now) == peerStateStalled {
 			continue
 		}
 		scored = append(scored, scoredTarget{

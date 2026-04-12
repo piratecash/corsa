@@ -13,6 +13,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
+const fileCommandDefaultMaxTTL uint8 = 10
+
 // NonceCache is the anti-replay interface required by Router. The node
 // package provides the concrete implementation (nonceCache).
 type NonceCache interface {
@@ -36,6 +38,7 @@ type Router struct {
 	localID      domain.PeerIdentity
 	isFullNode   func() bool
 	routeSnap    func() routing.Snapshot
+	peerUsableAt func(domain.PeerIdentity) (time.Time, bool)
 	peerPubKey   func(domain.PeerIdentity) (ed25519.PublicKey, bool)
 	sessionSend  func(dst domain.PeerIdentity, data []byte) bool
 	localDeliver func(frame protocol.FileCommandFrame)
@@ -47,6 +50,7 @@ type RouterConfig struct {
 	LocalID      domain.PeerIdentity
 	IsFullNode   func() bool
 	RouteSnap    func() routing.Snapshot
+	PeerUsableAt func(domain.PeerIdentity) (time.Time, bool)
 	PeerPubKey   func(domain.PeerIdentity) (ed25519.PublicKey, bool)
 	SessionSend  func(dst domain.PeerIdentity, data []byte) bool
 	LocalDeliver func(frame protocol.FileCommandFrame)
@@ -59,6 +63,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		localID:      cfg.LocalID,
 		isFullNode:   cfg.IsFullNode,
 		routeSnap:    cfg.RouteSnap,
+		peerUsableAt: cfg.PeerUsableAt,
 		peerPubKey:   cfg.PeerPubKey,
 		sessionSend:  cfg.SessionSend,
 		localDeliver: cfg.LocalDeliver,
@@ -108,7 +113,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	// a nonce copied from a legitimate frame inside a malformed wrapper,
 	// causing the real frame to be rejected as a replay.
 	if r.nonceCache.Has(frame.Nonce) {
-		log.Debug().Str("nonce", frame.Nonce[:16]).Msg("file_router: replay detected")
+		log.Debug().Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: replay detected")
 		return
 	}
 
@@ -117,7 +122,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	if !isLocal {
 		snap := r.routeSnap()
 		if _, hasRoute := snap.Routes[frame.DST]; !hasRoute {
-			log.Debug().Str("dst", string(frame.DST)).Msg("file_router: no route to destination, dropping")
+			log.Debug().Str("dst", string(frame.DST)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no route to destination, dropping")
 			return
 		}
 	}
@@ -129,14 +134,14 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	// inflate TTL to MaxTTL+1; decrementing first would reduce it to MaxTTL,
 	// passing the TTL <= MaxTTL check inside ValidateFileCommandFrame.
 	if err := protocol.ValidateFileCommandFrame(frame, now); err != nil {
-		log.Debug().Err(err).Msg("file_router: validation failed")
+		log.Debug().Err(err).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: validation failed")
 		return
 	}
 
 	// 4. TTL decrement: apply hop budget after validation.
 	decremented, err := frame.DecrementTTL()
 	if err != nil {
-		log.Debug().Str("dst", string(frame.DST)).Uint8("ttl", frame.TTL).Msg("file_router: TTL exhausted, dropping")
+		log.Debug().Str("dst", string(frame.DST)).Uint8("ttl", frame.TTL).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: TTL exhausted, dropping")
 		return
 	}
 	frame = decremented
@@ -144,11 +149,11 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	// 5. Signature verification: need sender's public key.
 	senderPubKey, ok := r.peerPubKey(frame.SRC)
 	if !ok {
-		log.Debug().Str("src", string(frame.SRC)).Msg("file_router: unknown sender public key")
+		log.Debug().Str("src", string(frame.SRC)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: unknown sender public key")
 		return
 	}
 	if err := protocol.VerifyFileCommandSignature(frame.Nonce, frame.Signature, senderPubKey); err != nil {
-		log.Debug().Err(err).Str("src", string(frame.SRC)).Msg("file_router: signature verification failed")
+		log.Debug().Err(err).Str("src", string(frame.SRC)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: signature verification failed")
 		return
 	}
 
@@ -160,7 +165,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	// while still preventing cache poisoning (forged frames never reach
 	// this point).
 	if !r.nonceCache.TryAdd(frame.Nonce) {
-		log.Debug().Str("nonce", frame.Nonce[:16]).Msg("file_router: concurrent duplicate, nonce already committed")
+		log.Debug().Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: concurrent duplicate, nonce already committed")
 		return
 	}
 
@@ -172,7 +177,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 
 	// 8. Relay restriction: only full nodes forward.
 	if !r.isFullNode() {
-		log.Debug().Str("dst", string(frame.DST)).Msg("file_router: client node, dropping non-local file command")
+		log.Debug().Str("dst", string(frame.DST)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: client node, dropping non-local file command")
 		return
 	}
 
@@ -186,8 +191,15 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 // collectRouteCandidates to deduplicate the route-selection logic shared
 // between inbound forwarding and outbound sending.
 type routeCandidate struct {
-	nextHop domain.PeerIdentity
-	hops    int
+	nextHop     domain.PeerIdentity
+	hops        int
+	connectedAt time.Time
+}
+
+type peerUsableAtResult struct {
+	connectedAt time.Time
+	ok          bool
+	resolved    bool
 }
 
 // collectRouteCandidates returns active, non-self routes to dst sorted by
@@ -209,6 +221,8 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 	}
 
 	var candidates []routeCandidate
+	byNextHop := make(map[domain.PeerIdentity]int)
+	usableCache := make(map[domain.PeerIdentity]peerUsableAtResult)
 	for i := range routes {
 		re := &routes[i]
 		if re.IsWithdrawn() || re.IsExpired(snap.TakenAt) {
@@ -220,12 +234,46 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 		if excludeVia != "" && re.NextHop == excludeVia {
 			continue
 		}
-		candidates = append(candidates, routeCandidate{nextHop: re.NextHop, hops: re.Hops})
+		connectedAt := time.Time{}
+		if r.peerUsableAt != nil {
+			result := usableCache[re.NextHop]
+			if !result.resolved {
+				// peerUsableAt may hit node-level session/health state, so memoize
+				// it per next-hop within this selection pass. This keeps the
+				// current interface simple while avoiding repeated lock+clock work
+				// for multiple route entries that collapse to the same next-hop.
+				result.connectedAt, result.ok = r.peerUsableAt(re.NextHop)
+				result.resolved = true
+				usableCache[re.NextHop] = result
+			}
+			if !result.ok {
+				continue
+			}
+			connectedAt = result.connectedAt
+		}
+		candidate := routeCandidate{
+			nextHop:     re.NextHop,
+			hops:        re.Hops,
+			connectedAt: connectedAt,
+		}
+		if idx, exists := byNextHop[re.NextHop]; exists {
+			if routeCandidateLess(candidate, candidates[idx]) {
+				candidates[idx] = candidate
+			}
+			continue
+		}
+		byNextHop[re.NextHop] = len(candidates)
+		candidates = append(candidates, candidate)
 	}
 
 	// Sort by hops ascending — try closest routes first.
+	// For equal hop count prefer the peer that has been connected longer
+	// (older connectedAt). This makes tie-breaking deterministic and leans
+	// toward the more stable link when path length is identical.
+	// Insertion sort is intentional here: candidate sets are tiny, stable
+	// ordering matters, and this keeps the hot path allocation-free.
 	for i := 1; i < len(candidates); i++ {
-		for j := i; j > 0 && candidates[j].hops < candidates[j-1].hops; j-- {
+		for j := i; j > 0 && routeCandidateLess(candidates[j], candidates[j-1]); j-- {
 			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
 		}
 	}
@@ -233,9 +281,29 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 	return candidates
 }
 
+func noncePrefix(nonce string) string {
+	if len(nonce) <= 16 {
+		return nonce
+	}
+	return nonce[:16]
+}
+
+func routeCandidateLess(a, b routeCandidate) bool {
+	if a.hops != b.hops {
+		return a.hops < b.hops
+	}
+	if a.connectedAt.IsZero() != b.connectedAt.IsZero() {
+		return !a.connectedAt.IsZero()
+	}
+	if !a.connectedAt.Equal(b.connectedAt) {
+		return a.connectedAt.Before(b.connectedAt)
+	}
+	return a.nextHop < b.nextHop
+}
+
 // trySendToCandidates iterates route candidates in order and sends data to
 // the first reachable next-hop. Returns true if delivery succeeded.
-func (r *Router) trySendToCandidates(dst domain.PeerIdentity, candidates []routeCandidate, data []byte) bool {
+func (r *Router) trySendToCandidates(dst domain.PeerIdentity, nonce string, candidates []routeCandidate, data []byte) bool {
 	for _, c := range candidates {
 		if r.sessionSend(c.nextHop, data) {
 			return true
@@ -243,6 +311,7 @@ func (r *Router) trySendToCandidates(dst domain.PeerIdentity, candidates []route
 		log.Debug().
 			Str("dst", string(dst)).
 			Str("next_hop", string(c.nextHop)).
+			Str("nonce", noncePrefix(nonce)).
 			Msg("file_router: next hop send failed, trying next route")
 	}
 	return false
@@ -262,20 +331,22 @@ func (r *Router) forwardToNextHop(frame protocol.FileCommandFrame, excludeVia do
 		log.Debug().
 			Str("dst", string(frame.DST)).
 			Str("exclude_via", string(excludeVia)).
+			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: no active route to destination (after split-horizon)")
 		return
 	}
 
 	data, err := protocol.MarshalFileCommandFrame(frame)
 	if err != nil {
-		log.Debug().Err(err).Msg("file_router: marshal failed")
+		log.Debug().Err(err).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: marshal failed")
 		return
 	}
 
-	if r.trySendToCandidates(frame.DST, candidates, data) {
+	if r.trySendToCandidates(frame.DST, frame.Nonce, candidates, data) {
 		log.Debug().
 			Str("dst", string(frame.DST)).
 			Uint8("ttl", frame.TTL).
+			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: forwarded")
 		return
 	}
@@ -283,6 +354,7 @@ func (r *Router) forwardToNextHop(frame protocol.FileCommandFrame, excludeVia do
 	log.Debug().
 		Str("dst", string(frame.DST)).
 		Int("routes_tried", len(candidates)).
+		Str("nonce", noncePrefix(frame.Nonce)).
 		Msg("file_router: all routes exhausted, relay forward failed")
 }
 
@@ -308,7 +380,9 @@ func (r *Router) SendFileCommand(
 		return fmt.Errorf("encrypt file command: %w", err)
 	}
 
-	frame := protocol.NewFileCommandFrame(r.localID, dst, 10, encryptedPayload, senderPrivateKey)
+	// Default TTL 10 keeps file commands comfortably above the expected mesh
+	// diameter while still bounding loops and retries on pathological paths.
+	frame := protocol.NewFileCommandFrame(r.localID, dst, fileCommandDefaultMaxTTL, encryptedPayload, senderPrivateKey)
 
 	data, err := protocol.MarshalFileCommandFrame(frame)
 	if err != nil {
@@ -317,11 +391,11 @@ func (r *Router) SendFileCommand(
 
 	// 1. Try direct session to destination.
 	if r.sessionSend(dst, data) {
-		log.Debug().Str("dst", string(dst)).Msg("file_router: sent via direct session")
+		log.Debug().Str("dst", string(dst)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: sent via direct session")
 		return nil
 	}
 
-	log.Debug().Str("dst", string(dst)).Msg("file_router: no direct session, trying route table")
+	log.Debug().Str("dst", string(dst)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no direct session, trying route table")
 
 	// 2. Route table fallback: collect active routes sorted by hops.
 	// No split-horizon here — this is a locally-originated send, there
@@ -330,17 +404,19 @@ func (r *Router) SendFileCommand(
 	if len(candidates) == 0 {
 		log.Warn().
 			Str("dst", string(dst)).
+			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: no viable route to peer")
 		return fmt.Errorf("no route to %s", dst)
 	}
 
-	if r.trySendToCandidates(dst, candidates, data) {
+	if r.trySendToCandidates(dst, frame.Nonce, candidates, data) {
 		return nil
 	}
 
 	log.Warn().
 		Str("dst", string(dst)).
 		Int("routes_tried", len(candidates)).
+		Str("nonce", noncePrefix(frame.Nonce)).
 		Msg("file_router: all routes exhausted, file command not delivered")
 	return fmt.Errorf("all %d routes to %s failed", len(candidates), dst)
 }

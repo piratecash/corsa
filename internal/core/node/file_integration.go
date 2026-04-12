@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -61,6 +62,9 @@ func (s *Service) initFileTransfer() {
 				return routing.Snapshot{}
 			}
 			return s.routingTable.Snapshot()
+		},
+		PeerUsableAt: func(id domain.PeerIdentity) (time.Time, bool) {
+			return s.fileTransferPeerUsableAt(id)
 		},
 		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
 			return peerPubKeyFromTrust(s, id)
@@ -180,6 +184,81 @@ func hasCapability(caps []domain.Capability, target domain.Capability) bool {
 	return false
 }
 
+// fileTransferPeerUsableAt reports whether peer currently has at least one
+// usable file-capable connection and, when known, when that peer most
+// recently connected. Stalled peers are treated as unusable so file datagrams
+// do not route into dead next-hops. When multiple live connections exist for
+// the same identity, the oldest connected one wins as the stability tie-break.
+func (s *Service) fileTransferPeerUsableAt(peer domain.PeerIdentity) (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fileTransferPeerUsableAtLocked(peer, time.Now().UTC())
+}
+
+func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(domain.PeerIdentity, time.Time)) {
+	consider := func(id domain.PeerIdentity, address domain.PeerAddress) {
+		health := s.health[s.resolveHealthAddress(address)]
+		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+			return
+		}
+		visit(id, health.LastConnectedAt)
+	}
+
+	for _, sess := range s.sessions {
+		if sess == nil || !hasCapability(sess.capabilities, domain.CapFileTransferV1) {
+			continue
+		}
+		consider(sess.peerIdentity, sess.address)
+	}
+
+	for _, pc := range s.inboundNetCores {
+		if pc == nil || !pc.HasCapability(domain.CapFileTransferV1) {
+			continue
+		}
+		consider(pc.Identity(), pc.Address())
+	}
+}
+
+func (s *Service) usableFileTransferPeersLocked(now time.Time) map[domain.PeerIdentity]struct{} {
+	fileCapable := make(map[domain.PeerIdentity]struct{})
+	s.forEachUsableFileTransferPeerLocked(now, func(id domain.PeerIdentity, _ time.Time) {
+		fileCapable[id] = struct{}{}
+	})
+	return fileCapable
+}
+
+func (s *Service) fileTransferPeerUsableAtLocked(peer domain.PeerIdentity, now time.Time) (time.Time, bool) {
+	var oldest time.Time
+	found := false
+
+	consider := func(address domain.PeerAddress) {
+		health := s.health[s.resolveHealthAddress(address)]
+		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+			return
+		}
+		if !health.LastConnectedAt.IsZero() && (oldest.IsZero() || health.LastConnectedAt.Before(oldest)) {
+			oldest = health.LastConnectedAt
+		}
+		found = true
+	}
+
+	for _, sess := range s.sessions {
+		if sess == nil || sess.peerIdentity != peer || !hasCapability(sess.capabilities, domain.CapFileTransferV1) {
+			continue
+		}
+		consider(sess.address)
+	}
+
+	for _, pc := range s.inboundNetCores {
+		if pc == nil || pc.Identity() != peer || !pc.HasCapability(domain.CapFileTransferV1) {
+			continue
+		}
+		consider(pc.Address())
+	}
+
+	return oldest, found
+}
+
 // isPeerReachable returns true if the peer has a direct session (outbound
 // or inbound) with file_transfer_v1 capability, or an active route whose
 // next-hop has file_transfer_v1 capability. Routes through next-hops without
@@ -187,36 +266,23 @@ func hasCapability(caps []domain.Capability, target domain.Capability) bool {
 // would cause pointless retries.
 func (s *Service) isPeerReachable(peer domain.PeerIdentity) bool {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now().UTC()
 
-	// Build the set of peers that have file_transfer_v1 on any session
-	// (outbound or inbound). Used both for the direct-peer check and to
-	// filter route next-hops.
-	fileCapable := make(map[domain.PeerIdentity]struct{})
-
-	for _, sess := range s.sessions {
-		if hasCapability(sess.capabilities, domain.CapFileTransferV1) {
-			fileCapable[sess.peerIdentity] = struct{}{}
-		}
-	}
-
-	for _, pc := range s.inboundNetCores {
-		if pc == nil {
-			continue
-		}
-		if pc.HasCapability(domain.CapFileTransferV1) {
-			fileCapable[pc.Identity()] = struct{}{}
-		}
-	}
-
-	// Fast path: target peer has a direct file-capable session.
-	if _, ok := fileCapable[peer]; ok {
-		s.mu.RUnlock()
+	// Reuse the same liveness rules as the actual file-router path so
+	// FileTransferManager does not get an optimistic "reachable" result
+	// for peers that are connected on paper but already stalled. The same
+	// now timestamp is used for both the direct-peer and routed-peer checks
+	// to avoid threshold drift around the healthy/degraded/stalled boundary.
+	if _, ok := s.fileTransferPeerUsableAtLocked(peer, now); ok {
 		return true
 	}
 
+	// Build the set of peers that currently have at least one usable
+	// file-capable connection. Used to filter route next-hops.
+	fileCapable := s.usableFileTransferPeersLocked(now)
 	localID := domain.PeerIdentity(s.identity.Address)
 	rt := s.routingTable
-	s.mu.RUnlock()
 
 	// Check routing table — skip self-routes and next-hops without
 	// file_transfer_v1 capability.
@@ -246,9 +312,10 @@ func (s *Service) isPeerReachable(peer domain.PeerIdentity) bool {
 // per-connection write queue (servePeerSession for outbound, connWriter for
 // inbound) — preventing byte interleaving on shared sockets.
 func (s *Service) sendFileRawToPeer(dst domain.PeerIdentity, data []byte) bool {
+	data = append(data, '\n')
 	frame := protocol.Frame{
 		Type:    protocol.FileCommandFrameType,
-		RawLine: string(data) + "\n",
+		RawLine: string(data),
 	}
 	return s.sendFrameToIdentity(dst, frame, domain.CapFileTransferV1)
 }

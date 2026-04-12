@@ -1527,6 +1527,9 @@ func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
 // Returns true if the frame was accepted into the peer's write queue.
 func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Frame, requiredCap domain.Capability) bool {
 	s.mu.RLock()
+	now := time.Now().UTC()
+	var outbound []*peerSession
+	var inbound []*NetCore
 
 	// 1. Outbound sessions — preferred path, one writer per session (servePeerSession).
 	for _, sess := range s.sessions {
@@ -1536,31 +1539,39 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 		if !hasCapability(sess.capabilities, requiredCap) {
 			continue
 		}
-		s.mu.RUnlock()
-		select {
-		case sess.sendCh <- frame:
-			return true
-		default:
-			return false
+		if health := s.health[s.resolveHealthAddress(sess.address)]; health != nil {
+			if !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+				continue
+			}
 		}
+		outbound = append(outbound, sess)
 	}
 
 	// 2. Inbound connections — fallback, one writer per NetCore.
-	var target net.Conn
-	for c, pc := range s.inboundNetCores {
+	for _, pc := range s.inboundNetCores {
 		if pc == nil || pc.Identity() != dst {
 			continue
 		}
 		if !pc.HasCapability(requiredCap) {
 			continue
 		}
-		target = c
-		break
+		if health := s.health[s.resolveHealthAddress(pc.Address())]; health != nil {
+			if !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+				continue
+			}
+		}
+		inbound = append(inbound, pc)
 	}
 
 	s.mu.RUnlock()
 
-	if target == nil {
+	for _, sess := range outbound {
+		if tryEnqueuePeerSessionFrame(sess, frame) {
+			return true
+		}
+	}
+
+	if len(inbound) == 0 {
 		return false
 	}
 
@@ -1573,7 +1584,34 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 		return false
 	}
 
-	return s.enqueueFrame(target, []byte(line)) == enqueueSent
+	data := []byte(line)
+	for _, target := range inbound {
+		// NetCore writer loop retains the slice after enqueue, so each
+		// candidate gets its own immutable copy.
+		payload := append([]byte(nil), data...)
+		if target.sendRaw(payload) == sendOK {
+			return true
+		}
+	}
+	return false
+}
+
+// tryEnqueuePeerSessionFrame performs a non-blocking send to an outbound
+// session queue. It recovers from send-on-closed-channel so callers can
+// safely race with future teardown changes.
+func tryEnqueuePeerSessionFrame(sess *peerSession, frame protocol.Frame) (accepted bool) {
+	defer func() {
+		if recover() != nil {
+			accepted = false
+		}
+	}()
+
+	select {
+	case sess.sendCh <- frame:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {

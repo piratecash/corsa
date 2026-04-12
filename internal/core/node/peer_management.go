@@ -2011,7 +2011,7 @@ func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame
 	} else if frame.Type != "" {
 		health.LastUsefulSendAt = now
 	}
-	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 }
 
 func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame) {
@@ -2035,13 +2035,13 @@ func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame)
 	now := time.Now().UTC()
 	if frame.Type == "pong" {
 		health.LastPongAt = now
-		s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+		s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 		return
 	}
 	if frame.Type != "" {
 		health.LastUsefulReceiveAt = now
 	}
-	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 }
 
 func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
@@ -2049,8 +2049,9 @@ func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
 	defer s.mu.Unlock()
 
 	health := s.ensurePeerHealthLocked(address)
-	health.LastUsefulReceiveAt = time.Now().UTC()
-	s.updatePeerStateLocked(health, s.computePeerStateLocked(health))
+	now := time.Now().UTC()
+	health.LastUsefulReceiveAt = now
+	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 }
 
 // nextConnIDLocked returns a monotonically increasing connection ID.
@@ -2137,6 +2138,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now().UTC()
 
 	live := s.liveTrafficLocked()
 
@@ -2157,7 +2159,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			Direction:           string(health.Direction),
 			ClientVersion:       s.peerVersions[health.Address],
 			ClientBuild:         s.peerBuilds[health.Address],
-			State:               s.computePeerStateLocked(health),
+			State:               s.computePeerStateAtLocked(health, now),
 			Connected:           health.Connected,
 			PendingCount:        len(s.pending[health.Address]),
 			LastConnectedAt:     formatTime(health.LastConnectedAt),
@@ -2263,12 +2265,11 @@ func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 	return nil
 }
 
-func (s *Service) computePeerStateLocked(health *peerHealth) string {
+func (s *Service) computePeerStateAtLocked(health *peerHealth, now time.Time) string {
 	if !health.Connected {
 		return peerStateReconnecting
 	}
 
-	now := time.Now().UTC()
 	lastUseful := health.LastUsefulReceiveAt
 	// A pong response is proof of liveness — use the most recent of
 	// LastUsefulReceiveAt and LastPongAt. Previously LastPongAt was
@@ -2293,6 +2294,14 @@ func (s *Service) computePeerStateLocked(health *peerHealth) string {
 	default:
 		return peerStateHealthy
 	}
+}
+
+// computePeerStateLocked is a convenience wrapper for infra code paths that
+// already want "state as of now". Business logic that coordinates multiple
+// decisions in one flow should prefer computePeerStateAtLocked with an
+// explicit shared timestamp.
+func (s *Service) computePeerStateLocked(health *peerHealth) string {
+	return s.computePeerStateAtLocked(health, time.Now().UTC())
 }
 
 func formatTime(ts time.Time) string {
@@ -2575,7 +2584,8 @@ func (s *Service) peerState(address domain.PeerAddress) string {
 	if health == nil {
 		return peerStateReconnecting
 	}
-	return s.computePeerStateLocked(health)
+	now := time.Now().UTC()
+	return s.computePeerStateAtLocked(health, now)
 }
 
 func nextHeartbeatDuration() time.Duration {

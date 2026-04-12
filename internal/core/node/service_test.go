@@ -5999,7 +5999,7 @@ func TestComputePeerStateThresholds(t *testing.T) {
 			svc.mu.Unlock()
 
 			svc.mu.RLock()
-			got := svc.computePeerStateLocked(svc.health[domain.PeerAddress("test:1")])
+			got := svc.computePeerStateAtLocked(svc.health[domain.PeerAddress("test:1")], now)
 			svc.mu.RUnlock()
 
 			if got != tt.wantState {

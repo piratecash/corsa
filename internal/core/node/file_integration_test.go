@@ -1,8 +1,10 @@
 package node
 
 import (
+	"bufio"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -13,11 +15,18 @@ import (
 // a direct outbound session carrying file_transfer_v1 is reported reachable.
 func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
 
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
 	}
 
 	if !svc.isPeerReachable(idPeerB) {
@@ -29,11 +38,18 @@ func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 // session lacking file_transfer_v1 is NOT considered reachable for file transfer.
 func TestIsPeerReachable_DirectSessionWithoutCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
 
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
 	}
 
 	if svc.isPeerReachable(idPeerB) {
@@ -57,12 +73,19 @@ func announceRouteVia(svc *Service, nextHopID domain.PeerIdentity, targetID doma
 // is reachable when the next-hop has file_transfer_v1 capability.
 func TestIsPeerReachable_RouteViaFileCapableNextHop(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
 
 	// Relay peer-B has file_transfer_v1.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
 	}
 
 	// Target X is reachable via peer-B (2 hops after +1 at receiver).
@@ -78,12 +101,19 @@ func TestIsPeerReachable_RouteViaFileCapableNextHop(t *testing.T) {
 // This is the core regression test for the false-positive reachability bug.
 func TestIsPeerReachable_RouteViaNextHopWithoutFileCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
 
 	// Relay peer-B has relay + routing but NOT file_transfer_v1.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
 	}
 
 	// Target X is reachable via peer-B.
@@ -98,18 +128,31 @@ func TestIsPeerReachable_RouteViaNextHopWithoutFileCapability(t *testing.T) {
 // routes exist, the peer is reachable if at least one next-hop has file_transfer_v1.
 func TestIsPeerReachable_MultipleRoutesOneCapable(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
 
 	// Peer-B: relay only, no file transfer.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-2 * time.Minute),
+		LastUsefulReceiveAt: now,
 	}
 
 	// Peer-C: has file_transfer_v1.
 	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
+		address:      domain.PeerAddress("addr-C"),
 		peerIdentity: idPeerC,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-C")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
 	}
 
 	// Target X announced via both peers.
@@ -137,12 +180,19 @@ func TestIsPeerReachable_NoPeerNoRoute(t *testing.T) {
 // the local node has file_transfer_v1 capability.
 func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
 
 	// The local node has file_transfer_v1 — so it appears in fileCapable.
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
+		address:      domain.PeerAddress("addr-A"),
 		peerIdentity: domain.PeerIdentity(idNodeA),
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-A")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
 	}
 
 	// Inject a route to targetX with NextHop == localID directly via
@@ -178,19 +228,266 @@ func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 // connected via an inbound connection with file_transfer_v1 is reachable.
 func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
 
 	pipeLocal, pipeRemote := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
 	defer func() { _ = pipeRemote.Close() }()
 
 	pc := newNetCore(connID(1), pipeLocal, Inbound, NetCoreOpts{
+		Address:  domain.PeerAddress("addr-B"),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	})
 	svc.inboundNetCores[pipeLocal] = pc
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
 
 	if !svc.isPeerReachable(idPeerB) {
 		t.Fatal("peer with inbound file_transfer_v1 connection should be reachable")
+	}
+}
+
+func TestIsPeerReachable_DirectSessionStalled(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
+		peerIdentity: idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - time.Second),
+	}
+
+	if svc.isPeerReachable(idPeerB) {
+		t.Fatal("stalled direct peer should NOT be reachable for file transfer")
+	}
+}
+
+func TestIsPeerReachable_RouteViaStalledNextHop(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
+		peerIdentity: idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - time.Second),
+	}
+	announceRouteVia(svc, idPeerB, idTargetX, 1)
+
+	if svc.isPeerReachable(idTargetX) {
+		t.Fatal("route via stalled next-hop should NOT be considered reachable")
+	}
+}
+
+func TestFileTransferPeerUsableAtPrefersOldestHealthyConnection(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
+
+	svc.sessions[domain.PeerAddress("addr-old")] = &peerSession{
+		address:      domain.PeerAddress("addr-old"),
+		peerIdentity: idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.sessions[domain.PeerAddress("addr-new")] = &peerSession{
+		address:      domain.PeerAddress("addr-new"),
+		peerIdentity: idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+
+	svc.health[domain.PeerAddress("addr-old")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-10 * time.Minute),
+		LastUsefulReceiveAt: now.Add(-10 * time.Second),
+	}
+	svc.health[domain.PeerAddress("addr-new")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-1 * time.Minute),
+		LastUsefulReceiveAt: now.Add(-5 * time.Second),
+	}
+
+	got, ok := svc.fileTransferPeerUsableAt(idPeerB)
+	if !ok {
+		t.Fatal("expected peer to be usable")
+	}
+	want := now.Add(-10 * time.Minute)
+	if !got.Equal(want) {
+		t.Fatalf("connectedAt = %v, want %v", got, want)
+	}
+}
+
+func TestFileTransferPeerUsableAtRejectsStalledPeer(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
+
+	svc.sessions[domain.PeerAddress("addr-stalled")] = &peerSession{
+		address:      domain.PeerAddress("addr-stalled"),
+		peerIdentity: idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-stalled")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-30 * time.Minute),
+		LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - time.Second),
+	}
+
+	if got, ok := svc.fileTransferPeerUsableAt(idPeerB); ok {
+		t.Fatalf("stalled peer must be unusable, got connectedAt=%v", got)
+	}
+}
+
+func TestFileTransferPeerUsableAtRejectsPeerWithoutHealth(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc.sessions[domain.PeerAddress("addr-no-health")] = &peerSession{
+		address:      domain.PeerAddress("addr-no-health"),
+		peerIdentity: idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+
+	if got, ok := svc.fileTransferPeerUsableAt(idPeerB); ok {
+		t.Fatalf("peer without health must be unusable, got connectedAt=%v", got)
+	}
+}
+
+func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
+
+	outLocal, outRemote := net.Pipe()
+	defer func() { _ = outLocal.Close() }()
+	defer func() { _ = outRemote.Close() }()
+
+	outboundSendCh := make(chan protocol.Frame, 1)
+	outboundSendCh <- protocol.Frame{Type: "pre-filled"}
+	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
+		address:      domain.PeerAddress("addr-out"),
+		peerIdentity: idPeerB,
+		conn:         outLocal,
+		sendCh:       outboundSendCh,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-out")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-2 * time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	inLocal, inRemote := net.Pipe()
+	defer func() { _ = inLocal.Close() }()
+	defer func() { _ = inRemote.Close() }()
+
+	pc := newNetCore(connID(1), inLocal, Inbound, NetCoreOpts{
+		Address:  domain.PeerAddress("addr-in"),
+		Identity: idPeerB,
+		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	})
+	defer pc.Close()
+	svc.inboundNetCores[inLocal] = pc
+	svc.health[domain.PeerAddress("addr-in")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	frame := protocol.Frame{Type: "ping"}
+	if !svc.sendFrameToIdentity(idPeerB, frame, domain.CapFileTransferV1) {
+		t.Fatal("expected inbound fallback to succeed when outbound sendCh is full")
+	}
+
+	reader := bufio.NewReader(inRemote)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString: %v", err)
+	}
+	parsed, err := protocol.ParseFrameLine(line[:len(line)-1])
+	if err != nil {
+		t.Fatalf("ParseFrameLine: %v", err)
+	}
+	if parsed.Type != "ping" {
+		t.Fatalf("forwarded frame type = %q, want ping", parsed.Type)
+	}
+}
+
+func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	now := time.Now().UTC()
+
+	outLocal, outRemote := net.Pipe()
+	defer func() { _ = outLocal.Close() }()
+	defer func() { _ = outRemote.Close() }()
+
+	outboundSendCh := make(chan protocol.Frame, 1)
+	close(outboundSendCh)
+	svc.sessions[domain.PeerAddress("addr-out-closed")] = &peerSession{
+		address:      domain.PeerAddress("addr-out-closed"),
+		peerIdentity: idPeerB,
+		conn:         outLocal,
+		sendCh:       outboundSendCh,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-out-closed")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-2 * time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	inLocal, inRemote := net.Pipe()
+	defer func() { _ = inLocal.Close() }()
+	defer func() { _ = inRemote.Close() }()
+
+	pc := newNetCore(connID(2), inLocal, Inbound, NetCoreOpts{
+		Address:  domain.PeerAddress("addr-in-fallback"),
+		Identity: idPeerB,
+		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	})
+	defer pc.Close()
+	svc.inboundNetCores[inLocal] = pc
+	svc.health[domain.PeerAddress("addr-in-fallback")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	frame := protocol.Frame{Type: "ping"}
+	if !svc.sendFrameToIdentity(idPeerB, frame, domain.CapFileTransferV1) {
+		t.Fatal("expected inbound fallback to succeed when outbound sendCh is closed")
+	}
+
+	reader := bufio.NewReader(inRemote)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString: %v", err)
+	}
+	parsed, err := protocol.ParseFrameLine(line[:len(line)-1])
+	if err != nil {
+		t.Fatalf("ParseFrameLine: %v", err)
+	}
+	if parsed.Type != "ping" {
+		t.Fatalf("forwarded frame type = %q, want ping", parsed.Type)
 	}
 }
