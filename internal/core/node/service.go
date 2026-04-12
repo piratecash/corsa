@@ -1223,6 +1223,9 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// Auth gate enforced above. Only authenticated peers may announce,
 		// so we always promote.
 		nodeType := frame.NodeType
+		// node_type is validated for wire compatibility only. For third-party
+		// gossip we learn the address, but we do not trust the sender to set
+		// or override the announced peer's local role.
 		if !isKnownNodeType(nodeType) {
 			s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 			return true
@@ -1235,7 +1238,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
-			s.promotePeerAddress(domain.PeerAddress(peer), nodeType)
+			s.promotePeerAddress(domain.PeerAddress(peer))
 		}
 		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 		return true
@@ -3230,9 +3233,8 @@ func listenerFlag(enabled bool) string {
 func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
 		if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(frame.Listen), domain.PeerAddress(frame.Listen)); ok {
-			// Same as learnPeerFromFrame: the welcome is a direct response
-			// from the peer, so its node_type is authoritative.
-			s.promotePeerAddress(normalizedAddr, frame.NodeType)
+			s.promotePeerAddress(normalizedAddr)
+			s.rememberPeerType(normalizedAddr, frame.NodeType)
 			s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
 			s.addPeerVersion(normalizedAddr, frame.ClientVersion)
 			s.addPeerBuild(normalizedAddr, frame.ClientBuild)

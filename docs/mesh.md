@@ -251,8 +251,9 @@ sequenceDiagram
 - **Peer announcement** — when a new peer authenticates on an inbound
   connection, its advertised listen address is announced to all active
   outbound sessions via `announce_peer`. The frame includes the peer's
-  `node_type` ("full" or "client") so recipients know what kind of peer
-  is being offered. The announcement is non-recursive: recipients learn
+  `node_type` ("full" or "client"), but recipients treat it as advisory
+  third-party metadata rather than a trusted type override. The
+  announcement is non-recursive: recipients learn
   the address locally but do not relay it further.
   Local/private addresses are excluded. If the outbound send channel is
   full, the frame is queued via the pending mechanism and delivered after
@@ -267,12 +268,13 @@ sequenceDiagram
   but **not** in `addPeerAddress`/`promotePeerAddress` — those lower-level
   functions accept LAN peers so that dev/LAN meshes can discover 10.x /
   192.168.x nodes via direct hello/welcome and `get_peers`.
-  Authenticated senders trigger promotion: the peer's cooldown is reset
-  (via `resolveHealthAddress` so fallback-variant cooldown shares with
-  the primary) and its `node_type` is updated, but it is **not** moved
-  to the front
-  of the dial list. Dial priority is managed locally — remote peers
-  cannot influence it (trust-no-one policy). Only the local `add_peer`
+  Authenticated senders trigger promotion: the address may be learned and,
+  if it is truly new, receives a short-lived candidate preference for the
+  next dial selection. Third-party `node_type` is advisory only: it does
+  not overwrite an already known peer type, and announce processing does
+  not reset ban/cooldown state. The peer is **not** moved to the front of
+  the dial list. Dial priority is managed locally — remote peers cannot
+  influence it (trust-no-one policy). Only the local `add_peer`
   RPC command (explicit user action) prepends to the front.
   Unauthenticated senders can only add **new** peers; if the address is
   already known, its `node_type` is preserved to prevent an unauthenticated
@@ -891,8 +893,9 @@ sequenceDiagram
 - **Анонс peer'ов** — когда новый peer аутентифицируется через входящее
   соединение, его объявленный listen-адрес анонсируется всем активным
   исходящим сессиям через `announce_peer`. Фрейм включает `node_type`
-  пира ("full" или "client"), чтобы получатели знали тип предлагаемого
-  узла. Анонс нерекурсивный: получатели сохраняют адрес локально, но
+  пира ("full" или "client"), но получатели трактуют его только как
+  подсказку о третьей стороне, а не как доверенный override типа.
+  Анонс нерекурсивный: получатели сохраняют адрес локально, но
   не ретранслируют дальше. Локальные/приватные адреса исключаются. Если
   канал отправки переполнен, фрейм ставится в pending-очередь и
   доставляется после освобождения. Если фрейм с таким же ключом
@@ -907,11 +910,13 @@ sequenceDiagram
   **не** в `addPeerAddress`/`promotePeerAddress` — эти низкоуровневые
   функции принимают LAN-пиры, чтобы dev/LAN-меши могли обнаруживать
   10.x / 192.168.x узлы через прямые hello/welcome и `get_peers`.
-  Аутентифицированные отправители вызывают промоцию пира: cooldown
-  сбрасывается (через `resolveHealthAddress`, чтобы fallback-вариант
-  разделял cooldown с primary) и `node_type` обновляется, но пир
-  **не** перемещается
-  в начало dial-списка. Приоритет dial управляется локально — удалённые
+  Аутентифицированные отправители вызывают промоцию пира: адрес может
+  быть изучен и, если он действительно новый, получает краткоживущий
+  приоритет в списке кандидатов для следующего дозвона. Сторонний
+  `node_type` считается только подсказкой: он не переопределяет уже
+  известный тип пира, а обработка announce не сбрасывает ban/cooldown.
+  Пир **не** перемещается в начало dial-списка. Приоритет dial
+  управляется локально — удалённые
   пиры не могут на него влиять (политика «никому не доверять»). Только
   локальная RPC-команда `add_peer` (явное действие пользователя)
   добавляет пир в начало списка.

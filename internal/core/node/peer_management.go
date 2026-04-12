@@ -913,11 +913,8 @@ func scorePeerTargetLocked(health *peerHealth) int64 {
 func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
 		if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(frame.Listen)); ok {
-			// Use promotePeerAddress: this is a direct hello from the peer
-			// itself, so its self-reported node_type is authoritative and
-			// must overwrite any earlier value (which could have come from
-			// an unauthenticated announce_peer with a wrong type).
-			s.promotePeerAddress(normalizedAddr, frame.NodeType)
+			s.promotePeerAddress(normalizedAddr)
+			s.rememberPeerType(normalizedAddr, frame.NodeType)
 			s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
 			s.addPeerVersion(normalizedAddr, frame.ClientVersion)
 			s.addPeerBuild(normalizedAddr, frame.ClientBuild)
@@ -1158,33 +1155,34 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 		return
 	}
 
-	// Register in PeerProvider for CM-based dial candidate selection.
-	if s.peerProvider != nil {
-		s.peerProvider.Add(address, domain.PeerSourcePeerExchange)
-	}
-
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for _, peer := range s.peers {
-		if peer.Address == address {
+	if existing, exists := s.findKnownPeerByIPLocked(address); exists {
+		if existing == address {
 			// Peer already known — do not overwrite its node type.
-			// The type was set from a trusted source (bootstrap config,
-			// auth handshake, or authenticated announce_peer). Allowing
-			// any caller to retag it would let unauthenticated senders
+			// The type was set from a trusted self-report or local source
+			// (bootstrap config, manual add, direct hello/welcome). Allowing
+			// any network-discovered path to retag it would let senders
 			// downgrade a "full" peer to "client" and break routing.
 			if peerID != "" {
 				s.peerIDs[address] = peerID
 			}
+			s.mu.Unlock()
 			return
 		}
+		// Peer exchange keeps only one stored address per IP. Alternative
+		// ports learned from the network are ignored to avoid peer-list
+		// poisoning via many addresses on the same host.
+		s.mu.Unlock()
+		return
 	}
 
 	s.peers = append(s.peers, transport.Peer{
 		Address: address,
 		Source:  domain.PeerSourcePeerExchange,
 	})
-	s.peerTypes[address] = normalizePeerNodeType(nodeType)
+	if peerType, ok := domain.ParseNodeType(nodeType); ok {
+		s.peerTypes[address] = peerType
+	}
 	if peerID != "" {
 		s.peerIDs[address] = peerID
 	}
@@ -1194,43 +1192,34 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 		now := time.Now().UTC()
 		s.persistedMeta[address] = &peerEntry{
 			Address:  address,
-			NodeType: normalizePeerNodeType(nodeType),
+			NodeType: parseKnownPeerNodeType(nodeType),
 			Source:   domain.PeerSourcePeerExchange,
 			AddedAt:  &now,
 		}
 	}
+	s.mu.Unlock()
+
+	if s.peerProvider != nil {
+		s.peerProvider.Add(address, domain.PeerSourcePeerExchange)
+	}
 }
 
-// promotePeerAddress adds or updates a peer learned from an authenticated
-// announce_peer. Unlike addPeerAddress it is allowed to update the node
-// type and reset cooldown for an already-known peer, because the sender
-// has been verified.
-//
-// The peer is NOT moved to the front of the dial list. Letting remote
-// peers control dial priority would allow an attacker to flood the list
-// with fake addresses and push real peers down. The dial order is managed
-// solely by the local bootstrap/health logic.
-func (s *Service) promotePeerAddress(address domain.PeerAddress, nodeType string) {
+// promotePeerAddress learns a network-discovered peer address without
+// trusting third-party metadata such as node type. Freshness boosting is
+// applied only on the first successful insertion.
+func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return
 	}
 
-	// Register in PeerProvider for CM-based dial candidate selection.
-	if s.peerProvider != nil {
-		s.peerProvider.Add(address, domain.PeerSourceAnnounce)
-	}
-
-	peerType := normalizePeerNodeType(nodeType)
-
+	shouldMarkFresh := false
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	found := false
-	for _, peer := range s.peers {
-		if peer.Address == address {
-			found = true
-			break
-		}
+	existing, found := s.findKnownPeerByIPLocked(address)
+	if found && existing != address {
+		// Network-learned/promoted peers keep a single stored address per IP.
+		// Manual/bootstrap paths are intentionally exempt and do not call here.
+		s.mu.Unlock()
+		return
 	}
 
 	if !found {
@@ -1242,45 +1231,35 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress, nodeType string
 		if _, ok := s.persistedMeta[address]; !ok {
 			s.persistedMeta[address] = &peerEntry{
 				Address:  address,
-				NodeType: peerType,
+				NodeType: domain.NodeTypeUnknown,
 				Source:   domain.PeerSourceAnnounce,
 				AddedAt:  &now,
 			}
 		}
+		shouldMarkFresh = true
 	}
+	s.mu.Unlock()
 
-	s.peerTypes[address] = peerType
-
-	// Reset cooldown so the peer is dialled on the next bootstrap tick.
-	// Use resolveHealthAddress to find the primary entry: if this address
-	// is a known fallback variant, reset cooldown on the primary too so
-	// the shared reputation invariant is maintained.
-	healthAddr := s.resolveHealthAddress(address)
-	if h := s.health[healthAddr]; h != nil {
-		h.ConsecutiveFailures = 0
-		h.LastDisconnectedAt = time.Time{}
-		h.BannedUntil = time.Time{}
-	}
-	// Also reset the direct address entry if it differs from primary
-	// (the announced address itself may have accumulated failures).
-	if healthAddr != address {
-		if h := s.health[address]; h != nil {
-			h.ConsecutiveFailures = 0
-			h.LastDisconnectedAt = time.Time{}
-			h.BannedUntil = time.Time{}
+	if s.peerProvider != nil {
+		s.peerProvider.Add(address, domain.PeerSourceAnnounce)
+		if shouldMarkFresh {
+			s.peerProvider.MarkFresh(address, freshPeerTTL)
 		}
 	}
+}
 
-	// Clear IP-wide bans for both primary and announced addresses so
-	// that buildBannedIPsSet does not re-exclude the promoted peer.
-	if ip, _, ok := splitHostPort(string(healthAddr)); ok {
-		delete(s.bannedIPSet, ip)
+func (s *Service) findKnownPeerByIPLocked(address domain.PeerAddress) (domain.PeerAddress, bool) {
+	host, _, ok := splitHostPort(string(address))
+	if !ok {
+		return "", false
 	}
-	if healthAddr != address {
-		if ip, _, ok := splitHostPort(string(address)); ok {
-			delete(s.bannedIPSet, ip)
+	for _, peer := range s.peers {
+		peerHost, _, ok := splitHostPort(string(peer.Address))
+		if ok && peerHost == host {
+			return peer.Address, true
 		}
 	}
+	return "", false
 }
 
 // addPeerID associates a peer identity (fingerprint) with a dial address.
@@ -1317,11 +1296,21 @@ func (s *Service) addPeerBuild(address domain.PeerAddress, build int) {
 	s.mu.Unlock()
 }
 
-func normalizePeerNodeType(raw string) domain.NodeType {
+func parseKnownPeerNodeType(raw string) domain.NodeType {
 	if t, ok := domain.ParseNodeType(raw); ok {
 		return t
 	}
-	return domain.NodeTypeFull
+	return domain.NodeTypeUnknown
+}
+
+func (s *Service) rememberPeerType(address domain.PeerAddress, raw string) {
+	peerType, ok := domain.ParseNodeType(raw)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	s.peerTypes[address] = peerType
+	s.mu.Unlock()
 }
 
 func (s *Service) peerTypeForAddress(address domain.PeerAddress) domain.NodeType {
@@ -1334,7 +1323,11 @@ func (s *Service) peerTypeForAddressLocked(address domain.PeerAddress) domain.No
 	if peerType, ok := s.peerTypes[address]; ok {
 		return peerType
 	}
-	return domain.NodeTypeFull
+	// Unknown is the safe default for network-learned peers without a
+	// direct self-report. Callers that want to exclude non-relay peers
+	// should check IsClient(); treating unknown as full would silently
+	// trust third-party gossip.
+	return domain.NodeTypeUnknown
 }
 
 func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
@@ -1708,6 +1701,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		}
 	case "announce_peer":
 		nodeType := frame.NodeType
+		// node_type is validated for protocol compatibility only. announce_peer
+		// is third-party gossip, so the sender cannot set the announced peer's
+		// local role in our state.
 		if !isKnownNodeType(nodeType) {
 			return
 		}
@@ -1720,7 +1716,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
-			s.promotePeerAddress(domain.PeerAddress(peer), nodeType)
+			s.promotePeerAddress(domain.PeerAddress(peer))
 			added++
 			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", string(address)).Msg("learned peer from announce")
 		}

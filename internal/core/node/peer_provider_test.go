@@ -520,6 +520,74 @@ func TestCandidates_DeduplicationByIP_EqualScore_EarlierAddedAtWins(t *testing.T
 	}
 }
 
+func TestCandidates_FreshPeerWinsEqualScore(t *testing.T) {
+	cfg := testProviderConfig()
+	cfg.HealthFn = func(addr domain.PeerAddress) *PeerHealthView {
+		return &PeerHealthView{Score: 50}
+	}
+
+	baseNow := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+	cfg.NowFn = func() time.Time { return baseNow }
+	pp := NewPeerProvider(cfg)
+
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("1.1.1.1:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: baseNow.Add(-24 * time.Hour),
+		Network: domain.NetGroupIPv4,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("2.2.2.2:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: baseNow.Add(-48 * time.Hour),
+		Network: domain.NetGroupIPv4,
+	})
+
+	pp.MarkFresh(mustAddr("1.1.1.1:64646"), freshPeerTTL)
+
+	candidates := pp.Candidates()
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(candidates))
+	}
+	if candidates[0].Address != mustAddr("1.1.1.1:64646") {
+		t.Fatalf("expected fresh peer to win equal score tie, got %v", candidates[0].Address)
+	}
+}
+
+func TestCandidates_FreshPeerExpires(t *testing.T) {
+	now := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+	cfg := testProviderConfig()
+	cfg.HealthFn = func(addr domain.PeerAddress) *PeerHealthView {
+		return &PeerHealthView{Score: 50}
+	}
+	cfg.NowFn = func() time.Time { return now }
+	pp := NewPeerProvider(cfg)
+
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("1.1.1.1:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: now.Add(-24 * time.Hour),
+		Network: domain.NetGroupIPv4,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("2.2.2.2:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: now.Add(-48 * time.Hour),
+		Network: domain.NetGroupIPv4,
+	})
+
+	pp.MarkFresh(mustAddr("1.1.1.1:64646"), freshPeerTTL)
+	now = now.Add(freshPeerTTL + time.Second)
+
+	candidates := pp.Candidates()
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(candidates))
+	}
+	if candidates[0].Address != mustAddr("2.2.2.2:64646") {
+		t.Fatalf("expected older peer to win after freshness expiry, got %v", candidates[0].Address)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Candidates — sorting
 // ---------------------------------------------------------------------------

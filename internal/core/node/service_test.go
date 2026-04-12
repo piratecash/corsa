@@ -1293,6 +1293,31 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 	}
 }
 
+func TestRoutingTargetsAllowUnknownPeerType(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		cfg:      config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		sessions: map[domain.PeerAddress]*peerSession{},
+		health:   map[domain.PeerAddress]*peerHealth{},
+	}
+
+	now := time.Now().UTC()
+	addr := domain.PeerAddress("unknown:1")
+	svc.sessions[addr] = &peerSession{address: addr}
+	svc.health[addr] = &peerHealth{
+		Address:             addr,
+		Connected:           true,
+		State:               peerStateHealthy,
+		LastUsefulReceiveAt: now,
+	}
+
+	targets := svc.routingTargets()
+	if len(targets) != 1 || targets[0] != addr {
+		t.Fatalf("unknown peer type should remain eligible for routing targets: %#v", targets)
+	}
+}
+
 func TestMeshMessagePropagation(t *testing.T) {
 	t.Parallel()
 
@@ -3541,12 +3566,10 @@ func TestPeerDialCandidatesBanExpires(t *testing.T) {
 	}
 }
 
-// TestPromotePeerAddressClearsBannedUntil verifies that promotePeerAddress
-// (called from announce_peer) clears BannedUntil so the peer can be dialled
-// again immediately. Without this, a peer that upgraded its protocol version
-// and was announced by a third party would remain banned until the 24h window
-// expired, even though the announce proves it is reachable and compatible.
-func TestPromotePeerAddressClearsBannedUntil(t *testing.T) {
+// TestPromotePeerAddressDoesNotClearBannedUntil verifies that network-learned
+// promotion does not clear an existing ban. Candidate policy remains in
+// selection logic rather than in announce processing.
+func TestPromotePeerAddressDoesNotClearBannedUntil(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
@@ -3575,17 +3598,17 @@ func TestPromotePeerAddressClearsBannedUntil(t *testing.T) {
 		}
 	}
 
-	// promotePeerAddress should clear the ban.
-	svc.promotePeerAddress(peer, "full")
+	// promotePeerAddress must not clear the ban.
+	svc.promotePeerAddress(peer)
 
 	svc.mu.RLock()
 	banned := svc.health[peer].BannedUntil
 	svc.mu.RUnlock()
-	if !banned.IsZero() {
-		t.Fatalf("BannedUntil should be zero after promotePeerAddress, got %v", banned)
+	if banned.IsZero() {
+		t.Fatal("BannedUntil should remain set after promotePeerAddress")
 	}
 
-	// Now the peer should appear in candidates.
+	// The peer must still stay out of candidates while banned.
 	candidates = candidateAddresses(svc.peerDialCandidates())
 	found := false
 	for _, c := range candidates {
@@ -3594,7 +3617,46 @@ func TestPromotePeerAddressClearsBannedUntil(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("peer should be in candidates after promotePeerAddress: %v", candidates)
+		return
+	}
+	t.Fatalf("banned peer should remain excluded after promotePeerAddress: %v", candidates)
+}
+
+func TestPromotePeerAddressDoesNotClearIPWideBanForAlternatePort(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             domain.NodeTypeFull,
+	})
+	defer stop()
+
+	primary := domain.PeerAddress("10.0.0.99:64646")
+	alternate := domain.PeerAddress("10.0.0.99:7777")
+	svc.addPeerAddress(primary, "full", "peer-99")
+	svc.penalizeOldProtocolPeer(primary)
+
+	svc.promotePeerAddress(alternate)
+
+	svc.mu.RLock()
+	_, ipStillBanned := svc.bannedIPSet["10.0.0.99"]
+	_, altKnown := svc.persistedMeta[alternate]
+	svc.mu.RUnlock()
+	if !ipStillBanned {
+		t.Fatal("IP-wide ban should remain after promotePeerAddress on alternate port")
+	}
+	if altKnown {
+		t.Fatal("alternate port on same banned IP should not be added as a new peer")
+	}
+
+	candidates := candidateAddresses(svc.peerDialCandidates())
+	for _, candidate := range candidates {
+		if candidate == string(primary) || candidate == string(alternate) {
+			t.Fatalf("banned IP should remain excluded from candidates, got %v", candidates)
+		}
 	}
 }
 
@@ -5971,8 +6033,6 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	}
 
 	// Verify the announced address was added to the peer dial list.
-	// announce_peer populates s.peers/peerTypes (not s.known, which is
-	// for discovered identities/contacts).
 	svc.mu.RLock()
 	found := false
 	for _, p := range svc.peers {
@@ -5984,6 +6044,9 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	svc.mu.RUnlock()
 	if !found {
 		t.Error("expected announced peer to be added to dial list")
+	}
+	if _, ok := svc.peerTypes[domain.PeerAddress("83.172.44.178:64646")]; ok {
+		t.Error("announce_peer must not set peer type for third-party address")
 	}
 
 	// Announce a local address — it should be ignored.
@@ -6045,6 +6108,32 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 	}
 }
 
+func TestAddPeerAddressWithoutNodeTypeKeepsTypeUnknown(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	svc.addPeerAddress("6.6.6.6:64646", "", "")
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	if _, ok := svc.peerTypes[domain.PeerAddress("6.6.6.6:64646")]; ok {
+		t.Fatal("peer learned without self-reported node type must not get peerTypes entry")
+	}
+	if pm := svc.persistedMeta[domain.PeerAddress("6.6.6.6:64646")]; pm != nil && pm.NodeType != domain.NodeTypeUnknown {
+		t.Fatalf("persistedMeta node type = %s, want unknown", pm.NodeType)
+	}
+	if got := svc.peerTypeForAddress(domain.PeerAddress("6.6.6.6:64646")); got != domain.NodeTypeUnknown {
+		t.Fatalf("peerTypeForAddress = %s, want unknown", got)
+	}
+}
+
 func TestAnnouncePeerHelpers(t *testing.T) {
 	t.Parallel()
 
@@ -6077,8 +6166,8 @@ func TestAnnouncePeerHelpers(t *testing.T) {
 }
 
 // TestPromotePeerAddress verifies that promotePeerAddress adds a peer to the
-// end of the dial list (no front-promotion), resets cooldown, updates type
-// for already-known peers, and rejects local addresses.
+// end of the dial list (no front-promotion), does not rewrite existing trust
+// metadata, and rejects local addresses.
 func TestPromotePeerAddress(t *testing.T) {
 	t.Parallel()
 
@@ -6104,7 +6193,7 @@ func TestPromotePeerAddress(t *testing.T) {
 	svc.mu.Unlock()
 
 	// Promote a new peer — it should be appended at the end (not front).
-	svc.promotePeerAddress("3.3.3.3:64646", "full")
+	svc.promotePeerAddress("3.3.3.3:64646")
 
 	svc.mu.RLock()
 	if len(svc.peers) < 3 {
@@ -6121,38 +6210,68 @@ func TestPromotePeerAddress(t *testing.T) {
 		t.Fatal("new peer must not be placed at front — trust-no-one policy")
 	}
 
-	// Promote existing peer with cooldown — cooldown must reset, order unchanged.
-	svc.promotePeerAddress("1.1.1.1:64646", "full")
+	// Promote existing peer with cooldown — cooldown must stay untouched.
+	svc.promotePeerAddress("1.1.1.1:64646")
 
 	svc.mu.RLock()
 	h := svc.health[domain.PeerAddress("1.1.1.1:64646")]
-	if h == nil || h.ConsecutiveFailures != 0 {
+	if h == nil || h.ConsecutiveFailures != 5 {
 		svc.mu.RUnlock()
-		t.Fatal("expected cooldown reset after promote")
+		t.Fatal("expected cooldown to remain unchanged after promote")
 	}
 	svc.mu.RUnlock()
 
-	// Promote with different type — authenticated promote updates type.
-	svc.promotePeerAddress("1.1.1.1:64646", "client")
+	// Promote with different type — network announce must not retag peer.
+	svc.promotePeerAddress("1.1.1.1:64646")
 	svc.mu.RLock()
 	pt := svc.peerTypes[domain.PeerAddress("1.1.1.1:64646")]
 	svc.mu.RUnlock()
-	if pt != domain.NodeTypeClient {
-		t.Errorf("expected type update to client, got %s", pt)
+	if pt != domain.NodeTypeFull {
+		t.Errorf("expected existing type to remain full, got %s", pt)
 	}
 
-	// Different port on the same host must be treated as a distinct peer.
+	// Different port on the same host must NOT be stored as a distinct peer
+	// on the network-learned promote path.
 	peersBefore := len(svc.peers)
-	svc.promotePeerAddress("2.2.2.2:12345", "client")
+	svc.promotePeerAddress("2.2.2.2:12345")
 	svc.mu.RLock()
 	peersAfter := len(svc.peers)
-	newType := svc.peerTypes[domain.PeerAddress("2.2.2.2:12345")]
+	_, hasAltPort := svc.peerTypes[domain.PeerAddress("2.2.2.2:12345")]
 	svc.mu.RUnlock()
-	if peersAfter != peersBefore+1 {
-		t.Errorf("different port should create new peer, count went from %d to %d", peersBefore, peersAfter)
+	if peersAfter != peersBefore {
+		t.Errorf("different port on same IP should be ignored, count went from %d to %d", peersBefore, peersAfter)
 	}
-	if newType != domain.NodeTypeClient {
-		t.Errorf("expected client type for new peer, got %s", newType)
+	if hasAltPort {
+		t.Error("different port on same IP should not create peerTypes entry")
+	}
+}
+
+func TestAddPeerAddressSkipsAlternatePortOnKnownIP(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	svc.addPeerAddress("9.9.9.9:64646", "full", "")
+
+	svc.mu.RLock()
+	before := len(svc.peers)
+	svc.mu.RUnlock()
+
+	svc.addPeerAddress("9.9.9.9:7777", "client", "")
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	if len(svc.peers) != before {
+		t.Fatalf("alternate port on same IP should be ignored, count went from %d to %d", before, len(svc.peers))
+	}
+	if _, ok := svc.peerTypes[domain.PeerAddress("9.9.9.9:7777")]; ok {
+		t.Fatal("alternate port on same IP should not create peerTypes entry")
 	}
 }
 

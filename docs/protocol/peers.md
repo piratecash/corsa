@@ -79,10 +79,11 @@ Announces one or more peer addresses to the network, optionally promoting them i
 
 **Behavior:**
 - Only known `node_type` values (`"full"`, `"client"`) are processed. Unknown types are silently ignored for forward compatibility: on inbound TCP, an `announce_peer_ack` is still sent but no peers are learned; on peer sessions, the frame is silently dropped with no ack
-- **Authenticated requesters**: Can add new peers and reset cooldown/failure counters on existing ones, making them eligible for the next dial cycle. Dial order is not changed — peers are never moved to the front of the list
-- **Unauthenticated requesters** (inbound TCP only): Can learn about new peers but cannot reset cooldowns on existing ones
+- **Authenticated requesters**: Can add new peer addresses. Third-party `node_type` is treated as advisory only and does not override an already known peer type. Ban/cooldown state is not cleared by `announce_peer`; dial policy remains in candidate selection
+- **Unauthenticated requesters** (inbound TCP only): Cannot use `announce_peer` — the P2P auth gate rejects the command before processing
 - The `peers` list is capped at 64 entries (`maxAnnouncePeers`). Excess entries beyond the cap are silently dropped
 - Local addresses in the peer list are skipped/filtered out
+- Newly learned addresses receive a short-lived candidate preference so the next dial selection can try them early without bypassing normal ban/cooldown filters
 - On inbound TCP, `announce_peer_ack` is sent immediately after processing
 
 ### add_peer
@@ -464,7 +465,7 @@ graph TB
 
 1. **Network Group Filtering**: When responding to remote `get_peers` requests, filter addresses by network reachability (don't leak private IPs)
 
-2. **Authenticated Promotion**: Peers announced by authenticated (v2 session) requesters can move to the front of the peer list and have their cooldown reset; unauthenticated peers cannot be promoted
+2. **Authenticated Promotion**: Peers announced by authenticated requesters are learned as addresses only; third-party `node_type` stays advisory, bans/cooldowns stay untouched, and truly new addresses only get a short-lived candidate preference
 
 3. **Persistent Manual Peers**: Peers added via `add_peer` are marked with source `"manual"` and flushed to disk immediately, surviving restarts
 
@@ -557,10 +558,11 @@ graph TB
 
 **Поведение:**
 - Обрабатываются только известные значения `node_type` (`"full"`, `"client"`). Неизвестные типы молча игнорируются для прямой совместимости: на inbound TCP отправляется `announce_peer_ack`, но пиры не запоминаются; на peer-сессиях фрейм молча отбрасывается без ack
-- **Аутентифицированные запрашивающие**: Могут добавлять новых пиров и сбрасывать cooldown/счётчики ошибок у существующих, делая их доступными для следующего цикла подключения. Порядок подключения не меняется — пиры не перемещаются в начало списка
-- **Неаутентифицированные запрашивающие** (только inbound TCP): Могут узнавать о новых пирах, но не могут сбрасывать cooldown у существующих
+- **Аутентифицированные запрашивающие**: Могут добавлять новые peer-адреса. Сторонний `node_type` считается только подсказкой и не переопределяет уже известный тип пира. `announce_peer` не снимает ban/cooldown; политика дозвона остаётся в выборе кандидатов
+- **Неаутентифицированные запрашивающие** (только inbound TCP): Не могут использовать `announce_peer` — auth gate P2P отклоняет команду до обработки
 - Список `peers` ограничен 64 записями (`maxAnnouncePeers`). Записи сверх лимита молча отбрасываются
 - Локальные адреса в списке пиров пропускаются/фильтруются
+- Новые адреса получают краткоживущий приоритет в списке кандидатов, чтобы следующий выбор для дозвона мог попробовать их раньше, не обходя обычные ban/cooldown-фильтры
 - На inbound TCP `announce_peer_ack` отправляется немедленно после обработки
 
 ### add_peer

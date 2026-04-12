@@ -27,12 +27,13 @@ import (
 
 // knownPeer is the internal record stored by PeerProvider.
 type knownPeer struct {
-	Address domain.PeerAddress
-	Source  domain.PeerSource
-	IP      string
-	Port    string
-	Network domain.NetGroup
-	AddedAt time.Time
+	Address    domain.PeerAddress
+	Source     domain.PeerSource
+	IP         string
+	Port       string
+	Network    domain.NetGroup
+	AddedAt    time.Time
+	FreshUntil *time.Time
 }
 
 // PeerHealthView is the subset of peerHealth that PeerProvider needs
@@ -101,6 +102,13 @@ type PeerProvider struct {
 	known  map[domain.PeerAddress]*knownPeer
 	config PeerProviderConfig
 }
+
+const (
+	// Freshly discovered peers get a short-lived ranking bump so the next
+	// candidate selection can try them without bypassing normal filters.
+	freshPeerTTL   = 2 * time.Minute
+	freshPeerBonus = 5
+)
 
 // NewPeerProvider creates a PeerProvider with the given configuration.
 func NewPeerProvider(cfg PeerProviderConfig) *PeerProvider {
@@ -185,6 +193,29 @@ func (pp *PeerProvider) Promote(address domain.PeerAddress, source domain.PeerSo
 		Network: classifyAddress(address),
 		AddedAt: pp.config.NowFn(),
 	}
+}
+
+// MarkFresh gives a known peer a temporary candidate-ranking boost.
+// Callers use it only on first discovery; repeated sightings do not refresh it.
+func (pp *PeerProvider) MarkFresh(address domain.PeerAddress, ttl time.Duration) {
+	address = domain.PeerAddress(strings.TrimSpace(string(address)))
+	if address == "" {
+		return
+	}
+
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+
+	peer := pp.known[address]
+	if peer == nil {
+		return
+	}
+
+	freshUntil := pp.config.NowFn().Add(ttl)
+	if peer.FreshUntil != nil && peer.FreshUntil.After(freshUntil) {
+		return
+	}
+	peer.FreshUntil = &freshUntil
 }
 
 // Restore loads a peer from persisted state (peers.json) at startup.
@@ -315,6 +346,9 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 					}
 				}
 			}
+		}
+		if kp.FreshUntil != nil && now.Before(*kp.FreshUntil) {
+			peerScore += freshPeerBonus
 		}
 
 		// 6g: skip unreachable network groups.
