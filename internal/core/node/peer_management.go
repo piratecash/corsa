@@ -1105,6 +1105,54 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	}
 }
 
+// applyStartupBootstrapPeer adds a compiled/default bootstrap peer using the
+// same local command path as CommandTable.addPeer:
+// addPeer -> HandleLocalFrame -> add_peer -> addPeerFrame.
+func (s *Service) applyStartupBootstrapPeer(address string) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return
+	}
+
+	frame := s.HandleLocalFrame(protocol.Frame{Type: "add_peer", Peers: []string{address}})
+	if frame.Type == "error" {
+		log.Debug().Str("address", address).Str("error", frame.Error).Msg("startup bootstrap peer skipped")
+		return
+	}
+}
+
+// PrimeBootstrapPeers applies compiled/default bootstrap peers once at startup.
+// Injection happens later in Run(), after ConnectionManager is ready, so the
+// add_peer path can enqueue immediate dials instead of being called too early.
+func (s *Service) PrimeBootstrapPeers() {
+	s.mu.Lock()
+	s.primeBootstrapOnRun = true
+	s.mu.Unlock()
+}
+
+// primeStartupBootstrapPeers applies compiled/default bootstrap peers once the
+// ConnectionManager is running. Peers already restored from persisted state are
+// left untouched; bootstrap-only entries are promoted through the manual-add
+// path so startup behaves like an operator-issued add_peer.
+func (s *Service) primeStartupBootstrapPeers() {
+	for _, address := range s.cfg.BootstrapPeers {
+		peerAddress := domain.PeerAddress(strings.TrimSpace(address))
+		if peerAddress == "" {
+			continue
+		}
+
+		s.mu.RLock()
+		_, restoredFromState := s.persistedMeta[peerAddress]
+		s.mu.RUnlock()
+
+		if restoredFromState {
+			continue
+		}
+
+		s.applyStartupBootstrapPeer(string(peerAddress))
+	}
+}
+
 func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, peerID domain.PeerIdentity) {
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return

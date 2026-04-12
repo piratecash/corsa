@@ -26,6 +26,8 @@ func (r *NodeRuntime) Start(ctx context.Context) {
 	r.err = nil
 	r.mu.Unlock()
 
+	r.service.PrimeBootstrapPeers()
+
 	go func() {
 		err := r.service.Run(ctx)
 

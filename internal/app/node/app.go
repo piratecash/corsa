@@ -60,5 +60,6 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
+	a.service.PrimeBootstrapPeers()
 	return a.service.Run(ctx)
 }

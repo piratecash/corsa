@@ -122,6 +122,7 @@ type Service struct {
 	disableRateLimiting   bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
 	drainDone             func()                                    // test hook: called after drainPendingForIdentities completes; nil in production
 	done                  chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
+	primeBootstrapOnRun   bool                                      // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
 
 	// runCtx is the context passed to Run(). Stored so that callbacks
 	// (e.g. onCMSessionEstablished) can start goroutines bound to the
@@ -697,6 +698,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 	// Wait for CM event loop to be ready before starting bootstrap.
 	<-s.connManager.Ready()
+	if s.primeBootstrapOnRun {
+		s.primeStartupBootstrapPeers()
+	}
 
 	bootstrapDone := make(chan struct{})
 	go func() {

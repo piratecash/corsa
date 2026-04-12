@@ -4,6 +4,7 @@
 .idea/
 .corsa/
 _refs/
+__pycache__/
 dist/
 corsa-desktop
 corsa-desktop.exe

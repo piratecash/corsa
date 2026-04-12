@@ -289,7 +289,7 @@ func bootstrapPeersFromEnv(listenAddress string) []string {
 	}
 
 	_ = listenAddress
-	return []string{net.JoinHostPort("65.108.204.190", DefaultPeerPort)}
+	return append([]string(nil), chainParamSeedsMain...)
 }
 
 func nodeTypeFromEnv() NodeType {

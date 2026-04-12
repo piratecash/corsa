@@ -116,6 +116,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.startOnce.Do(func() {
 		go r.metrics.Run(ctx)
 		r.router.Start()
+		r.nodeService.PrimeBootstrapPeers()
 
 		if r.rpcServer != nil {
 			if err := r.rpcServer.StartAsync(); err != nil {
