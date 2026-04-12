@@ -68,6 +68,7 @@ type senderFileMapping struct {
 	CreatedAt     time.Time
 	CompletedAt   time.Time
 	BytesServed   uint64    // cumulative bytes sent via chunk_response
+	ProgressBytes uint64    // highest contiguous byte position ever served
 	LastServedAt  time.Time // last time a chunk was successfully served
 	TransmitPath  string    // internal-only, never exposed in RPC/protocol
 
@@ -587,6 +588,10 @@ func (m *Manager) HandleChunkRequest(
 	m.mu.Lock()
 	if sm, ok := m.senderMaps[req.FileID]; ok {
 		sm.BytesServed += uint64(len(data))
+		endOffset := prep.offset + uint64(len(data))
+		if endOffset > sm.ProgressBytes {
+			sm.ProgressBytes = endOffset
+		}
 		sm.LastServedAt = time.Now()
 		m.saveMappingsLocked()
 	}
@@ -1103,7 +1108,7 @@ func (m *Manager) SenderProgress(fileID domain.FileID) (bytesServed, totalSize u
 	if !ok {
 		return 0, 0, "", false
 	}
-	return mapping.BytesServed, mapping.FileSize, string(mapping.State), true
+	return mapping.ProgressBytes, mapping.FileSize, string(mapping.State), true
 }
 
 // ReceiverProgress returns the download progress for an incoming file.

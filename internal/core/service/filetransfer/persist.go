@@ -43,6 +43,7 @@ type persistedTransferEntry struct {
 
 	// Sender-specific.
 	BytesServed   uint64    `json:"bytes_served,omitempty"`
+	ProgressBytes uint64    `json:"progress_bytes,omitempty"`
 	LastServedAt  time.Time `json:"last_served_at,omitempty"`
 	TransmitPath  string    `json:"transmit_path,omitempty"`
 	PreServeState string    `json:"pre_serve_state,omitempty"`
@@ -95,6 +96,7 @@ func senderMappingToEntry(m *senderFileMapping) persistedTransferEntry {
 		CreatedAt:     m.CreatedAt,
 		CompletedAt:   m.CompletedAt,
 		BytesServed:   m.BytesServed,
+		ProgressBytes: m.ProgressBytes,
 		LastServedAt:  m.LastServedAt,
 		TransmitPath:  m.TransmitPath,
 		PreServeState: string(m.PreServeState),
@@ -128,6 +130,13 @@ func receiverMappingToEntry(m *receiverFileMapping) persistedTransferEntry {
 }
 
 func entryToSenderMapping(e persistedTransferEntry) *senderFileMapping {
+	progressBytes := e.ProgressBytes
+	if progressBytes == 0 && e.BytesServed > 0 {
+		progressBytes = e.BytesServed
+		if progressBytes > e.FileSize {
+			progressBytes = e.FileSize
+		}
+	}
 	return &senderFileMapping{
 		FileID:        e.FileID,
 		FileHash:      e.FileHash,
@@ -140,6 +149,7 @@ func entryToSenderMapping(e persistedTransferEntry) *senderFileMapping {
 		CreatedAt:     e.CreatedAt,
 		CompletedAt:   e.CompletedAt,
 		BytesServed:   e.BytesServed,
+		ProgressBytes: progressBytes,
 		LastServedAt:  e.LastServedAt,
 		TransmitPath:  e.TransmitPath,
 		ServingEpoch:  e.ServingEpoch,

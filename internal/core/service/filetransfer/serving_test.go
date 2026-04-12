@@ -154,6 +154,87 @@ func TestHandleChunkRequest_AlreadyServingNotBlockedByLimit(t *testing.T) {
 	}
 }
 
+func TestHandleChunkRequest_RepeatedOffsetDoesNotAdvanceSenderProgress(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	fileHash := "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	fileContent := []byte("sender progress should not double-count repeated offsets")
+	filePath := filepath.Join(dir, fileHash+".bin")
+	if err := os.WriteFile(filePath, fileContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		store:        store,
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			return nil
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	receiver := domain.PeerIdentity("receiver-progress")
+	fileID := domain.FileID("repeated-offset-progress")
+	chunkSize := uint32(8)
+	m.senderMaps[fileID] = &senderFileMapping{
+		FileID:    fileID,
+		FileHash:  fileHash,
+		FileName:  "progress.bin",
+		FileSize:  uint64(len(fileContent)),
+		Recipient: receiver,
+		State:     senderAnnounced,
+		CreatedAt: time.Now(),
+	}
+
+	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{
+		FileID: fileID,
+		Offset: 0,
+		Size:   chunkSize,
+	})
+
+	bytesTransferred, totalSize, state, found := m.SenderProgress(fileID)
+	if !found {
+		t.Fatal("SenderProgress: mapping not found")
+	}
+	if totalSize != uint64(len(fileContent)) {
+		t.Fatalf("SenderProgress totalSize = %d, want %d", totalSize, len(fileContent))
+	}
+	if state != string(senderServing) {
+		t.Fatalf("SenderProgress state = %q, want %q", state, senderServing)
+	}
+	if bytesTransferred != uint64(chunkSize) {
+		t.Fatalf("SenderProgress after first chunk = %d, want %d", bytesTransferred, chunkSize)
+	}
+
+	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{
+		FileID: fileID,
+		Offset: 0,
+		Size:   chunkSize,
+	})
+
+	bytesTransferred, _, _, found = m.SenderProgress(fileID)
+	if !found {
+		t.Fatal("SenderProgress after retry: mapping not found")
+	}
+	if bytesTransferred != uint64(chunkSize) {
+		t.Errorf("SenderProgress after repeated offset = %d, want %d", bytesTransferred, chunkSize)
+	}
+
+	if m.senderMaps[fileID].BytesServed != uint64(chunkSize)*2 {
+		t.Errorf("BytesServed = %d, want %d", m.senderMaps[fileID].BytesServed, uint64(chunkSize)*2)
+	}
+	if m.senderMaps[fileID].ProgressBytes != uint64(chunkSize) {
+		t.Errorf("ProgressBytes = %d, want %d", m.senderMaps[fileID].ProgressBytes, chunkSize)
+	}
+}
+
 // TestHandleChunkRequest_BelowLimitAllowed verifies that chunk_requests below
 // the concurrency limit transition normally to senderServing.
 func TestHandleChunkRequest_BelowLimitAllowed(t *testing.T) {

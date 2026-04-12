@@ -40,8 +40,15 @@ type SenderMappingEntry struct {
 	Recipient   domain.PeerIdentity `json:"recipient"`
 	State       string              `json:"state"`
 	BytesServed uint64              `json:"bytes_served"`
-	CreatedAt   string              `json:"created_at"`
-	CompletedAt string              `json:"completed_at,omitempty"`
+	// ProgressBytes is the highest contiguous byte position ever served.
+	// Unlike BytesServed (which is a cumulative bandwidth counter that grows
+	// on every chunk_response, including re-served offsets), ProgressBytes
+	// only advances when the sender serves data beyond the previous high-water
+	// mark. Use this field for progress display; use BytesServed for bandwidth
+	// accounting.
+	ProgressBytes uint64 `json:"progress_bytes"`
+	CreatedAt     string `json:"created_at"`
+	CompletedAt   string `json:"completed_at,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +66,7 @@ func senderToTransferEntry(sm *senderFileMapping) TransferSnapshot {
 		Peer:        sm.Recipient,
 		Direction:   "send",
 		State:       string(sm.State),
-		Bytes:       sm.BytesServed,
+		Bytes:       sm.ProgressBytes,
 		CreatedAt:   sm.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if !sm.CompletedAt.IsZero() {
@@ -91,15 +98,16 @@ func receiverToTransferEntry(rm *receiverFileMapping) TransferSnapshot {
 // senderToMappingEntry converts a sender mapping to a SenderMappingEntry.
 func senderToMappingEntry(sm *senderFileMapping) SenderMappingEntry {
 	e := SenderMappingEntry{
-		FileID:      sm.FileID,
-		FileHash:    sm.FileHash,
-		FileName:    sm.FileName,
-		FileSize:    sm.FileSize,
-		ContentType: sm.ContentType,
-		Recipient:   sm.Recipient,
-		State:       string(sm.State),
-		BytesServed: sm.BytesServed,
-		CreatedAt:   sm.CreatedAt.UTC().Format(time.RFC3339),
+		FileID:        sm.FileID,
+		FileHash:      sm.FileHash,
+		FileName:      sm.FileName,
+		FileSize:      sm.FileSize,
+		ContentType:   sm.ContentType,
+		Recipient:     sm.Recipient,
+		State:         string(sm.State),
+		BytesServed:   sm.BytesServed,
+		ProgressBytes: sm.ProgressBytes,
+		CreatedAt:     sm.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if !sm.CompletedAt.IsZero() {
 		e.CompletedAt = sm.CompletedAt.UTC().Format(time.RFC3339)
