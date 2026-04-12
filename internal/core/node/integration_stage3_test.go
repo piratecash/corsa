@@ -226,6 +226,29 @@ func TestBuildPeerExchange_OnlyCandidatesNoActive(t *testing.T) {
 	}
 }
 
+func TestBuildPeerExchange_HidesLoopbackAndRFC1918IPv4(t *testing.T) {
+	ppCfg := testProviderConfig()
+	pp := NewPeerProvider(ppCfg)
+	pp.Add(mustAddr("127.0.0.1:9000"), domain.PeerSourceBootstrap)
+	pp.Add(mustAddr("10.1.2.3:9000"), domain.PeerSourceBootstrap)
+	pp.Add(mustAddr("172.16.5.9:9000"), domain.PeerSourceBootstrap)
+	pp.Add(mustAddr("192.168.1.10:9000"), domain.PeerSourceBootstrap)
+	pp.Add(mustAddr("8.8.8.8:9000"), domain.PeerSourceBootstrap)
+
+	svc := &Service{
+		connManager:  nil,
+		peerProvider: pp,
+	}
+
+	result := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	if len(result) != 1 {
+		t.Fatalf("expected only public peer in peer exchange response, got %v", result)
+	}
+	if result[0] != "8.8.8.8:9000" {
+		t.Fatalf("unexpected peer exchange result %v", result)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tests: RPC wire schema — ConnectionDiagnosticProvider
 // ---------------------------------------------------------------------------

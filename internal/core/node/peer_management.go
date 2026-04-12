@@ -3431,6 +3431,9 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 			if slot.ConnectedAddress != nil {
 				addr = *slot.ConnectedAddress
 			}
+			if shouldHidePeerExchangeAddress(addr) {
+				continue
+			}
 			ip, _, ok := splitHostPort(string(addr))
 			if ok {
 				if _, exists := seenIPs[ip]; !exists {
@@ -3450,6 +3453,9 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 		if h.Direction != peerDirectionInbound || !h.Connected {
 			continue
 		}
+		if shouldHidePeerExchangeAddress(addr) {
+			continue
+		}
 		ip, _, ok := splitHostPort(string(addr))
 		if ok {
 			if _, exists := seenIPs[ip]; !exists {
@@ -3465,6 +3471,9 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	var candidates []domain.PeerAddress
 	if s.peerProvider != nil {
 		for _, candidate := range s.peerProvider.Candidates() {
+			if shouldHidePeerExchangeAddress(candidate.Address) {
+				continue
+			}
 			ip, _, ok := splitHostPort(string(candidate.Address))
 			if ok {
 				if _, exists := seenIPs[ip]; !exists {
@@ -3507,4 +3516,22 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	}
 
 	return addresses
+}
+
+func shouldHidePeerExchangeAddress(address domain.PeerAddress) bool {
+	host, _, ok := splitHostPort(string(address))
+	if !ok {
+		return false
+	}
+	return isLoopbackOrPrivateIPv4(net.ParseIP(host))
+}
+
+func isLoopbackOrPrivateIPv4(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return ipv4[0] == 127 || ip.IsPrivate()
+	}
+	return false
 }

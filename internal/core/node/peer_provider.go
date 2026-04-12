@@ -270,6 +270,13 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 			continue
 		}
 
+		// 6a.1: never resurrect loopback / RFC1918 IPv4 peers from persisted
+		// state. They may be valid in local dev, but stale private addresses
+		// from peers.json are not useful dial candidates after restart.
+		if shouldSkipPersistedPrivatePeer(kp) {
+			continue
+		}
+
 		// 6b: skip forbidden IPs.
 		ip := net.ParseIP(kp.IP)
 		if cfg.ForbiddenFn != nil && cfg.ForbiddenFn(ip) {
@@ -401,10 +408,16 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 	for _, kp := range pp.known {
 		var reasons []domain.ExcludeReason
 
+		if shouldSkipPersistedPrivatePeer(kp) {
+			reasons = append(reasons, domain.ExcludeReasonForbidden)
+		}
+
 		// Forbidden check.
 		ip := net.ParseIP(kp.IP)
 		if cfg.ForbiddenFn != nil && cfg.ForbiddenFn(ip) {
-			reasons = append(reasons, domain.ExcludeReasonForbidden)
+			if len(reasons) == 0 || reasons[len(reasons)-1] != domain.ExcludeReasonForbidden {
+				reasons = append(reasons, domain.ExcludeReasonForbidden)
+			}
 		}
 
 		// Self-address check — also falls under forbidden.
@@ -696,6 +709,13 @@ func (pp *PeerProvider) buildBannedIPsSet(now time.Time) map[string]domain.Banne
 // Delegates to BuildDialAddresses for the actual logic.
 func (pp *PeerProvider) buildDialAddresses(kp *knownPeer) []domain.PeerAddress {
 	return pp.BuildDialAddresses(kp.Address)
+}
+
+func shouldSkipPersistedPrivatePeer(kp *knownPeer) bool {
+	if kp == nil || kp.Source != domain.PeerSourcePersisted {
+		return false
+	}
+	return isLoopbackOrPrivateIPv4(net.ParseIP(kp.IP))
 }
 
 // BuildDialAddresses generates the ordered dial address list for an

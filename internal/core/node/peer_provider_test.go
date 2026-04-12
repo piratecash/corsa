@@ -194,6 +194,63 @@ func TestCandidates_ForbiddenIPFiltered(t *testing.T) {
 	}
 }
 
+func TestCandidates_PersistedPrivateIPv4Filtered(t *testing.T) {
+	pp := NewPeerProvider(testProviderConfig())
+
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("127.0.0.1:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("10.1.2.3:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: time.Date(2025, 1, 1, 0, 1, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("192.168.1.10:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: time.Date(2025, 1, 1, 0, 2, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("172.16.5.9:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: time.Date(2025, 1, 1, 0, 3, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("8.8.8.8:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: time.Date(2025, 1, 1, 0, 4, 0, 0, time.UTC),
+		Network: domain.NetGroupIPv4,
+	})
+
+	candidates := pp.Candidates()
+	if len(candidates) != 1 {
+		t.Fatalf("expected only public persisted peer to survive, got %d", len(candidates))
+	}
+	if candidates[0].Address != mustAddr("8.8.8.8:64646") {
+		t.Fatalf("unexpected candidate %v", candidates[0].Address)
+	}
+}
+
+func TestCandidates_RuntimePrivateIPv4NotFilteredByPersistedRule(t *testing.T) {
+	cfg := testProviderConfig()
+	cfg.ForbiddenFn = func(net.IP) bool { return false }
+	pp := NewPeerProvider(cfg)
+
+	pp.Add(mustAddr("127.0.0.1:64646"), domain.PeerSourceManual)
+	pp.Add(mustAddr("10.1.2.3:64646"), domain.PeerSourcePeerExchange)
+
+	candidates := pp.Candidates()
+	if len(candidates) != 2 {
+		t.Fatalf("expected runtime-discovered private peers to be unaffected, got %d", len(candidates))
+	}
+}
+
 func TestCandidates_BannedIPFiltered(t *testing.T) {
 	cfg := testProviderConfig()
 	now := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
@@ -708,6 +765,24 @@ func TestKnownPeers_MultipleReasons(t *testing.T) {
 	}
 	if !containsReason(reasons, domain.ExcludeReasonConnected) {
 		t.Errorf("expected 'connected' reason, got %v", reasons)
+	}
+}
+
+func TestKnownPeers_PersistedPrivateIPv4MarkedForbidden(t *testing.T) {
+	pp := NewPeerProvider(testProviderConfig())
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("192.168.1.10:64646"),
+		Source:  domain.PeerSourcePersisted,
+		AddedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+
+	peers := pp.KnownPeers()
+	if len(peers) != 1 {
+		t.Fatalf("expected 1 known peer, got %d", len(peers))
+	}
+	if !containsReason(peers[0].ExcludeReasons, domain.ExcludeReasonForbidden) {
+		t.Fatalf("expected persisted private peer to be marked forbidden, got %v", peers[0].ExcludeReasons)
 	}
 }
 

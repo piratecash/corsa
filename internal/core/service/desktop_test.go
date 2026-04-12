@@ -1003,10 +1003,10 @@ func TestBuildConsolePeersPayloadStatusDiscriminator(t *testing.T) {
 	// Three entries: one connected, one pending (has health but not connected),
 	// one candidate (in peers[] but no health entry).
 	payload := buildConsolePeersPayload(
-		[]string{"10.0.0.1:9333", "10.0.0.2:9333", "10.0.0.3:9333"},
+		[]string{"198.51.100.1:9333", "198.51.100.2:9333", "198.51.100.3:9333"},
 		[]PeerHealth{
-			{Address: "10.0.0.1:9333", State: "healthy", Connected: true},
-			{Address: "10.0.0.2:9333", State: "reconnecting", Connected: false},
+			{Address: "198.51.100.1:9333", State: "healthy", Connected: true},
+			{Address: "198.51.100.2:9333", State: "reconnecting", Connected: false},
 		},
 	)
 
@@ -1035,13 +1035,13 @@ func TestBuildConsolePeersPayloadStatusDiscriminator(t *testing.T) {
 		statusByAddr[p.Address] = p.Status
 	}
 
-	if got := statusByAddr["10.0.0.1:9333"]; got != "connected" {
+	if got := statusByAddr["198.51.100.1:9333"]; got != "connected" {
 		t.Errorf("connected peer: expected status='connected', got %q", got)
 	}
-	if got := statusByAddr["10.0.0.2:9333"]; got != "pending" {
+	if got := statusByAddr["198.51.100.2:9333"]; got != "pending" {
 		t.Errorf("pending peer: expected status='pending', got %q", got)
 	}
-	if got := statusByAddr["10.0.0.3:9333"]; got != "candidate" {
+	if got := statusByAddr["198.51.100.3:9333"]; got != "candidate" {
 		t.Errorf("candidate peer: expected status='candidate', got %q", got)
 	}
 
@@ -1052,8 +1052,8 @@ func TestBuildConsolePeersPayloadStatusDiscriminator(t *testing.T) {
 	if len(result.Pending) != 1 || result.Pending[0].Status != "pending" {
 		t.Errorf("deprecated pending[]: expected status='pending', got %v", result.Pending)
 	}
-	if len(result.KnownOnly) != 1 || result.KnownOnly[0] != "10.0.0.3:9333" {
-		t.Errorf("known_only: expected [10.0.0.3:9333], got %v", result.KnownOnly)
+	if len(result.KnownOnly) != 1 || result.KnownOnly[0] != "198.51.100.3:9333" {
+		t.Errorf("known_only: expected [198.51.100.3:9333], got %v", result.KnownOnly)
 	}
 }
 
