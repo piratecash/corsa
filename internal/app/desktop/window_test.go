@@ -81,9 +81,9 @@ func TestEllipsize(t *testing.T) {
 }
 
 // TestNetworkStatusSummary verifies that the aggregate network status is based
-// on the number of usable peers (healthy + degraded). Stalled peers are
-// connected at TCP level but excluded from routing, so they do not count
-// as usable for the aggregate status label.
+// on the number of usable peers (healthy + degraded) among currently live
+// peers. Stalled peers count as connected-but-not-usable, while reconnecting
+// peers are diagnostic only unless there are no live peers at all.
 // TestHasNewerPeerBuildRequiresQuorum verifies that a single peer with a
 // higher build number is not enough to trigger the update badge. At least
 // 2 distinct peer identities must report a higher build to prevent a
@@ -239,7 +239,7 @@ func TestNetworkStatusSummary(t *testing.T) {
 			wantTotal:     3,
 		},
 		{
-			name: "less than half usable is warning",
+			name: "reconnecting peers do not downgrade live healthy quorum",
 			peers: []service.PeerHealth{
 				{State: "healthy"},
 				{State: "degraded"},
@@ -249,7 +249,7 @@ func TestNetworkStatusSummary(t *testing.T) {
 				{State: "reconnecting"},
 				{State: "reconnecting"},
 			},
-			wantState:     "warning",
+			wantState:     "healthy",
 			wantConnected: 2,
 			wantTotal:     7,
 		},
@@ -278,21 +278,17 @@ func TestNetworkStatusSummary(t *testing.T) {
 			wantTotal:     4,
 		},
 		{
-			name: "stalled peers do not help reach healthy threshold",
+			name: "less than half of live peers usable is warning",
 			peers: []service.PeerHealth{
 				{State: "healthy"},
 				{State: "degraded"},
 				{State: "stalled"},
 				{State: "stalled"},
-				{State: "reconnecting"},
-				{State: "reconnecting"},
-				{State: "reconnecting"},
-				{State: "reconnecting"},
-				{State: "reconnecting"},
+				{State: "stalled"},
 			},
 			wantState:     "warning",
-			wantConnected: 4,
-			wantTotal:     9,
+			wantConnected: 5,
+			wantTotal:     5,
 		},
 	}
 

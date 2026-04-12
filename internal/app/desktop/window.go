@@ -1284,11 +1284,13 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 	})
 }
 
-// networkStatusSummary computes the aggregate network status based on the
-// number of usable peers. Stalled peers have a live TCP session but are
-// excluded from message routing (routingTargets skips peerStateStalled),
-// so they do not count as usable. Per-peer health details (degraded,
-// stalled) are shown in the breakdown line instead.
+// networkStatusSummary computes the aggregate network status from peers that
+// are currently live enough to matter for the main UI badge. Reconnecting
+// peers are retained for diagnostics and the 0-live-peers fallback state,
+// but they do not downgrade the aggregate status once live sessions exist.
+// Stalled peers have a live TCP session but are excluded from message
+// routing (routingTargets skips peerStateStalled), so they count as
+// connected-but-not-usable rather than usable.
 func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
 	usable := 0  // healthy + degraded — can route messages
 	stalled := 0 // connected at TCP level but not routing
@@ -1320,8 +1322,8 @@ func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
 		return "limited", connected, total, pending
 	case usable == 1:
 		return "limited", connected, total, pending
-	case usable*2 < total:
-		// Less than half of known peers are usable.
+	case usable*2 < connected:
+		// Less than half of currently live peers are usable.
 		return "warning", connected, total, pending
 	default:
 		return "healthy", connected, total, pending
