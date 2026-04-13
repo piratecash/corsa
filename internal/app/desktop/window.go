@@ -1284,14 +1284,17 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 	})
 }
 
-// networkStatusSummary computes the aggregate network status from peers that
-// are currently live enough to matter for the main UI badge. Reconnecting
-// peers are retained for diagnostics and the 0-live-peers fallback state,
-// but they do not downgrade the aggregate status once live sessions exist.
-// Stalled peers have a live TCP session but are excluded from message
-// routing (routingTargets skips peerStateStalled), so they count as
-// connected-but-not-usable rather than usable.
+// networkStatusSummary returns the aggregate network status for the main UI
+// badge. The node layer is the single source of truth: when ProbeNode returns
+// an AggregateStatus from fetch_aggregate_status, we use it directly.
+// The local fallback is kept only for backward compatibility with older node
+// versions that do not yet serve fetch_aggregate_status.
 func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
+	if as := status.AggregateStatus; as != nil {
+		return as.Status, as.ConnectedPeers, as.TotalPeers, as.PendingMessages
+	}
+
+	// Fallback: local computation for backward compatibility.
 	usable := 0  // healthy + degraded — can route messages
 	stalled := 0 // connected at TCP level but not routing
 	reconnecting := 0
@@ -1318,12 +1321,10 @@ func networkStatusSummary(status service.NodeStatus) (string, int, int, int) {
 	case connected == 0:
 		return "reconnecting", 0, total, pending
 	case usable == 0:
-		// Peers exist but none can route — functionally limited.
 		return "limited", connected, total, pending
 	case usable == 1:
 		return "limited", connected, total, pending
 	case usable*2 < connected:
-		// Less than half of currently live peers are usable.
 		return "warning", connected, total, pending
 	default:
 		return "healthy", connected, total, pending

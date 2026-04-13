@@ -284,14 +284,12 @@ as a follow-up migration after Phase 1 is stable.
 
 - [ ] Without routing table, network continues delivery via gossip fallback
 
-**Connection Manager — remove deprecated `get_peers` RPC fields:**
+**Connection Manager — finish cleanup after deprecated `get_peers` RPC fields were removed:**
 
-- [ ] Remove `connected`, `pending`, `known_only` fields from `ConsolePeersJSON()` response (deprecated after CM rollout)
-- [ ] Remove categorization logic in `buildConsolePeersPayload()` — connected/pending/known_only split
-- [ ] Simplify `get_peers` RPC response to `{type, count, total, peers}` — single list of connected + pending + Candidates
-- [ ] Migrate Desktop UI (`buildConsolePeersPayload`) to read only `peers`, group on client side by `State`/`Connected`
-- [ ] Migrate CLI to same pattern
-- [ ] Protocol `get_peers` (remote) — no changes (`Frame{Peers: []string}`)
+The core removal already landed: `ConsolePeersJSON()` and `buildConsolePeersPayload()` no longer exist in the codebase, the local `get_peers` RPC handler returns `protocol.Frame{Type: "peers", Count, Peers}` with no `connected` / `pending` / `known_only` fields, and Desktop / CLI consumers were migrated off the old shape. The protocol-level remote `get_peers` frame was never in scope. What is still stale is peripheral:
+
+- [ ] Remove dead i18n keys `console.peers.connected`, `console.peers.pending`, `console.peers.known_only` from `internal/app/desktop/i18n.go` across all locales — no call site references them.
+- [ ] Update `docs/connection-manager.md` section «`get_peers` — backward compatibility + extension»: it still describes the old `ConsolePeersJSON()` JSON shape (`connected` / `pending` / `known_only`) and the non-existent `buildConsolePeersPayload`. Rewrite to match the current `{type, count, peers}` contract.
 
 ---
 

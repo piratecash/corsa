@@ -68,6 +68,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.retryRelayDeliveries()
 			s.relayLimiter.cleanup(5 * time.Minute)
 			s.maybeSavePeerState()
+			s.refreshAggregateStatus()
 		}
 	}
 }
@@ -481,9 +482,17 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 }
 
 // syncPeer opens a fresh TCP connection to the given address, performs
-// a full handshake (hello → welcome → auth if required), fetches peer
-// addresses and contacts, and imports any verified contacts into local
-// state. Returns the number of contacts successfully imported.
+// a full handshake (hello → welcome → auth if required), optionally
+// requests the peer list (when requestPeers is true), fetches contacts,
+// and imports any verified contacts into local state. Returns the number
+// of contacts successfully imported.
+//
+// The requestPeers parameter is passed by the caller rather than derived
+// internally from shouldRequestPeers(): forced-refresh paths (sender-key
+// recovery) deliberately skip peer exchange even when the aggregate status
+// would otherwise allow it, because those paths are a narrow contact/key
+// sync, not a bootstrap/recovery dial. See
+// docs/peer-discovery-conditional-get-peers.ru.md § Шаг 5.
 //
 // A fresh connection is used instead of reusing the active session
 // because syncPeer is called from dispatchPeerSessionFrame when a
@@ -492,7 +501,7 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 // syncPeerSession → peerSessionRequest on the same inboxCh, consuming
 // frames meant for the outer caller and causing a 12-second stall
 // (peerRequestTimeout).
-func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress) int {
+func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requestPeers bool) int {
 	conn, err := s.dialPeer(ctx, address, syncHandshakeTimeout)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_dial_failed")
@@ -564,24 +573,35 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress) int 
 	s.addPeerVersion(syncHealthKey, welcome.ClientVersion)
 	s.addPeerBuild(syncHealthKey, welcome.ClientBuild)
 
-	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
-		if _, err := io.WriteString(conn, line); err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_failed")
-			return 0
-		}
-		reply, err := readFrameLine(reader, maxResponseLineBytes)
-		if err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_read_failed")
-			return 0
-		}
-		frame, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
-		if err == nil {
-			for _, peer := range frame.Peers {
-				s.addPeerAddress(domain.PeerAddress(peer), "", "")
+	// Peer exchange policy is decided by the caller (see requestPeers param).
+	// Forced-refresh paths pass false to keep the sync narrow. Other future
+	// callers that want the legacy behaviour must evaluate shouldRequestPeers()
+	// themselves before calling. See
+	// docs/peer-discovery-conditional-get-peers.ru.md §§ Шаг 4, Шаг 5.
+	if requestPeers {
+		if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
+			if _, err := io.WriteString(conn, line); err != nil {
+				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_failed")
+				return 0
 			}
+			reply, err := readFrameLine(reader, maxResponseLineBytes)
+			if err != nil {
+				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_read_failed")
+				return 0
+			}
+			frame, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
+			if err == nil {
+				peersImported := 0
+				for _, peer := range frame.Peers {
+					if s.addPeerAddress(domain.PeerAddress(peer), "", "") {
+						peersImported++
+					}
+				}
+				s.logPeerExchangeExecuted(peerExchangePathLegacyDial, address, len(frame.Peers), peersImported)
+			}
+		} else {
+			return 0
 		}
-	} else {
-		return 0
 	}
 
 	imported := 0
@@ -747,6 +767,16 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// Record observed address only after authentication succeeds so that
 	// an unauthenticated responder cannot influence NAT consensus.
 	s.recordObservedAddress(domain.PeerIdentity(welcome.Address), welcome.ObservedAddress)
+
+	// Evaluate peer exchange policy BEFORE markPeerConnected so that the
+	// aggregate status snapshot does not yet include the peer being set up.
+	// This normalizes the decision with the CM path (initPeerSession),
+	// where the session is not yet registered either.
+	requestPeers := s.shouldRequestPeers()
+	if !requestPeers {
+		s.logPeerExchangeSkipped(peerExchangePathSessionOutbound, address, peerExchangeSkipByAggregateHealthy)
+	}
+
 	s.mu.Lock()
 	s.sessions[address] = session
 	s.mu.Unlock()
@@ -763,7 +793,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	_ = conn.SetDeadline(time.Time{})
 	log.Info().Str("peer", string(address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 
-	if err := s.syncPeerSession(session); err != nil {
+	if err := s.syncPeerSession(session, requestPeers, peerExchangePathSessionOutbound); err != nil {
 		return true, err
 	}
 
@@ -1150,9 +1180,15 @@ func (s *Service) primeStartupBootstrapPeers() {
 	}
 }
 
-func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, peerID domain.PeerIdentity) {
+// addPeerAddress stores a peer-exchange-discovered address. Returns true only
+// when a brand-new address was actually appended to s.peers (first time seen,
+// not a self address, not a local/blocked destination, not collapsed onto an
+// existing same-IP entry). Observability callers (peer_exchange_executed log)
+// rely on this signal to report peers actually imported rather than raw
+// response size — see docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, peerID domain.PeerIdentity) bool {
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
-		return
+		return false
 	}
 
 	s.mu.Lock()
@@ -1167,13 +1203,13 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 				s.peerIDs[address] = peerID
 			}
 			s.mu.Unlock()
-			return
+			return false
 		}
 		// Peer exchange keeps only one stored address per IP. Alternative
 		// ports learned from the network are ignored to avoid peer-list
 		// poisoning via many addresses on the same host.
 		s.mu.Unlock()
-		return
+		return false
 	}
 
 	s.peers = append(s.peers, transport.Peer{
@@ -1202,6 +1238,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 	if s.peerProvider != nil {
 		s.peerProvider.Add(address, domain.PeerSourcePeerExchange)
 	}
+	return true
 }
 
 // promotePeerAddress learns a network-discovered peer address without
@@ -1480,21 +1517,42 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 	}
 }
 
-func (s *Service) syncPeerSession(session *peerSession) error {
-	peersFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers", false)
-	if err != nil {
-		return err
-	}
-	for _, peer := range peersFrame.Peers {
-		s.addPeerAddress(domain.PeerAddress(peer), "", "")
+// syncPeerSession performs peer exchange (conditional) and contact sync over
+// an existing authenticated peer session.
+//
+// requestPeers controls whether get_peers is sent. The caller must evaluate
+// shouldRequestPeers() BEFORE any side-effects that alter the aggregate
+// status for the current connection (e.g. markPeerConnected). This ensures
+// both session-based call sites (openPeerSession / initPeerSession) see a
+// consistent aggregate snapshot that does not yet include the peer being
+// set up.
+//
+// path identifies the caller for observability (peerExchangePathSessionOutbound
+// for the legacy openPeerSession path, peerExchangePathSessionCM for the
+// ConnectionManager initPeerSession path). See
+// docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+func (s *Service) syncPeerSession(session *peerSession, requestPeers bool, path peerExchangePath) error {
+	if requestPeers {
+		peersFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers", false)
+		if err != nil {
+			return err
+		}
+		peersImported := 0
+		for _, peer := range peersFrame.Peers {
+			if s.addPeerAddress(domain.PeerAddress(peer), "", "") {
+				peersImported++
+			}
+		}
+
+		// Notify CM that new peers were discovered from peer exchange.
+		if len(peersFrame.Peers) > 0 && s.connManager != nil {
+			s.connManager.EmitHint(NewPeersDiscovered{Count: len(peersFrame.Peers)})
+		}
+
+		s.logPeerExchangeExecuted(path, session.address, len(peersFrame.Peers), peersImported)
 	}
 
-	// Notify CM that new peers were discovered from peer exchange.
-	if len(peersFrame.Peers) > 0 && s.connManager != nil {
-		s.connManager.EmitHint(NewPeersDiscovered{Count: len(peersFrame.Peers)})
-	}
-
-	_, err = s.syncContactsViaSession(session)
+	_, err := s.syncContactsViaSession(session)
 	return err
 }
 
@@ -1537,13 +1595,33 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 // TCP connection, works for NATed/inbound-only peers) and falls back to a
 // fresh dial only when no reusable session is available.
 //
+// The fallback fresh-dial path deliberately skips get_peers. Sender-key
+// recovery is a narrow contact/key sync, not a bootstrap/recovery dial, so
+// it must not trigger peer exchange even when the aggregate status would
+// otherwise allow it. See docs/peer-discovery-conditional-get-peers.ru.md
+// § Шаг 5.
+//
+// The ctx parameter is the owning lifecycle context (service run / peer
+// session). It is used both to bound the fresh-dial handshake and to cancel
+// the recovery when the owning lifecycle is torn down. A local
+// context.Background() here would lose that cancellation — see
+// CLAUDE.md "context.Context передается первым аргументом".
+//
 // The syncSession parameter, when non-nil, is used directly instead of
 // looking up a session by address. Callers pass nil when the only candidate
 // session is currently inside a peerSessionRequest read loop (e.g.,
 // dispatchPeerSessionFrame dispatched during a ping), because the
 // single-reader constraint on inboxCh would cause a deadlock.
-func (s *Service) syncSenderKeys(senderAddress domain.PeerAddress, syncSession *peerSession) int {
+func (s *Service) syncSenderKeys(ctx context.Context, senderAddress domain.PeerAddress, syncSession *peerSession) int {
 	if syncSession != nil {
+		// Narrow contact/key recovery over an existing authenticated session:
+		// peer exchange is never initiated here. Logged as a narrow-recovery
+		// skip so this branch is visible in the peer_exchange_skipped stream
+		// alongside the fresh-dial fallback — otherwise operators would see
+		// contact recovery happen with no corresponding skip record and could
+		// not tell a consciously-narrow sync from silent observability drift.
+		// See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+		s.logPeerExchangeSkipped(peerExchangePathSenderKeyViaSession, senderAddress, peerExchangeSkipByNarrowRecovery)
 		imported, err := s.syncContactsViaSession(syncSession)
 		if err == nil {
 			if imported > 0 {
@@ -1554,10 +1632,16 @@ func (s *Service) syncSenderKeys(senderAddress domain.PeerAddress, syncSession *
 		log.Warn().Err(err).Str("peer", string(senderAddress)).Msg("sync_sender_keys_session_failed")
 	}
 
-	// Fall back to a fresh TCP connection.
-	ctx, cancel := context.WithTimeout(context.Background(), syncHandshakeTimeout)
+	// Fall back to a fresh TCP connection. Derive a timeout from the owning
+	// ctx so the dial is bounded but still cancels on lifecycle shutdown.
+	dialCtx, cancel := context.WithTimeout(ctx, syncHandshakeTimeout)
 	defer cancel()
-	return s.syncPeer(ctx, senderAddress)
+	// requestPeers=false: narrow contact/key recovery only. Logged as a
+	// narrow-recovery skip so operators can tell this path apart from a
+	// steady-state (healthy) policy skip. See
+	// docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+	s.logPeerExchangeSkipped(peerExchangePathSenderKeyFreshDial, senderAddress, peerExchangeSkipByNarrowRecovery)
+	return s.syncPeer(dialCtx, senderAddress, false)
 }
 
 func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *peerSession, frame protocol.Frame) {
@@ -1625,7 +1709,14 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			// session event loop and may be inside peerSessionRequest
 			// (single-reader constraint). syncSenderKeys falls back to a
 			// fresh TCP dial.
-			imported := s.syncSenderKeys(address, nil)
+			//
+			// Propagate s.runCtx rather than synthesising context.Background():
+			// dispatchPeerSessionFrame is invoked from servePeerSession which
+			// was started with s.runCtx, so this is the effective incoming
+			// context for this session. Threading ctx through the full
+			// dispatch signature is deferred to a separate task to keep this
+			// change focused on Шаг 5 policy (see CLAUDE.md: scope).
+			imported := s.syncSenderKeys(s.runCtx, address, nil)
 			stored, _, errCode = s.storeIncomingMessage(msg, true)
 			if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 				log.Warn().
@@ -2110,6 +2201,12 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 		log.Info().Str("peer", string(health.Address)).Str("from", health.State).Str("to", next).Int("pending", len(s.pending[health.Address])).Int("failures", health.ConsecutiveFailures).Msg("peer_state_change")
 	}
 	health.State = next
+
+	// Any per-peer state transition may shift the aggregate network status
+	// (e.g. the last usable peer going stalled moves aggregate from healthy
+	// to limited). Recompute and store the materialized snapshot so that
+	// policy helpers and the Desktop UI always see a consistent value.
+	s.refreshAggregateStatusLocked()
 }
 
 func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
@@ -3312,13 +3409,25 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 
 // initPeerSession performs the application-level setup for an already
 // authenticated session: subscribes to the peer's inbox relay and runs
-// the initial sync (get_peers + fetch_contacts). This is the blocking
-// I/O phase that must NOT run in the CM event loop — call it from a
-// dedicated goroutine only.
+// the initial sync (conditionally get_peers, then fetch_contacts).
+// Whether get_peers is sent depends on the aggregate network status at
+// the moment of entry — see shouldRequestPeers() for the policy.
+// This is the blocking I/O phase that must NOT run in the CM event
+// loop — call it from a dedicated goroutine only.
 //
 // On success the session is ready for the servePeerSession read loop.
 // On error the caller is responsible for session cleanup and CM notification.
 func (s *Service) initPeerSession(session *peerSession) error {
+	// Evaluate peer exchange policy before subscribe_inbox so that any
+	// network I/O done during subscribe cannot shift the aggregate status
+	// between the decision point and its use. In the CM path the session
+	// is not yet registered in s.health, so the snapshot naturally excludes
+	// the peer being set up — matching the legacy path (openPeerSession).
+	requestPeers := s.shouldRequestPeers()
+	if !requestPeers {
+		s.logPeerExchangeSkipped(peerExchangePathSessionCM, session.address, peerExchangeSkipByAggregateHealthy)
+	}
+
 	if _, err := s.peerSessionRequest(session, protocol.Frame{
 		Type:       "subscribe_inbox",
 		Topic:      "dm",
@@ -3330,7 +3439,7 @@ func (s *Service) initPeerSession(session *peerSession) error {
 	_ = session.conn.SetDeadline(time.Time{})
 	log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 
-	if err := s.syncPeerSession(session); err != nil {
+	if err := s.syncPeerSession(session, requestPeers, peerExchangePathSessionCM); err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
 	return nil

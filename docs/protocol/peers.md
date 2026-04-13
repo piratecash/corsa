@@ -393,22 +393,9 @@ Recovery timeline after internet outage:
 3. Next bootstrap tick force-closes the zombie TCP socket and unblocks the host slot
 4. Remote peer's retry loop (or local outbound retry) re-establishes the connection
 
-## Очистка зависших inbound-соединений
+## Mesh learning (peer sync on session establishment)
 
-При потере интернета TCP-сокеты могут оставаться «живыми» минуты из-за тайм-аутов ретрансмиссии на уровне ОС — даже после того, как heartbeat объявил пир `stalled`. Эти зомби-соединения занимают слот в `inboundConns` и блокируют исходящие попытки подключения к тому же хосту (потому что `connectedHostsLocked` видит хост как уже подключённый).
-
-Очистка `evictStaleInboundConns` выполняется на каждом тике bootstrap (~2 с) и принудительно закрывает inbound TCP-соединения, чей peer health находится в состоянии `stalled`. Это освобождает слот хоста, чтобы retry-цикл удалённого пира мог восстановить соединение. Кроме того, `connectedHostsLocked` исключает зависшие inbound-соединения при вычислении набора подключённых хостов — позволяя `peerDialCandidates` попытаться установить новое исходящее соединение к тому же хосту, не дожидаясь тайм-аута зомби-сокета.
-
-Таймлайн восстановления после обрыва интернета:
-
-1. Heartbeat обнаруживает неотвечающий пир в течение ~2 мин 45 с (интервал heartbeat + тайм-аут pong)
-2. Состояние здоровья пира переходит в `stalled`
-3. Следующий тик bootstrap принудительно закрывает зомби TCP-сокет и освобождает слот хоста
-4. Retry-цикл удалённого пира (или локальный исходящий retry) восстанавливает соединение
-
-## Mesh learning (peer re-sync via syncTicker)
-
-`servePeerSession` runs a `syncTicker` that fires every 4 seconds.  Each tick calls `syncPeerSession`, which sends `get_peers` to the connected peer and merges newly discovered addresses into the local pool via `addPeerAddress`.  This ensures the mesh constantly learns about new nodes through its existing connections without requiring a separate re-sync goroutine.
+`syncPeerSession` runs once per outbound session, immediately after the handshake completes and before `servePeerSession` enters its event-driven main loop.  Whether this one-shot sync includes `get_peers` is decided by the caller from the node's `AggregateStatusSnapshot`: `shouldRequestPeers()` returns `false` once the node is `Healthy`, so steady-state reconnects do not re-issue `get_peers` against every peer.  `fetch_contacts` and pending-frame flush run regardless — only the peer-exchange step is conditional.  See [peer-discovery-conditional-get-peers.ru.md](../peer-discovery-conditional-get-peers.ru.md) for the full policy and design rationale.
 
 ## Onion address support
 
@@ -859,9 +846,22 @@ Orphaned фреймы сохраняются между рестартами в 
 
 При вытеснении очищается всё связанное состояние (health, тип пира, версия, персистированные метаданные). Bootstrap-пиры и подключённые в данный момент пиры **никогда** не удаляются вне зависимости от score.
 
-## Обучение mesh-сети (re-sync через syncTicker)
+## Очистка зависших inbound-соединений
 
-`servePeerSession` запускает `syncTicker`, который срабатывает каждые 4 секунды. При каждом тике вызывается `syncPeerSession`, который отправляет `get_peers` подключённому пиру и добавляет новые адреса в локальный пул через `addPeerAddress`. Это обеспечивает постоянное обнаружение новых нод через существующие соединения без необходимости отдельной goroutine для re-sync.
+При потере интернета TCP-сокеты могут оставаться «живыми» минуты из-за тайм-аутов ретрансмиссии на уровне ОС — даже после того, как heartbeat объявил пир `stalled`. Эти зомби-соединения занимают слот в `inboundConns` и блокируют исходящие попытки подключения к тому же хосту (потому что `connectedHostsLocked` видит хост как уже подключённый).
+
+Очистка `evictStaleInboundConns` выполняется на каждом тике bootstrap (~2 с) и принудительно закрывает inbound TCP-соединения, чей peer health находится в состоянии `stalled`. Это освобождает слот хоста, чтобы retry-цикл удалённого пира мог восстановить соединение. Кроме того, `connectedHostsLocked` исключает зависшие inbound-соединения при вычислении набора подключённых хостов — позволяя `peerDialCandidates` попытаться установить новое исходящее соединение к тому же хосту, не дожидаясь тайм-аута зомби-сокета.
+
+Таймлайн восстановления после обрыва интернета:
+
+1. Heartbeat обнаруживает неотвечающий пир в течение ~2 мин 45 с (интервал heartbeat + тайм-аут pong)
+2. Состояние здоровья пира переходит в `stalled`
+3. Следующий тик bootstrap принудительно закрывает зомби TCP-сокет и освобождает слот хоста
+4. Retry-цикл удалённого пира (или локальный исходящий retry) восстанавливает соединение
+
+## Обучение mesh-сети (синхронизация при установлении сессии)
+
+`syncPeerSession` выполняется один раз на исходящую сессию — сразу после handshake и до того, как `servePeerSession` войдёт в event-driven основной цикл. Содержит ли этот однократный sync команду `get_peers`, решает caller на основе `AggregateStatusSnapshot` ноды: `shouldRequestPeers()` возвращает `false`, когда нода уже `Healthy`, поэтому reconnect в steady-state не повторяет `get_peers` к каждому пиру. `fetch_contacts` и flush pending-фреймов выполняются безусловно — условен только peer exchange. Политика и дизайн описаны в [peer-discovery-conditional-get-peers.ru.md](../peer-discovery-conditional-get-peers.ru.md).
 
 ## Поддержка onion-адресов
 

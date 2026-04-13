@@ -626,7 +626,12 @@ func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSe
 	stored, _, errCode := s.storeIncomingMessage(msg, false)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey && senderAddress != "" {
 		log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_start")
-		imported := s.syncSenderKeys(senderAddress, syncSession)
+		// Use s.runCtx as the owning lifecycle ctx for the narrow key sync.
+		// Threading ctx through handleRelayMessage/deliverRelayedMessage is
+		// out of scope for Шаг 5 (would touch 25+ call sites in tests); the
+		// service-run context still provides cancellation on shutdown, which
+		// is the property CLAUDE.md protects.
+		imported := s.syncSenderKeys(s.runCtx, senderAddress, syncSession)
 		if imported == 0 {
 			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_no_contacts_imported")
 		}

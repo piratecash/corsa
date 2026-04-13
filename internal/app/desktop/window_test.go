@@ -309,6 +309,79 @@ func TestNetworkStatusSummary(t *testing.T) {
 	}
 }
 
+// TestNetworkStatusSummary_AggregateStatusTakesPrecedence verifies the key
+// contract of step 2a: when NodeStatus contains a non-nil AggregateStatus
+// (from fetch_aggregate_status), networkStatusSummary uses it directly and
+// ignores the PeerHealth entries. The test intentionally feeds conflicting
+// values so that any fallback to local computation would produce a different
+// result and be caught.
+func TestNetworkStatusSummary_AggregateStatusTakesPrecedence(t *testing.T) {
+	t.Parallel()
+
+	status := service.NodeStatus{
+		// PeerHealth says: 2 healthy → would produce "healthy", connected=2, total=2.
+		PeerHealth: []service.PeerHealth{
+			{State: "healthy", PendingCount: 1},
+			{State: "healthy", PendingCount: 1},
+		},
+		// AggregateStatus from node says: "warning" with different counters.
+		AggregateStatus: &service.AggregateStatus{
+			Status:          "warning",
+			UsablePeers:     1,
+			ConnectedPeers:  3,
+			TotalPeers:      5,
+			PendingMessages: 42,
+		},
+	}
+
+	gotState, gotConnected, gotTotal, gotPending := networkStatusSummary(status)
+
+	if gotState != "warning" {
+		t.Errorf("state: got %q, want %q (AggregateStatus should take precedence over PeerHealth)", gotState, "warning")
+	}
+	if gotConnected != 3 {
+		t.Errorf("connected: got %d, want %d", gotConnected, 3)
+	}
+	if gotTotal != 5 {
+		t.Errorf("total: got %d, want %d", gotTotal, 5)
+	}
+	if gotPending != 42 {
+		t.Errorf("pending: got %d, want %d", gotPending, 42)
+	}
+}
+
+// TestNetworkStatusSummary_FallbackWhenAggregateStatusNil verifies that when
+// AggregateStatus is nil (older node version), the function falls back to
+// local computation from PeerHealth.
+func TestNetworkStatusSummary_FallbackWhenAggregateStatusNil(t *testing.T) {
+	t.Parallel()
+
+	status := service.NodeStatus{
+		PeerHealth: []service.PeerHealth{
+			{State: "healthy", PendingCount: 3},
+			{State: "stalled", PendingCount: 0},
+			{State: "reconnecting", PendingCount: 0},
+		},
+		AggregateStatus: nil, // older node — command not available
+	}
+
+	gotState, gotConnected, gotTotal, gotPending := networkStatusSummary(status)
+
+	// 1 usable out of 2 connected → "limited"
+	if gotState != "limited" {
+		t.Errorf("state: got %q, want %q", gotState, "limited")
+	}
+	if gotConnected != 2 {
+		t.Errorf("connected: got %d, want %d", gotConnected, 2)
+	}
+	if gotTotal != 3 {
+		t.Errorf("total: got %d, want %d", gotTotal, 3)
+	}
+	if gotPending != 3 {
+		t.Errorf("pending: got %d, want %d", gotPending, 3)
+	}
+}
+
 func TestFindMessageBody(t *testing.T) {
 	t.Parallel()
 

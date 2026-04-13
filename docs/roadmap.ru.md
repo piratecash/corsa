@@ -293,14 +293,12 @@ TCP-сокетов.
 
 - [ ] Без routing table сеть продолжает доставку через gossip fallback
 
-**Connection Manager — удаление deprecated полей `get_peers` RPC:**
+**Connection Manager — доделать cleanup после удаления deprecated полей `get_peers` RPC:**
 
-- [ ] Удалить поля `connected`, `pending`, `known_only` из ответа `ConsolePeersJSON()` (deprecated после внедрения CM)
-- [ ] Удалить логику категоризации в `buildConsolePeersPayload()` — разделение на connected/pending/known_only
-- [ ] Упростить ответ `get_peers` RPC до `{type, count, total, peers}` — единственный список connected + pending + Candidates
-- [ ] Мигрировать Desktop UI (`buildConsolePeersPayload`) на чтение только `peers`, группировку делать на клиенте по полю `State`/`Connected`
-- [ ] Мигрировать CLI на аналогичную схему
-- [ ] Протокольный `get_peers` (remote) — без изменений (`Frame{Peers: []string}`)
+Основная часть уже сделана: функций `ConsolePeersJSON()` и `buildConsolePeersPayload()` в кодовой базе больше нет, локальный RPC-хендлер `get_peers` возвращает `protocol.Frame{Type: "peers", Count, Peers}` без полей `connected` / `pending` / `known_only`, Desktop и CLI мигрированы. Протокольный remote `get_peers` в scope не входил. Остаётся периферия:
+
+- [ ] Удалить мёртвые i18n-ключи `console.peers.connected`, `console.peers.pending`, `console.peers.known_only` из `internal/app/desktop/i18n.go` во всех локалях — на них нет ни одной ссылки из кода.
+- [ ] Переписать раздел «`get_peers` — обратная совместимость + расширение» в `docs/connection-manager.md`: там до сих пор описан старый JSON-формат ответа `ConsolePeersJSON()` (`connected` / `pending` / `known_only`) и несуществующий `buildConsolePeersPayload`. Привести к актуальному контракту `{type, count, peers}`.
 
 ---
 

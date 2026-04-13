@@ -61,6 +61,7 @@ type Frame struct {
 	ChatPreviews           []ChatPreviewFrame    `json:"chat_previews,omitempty"`
 	Conversations          []ConversationFrame   `json:"conversations,omitempty"`
 	NetworkStats           *NetworkStatsFrame    `json:"network_stats,omitempty"`
+	AggregateStatus        *AggregateStatusFrame `json:"aggregate_status,omitempty"`
 	TrafficHistory         *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
 	Capabilities           []string              `json:"capabilities,omitempty"`
 
@@ -160,6 +161,17 @@ type PeerTrafficFrame struct {
 	BytesReceived int64  `json:"bytes_received"`
 	TotalTraffic  int64  `json:"total_traffic"`
 	Connected     bool   `json:"connected"`
+}
+
+// AggregateStatusFrame is the wire representation of the node's aggregate
+// network health returned by the fetch_aggregate_status local RPC command.
+// Desktop consumes this frame instead of computing the status locally.
+type AggregateStatusFrame struct {
+	Status          string `json:"status"`           // offline | reconnecting | limited | warning | healthy
+	UsablePeers     int    `json:"usable_peers"`     // healthy + degraded — can route messages
+	ConnectedPeers  int    `json:"connected_peers"`  // usable + stalled
+	TotalPeers      int    `json:"total_peers"`      // connected + reconnecting
+	PendingMessages int    `json:"pending_messages"`
 }
 
 // TrafficHistoryFrame holds a rolling window of per-second traffic samples.

@@ -62,6 +62,7 @@ sequenceDiagram
         New->>BS: TCP dial → hello
         BS-->>New: welcome (challenge, observed IP)
         New->>BS: auth_session (signed challenge)
+        Note over New: shouldRequestPeers true<br/>aggregate status not yet Healthy<br/>send get_peers
         New->>BS: get_peers
         BS-->>New: peers [P1, P2, ...]
         Note over New: addPeerAddress(P1)<br/>addPeerAddress(P2)
@@ -69,7 +70,8 @@ sequenceDiagram
 
     New->>P1: TCP dial → hello → auth
     P1-->>New: welcome
-    New->>P1: get_peers
+    Note over New: shouldRequestPeers re-evaluated per session<br/>sent while not Healthy<br/>skipped once Healthy
+    New->>P1: get_peers (conditional)
     P1-->>New: peers [BS, P2, P3, ...]
     Note over New: Merges new addresses<br/>into local pool
 
@@ -94,10 +96,14 @@ every 2 seconds and:
 
 1. **`ensurePeerSessions()`** — dials up to 8 outgoing peers, selected by
    score (highest first) from the known address pool.
-2. **Peer exchange** — on connecting to any peer, the node sends `get_peers`
-   and receives a `peers` frame. Discovered addresses are merged into the local
-   pool via `addPeerAddress()`, making them available for future dials. This
-   gives the network a gossip-style peer discovery mechanism.
+2. **Peer exchange** — on connecting to any peer, the node may send `get_peers`
+   and receive a `peers` frame. The call is gated by `shouldRequestPeers()`
+   against the current `AggregateStatusSnapshot`: while the node is not yet
+   `Healthy` (cold start, recovery after loss of all connections, Reconnecting /
+   Limited / Warning) the exchange runs and merges discovered addresses into the
+   local pool via `addPeerAddress()`; once `Healthy`, `get_peers` is skipped so
+   that steady-state reconnects do not re-issue it to every peer. See
+   [peer-discovery-conditional-get-peers.ru.md](peer-discovery-conditional-get-peers.ru.md) for the full policy.
 3. **Stale peer eviction** — every 10 minutes, peers with score ≤ −20 and no
    successful connection in the last 24 hours are pruned. Bootstrap peers and
    currently connected peers are never evicted.
@@ -133,10 +139,11 @@ peer's reputation to prevent cooldown bypass.
 4. Client signs the challenge with `ed25519` and sends `auth_session`.
    Server verifies; invalid signatures accumulate ban points (1 000 points
    → 24-hour IP ban).
-5. Session enters `servePeerSession()`: initial one-time sync
-   (`get_peers`, `fetch_contacts`, flush pending frames), then
-   steady-state with heartbeat pings every ~2 min and event-driven
-   push frames only (no periodic polling).
+5. Session enters `servePeerSession()`: initial one-time sync —
+   `fetch_contacts` and flush pending frames always run, `get_peers` is
+   sent conditionally via `shouldRequestPeers()` (skipped once aggregate
+   status is `Healthy`). Then steady-state with heartbeat pings every
+   ~2 min and event-driven push frames only (no periodic polling).
 
 **Inbound:**
 
@@ -192,9 +199,10 @@ sequenceDiagram
     A->>B: subscribe_inbox (topic="dm", recipient=A.address)
     B->>A: subscribed
 
-    Note over A,B: Phase 4: Initial Sync (one-time)
+    Note over A,B: Phase 4 — Initial Sync (one-time, get_peers is conditional)
 
-    A->>B: get_peers
+    Note right of A: shouldRequestPeers(aggregate status)<br/>true while not Healthy — send get_peers<br/>false once Healthy — skip
+    A->>B: get_peers (only if shouldRequestPeers)
     B->>A: peers [...]
     A->>B: fetch_contacts
     B->>A: contacts [...]
@@ -246,8 +254,10 @@ sequenceDiagram
   declared stalled and the connection is torn down. This bidirectional
   approach ensures each node has its own proof of liveness regardless of
   who initiated the TCP connection.
-- **Initial sync** — on connect only: `get_peers`, `fetch_contacts`,
-  flush pending frames. No periodic polling in steady-state.
+- **Initial sync** — on connect only: `fetch_contacts` and flush pending
+  frames always run; `get_peers` is sent conditionally via
+  `shouldRequestPeers()` (skipped once the node is `Healthy`). No periodic
+  polling in steady-state.
 - **Peer announcement** — when a new peer authenticates on an inbound
   connection, its advertised listen address is announced to all active
   outbound sessions via `announce_peer`. The frame includes the peer's
@@ -314,6 +324,22 @@ shown in the breakdown line.
 - `limited` — zero or one usable peer (stalled-only counts here too)
 - `warning` — usable peers exist but less than half of total
 - `healthy` — at least half of known peers are usable (2+)
+
+The aggregate status is materialized in the node layer
+(`Service.aggregateStatus`) and kept current by two mechanisms:
+event-driven recomputation on every per-peer state transition
+(`updatePeerStateLocked` → `refreshAggregateStatusLocked`) and a
+periodic recompute every 2 s from `bootstrapLoop` to catch time-based
+drift (peers silently aging from healthy → stalled) and pending queue
+changes. `NewService` performs an initial recompute after restoring
+health from disk so the value is correct from the first query.
+Desktop obtains the status through the `fetch_aggregate_status` local
+RPC command instead of computing it locally, keeping the node layer as
+the single source of truth. The domain type `domain.NetworkStatus` and
+the snapshot struct `domain.AggregateStatusSnapshot` live in
+`internal/core/domain/peer.go`.
+See [peer-discovery-conditional-get-peers.ru.md](peer-discovery-conditional-get-peers.ru.md)
+§ Шаг 2a for the design rationale.
 
 ### Message routing
 
@@ -705,6 +731,7 @@ sequenceDiagram
         New->>BS: TCP dial → hello
         BS-->>New: welcome (challenge, observed IP)
         New->>BS: auth_session (подписанный challenge)
+        Note over New: shouldRequestPeers true<br/>aggregate status ещё не Healthy<br/>отправляем get_peers
         New->>BS: get_peers
         BS-->>New: peers [P1, P2, ...]
         Note over New: addPeerAddress(P1)<br/>addPeerAddress(P2)
@@ -712,7 +739,8 @@ sequenceDiagram
 
     New->>P1: TCP dial → hello → auth
     P1-->>New: welcome
-    New->>P1: get_peers
+    Note over New: shouldRequestPeers переоценивается на сессию<br/>отправляем, пока не Healthy<br/>пропускаем после Healthy
+    New->>P1: get_peers (условно)
     P1-->>New: peers [BS, P2, P3, ...]
     Note over New: Мержит новые адреса<br/>в локальный пул
 
@@ -739,9 +767,15 @@ sequenceDiagram
 
 1. **`ensurePeerSessions()`** — устанавливает до 8 исходящих соединений,
    выбирая peer'ов по скору (наивысший первым).
-2. **Обмен peer'ами** — при подключении к peer'у нода отправляет `get_peers`
-   и получает фрейм `peers`. Обнаруженные адреса добавляются в локальный пул
-   через `addPeerAddress()`, что создаёт gossip-механизм обнаружения.
+2. **Обмен peer'ами** — при подключении к peer'у нода может отправить
+   `get_peers` и получить фрейм `peers`. Отправка управляется
+   `shouldRequestPeers()` на основе текущего `AggregateStatusSnapshot`: пока
+   нода ещё не `Healthy` (cold start, восстановление после потери всех
+   соединений, Reconnecting / Limited / Warning), обмен выполняется и
+   добавляет обнаруженные адреса в локальный пул через `addPeerAddress()`;
+   после достижения `Healthy` `get_peers` пропускается, чтобы reconnect в
+   steady-state не повторял его к каждому пиру. Политика описана в
+   [peer-discovery-conditional-get-peers.ru.md](peer-discovery-conditional-get-peers.ru.md).
 3. **Вычищение устаревших peer'ов** — каждые 10 минут удаляются peer'ы со
    скором ≤ −20 и без успешных подключений за последние 24 часа. Bootstrap-
    и текущие peer'ы никогда не удаляются.
@@ -775,8 +809,10 @@ sequenceDiagram
    Сервер проверяет; невалидные подписи накапливают ban-баллы (1 000 баллов
    → бан IP на 24 часа).
 5. Сессия переходит в `servePeerSession()`: однократная начальная
-   синхронизация (`get_peers`, `fetch_contacts`, flush pending фреймов),
-   затем steady-state с heartbeat-пингами каждые ~2 мин и только
+   синхронизация — `fetch_contacts` и flush pending-фреймов выполняются
+   всегда, `get_peers` отправляется условно через `shouldRequestPeers()`
+   (пропускается после достижения `Healthy`). Затем steady-state с
+   heartbeat-пингами каждые ~2 мин и только
    event-driven push-фреймами (без периодического polling).
 
 **Входящее:**
@@ -833,9 +869,10 @@ sequenceDiagram
     A->>B: subscribe_inbox (topic="dm", recipient=A.address)
     B->>A: subscribed
 
-    Note over A,B: Фаза 4: Начальная синхронизация (однократно)
+    Note over A,B: Фаза 4 — Начальная синхронизация (однократно, get_peers условно)
 
-    A->>B: get_peers
+    Note right of A: shouldRequestPeers(aggregate status)<br/>true пока не Healthy — шлём get_peers<br/>false после Healthy — пропускаем
+    A->>B: get_peers (только если shouldRequestPeers)
     B->>A: peers [...]
     A->>B: fetch_contacts
     B->>A: contacts [...]
@@ -887,9 +924,11 @@ sequenceDiagram
   соединение разрывается. Двусторонний подход гарантирует каждому узлу
   независимое подтверждение liveness, вне зависимости от того, кто
   инициировал TCP-соединение.
-- **Начальная синхронизация** — только при подключении: `get_peers`,
-  `fetch_contacts`, flush pending фреймов. В steady-state нет
-  периодического polling.
+- **Начальная синхронизация** — только при подключении: `fetch_contacts`
+  и flush pending фреймов выполняются всегда; `get_peers` отправляется
+  условно — решение принимает `shouldRequestPeers()` по текущему
+  aggregate status ноды (пропускается после достижения `Healthy`).
+  В steady-state нет периодического polling.
 - **Анонс peer'ов** — когда новый peer аутентифицируется через входящее
   соединение, его объявленный listen-адрес анонсируется всем активным
   исходящим сессиям через `announce_peer`. Фрейм включает `node_type`
@@ -959,6 +998,22 @@ sequenceDiagram
 - `limited` — ноль или один пригодный пир (stalled-only тоже попадает сюда)
 - `warning` — есть пригодные пиры, но менее половины от общего числа
 - `healthy` — как минимум половина известных пиров пригодна (2+)
+
+Агрегированный статус материализован в node layer
+(`Service.aggregateStatus`) и поддерживается актуальным двумя
+механизмами: event-driven пересчёт при каждом переходе per-peer state
+(`updatePeerStateLocked` → `refreshAggregateStatusLocked`) и
+периодический пересчёт каждые 2 с из `bootstrapLoop` для отлова
+time-based дрифта (пиры тихо стареют из healthy → stalled) и
+изменений pending queue. `NewService` выполняет начальный пересчёт
+после восстановления health с диска, чтобы значение было корректным
+с первого запроса. Desktop получает статус через локальную RPC-команду
+`fetch_aggregate_status` вместо локального вычисления, сохраняя node
+layer как единственный источник истины. Доменный тип
+`domain.NetworkStatus` и snapshot-структура
+`domain.AggregateStatusSnapshot` находятся в `internal/core/domain/peer.go`.
+См. [peer-discovery-conditional-get-peers.ru.md](peer-discovery-conditional-get-peers.ru.md)
+§ Шаг 2a — обоснование решения.
 
 ### Маршрутизация сообщений
 

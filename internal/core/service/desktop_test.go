@@ -616,6 +616,110 @@ func TestPeerHealthFromFrame(t *testing.T) {
 	}
 }
 
+// TestResolveAggregateStatus exercises the four error paths in the
+// fetch_aggregate_status compatibility/error logic:
+//
+//  1. Normal success: frame has AggregateStatus → non-nil result, no warning.
+//  2. Legacy node (unknown-command): expected fallback → nil result, no warning.
+//  3. Unexpected RPC error: regression → nil result, warning.
+//  4. Success but empty payload: wiring bug → nil result, warning.
+//
+// These paths have changed several times during step 2a. This test
+// guards the branching logic so future changes are caught immediately.
+func TestResolveAggregateStatus(t *testing.T) {
+	t.Parallel()
+
+	t.Run("normal success", func(t *testing.T) {
+		t.Parallel()
+		reply := protocol.Frame{
+			Type: "aggregate_status",
+			AggregateStatus: &protocol.AggregateStatusFrame{
+				Status:          "healthy",
+				UsablePeers:     3,
+				ConnectedPeers:  4,
+				TotalPeers:      5,
+				PendingMessages: 7,
+			},
+		}
+		result, warn := resolveAggregateStatus(reply, nil)
+		if result == nil {
+			t.Fatal("expected non-nil AggregateStatus for normal success")
+		}
+		if result.Status != "healthy" {
+			t.Errorf("status: got %q, want %q", result.Status, "healthy")
+		}
+		if result.UsablePeers != 3 {
+			t.Errorf("usable: got %d, want 3", result.UsablePeers)
+		}
+		if result.ConnectedPeers != 4 {
+			t.Errorf("connected: got %d, want 4", result.ConnectedPeers)
+		}
+		if result.TotalPeers != 5 {
+			t.Errorf("total: got %d, want 5", result.TotalPeers)
+		}
+		if result.PendingMessages != 7 {
+			t.Errorf("pending: got %d, want 7", result.PendingMessages)
+		}
+		if warn != "" {
+			t.Errorf("expected no warning for normal success, got %q", warn)
+		}
+	})
+
+	t.Run("legacy node unknown command", func(t *testing.T) {
+		t.Parallel()
+		result, warn := resolveAggregateStatus(protocol.Frame{}, protocol.ErrUnknownCommand)
+		if result != nil {
+			t.Fatalf("expected nil result for legacy node, got %+v", result)
+		}
+		if warn != "" {
+			t.Errorf("expected no warning for legacy node fallback, got %q", warn)
+		}
+	})
+
+	t.Run("unexpected RPC error", func(t *testing.T) {
+		t.Parallel()
+		result, warn := resolveAggregateStatus(protocol.Frame{}, protocol.ErrProtocol)
+		if result != nil {
+			t.Fatalf("expected nil result for unexpected error, got %+v", result)
+		}
+		if warn == "" {
+			t.Fatal("expected warning for unexpected RPC error, got empty string")
+		}
+		if !strings.Contains(warn, "failed unexpectedly") {
+			t.Errorf("warning should mention unexpected failure, got %q", warn)
+		}
+	})
+
+	t.Run("success but empty payload", func(t *testing.T) {
+		t.Parallel()
+		// Command returned a frame without AggregateStatus — wiring bug.
+		reply := protocol.Frame{Type: "wrong_type"}
+		result, warn := resolveAggregateStatus(reply, nil)
+		if result != nil {
+			t.Fatalf("expected nil result for empty payload, got %+v", result)
+		}
+		if warn == "" {
+			t.Fatal("expected warning for malformed success reply, got empty string")
+		}
+		if !strings.Contains(warn, "lacks AggregateStatus payload") {
+			t.Errorf("warning should mention missing payload, got %q", warn)
+		}
+	})
+
+	t.Run("wrapped unknown command still recognized", func(t *testing.T) {
+		t.Parallel()
+		// errors.Is must traverse wrapping.
+		wrapped := fmt.Errorf("dispatch: %w", protocol.ErrUnknownCommand)
+		result, warn := resolveAggregateStatus(protocol.Frame{}, wrapped)
+		if result != nil {
+			t.Fatalf("expected nil result for wrapped unknown-command, got %+v", result)
+		}
+		if warn != "" {
+			t.Errorf("expected no warning for wrapped unknown-command, got %q", warn)
+		}
+	})
+}
+
 func TestParseOptionalTime(t *testing.T) {
 	t.Parallel()
 

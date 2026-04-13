@@ -277,6 +277,7 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_network_stats":     "fetchNetworkStats",
 		"add_peer":                "addPeer",
 		"fetch_reachable_ids":     "fetchReachableIds",
+		"fetch_aggregate_status":  "fetchAggregateStatus",
 		"fetch_relay_status":      "fetchRelayStatus",
 		"fetch_identities":        "fetchIdentities",
 		"fetch_contacts":          "fetchContacts",
@@ -450,7 +451,8 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 	)
 }
 
-// RegisterNetworkCommands registers getPeers, fetchPeerHealth, addPeer, fetchReachableIds.
+// RegisterNetworkCommands registers getPeers, fetchPeerHealth, fetchNetworkStats,
+// addPeer, fetchReachableIds, fetchAggregateStatus.
 func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "getPeers", Description: "Get list of connected peers", Category: "network"},
@@ -495,6 +497,13 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 		CommandInfo{Name: "fetchReachableIds", Description: "Get identities reachable via mesh routing", Category: "network"},
 		func(req CommandRequest) CommandResponse {
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"}))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "fetchAggregateStatus", Description: "Get aggregate network health status (single source of truth for policy and UI)", Category: "network"},
+		func(req CommandRequest) CommandResponse {
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_aggregate_status"}))
 		},
 	)
 }

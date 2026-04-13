@@ -2,6 +2,7 @@ package node
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -226,6 +227,12 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 // production the maps are set up by New(), but tests that create a bare
 // Service need this helper.
 func (s *Service) initMaps() {
+	// Match the production NewService default: keep runCtx non-nil so that
+	// code paths deriving ctx from s.runCtx (sender-key recovery etc.)
+	// do not panic in tests that construct &Service{} directly.
+	if s.runCtx == nil {
+		s.runCtx = context.Background()
+	}
 	s.topics = make(map[string][]protocol.Envelope)
 	s.seen = make(map[string]struct{})
 	s.seenReceipts = make(map[string]struct{})

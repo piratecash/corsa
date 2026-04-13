@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -143,7 +144,8 @@ type NodeStatus struct {
 	Contacts         map[string]Contact
 	Peers            []string
 	PeerHealth       []PeerHealth
-	ReachableIDs     map[domain.PeerIdentity]bool // identity reachable via routing table (at least one live route exists)
+	AggregateStatus  *AggregateStatus                       // node-computed aggregate network health; nil when node does not support the command yet
+	ReachableIDs     map[domain.PeerIdentity]bool           // identity reachable via routing table (at least one live route exists)
 	Stored           string
 	Messages         []string
 	MessageIDs       []string
@@ -155,6 +157,17 @@ type NodeStatus struct {
 	Gazeta           []string
 	Error            string
 	CheckedAt        time.Time
+}
+
+// AggregateStatus holds the node-computed aggregate network health snapshot.
+// Desktop consumes this value directly instead of recomputing it from
+// per-peer states, keeping the node layer as the single source of truth.
+type AggregateStatus struct {
+	Status          string
+	UsablePeers     int
+	ConnectedPeers  int
+	TotalPeers      int
+	PendingMessages int
 }
 
 func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service) *DesktopClient {
@@ -371,6 +384,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		status.CheckedAt = time.Now()
 		return status
 	}
+	aggregateStatusReply, aggregateStatusErr := c.localRequestFrame(protocol.Frame{Type: "fetch_aggregate_status"})
 	pendingReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
 	if err != nil {
 		status.Error = err.Error()
@@ -446,6 +460,11 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Contacts = contacts
 	status.Peers = peers
 	status.PeerHealth = peerHealthFromFrame(peerHealthReply)
+	resolvedStatus, resolveWarn := resolveAggregateStatus(aggregateStatusReply, aggregateStatusErr)
+	if resolveWarn != "" {
+		log.Warn().Msg(resolveWarn)
+	}
+	status.AggregateStatus = resolvedStatus
 	status.ReachableIDs = c.buildReachableIDs()
 	status.Messages = stringifyMessages(messages)
 	status.MessageIDs = messageIDs
@@ -529,6 +548,53 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 		})
 	}
 	return items
+}
+
+// aggregateStatusFromFrame converts the protocol frame returned by
+// fetch_aggregate_status into the service-layer AggregateStatus struct.
+// Returns nil when the frame carries no aggregate status data (e.g. the
+// node version does not support the command yet).
+func aggregateStatusFromFrame(frame protocol.Frame) *AggregateStatus {
+	if frame.AggregateStatus == nil {
+		return nil
+	}
+	return &AggregateStatus{
+		Status:          frame.AggregateStatus.Status,
+		UsablePeers:     frame.AggregateStatus.UsablePeers,
+		ConnectedPeers:  frame.AggregateStatus.ConnectedPeers,
+		TotalPeers:      frame.AggregateStatus.TotalPeers,
+		PendingMessages: frame.AggregateStatus.PendingMessages,
+	}
+}
+
+// resolveAggregateStatus interprets the fetch_aggregate_status RPC result
+// and classifies it into one of four outcomes:
+//
+//  1. Normal success         → non-nil *AggregateStatus, empty warning.
+//  2. unknown-command (legacy)→ nil *AggregateStatus, empty warning (expected fallback).
+//  3. Unexpected RPC error   → nil *AggregateStatus, warning describing the failure.
+//  4. Success but no payload → nil *AggregateStatus, warning about malformed reply.
+//
+// The function is intentionally side-effect-free so that the branching
+// logic can be tested without a live node.
+func resolveAggregateStatus(reply protocol.Frame, err error) (*AggregateStatus, string) {
+	if err != nil {
+		if errors.Is(err, protocol.ErrUnknownCommand) {
+			// Case 2: older node — expected, silent fallback.
+			return nil, ""
+		}
+		// Case 3: unexpected RPC error.
+		return nil, fmt.Sprintf("fetch_aggregate_status failed unexpectedly: %v", err)
+	}
+
+	result := aggregateStatusFromFrame(reply)
+	if result == nil {
+		// Case 4: command succeeded but frame has no AggregateStatus payload.
+		return nil, fmt.Sprintf("fetch_aggregate_status returned success but frame (type=%q) lacks AggregateStatus payload", reply.Type)
+	}
+
+	// Case 1: normal success.
+	return result, ""
 }
 
 func parseOptionalTime(value string) *time.Time {

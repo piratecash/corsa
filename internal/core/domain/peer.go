@@ -77,6 +77,57 @@ type PeerSessionRef struct {
 	AuthOK       bool
 }
 
+// ---------------------------------------------------------------------------
+// Aggregate network status
+// ---------------------------------------------------------------------------
+
+// NetworkStatus represents the aggregate health of the node's network
+// connectivity. It is the single source of truth for policy decisions
+// (e.g. whether to request peers during initial sync) and for Desktop
+// UI rendering. Desktop must obtain this value from the node layer via
+// the fetch_aggregate_status command rather than computing it locally.
+//
+// See docs/mesh.md § Aggregate Status and
+// docs/peer-discovery-conditional-get-peers.ru.md § Шаг 2a.
+type NetworkStatus string
+
+const (
+	// NetworkStatusOffline — no known peers exist.
+	NetworkStatusOffline NetworkStatus = "offline"
+	// NetworkStatusReconnecting — all peers are reconnecting, none connected.
+	NetworkStatusReconnecting NetworkStatus = "reconnecting"
+	// NetworkStatusLimited — zero or one usable peer (healthy+degraded).
+	NetworkStatusLimited NetworkStatus = "limited"
+	// NetworkStatusWarning — usable peers exist but less than half of connected are usable.
+	NetworkStatusWarning NetworkStatus = "warning"
+	// NetworkStatusHealthy — at least half of connected peers are usable (minimum 2).
+	NetworkStatusHealthy NetworkStatus = "healthy"
+)
+
+// String returns the raw status label.
+func (s NetworkStatus) String() string { return string(s) }
+
+// IsHealthy reports whether the aggregate network status is in the steady-state
+// healthy mode. Policy helpers use this to decide whether peer exchange
+// (get_peers) can be skipped during initial sync.
+func (s NetworkStatus) IsHealthy() bool { return s == NetworkStatusHealthy }
+
+// AggregateStatusSnapshot is an immutable point-in-time snapshot of the
+// node's aggregate network health. It is returned by the node layer to
+// Desktop and consumed by internal policy helpers.
+type AggregateStatusSnapshot struct {
+	// Status is the computed aggregate network health label.
+	Status NetworkStatus
+	// UsablePeers is the count of healthy + degraded peers that can route messages.
+	UsablePeers int
+	// ConnectedPeers is usable + stalled (TCP-connected but not routing).
+	ConnectedPeers int
+	// TotalPeers is connected + reconnecting.
+	TotalPeers int
+	// PendingMessages is the total number of unsent pending messages across all peers.
+	PendingMessages int
+}
+
 // InboundPeerRef describes a live inbound connection that has completed
 // (or is completing) the hello/auth handshake.
 type InboundPeerRef struct {

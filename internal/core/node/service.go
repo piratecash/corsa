@@ -124,6 +124,13 @@ type Service struct {
 	done                  chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
 	primeBootstrapOnRun   bool                                      // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
 
+	// aggregateStatus is the materialized aggregate network health of the
+	// node. It is recomputed on every per-peer state transition via
+	// refreshAggregateStatusLocked and is the single source of truth for
+	// policy decisions (shouldRequestPeers) and for the Desktop UI.
+	// Protected by s.mu.
+	aggregateStatus domain.AggregateStatusSnapshot
+
 	// runCtx is the context passed to Run(). Stored so that callbacks
 	// (e.g. onCMSessionEstablished) can start goroutines bound to the
 	// Service lifecycle instead of context.Background().
@@ -461,6 +468,12 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	}
 
 	svc := &Service{
+		// Default lifecycle context: replaced by Run(ctx) with the real
+		// cancellable ctx. The default prevents nil-deref in code paths
+		// (e.g. handleInboundPushMessage sender-key recovery) that derive
+		// a timeout from s.runCtx before Run() has been called — notably in
+		// unit tests that exercise handlers directly without Run().
+		runCtx:                context.Background(),
 		identity:              id,
 		cfg:                   cfg,
 		selfBoxSig:            selfContact.BoxSignature,
@@ -503,6 +516,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		bannedIPSet:           make(map[string]domain.BannedIPEntry),
+		aggregateStatus:       domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                  make(chan struct{}),
 	}
 
@@ -635,6 +649,14 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	svc.connLimiter = newConnRateLimiter()
 	svc.cmdLimiter = newCommandRateLimiter()
 	svc.inboundByIP = make(map[string]int)
+
+	// Compute initial aggregate status from restored health entries so that
+	// fetch_aggregate_status returns a correct value immediately after
+	// restart, before any peer events arrive. Without this, the status
+	// stays at the zero-value "offline" even when restored peers are in
+	// reconnecting state — which mis-drives bootstrap policy decisions.
+	svc.refreshAggregateStatusLocked()
+
 	return svc
 }
 
@@ -1399,6 +1421,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.peerHealthFrame()
 	case "fetch_network_stats":
 		return s.networkStatsFrame()
+	case "fetch_aggregate_status":
+		return s.aggregateStatusFrame()
 	case "fetch_pending_messages":
 		return s.pendingMessagesFrame(frame.Topic)
 	case "import_contacts":
@@ -3505,8 +3529,21 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 	stored, _, errCode := s.storeIncomingMessage(msg, true)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 		if peerAddr != "" {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-			s.syncPeer(refreshCtx, peerAddr)
+			// Narrow sender-key recovery: only contact/key sync, no peer
+			// exchange. See docs/peer-discovery-conditional-get-peers.ru.md
+			// § Шаг 5 — частная ошибка (unknown sender key) не должна
+			// превращаться в eager peer exchange.
+			//
+			// Use s.runCtx as the parent: this handler runs on the inbound
+			// read loop started by handleConn, which is itself bounded by
+			// the service lifecycle. Synthesising context.Background() here
+			// would discard shutdown cancellation — forbidden by CLAUDE.md.
+			refreshCtx, cancel := context.WithTimeout(s.runCtx, 1500*time.Millisecond)
+			// Narrow recovery: always skip peer exchange. Logged so this path
+			// is visible in observability alongside the other skip sites.
+			// See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+			s.logPeerExchangeSkipped(peerExchangePathUnknownSenderRecovery, peerAddr, peerExchangeSkipByNarrowRecovery)
+			s.syncPeer(refreshCtx, peerAddr, false)
 			cancel()
 			stored, _, _ = s.storeIncomingMessage(msg, true)
 		}

@@ -454,3 +454,106 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 		t.Fatal("forged non-DM message must not be stored")
 	}
 }
+
+// TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers pins the
+// second forced-refresh insertion point exercised inside
+// handleInboundPushMessage. When an inbound DM push_message fails with
+// ErrCodeUnknownSenderKey the handler must trigger the narrow sender-key
+// recovery (fetch_contacts only) against the originating relay peer and
+// must never escalate into broad peer exchange (get_peers).
+//
+// This is a direct regression guard — it invokes handleInboundPushMessage
+// end-to-end and inspects the frames observed by the peer on the recovery
+// dial. Future refactors that accidentally re-enable peer exchange on this
+// path will fail here even if the lower-level syncSenderKeys tests still
+// pass. See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 5.
+func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	receivedCh := make(chan []string, 1)
+	go func() {
+		receivedCh <- syncPeerMockServer(t, ln, []string{"10.0.0.42:9000"})
+	}()
+
+	svc := newTestService(t, config.NodeTypeFull)
+
+	peerConn, _ := net.Pipe()
+	defer func() { _ = peerConn.Close() }()
+
+	peerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+
+	// The NetCore Address points at the mock listener so the recovery dial
+	// inside handleInboundPushMessage lands on our observable server.
+	relayAddr := domain.PeerAddress(ln.Addr().String())
+	svc.mu.Lock()
+	pc := newNetCore(connID(17), peerConn, Inbound, NetCoreOpts{
+		Address:  relayAddr,
+		Identity: domain.PeerIdentity(peerID.Address),
+	})
+	svc.inboundNetCores[peerConn] = pc
+	svc.inboundConns[peerConn] = struct{}{}
+	svc.mu.Unlock()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	// DM with an unknown sender: bypasses the non-DM gate, fails inside
+	// storeIncomingMessage with ErrCodeUnknownSenderKey, triggers the
+	// narrow recovery dial to relayAddr.
+	svc.handleInboundPushMessage(peerConn, protocol.Frame{
+		Type:  "push_message",
+		Topic: "dm",
+		Item: &protocol.MessageFrame{
+			ID:         "dm-recovery-regression-1",
+			Sender:     "unknown-dm-sender-for-recovery",
+			Recipient:  svc.identity.Address,
+			Flag:       string(protocol.MessageFlagSenderDelete),
+			CreatedAt:  ts,
+			TTLSeconds: 0,
+			Body:       "encrypted-body-placeholder",
+		},
+	})
+
+	var received []string
+	select {
+	case received = <-receivedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery dial did not reach mock server within 5s")
+	}
+
+	// Contract: the recovery must send hello + fetch_contacts only.
+	// Any get_peers in this sequence is a regression — a future refactor
+	// re-broadening the inbound forced-refresh path.
+	expectedTypes := []string{"hello", "fetch_contacts"}
+	if len(received) != len(expectedTypes) {
+		t.Fatalf("expected frames %v, got %v", expectedTypes, received)
+	}
+	for i, exp := range expectedTypes {
+		if received[i] != exp {
+			t.Errorf("frame[%d]: expected %q, got %q (full sequence: %v)", i, exp, received[i], received)
+		}
+	}
+	for _, f := range received {
+		if f == "get_peers" {
+			t.Fatalf("get_peers must not appear during inbound DM unknown-sender recovery, got sequence: %v", received)
+		}
+	}
+
+	// Even though the mock was primed with a peer address to return, the
+	// narrow recovery must not have requested peers — so nothing should have
+	// been imported into svc.peers on this path.
+	svc.mu.RLock()
+	peerCount := len(svc.peers)
+	svc.mu.RUnlock()
+	if peerCount != 0 {
+		t.Fatalf("narrow recovery must not import peers, got %d", peerCount)
+	}
+}
