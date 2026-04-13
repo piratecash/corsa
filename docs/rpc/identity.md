@@ -11,13 +11,13 @@ All known identities (ed25519 fingerprints observed on the network).
 #### CLI
 
 ```bash
-corsa-cli fetch_identities
+corsa-cli fetchIdentities
 ```
 
 #### Console
 
 ```
-fetch_identities
+fetchIdentities
 ```
 
 ### POST /rpc/v1/identity/contacts
@@ -27,13 +27,13 @@ All contacts (identities with associated metadata such as display name).
 #### CLI
 
 ```bash
-corsa-cli fetch_contacts
+corsa-cli fetchContacts
 ```
 
 #### Console
 
 ```
-fetch_contacts
+fetchContacts
 ```
 
 ### POST /rpc/v1/identity/trusted_contacts
@@ -43,13 +43,13 @@ Trusted contacts (TOFU pinned — identity verified on first contact and locked)
 #### CLI
 
 ```bash
-corsa-cli fetch_trusted_contacts
+corsa-cli fetchTrustedContacts
 ```
 
 #### Console
 
 ```
-fetch_trusted_contacts
+fetchTrustedContacts
 ```
 
 ---
@@ -65,13 +65,13 @@ fetch_trusted_contacts
 #### CLI
 
 ```bash
-corsa-cli fetch_identities
+corsa-cli fetchIdentities
 ```
 
 #### Консоль
 
 ```
-fetch_identities
+fetchIdentities
 ```
 
 ### POST /rpc/v1/identity/contacts
@@ -81,13 +81,13 @@ fetch_identities
 #### CLI
 
 ```bash
-corsa-cli fetch_contacts
+corsa-cli fetchContacts
 ```
 
 #### Консоль
 
 ```
-fetch_contacts
+fetchContacts
 ```
 
 ### POST /rpc/v1/identity/trusted_contacts
@@ -97,11 +97,11 @@ fetch_contacts
 #### CLI
 
 ```bash
-corsa-cli fetch_trusted_contacts
+corsa-cli fetchTrustedContacts
 ```
 
 #### Консоль
 
 ```
-fetch_trusted_contacts
+fetchTrustedContacts
 ```

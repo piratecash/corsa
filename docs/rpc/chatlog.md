@@ -19,10 +19,10 @@ Request: `{"topic": "dm", "peer_address": "address"}`
 
 ```bash
 # Positional arguments (topic peer_address)
-corsa-cli fetch_chatlog dm 10.0.0.5:64646
+corsa-cli fetchChatlog dm 10.0.0.5:64646
 
 # Named arguments
-corsa-cli fetch_chatlog topic=dm peer_address=10.0.0.5:64646
+corsa-cli fetchChatlog topic=dm peer_address=10.0.0.5:64646
 
 # JSON
 corsa-cli '{"type": "fetch_chatlog", "topic": "dm", "address": "10.0.0.5:64646"}'
@@ -33,7 +33,7 @@ Note: JSON wire format uses `address`, the RPC handler expects `peer_address`. T
 #### Console
 
 ```
-fetch_chatlog dm 10.0.0.5:64646
+fetchChatlog dm 10.0.0.5:64646
 ```
 
 ### POST /rpc/v1/chatlog/previews
@@ -43,13 +43,13 @@ Last message from each peer. No arguments.
 #### CLI
 
 ```bash
-corsa-cli fetch_chatlog_previews
+corsa-cli fetchChatlogPreviews
 ```
 
 #### Console
 
 ```
-fetch_chatlog_previews
+fetchChatlogPreviews
 ```
 
 ### POST /rpc/v1/chatlog/conversations
@@ -59,13 +59,13 @@ Metadata for all conversations. No arguments.
 #### CLI
 
 ```bash
-corsa-cli fetch_conversations
+corsa-cli fetchConversations
 ```
 
 #### Console
 
 ```
-fetch_conversations
+fetchConversations
 ```
 
 ---
@@ -89,10 +89,10 @@ fetch_conversations
 
 ```bash
 # Позиционные аргументы (topic peer_address)
-corsa-cli fetch_chatlog dm 10.0.0.5:64646
+corsa-cli fetchChatlog dm 10.0.0.5:64646
 
 # Именованные аргументы
-corsa-cli fetch_chatlog topic=dm peer_address=10.0.0.5:64646
+corsa-cli fetchChatlog topic=dm peer_address=10.0.0.5:64646
 
 # JSON
 corsa-cli '{"type": "fetch_chatlog", "topic": "dm", "address": "10.0.0.5:64646"}'
@@ -103,7 +103,7 @@ corsa-cli '{"type": "fetch_chatlog", "topic": "dm", "address": "10.0.0.5:64646"}
 #### Консоль
 
 ```
-fetch_chatlog dm 10.0.0.5:64646
+fetchChatlog dm 10.0.0.5:64646
 ```
 
 ### POST /rpc/v1/chatlog/previews
@@ -113,13 +113,13 @@ fetch_chatlog dm 10.0.0.5:64646
 #### CLI
 
 ```bash
-corsa-cli fetch_chatlog_previews
+corsa-cli fetchChatlogPreviews
 ```
 
 #### Консоль
 
 ```
-fetch_chatlog_previews
+fetchChatlogPreviews
 ```
 
 ### POST /rpc/v1/chatlog/conversations
@@ -129,11 +129,11 @@ fetch_chatlog_previews
 #### CLI
 
 ```bash
-corsa-cli fetch_conversations
+corsa-cli fetchConversations
 ```
 
 #### Консоль
 
 ```
-fetch_conversations
+fetchConversations
 ```

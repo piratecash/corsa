@@ -12,11 +12,11 @@ Request: `{"topic": "global"}`
 
 ```bash
 # Positional (topic defaults to "global")
-corsa-cli fetch_messages
-corsa-cli fetch_messages dm
+corsa-cli fetchMessages
+corsa-cli fetchMessages dm
 
 # Named
-corsa-cli fetch_messages topic=dm
+corsa-cli fetchMessages topic=dm
 
 # JSON
 corsa-cli '{"type": "fetch_messages", "topic": "dm"}'
@@ -25,8 +25,8 @@ corsa-cli '{"type": "fetch_messages", "topic": "dm"}'
 #### Console
 
 ```
-fetch_messages
-fetch_messages dm
+fetchMessages
+fetchMessages dm
 ```
 
 ### POST /rpc/v1/message/ids
@@ -38,15 +38,15 @@ Request: `{"topic": "global"}`
 #### CLI
 
 ```bash
-corsa-cli fetch_message_ids
-corsa-cli fetch_message_ids dm
+corsa-cli fetchMessageIds
+corsa-cli fetchMessageIds dm
 ```
 
 #### Console
 
 ```
-fetch_message_ids
-fetch_message_ids dm
+fetchMessageIds
+fetchMessageIds dm
 ```
 
 ### POST /rpc/v1/message/get
@@ -59,16 +59,16 @@ Request: `{"topic": "dm", "id": "message-uuid"}`
 
 ```bash
 # Positional (topic id)
-corsa-cli fetch_message dm 550e8400-e29b-41d4-a716-446655440001
+corsa-cli fetchMessage dm 550e8400-e29b-41d4-a716-446655440001
 
 # Named
-corsa-cli fetch_message topic=dm id=550e8400-e29b-41d4-a716-446655440001
+corsa-cli fetchMessage topic=dm id=550e8400-e29b-41d4-a716-446655440001
 ```
 
 #### Console
 
 ```
-fetch_message dm 550e8400-e29b-41d4-a716-446655440001
+fetchMessage dm 550e8400-e29b-41d4-a716-446655440001
 ```
 
 ### POST /rpc/v1/message/inbox
@@ -81,18 +81,18 @@ Request: `{"topic": "dm", "recipient": "address (optional, defaults to self)"}`
 
 ```bash
 # Positional (topic defaults to "dm", recipient optional)
-corsa-cli fetch_inbox
-corsa-cli fetch_inbox dm a1b2c3d4...
+corsa-cli fetchInbox
+corsa-cli fetchInbox dm a1b2c3d4...
 
 # Named
-corsa-cli fetch_inbox topic=dm recipient=a1b2c3d4...
+corsa-cli fetchInbox topic=dm recipient=a1b2c3d4...
 ```
 
 #### Console
 
 ```
-fetch_inbox
-fetch_inbox dm a1b2c3d4...
+fetchInbox
+fetchInbox dm a1b2c3d4...
 ```
 
 ### POST /rpc/v1/message/pending
@@ -104,15 +104,15 @@ Request: `{"topic": "dm"}`
 #### CLI
 
 ```bash
-corsa-cli fetch_pending_messages
-corsa-cli fetch_pending_messages dm
+corsa-cli fetchPendingMessages
+corsa-cli fetchPendingMessages dm
 ```
 
 #### Console
 
 ```
-fetch_pending_messages
-fetch_pending_messages dm
+fetchPendingMessages
+fetchPendingMessages dm
 ```
 
 ### POST /rpc/v1/message/receipts
@@ -124,15 +124,15 @@ Request: `{"recipient": "address (optional, defaults to self)"}`
 #### CLI
 
 ```bash
-corsa-cli fetch_delivery_receipts
-corsa-cli fetch_delivery_receipts a1b2c3d4...
+corsa-cli fetchDeliveryReceipts
+corsa-cli fetchDeliveryReceipts a1b2c3d4...
 ```
 
 #### Console
 
 ```
-fetch_delivery_receipts
-fetch_delivery_receipts a1b2c3d4...
+fetchDeliveryReceipts
+fetchDeliveryReceipts a1b2c3d4...
 ```
 
 ### POST /rpc/v1/message/dm_headers
@@ -142,13 +142,13 @@ Fetch direct message headers. No arguments.
 #### CLI
 
 ```bash
-corsa-cli fetch_dm_headers
+corsa-cli fetchDmHeaders
 ```
 
 #### Console
 
 ```
-fetch_dm_headers
+fetchDmHeaders
 ```
 
 ### POST /rpc/v1/message/send_dm
@@ -169,19 +169,19 @@ Response: `{"status": "pending", "to": "address"}`. The message is accepted for 
 
 ```bash
 # Positional (to body...) — reply_to is not available in positional mode
-corsa-cli send_dm a1b2c3d4... hello world
+corsa-cli sendDm a1b2c3d4... hello world
 
 # Named
-corsa-cli send_dm to=a1b2c3d4... body="hello world"
+corsa-cli sendDm to=a1b2c3d4... body="hello world"
 
 # Named with reply
-corsa-cli send_dm to=a1b2c3d4... body="I agree" reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e
+corsa-cli sendDm to=a1b2c3d4... body="I agree" reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e
 
 # JSON (command name first, single JSON argument with fields)
-corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "hello world"}'
+corsa-cli sendDm '{"to": "a1b2c3d4...", "body": "hello world"}'
 
 # JSON with reply
-corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "I agree", "reply_to": "e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e"}'
+corsa-cli sendDm '{"to": "a1b2c3d4...", "body": "I agree", "reply_to": "e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e"}'
 ```
 
 Note: JSON wire format uses `recipient`, the RPC handler expects `to`. The `normalizeFrameArgs` layer maps `recipient` → `to` automatically when pasting wire frames into the console. The `reply_to` field is only available via named args or JSON — positional mode joins all tokens after `<to>` into `body`. The `reply_to` value is encrypted inside the PlainMessage envelope — the relay server never sees it.
@@ -189,7 +189,7 @@ Note: JSON wire format uses `recipient`, the RPC handler expects `to`. The `norm
 #### Console
 
 ```
-send_dm a1b2c3d4... hello world
+sendDm a1b2c3d4... hello world
 ```
 
 ---
@@ -206,18 +206,18 @@ send_dm a1b2c3d4... hello world
 
 ```bash
 # Позиционные (topic по умолчанию "global")
-corsa-cli fetch_messages
-corsa-cli fetch_messages dm
+corsa-cli fetchMessages
+corsa-cli fetchMessages dm
 
 # Именованные
-corsa-cli fetch_messages topic=dm
+corsa-cli fetchMessages topic=dm
 ```
 
 #### Консоль
 
 ```
-fetch_messages
-fetch_messages dm
+fetchMessages
+fetchMessages dm
 ```
 
 ### POST /rpc/v1/message/ids
@@ -229,15 +229,15 @@ fetch_messages dm
 #### CLI
 
 ```bash
-corsa-cli fetch_message_ids
-corsa-cli fetch_message_ids dm
+corsa-cli fetchMessageIds
+corsa-cli fetchMessageIds dm
 ```
 
 #### Консоль
 
 ```
-fetch_message_ids
-fetch_message_ids dm
+fetchMessageIds
+fetchMessageIds dm
 ```
 
 ### POST /rpc/v1/message/get
@@ -250,16 +250,16 @@ fetch_message_ids dm
 
 ```bash
 # Позиционные (topic id)
-corsa-cli fetch_message dm 550e8400-e29b-41d4-a716-446655440001
+corsa-cli fetchMessage dm 550e8400-e29b-41d4-a716-446655440001
 
 # Именованные
-corsa-cli fetch_message topic=dm id=550e8400-e29b-41d4-a716-446655440001
+corsa-cli fetchMessage topic=dm id=550e8400-e29b-41d4-a716-446655440001
 ```
 
 #### Консоль
 
 ```
-fetch_message dm 550e8400-e29b-41d4-a716-446655440001
+fetchMessage dm 550e8400-e29b-41d4-a716-446655440001
 ```
 
 ### POST /rpc/v1/message/inbox
@@ -272,18 +272,18 @@ fetch_message dm 550e8400-e29b-41d4-a716-446655440001
 
 ```bash
 # Позиционные (topic по умолчанию "dm", recipient опционально)
-corsa-cli fetch_inbox
-corsa-cli fetch_inbox dm a1b2c3d4...
+corsa-cli fetchInbox
+corsa-cli fetchInbox dm a1b2c3d4...
 
 # Именованные
-corsa-cli fetch_inbox topic=dm recipient=a1b2c3d4...
+corsa-cli fetchInbox topic=dm recipient=a1b2c3d4...
 ```
 
 #### Консоль
 
 ```
-fetch_inbox
-fetch_inbox dm a1b2c3d4...
+fetchInbox
+fetchInbox dm a1b2c3d4...
 ```
 
 ### POST /rpc/v1/message/pending
@@ -295,15 +295,15 @@ fetch_inbox dm a1b2c3d4...
 #### CLI
 
 ```bash
-corsa-cli fetch_pending_messages
-corsa-cli fetch_pending_messages dm
+corsa-cli fetchPendingMessages
+corsa-cli fetchPendingMessages dm
 ```
 
 #### Консоль
 
 ```
-fetch_pending_messages
-fetch_pending_messages dm
+fetchPendingMessages
+fetchPendingMessages dm
 ```
 
 ### POST /rpc/v1/message/receipts
@@ -315,15 +315,15 @@ fetch_pending_messages dm
 #### CLI
 
 ```bash
-corsa-cli fetch_delivery_receipts
-corsa-cli fetch_delivery_receipts a1b2c3d4...
+corsa-cli fetchDeliveryReceipts
+corsa-cli fetchDeliveryReceipts a1b2c3d4...
 ```
 
 #### Консоль
 
 ```
-fetch_delivery_receipts
-fetch_delivery_receipts a1b2c3d4...
+fetchDeliveryReceipts
+fetchDeliveryReceipts a1b2c3d4...
 ```
 
 ### POST /rpc/v1/message/dm_headers
@@ -333,13 +333,13 @@ fetch_delivery_receipts a1b2c3d4...
 #### CLI
 
 ```bash
-corsa-cli fetch_dm_headers
+corsa-cli fetchDmHeaders
 ```
 
 #### Консоль
 
 ```
-fetch_dm_headers
+fetchDmHeaders
 ```
 
 ### POST /rpc/v1/message/send_dm
@@ -360,19 +360,19 @@ fetch_dm_headers
 
 ```bash
 # Позиционные (to body...) — reply_to недоступен в позиционном режиме
-corsa-cli send_dm a1b2c3d4... hello world
+corsa-cli sendDm a1b2c3d4... hello world
 
 # Именованные
-corsa-cli send_dm to=a1b2c3d4... body="hello world"
+corsa-cli sendDm to=a1b2c3d4... body="hello world"
 
 # Именованные с ответом
-corsa-cli send_dm to=a1b2c3d4... body="Согласен" reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e
+corsa-cli sendDm to=a1b2c3d4... body="Согласен" reply_to=e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e
 
 # JSON (имя команды первым, затем один JSON-аргумент с полями)
-corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "hello world"}'
+corsa-cli sendDm '{"to": "a1b2c3d4...", "body": "hello world"}'
 
 # JSON с ответом
-corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "Согласен", "reply_to": "e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e"}'
+corsa-cli sendDm '{"to": "a1b2c3d4...", "body": "Согласен", "reply_to": "e4a7c391-5f02-4b8a-9d1e-0f3a6b7c8d2e"}'
 ```
 
 Примечание: JSON wire-формат использует `recipient`, RPC-обработчик ожидает `to`. Слой `normalizeFrameArgs` автоматически маппит `recipient` → `to` при вставке wire-фреймов в консоль. Поле `reply_to` доступно только через именованные аргументы или JSON — в позиционном режиме все токены после `<to>` объединяются в `body`. Значение `reply_to` шифруется внутри PlainMessage-конверта — relay-сервер его не видит.
@@ -380,5 +380,5 @@ corsa-cli send_dm '{"to": "a1b2c3d4...", "body": "Согласен", "reply_to":
 #### Консоль
 
 ```
-send_dm a1b2c3d4... hello world
+sendDm a1b2c3d4... hello world
 ```

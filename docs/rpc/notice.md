@@ -11,13 +11,13 @@ Notices are broadcast messages encrypted with the network-wide Gazeta key. They 
 #### CLI
 
 ```bash
-corsa-cli fetch_notices
+corsa-cli fetchNotices
 ```
 
 #### Console
 
 ```
-fetch_notices
+fetchNotices
 ```
 
 ---
@@ -33,11 +33,11 @@ fetch_notices
 #### CLI
 
 ```bash
-corsa-cli fetch_notices
+corsa-cli fetchNotices
 ```
 
 #### Консоль
 
 ```
-fetch_notices
+fetchNotices
 ```

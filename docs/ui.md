@@ -61,8 +61,8 @@ sequenceDiagram
     Note over Router: Empty peers, cache,<br/>32-slot event channel
 
     App->>Cmd: NewCommandTable()
-    App->>Cmd: RegisterAllCommands()
-    App->>Cmd: RegisterDesktopOverrides()
+    App->>Cmd: RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector)
+    App->>Cmd: RegisterDesktopOverrides(cmdTable, client, nodeService)
 
     App->>App: rpc.NewServer(cfg, cmdTable, node)
     Note over App: HTTP server for<br/>external clients
@@ -283,11 +283,11 @@ flowchart TD
 
     subgraph Commands["Command groups"]
         SYS[System: help, ping, version]
-        NET[Network: get_peers, add_peer]
-        ID[Identity: fetch_contacts,<br/>delete_trusted_contact]
-        MSG[Messages: send_message,<br/>fetch_messages]
-        CHAT[Chatlog: fetch_chatlog_previews]
-        METRICS[Metrics: fetch_network_stats]
+        NET[Network: getPeers, addPeer]
+        ID[Identity: fetchContacts,<br/>fetchTrustedContacts]
+        MSG[Messages: sendDm,<br/>fetchMessages]
+        CHAT[Chatlog: fetchChatlogPreviews]
+        METRICS[Metrics: fetchTrafficHistory]
     end
 
     subgraph Core["Core services"]
@@ -381,8 +381,8 @@ sequenceDiagram
     Note over Router: Пустые peers, cache,<br/>32-слотовый event channel
 
     App->>Cmd: NewCommandTable()
-    App->>Cmd: RegisterAllCommands()
-    App->>Cmd: RegisterDesktopOverrides()
+    App->>Cmd: RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector)
+    App->>Cmd: RegisterDesktopOverrides(cmdTable, client, nodeService)
 
     App->>App: rpc.NewServer(cfg, cmdTable, node)
     Note over App: HTTP сервер для<br/>внешних клиентов
@@ -563,11 +563,11 @@ flowchart TD
 
     subgraph Commands["Группы команд"]
         SYS[System: help, ping, version]
-        NET[Network: get_peers, add_peer]
-        ID[Identity: fetch_contacts,<br/>delete_trusted_contact]
-        MSG[Messages: send_message,<br/>fetch_messages]
-        CHAT[Chatlog: fetch_chatlog_previews]
-        METRICS[Metrics: fetch_network_stats]
+        NET[Network: getPeers, addPeer]
+        ID[Identity: fetchContacts,<br/>fetchTrustedContacts]
+        MSG[Messages: sendDm,<br/>fetchMessages]
+        CHAT[Chatlog: fetchChatlogPreviews]
+        METRICS[Metrics: fetchTrafficHistory]
     end
 
     subgraph Core["Core сервисы"]

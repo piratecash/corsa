@@ -225,10 +225,9 @@ The architecture separates command execution from transport:
 // CommandTable — single source of truth for all commands.
 // RegisterAllCommands is the single registration point — both bootstrap and tests use it.
 table := rpc.NewCommandTable()
-rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector, routingProvider)
+rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector)
 
-// Desktop: replace base ping/getPeers with diagnostic-enriched versions,
-// and hello with desktop identity (Client: "desktop").
+// Desktop: register hello override with desktop identity (Client: "desktop").
 // Accepts DiagnosticProvider + NodeProvider; nil diag is a safe no-op.
 rpc.RegisterDesktopOverrides(table, desktopClient, nodeService)
 
@@ -239,6 +238,27 @@ resp := table.Execute(rpc.CommandRequest{Name: "ping"})
 // Pass nodeService to enable /rpc/v1/frame (registered frame types only).
 server, _ := rpc.NewServer(cfg, table, nodeService)
 ```
+
+#### Command Taxonomy: Raw, View, and UI-Formatting
+
+Every command in the system belongs to exactly one of three layers. This classification determines what the command may do, how it is named, and where its logic lives.
+
+**Layer 1 — Raw commands.** Source-of-truth commands that expose node/network state. A raw command must have the same semantic contract regardless of transport (HTTP RPC, in-process desktop, SDK). Raw commands are suitable for debugging node and wire behavior. Examples: `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `hello`, `version`.
+
+**Layer 2 — View commands.** Convenience commands that aggregate data from one or more raw commands, add categorization, merge health status, or build UI-oriented snapshots. View commands must have explicit names that distinguish them from raw commands. A view command must never reuse a raw command name. View commands have their own documented contracts. Currently no view commands are registered — the layer exists as an architectural guideline for future needs.
+
+**Layer 3 — UI-formatting.** Pure presentation logic: sorting for render, grouping, badge mapping, human-readable labels. This logic must not exist inside command handlers — it belongs to the UI layer above `CommandTable`. It does not change the command contract.
+
+**Rules:**
+
+- One command name = one semantic contract, regardless of transport.
+- `CommandTable` owns the semantic contract of a command. No caller (desktop, HTTP, SDK) may silently change it.
+- Desktop console and Desktop UI are **in-process transports** for RPC semantics, not a separate semantic layer.
+- Silent semantic overrides of existing raw commands are prohibited. If a desktop-enriched payload is needed, it must be registered as a separate view command with a distinct name.
+- A new RPC command registered in `CommandTable` must be automatically available in the desktop console without separate manual UI registration.
+- `CommandTable.Commands()` is the single source of truth for help, autocomplete, and dispatch in all transports including desktop console.
+
+> **Current state:** `RegisterDesktopOverrides` registers a transport-level `hello` override (`Client: "desktop"`). Raw commands `ping` and `getPeers` are not overridden — they return the same semantic result regardless of transport. The `hello` override changes only identity metadata (`Client` + `ClientVersion`), not the semantic contract — this is why it does not violate the taxonomy.
 
 #### Command Categories
 
@@ -309,7 +329,6 @@ Per-command documentation is in the [rpc/](rpc/) folder. See [rpc/README.md](rpc
 | [Mesh](rpc/mesh.md) | `fetchRelayStatus` | [rpc/mesh.md](rpc/mesh.md) |
 | [Metrics](rpc/metrics.md) | `fetchTrafficHistory` | [rpc/metrics.md](rpc/metrics.md) |
 | [Routing](rpc/routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [rpc/routing.md](rpc/routing.md) |
-
 ### corsa-cli
 
 Thin console client for the RPC server. No local command table — positional arguments are parsed via the shared `ParseConsoleInput`, which normalizes command names to canonical camelCase before sending `{command, args}` to `POST /rpc/v1/exec`. The server is the single source of truth. `corsa-cli help` fetches the command list from the server. Both camelCase and snake_case input are accepted (normalization is transparent).
@@ -375,7 +394,9 @@ corsa-cli --host 192.168.1.100 --port 46464 getPeers
 
 #### Desktop Application
 
-The desktop application creates a `CommandTable`, calls `RegisterAllCommands` with all providers, then calls `RegisterDesktopOverrides(table, client, client)` to replace base `ping`, `getPeers`, and `hello` handlers with desktop-enriched versions. The enriched `ping` opens TCP sessions to every connected peer and reports per-peer status. The enriched `getPeers` merges the raw peer list with health data and categorizes peers into connected/pending/known_only. Its `peers` field is already a filtered merged view: active outbound peers + inbound-only connected peers + `PeerProvider.Candidates()`, so banned / forbidden / cooldown / queued / IP-duplicate peers are already excluded, and persisted localhost / RFC1918 IPv4 addresses are not resurrected into this view after restart. For the full known-peer set with exclusion reasons, use the connection diagnostics commands (`listPeers`, `listBanned`, `getActivePeers`) documented in `docs/connection-manager.md`. The enriched `hello` identifies as `Client: "desktop"` with the desktop application version instead of the generic `Client: "rpc"`. `RegisterDesktopOverrides` accepts a `DiagnosticProvider` and a `NodeProvider` — passing `nil` diag is a no-op. The resulting table is passed to both the Fiber HTTP server (for external access) and the Window (for direct UI access). All 6 command categories are registered, including chatlog and DM commands.
+The desktop application creates a `CommandTable`, calls `RegisterAllCommands` with all providers, then calls `RegisterDesktopOverrides(table, client, nodeService)` to register the transport-level `hello` override. The first provider argument (`client`) implements `DiagnosticProvider`, the second (`nodeService`) implements `NodeProvider`. Raw commands `ping` and `getPeers` are not overridden — they return the same semantic result as through HTTP RPC. The `hello` override identifies as `Client: "desktop"` with the desktop application version instead of the generic `Client: "rpc"` — this is a transport-level identity change, not a semantic fork. Passing `nil` for `DiagnosticProvider` is a safe no-op. The resulting table is passed to both the Fiber HTTP server (for external access) and the Window (for direct UI access). All command categories are registered, including chatlog and DM commands.
+
+> **Architectural rule (see Command Taxonomy above):** `RegisterDesktopOverrides` must only register transport-level overrides. Silent semantic overrides of existing raw commands are prohibited. If a desktop-enriched payload is ever needed, it must be a new view command with a distinct name (e.g. `getSomethingView`), not an override of an existing raw command. Currently `RegisterDesktopOverrides` contains only the `hello` override — no view commands are registered. Enriched data for the Desktop UI is available through the service-level `ProbeNode()` function, which bypasses the CommandTable entirely.
 
 #### Standalone Node (corsa-node)
 
@@ -674,10 +695,9 @@ graph TD
 // CommandTable — единственный источник истины для всех команд.
 // RegisterAllCommands — единая точка регистрации, используемая и bootstrap, и тестами.
 table := rpc.NewCommandTable()
-rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector, routingProvider)
+rpc.RegisterAllCommands(table, nodeService, chatlogProvider, dmRouter, metricsCollector)
 
-// Desktop: замена базовых ping/getPeers на диагностически обогащённые версии,
-// а также hello на desktop-идентификацию (Client: "desktop").
+// Desktop: регистрация hello override с desktop-идентификацией (Client: "desktop").
 // Принимает DiagnosticProvider + NodeProvider; nil diag — безопасный no-op.
 rpc.RegisterDesktopOverrides(table, desktopClient, nodeService)
 
@@ -688,6 +708,27 @@ resp := table.Execute(rpc.CommandRequest{Name: "ping"})
 // nodeService включает /rpc/v1/frame (только зарегистрированные типы фреймов).
 server, _ := rpc.NewServer(cfg, table, nodeService)
 ```
+
+#### Таксономия команд: Raw, View и UI-Formatting
+
+Каждая команда в системе принадлежит ровно одному из трёх слоёв. Эта классификация определяет, что команда может делать, как она именуется и где живёт её логика.
+
+**Слой 1 — Raw-команды.** Команды-источники истины, раскрывающие состояние ноды/сети. Raw-команда должна иметь одинаковый семантический контракт вне зависимости от транспорта (HTTP RPC, in-process desktop, SDK). Raw-команды пригодны для отладки node и wire поведения. Примеры: `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `hello`, `version`.
+
+**Слой 2 — View-команды.** Удобные команды, агрегирующие данные из одной или нескольких raw-команд, добавляющие категоризацию, merge health-статусов или собирающие UI-ориентированные снимки. View-команды должны иметь явные имена, отличающие их от raw-команд. View-команда не может переиспользовать имя raw-команды. У view-команд свой документированный контракт. В настоящее время view-команды не зарегистрированы — слой существует как архитектурное руководство для будущих потребностей.
+
+**Слой 3 — UI-formatting.** Чистая логика отображения: сортировка для рендера, группировка, badge mapping, человекочитаемые labels. Эта логика не должна существовать внутри обработчиков команд — она принадлежит UI-слою выше `CommandTable`. Она не меняет контракт команды.
+
+**Правила:**
+
+- Одно имя команды = один семантический контракт, вне зависимости от транспорта.
+- `CommandTable` владеет семантическим контрактом команды. Ни один вызывающий (desktop, HTTP, SDK) не может тихо его менять.
+- Desktop console и Desktop UI — это **in-process транспорты** для RPC-семантики, а не отдельный семантический слой.
+- Тихие семантические override'ы существующих raw-команд запрещены. Если нужен desktop-обогащённый payload, он должен быть зарегистрирован как отдельная view-команда с другим именем.
+- Новая RPC-команда, зарегистрированная в `CommandTable`, должна автоматически быть доступна в desktop console без отдельной ручной правки UI.
+- `CommandTable.Commands()` — единственный источник истины для help, autocomplete и dispatch во всех транспортах, включая desktop console.
+
+> **Текущее состояние:** `RegisterDesktopOverrides` регистрирует transport-level override `hello` (`Client: "desktop"`). Raw-команды `ping` и `getPeers` не подменяются — они возвращают одинаковый семантический результат вне зависимости от транспорта. Override `hello` меняет только identity metadata (`Client` + `ClientVersion`), а не семантический контракт — поэтому он не нарушает таксономию.
 
 #### Категории команд
 
@@ -758,7 +799,6 @@ Mode-gated команды регистрируются через `RegisterUnava
 | [Mesh](rpc/mesh.md) | `fetchRelayStatus` | [rpc/mesh.md](rpc/mesh.md) |
 | [Метрики](rpc/metrics.md) | `fetchTrafficHistory` | [rpc/metrics.md](rpc/metrics.md) |
 | [Маршрутизация](rpc/routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [rpc/routing.md](rpc/routing.md) |
-
 ### corsa-cli
 
 Тонкий консольный клиент RPC сервера. Без локальной таблицы команд — позиционные аргументы разбираются через общий `ParseConsoleInput`, который нормализует имена команд в каноническое camelCase перед отправкой `{command, args}` в `POST /rpc/v1/exec`. Сервер является единственным источником истины. `corsa-cli help` получает список команд с сервера. Принимается как camelCase, так и snake_case ввод (нормализация прозрачна).
@@ -824,7 +864,9 @@ corsa-cli --host 192.168.1.100 --port 46464 getPeers
 
 #### Desktop приложение
 
-Desktop приложение создаёт `CommandTable`, вызывает `RegisterAllCommands` со всеми провайдерами, затем вызывает `RegisterDesktopOverrides(table, client, client)` для замены базовых обработчиков `ping`, `getPeers` и `hello` на desktop-обогащённые версии. Обогащённый `ping` открывает TCP-сессии ко всем подключённым пирам и сообщает статус по каждому. Обогащённый `getPeers` объединяет список пиров с данными о здоровье и категоризирует пиров на connected/pending/known_only. Поле `peers` в этом ответе уже является отфильтрованным merged-view: active outbound peers + inbound-only connected peers + `PeerProvider.Candidates()`, поэтому забаненные, forbidden, queued, cooldown и IP-дубликаты уже исключены, а persisted localhost / RFC1918 IPv4 адреса после рестарта в этот список не resurrect'ятся. Если нужен полный known-peer set с причинами исключения, используйте диагностические команды connection layer (`listPeers`, `listBanned`, `getActivePeers`), описанные в `docs/connection-manager.md`. Обогащённый `hello` идентифицируется как `Client: "desktop"` с версией desktop-приложения вместо генерического `Client: "rpc"`. `RegisterDesktopOverrides` принимает `DiagnosticProvider` и `NodeProvider` — передача `nil` diag является no-op. Результирующая таблица передаётся и Fiber HTTP серверу (для внешнего доступа), и Window (для прямого доступа UI). Все 6 категорий команд регистрируются, включая chatlog и DM.
+Desktop приложение создаёт `CommandTable`, вызывает `RegisterAllCommands` со всеми провайдерами, затем вызывает `RegisterDesktopOverrides(table, client, nodeService)` для регистрации transport-level override `hello`. Первый аргумент-провайдер (`client`) реализует `DiagnosticProvider`, второй (`nodeService`) реализует `NodeProvider`. Raw-команды `ping` и `getPeers` не подменяются — они возвращают тот же семантический результат, что и через HTTP RPC. Override `hello` идентифицируется как `Client: "desktop"` с версией desktop-приложения вместо генерического `Client: "rpc"` — это transport-level identity, а не семантический форк. Передача `nil` для `DiagnosticProvider` — безопасный no-op. Результирующая таблица передаётся и Fiber HTTP серверу (для внешнего доступа), и Window (для прямого доступа UI). Все категории команд регистрируются, включая chatlog и DM.
+
+> **Архитектурное правило (см. Таксономия команд выше):** `RegisterDesktopOverrides` должен регистрировать только transport-level override'ы. Тихие семантические override'ы существующих raw-команд запрещены. Если когда-либо понадобится desktop-обогащённый payload, он должен быть отдельной view-командой с отдельным именем (например, `getSomethingView`), а не override'ом существующей raw-команды. Сейчас `RegisterDesktopOverrides` содержит только override `hello` — view-команды не зарегистрированы. Обогащённые данные для Desktop UI доступны через service-level функцию `ProbeNode()`, которая обходит CommandTable.
 
 #### Standalone нода (corsa-node)
 

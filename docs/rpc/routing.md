@@ -2,12 +2,12 @@
 
 ## English
 
-### fetch_route_table
+### fetchRouteTable
 
 Full routing table snapshot. Returns every entry (active, withdrawn, expired) with detailed metadata.
 
 ```bash
-corsa-cli fetch_route_table
+corsa-cli fetchRouteTable
 ```
 
 Response:
@@ -59,12 +59,12 @@ All time-dependent fields (`expired`, `ttl_seconds`, reachable counts) are compu
 
 **Note on `next_hop.address` / `next_hop.network`:** these fields reflect *live* peer transport state queried after the routing snapshot. They are best-effort metadata — a peer may disconnect between the snapshot and the transport lookup. Routing fields (`identity`, `hops`, `seq_no`, `source`, `withdrawn`, `expired`, `ttl_seconds`) are fully atomic within `snapshot_at`.
 
-### fetch_route_summary
+### fetchRouteSummary
 
 Compact routing table overview for dashboards and monitoring.
 
 ```bash
-corsa-cli fetch_route_summary
+corsa-cli fetchRouteSummary
 ```
 
 Response:
@@ -101,12 +101,12 @@ Response:
 | `flap_state[].in_hold_down` | bool | True if peer is in hold-down (penalized TTL) |
 | `flap_state[].hold_down_until` | string | ISO 8601 timestamp when hold-down expires (only when in_hold_down=true) |
 
-### fetch_route_lookup
+### fetchRouteLookup
 
 Lookup routes for a specific destination identity. Returns routes sorted by preference (source priority, then hops ascending).
 
 ```bash
-corsa-cli fetch_route_lookup <identity>
+corsa-cli fetchRouteLookup <identity>
 ```
 
 Response:
@@ -159,12 +159,12 @@ All routing commands require `RoutingProvider`. When the provider is nil (e.g., 
 
 ## Русский
 
-### fetch_route_table
+### fetchRouteTable
 
 Полный снапшот таблицы маршрутизации. Возвращает каждую запись (активную, отозванную, истёкшую) с подробными метаданными.
 
 ```bash
-corsa-cli fetch_route_table
+corsa-cli fetchRouteTable
 ```
 
 Ответ:
@@ -216,12 +216,12 @@ corsa-cli fetch_route_table
 
 **Примечание о `next_hop.address` / `next_hop.network`:** эти поля отражают *живое* транспортное состояние peer'a, запрашиваемое после снапшота маршрутизации. Это best-effort метаданные — peer может отключиться между снапшотом и запросом транспорта. Поля маршрутизации (`identity`, `hops`, `seq_no`, `source`, `withdrawn`, `expired`, `ttl_seconds`) полностью атомарны в рамках `snapshot_at`.
 
-### fetch_route_summary
+### fetchRouteSummary
 
 Компактный обзор таблицы маршрутизации для дашбордов и мониторинга.
 
 ```bash
-corsa-cli fetch_route_summary
+corsa-cli fetchRouteSummary
 ```
 
 Ответ:
@@ -258,12 +258,12 @@ corsa-cli fetch_route_summary
 | `flap_state[].in_hold_down` | bool | True если peer в hold-down (укороченный TTL) |
 | `flap_state[].hold_down_until` | string | ISO 8601 timestamp окончания hold-down (только при in_hold_down=true) |
 
-### fetch_route_lookup
+### fetchRouteLookup
 
 Поиск маршрутов для конкретного destination identity. Возвращает маршруты, отсортированные по предпочтению (приоритет source, затем hops по возрастанию).
 
 ```bash
-corsa-cli fetch_route_lookup <identity>
+corsa-cli fetchRouteLookup <identity>
 ```
 
 Ответ:

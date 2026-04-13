@@ -168,11 +168,11 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 // handleFrame accepts a raw JSON protocol frame and dispatches it through
 // CommandTable. Only CommandTable-registered frame types are accepted.
 //
-// CommandTable dispatch gives diagnostic-enriched responses for ping/get_peers
-// (via DiagnosticProvider overrides) and chatlog support for fetch_chatlog,
-// fetch_chatlog_previews, fetch_conversations (via ChatlogProvider). This
-// matches the desktop console's ExecuteConsoleCommand behavior where these
-// frame types get special handling instead of going directly to HandleLocalFrame.
+// CommandTable dispatch provides chatlog support for fetch_chatlog,
+// fetch_chatlog_previews, fetch_conversations (via ChatlogProvider) and a
+// transport-level hello override (via DiagnosticProvider) that identifies
+// the desktop client. Raw commands (ping, getPeers) go directly through
+// HandleLocalFrame without enrichment.
 //
 // Unregistered frame types are REJECTED (400 Bad Request). Previously they
 // were forwarded to HandleLocalFrame, but this allowed HTTP clients to inject

@@ -9,16 +9,15 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | Group | Commands | File |
 |---|---|---|
 | [System](system.md) | `help`, `ping`, `hello`, `version` | [system.md](system.md) |
-| [Network](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer`, `fetch_reachable_ids` | [network.md](network.md) |
-| [Identity](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts`, `delete_trusted_contact`, `import_contacts` | [identity.md](identity.md) |
-| [Message](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm`, `send_message`, `import_message`, `send_delivery_receipt` | [message.md](message.md) |
-| [File Transfer](file.md) | `send_file_announce`, `fetch_file_transfers`, `fetch_file_mapping`, `retry_file_chunk`, `start_file_download`, `cancel_file_download` | [file.md](file.md) |
-| [Chatlog](chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [chatlog.md](chatlog.md) |
-| [Notice](notice.md) | `fetch_notices`, `publish_notice` | [notice.md](notice.md) |
-| [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
-| [Metrics](metrics.md) | `fetch_traffic_history` | [metrics.md](metrics.md) |
-| [Routing](routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [routing.md](routing.md) |
-
+| [Network](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds` | [network.md](network.md) |
+| [Identity](identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts`, `deleteTrustedContact`, `importContacts` | [identity.md](identity.md) |
+| [Message](message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm`, `sendMessage`, `importMessage`, `sendDeliveryReceipt` | [message.md](message.md) |
+| [File Transfer](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload` | [file.md](file.md) |
+| [Chatlog](chatlog.md) | `fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations` | [chatlog.md](chatlog.md) |
+| [Notice](notice.md) | `fetchNotices`, `publishNotice` | [notice.md](notice.md) |
+| [Mesh](mesh.md) | `fetchRelayStatus` | [mesh.md](mesh.md) |
+| [Metrics](metrics.md) | `fetchTrafficHistory` | [metrics.md](metrics.md) |
+| [Routing](routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [routing.md](routing.md) |
 ### Universal Dispatch
 
 **POST /rpc/v1/exec** — execute any registered command.
@@ -60,16 +59,15 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | Группа | Команды | Файл |
 |---|---|---|
 | [Системные](system.md) | `help`, `ping`, `hello`, `version` | [system.md](system.md) |
-| [Сеть](network.md) | `get_peers`, `fetch_peer_health`, `fetch_network_stats`, `add_peer`, `fetch_reachable_ids` | [network.md](network.md) |
-| [Идентификация](identity.md) | `fetch_identities`, `fetch_contacts`, `fetch_trusted_contacts`, `delete_trusted_contact`, `import_contacts` | [identity.md](identity.md) |
-| [Сообщения](message.md) | `fetch_messages`, `fetch_message_ids`, `fetch_message`, `fetch_inbox`, `fetch_pending_messages`, `fetch_delivery_receipts`, `fetch_dm_headers`, `send_dm`, `send_message`, `import_message`, `send_delivery_receipt` | [message.md](message.md) |
-| [Файловый трансфер](file.md) | `send_file_announce`, `fetch_file_transfers`, `fetch_file_mapping`, `retry_file_chunk`, `start_file_download`, `cancel_file_download` | [file.md](file.md) |
-| [История чатов](chatlog.md) | `fetch_chatlog`, `fetch_chatlog_previews`, `fetch_conversations` | [chatlog.md](chatlog.md) |
-| [Уведомления](notice.md) | `fetch_notices`, `publish_notice` | [notice.md](notice.md) |
-| [Mesh](mesh.md) | `fetch_relay_status` | [mesh.md](mesh.md) |
-| [Метрики](metrics.md) | `fetch_traffic_history` | [metrics.md](metrics.md) |
-| [Маршрутизация](routing.md) | `fetch_route_table`, `fetch_route_summary`, `fetch_route_lookup` | [routing.md](routing.md) |
-
+| [Сеть](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds` | [network.md](network.md) |
+| [Идентификация](identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts`, `deleteTrustedContact`, `importContacts` | [identity.md](identity.md) |
+| [Сообщения](message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm`, `sendMessage`, `importMessage`, `sendDeliveryReceipt` | [message.md](message.md) |
+| [Файловый трансфер](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload` | [file.md](file.md) |
+| [История чатов](chatlog.md) | `fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations` | [chatlog.md](chatlog.md) |
+| [Уведомления](notice.md) | `fetchNotices`, `publishNotice` | [notice.md](notice.md) |
+| [Mesh](mesh.md) | `fetchRelayStatus` | [mesh.md](mesh.md) |
+| [Метрики](metrics.md) | `fetchTrafficHistory` | [metrics.md](metrics.md) |
+| [Маршрутизация](routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [routing.md](routing.md) |
 ### Универсальная диспетчеризация
 
 **POST /rpc/v1/exec** — выполнение любой зарегистрированной команды.

@@ -11,19 +11,7 @@ import (
 
 // mockDiagnosticProvider implements rpc.DiagnosticProvider for testing.
 type mockDiagnosticProvider struct {
-	pingResult     string
-	pingErr        error
-	peersResult    string
-	peersErr       error
 	desktopVersion string
-}
-
-func (m *mockDiagnosticProvider) ConsolePingJSON() (string, error) {
-	return m.pingResult, m.pingErr
-}
-
-func (m *mockDiagnosticProvider) ConsolePeersJSON() (string, error) {
-	return m.peersResult, m.peersErr
 }
 
 func (m *mockDiagnosticProvider) DesktopVersion() string {
@@ -157,50 +145,73 @@ func TestSystemHelloSendsProtocolMetadata(t *testing.T) {
 	}
 }
 
-func TestDesktopOverridePingReplaces(t *testing.T) {
-	// RegisterDesktopOverrides replaces the base ping handler with
-	// the desktop diagnostic version.
-	node := &mockNodeProvider{}
+func TestDesktopOverridePingNotReplaced(t *testing.T) {
+	// After RegisterDesktopOverrides, raw ping must retain its base
+	// semantics (pong frame), not return the enriched view payload.
+	node := &mockNodeProvider{
+		handleFunc: func(frame protocol.Frame) protocol.Frame {
+			if frame.Type == "ping" {
+				return protocol.Frame{
+					Type:  "pong",
+					Peers: []string{"peer1"},
+				}
+			}
+			return protocol.Frame{Type: "ok"}
+		},
+	}
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
-	// Before override: base handler returns raw pong frame.
-	resp := table.Execute(rpc.CommandRequest{Name: "ping"})
-	if resp.Error != nil {
-		t.Fatalf("base ping error: %v", resp.Error)
-	}
-
-	diag := &mockDiagnosticProvider{
-		pingResult: `{"type":"ping","count":2,"total":3,"results":[]}`,
-	}
+	diag := &mockDiagnosticProvider{}
 	rpc.RegisterDesktopOverrides(table, diag, node)
 
-	// After override: enriched handler returns diagnostic JSON.
-	resp = table.Execute(rpc.CommandRequest{Name: "ping"})
+	resp := table.Execute(rpc.CommandRequest{Name: "ping"})
 	if resp.Error != nil {
-		t.Fatalf("desktop ping error: %v", resp.Error)
+		t.Fatalf("raw ping error: %v", resp.Error)
 	}
-	if !strings.Contains(string(resp.Data), `"count":2`) {
-		t.Errorf("expected enriched ping response with count, got %s", string(resp.Data))
+	// Raw ping returns a pong frame, not enriched diagnostic JSON.
+	if strings.Contains(string(resp.Data), `"count"`) {
+		t.Errorf("raw ping should not contain enriched fields, got %s", string(resp.Data))
+	}
+	if !strings.Contains(string(resp.Data), `"pong"`) {
+		t.Errorf("raw ping should return pong frame, got %s", string(resp.Data))
 	}
 }
 
-func TestDesktopOverrideGetPeersReplaces(t *testing.T) {
-	node := &mockNodeProvider{}
+func TestDesktopOverrideGetPeersNotReplaced(t *testing.T) {
+	// After RegisterDesktopOverrides, raw getPeers must retain its base
+	// semantics (peer-exchange frame), not return the enriched view payload.
+	// Production node returns Frame{Type: "peers", Peers: [...]} for get_peers.
+	node := &mockNodeProvider{
+		handleFunc: func(frame protocol.Frame) protocol.Frame {
+			if frame.Type == "get_peers" {
+				return protocol.Frame{
+					Type:  "peers",
+					Peers: []string{"peer-a", "peer-b"},
+				}
+			}
+			return protocol.Frame{Type: "ok"}
+		},
+	}
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
-	diag := &mockDiagnosticProvider{
-		peersResult: `{"type":"peers","count":1,"total":5,"peers":[]}`,
-	}
+	diag := &mockDiagnosticProvider{}
 	rpc.RegisterDesktopOverrides(table, diag, node)
 
 	resp := table.Execute(rpc.CommandRequest{Name: "getPeers"})
 	if resp.Error != nil {
-		t.Fatalf("desktop get_peers error: %v", resp.Error)
+		t.Fatalf("raw getPeers error: %v", resp.Error)
 	}
-	if !strings.Contains(string(resp.Data), `"total":5`) {
-		t.Errorf("expected enriched peers response with total, got %s", string(resp.Data))
+	// Raw getPeers returns the node's wire frame, not enriched view JSON.
+	if strings.Contains(string(resp.Data), `"total"`) {
+		t.Errorf("raw getPeers should not contain enriched fields, got %s", string(resp.Data))
+	}
+	if !strings.Contains(string(resp.Data), `"peer-a"`) {
+		t.Errorf("raw getPeers should contain peers from node, got %s", string(resp.Data))
+	}
+	if !strings.Contains(string(resp.Data), `"peers"`) {
+		t.Errorf("raw getPeers should return peers frame type, got %s", string(resp.Data))
 	}
 }
 

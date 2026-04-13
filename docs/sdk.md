@@ -110,7 +110,7 @@ sequenceDiagram
     Mesh-->>Node: incoming DM
     Node-->>SDK: LocalChangeEvent
     SDK-->>Bot: DirectMessage
-    Bot->>SDK: Execute("send_dm", args)
+    Bot->>SDK: Execute("sendDm", args)
     SDK->>Cmd: in-process command execution
     Cmd->>Mesh: queue direct message
 ```
@@ -155,7 +155,7 @@ The SDK uses the same command handlers as the desktop console and RPC layer, but
 Structured execution:
 
 ```go
-result, err := runtime.Execute("send_dm", map[string]interface{}{
+result, err := runtime.Execute("sendDm", map[string]interface{}{
 	"to":   peerAddress,
 	"body": "Sic Parvis Magna",
 })
@@ -164,7 +164,7 @@ result, err := runtime.Execute("send_dm", map[string]interface{}{
 Console-style execution:
 
 ```go
-result, err := runtime.ExecuteCommand(`send_dm to=` + peerAddress + ` body="Sic Parvis Magna"`)
+result, err := runtime.ExecuteCommand(`sendDm to=` + peerAddress + ` body="Sic Parvis Magna"`)
 ```
 
 Both paths hit the same in-process `CommandTable`.
@@ -174,7 +174,7 @@ Both paths hit the same in-process `CommandTable`.
 ```go
 messages := runtime.SubscribeDirectMessages(ctx)
 for msg := range messages {
-	_, err := runtime.Execute("send_dm", map[string]interface{}{
+	_, err := runtime.Execute("sendDm", map[string]interface{}{
 		"to":   msg.Sender,
 		"body": "Sic Parvis Magna",
 	})
@@ -306,7 +306,7 @@ sequenceDiagram
     Mesh-->>Node: входящее DM
     Node-->>SDK: LocalChangeEvent
     SDK-->>Bot: DirectMessage
-    Bot->>SDK: Execute("send_dm", args)
+    Bot->>SDK: Execute("sendDm", args)
     SDK->>Cmd: in-process выполнение команды
     Cmd->>Mesh: постановка direct message в отправку
 ```
@@ -351,7 +351,7 @@ SDK использует тот же `CommandTable`, что и desktop-конс�
 Структурированный вызов:
 
 ```go
-result, err := runtime.Execute("send_dm", map[string]interface{}{
+result, err := runtime.Execute("sendDm", map[string]interface{}{
 	"to":   peerAddress,
 	"body": "Sic Parvis Magna",
 })
@@ -360,7 +360,7 @@ result, err := runtime.Execute("send_dm", map[string]interface{}{
 В стиле консоли:
 
 ```go
-result, err := runtime.ExecuteCommand(`send_dm to=` + peerAddress + ` body="Sic Parvis Magna"`)
+result, err := runtime.ExecuteCommand(`sendDm to=` + peerAddress + ` body="Sic Parvis Magna"`)
 ```
 
 ### Входящие сообщения
@@ -368,7 +368,7 @@ result, err := runtime.ExecuteCommand(`send_dm to=` + peerAddress + ` body="Sic 
 ```go
 messages := runtime.SubscribeDirectMessages(ctx)
 for msg := range messages {
-	_, err := runtime.Execute("send_dm", map[string]interface{}{
+	_, err := runtime.Execute("sendDm", map[string]interface{}{
 		"to":   msg.Sender,
 		"body": "Sic Parvis Magna",
 	})

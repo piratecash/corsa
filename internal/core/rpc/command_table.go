@@ -1118,18 +1118,16 @@ func RegisterNoticeCommands(t *CommandTable, node NodeProvider) {
 	)
 }
 
-// RegisterDesktopOverrides replaces base command handlers with desktop-enriched
-// versions when a DiagnosticProvider is available.
+// RegisterDesktopOverrides registers the transport-level hello override when
+// a DiagnosticProvider is available.
 //
-// The base ping (system) and get_peers (network) handlers forward directly
-// to HandleLocalFrame and return raw wire frames. The desktop client provides
-// richer versions: ping opens TCP sessions to every connected peer and reports
-// per-peer status; get_peers merges the raw list with peer health data and
-// categorizes peers into connected/pending/known_only groups.
+// Raw commands (ping, getPeers) are NOT overridden. They retain their base
+// semantics regardless of whether the node runs in desktop or standalone
+// mode. This ensures "one name = one contract" across all transports.
 //
-// The base hello handler identifies as Client: "rpc". The desktop override
-// identifies as Client: "desktop" with the desktop application version,
-// ensuring that peers see the correct client type in handshake frames.
+// The hello override is a transport-level concern (Client: "desktop" vs
+// Client: "rpc") and does not violate the taxonomy — it changes identity
+// metadata, not the semantic contract of the command.
 //
 // Call this AFTER RegisterAllCommands. Pass nil diag to skip (standalone node).
 // Both diag and node must be non-nil when overrides are enabled — the hello
@@ -1142,27 +1140,7 @@ func RegisterDesktopOverrides(t *CommandTable, diag DiagnosticProvider, node Nod
 		panic("rpc: RegisterDesktopOverrides requires non-nil NodeProvider when DiagnosticProvider is set")
 	}
 
-	t.Register(
-		CommandInfo{Name: "ping", Description: "Ping all connected peers and report status", Category: "system"},
-		func(req CommandRequest) CommandResponse {
-			output, err := diag.ConsolePingJSON()
-			if err != nil {
-				return internalError(fmt.Errorf("console ping: %w", err))
-			}
-			return rawJSONResponse(output)
-		},
-	)
-
-	t.Register(
-		CommandInfo{Name: "getPeers", Description: "Get peers with health status and categorization", Category: "network"},
-		func(req CommandRequest) CommandResponse {
-			output, err := diag.ConsolePeersJSON()
-			if err != nil {
-				return internalError(fmt.Errorf("console peers: %w", err))
-			}
-			return rawJSONResponse(output)
-		},
-	)
+	// --- Transport-level hello override (not a semantic fork) ---
 
 	t.Register(
 		CommandInfo{Name: "hello", Description: "Send hello frame to identify with peers", Category: "system"},

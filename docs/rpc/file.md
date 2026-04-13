@@ -2,7 +2,7 @@
 
 ## English
 
-### POST /rpc/v1/file/send_file_announce
+### POST /rpc/v1/file/sendFileAnnounce
 
 Send a `file_announce` DM to a recipient. The file must already exist in the transmit directory (`<dataDir>/transmit/<sha256>.<ext>`). Pre-send validation (transmit file existence, sender quota) runs synchronously — if it fails, the RPC returns HTTP 500 with an error message. On success the response returns `"status": "pending"` indicating that pre-validation passed and the announce is queued for asynchronous delivery. The actual DM send and sender mapping registration happen in a background goroutine — delivery failures are reported via the UI status event stream. The sender-side mapping is registered automatically using the real DM message ID, so chunk_request frames from the receiver are guaranteed to match.
 
@@ -26,13 +26,13 @@ Error responses: HTTP 400 for missing/invalid parameters, HTTP 500 if pre-send v
 #### CLI
 
 ```bash
-corsa-cli send_file_announce to=<peer> file_name=report.pdf file_size=1048576 file_hash=a1b2c3...
+corsa-cli sendFileAnnounce to=<peer> file_name=report.pdf file_size=1048576 file_hash=a1b2c3...
 ```
 
 #### Console
 
 ```
-send_file_announce <to> <file_name> <file_size> <file_hash> [content_type] [body]
+sendFileAnnounce <to> <file_name> <file_size> <file_hash> [content_type] [body]
 ```
 
 ### POST /rpc/v1/file/transfers
@@ -42,13 +42,13 @@ List active and pending file transfers (both sender and receiver sides). Termina
 #### CLI
 
 ```bash
-corsa-cli fetch_file_transfers
+corsa-cli fetchFileTransfers
 ```
 
 #### Console
 
 ```
-fetch_file_transfers
+fetchFileTransfers
 ```
 
 ### POST /rpc/v1/file/mapping
@@ -58,13 +58,13 @@ Show the sender FileMapping table. TransmitPath is never exposed through RPC. No
 #### CLI
 
 ```bash
-corsa-cli fetch_file_mapping
+corsa-cli fetchFileMapping
 ```
 
 #### Console
 
 ```
-fetch_file_mapping
+fetchFileMapping
 ```
 
 ### POST /rpc/v1/file/retry_chunk
@@ -83,13 +83,13 @@ Required: `file_id`.
 #### CLI
 
 ```bash
-corsa-cli retry_file_chunk file_id=<uuid>
+corsa-cli retryFileChunk file_id=<uuid>
 ```
 
 #### Console
 
 ```
-retry_file_chunk <file_id>
+retryFileChunk <file_id>
 ```
 
 ### POST /rpc/v1/file/start_download
@@ -108,13 +108,13 @@ Required: `file_id`.
 #### CLI
 
 ```bash
-corsa-cli start_file_download file_id=<uuid>
+corsa-cli startFileDownload file_id=<uuid>
 ```
 
 #### Console
 
 ```
-start_file_download <file_id>
+startFileDownload <file_id>
 ```
 
 ### POST /rpc/v1/file/cancel_download
@@ -133,20 +133,20 @@ Required: `file_id`.
 #### CLI
 
 ```bash
-corsa-cli cancel_file_download file_id=<uuid>
+corsa-cli cancelFileDownload file_id=<uuid>
 ```
 
 #### Console
 
 ```
-cancel_file_download <file_id>
+cancelFileDownload <file_id>
 ```
 
 ---
 
 ## Русский
 
-### POST /rpc/v1/file/send_file_announce
+### POST /rpc/v1/file/sendFileAnnounce
 
 Отправка `file_announce` DM получателю. Файл должен уже существовать в директории transmit (`<dataDir>/transmit/<sha256>.<ext>`). Предотправочная валидация (наличие файла, квота отправителя) выполняется синхронно — при неудаче RPC возвращает HTTP 500 с сообщением об ошибке. При успехе ответ содержит `"status": "pending"`, что означает: предвалидация пройдена, announce поставлен в очередь на асинхронную доставку. Фактическая отправка DM и регистрация маппинга отправителя происходят в фоновой goroutine — ошибки доставки сообщаются через UI status event stream. Маппинг отправителя регистрируется автоматически с использованием реального ID DM-сообщения, поэтому chunk_request фреймы от получателя гарантированно совпадают.
 
@@ -170,13 +170,13 @@ cancel_file_download <file_id>
 #### CLI
 
 ```bash
-corsa-cli send_file_announce to=<peer> file_name=report.pdf file_size=1048576 file_hash=a1b2c3...
+corsa-cli sendFileAnnounce to=<peer> file_name=report.pdf file_size=1048576 file_hash=a1b2c3...
 ```
 
 #### Консоль
 
 ```
-send_file_announce <to> <file_name> <file_size> <file_hash> [content_type] [body]
+sendFileAnnounce <to> <file_name> <file_size> <file_hash> [content_type] [body]
 ```
 
 ### POST /rpc/v1/file/transfers
@@ -186,13 +186,13 @@ send_file_announce <to> <file_name> <file_size> <file_hash> [content_type] [body
 #### CLI
 
 ```bash
-corsa-cli fetch_file_transfers
+corsa-cli fetchFileTransfers
 ```
 
 #### Консоль
 
 ```
-fetch_file_transfers
+fetchFileTransfers
 ```
 
 ### POST /rpc/v1/file/mapping
@@ -202,13 +202,13 @@ fetch_file_transfers
 #### CLI
 
 ```bash
-corsa-cli fetch_file_mapping
+corsa-cli fetchFileMapping
 ```
 
 #### Консоль
 
 ```
-fetch_file_mapping
+fetchFileMapping
 ```
 
 ### POST /rpc/v1/file/retry_chunk
@@ -227,13 +227,13 @@ fetch_file_mapping
 #### CLI
 
 ```bash
-corsa-cli retry_file_chunk file_id=<uuid>
+corsa-cli retryFileChunk file_id=<uuid>
 ```
 
 #### Консоль
 
 ```
-retry_file_chunk <file_id>
+retryFileChunk <file_id>
 ```
 
 ### POST /rpc/v1/file/start_download
@@ -252,13 +252,13 @@ retry_file_chunk <file_id>
 #### CLI
 
 ```bash
-corsa-cli start_file_download file_id=<uuid>
+corsa-cli startFileDownload file_id=<uuid>
 ```
 
 #### Консоль
 
 ```
-start_file_download <file_id>
+startFileDownload <file_id>
 ```
 
 ### POST /rpc/v1/file/cancel_download
@@ -277,11 +277,11 @@ start_file_download <file_id>
 #### CLI
 
 ```bash
-corsa-cli cancel_file_download file_id=<uuid>
+corsa-cli cancelFileDownload file_id=<uuid>
 ```
 
 #### Консоль
 
 ```
-cancel_file_download <file_id>
+cancelFileDownload <file_id>
 ```

@@ -1304,17 +1304,11 @@ func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
 }
 
 // executeCommand parses console input and dispatches it through CommandTable.
-// CommandTable is the single dispatch point — no fallback to legacy
-// ExecuteConsoleCommand, which would bypass command registration and RBAC.
 func (c *ConsoleWindow) executeCommand(input string) (string, error) {
 	if c.parent.cmdTable == nil {
 		return "", fmt.Errorf("command table not initialized")
 	}
 
-	// All input (named commands, key=value, raw JSON frames) is parsed
-	// and dispatched through CommandTable. Previously raw JSON frames were
-	// routed through the legacy ExecuteConsoleCommand path which bypassed
-	// command registration. CommandTable is now the single dispatch point.
 	req, err := rpc.ParseConsoleInput(input)
 	if err != nil {
 		return "", err
@@ -1395,7 +1389,7 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 	commands := table.Commands()
 
 	// Group by category, preserving display order.
-	categoryOrder := []string{"system", "network", "routing", "metrics", "identity", "message", "file", "chatlog", "notice"}
+	categoryOrder := []string{"system", "network", "routing", "metrics", "identity", "message", "file", "chatlog", "notice", "view"}
 	categoryLabels := map[string]string{
 		"system":   "Control",
 		"network":  "Network",
@@ -1406,6 +1400,7 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 		"file":     "File Transfer",
 		"chatlog":  "Chat History",
 		"notice":   "Notices",
+		"view":     "Desktop Views",
 	}
 	grouped := make(map[string][]rpc.CommandInfo)
 	for _, cmd := range commands {

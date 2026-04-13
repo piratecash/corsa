@@ -12,7 +12,7 @@ Response:
   "version": "1.0",
   "commands": [
     {"name": "help", "description": "List all available RPC commands", "category": "system"},
-    {"name": "get_peers", "description": "Get list of connected peers", "category": "network"}
+    {"name": "getPeers", "description": "Get list of connected peers", "category": "network"}
   ]
 }
 ```
@@ -21,11 +21,11 @@ Response:
 
 ### POST /rpc/v1/system/ping
 
-Send local ping, returns pong response. In desktop mode, replaced by `DiagnosticProvider` — pings every connected peer over TCP and reports per-peer status.
+Send local ping, returns pong response. The same semantic result regardless of transport (HTTP RPC or in-process desktop).
 
 ### POST /rpc/v1/system/hello
 
-Send hello frame for identification. The handler populates `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion`, and `ClientBuild` before forwarding to the node — without these fields the handshake is rejected. The standalone node handler identifies as `Client: "rpc"`; in desktop mode, `RegisterDesktopOverrides` replaces it with `Client: "desktop"` and the desktop application version. `ClientBuild` is a monotonically increasing integer that peers compare to detect newer software releases.
+Send hello frame for identification. The handler populates `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion`, and `ClientBuild` before forwarding to the node — without these fields the handshake is rejected. The standalone node handler identifies as `Client: "rpc"`; in desktop mode, `RegisterDesktopOverrides` registers a transport-level override that identifies as `Client: "desktop"` with the desktop application version. This is not a semantic fork — it changes only transport identity metadata. `ClientBuild` is a monotonically increasing integer that peers compare to detect newer software releases.
 
 ### POST /rpc/v1/system/version
 
@@ -54,7 +54,7 @@ Response:
   "version": "1.0",
   "commands": [
     {"name": "help", "description": "Список всех доступных RPC команд", "category": "system"},
-    {"name": "get_peers", "description": "Получить список подключённых пиров", "category": "network"}
+    {"name": "getPeers", "description": "Получить список подключённых пиров", "category": "network"}
   ]
 }
 ```
@@ -63,11 +63,11 @@ Response:
 
 ### POST /rpc/v1/system/ping
 
-Локальный пинг, возвращает pong-ответ. В desktop-режиме заменяется через `DiagnosticProvider` — пингует каждого подключённого пира по TCP и сообщает статус по каждому.
+Локальный пинг, возвращает pong-ответ. Одинаковый семантический результат вне зависимости от транспорта (HTTP RPC или in-process desktop).
 
 ### POST /rpc/v1/system/hello
 
-Отправка hello-фрейма для идентификации. Обработчик заполняет `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion` и `ClientBuild` перед отправкой ноде — без этих полей handshake отклоняется. Standalone-нода идентифицируется как `Client: "rpc"`; в desktop-режиме `RegisterDesktopOverrides` заменяет обработчик на `Client: "desktop"` с версией desktop-приложения. `ClientBuild` — монотонно возрастающий целочисленный номер сборки, по которому пиры определяют наличие новых версий ПО.
+Отправка hello-фрейма для идентификации. Обработчик заполняет `Version`, `MinimumProtocolVersion`, `Client`, `ClientVersion` и `ClientBuild` перед отправкой ноде — без этих полей handshake отклоняется. Standalone-нода идентифицируется как `Client: "rpc"`; в desktop-режиме `RegisterDesktopOverrides` регистрирует transport-level override, который идентифицируется как `Client: "desktop"` с версией desktop-приложения. Это не семантический форк — меняются только transport identity метаданные. `ClientBuild` — монотонно возрастающий целочисленный номер сборки, по которому пиры определяют наличие новых версий ПО.
 
 ### POST /rpc/v1/system/version
 

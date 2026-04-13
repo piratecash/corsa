@@ -106,20 +106,13 @@ type ConnectionDiagnosticProvider interface {
 	ListBannedJSON() (json.RawMessage, error)
 }
 
-// DiagnosticProvider abstracts access to desktop-level diagnostic commands.
+// DiagnosticProvider abstracts access to desktop-level identity metadata.
 // Only the desktop client implements this; standalone node uses the base
 // handlers from RegisterSystemCommands.
-//
-// The desktop ping is a network diagnostic: it opens TCP sessions to every
-// connected peer, sends actual ping frames, and reports per-peer status.
-// The desktop get_peers merges the raw peer list with peer health data
-// and categorizes peers into connected/pending/known_only groups.
 //
 // DesktopVersion returns the desktop application version string (e.g. "1.0.0").
 // It is used by the hello override to correctly identify as Client: "desktop"
 // instead of the generic "rpc" identity used by the standalone node.
 type DiagnosticProvider interface {
-	ConsolePingJSON() (string, error)
-	ConsolePeersJSON() (string, error)
 	DesktopVersion() string
 }

@@ -13,13 +13,13 @@ Unavailable (503) when MetricsProvider is nil (standalone node without metrics c
 #### CLI
 
 ```bash
-corsa-cli fetch_traffic_history
+corsa-cli fetchTrafficHistory
 ```
 
 #### Console
 
 ```
-fetch_traffic_history
+fetchTrafficHistory
 ```
 
 ---
@@ -37,11 +37,11 @@ fetch_traffic_history
 #### CLI
 
 ```bash
-corsa-cli fetch_traffic_history
+corsa-cli fetchTrafficHistory
 ```
 
 #### Консоль
 
 ```
-fetch_traffic_history
+fetchTrafficHistory
 ```
