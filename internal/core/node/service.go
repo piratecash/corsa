@@ -95,7 +95,7 @@ type Service struct {
 	inboundTracked        map[net.Conn]struct{}      // connections promoted via trackInboundConnect (auth complete or auth not required)
 	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
-	inboundNetCores       map[net.Conn]*NetCore      // inbound conn → NetCore (single source of truth for connection state)
+	inboundNetCores       map[net.Conn]*NetCore      // conn → NetCore (now holds both inbound and outbound; renaming deferred to checkpoint 9.4)
 	connIDCounter         uint64                     // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
@@ -166,11 +166,30 @@ type peerSession struct {
 	authOK       bool
 	capabilities []domain.Capability // intersection of local and remote capabilities negotiated during handshake
 
+	// netCore owns the outbound connection and is the single writer to the
+	// socket. Set at construction by openPeerSession / openPeerSessionForCM
+	// before the first peerSessionRequest so that welcome/auth frames go
+	// through the managed writer path. nil only in unit tests that build a
+	// peerSession manually without the service wiring.
+	netCore *NetCore
+
+	// onClose is invoked by Close() before the underlying connection is shut
+	// down. Outbound sessions set it to unregister the netCore from the
+	// service-level connection map. nil for unit tests.
+	onClose func()
+
 	// welcomeMeta carries handshake metadata that must NOT be applied to
 	// Service-level maps until the CM generation check passes. Stale dials
 	// (generation mismatch) are discarded without activating side-effects;
 	// only onCMSessionEstablished writes these into shared state.
 	welcomeMeta *peerWelcomeMeta
+
+	// closeOnce guarantees that the teardown sequence (NetCore.Close +
+	// onClose) runs exactly once even under concurrent Close() calls from
+	// the defer in openPeerSession, the ctx-watcher, closeOnError in
+	// openPeerSessionForCM and the CM failure path.
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // peerWelcomeMeta holds welcome-frame data deferred until CM activation.
@@ -181,13 +200,45 @@ type peerWelcomeMeta struct {
 	observedAddress string
 }
 
-// Close shuts down the TCP connection underlying this session.
-// Safe to call multiple times — subsequent calls return the same error.
+// Close shuts down the session. When netCore is set, teardown runs in this
+// order:
+//  1. netCore.Close() — closes the raw socket, closes sendCh, waits for the
+//     writer goroutine to drain and exit.
+//  2. onClose() — removes the NetCore registration from s.inboundNetCores.
+//
+// The order matters for the single-writer invariant. While writerLoop is
+// still alive, the registration MUST remain visible to netCoreFor() so
+// that any concurrent writeJSONFrame(session.conn, ...) goes through the
+// managed path (enqueueFrame → sendRaw). Unregistering first would cause
+// netCoreFor to return nil and the writeJSONFrame fallback would then call
+// conn.Write / io.WriteString directly — a second writer racing with a
+// still-live writerLoop. Only after netCore.Close() has returned is it
+// safe to remove the map entry: the socket is closed, sendCh is closed,
+// and the writer goroutine has exited.
+//
+// Concurrent-safe and idempotent via sync.Once (mirrors NetCore.closeOnce).
+// The first caller performs the teardown; subsequent callers observe the
+// same stored result without re-running the callbacks.
 func (ps *peerSession) Close() error {
-	if ps == nil || ps.conn == nil {
+	if ps == nil {
 		return nil
 	}
-	return ps.conn.Close()
+	ps.closeOnce.Do(func() {
+		if ps.netCore != nil {
+			ps.netCore.Close()
+			if ps.onClose != nil {
+				ps.onClose()
+			}
+			return
+		}
+		if ps.onClose != nil {
+			ps.onClose()
+		}
+		if ps.conn != nil {
+			ps.closeErr = ps.conn.Close()
+		}
+	})
+	return ps.closeErr
 }
 
 type peerHealth struct {
@@ -1460,8 +1511,11 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	}
 }
 
-// netCoreFor returns the NetCore for a registered inbound connection,
-// or nil for outbound peer sessions that bypass handleConn.
+// netCoreFor returns the NetCore registered for this connection, or nil
+// if the connection predates the managed writer path (bootstrap dial edges
+// in syncPeer / routing_integration that intentionally stay on direct
+// io.WriteString — see migration doc 4.4). Inbound and outbound peer
+// sessions are both registered here after PR 2 of checkpoint 9.2.
 func (s *Service) netCoreFor(conn net.Conn) *NetCore {
 	s.mu.RLock()
 	pc := s.inboundNetCores[conn]
@@ -1521,6 +1575,12 @@ func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
 	if pc == nil {
 		return enqueueUnregistered
 	}
+	// Inbound error paths use fast-fail semantics: a saturated queue
+	// means the peer is unresponsive and must be evicted rather than
+	// kept alive while the caller blocks. Outbound control-plane writes
+	// that must not be starved by fire-and-forget traffic use the
+	// sendRawSyncBlocking variant via peerSessionRequest — that path
+	// does not reach this helper.
 	switch st := pc.sendRawSync(data); st {
 	case sendOK:
 		return enqueueSent
@@ -1556,6 +1616,13 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	var inbound []*NetCore
 
 	// 1. Outbound sessions — preferred path, one writer per session (servePeerSession).
+	//
+	// Activation gate: outbound bring-up inserts into s.sessions BEFORE
+	// calling markPeerConnected (see openPeerSession / openPeerSessionForCM).
+	// During that window health == nil for this address, and the session is
+	// not yet authoritative for outbound sends. Require a present and
+	// Connected health entry — missing health means "not yet activated" and
+	// must be treated as a reject, not as an accept.
 	for _, sess := range s.sessions {
 		if sess.peerIdentity != dst || sess.conn == nil {
 			continue
@@ -1563,26 +1630,39 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 		if !hasCapability(sess.capabilities, requiredCap) {
 			continue
 		}
-		if health := s.health[s.resolveHealthAddress(sess.address)]; health != nil {
-			if !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
-				continue
-			}
+		health := s.health[s.resolveHealthAddress(sess.address)]
+		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+			continue
 		}
 		outbound = append(outbound, sess)
 	}
 
 	// 2. Inbound connections — fallback, one writer per NetCore.
+	//
+	// The registry (s.inboundNetCores) now holds both directions after
+	// PR 2, but outbound entries must stay invisible on this identity
+	// fallback path until they are promoted through s.sessions + health
+	// (visibility boundary enforced by step 1 above and by
+	// markPeerConnected). An outbound NetCore that has completed handshake
+	// but is not yet in s.sessions would otherwise be reachable here with
+	// health == nil and bypass the activation gate — so skip Outbound and
+	// only consider Inbound NetCores on the fallback path.
+	//
+	// Same activation gate applies for inbound: registerInboundConn creates
+	// the NetCore before hello/auth, and identity/capabilities land before
+	// markPeerConnected. Require health != nil && Connected here too so a
+	// partially-handshaken inbound NetCore cannot receive identity-routed
+	// frames ahead of activation.
 	for _, pc := range s.inboundNetCores {
-		if pc == nil || pc.Identity() != dst {
+		if pc == nil || pc.Dir() != Inbound || pc.Identity() != dst {
 			continue
 		}
 		if !pc.HasCapability(requiredCap) {
 			continue
 		}
-		if health := s.health[s.resolveHealthAddress(pc.Address())]; health != nil {
-			if !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
-				continue
-			}
+		health := s.health[s.resolveHealthAddress(pc.Address())]
+		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+			continue
 		}
 		inbound = append(inbound, pc)
 	}
@@ -3074,6 +3154,33 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 		s.inboundMetered[conn] = mc
 	}
 	return true
+}
+
+// attachOutboundNetCore creates an outbound NetCore for the given dialled
+// connection, registers it in s.inboundNetCores (the map currently holds
+// connections of both directions; renaming is deferred to checkpoint 9.4)
+// and wires session.netCore / session.onClose so that peerSession.Close()
+// removes the registration atomically with the NetCore teardown.
+//
+// The NetCore must exist before peerSessionRequest runs so that the welcome
+// and auth frames are routed through the managed single-writer path instead
+// of raw io.WriteString. This is the Phase 1 gate C1 — all outbound writes
+// share the same back-pressure and deadline discipline as inbound.
+func (s *Service) attachOutboundNetCore(session *peerSession) *NetCore {
+	pc := newNetCore(connID(session.connID), session.conn, Outbound, NetCoreOpts{})
+
+	s.mu.Lock()
+	s.inboundNetCores[session.conn] = pc
+	s.mu.Unlock()
+
+	session.netCore = pc
+	conn := session.conn
+	session.onClose = func() {
+		s.mu.Lock()
+		delete(s.inboundNetCores, conn)
+		s.mu.Unlock()
+	}
+	return pc
 }
 
 func (s *Service) unregisterInboundConn(conn net.Conn) {

@@ -884,13 +884,32 @@ func (s *Service) relayStatusFrame() protocol.Frame {
 // countCapablePeers returns the number of unique connected peers (both
 // outbound sessions and inbound connections) that have the specified
 // capability. A peer that appears in both maps is counted once.
+//
+// Activation gate: mirrors sendFrameToIdentity. An outbound session is
+// inserted into s.sessions before markPeerConnected seeds s.health, and an
+// inbound NetCore is registered before hello/auth populates identity and
+// capabilities; during those windows the peer is not yet active. Require a
+// present, Connected, non-stalled health entry so relay_status.limit does
+// not include peers the rest of the PR treats as not yet active.
 func (s *Service) countCapablePeers(cap domain.Capability) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	now := time.Now().UTC()
 	seen := make(map[domain.PeerIdentity]struct{})
 
+	isActive := func(address domain.PeerAddress) bool {
+		health := s.health[s.resolveHealthAddress(address)]
+		if health == nil || !health.Connected {
+			return false
+		}
+		return s.computePeerStateAtLocked(health, now) != peerStateStalled
+	}
+
 	for _, session := range s.sessions {
+		if session == nil || !isActive(session.address) {
+			continue
+		}
 		for _, c := range session.capabilities {
 			if c == cap {
 				seen[session.peerIdentity] = struct{}{}
@@ -900,7 +919,16 @@ func (s *Service) countCapablePeers(cap domain.Capability) int {
 	}
 
 	for _, pc := range s.inboundNetCores {
+		// Outbound NetCores are already counted via s.sessions above;
+		// skip them here so pre-activation outbound entries cannot
+		// inflate the capable-peer count.
+		if pc == nil || pc.Dir() != Inbound {
+			continue
+		}
 		if _, dup := seen[pc.Identity()]; dup {
+			continue
+		}
+		if !isActive(pc.Address()) {
 			continue
 		}
 		if pc.HasCapability(cap) {

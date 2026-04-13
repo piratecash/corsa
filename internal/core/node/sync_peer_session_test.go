@@ -12,6 +12,22 @@ import (
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
+// attachTestNetCore wires a standalone outbound NetCore onto a peerSession
+// that was constructed manually (without going through attachOutboundNetCore
+// and the Service-level registration). After the PR 2 single-writer migration
+// peerSessionRequest requires session.netCore to be non-nil; tests that drive
+// an outbound session over net.Pipe use this helper to mirror production.
+//
+// The NetCore is NOT registered in any Service map — these tests do not
+// route writes through writeJSONFrame / netCoreFor, they exercise
+// peerSessionRequest directly against the pipe's remote end.
+func attachTestNetCore(session *peerSession) {
+	if session == nil || session.conn == nil || session.netCore != nil {
+		return
+	}
+	session.netCore = newNetCore(connID(1), session.conn, Outbound, NetCoreOpts{})
+}
+
 // newSyncTestService creates a minimal Service for testing syncPeerSession().
 // It has enough fields populated to avoid nil-pointer panics in the code paths
 // exercised by syncPeerSession (peerSessionRequest, addPeerAddress,
@@ -84,6 +100,7 @@ func TestSyncPeerSession_RequestPeersTrue(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
+	attachTestNetCore(session)
 
 	// Responses the mock peer will send for each request type.
 	responses := map[string]protocol.Frame{
@@ -157,6 +174,7 @@ func TestSyncPeerSession_RequestPeersFalse(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
+	attachTestNetCore(session)
 
 	// Only fetch_contacts response needed — get_peers should not be sent.
 	responses := map[string]protocol.Frame{
@@ -228,6 +246,7 @@ func TestSyncPeerSession_SkipDoesNotEmitNewPeersDiscovered(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
+	attachTestNetCore(session)
 
 	responses := map[string]protocol.Frame{
 		"fetch_contacts": {
@@ -291,6 +310,7 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
+	attachTestNetCore(session)
 
 	responses := map[string]protocol.Frame{
 		"get_peers": {

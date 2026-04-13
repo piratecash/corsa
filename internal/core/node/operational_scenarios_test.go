@@ -63,6 +63,7 @@ func newScenarioSession(
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
+	attachTestNetCore(s)
 
 	recv := make(chan []string, 1)
 	go func() {

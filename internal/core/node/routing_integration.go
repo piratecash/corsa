@@ -1004,8 +1004,14 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	}
 
 	// Inbound connection: match on the connection's transport address.
+	// Outbound NetCores are resolved via s.sessions above, so skip them
+	// here — a pre-activation outbound entry must not answer identity
+	// lookups before the session is installed.
 	for conn, pc := range s.inboundNetCores {
-		if pc != nil && conn.RemoteAddr().String() == string(address) {
+		if pc == nil || pc.Dir() != Inbound {
+			continue
+		}
+		if conn.RemoteAddr().String() == string(address) {
 			return pc.Identity()
 		}
 	}

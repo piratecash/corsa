@@ -96,6 +96,32 @@ func TestNetCoreSendSyncBlocksUntilWrite(t *testing.T) {
 	}
 }
 
+// TestNetCoreWriteDeadlinePerDirection verifies that newNetCore selects
+// the per-write socket deadline based on Direction: outbound connections
+// must use the shorter sessionWriteTimeout so that slow-peer eviction for
+// dialled sessions keeps the same back-pressure window it had before
+// outbound writes were routed through the managed send path.
+func TestNetCoreWriteDeadlinePerDirection(t *testing.T) {
+	inbound := newNetCore(100, &mockConn{}, Inbound, NetCoreOpts{})
+	defer inbound.Close()
+	if inbound.writeDeadline != connWriteTimeout {
+		t.Fatalf("inbound writeDeadline = %v, want %v", inbound.writeDeadline, connWriteTimeout)
+	}
+
+	outbound := newNetCore(101, &mockConn{}, Outbound, NetCoreOpts{})
+	defer outbound.Close()
+	if outbound.writeDeadline != sessionWriteTimeout {
+		t.Fatalf("outbound writeDeadline = %v, want %v", outbound.writeDeadline, sessionWriteTimeout)
+	}
+
+	if got := writeDeadlineFor(Inbound); got != connWriteTimeout {
+		t.Fatalf("writeDeadlineFor(Inbound) = %v, want %v", got, connWriteTimeout)
+	}
+	if got := writeDeadlineFor(Outbound); got != sessionWriteTimeout {
+		t.Fatalf("writeDeadlineFor(Outbound) = %v, want %v", got, sessionWriteTimeout)
+	}
+}
+
 // TestNetCoreSendReturnsFalseWhenQueueFull verifies that Send() returns false
 // instead of blocking when the write channel is full.
 func TestNetCoreSendReturnsFalseWhenQueueFull(t *testing.T) {
@@ -246,6 +272,150 @@ func TestSendStatusStringCoversAllValues(t *testing.T) {
 	}
 	if zero.String() != "INVALID(zero)" {
 		t.Fatalf("zero-value String() = %q, want %q", zero.String(), "INVALID(zero)")
+	}
+}
+
+// saturateSendCh drives NetCore into a fully-saturated backpressure state:
+// one item is pulled by the writer (blocked in the caller-owned mockConn
+// gate), and sendChBuffer more items fill every buffered slot. The caller
+// passes writerStarted so the helper can wait until the writer has
+// definitely pulled the first frame before filling the buffer — otherwise
+// the first Send might still sit in the channel and the loop would hit
+// sendBufferFull one slot early.
+func saturateSendCh(t *testing.T, pc *NetCore, writerStarted <-chan struct{}) {
+	t.Helper()
+	frame := protocol.Frame{Type: "ping"}
+	if st := pc.Send(frame); st != sendOK {
+		t.Fatalf("saturateSendCh: first Send: got %s, want sendOK", st.String())
+	}
+	<-writerStarted
+	for i := 0; i < sendChBuffer; i++ {
+		if st := pc.Send(frame); st != sendOK {
+			t.Fatalf("saturateSendCh: Send #%d: got %s, want sendOK (buffer not full yet)", i, st.String())
+		}
+	}
+	if st := pc.Send(frame); st != sendBufferFull {
+		t.Fatalf("saturateSendCh: Send on full queue: got %s, want sendBufferFull", st.String())
+	}
+}
+
+// TestNetCoreSendRawSyncFastFailsOnFullQueue pins the inbound error-path
+// contract: when the send channel is saturated, sendRawSync must return
+// sendBufferFull immediately so enqueueFrameSync can evict the slow peer
+// rather than block for seconds on a malformed/oversized frame response.
+func TestNetCoreSendRawSyncFastFailsOnFullQueue(t *testing.T) {
+	writerStarted := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	conn := &mockConn{
+		writeFn: func(b []byte) (int, error) {
+			once.Do(func() { close(writerStarted) })
+			<-release
+			return len(b), nil
+		},
+	}
+	pc := newNetCore(41, conn, Inbound, NetCoreOpts{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		pc.Close()
+	}()
+
+	saturateSendCh(t, pc, writerStarted)
+
+	line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	start := time.Now()
+	st := pc.sendRawSync([]byte(line))
+	elapsed := time.Since(start)
+
+	if st != sendBufferFull {
+		t.Fatalf("sendRawSync on saturated queue: got %s, want sendBufferFull (fast-fail)", st.String())
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("sendRawSync took %v — should be fast-fail, not blocking", elapsed)
+	}
+}
+
+// TestNetCoreSendRawSyncBlockingDoesNotStarveOnFullQueue verifies that
+// outbound control-plane writes are not starved by fire-and-forget traffic
+// already queued on sendCh. When the buffer is fully saturated,
+// sendRawSyncBlocking must wait for a slot rather than fail fast with
+// sendBufferFull (that signal remains reserved for the best-effort path
+// used by slow-peer eviction). Once the writer drains one item,
+// sendRawSyncBlocking proceeds and returns sendOK.
+func TestNetCoreSendRawSyncBlockingDoesNotStarveOnFullQueue(t *testing.T) {
+	writerStarted := make(chan struct{})
+	release := make(chan struct{})
+	writes := make(chan struct{}, sendChBuffer+2)
+	var once sync.Once
+	conn := &mockConn{
+		writeFn: func(b []byte) (int, error) {
+			once.Do(func() { close(writerStarted) })
+			<-release
+			writes <- struct{}{}
+			return len(b), nil
+		},
+	}
+	pc := newNetCore(42, conn, Outbound, NetCoreOpts{})
+	defer func() {
+		// Release the writer (if still waiting) before closing so Close()
+		// can drain sendCh and the writer goroutine can exit cleanly.
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		pc.Close()
+	}()
+
+	saturateSendCh(t, pc, writerStarted)
+
+	// Blocking sync path must NOT fail fast on a saturated queue.
+	syncResult := make(chan sendStatus, 1)
+	go func() {
+		line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "subscribe_inbox"})
+		if err != nil {
+			syncResult <- sendMarshalError
+			return
+		}
+		syncResult <- pc.sendRawSyncBlocking([]byte(line))
+	}()
+
+	select {
+	case st := <-syncResult:
+		t.Fatalf("sendRawSyncBlocking returned early (%s) while queue was saturated — "+
+			"control-plane must block, not fail fast", st.String())
+	case <-time.After(50 * time.Millisecond):
+		// Expected: still waiting for a slot.
+	}
+
+	// Let the writer drain items one by one. Each drained item frees a
+	// sendCh slot; at least one is enough for sendRawSyncBlocking to enqueue.
+	close(release)
+
+	select {
+	case st := <-syncResult:
+		if st != sendOK {
+			t.Fatalf("sendRawSyncBlocking: got %s, want sendOK", st.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendRawSyncBlocking did not complete after writer drained the queue")
+	}
+
+	// Drain writes counter to avoid blocking the writer — we've already
+	// verified the control-plane contract.
+	for {
+		select {
+		case <-writes:
+		case <-time.After(100 * time.Millisecond):
+			return
+		}
 	}
 }
 

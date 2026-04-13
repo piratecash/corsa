@@ -491,3 +491,64 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 		t.Fatalf("forwarded frame type = %q, want ping", parsed.Type)
 	}
 }
+
+// TestSendFrameToIdentityRejectsOutboundBeforeActivation pins the activation
+// boundary: outbound bring-up inserts into s.sessions before markPeerConnected
+// seeds s.health, and during that window identity-routed frames must not be
+// accepted. Regression for the pre-activation visibility leak in
+// sendFrameToIdentity step 1 (outbound preferred path).
+func TestSendFrameToIdentityRejectsOutboundBeforeActivation(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+
+	outLocal, outRemote := net.Pipe()
+	defer func() { _ = outLocal.Close() }()
+	defer func() { _ = outRemote.Close() }()
+
+	// Session is installed into s.sessions but markPeerConnected has NOT
+	// been called yet — health is absent. This mirrors the window between
+	// peer_management.go s.sessions[address] = session and the subsequent
+	// markPeerConnected(...) call.
+	svc.sessions[domain.PeerAddress("addr-out-preactivation")] = &peerSession{
+		address:      domain.PeerAddress("addr-out-preactivation"),
+		peerIdentity: idPeerB,
+		conn:         outLocal,
+		sendCh:       make(chan protocol.Frame, 4),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+
+	frame := protocol.Frame{Type: "ping"}
+	if svc.sendFrameToIdentity(idPeerB, frame, domain.CapFileTransferV1) {
+		t.Fatal("sendFrameToIdentity accepted outbound session before markPeerConnected; pre-activation visibility leak")
+	}
+}
+
+// TestSendFrameToIdentityRejectsInboundBeforeActivation pins the same
+// activation boundary for the inbound fallback branch. registerInboundConn
+// installs the NetCore before hello/auth; identity/capabilities populate
+// before markPeerConnected. Identity-routed frames must not land on a
+// partially-handshaken inbound NetCore.
+func TestSendFrameToIdentityRejectsInboundBeforeActivation(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+
+	inLocal, inRemote := net.Pipe()
+	defer func() { _ = inLocal.Close() }()
+	defer func() { _ = inRemote.Close() }()
+
+	pc := newNetCore(connID(7), inLocal, Inbound, NetCoreOpts{
+		Address:  domain.PeerAddress("addr-in-preactivation"),
+		Identity: idPeerB,
+		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	})
+	defer pc.Close()
+	svc.inboundNetCores[inLocal] = pc
+	// Intentionally no svc.health entry for addr-in-preactivation.
+
+	frame := protocol.Frame{Type: "ping"}
+	if svc.sendFrameToIdentity(idPeerB, frame, domain.CapFileTransferV1) {
+		t.Fatal("sendFrameToIdentity accepted inbound NetCore before markPeerConnected; pre-activation visibility leak")
+	}
+}

@@ -709,8 +709,13 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		return false, err
 	}
 	conn := NewMeteredConn(rawConn)
+	var session *peerSession
 	defer func() {
 		s.accumulateSessionTraffic(address, conn)
+		if session != nil {
+			_ = session.Close()
+			return
+		}
 		_ = conn.Close()
 	}()
 	enableTCPKeepAlive(rawConn)
@@ -725,7 +730,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	s.mu.Lock()
 	cid := s.nextConnIDLocked()
 	s.mu.Unlock()
-	session := &peerSession{
+	session = &peerSession{
 		address:      address,
 		peerIdentity: "",
 		connID:       cid,
@@ -735,6 +740,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		inboxCh:      make(chan protocol.Frame, 64),
 		errCh:        make(chan error, 1),
 	}
+	s.attachOutboundNetCore(session)
 	go s.readPeerSession(reader, session)
 
 	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
@@ -749,6 +755,25 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
+	// Mirror the negotiated handshake state onto the outbound NetCore so
+	// that s.inboundNetCores (which now holds both directions) is a
+	// symmetric registry: helpers that read pc.Address()/Identity()/
+	// Capabilities() get the real values instead of an anonymous entry.
+	//
+	// pc.Address must be the peer's advertised listen address (the canonical
+	// overlay key), not the dial address — for fallback-port variants the
+	// two can differ. Mirror the inbound pattern from rememberConnPeerAddr:
+	// prefer welcome.Listen, fall back to welcome.Address (identity) when
+	// the peer does not advertise a listen address.
+	if session.netCore != nil {
+		advertised := domain.PeerAddress(strings.TrimSpace(welcome.Listen))
+		if advertised == "" {
+			advertised = domain.PeerAddress(strings.TrimSpace(welcome.Address))
+		}
+		session.netCore.SetAddress(advertised)
+		session.netCore.SetIdentity(session.peerIdentity)
+		session.netCore.SetCapabilities(session.capabilities)
+	}
 	s.learnIdentityFromWelcome(welcome)
 	// learnIdentityFromWelcome stores version/build keyed by the normalized
 	// listen address, which may differ from the dial address (or be absent
@@ -845,10 +870,36 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	pingTimer := time.NewTimer(nextHeartbeatDuration())
 	defer pingTimer.Stop()
 
+	// writerDone signals that the managed writer goroutine has exited —
+	// typically after a socket write failure, but also on normal teardown
+	// where the context watcher closes the socket (which unblocks the
+	// writer's Write with an error and then closes writerDone). If both
+	// ctx.Done() and writerDone become ready simultaneously, Go's select
+	// picks randomly; we must not report a clean shutdown as a peer write
+	// failure. The case below re-checks ctx.Err() after writerDone fires
+	// and returns nil on local cancellation, reserving markPeerDisconnected
+	// for genuine remote-side failures. Without this case, a fire-and-forget
+	// Send() that returns sendOK for a frame enqueued moments before the
+	// writer dies (writer hits the write error post-enqueue) would leave
+	// servePeerSession idle until the next heartbeat.
+	var writerDoneCh <-chan struct{}
+	if session.netCore != nil {
+		writerDoneCh = session.netCore.writerDone
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-writerDoneCh:
+			if err := ctx.Err(); err != nil {
+				// Local shutdown closed the socket, which killed the
+				// writer. Treat as a clean teardown.
+				return nil
+			}
+			writeErr := fmt.Errorf("managed writer exited (socket write failed)")
+			s.markPeerDisconnected(session.address, writeErr)
+			return writeErr
 		case err := <-session.errCh:
 			log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("upstream subscription closed")
 			s.markPeerDisconnected(session.address, err)
@@ -866,22 +917,35 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		case outbound := <-session.sendCh:
 			if isFireAndForgetFrame(outbound.Type) {
 				// Fire-and-forget frames (relay_message, relay_hop_ack) are
-				// written directly without waiting for a response. The remote
-				// side may or may not send an ack — we don't block the session
-				// waiting for one.
-				line, err := protocol.MarshalFrameLine(outbound)
-				if err != nil {
-					continue
+				// enqueued on the managed writer without waiting for a reply.
+				// Buffer-full means the peer is not draining fast enough —
+				// evict it (slow-peer semantics) so upstream retry logic can
+				// pick a different route.
+				if session.netCore == nil {
+					return fmt.Errorf("fire_and_forget: outbound session missing NetCore")
 				}
-				_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
 				s.markPeerWrite(session.address, outbound)
-				if _, writeErr := io.WriteString(session.conn, line); writeErr != nil {
-					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Err(writeErr).Msg("fire_and_forget_write_failed")
-					_ = session.conn.SetWriteDeadline(time.Time{})
+				switch st := session.netCore.Send(outbound); st {
+				case sendOK:
+					// enqueued
+				case sendBufferFull:
+					writeErr := fmt.Errorf("fire_and_forget: send buffer full")
+					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Msg("fire_and_forget_buffer_full")
+					s.markPeerDisconnected(session.address, writeErr)
+					return writeErr
+				case sendChanClosed, sendWriterDone:
+					writeErr := fmt.Errorf("fire_and_forget: connection closing (%s)", st.String())
+					s.markPeerDisconnected(session.address, writeErr)
+					return writeErr
+				case sendMarshalError:
+					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Msg("fire_and_forget_marshal_error")
+					continue
+				default:
+					writeErr := fmt.Errorf("fire_and_forget: unexpected send status %s", st.String())
+					log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Str("status", st.String()).Msg("fire_and_forget_unexpected_status")
 					s.markPeerDisconnected(session.address, writeErr)
 					return writeErr
 				}
-				_ = session.conn.SetWriteDeadline(time.Time{})
 			} else if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
 				log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
 				s.markPeerDisconnected(session.address, err)
@@ -1435,24 +1499,33 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 }
 
 func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
-	_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
+	// All outbound writes route through the managed single-writer path on
+	// NetCore so that deadline, back-pressure and ordering match inbound.
+	// sendRawSyncBlocking blocks until the writer goroutine flushes the
+	// bytes to the socket, preserving the "write completed before we wait
+	// for reply" contract the request loop relies on.
+	if session.netCore == nil {
+		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: outbound session missing NetCore")
+	}
+	var payload []byte
 	if hello {
-		line := s.nodeHelloJSONLine()
+		payload = []byte(s.nodeHelloJSONLine())
 		s.markPeerWrite(session.address, protocol.Frame{Type: "hello"})
-		if _, err := io.WriteString(session.conn, line); err != nil {
-			return protocol.Frame{}, err
-		}
 	} else {
 		line, err := protocol.MarshalFrameLine(frame)
 		if err != nil {
 			return protocol.Frame{}, err
 		}
+		payload = []byte(line)
 		s.markPeerWrite(session.address, frame)
-		if _, err := io.WriteString(session.conn, line); err != nil {
-			return protocol.Frame{}, err
-		}
 	}
-	_ = session.conn.SetWriteDeadline(time.Time{})
+	// Outbound control-plane: block on full queue rather than fast-fail,
+	// so relay traffic backlog cannot starve handshake / subscribe_inbox /
+	// heartbeat writes. Inbound error paths keep the fast-fail sendRawSync
+	// contract via enqueueFrameSync.
+	if st := session.netCore.sendRawSyncBlocking(payload); st != sendOK {
+		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: send failed: %s", st.String())
+	}
 
 	// Use a longer read deadline for ping so that the heartbeat timeout
 	// (pongStallTimeout) governs stall detection instead of the generic
@@ -1473,10 +1546,12 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
 			}
 			if incoming.Type == "ping" {
-				_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
 				pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
+				// NetCore is registered in s.inboundNetCores, so writeJSONFrame
+				// routes through the managed writer — no direct SetWriteDeadline
+				// on session.conn is needed (writerLoop applies its own per-write
+				// deadline based on Direction).
 				s.writeJSONFrame(session.conn, pongFrame)
-				_ = session.conn.SetWriteDeadline(time.Time{})
 				s.markPeerWrite(session.address, pongFrame)
 				continue
 			}
@@ -1651,10 +1726,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	// Pings are not "useful" application traffic, only keep-alive.
 	if frame.Type == "ping" {
 		if session != nil {
-			_ = session.conn.SetWriteDeadline(time.Now().Add(sessionWriteTimeout))
 			pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
+			// Outbound NetCore is registered in s.inboundNetCores from
+			// attachOutboundNetCore, so writeJSONFrame routes through the
+			// managed writer — writerLoop applies the per-direction write
+			// deadline itself, no manual SetWriteDeadline is needed.
 			s.writeJSONFrame(session.conn, pongFrame)
-			_ = session.conn.SetWriteDeadline(time.Time{})
 			s.markPeerWrite(address, pongFrame)
 		}
 		return
@@ -2158,7 +2235,13 @@ func (s *Service) nextConnIDLocked() uint64 {
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
 	for _, pc := range s.inboundNetCores {
-		if pc != nil && pc.Address() == address {
+		// The registry now holds both directions after PR 2. Outbound
+		// NetCores must stay invisible on inbound-only lookup paths —
+		// they are surfaced through s.sessions once activated.
+		if pc == nil || pc.Dir() != Inbound {
+			continue
+		}
+		if pc.Address() == address {
 			ids = append(ids, pc.ConnIDNum())
 		}
 	}
@@ -2171,7 +2254,10 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 // for fire-and-forget writes). Must be called with s.mu held (read lock).
 func (s *Service) inboundConnForAddressLocked(address domain.PeerAddress) net.Conn {
 	for conn, pc := range s.inboundNetCores {
-		if pc == nil || pc.Address() != address {
+		// inboundTracked already excludes outbound conns, but make the
+		// direction filter explicit so the function's contract matches
+		// its name regardless of how the registry evolves.
+		if pc == nil || pc.Dir() != Inbound || pc.Address() != address {
 			continue
 		}
 		if _, tracked := s.inboundTracked[conn]; tracked {
@@ -2355,6 +2441,12 @@ func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 		return domain.CapabilityStrings(session.capabilities)
 	}
 	for _, pc := range s.inboundNetCores {
+		// Outbound NetCores surface their capabilities via s.sessions
+		// (checked above); skip them here so a pre-activation outbound
+		// entry cannot answer on the inbound fallback path.
+		if pc == nil || pc.Dir() != Inbound {
+			continue
+		}
 		if pc.Address() == address && len(pc.Capabilities()) > 0 {
 			return domain.CapabilityStrings(pc.Capabilities())
 		}
@@ -3128,13 +3220,6 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		}
 	}()
 
-	// closeOnError closes the connection and stops the guard goroutine.
-	// Must be called on every error return path.
-	closeOnError := func() {
-		_ = conn.Close()
-		close(abort)
-	}
-
 	enableTCPKeepAlive(rawConn)
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
@@ -3152,6 +3237,17 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		inboxCh:      make(chan protocol.Frame, 64),
 		errCh:        make(chan error, 1),
 	}
+	s.attachOutboundNetCore(session)
+
+	// closeOnError tears down the session (including the outbound NetCore
+	// registration) and stops the guard goroutine. Must be called on every
+	// error return path; success exits via close(abort) below, leaving the
+	// session live for the CM caller to own.
+	closeOnError := func() {
+		_ = session.Close()
+		close(abort)
+	}
+
 	go s.readPeerSession(reader, session)
 
 	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
@@ -3170,6 +3266,23 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
+	// Mirror the negotiated handshake state onto the outbound NetCore so
+	// that s.inboundNetCores (which now holds both directions) is a
+	// symmetric registry: helpers that read pc.Address()/Identity()/
+	// Capabilities() get the real values instead of an anonymous entry.
+	//
+	// pc.Address must be the peer's advertised listen address (canonical
+	// overlay key), not the dial address — for fallback-port variants the
+	// two can differ. Mirror the inbound pattern from rememberConnPeerAddr.
+	if session.netCore != nil {
+		advertised := domain.PeerAddress(strings.TrimSpace(welcome.Listen))
+		if advertised == "" {
+			advertised = domain.PeerAddress(strings.TrimSpace(welcome.Address))
+		}
+		session.netCore.SetAddress(advertised)
+		session.netCore.SetIdentity(session.peerIdentity)
+		session.netCore.SetCapabilities(session.capabilities)
+	}
 
 	// Stash welcome metadata for deferred application in
 	// onCMSessionEstablished after the generation check passes.

@@ -1476,6 +1476,14 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.inboundNetCores[c1] = pc
+		// Activation gate: countCapablePeers requires a present, Connected
+		// health entry (mirrors markPeerConnected in production).
+		svc.health[domain.PeerAddress("inbound-peer-1")] = &peerHealth{
+			Address:             domain.PeerAddress("inbound-peer-1"),
+			Connected:           true,
+			LastConnectedAt:     time.Now().UTC(),
+			LastUsefulReceiveAt: time.Now().UTC(),
+		}
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1486,6 +1494,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.inboundNetCores, c1)
+		delete(svc.health, domain.PeerAddress("inbound-peer-1"))
 		svc.mu.Unlock()
 	})
 
@@ -1510,6 +1519,13 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.inboundNetCores[c1] = pc
+		// Activation gate seed (mirrors markPeerConnected).
+		svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{
+			Address:             domain.PeerAddress(peerAddr),
+			Connected:           true,
+			LastConnectedAt:     time.Now().UTC(),
+			LastUsefulReceiveAt: time.Now().UTC(),
+		}
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1521,6 +1537,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress(peerAddr))
 		delete(svc.inboundNetCores, c1)
+		delete(svc.health, domain.PeerAddress(peerAddr))
 		svc.mu.Unlock()
 	})
 
@@ -1543,6 +1560,19 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.inboundNetCores[c1] = pc
+		// Activation gate seeds for both peers.
+		svc.health[domain.PeerAddress("outbound-peer")] = &peerHealth{
+			Address:             domain.PeerAddress("outbound-peer"),
+			Connected:           true,
+			LastConnectedAt:     time.Now().UTC(),
+			LastUsefulReceiveAt: time.Now().UTC(),
+		}
+		svc.health[domain.PeerAddress("inbound-peer-2")] = &peerHealth{
+			Address:             domain.PeerAddress("inbound-peer-2"),
+			Connected:           true,
+			LastConnectedAt:     time.Now().UTC(),
+			LastUsefulReceiveAt: time.Now().UTC(),
+		}
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1554,6 +1584,8 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-peer"))
 		delete(svc.inboundNetCores, c1)
+		delete(svc.health, domain.PeerAddress("outbound-peer"))
+		delete(svc.health, domain.PeerAddress("inbound-peer-2"))
 		svc.mu.Unlock()
 	})
 
@@ -1579,6 +1611,20 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.inboundNetCores[c1] = pc
+		// Activation gate seeds for both sides of the duplex — same identity,
+		// different addresses, both must be active for dedup to matter.
+		svc.health[domain.PeerAddress("outbound-addr-X")] = &peerHealth{
+			Address:             domain.PeerAddress("outbound-addr-X"),
+			Connected:           true,
+			LastConnectedAt:     time.Now().UTC(),
+			LastUsefulReceiveAt: time.Now().UTC(),
+		}
+		svc.health[domain.PeerAddress("127.0.0.1:64646")] = &peerHealth{
+			Address:             domain.PeerAddress("127.0.0.1:64646"),
+			Connected:           true,
+			LastConnectedAt:     time.Now().UTC(),
+			LastUsefulReceiveAt: time.Now().UTC(),
+		}
 		svc.mu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
@@ -1589,6 +1635,47 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-addr-X"))
+		delete(svc.inboundNetCores, c1)
+		delete(svc.health, domain.PeerAddress("outbound-addr-X"))
+		delete(svc.health, domain.PeerAddress("127.0.0.1:64646"))
+		svc.mu.Unlock()
+	})
+
+	// Regression for the pre-activation visibility leak: a session inserted
+	// into s.sessions before markPeerConnected (health == nil) or an inbound
+	// NetCore populated before activation must NOT contribute to the capable-
+	// peer count, otherwise relay_status.limit inflates ahead of the rest of
+	// the PR that already treats those objects as not yet active.
+	t.Run("excludes_pre_activation_peers", func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		defer func() { _ = c1.Close() }()
+		defer func() { _ = c2.Close() }()
+
+		svc.mu.Lock()
+		svc.sessions[domain.PeerAddress("outbound-preactivation")] = &peerSession{
+			address:      "outbound-preactivation",
+			peerIdentity: "preactivation-id-1",
+			capabilities: []domain.Capability{domain.CapMeshRelayV1},
+			sendCh:       make(chan protocol.Frame),
+		}
+		pc := newNetCore(connID(5), c1, Inbound, NetCoreOpts{
+			Address:  domain.PeerAddress("inbound-preactivation"),
+			Identity: domain.PeerIdentity("preactivation-id-2"),
+			Caps:     []domain.Capability{domain.CapMeshRelayV1},
+		})
+		svc.inboundNetCores[c1] = pc
+		// Intentionally no s.health entries — mirrors the insert →
+		// markPeerConnected window on both bring-up paths.
+		svc.mu.Unlock()
+
+		got := svc.countCapablePeers(domain.CapMeshRelayV1)
+		if got != 0 {
+			t.Fatalf("countCapablePeers = %d, want 0 (pre-activation peers must not inflate count)", got)
+		}
+
+		// Cleanup.
+		svc.mu.Lock()
+		delete(svc.sessions, domain.PeerAddress("outbound-preactivation"))
 		delete(svc.inboundNetCores, c1)
 		svc.mu.Unlock()
 	})
@@ -1749,6 +1836,7 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 		errCh:        errCh,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
+	attachTestNetCore(session)
 
 	svc.mu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = session
@@ -1818,6 +1906,7 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 		errCh:        errCh,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
+	attachTestNetCore(session)
 
 	svc.mu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = session

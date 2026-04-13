@@ -69,6 +69,14 @@ type NetCore struct {
 
 	// Immutable after construction.
 	connIDNum uint64
+
+	// writeDeadline is the per-write deadline applied by writerLoop before
+	// each socket write. The value is direction-specific: inbound reuses the
+	// generic connWriteTimeout, outbound reuses sessionWriteTimeout so that
+	// slow-peer eviction for dialled sessions keeps the same back-pressure
+	// characteristics it had before outbound writes were routed through the
+	// managed send path. Immutable after construction.
+	writeDeadline time.Duration
 }
 
 // sendItem carries serialised frame data through the per-connection send
@@ -122,21 +130,35 @@ func newNetCore(id connID, rawConn net.Conn, dir Direction, opts NetCoreOpts) *N
 	metered, _ := rawConn.(*MeteredConn)
 
 	pc := &NetCore{
-		id:           id,
-		direction:    dir,
-		address:      opts.Address,
-		identity:     opts.Identity,
-		caps:         cloneCaps(opts.Caps),
-		networks:     cloneNetworks(opts.Networks),
-		lastActivity: opts.LastActivity,
-		sendCh:       make(chan sendItem, sendChBuffer),
-		writerDone:   make(chan struct{}),
-		rawConn:      rawConn,
-		metered:      metered,
-		connIDNum:    uint64(id),
+		id:            id,
+		direction:     dir,
+		address:       opts.Address,
+		identity:      opts.Identity,
+		caps:          cloneCaps(opts.Caps),
+		networks:      cloneNetworks(opts.Networks),
+		lastActivity:  opts.LastActivity,
+		sendCh:        make(chan sendItem, sendChBuffer),
+		writerDone:    make(chan struct{}),
+		rawConn:       rawConn,
+		metered:       metered,
+		connIDNum:     uint64(id),
+		writeDeadline: writeDeadlineFor(dir),
 	}
 	go pc.writerLoop()
 	return pc
+}
+
+// writeDeadlineFor returns the per-write socket deadline for a given
+// connection direction. Outbound (dialled) sessions historically used a
+// tighter 3s deadline to keep slow-peer eviction responsive; inbound
+// (accepted) connections used 30s. Keeping these values split per direction
+// preserves the pre-migration back-pressure behaviour when outbound writes
+// move off raw io.WriteString onto NetCore's managed send path.
+func writeDeadlineFor(dir Direction) time.Duration {
+	if dir == Outbound {
+		return sessionWriteTimeout
+	}
+	return connWriteTimeout
 }
 
 // writerLoop is the single goroutine that drains sendCh and writes to
@@ -146,7 +168,7 @@ func (pc *NetCore) writerLoop() {
 	defer crashlog.DeferRecover()
 	defer close(pc.writerDone)
 	for item := range pc.sendCh {
-		_ = pc.rawConn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
+		_ = pc.rawConn.SetWriteDeadline(time.Now().Add(pc.writeDeadline))
 		if _, err := pc.rawConn.Write(item.data); err != nil {
 			return
 		}
@@ -240,6 +262,14 @@ func (pc *NetCore) SendSync(frame protocol.Frame) sendStatus {
 }
 
 // sendRawSync enqueues pre-serialized bytes and waits for write completion.
+//
+// Fast-fail on full queue: returns sendBufferFull immediately if the write
+// channel has no slot. This preserves the pre-PR2 contract relied on by
+// inbound error paths (writeJSONFrameSync / enqueueFrameSync), where a
+// saturated queue means the peer is unresponsive and must be evicted
+// rather than kept alive while the caller blocks. Outbound control-plane
+// writes that must not be starved by fire-and-forget traffic use
+// sendRawSyncBlocking instead.
 func (pc *NetCore) sendRawSync(data []byte) (result sendStatus) {
 	ack := make(chan struct{})
 
@@ -262,6 +292,51 @@ func (pc *NetCore) sendRawSync(data []byte) (result sendStatus) {
 	case <-pc.writerDone:
 		return sendWriterDone
 	case <-time.After(syncFlushTimeout):
+		return sendTimeout
+	}
+}
+
+// sendRawSyncBlocking enqueues pre-serialized bytes and waits for write
+// completion, BLOCKING on enqueue until a slot is available. Used by
+// outbound control-plane writes (handshake, heartbeat, subscribe_inbox,
+// request-reply) that must not be starved by fire-and-forget relay traffic
+// already queued on sendCh. The entire operation (enqueue + flush) is
+// bounded by syncFlushTimeout so a stuck writer cannot hang the caller
+// indefinitely, and writerDone unblocks immediately if the connection is
+// being torn down.
+//
+// This method never returns sendBufferFull — backpressure from a saturated
+// queue is reserved for the fire-and-forget Send / sendRaw path, which
+// uses sendBufferFull as the slow-peer eviction signal.
+func (pc *NetCore) sendRawSyncBlocking(data []byte) (result sendStatus) {
+	ack := make(chan struct{})
+
+	defer func() {
+		if r := recover(); r != nil {
+			result = sendChanClosed
+		}
+	}()
+
+	// Bound the entire operation (enqueue + flush) by a single deadline so
+	// a stuck writer can never hang the caller longer than syncFlushTimeout.
+	deadline := time.NewTimer(syncFlushTimeout)
+	defer deadline.Stop()
+
+	select {
+	case pc.sendCh <- sendItem{data: data, ack: ack}:
+		// Enqueued — wait for the writer goroutine to flush.
+	case <-pc.writerDone:
+		return sendWriterDone
+	case <-deadline.C:
+		return sendTimeout
+	}
+
+	select {
+	case <-ack:
+		return sendOK
+	case <-pc.writerDone:
+		return sendWriterDone
+	case <-deadline.C:
 		return sendTimeout
 	}
 }

@@ -212,7 +212,10 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 	}
 
 	for _, pc := range s.inboundNetCores {
-		if pc == nil || !pc.HasCapability(domain.CapFileTransferV1) {
+		// Outbound NetCores surface through s.sessions above; skip them
+		// here so pre-activation outbound entries do not leak into the
+		// file-transfer peer set before the session is established.
+		if pc == nil || pc.Dir() != Inbound || !pc.HasCapability(domain.CapFileTransferV1) {
 			continue
 		}
 		consider(pc.Identity(), pc.Address())
@@ -250,7 +253,10 @@ func (s *Service) fileTransferPeerUsableAtLocked(peer domain.PeerIdentity, now t
 	}
 
 	for _, pc := range s.inboundNetCores {
-		if pc == nil || pc.Identity() != peer || !pc.HasCapability(domain.CapFileTransferV1) {
+		// Same visibility boundary as forEachUsableFileTransferPeerLocked:
+		// outbound NetCores are reachable via s.sessions above, so skip
+		// them here to keep pre-activation outbound entries hidden.
+		if pc == nil || pc.Dir() != Inbound || pc.Identity() != peer || !pc.HasCapability(domain.CapFileTransferV1) {
 			continue
 		}
 		consider(pc.Address())

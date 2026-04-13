@@ -265,9 +265,10 @@ const handshakeTimeout = 2 * time.Second
 // (syncPeer, startPeerSession) which do less work than a full session.
 const syncHandshakeTimeout = 1500 * time.Millisecond
 
-// sessionWriteTimeout is the per-frame write deadline for fire-and-forget
-// frames on an established peer session (relay_message, relay_hop_ack, and
-// peerSessionRequest).
+// sessionWriteTimeout is the per-write deadline applied by NetCore.writerLoop
+// for outbound (dialled) connections — fire-and-forget frames, request-reply
+// handshake and steady-state traffic all share this 3-second window.
+// writeDeadlineFor(Outbound) returns this value; inbound uses connWriteTimeout.
 const sessionWriteTimeout = 3 * time.Second
 
 // inboundReadTimeout is the maximum time an inbound connection may remain
