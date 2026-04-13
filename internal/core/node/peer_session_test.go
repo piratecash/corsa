@@ -61,8 +61,10 @@ func TestPeerSessionCloseWithoutNetCoreClosesConn(t *testing.T) {
 // strictly AFTER netCore.Close() has returned, so that while writerLoop is
 // still alive the map lookup continues to resolve to the managed path.
 // Unregistering first would let a concurrent writeJSONFrame fall through
-// to the enqueueUnregistered branch and call conn.Write directly, racing
-// with the still-live writer goroutine.
+// to the enqueueUnregistered branch — which, since PR 3, is a hard
+// fail-closed invariant violation that silently drops the frame instead of
+// reaching the writer. Either way (pre-PR3 race, post-PR3 data loss) the
+// ordering must be preserved: NetCore stays resolvable until writerDone.
 func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
 	conn := &mockConn{}
 	nc := newNetCore(1, conn, Outbound, NetCoreOpts{})

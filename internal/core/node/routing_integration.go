@@ -1248,6 +1248,11 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
+	// netcore-migration: §4.4 bootstrap exception, pending architectural
+	// review of the inbound-absent dial fallback itself (see §2.6.6). The
+	// forbidden-list in §2.9 enumerates this write explicitly; removing the
+	// sentinel without removing the raw write triggers the grep gate. The
+	// same applies to the two writes below in this function body.
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}
@@ -1268,6 +1273,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		if err != nil {
 			return
 		}
+		// netcore-migration: §4.4 bootstrap exception (see sentinel above).
 		if _, err := io.WriteString(conn, authLine); err != nil {
 			return
 		}
@@ -1288,6 +1294,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	if err != nil {
 		return
 	}
+	// netcore-migration: §4.4 bootstrap exception (see sentinel above).
 	_, _ = io.WriteString(conn, line)
 	_, _ = readFrameLine(reader, maxResponseLineBytes)
 }

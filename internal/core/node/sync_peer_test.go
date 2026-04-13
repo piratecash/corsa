@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -446,5 +447,69 @@ func TestSyncSenderKeys_FreshDialFallback_RespectsCtxCancel(t *testing.T) {
 	if elapsed >= syncHandshakeTimeout {
 		t.Errorf("expected prompt cancellation, took %v (timeout=%v)",
 			elapsed, syncHandshakeTimeout)
+	}
+}
+
+// TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine verifies the
+// single-writer invariant for the migrated syncPeer path: each invocation
+// creates a bootstrap NetCore with a writer goroutine, and pc.Close() must
+// drain/terminate that goroutine before returning. A leak would manifest as
+// goroutine count growing linearly with the iteration count.
+//
+// This is the regression lock on PR 5 §4.4 bootstrap exception for syncPeer:
+// if a future refactor replaces pc.Close() with a raw conn.Close() or
+// forgets the defer, sendCh never closes, writerLoop never exits, and this
+// test catches it deterministically.
+func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
+	// Intentionally not t.Parallel — goroutine counting is a global signal.
+
+	const iterations = 20
+
+	// Settle any goroutines left over from previous tests in this package.
+	for i := 0; i < 5; i++ {
+		runtime.Gosched()
+		time.Sleep(10 * time.Millisecond)
+	}
+	baseline := runtime.NumGoroutine()
+
+	for i := 0; i < iterations; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("iter %d: failed to start listener: %v", i, err)
+		}
+
+		svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+		peerAddr := domain.PeerAddress(ln.Addr().String())
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = syncPeerMockServer(t, ln, nil)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		svc.syncPeer(ctx, peerAddr, false)
+		cancel()
+
+		_ = ln.Close()
+		<-done
+	}
+
+	// Allow any in-flight writerLoop goroutines to observe close(sendCh)
+	// and exit. pc.Close() already waits on writerDone, so this is a
+	// belt-and-braces settle window against accept goroutines etc.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline+2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	final := runtime.NumGoroutine()
+	// Small tolerance for unrelated runtime goroutines (GC, netpoll noise).
+	if final > baseline+5 {
+		t.Errorf("goroutine leak: baseline=%d final=%d iterations=%d (delta=%d)",
+			baseline, final, iterations, final-baseline)
 	}
 }

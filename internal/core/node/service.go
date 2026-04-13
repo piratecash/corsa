@@ -1532,10 +1532,35 @@ const connWriteTimeout = 30 * time.Second
 type enqueueResult int
 
 const (
-	enqueueSent         enqueueResult = iota // data accepted into the channel
-	enqueueUnregistered                      // connection has no send channel (outbound peer session)
-	enqueueDropped                           // channel full or closed — data lost, conn closing
+	enqueueSent enqueueResult = iota // data accepted into the channel
+	// enqueueUnregistered signals that the conn is not in s.inboundNetCores.
+	// After PR 2 every live connection — inbound via registerInboundConn and
+	// outbound via attachOutboundNetCore — is registered before any send,
+	// so this outcome now means "invariant violation / state inconsistency",
+	// not "legitimate outbound peer session without send channel". Callers
+	// must fail closed on this result; bypassing the managed writer with a
+	// direct conn.Write would reintroduce the broken single-writer property
+	// the migration is closing.
+	enqueueUnregistered
+	enqueueDropped // channel full or closed — data lost, conn closing
 )
+
+// String returns a stable machine-friendly label for each enqueueResult,
+// used by emitProtocolTrace to surface the effective send outcome in
+// observability. The labels are part of the log contract — renaming them
+// is an operations-visible change.
+func (r enqueueResult) String() string {
+	switch r {
+	case enqueueSent:
+		return "sent"
+	case enqueueUnregistered:
+		return "unregistered"
+	case enqueueDropped:
+		return "dropped"
+	default:
+		return "unknown"
+	}
+}
 
 // enqueueFrame sends the serialised bytes to the per-connection writer
 // goroutine via NetCore.sendRaw. Fire-and-forget: the caller does not
@@ -1719,30 +1744,21 @@ func tryEnqueuePeerSessionFrame(sess *peerSession, frame protocol.Frame) (accept
 }
 
 func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
-	ev := log.Debug().
-		Str("protocol", "json/tcp").
-		Str("addr", conn.RemoteAddr().String()).
-		Str("direction", "send").
-		Str("command", frame.Type).
-		Bool("accepted", frame.Type != "error")
-	if frame.Type == "error" {
-		ev = ev.Str("code", frame.Code).Str("error", frame.Error)
-	}
-	ev.Msg("protocol_trace")
-
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
 		data := append(fallback, '\n')
-		if s.enqueueFrame(conn, data) == enqueueUnregistered {
-			// Outbound peer session — no send channel, write directly.
-			_, _ = conn.Write(data)
+		res := s.enqueueFrame(conn, data)
+		emitProtocolTrace(conn, frame, res)
+		if res == enqueueUnregistered {
+			logUnregisteredWrite(conn, frame, "writeJSONFrame.marshal_fallback")
 		}
 		return
 	}
-	if s.enqueueFrame(conn, []byte(line)) == enqueueUnregistered {
-		// Outbound peer session — no send channel, write directly.
-		_, _ = io.WriteString(conn, line)
+	res := s.enqueueFrame(conn, []byte(line))
+	emitProtocolTrace(conn, frame, res)
+	if res == enqueueUnregistered {
+		logUnregisteredWrite(conn, frame, "writeJSONFrame")
 	}
 }
 
@@ -1754,29 +1770,74 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 // teardown, preserving the "write completed before return" contract that
 // error-path callers rely on.
 func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) {
-	ev := log.Debug().
-		Str("protocol", "json/tcp").
-		Str("addr", conn.RemoteAddr().String()).
-		Str("direction", "send").
-		Str("command", frame.Type).
-		Bool("accepted", frame.Type != "error")
-	if frame.Type == "error" {
-		ev = ev.Str("code", frame.Code).Str("error", frame.Error)
-	}
-	ev.Msg("protocol_trace")
-
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
 		data := append(fallback, '\n')
-		if s.enqueueFrameSync(conn, data) == enqueueUnregistered {
-			_, _ = conn.Write(data)
+		res := s.enqueueFrameSync(conn, data)
+		emitProtocolTrace(conn, frame, res)
+		if res == enqueueUnregistered {
+			logUnregisteredWrite(conn, frame, "writeJSONFrameSync.marshal_fallback")
 		}
 		return
 	}
-	if s.enqueueFrameSync(conn, []byte(line)) == enqueueUnregistered {
-		_, _ = io.WriteString(conn, line)
+	res := s.enqueueFrameSync(conn, []byte(line))
+	emitProtocolTrace(conn, frame, res)
+	if res == enqueueUnregistered {
+		logUnregisteredWrite(conn, frame, "writeJSONFrameSync")
 	}
+}
+
+// emitProtocolTrace writes the send-side protocol_trace entry after the
+// enqueue outcome is known. accepted reflects the *effective* send result:
+// a frame that was dropped (unregistered conn, buffer full, writer done)
+// must not show up as accepted=true — otherwise operators would see a
+// successful trace followed by a drop log for the same frame, which is
+// exactly the observability lie the PR 3 reviewer flagged. For a non-error
+// frame, accepted == true only when the frame actually reached the managed
+// writer queue (enqueueSent); any drop path forces accepted=false and adds
+// the concrete outcome so the trace is self-describing.
+func emitProtocolTrace(conn net.Conn, frame protocol.Frame, res enqueueResult) {
+	addr := ""
+	if conn != nil {
+		if ra := conn.RemoteAddr(); ra != nil {
+			addr = ra.String()
+		}
+	}
+	ev := log.Debug().
+		Str("protocol", "json/tcp").
+		Str("addr", addr).
+		Str("direction", "send").
+		Str("command", frame.Type).
+		Str("send_outcome", res.String()).
+		Bool("accepted", frame.Type != "error" && res == enqueueSent)
+	if frame.Type == "error" {
+		ev = ev.Str("code", frame.Code).Str("error", frame.Error)
+	}
+	ev.Msg("protocol_trace")
+}
+
+// logUnregisteredWrite records the invariant violation that the reviewer
+// behind PR 3 is asking us to surface: after PR 2 every live connection
+// must be registered in s.inboundNetCores before the first write — an
+// enqueueUnregistered outcome means the single-writer invariant was
+// attempted to be bypassed. The frame is dropped (fail closed) rather than
+// slipped around the managed writer via a direct conn.Write: a silent direct
+// write would reintroduce exactly the broken state the migration is closing.
+// The log includes origin, remote address, and the command type so the
+// responsible call-site is immediately identifiable in production logs.
+func logUnregisteredWrite(conn net.Conn, frame protocol.Frame, origin string) {
+	addr := ""
+	if conn != nil {
+		if ra := conn.RemoteAddr(); ra != nil {
+			addr = ra.String()
+		}
+	}
+	log.Error().
+		Str("origin", origin).
+		Str("addr", addr).
+		Str("command", frame.Type).
+		Msg("unregistered_write: conn missing NetCore — single-writer invariant violation, frame dropped")
 }
 
 func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.Frame {

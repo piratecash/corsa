@@ -8979,3 +8979,95 @@ func TestSubscribeInboxAllowsOwnIdentity(t *testing.T) {
 // TestDataCommandViaTCP_UnknownCommand_SnakeCase). The equivalent identity-
 // binding test for subscribe_inbox already exists as
 // TestSubscribeInboxRejectsIdentityMismatch above (line ~8506).
+
+// TestWriteJSONFrameDropsOnUnregisteredConn pins the PR 3 fail-closed
+// contract for the fire-and-forget send path: when writeJSONFrame is invoked
+// on a conn that is NOT registered in s.inboundNetCores, the managed writer
+// cannot be resolved and the frame MUST be dropped rather than slipped around
+// the NetCore via a direct conn.Write. Any non-zero bytes reaching the socket
+// here would mean the migration's single-writer invariant had been bypassed
+// again — the exact regression PR 3 is closing.
+//
+// The test also pins the observability contract (reviewer P2 fix-up): the
+// protocol_trace line MUST reflect the effective send outcome. A ping that
+// is dropped on the unregistered path must not be logged as accepted=true —
+// that would leave operators with a successful-send trace followed by a
+// drop log for the same frame.
+func TestWriteJSONFrameDropsOnUnregisteredConn(t *testing.T) {
+	// NOT parallel: mutates the global zerolog logger to capture trace output.
+	var buf syncWriter
+	origLogger := log.Logger
+	origLevel := zerolog.GlobalLevel()
+	log.Logger = zerolog.New(&buf).With().Logger()
+	zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	defer func() {
+		log.Logger = origLogger
+		zerolog.SetGlobalLevel(origLevel)
+	}()
+
+	svc := &Service{
+		inboundNetCores: map[net.Conn]*NetCore{},
+	}
+	conn := &mockConn{}
+
+	svc.writeJSONFrame(conn, protocol.Frame{Type: "ping"})
+
+	if written := conn.Written(); len(written) != 0 {
+		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"send_outcome":"unregistered"`) {
+		t.Fatalf("protocol_trace must surface send_outcome=unregistered; got: %s", out)
+	}
+	if strings.Contains(out, `"accepted":true`) {
+		t.Fatalf("protocol_trace must not show accepted=true for a dropped frame; got: %s", out)
+	}
+	if !strings.Contains(out, "unregistered_write:") {
+		t.Fatalf("expected unregistered_write error log; got: %s", out)
+	}
+}
+
+// TestWriteJSONFrameSyncDropsOnUnregisteredConn mirrors the guarantee above
+// for the synchronous error-path variant used by handleConn when it is about
+// to return false. The sync variant is the more tempting injection point for
+// a silent-write regression because its callers expect "write completed before
+// return" semantics — it is even more important that it fails closed rather
+// than reaching for the raw socket when the NetCore is missing.
+func TestWriteJSONFrameSyncDropsOnUnregisteredConn(t *testing.T) {
+	// NOT parallel: mutates the global zerolog logger to capture trace output.
+	var buf syncWriter
+	origLogger := log.Logger
+	origLevel := zerolog.GlobalLevel()
+	log.Logger = zerolog.New(&buf).With().Logger()
+	zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	defer func() {
+		log.Logger = origLogger
+		zerolog.SetGlobalLevel(origLevel)
+	}()
+
+	svc := &Service{
+		inboundNetCores: map[net.Conn]*NetCore{},
+	}
+	conn := &mockConn{}
+
+	svc.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+
+	if written := conn.Written(); len(written) != 0 {
+		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"send_outcome":"unregistered"`) {
+		t.Fatalf("protocol_trace must surface send_outcome=unregistered; got: %s", out)
+	}
+	// Error frames already had accepted=false by the old semantic, but the
+	// contract now also requires send_outcome to distinguish "delivered error"
+	// from "dropped error" — the latter is exactly this test.
+	if strings.Contains(out, `"send_outcome":"sent"`) {
+		t.Fatalf("protocol_trace must not report send_outcome=sent for a dropped frame; got: %s", out)
+	}
+	if !strings.Contains(out, "unregistered_write:") {
+		t.Fatalf("expected unregistered_write error log; got: %s", out)
+	}
+}

@@ -507,13 +507,22 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_dial_failed")
 		return 0
 	}
-	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
-	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_hello_write_failed")
+	// Wrap the one-shot conn in a bootstrap NetCore so every write on this
+	// handshake path goes through the managed writer — no raw io.WriteString
+	// remains on this probe. pc.Close() closes conn and waits for the writer
+	// goroutine to drain, so no separate defer conn.Close() is needed.
+	// writeDeadline matches the outer handshake budget (syncHandshakeTimeout)
+	// so the wrapper does not silently extend per-write timing past what the
+	// caller guaranteed with SetDeadline above.
+	pc := newBootstrapNetCore(conn, syncHandshakeTimeout)
+	defer pc.Close()
+
+	if st := pc.sendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != sendOK {
+		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_hello_write_failed")
 		return 0
 	}
 	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
@@ -536,8 +545,8 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_marshal_failed")
 			return 0
 		}
-		if _, err := io.WriteString(conn, authLine); err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_write_failed")
+		if st := pc.sendRawSyncBlocking([]byte(authLine)); st != sendOK {
+			log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_auth_write_failed")
 			return 0
 		}
 		// After auth_session the remote may interleave non-auth frames
@@ -580,8 +589,8 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// docs/peer-discovery-conditional-get-peers.ru.md §§ Шаг 4, Шаг 5.
 	if requestPeers {
 		if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
-			if _, err := io.WriteString(conn, line); err != nil {
-				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_failed")
+			if st := pc.sendRawSyncBlocking([]byte(line)); st != sendOK {
+				log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_get_peers_failed")
 				return 0
 			}
 			reply, err := readFrameLine(reader, maxResponseLineBytes)
@@ -606,8 +615,8 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 
 	imported := 0
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "fetch_contacts"}); err == nil {
-		if _, err := io.WriteString(conn, line); err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_fetch_contacts_failed")
+		if st := pc.sendRawSyncBlocking([]byte(line)); st != sendOK {
+			log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_fetch_contacts_failed")
 			return 0
 		}
 		contactsReply, err := readFrameLine(reader, maxResponseLineBytes)

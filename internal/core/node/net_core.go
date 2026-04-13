@@ -75,7 +75,10 @@ type NetCore struct {
 	// generic connWriteTimeout, outbound reuses sessionWriteTimeout so that
 	// slow-peer eviction for dialled sessions keeps the same back-pressure
 	// characteristics it had before outbound writes were routed through the
-	// managed send path. Immutable after construction.
+	// managed send path. Immutable after construction for peerSession-owned
+	// NetCores; newBootstrapNetCore overrides the value once, before any
+	// Send* call can happen, and the writer goroutine reads the field only
+	// on dequeue — see newBootstrapNetCore for why the override is safe.
 	writeDeadline time.Duration
 }
 
@@ -145,6 +148,32 @@ func newNetCore(id connID, rawConn net.Conn, dir Direction, opts NetCoreOpts) *N
 		writeDeadline: writeDeadlineFor(dir),
 	}
 	go pc.writerLoop()
+	return pc
+}
+
+// newBootstrapNetCore wraps a one-shot outbound dial (e.g., syncPeer and
+// other §4.4 bootstrap/probe paths) in a NetCore so that every write on
+// conn goes through the single-writer invariant instead of raw
+// io.WriteString. The NetCore is never registered in s.inboundNetCores —
+// its sole job is to serialise writes on conn while the caller continues
+// to read directly from a bufio.Reader over the same conn. Caller owns
+// lifecycle via Close(), which closes the underlying conn and waits for
+// the writer goroutine to exit.
+//
+// writeDeadline is taken from the caller's outer overall-operation budget
+// (e.g., syncHandshakeTimeout for syncPeer) rather than the generic
+// Outbound default (sessionWriteTimeout), because the bootstrap wrapper
+// must not relax the caller's existing timing contract: if the outer code
+// guarantees "this whole handshake finishes in 1.5s" via SetDeadline, the
+// per-write budget has to fit inside that window, not exceed it.
+//
+// The writeDeadline override after construction is safe because no sender
+// can enqueue data until the caller observes the returned *NetCore, and the
+// writer goroutine reads pc.writeDeadline only on dequeue — so the field
+// write happens-before any read by Go's memory model via the channel send.
+func newBootstrapNetCore(conn net.Conn, writeDeadline time.Duration) *NetCore {
+	pc := newNetCore(connID(0), conn, Outbound, NetCoreOpts{})
+	pc.writeDeadline = writeDeadline
 	return pc
 }
 
