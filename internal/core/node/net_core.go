@@ -29,6 +29,32 @@ import (
 // to use peerSession until Phase 3, because servePeerSession owns both
 // read and write and has request-reply semantics that require a different
 // migration path.
+
+// connEntry is the single-source-of-truth record the Service keeps per
+// registered net.Conn. It consolidates what checkpoint 9.3 previously
+// spread across four parallel maps (inboundConns / inboundMetered /
+// inboundTracked / inboundNetCores). The lifecycle invariant is pinned
+// in doc §2.6.7: all fields are created in registerInboundConn /
+// attachOutboundNetCore, mutated (tracked flag) by trackInboundConnect /
+// trackInboundDisconnect, and invalidated atomically by
+// unregisterInboundConn — there is exactly one delete call site.
+//
+// core is always non-nil for a registered conn.
+// metered is nil for conns that are not wrapped in MeteredConn (e.g.
+//
+//	outbound dials that do not measure bytes).
+//
+// tracked is set to true after the auth-complete / auth-not-required
+//
+//	promotion in trackInboundConnect, and flipped back to false by
+//	trackInboundDisconnect. Deletion of the whole entry happens only in
+//	unregisterInboundConn, keeping the four legacy removals coherent.
+type connEntry struct {
+	core    *NetCore
+	metered *MeteredConn
+	tracked bool
+}
+
 type NetCore struct {
 	id        connID
 	direction Direction
@@ -154,7 +180,7 @@ func newNetCore(id connID, rawConn net.Conn, dir Direction, opts NetCoreOpts) *N
 // newBootstrapNetCore wraps a one-shot outbound dial (e.g., syncPeer and
 // other §4.4 bootstrap/probe paths) in a NetCore so that every write on
 // conn goes through the single-writer invariant instead of raw
-// io.WriteString. The NetCore is never registered in s.inboundNetCores —
+// io.WriteString. The NetCore is never registered in s.conns —
 // its sole job is to serialise writes on conn while the caller continues
 // to read directly from a bufio.Reader over the same conn. Caller owns
 // lifecycle via Close(), which closes the underlying conn and waits for

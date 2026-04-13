@@ -18,10 +18,19 @@ import (
 // peerSessionRequest requires session.netCore to be non-nil; tests that drive
 // an outbound session over net.Pipe use this helper to mirror production.
 //
-// The NetCore is NOT registered in any Service map — these tests do not
-// route writes through writeJSONFrame / netCoreFor, they exercise
-// peerSessionRequest directly against the pipe's remote end.
-func attachTestNetCore(session *peerSession) {
+// TRANSLATION (RU): хелпер, аналогичный attachOutboundNetCore, для тестов,
+// которые создают peerSession вручную. Создаёт Outbound NetCore для
+// session.conn. Опциональный svc передаётся только чтобы сохранить
+// совместимость вызовов — после перехода session-local reply-путей на
+// writeSessionFrame (P1 ревью 9.4a) регистрация в s.conns больше не
+// требуется для корректной работы pong / push_message / subscribe_inbox
+// ответов.
+//
+// The svc parameter is retained for call-site compatibility but is not
+// used: session-local reply paths route through session.netCore directly
+// via writeSessionFrame, so registration in s.conns is not needed for the
+// session reply invariant.
+func attachTestNetCore(_ *Service, session *peerSession) {
 	if session == nil || session.conn == nil || session.netCore != nil {
 		return
 	}
@@ -100,7 +109,7 @@ func TestSyncPeerSession_RequestPeersTrue(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
-	attachTestNetCore(session)
+	attachTestNetCore(svc, session)
 
 	// Responses the mock peer will send for each request type.
 	responses := map[string]protocol.Frame{
@@ -174,7 +183,7 @@ func TestSyncPeerSession_RequestPeersFalse(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
-	attachTestNetCore(session)
+	attachTestNetCore(svc, session)
 
 	// Only fetch_contacts response needed — get_peers should not be sent.
 	responses := map[string]protocol.Frame{
@@ -246,7 +255,7 @@ func TestSyncPeerSession_SkipDoesNotEmitNewPeersDiscovered(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
-	attachTestNetCore(session)
+	attachTestNetCore(svc, session)
 
 	responses := map[string]protocol.Frame{
 		"fetch_contacts": {
@@ -310,7 +319,7 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
-	attachTestNetCore(session)
+	attachTestNetCore(svc, session)
 
 	responses := map[string]protocol.Frame{
 		"get_peers": {

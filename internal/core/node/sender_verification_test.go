@@ -94,8 +94,7 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 		Address:  domain.PeerAddress("inbound-peer-1"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
-	svc.inboundNetCores[peerConn] = pc
-	svc.inboundConns[peerConn] = struct{}{}
+	svc.conns[peerConn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -160,8 +159,7 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 		Address:  domain.PeerAddress("relay-peer-2"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
-	svc.inboundNetCores[peerConn] = pc
-	svc.inboundConns[peerConn] = struct{}{}
+	svc.conns[peerConn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -210,8 +208,7 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 		Address:  domain.PeerAddress("relay-peer-3"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
-	svc.inboundNetCores[peerConn] = pc
-	svc.inboundConns[peerConn] = struct{}{}
+	svc.conns[peerConn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -261,8 +258,7 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 		Address:  domain.PeerAddress("relay-peer-4"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
-	svc.inboundNetCores[peerConn] = pc
-	svc.inboundConns[peerConn] = struct{}{}
+	svc.conns[peerConn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -409,8 +405,7 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 		Address:  domain.PeerAddress("ban-test-peer"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
-	svc.inboundNetCores[peerConn] = pc
-	svc.inboundConns[peerConn] = struct{}{}
+	svc.conns[peerConn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -499,8 +494,7 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 		Address:  relayAddr,
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
-	svc.inboundNetCores[peerConn] = pc
-	svc.inboundConns[peerConn] = struct{}{}
+	svc.conns[peerConn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)

@@ -126,10 +126,15 @@ func TestRespondToInboxRequestPushesMessages(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 	defer func() { _ = clientConn.Close() }()
 
+	// respondToInboxRequest writes through writeSessionFrame, which
+	// routes via session.netCore — attach a NetCore just like
+	// attachOutboundNetCore does in production so the managed writer
+	// loop drains the pipe.
 	session := &peerSession{
 		address:      domain.PeerAddress(peerIdentity),
 		peerIdentity: domain.PeerIdentity(peerIdentity),
 		conn:         clientConn,
+		netCore:      newNetCore(connID(1), clientConn, Outbound, NetCoreOpts{}),
 	}
 
 	go svc.respondToInboxRequest(session)
@@ -190,10 +195,13 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 	// Transport address differs from identity — this is the normal case
 	// in production where the dial address is an IP:port and the identity
 	// is the Ed25519 fingerprint.
+	// Attach a NetCore to satisfy writeSessionFrame's session.netCore
+	// precondition (session-local reply path, PR 9.4a P1 fix).
 	session := &peerSession{
 		address:      domain.PeerAddress(transportAddr),
 		peerIdentity: domain.PeerIdentity(peerIdentity),
 		conn:         clientConn,
+		netCore:      newNetCore(connID(1), clientConn, Outbound, NetCoreOpts{}),
 	}
 
 	go svc.respondToInboxRequest(session)
@@ -241,7 +249,7 @@ func (s *Service) initMaps() {
 	s.subs = make(map[string]map[string]*subscriber)
 	s.receipts = make(map[string][]protocol.DeliveryReceipt)
 	s.notices = make(map[string]gazeta.Notice)
-	s.inboundNetCores = make(map[net.Conn]*NetCore)
+	s.conns = make(map[net.Conn]*connEntry)
 	s.pending = make(map[domain.PeerAddress][]pendingFrame)
 	s.pendingKeys = make(map[string]struct{})
 	s.orphaned = make(map[domain.PeerAddress][]pendingFrame)
@@ -258,10 +266,7 @@ func (s *Service) initMaps() {
 	s.boxSigs = make(map[string]string)
 	s.bans = make(map[string]banEntry)
 	s.events = make(map[chan protocol.LocalChangeEvent]struct{})
-	s.inboundConns = make(map[net.Conn]struct{})
-	s.inboundMetered = make(map[net.Conn]*MeteredConn)
 	s.inboundHealthRefs = make(map[domain.PeerAddress]int)
-	s.inboundTracked = make(map[net.Conn]struct{})
 	s.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
 	s.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
 	s.observedAddrs = make(map[domain.PeerIdentity]string)

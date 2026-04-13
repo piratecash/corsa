@@ -89,13 +89,10 @@ type Service struct {
 	relayRetry            map[string]relayAttempt
 	outbound              map[string]outboundDelivery
 	upstream              map[domain.PeerAddress]struct{}
-	inboundConns          map[net.Conn]struct{}
-	inboundMetered        map[net.Conn]*MeteredConn  // inbound conn → MeteredConn for live traffic reads
 	inboundHealthRefs     map[domain.PeerAddress]int // resolved overlay address → active inbound connection count
-	inboundTracked        map[net.Conn]struct{}      // connections promoted via trackInboundConnect (auth complete or auth not required)
 	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
-	inboundNetCores       map[net.Conn]*NetCore      // conn → NetCore (now holds both inbound and outbound; renaming deferred to checkpoint 9.4)
+	conns                 map[net.Conn]*connEntry    // primary registry: conn → connEntry (core + metered + tracked). See §2.6.7 of docs/netcore-migration.md for the lifecycle invariant and §2.6.8 for the PR 9.4a consolidation that replaced inboundConns / inboundMetered / inboundTracked / inboundNetCores.
 	connIDCounter         uint64                     // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
@@ -204,7 +201,7 @@ type peerWelcomeMeta struct {
 // order:
 //  1. netCore.Close() — closes the raw socket, closes sendCh, waits for the
 //     writer goroutine to drain and exit.
-//  2. onClose() — removes the NetCore registration from s.inboundNetCores.
+//  2. onClose() — removes the NetCore registration from s.conns.
 //
 // The order matters for the single-writer invariant. While writerLoop is
 // still alive, the registration MUST remain visible to netCoreFor() so
@@ -557,11 +554,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		dialOrigin:            make(map[domain.PeerAddress]domain.PeerAddress),
 		observedAddrs:         make(map[domain.PeerIdentity]string),
 		reachableGroups:       computeReachableGroups(cfg),
-		inboundConns:          make(map[net.Conn]struct{}),
-		inboundMetered:        make(map[net.Conn]*MeteredConn),
 		inboundHealthRefs:     make(map[domain.PeerAddress]int),
-		inboundTracked:        make(map[net.Conn]struct{}),
-		inboundNetCores:       make(map[net.Conn]*NetCore),
+		conns:                 make(map[net.Conn]*connEntry),
 		bans:                  make(map[string]banEntry),
 		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:      make(map[domain.PeerIdentity]int),
@@ -1518,9 +1512,38 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 // sessions are both registered here after PR 2 of checkpoint 9.2.
 func (s *Service) netCoreFor(conn net.Conn) *NetCore {
 	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
-	return pc
+	defer s.mu.RUnlock()
+	entry := s.conns[conn]
+	if entry == nil {
+		return nil
+	}
+	return entry.core
+}
+
+// meteredFor returns the MeteredConn wrapper for the given conn, or nil if
+// the conn is not registered or was not wrapped in a MeteredConn (e.g.
+// outbound dials that do not measure bytes).
+func (s *Service) meteredFor(conn net.Conn) *MeteredConn {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry := s.conns[conn]
+	if entry == nil {
+		return nil
+	}
+	return entry.metered
+}
+
+// isInboundTracked returns true when the conn has been promoted via
+// trackInboundConnect (auth complete or auth not required) and has not
+// been untracked yet.
+func (s *Service) isInboundTracked(conn net.Conn) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry := s.conns[conn]
+	if entry == nil {
+		return false
+	}
+	return entry.tracked
 }
 
 const connWriteTimeout = 30 * time.Second
@@ -1533,7 +1556,7 @@ type enqueueResult int
 
 const (
 	enqueueSent enqueueResult = iota // data accepted into the channel
-	// enqueueUnregistered signals that the conn is not in s.inboundNetCores.
+	// enqueueUnregistered signals that the conn is not in s.conns.
 	// After PR 2 every live connection — inbound via registerInboundConn and
 	// outbound via attachOutboundNetCore — is registered before any send,
 	// so this outcome now means "invariant violation / state inconsistency",
@@ -1664,7 +1687,7 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 
 	// 2. Inbound connections — fallback, one writer per NetCore.
 	//
-	// The registry (s.inboundNetCores) now holds both directions after
+	// The registry (s.conns) now holds both directions after
 	// PR 2, but outbound entries must stay invisible on this identity
 	// fallback path until they are promoted through s.sessions + health
 	// (visibility boundary enforced by step 1 above and by
@@ -1678,7 +1701,11 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	// markPeerConnected. Require health != nil && Connected here too so a
 	// partially-handshaken inbound NetCore cannot receive identity-routed
 	// frames ahead of activation.
-	for _, pc := range s.inboundNetCores {
+	for _, entry := range s.conns {
+		if entry == nil {
+			continue
+		}
+		pc := entry.core
 		if pc == nil || pc.Dir() != Inbound || pc.Identity() != dst {
 			continue
 		}
@@ -1762,6 +1789,85 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 	}
 }
 
+// enqueueSessionFrame is the session-scoped counterpart of enqueueFrame:
+// instead of re-resolving the transport via s.conns (netCoreFor), it uses
+// the NetCore that the peerSession already owns. Session-local reply paths
+// — pong on outbound sessions, push_message/push_delivery_receipt on
+// respondToInboxRequest, subscribe_inbox reply — must not fail closed with
+// unregistered_write just because the registry entry has been reaped or
+// never existed (tests); the authoritative writer is session.netCore.
+//
+// TRANSLATION (RU): аналог enqueueFrame, но без обращения к s.conns —
+// writer берётся напрямую из session.netCore. Используется на всех
+// session-local ответных путях, где peerSession и так держит
+// authoritative transport owner. Снимает зависимость reply-путей от
+// реестра s.conns и устраняет класс unregistered_write на валидных
+// сессиях (см. P1 ревью 9.4a).
+func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueueResult {
+	if session == nil || session.netCore == nil {
+		return enqueueUnregistered
+	}
+	switch st := session.netCore.sendRaw(data); st {
+	case sendOK:
+		return enqueueSent
+	case sendBufferFull:
+		addr := "unknown"
+		if session.conn != nil {
+			addr = session.conn.RemoteAddr().String()
+		}
+		log.Warn().Str("addr", addr).Msg("send buffer full, disconnecting slow peer")
+		if session.conn != nil {
+			_ = session.conn.Close()
+		}
+		return enqueueDropped
+	case sendChanClosed:
+		return enqueueDropped
+	default:
+		addr := "unknown"
+		if session.conn != nil {
+			addr = session.conn.RemoteAddr().String()
+		}
+		log.Error().Str("addr", addr).Str("status", st.String()).Msg("enqueueSessionFrame: unexpected sendStatus")
+		return enqueueDropped
+	}
+}
+
+// writeSessionFrame marshals the frame and enqueues it on session.netCore
+// via enqueueSessionFrame. Use this on session-local reply paths where the
+// peerSession is the authoritative transport owner; callers must not use
+// writeJSONFrame(session.conn, ...) on these paths because that re-resolves
+// the transport through s.conns and fails closed whenever the session
+// exists without a matching registry entry (addressed in P1 review 9.4a).
+//
+// TRANSLATION (RU): обёртка над enqueueSessionFrame: сериализует фрейм и
+// маршрутизирует его через session.netCore. Применять на всех
+// session-local reply-путях — pong, push_message из respondToInboxRequest,
+// subscribe_inbox ответ — где peerSession уже владеет authoritative
+// transport'ом. Заменяет небезопасный writeJSONFrame(session.conn, …) на
+// этих путях.
+func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) {
+	var conn net.Conn
+	if session != nil {
+		conn = session.conn
+	}
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
+		data := append(fallback, '\n')
+		res := s.enqueueSessionFrame(session, data)
+		emitProtocolTrace(conn, frame, res)
+		if res == enqueueUnregistered {
+			logUnregisteredWrite(conn, frame, "writeSessionFrame.marshal_fallback")
+		}
+		return
+	}
+	res := s.enqueueSessionFrame(session, []byte(line))
+	emitProtocolTrace(conn, frame, res)
+	if res == enqueueUnregistered {
+		logUnregisteredWrite(conn, frame, "writeSessionFrame")
+	}
+}
+
 // writeJSONFrameSync serialises a protocol frame and blocks until the
 // per-connection writer goroutine has handed the bytes to the socket.
 // Use this instead of writeJSONFrame on error paths where the caller is
@@ -1819,7 +1925,7 @@ func emitProtocolTrace(conn net.Conn, frame protocol.Frame, res enqueueResult) {
 
 // logUnregisteredWrite records the invariant violation that the reviewer
 // behind PR 3 is asking us to surface: after PR 2 every live connection
-// must be registered in s.inboundNetCores before the first write — an
+// must be registered in s.conns before the first write — an
 // enqueueUnregistered outcome means the single-writer invariant was
 // attempted to be bypassed. The frame is dropped (fail closed) rather than
 // slipped around the managed writer via a direct conn.Write: a silent direct
@@ -1945,9 +2051,7 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 }
 
 func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bool) {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
+	pc := s.netCoreFor(conn)
 	if pc == nil {
 		return protocol.Frame{}, false
 	}
@@ -1959,10 +2063,7 @@ func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bo
 }
 
 func (s *Service) clearConnAuth(conn net.Conn) {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
-	if pc != nil {
+	if pc := s.netCoreFor(conn); pc != nil {
 		pc.ClearAuth()
 	}
 }
@@ -1971,9 +2072,7 @@ func (s *Service) clearConnAuth(conn net.Conn) {
 // the connection, or nil if the connection is not registered or has no
 // auth state.
 func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
+	pc := s.netCoreFor(conn)
 	if pc == nil {
 		return nil
 	}
@@ -1983,10 +2082,7 @@ func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
 // SetConnAuthState implements connauth.AuthStore. Stores auth state for
 // the connection. The connection must already be registered.
 func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
-	if pc != nil {
+	if pc := s.netCoreFor(conn); pc != nil {
 		pc.SetAuth(state)
 	}
 }
@@ -2004,9 +2100,7 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 	if addr == "" {
 		addr = strings.TrimSpace(hello.Address)
 	}
-	s.mu.Lock()
-	pc := s.inboundNetCores[conn]
-	s.mu.Unlock()
+	pc := s.netCoreFor(conn)
 	if pc == nil {
 		return
 	}
@@ -2023,9 +2117,7 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 // remote peer during the hello handshake, or "" if no address is
 // known yet. The returned address is suitable for health tracking.
 func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
+	pc := s.netCoreFor(conn)
 	if pc == nil {
 		return ""
 	}
@@ -2041,13 +2133,12 @@ func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
 // connection for the same address is already tracked.
 func (s *Service) trackedInboundPeerAddress(conn net.Conn) domain.PeerAddress {
 	s.mu.RLock()
-	_, tracked := s.inboundTracked[conn]
-	pc := s.inboundNetCores[conn]
+	entry := s.conns[conn]
 	s.mu.RUnlock()
-	if !tracked || pc == nil {
+	if entry == nil || !entry.tracked || entry.core == nil {
 		return ""
 	}
-	return pc.Address()
+	return entry.core.Address()
 }
 
 // trackInboundConnect increments the inbound connection reference count
@@ -2061,7 +2152,9 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
 	s.inboundHealthRefs[resolved]++
-	s.inboundTracked[conn] = struct{}{}
+	if e := s.conns[conn]; e != nil {
+		e.tracked = true
+	}
 	s.mu.Unlock()
 
 	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
@@ -2103,8 +2196,11 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 // health entries for unauthenticated connections.
 func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddress) {
 	s.mu.Lock()
-	_, wasTracked := s.inboundTracked[conn]
-	delete(s.inboundTracked, conn)
+	var wasTracked bool
+	if e := s.conns[conn]; e != nil {
+		wasTracked = e.tracked
+		e.tracked = false
+	}
 	resolved := s.resolveHealthAddress(address)
 	peerIdentity := s.peerIDs[resolved]
 	var last bool
@@ -2150,9 +2246,7 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddre
 //     all routable addresses).  This is the safe backward-compatible default
 //     for old clients that don't send "networks".
 func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]struct{} {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
+	pc := s.netCoreFor(conn)
 
 	if pc == nil {
 		return nil
@@ -3194,33 +3288,47 @@ func (s *Service) fetchDeliveryReceiptsFrame(recipient string) protocol.Frame {
 	}
 }
 
+// countInboundConnsLocked returns the number of inbound entries currently
+// in the primary registry. Outbound entries (created by
+// attachOutboundNetCore) are not counted — the inbound cap only governs
+// incoming TCP acceptance. Caller must hold s.mu at least for read.
+func (s *Service) countInboundConnsLocked() int {
+	n := 0
+	for _, e := range s.conns {
+		if e != nil && e.core != nil && e.core.Dir() == Inbound {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *Service) registerInboundConn(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	limit := s.cfg.EffectiveMaxIncomingPeers()
-	if limit > 0 && len(s.inboundConns) >= limit {
+	if limit > 0 && s.countInboundConnsLocked() >= limit {
 		return false
 	}
-	s.inboundConns[conn] = struct{}{}
 
 	s.connIDCounter++
 	pc := newNetCore(connID(s.connIDCounter), conn, Inbound, NetCoreOpts{})
 	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && addr.IP.IsLoopback() {
 		pc.SetLocal(true)
 	}
-	s.inboundNetCores[conn] = pc
 
+	entry := &connEntry{core: pc}
 	if mc, ok := conn.(*MeteredConn); ok {
-		s.inboundMetered[conn] = mc
+		entry.metered = mc
 	}
+	s.conns[conn] = entry
 	return true
 }
 
 // attachOutboundNetCore creates an outbound NetCore for the given dialled
-// connection, registers it in s.inboundNetCores (the map currently holds
-// connections of both directions; renaming is deferred to checkpoint 9.4)
-// and wires session.netCore / session.onClose so that peerSession.Close()
+// connection, registers it in s.conns (the single primary registry that
+// holds both inbound and outbound entries after checkpoint 9.4a) and
+// wires session.netCore / session.onClose so that peerSession.Close()
 // removes the registration atomically with the NetCore teardown.
 //
 // The NetCore must exist before peerSessionRequest runs so that the welcome
@@ -3231,14 +3339,14 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *NetCore {
 	pc := newNetCore(connID(session.connID), session.conn, Outbound, NetCoreOpts{})
 
 	s.mu.Lock()
-	s.inboundNetCores[session.conn] = pc
+	s.conns[session.conn] = &connEntry{core: pc}
 	s.mu.Unlock()
 
 	session.netCore = pc
 	conn := session.conn
 	session.onClose = func() {
 		s.mu.Lock()
-		delete(s.inboundNetCores, conn)
+		delete(s.conns, conn)
 		s.mu.Unlock()
 	}
 	return pc
@@ -3246,10 +3354,8 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *NetCore {
 
 func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Lock()
-	pc := s.inboundNetCores[conn]
-	delete(s.inboundConns, conn)
-	delete(s.inboundMetered, conn)
-	delete(s.inboundNetCores, conn)
+	entry := s.conns[conn]
+	delete(s.conns, conn)
 	s.mu.Unlock()
 
 	// NetCore.Close() handles the full shutdown sequence:
@@ -3260,8 +3366,8 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	// Note: handleConn calls metered.Close() before unregisterInboundConn,
 	// which is now redundant (NetCore.Close does it). The double Close on
 	// net.Conn is safe — subsequent calls return an error but don't panic.
-	if pc != nil {
-		pc.Close()
+	if entry != nil && entry.core != nil {
+		entry.core.Close()
 	}
 }
 
@@ -3270,17 +3376,20 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 // before connWg.Wait().
 func (s *Service) closeAllInboundConns() {
 	s.mu.Lock()
-	conns := make([]net.Conn, 0, len(s.inboundConns))
-	for c := range s.inboundConns {
-		conns = append(conns, c)
+	inbound := make([]net.Conn, 0, len(s.conns))
+	for c, e := range s.conns {
+		if e == nil || e.core == nil || e.core.Dir() != Inbound {
+			continue
+		}
+		inbound = append(inbound, c)
 	}
 	s.mu.Unlock()
 
-	for _, c := range conns {
+	for _, c := range inbound {
 		_ = c.Close()
 	}
-	if len(conns) > 0 {
-		log.Info().Int("count", len(conns)).Msg("closed inbound connections for shutdown")
+	if len(inbound) > 0 {
+		log.Info().Int("count", len(inbound)).Msg("closed inbound connections for shutdown")
 	}
 }
 

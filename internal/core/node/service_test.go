@@ -6944,8 +6944,14 @@ func TestConnectedHostsLocked(t *testing.T) {
 	svc.mu.Lock()
 	// Simulate an outbound upstream session.
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
-	// Register the real TCP connection as inbound.
-	svc.inboundConns[server] = struct{}{}
+	// Register the real TCP connection as inbound. The unified registry
+	// (PR 9.4a) distinguishes directions via NetCore.Dir(), so the seed must
+	// carry an Inbound NetCore — a bare entry would be ignored by
+	// connectedHostsLocked's direction filter.
+	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
+		LastActivity: time.Now().UTC(),
+	})
+	svc.conns[server] = &connEntry{core: pc}
 
 	hosts := svc.connectedHostsLocked()
 	svc.mu.Unlock()
@@ -7002,7 +7008,14 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	defer func() { _ = server.Close() }()
 
 	svc.mu.Lock()
-	svc.inboundConns[server] = struct{}{}
+	// Register the real TCP connection as inbound. The unified registry
+	// (PR 9.4a) distinguishes directions via NetCore.Dir(), so the seed must
+	// carry an Inbound NetCore — a bare entry would be ignored by the
+	// direction filter in connectedHostsLocked.
+	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
+		LastActivity: time.Now().UTC(),
+	})
+	svc.conns[server] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	candidates := svc.peerDialCandidates()
@@ -7081,6 +7094,19 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	defer func() { _ = conn1b.Close() }()
 	conn2a, conn2b := net.Pipe()
 	defer func() { _ = conn2b.Close() }()
+
+	// Register the connections in the unified registry first — in
+	// production registerInboundConn runs before trackInboundConnect and
+	// creates the connEntry whose tracked flag is then flipped.
+	// After PR 9.4a trackInboundConnect only mutates the existing entry
+	// (no lazy insert) to keep a single creation site and satisfy the
+	// §2.6.7 invariant; tests must follow the same order.
+	if !svc.registerInboundConn(conn1a) {
+		t.Fatalf("registerInboundConn conn1a failed")
+	}
+	if !svc.registerInboundConn(conn2a) {
+		t.Fatalf("registerInboundConn conn2a failed")
+	}
 
 	// Two inbound connections to the same peer.
 	svc.trackInboundConnect(conn1a, peer, "test-peer-identity")
@@ -7172,11 +7198,10 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 
 	svc.mu.Lock()
 	// Register inbound connection + peer info with a different overlay address.
-	svc.inboundConns[server] = struct{}{}
 	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
 	})
-	svc.inboundNetCores[server] = pc
+	svc.conns[server] = &connEntry{core: pc}
 
 	hosts := svc.connectedHostsLocked()
 	svc.mu.Unlock()
@@ -8055,20 +8080,19 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 	// Register as inbound connection with per-connection lastActivity
 	// old enough to be considered stale.
 	svc.mu.Lock()
-	svc.inboundConns[server] = struct{}{}
 	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
 		Address:      peerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.inboundNetCores[server] = pc
+	svc.conns[server] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
-	// Verify the connection is in inboundConns before eviction.
+	// Verify the connection is in conns before eviction.
 	svc.mu.RLock()
-	_, exists := svc.inboundConns[server]
+	_, exists := svc.conns[server]
 	svc.mu.RUnlock()
 	if !exists {
-		t.Fatal("expected server conn in inboundConns before eviction")
+		t.Fatal("expected server conn in conns before eviction")
 	}
 
 	// Run the eviction sweep.
@@ -8120,12 +8144,11 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 	peerAddr := domain.PeerAddress("10.0.0.88:64646")
 
 	svc.mu.Lock()
-	svc.inboundConns[server] = struct{}{}
 	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
 		Address:      peerAddr,
 		LastActivity: time.Now(), // recent activity — should not be evicted
 	})
-	svc.inboundNetCores[server] = pc
+	svc.conns[server] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	svc.evictStaleInboundConns()
@@ -8184,15 +8207,14 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	svc.mu.Lock()
 	// Clear any pre-existing inbound connections left over from
 	// startTestNode's health-check dial to avoid 127.0.0.1 collisions.
-	for c := range svc.inboundConns {
-		delete(svc.inboundConns, c)
+	for c := range svc.conns {
+		delete(svc.conns, c)
 	}
-	svc.inboundConns[server1] = struct{}{}
 	pc := newNetCore(connID(1), server1, Inbound, NetCoreOpts{
 		Address:      stalledPeerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.inboundNetCores[server1] = pc
+	svc.conns[server1] = &connEntry{core: pc}
 
 	// Also add an outbound session as control.
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
@@ -8471,7 +8493,7 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 		Address:  peerAddr,
 		Identity: domain.PeerIdentity("stale-identity"),
 	})
-	svc.inboundNetCores[staleConn] = pc
+	svc.conns[staleConn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	frames := svc.peerHealthFrames()
@@ -8982,7 +9004,7 @@ func TestSubscribeInboxAllowsOwnIdentity(t *testing.T) {
 
 // TestWriteJSONFrameDropsOnUnregisteredConn pins the PR 3 fail-closed
 // contract for the fire-and-forget send path: when writeJSONFrame is invoked
-// on a conn that is NOT registered in s.inboundNetCores, the managed writer
+// on a conn that is NOT registered in s.conns, the managed writer
 // cannot be resolved and the frame MUST be dropped rather than slipped around
 // the NetCore via a direct conn.Write. Any non-zero bytes reaching the socket
 // here would mean the migration's single-writer invariant had been bypassed
@@ -9006,7 +9028,7 @@ func TestWriteJSONFrameDropsOnUnregisteredConn(t *testing.T) {
 	}()
 
 	svc := &Service{
-		inboundNetCores: map[net.Conn]*NetCore{},
+		conns: map[net.Conn]*connEntry{},
 	}
 	conn := &mockConn{}
 
@@ -9047,7 +9069,7 @@ func TestWriteJSONFrameSyncDropsOnUnregisteredConn(t *testing.T) {
 	}()
 
 	svc := &Service{
-		inboundNetCores: map[net.Conn]*NetCore{},
+		conns: map[net.Conn]*connEntry{},
 	}
 	conn := &mockConn{}
 

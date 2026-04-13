@@ -198,7 +198,7 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	svc.trackInboundConnect(conn, idPeerB, idPeerB)
@@ -230,7 +230,7 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	svc.trackInboundConnect(conn, idPeerB, idPeerB)
@@ -695,8 +695,7 @@ func newTestServiceWithRouting(localIdentity string) *Service {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:       make(map[net.Conn]*NetCore),
-		inboundTracked:        make(map[net.Conn]struct{}),
+		conns:                 make(map[net.Conn]*connEntry),
 		done:                  make(chan struct{}),
 	}
 	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(routing.PeerIdentity(localIdentity)))
@@ -1116,13 +1115,12 @@ func TestResolveRelayAddress_InboundPeer(t *testing.T) {
 	// Set up an inbound connection with relay capability.
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
 	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc, tracked: true}
 	svc.mu.Unlock()
 
 	addr := svc.resolveRelayAddress(idPeerB)
@@ -1139,12 +1137,11 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
 	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
 		Address: domain.PeerAddress(idPeerB),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1}, // only relay, no routing
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc, tracked: true}
 	svc.mu.Unlock()
 
 	// Should NOT resolve — transit requires both caps.
@@ -1176,13 +1173,12 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
 	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc, tracked: true}
 	svc.mu.Unlock()
 
 	// Should prefer outbound session (has async send queue).
@@ -1203,7 +1199,7 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	// Pass the transport address — should resolve to identity.
@@ -1418,7 +1414,7 @@ func newTestServiceWithRoutingAndHealth(localIdentity string) *Service {
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
 	svc.inboundHealthRefs = make(map[domain.PeerAddress]int)
 	svc.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
-	svc.inboundNetCores = make(map[net.Conn]*NetCore)
+	svc.conns = make(map[net.Conn]*connEntry)
 	return svc
 }
 
@@ -1449,8 +1445,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 	defer pc.Close()
 
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc, tracked: true}
 	svc.mu.Unlock()
 
 	// Start the pipe reader BEFORE calling the function under test.
@@ -1511,7 +1506,7 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
+	svc.conns[conn] = &connEntry{tracked: true}
 	svc.mu.Unlock()
 
 	// Call the function — with only peer-B's own route in the table,
@@ -1549,7 +1544,7 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
+	svc.conns[conn] = &connEntry{tracked: true}
 	svc.mu.Unlock()
 
 	svc.sendFullTableSyncToInbound(conn, idPeerB)
@@ -1653,7 +1648,7 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	// connHasCapability should return false.
@@ -1707,7 +1702,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	defer pc.Close()
 
 	svc.mu.Lock()
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	if !svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
@@ -1806,7 +1801,7 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	if !svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
@@ -1873,13 +1868,12 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
 	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc, tracked: true}
 	svc.mu.Unlock()
 
 	targets := svc.routingCapablePeers()
@@ -2084,8 +2078,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:       make(map[net.Conn]*NetCore),
-		inboundTracked:        make(map[net.Conn]struct{}),
+		conns:                 make(map[net.Conn]*connEntry),
 	}
 	svc.routingTable = routing.NewTable(
 		routing.WithLocalOrigin(idNodeA),
@@ -2188,7 +2181,7 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 	defer pc.Close()
 
 	svc.mu.Lock()
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	// Start the pipe reader BEFORE triggering the send — net.Pipe() is
@@ -2237,13 +2230,12 @@ func TestRoutingCapablePeersUsesIdentityForInbound(t *testing.T) {
 
 	// NATed peer: address is a local listen addr, identity is the fingerprint.
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
 	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
 		Address:  domain.PeerAddress("127.0.0.1:64646"),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc, tracked: true}
 	svc.mu.Unlock()
 
 	targets := svc.routingCapablePeers()
@@ -2262,13 +2254,12 @@ func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.52"), Port: 8080}}
 	svc.mu.Lock()
-	svc.inboundTracked[conn] = struct{}{}
 	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
 		Identity: domain.PeerIdentity(idPeerB),          // real identity
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc, tracked: true}
 	svc.mu.Unlock()
 
 	// Resolve by identity — should find the inbound connection.
@@ -2295,7 +2286,7 @@ func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen
 		Identity: domain.PeerIdentity(idPeerB),          // fingerprint
 	})
-	svc.inboundNetCores[conn] = pc
+	svc.conns[conn] = &connEntry{core: pc}
 	svc.mu.Unlock()
 
 	id := svc.resolvePeerIdentity("10.0.0.53:7777")
@@ -3185,8 +3176,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:       make(map[net.Conn]*NetCore),
-		inboundTracked:        make(map[net.Conn]struct{}),
+		conns:                 make(map[net.Conn]*connEntry),
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
 		pendingKeys:           make(map[string]struct{}),
@@ -3345,8 +3335,7 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
-		inboundNetCores:       make(map[net.Conn]*NetCore),
-		inboundTracked:        make(map[net.Conn]struct{}),
+		conns:                 make(map[net.Conn]*connEntry),
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
 		pendingKeys:           make(map[string]struct{}),

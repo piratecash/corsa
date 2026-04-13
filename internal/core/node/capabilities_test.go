@@ -143,14 +143,14 @@ func TestConnHasCapability(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 
 	svc := &Service{
-		inboundNetCores: make(map[net.Conn]*NetCore),
+		conns: make(map[net.Conn]*connEntry),
 	}
 
 	pc := newNetCore(connID(1), serverConn, Inbound, NetCoreOpts{
 		Address: domain.PeerAddress("10.0.0.1:64646"),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1},
 	})
-	svc.inboundNetCores[serverConn] = pc
+	svc.conns[serverConn] = &connEntry{core: pc}
 
 	if !svc.connHasCapability(serverConn, domain.CapMeshRelayV1) {
 		t.Fatal("serverConn should have mesh_relay_v1")
@@ -169,11 +169,11 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 
 	svc := &Service{
-		inboundNetCores: make(map[net.Conn]*NetCore),
+		conns: make(map[net.Conn]*connEntry),
 	}
 
 	pc := newNetCore(connID(1), serverConn, Inbound, NetCoreOpts{})
-	svc.inboundNetCores[serverConn] = pc
+	svc.conns[serverConn] = &connEntry{core: pc}
 
 	hello := protocol.Frame{
 		Type:         "hello",

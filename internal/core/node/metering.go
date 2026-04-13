@@ -40,11 +40,11 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *Meter
 // (no-session-auth) path auth is nil and attribution is allowed.
 // Caller must hold s.mu (read or write).
 func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
-	pc := s.inboundNetCores[conn]
-	if pc == nil {
+	entry := s.conns[conn]
+	if entry == nil || entry.core == nil {
 		return false
 	}
-	state := pc.Auth()
+	state := entry.core.Auth()
 	return state == nil || state.Verified
 }
 
@@ -67,11 +67,11 @@ func (s *Service) accumulateInboundTraffic(mc *MeteredConn) {
 	if !s.isConnTrafficTrustedLocked(mc) {
 		return
 	}
-	pc := s.inboundNetCores[mc]
-	if pc == nil || pc.Address() == "" {
+	entry := s.conns[mc]
+	if entry == nil || entry.core == nil || entry.core.Address() == "" {
 		return
 	}
-	address := s.resolveHealthAddress(pc.Address())
+	address := s.resolveHealthAddress(entry.core.Address())
 	health := s.ensurePeerHealthLocked(address)
 	health.BytesSent += sent
 	health.BytesReceived += received
@@ -97,18 +97,27 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 
 	// inbound connections — only attribute traffic for verified (or
 	// non-session-auth) connections to prevent address spoofing.
-	for conn, mc := range s.inboundMetered {
+	//
+	// Iterate the unified registry and filter to inbound direction because
+	// outbound NetCores now share s.conns after PR 9.4a; outbound traffic
+	// is already accumulated via s.sessions above.
+	for conn, entry := range s.conns {
+		if entry == nil || entry.core == nil || entry.metered == nil {
+			continue
+		}
+		if entry.core.Dir() != Inbound {
+			continue
+		}
 		if !s.isConnTrafficTrustedLocked(conn) {
 			continue
 		}
-		pc := s.inboundNetCores[conn]
-		if pc == nil || pc.Address() == "" {
+		if entry.core.Address() == "" {
 			continue
 		}
-		address := s.resolveHealthAddress(pc.Address())
+		address := s.resolveHealthAddress(entry.core.Address())
 		lt := result[address]
-		lt.sent += mc.BytesWritten()
-		lt.received += mc.BytesRead()
+		lt.sent += entry.metered.BytesWritten()
+		lt.received += entry.metered.BytesRead()
 		result[address] = lt
 	}
 

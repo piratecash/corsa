@@ -240,7 +240,7 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	})
-	svc.inboundNetCores[pipeLocal] = pc
+	svc.conns[pipeLocal] = &connEntry{core: pc}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
 		Connected:           true,
 		LastConnectedAt:     now.Add(-time.Minute),
@@ -405,7 +405,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	})
 	defer pc.Close()
-	svc.inboundNetCores[inLocal] = pc
+	svc.conns[inLocal] = &connEntry{core: pc}
 	svc.health[domain.PeerAddress("addr-in")] = &peerHealth{
 		Connected:           true,
 		LastConnectedAt:     now.Add(-time.Minute),
@@ -466,7 +466,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	})
 	defer pc.Close()
-	svc.inboundNetCores[inLocal] = pc
+	svc.conns[inLocal] = &connEntry{core: pc}
 	svc.health[domain.PeerAddress("addr-in-fallback")] = &peerHealth{
 		Connected:           true,
 		LastConnectedAt:     now.Add(-time.Minute),
@@ -544,7 +544,7 @@ func TestSendFrameToIdentityRejectsInboundBeforeActivation(t *testing.T) {
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	})
 	defer pc.Close()
-	svc.inboundNetCores[inLocal] = pc
+	svc.conns[inLocal] = &connEntry{core: pc}
 	// Intentionally no svc.health entry for addr-in-preactivation.
 
 	frame := protocol.Frame{Type: "ping"}

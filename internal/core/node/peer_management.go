@@ -346,7 +346,7 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 // to the same machine.
 // Caller must hold s.mu at least for read.
 func (s *Service) connectedHostsLocked() map[string]struct{} {
-	hosts := make(map[string]struct{}, len(s.upstream)+len(s.inboundConns))
+	hosts := make(map[string]struct{}, len(s.upstream)+len(s.conns))
 
 	// Outbound sessions.
 	for addr := range s.upstream {
@@ -360,13 +360,18 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 	// the stall threshold. Uses per-connection lastActivity instead of
 	// shared health state to avoid conflating NATed peers that advertise
 	// the same listen address.
+	//
+	// The unified registry (s.conns, PR 9.4a) now carries both directions;
+	// filter to Inbound so outbound NetCores are not double-counted here —
+	// they are already represented via s.upstream above.
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
-	for conn := range s.inboundConns {
-		if pc := s.inboundNetCores[conn]; pc != nil {
-			if la := pc.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
-				continue
-			}
+	for conn, entry := range s.conns {
+		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
+			continue
+		}
+		if la := entry.core.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
+			continue
 		}
 		if ip := remoteIP(conn.RemoteAddr()); ip != "" {
 			hosts[ip] = struct{}{}
@@ -765,7 +770,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
 	// Mirror the negotiated handshake state onto the outbound NetCore so
-	// that s.inboundNetCores (which now holds both directions) is a
+	// that s.conns (which now holds both directions) is a
 	// symmetric registry: helpers that read pc.Address()/Identity()/
 	// Capabilities() get the real values instead of an anonymous entry.
 	//
@@ -1556,11 +1561,11 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 			}
 			if incoming.Type == "ping" {
 				pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-				// NetCore is registered in s.inboundNetCores, so writeJSONFrame
-				// routes through the managed writer — no direct SetWriteDeadline
-				// on session.conn is needed (writerLoop applies its own per-write
-				// deadline based on Direction).
-				s.writeJSONFrame(session.conn, pongFrame)
+				// Route through session.netCore (the authoritative transport
+				// owner) instead of re-resolving via s.conns — see P1 review
+				// for PR 9.4a. writerLoop applies its own per-write deadline
+				// based on Direction, so no manual SetWriteDeadline is needed.
+				s.writeSessionFrame(session, pongFrame)
 				s.markPeerWrite(session.address, pongFrame)
 				continue
 			}
@@ -1736,11 +1741,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	if frame.Type == "ping" {
 		if session != nil {
 			pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-			// Outbound NetCore is registered in s.inboundNetCores from
-			// attachOutboundNetCore, so writeJSONFrame routes through the
-			// managed writer — writerLoop applies the per-direction write
-			// deadline itself, no manual SetWriteDeadline is needed.
-			s.writeJSONFrame(session.conn, pongFrame)
+			// Route through session.netCore directly — the peerSession
+			// already owns the authoritative transport; there is no need
+			// to re-resolve via s.conns (P1 review for PR 9.4a).
+			// writerLoop applies the per-direction write deadline itself,
+			// so no manual SetWriteDeadline is needed.
+			s.writeSessionFrame(session, pongFrame)
 			s.markPeerWrite(address, pongFrame)
 		}
 		return
@@ -1871,7 +1877,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	case "subscribe_inbox":
 		if session != nil {
 			reply, sub := s.subscribeInboxFrame(session.conn, frame)
-			s.writeJSONFrame(session.conn, reply)
+			// Session-local reply: route through session.netCore rather
+			// than re-resolving via s.conns (P1 review for PR 9.4a).
+			s.writeSessionFrame(session, reply)
 			if sub != nil {
 				go s.pushBacklogToSubscriber(sub)
 			}
@@ -1965,7 +1973,12 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 			continue
 		}
 		msgFrame := item
-		s.writeJSONFrame(session.conn, protocol.Frame{
+		// Session-local push: route through session.netCore (authoritative
+		// transport owner) instead of re-resolving via s.conns — removes
+		// the unregistered_write failure mode on valid sessions whose
+		// registry entry was not populated by the caller (P1 review
+		// for PR 9.4a).
+		s.writeSessionFrame(session, protocol.Frame{
 			Type:      "push_message",
 			Topic:     "dm",
 			Recipient: peerID,
@@ -1976,7 +1989,9 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 	receipts := s.fetchDeliveryReceiptsFrame(peerID)
 	for _, item := range receipts.Receipts {
 		receiptFrame := item
-		s.writeJSONFrame(session.conn, protocol.Frame{
+		// Session-local push: route through session.netCore (see
+		// writeSessionFrame doc for rationale).
+		s.writeSessionFrame(session, protocol.Frame{
 			Type:      "push_delivery_receipt",
 			Recipient: peerID,
 			Receipt:   &receiptFrame,
@@ -2243,15 +2258,15 @@ func (s *Service) nextConnIDLocked() uint64 {
 // Must be called with s.mu held (read lock).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
-	for _, pc := range s.inboundNetCores {
-		// The registry now holds both directions after PR 2. Outbound
+	for _, entry := range s.conns {
+		// The registry holds both directions. Outbound
 		// NetCores must stay invisible on inbound-only lookup paths —
 		// they are surfaced through s.sessions once activated.
-		if pc == nil || pc.Dir() != Inbound {
+		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
 			continue
 		}
-		if pc.Address() == address {
-			ids = append(ids, pc.ConnIDNum())
+		if entry.core.Address() == address {
+			ids = append(ids, entry.core.ConnIDNum())
 		}
 	}
 	return ids
@@ -2262,14 +2277,14 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 // connections are active, any one of them is returned (all are equally valid
 // for fire-and-forget writes). Must be called with s.mu held (read lock).
 func (s *Service) inboundConnForAddressLocked(address domain.PeerAddress) net.Conn {
-	for conn, pc := range s.inboundNetCores {
-		// inboundTracked already excludes outbound conns, but make the
-		// direction filter explicit so the function's contract matches
-		// its name regardless of how the registry evolves.
-		if pc == nil || pc.Dir() != Inbound || pc.Address() != address {
+	for conn, entry := range s.conns {
+		// entry.tracked already excludes unauthenticated conns; the direction
+		// filter makes the function's contract match its name regardless of
+		// how the registry evolves.
+		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound || entry.core.Address() != address {
 			continue
 		}
-		if _, tracked := s.inboundTracked[conn]; tracked {
+		if entry.tracked {
 			return conn
 		}
 	}
@@ -2449,11 +2464,15 @@ func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 	if session := s.resolveSessionLocked(address); session != nil && len(session.capabilities) > 0 {
 		return domain.CapabilityStrings(session.capabilities)
 	}
-	for _, pc := range s.inboundNetCores {
+	for _, entry := range s.conns {
 		// Outbound NetCores surface their capabilities via s.sessions
 		// (checked above); skip them here so a pre-activation outbound
 		// entry cannot answer on the inbound fallback path.
-		if pc == nil || pc.Dir() != Inbound {
+		if entry == nil || entry.core == nil {
+			continue
+		}
+		pc := entry.core
+		if pc.Dir() != Inbound {
 			continue
 		}
 		if pc.Address() == address && len(pc.Capabilities()) > 0 {
@@ -2844,7 +2863,7 @@ func (s *Service) inboundHeartbeat(conn net.Conn, address domain.PeerAddress, st
 // not received any frame for longer than heartbeatInterval + pongStallTimeout.
 // When internet drops, the underlying TCP socket may linger in the OS for
 // much longer than the heartbeat timeout (TCP retransmission timeouts).
-// These zombie connections occupy a slot in inboundConns and block outbound
+// These zombie connections occupy a slot in s.conns and block outbound
 // dial attempts to the same host via connectedHostsLocked. By actively
 // closing them we free the slot so the remote peer's retry loop can
 // re-establish the connection faster.
@@ -2859,12 +2878,12 @@ func (s *Service) evictStaleInboundConns() {
 
 	s.mu.RLock()
 	var stale []net.Conn
-	for conn := range s.inboundConns {
-		pc := s.inboundNetCores[conn]
-		if pc == nil {
+	for conn, entry := range s.conns {
+		// s.conns holds both directions; evict only inbound stalls.
+		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
 			continue
 		}
-		la := pc.LastActivity()
+		la := entry.core.LastActivity()
 		if la.IsZero() {
 			continue
 		}
@@ -2878,9 +2897,9 @@ func (s *Service) evictStaleInboundConns() {
 		var addr domain.PeerAddress
 		var ident domain.PeerIdentity
 		s.mu.RLock()
-		if pc := s.inboundNetCores[conn]; pc != nil {
-			addr = pc.Address()
-			ident = pc.Identity()
+		if entry := s.conns[conn]; entry != nil && entry.core != nil {
+			addr = entry.core.Address()
+			ident = entry.core.Identity()
 		}
 		s.mu.RUnlock()
 		log.Warn().Str("peer", string(addr)).Str("identity", string(ident)).Str("remote", conn.RemoteAddr().String()).Msg("force-closing stale inbound connection")
@@ -2890,10 +2909,7 @@ func (s *Service) evictStaleInboundConns() {
 
 // touchConnActivity updates the per-connection last activity timestamp.
 func (s *Service) touchConnActivity(conn net.Conn) {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
-	if pc != nil {
+	if pc := s.netCoreFor(conn); pc != nil {
 		pc.SetLastActivity(time.Now().UTC())
 	}
 }
@@ -3276,7 +3292,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
 	// Mirror the negotiated handshake state onto the outbound NetCore so
-	// that s.inboundNetCores (which now holds both directions) is a
+	// that s.conns (which now holds both directions) is a
 	// symmetric registry: helpers that read pc.Address()/Identity()/
 	// Capabilities() get the real values instead of an anonymous entry.
 	//

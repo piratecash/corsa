@@ -918,13 +918,14 @@ func (s *Service) countCapablePeers(cap domain.Capability) int {
 		}
 	}
 
-	for _, pc := range s.inboundNetCores {
+	for _, entry := range s.conns {
 		// Outbound NetCores are already counted via s.sessions above;
 		// skip them here so pre-activation outbound entries cannot
 		// inflate the capable-peer count.
-		if pc == nil || pc.Dir() != Inbound {
+		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
 			continue
 		}
+		pc := entry.core
 		if _, dup := seen[pc.Identity()]; dup {
 			continue
 		}

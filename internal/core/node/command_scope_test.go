@@ -14,12 +14,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/connauth"
 )
 
-// newTestServiceForAuth creates a minimal Service with inboundNetCores map
+// newTestServiceForAuth creates a minimal Service with conns map
 // initialized. This is the standard way to construct a Service for unit tests
 // that exercise auth gating logic.
 func newTestServiceForAuth() *Service {
 	return &Service{
-		inboundNetCores: make(map[net.Conn]*NetCore),
+		conns: make(map[net.Conn]*connEntry),
 	}
 }
 
@@ -346,7 +346,7 @@ func TestIsConnAuthenticated_NilAuth(t *testing.T) {
 
 	svc := newTestServiceForAuth()
 	mockConn := newMockNetConn()
-	svc.inboundNetCores[mockConn] = &NetCore{}
+	svc.conns[mockConn] = &connEntry{core: &NetCore{}}
 
 	if svc.isConnAuthenticated(mockConn) {
 		t.Error("isConnAuthenticated should be false for nil auth")
@@ -362,7 +362,7 @@ func TestIsConnAuthenticated_UnverifiedAuth(t *testing.T) {
 	mockConn := newMockNetConn()
 	nc := &NetCore{}
 	nc.auth = &connauth.State{Verified: false}
-	svc.inboundNetCores[mockConn] = nc
+	svc.conns[mockConn] = &connEntry{core: nc}
 
 	if svc.isConnAuthenticated(mockConn) {
 		t.Error("isConnAuthenticated should be false for unverified auth")
@@ -378,7 +378,7 @@ func TestIsConnAuthenticated_VerifiedAuth(t *testing.T) {
 	mockConn := newMockNetConn()
 	nc := &NetCore{}
 	nc.auth = &connauth.State{Verified: true}
-	svc.inboundNetCores[mockConn] = nc
+	svc.conns[mockConn] = &connEntry{core: nc}
 
 	if !svc.isConnAuthenticated(mockConn) {
 		t.Error("isConnAuthenticated should be true for verified auth")
@@ -394,7 +394,7 @@ func TestIsAuthInitiated_NilState(t *testing.T) {
 
 	svc := newTestServiceForAuth()
 	mockConn := newMockNetConn()
-	svc.inboundNetCores[mockConn] = &NetCore{}
+	svc.conns[mockConn] = &connEntry{core: &NetCore{}}
 
 	if svc.isAuthInitiated(mockConn) {
 		t.Error("isAuthInitiated should be false for nil auth state")
@@ -410,7 +410,7 @@ func TestIsAuthInitiated_PendingAuth(t *testing.T) {
 	mockConn := newMockNetConn()
 	nc := &NetCore{}
 	nc.auth = &connauth.State{Verified: false, Challenge: "test-challenge"}
-	svc.inboundNetCores[mockConn] = nc
+	svc.conns[mockConn] = &connEntry{core: nc}
 
 	if !svc.isAuthInitiated(mockConn) {
 		t.Error("isAuthInitiated should be true when challenge has been issued")
@@ -426,7 +426,7 @@ func TestIsAuthInitiated_CompletedAuth(t *testing.T) {
 	mockConn := newMockNetConn()
 	nc := &NetCore{}
 	nc.auth = &connauth.State{Verified: true}
-	svc.inboundNetCores[mockConn] = nc
+	svc.conns[mockConn] = &connEntry{core: nc}
 
 	if !svc.isAuthInitiated(mockConn) {
 		t.Error("isAuthInitiated should be true for completed auth")
@@ -445,7 +445,7 @@ func TestGAP0_ClientFieldDoesNotAffectAuth(t *testing.T) {
 	mockConn := newMockNetConn()
 	// No auth state — regardless of what Client field might say in the hello
 	// frame, the connection is unauthenticated.
-	svc.inboundNetCores[mockConn] = &NetCore{}
+	svc.conns[mockConn] = &connEntry{core: &NetCore{}}
 
 	if svc.isConnAuthenticated(mockConn) {
 		t.Fatal("SECURITY: isConnAuthenticated = true for unauth peer — " +
@@ -464,7 +464,7 @@ func TestLoopback_DoesNotElevateAuth(t *testing.T) {
 		local:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
 		remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 54321},
 	}
-	svc.inboundNetCores[mockConn] = &NetCore{} // no auth
+	svc.conns[mockConn] = &connEntry{core: &NetCore{}} // no auth
 
 	if svc.isConnAuthenticated(mockConn) {
 		t.Fatal("SECURITY: loopback connection authenticated without auth_session — " +

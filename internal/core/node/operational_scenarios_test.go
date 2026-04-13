@@ -63,7 +63,10 @@ func newScenarioSession(
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
 	}
-	attachTestNetCore(s)
+	// syncPeerSession routes only through session.netCore.sendRawSyncBlocking,
+	// never through writeJSONFrame, so the NetCore does not need to be
+	// registered in any Service.conns.
+	attachTestNetCore(nil, s)
 
 	recv := make(chan []string, 1)
 	go func() {

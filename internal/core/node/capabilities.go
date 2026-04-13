@@ -64,9 +64,7 @@ func (s *Service) sessionHasCapability(address domain.PeerAddress, capability do
 // connHasCapability returns true when the inbound connection has the specified
 // capability in its negotiated set (stored during the hello handshake).
 func (s *Service) connHasCapability(conn net.Conn, capability domain.Capability) bool {
-	s.mu.RLock()
-	pc := s.inboundNetCores[conn]
-	s.mu.RUnlock()
+	pc := s.netCoreFor(conn)
 	if pc == nil {
 		return false
 	}
