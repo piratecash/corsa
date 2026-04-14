@@ -39,6 +39,23 @@ import (
 //     sockets and are the only code that binds a net.Conn to a ConnID.
 //     Network is the working API for frames on already-registered
 //     connections, not a factory for them.
+//   - The permanent net.Conn-first surface inside node/ is the set of
+//     functions whose signature is dictated by structural role
+//     (pre-registration IP policy, lifecycle binding, external interface
+//     pinning net.Conn) and therefore will not migrate to ConnID. The
+//     authoritative enumeration of that permanent set, together with the
+//     separately classified transitional net.Conn-first bridges that are
+//     still present on the current branch but expected to shrink, lives
+//     in the block-comment at the top of node/conn_registry.go. That
+//     comment is the normative source of truth.
+//
+// Transitional bridge (NetCore.Conn()).
+//   - NetCore.Conn() returns the underlying net.Conn and is a known
+//     transitional bridge for write wrappers and a small set of address /
+//     iteration sites that have not yet migrated to ConnID-first surface.
+//     It is not part of the permanent carve-out described in
+//     node/conn_registry.go. New call sites of NetCore.Conn() outside the
+//     existing locations require explicit justification at review.
 type Network interface {
 	// SendFrame asynchronously enqueues frame for writing to id. It returns
 	// nil when the frame has been accepted by the writer queue. On partial

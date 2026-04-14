@@ -40,6 +40,59 @@ import (
 // This seam prevents unbounded churn if the internal shape of s.conns
 // changes in the future: only the helpers here need to be updated, not
 // dozens of call sites throughout the codebase.
+//
+// net.Conn-first functions in internal/core/node.
+//
+// The package distinguishes two disjoint sets of functions that accept a
+// raw net.Conn: a permanent carve-out whose signatures are frozen by
+// structural necessity, and a transitional set of bridges that are still
+// net.Conn-first pending later migration. This block-comment is the
+// normative source of truth for which functions belong to each set.
+// Introducing a net.Conn-accepting function that is not covered here is a
+// boundary violation and is rejected at review.
+//
+// Permanent carve-out (frozen).
+//
+// These functions accept net.Conn because the signature is dictated by
+// structural role, not by an incomplete migration. The criterion is one
+// of: entry boundary for a raw socket that has no ConnID yet, lifecycle
+// binding that creates or tears down the (net.Conn, ConnID) pairing,
+// pre-registration network-level policy that runs before a ConnID exists,
+// or the signature of an external interface that pins net.Conn. The
+// canonical list is:
+//
+//   - in this file (conn_registry.go): connIDForLocked, connIDFor,
+//     connEntryLocked, connEntryForLocked, registerInboundConnLocked,
+//     attachOutboundCoreLocked, unregisterConnLocked.
+//   - in service.go: handleConn (inbound entry boundary), public lifecycle
+//     wrappers registerInboundConn / unregisterInboundConn,
+//     pre-registration IP policy isBlacklistedConn, and the
+//     connauth.AuthStore implementation ConnAuthState / SetConnAuthState
+//     (structural carve-out from external interface).
+//
+// These are not "we'll migrate them later" placeholders — their net.Conn
+// signature will not be removed.
+//
+// Transitional net.Conn-first surface (not part of the frozen carve-out).
+//
+// These functions still accept net.Conn on the current branch because
+// later migration PRs have not yet reached them, not because the
+// signature is structurally required. They are acknowledged here so the
+// permanent list above does not pretend to exhaust every net.Conn-first
+// function in the package. They are expected to shrink over time and
+// eventually disappear; new call sites of them require explicit
+// justification at review.
+//
+//   - write-layer bridges in service.go: enqueueFrame, enqueueFrameSync,
+//     writeJSONFrame, writeJSONFrameSync, and their diagnostic helpers
+//     emitProtocolTrace and logUnregisteredWrite.
+//   - write-path helpers outside service.go: sendAckDeleteOnConn in
+//     peer_management.go.
+//   - metering-path helper: isConnTrafficTrustedLocked in metering.go.
+//   - socket-level infrastructure: enableTCPKeepAlive in peer_management.go
+//     (operates on the raw socket by definition; may stay net.Conn-first
+//     indefinitely, but is classified here rather than in the frozen
+//     carve-out because it is not a lifecycle/entry/interface boundary).
 
 // connIDForLocked resolves a net.Conn to its domain.ConnID via the
 // secondary index. Returns zero value and false if the connection is not

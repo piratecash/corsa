@@ -371,7 +371,7 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 		if la := core.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
 			return true
 		}
-		if ip := remoteIP(core.Conn().RemoteAddr()); ip != "" {
+		if ip := remoteIPFromString(core.RemoteAddr()); ip != "" {
 			hosts[ip] = struct{}{}
 		}
 		return true
@@ -2892,33 +2892,37 @@ func (s *Service) evictStaleInboundConns() {
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
 
+	type staleEntry struct {
+		id     domain.ConnID
+		addr   domain.PeerAddress
+		ident  domain.PeerIdentity
+		remote string
+	}
+
 	s.mu.RLock()
-	var stale []net.Conn
+	var stale []staleEntry
 	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
 		la := core.LastActivity()
 		if la.IsZero() {
 			return true
 		}
 		if now.Sub(la) >= stallThreshold {
-			stale = append(stale, core.Conn())
+			stale = append(stale, staleEntry{
+				id:     core.ConnID(),
+				addr:   core.Address(),
+				ident:  core.Identity(),
+				remote: core.RemoteAddr(),
+			})
 		}
 		return true
 	})
 	s.mu.RUnlock()
 
-	for _, conn := range stale {
-		var addr domain.PeerAddress
-		var ident domain.PeerIdentity
-		s.mu.RLock()
-		if id, ok := s.connIDForLocked(conn); ok {
-			if core := s.coreForIDLocked(id); core != nil {
-				addr = core.Address()
-				ident = core.Identity()
-			}
-		}
-		s.mu.RUnlock()
-		log.Warn().Str("peer", string(addr)).Str("identity", string(ident)).Str("remote", conn.RemoteAddr().String()).Msg("force-closing stale inbound connection")
-		_ = conn.Close()
+	ctx := context.Background()
+	network := s.Network()
+	for _, e := range stale {
+		log.Warn().Str("peer", string(e.addr)).Str("identity", string(e.ident)).Str("remote", e.remote).Msg("force-closing stale inbound connection")
+		_ = network.Close(ctx, e.id)
 	}
 }
 

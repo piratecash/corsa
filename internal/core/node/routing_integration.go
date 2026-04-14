@@ -250,7 +250,7 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			seen[pc.Identity()] = struct{}{}
 			targets = append(targets, routing.AnnounceTarget{
-				Address:  inboundConnKey(pc.Conn()),
+				Address:  inboundConnKey(pc),
 				Identity: pc.Identity(),
 			})
 		}
@@ -262,9 +262,10 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 
 // inboundConnKey returns a unique key for an inbound connection that can be
 // used as an AnnounceTarget address. Prefixed with "inbound:" to distinguish
-// from outbound session addresses.
-func inboundConnKey(conn net.Conn) domain.PeerAddress {
-	return domain.PeerAddress("inbound:" + conn.RemoteAddr().String())
+// from outbound session addresses. Keyed off *NetCore rather than net.Conn so
+// the routing layer does not pull the raw socket handle through the call path.
+func inboundConnKey(core *netcore.NetCore) domain.PeerAddress {
+	return domain.PeerAddress("inbound:" + core.RemoteAddr())
 }
 
 // sendFullTableSyncToInbound sends the current routing table to a newly
@@ -283,7 +284,7 @@ func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, core *netcore.Net
 		return
 	}
 
-	sendAddr := inboundConnKey(core.Conn())
+	sendAddr := inboundConnKey(core)
 	if !s.SendAnnounceRoutes(sendAddr, routes) {
 		log.Warn().
 			Str("peer", string(peerIdentity)).
@@ -822,7 +823,7 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 			return true
 		}
 		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
-			result = inboundConnKey(pc.Conn())
+			result = inboundConnKey(pc)
 			return false // Stop iteration
 		}
 		return true
@@ -860,7 +861,7 @@ func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.P
 			return true
 		}
 		if sessionHasCap(pc.Capabilities(), domain.CapMeshRelayV1) {
-			result = inboundConnKey(pc.Conn())
+			result = inboundConnKey(pc)
 			return false // Stop iteration
 		}
 		return true
@@ -1015,7 +1016,7 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	// lookups before the session is installed.
 	var result domain.PeerIdentity
 	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
-		if core.Conn().RemoteAddr().String() == string(address) {
+		if core.RemoteAddr() == string(address) {
 			result = core.Identity()
 			return false // Stop iteration
 		}

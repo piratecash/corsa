@@ -945,6 +945,11 @@ func (s *Service) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, fun
 	return ch, cancel
 }
 
+// handleConn is the inbound entry boundary. It is net.Conn-first by the
+// carve-out list in conn_registry.go: this is the point where a raw socket
+// first enters the registry and a domain.ConnID is born. Downstream dispatch,
+// auth, subscriber and inbound bookkeeping paths resolve id and core once at
+// this entry and propagate them as ConnID / *NetCore.
 func (s *Service) handleConn(conn net.Conn) {
 	if !s.disableRateLimiting && s.isBlacklistedConn(conn) {
 		_ = conn.Close()
@@ -2235,7 +2240,8 @@ func (s *Service) setConnAuthStateByID(id domain.ConnID, state *connauth.State) 
 // ConnAuthState implements connauth.AuthStore. Thin wrapper that crosses
 // the net.Conn → ConnID boundary once via connIDFor and delegates to
 // connAuthStateByID. The external interface pins net.Conn, so this
-// carve-out is structural and not subject to Phase 2 migration.
+// carve-out is structural and not subject to Phase 2 migration. Carve-out
+// membership is frozen; see the canonical list at the top of conn_registry.go.
 func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
 	id, ok := s.connIDFor(conn)
 	if !ok {
@@ -2246,6 +2252,8 @@ func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
 
 // SetConnAuthState implements connauth.AuthStore. Same carve-out rationale
 // as ConnAuthState: thin wrapper over the ConnID-first primary writer.
+// Carve-out membership is frozen; see the canonical list at the top of
+// conn_registry.go.
 func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
 	id, ok := s.connIDFor(conn)
 	if !ok {
@@ -2491,11 +2499,22 @@ func remoteIP(addr net.Addr) string {
 	if addr == nil {
 		return ""
 	}
-	host, _, err := net.SplitHostPort(addr.String())
+	return remoteIPFromString(addr.String())
+}
+
+// remoteIPFromString extracts the IP portion of an already-stringified
+// "host:port" address. Counterpart of remoteIP for call sites that have a
+// string (e.g. *netcore.NetCore.RemoteAddr()) and therefore no net.Addr.
+// Falls back to the raw input if the string is not in host:port form.
+func remoteIPFromString(s string) string {
+	if s == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(s)
 	if err == nil {
 		return host
 	}
-	return addr.String()
+	return s
 }
 
 // observedAddrConsensusThreshold is the minimum number of distinct peers
@@ -2559,6 +2578,10 @@ func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP s
 	log.Warn().Int("count", bestCount).Str("observed_ip", best).Str("advertise", s.cfg.AdvertiseAddress).Msg("NAT detected")
 }
 
+// isBlacklistedConn is net.Conn-first by the carve-out list in
+// conn_registry.go: pre-registration IP policy. The connection is not yet
+// in the registry, so no ConnID exists at this call site — only the
+// network-level RemoteAddr() of the raw socket is meaningful.
 func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 	ip := remoteIP(conn.RemoteAddr())
 	if ip == "" {
@@ -3526,6 +3549,10 @@ func (s *Service) countInboundConnsLocked() int {
 	return s.inboundConnCountLocked()
 }
 
+// registerInboundConn is the public lifecycle wrapper that births the
+// (net.Conn, ConnID) binding for an inbound socket. net.Conn-first by the
+// carve-out list in conn_registry.go: there is no ConnID before this
+// function runs.
 func (s *Service) registerInboundConn(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3576,6 +3603,11 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 	return pc
 }
 
+// unregisterInboundConn is the public lifecycle wrapper that tears down the
+// (net.Conn, ConnID) binding for an inbound socket. net.Conn-first by the
+// carve-out list in conn_registry.go: the secondary index
+// s.connIDByNetConn cannot be trimmed without the same net.Conn that
+// registerInboundConn registered.
 func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Lock()
 	entry := s.connEntryForLocked(conn)
@@ -3597,21 +3629,24 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 
 // closeAllInboundConns closes every tracked inbound connection so that
 // handleConn goroutines unblock and exit. Called during graceful shutdown
-// before connWg.Wait().
+// before connWg.Wait(). Uses the netcore.Network surface (Enumerate + Close)
+// instead of the raw net.Conn path so the shutdown loop no longer carries
+// the socket handle — identity of a connection in-flight is its ConnID.
 func (s *Service) closeAllInboundConns() {
-	s.mu.Lock()
-	inbound := make([]net.Conn, 0)
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
-		inbound = append(inbound, core.Conn())
+	ctx := context.Background()
+	network := s.Network()
+
+	ids := make([]domain.ConnID, 0)
+	network.Enumerate(ctx, netcore.Inbound, func(id domain.ConnID) bool {
+		ids = append(ids, id)
 		return true
 	})
-	s.mu.Unlock()
 
-	for _, c := range inbound {
-		_ = c.Close()
+	for _, id := range ids {
+		_ = network.Close(ctx, id)
 	}
-	if len(inbound) > 0 {
-		log.Info().Int("count", len(inbound)).Msg("closed inbound connections for shutdown")
+	if len(ids) > 0 {
+		log.Info().Int("count", len(ids)).Msg("closed inbound connections for shutdown")
 	}
 }
 
