@@ -1026,7 +1026,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
 			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
-			s.addBanScore(conn, banIncrementRateLimit)
+			s.addBanScore(connID, banIncrementRateLimit)
 			return
 		}
 
@@ -1043,7 +1043,12 @@ func (s *Service) handleConn(conn net.Conn) {
 		if heartbeatStop == nil {
 			if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 				heartbeatStop = make(chan struct{})
-				go s.inboundHeartbeat(conn, addr, heartbeatStop)
+				if core := s.netCoreForID(connID); core != nil {
+					go s.inboundHeartbeat(connID, core, addr, heartbeatStop)
+				} else {
+					close(heartbeatStop)
+					heartbeatStop = nil
+				}
 			}
 		}
 	}
@@ -1100,14 +1105,15 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			Msg("protocol_trace")
 	}()
 
-	// Update per-connection last activity timestamp for staleness checks.
-	s.touchConnActivity(conn)
-
 	// Resolve ConnID once at the entry boundary for ConnID-first helpers
-	// used below (isAuthInitiated, rememberConnPeerAddr, isConnAuthenticated).
-	// If the connection is not registered, connID stays zero and every
-	// ByID helper returns its safe default (nil/false).
+	// used below (isAuthInitiated, rememberConnPeerAddr, isConnAuthenticated,
+	// touchConnActivity, connHasCapability, addBanScore, inboundPeerIdentity,
+	// connPeerReachableGroups). If the connection is not registered, connID
+	// stays zero and every ByID helper returns its safe default (nil/false).
 	connID, _ := s.connIDFor(conn)
+
+	// Update per-connection last activity timestamp for staleness checks.
+	s.touchConnActivity(connID)
 
 	// --- Handshake commands (no auth required) ---
 	switch frame.Type {
@@ -1156,7 +1162,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			})
 			// Immediate IP blacklist (transport level): prevents the same
 			// remote IP from opening new TCP connections for 24 hours.
-			s.addBanScore(conn, banIncrementIncompatibleVersion)
+			s.addBanScore(connID, banIncrementIncompatibleVersion)
 			// Health-level ban (overlay level): if the hello declares a
 			// listen address that matches a known peer, apply the same
 			// BannedUntil + score penalty as the outbound path so that
@@ -1175,7 +1181,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			authState, err := connauth.PrepareAuth(frame)
 			if err != nil {
 				accepted = false
-				s.addBanScore(conn, banIncrementInvalidSig)
+				s.addBanScore(connID, banIncrementInvalidSig)
 				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
@@ -1241,7 +1247,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// Merges active CM slots with PeerProvider candidates, deduplicated
 		// by IP. Network group filtering prevents leaking clearnet addresses
 		// to Tor/I2P peers and vice versa.
-		exchanged := s.buildPeerExchangeResponse(s.connPeerReachableGroups(conn))
+		exchanged := s.buildPeerExchangeResponse(s.connPeerReachableGroups(connID))
 		peers := make([]string, len(exchanged))
 		for i, a := range exchanged {
 			peers[i] = string(a)
@@ -1271,7 +1277,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// peer may only subscribe to
 		// its own identity. Without this check, an authenticated peer could
 		// subscribe to a different identity's inbox and receive their messages.
-		peerIdentity := s.inboundPeerIdentity(conn)
+		peerIdentity := s.inboundPeerIdentity(connID)
 		requestedRecipient := strings.TrimSpace(frame.Recipient)
 		if requestedRecipient != "" && requestedRecipient != string(peerIdentity) {
 			accepted = false
@@ -1280,7 +1286,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 				Str("requested_recipient", requestedRecipient).
 				Msg("subscribe_inbox identity mismatch")
 			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
-			s.addBanScore(conn, banIncrementInvalidSig)
+			s.addBanScore(connID, banIncrementInvalidSig)
 			return true
 		}
 		reply, sub := s.subscribeInboxFrame(conn, frame)
@@ -1354,7 +1360,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		return true
 	case "relay_message":
 		// Auth gate enforced above (INV-9).
-		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.connHasCapability(connID, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
 		}
@@ -1384,7 +1390,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		return true
 	case "relay_hop_ack":
 		// Auth gate enforced above.
-		if admit := admitRelayFrame(s.connHasCapability(conn, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.connHasCapability(connID, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			accepted = false
 			return true
 		}
@@ -1395,7 +1401,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		return true
 	case "announce_routes":
 		// Auth gate enforced above.
-		if !s.connHasCapability(conn, domain.CapMeshRoutingV1) {
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV1) {
 			accepted = false
 			return true
 		}
@@ -1403,24 +1409,24 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// advertise routes, but this node can never send relay_message to
 		// it, making every route through it data-plane unusable. Reject
 		// announcements from such peers to avoid storing dead NextHop entries.
-		if !s.connHasCapability(conn, domain.CapMeshRelayV1) {
+		if !s.connHasCapability(connID, domain.CapMeshRelayV1) {
 			accepted = false
 			return true
 		}
-		senderIdentity := s.inboundPeerIdentity(conn)
+		senderIdentity := s.inboundPeerIdentity(connID)
 		s.handleAnnounceRoutes(senderIdentity, frame)
 		return true
 	case "file_command":
 		// Auth gate enforced above. Capability check: file_transfer_v1 must
 		// be negotiated.
-		if !s.connHasCapability(conn, domain.CapFileTransferV1) {
+		if !s.connHasCapability(connID, domain.CapFileTransferV1) {
 			accepted = false
 			return true
 		}
 		// Pass the inbound peer identity so the file router applies
 		// split-horizon forwarding and never reflects the frame back
 		// to the neighbor that just delivered it.
-		s.handleFileCommandFrame(json.RawMessage(line), s.inboundPeerIdentity(conn))
+		s.handleFileCommandFrame(json.RawMessage(line), s.inboundPeerIdentity(connID))
 		return true
 	default:
 		accepted = false
@@ -2081,11 +2087,15 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 // Ban scoring for invalid signatures is applied here because it depends on
 // the connection rate limiter which lives in Service.
 func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
+	// PR 10.3a — addBanScore / touchConnActivity / connHasCapability / etc.
+	// are ConnID-first. handleAuthSession itself stays net.Conn-first until
+	// PR 10.3b migrates dispatch + auth surface together. Resolve id locally.
+	connID, _ := s.connIDFor(conn)
 	state := s.ConnAuthState(conn)
 	verified, reply, ok := connauth.VerifyAuthSession(state, frame)
 	if !ok {
 		if reply.Code == protocol.ErrCodeInvalidAuthSignature {
-			s.addBanScore(conn, banIncrementInvalidSig)
+			s.addBanScore(connID, banIncrementInvalidSig)
 		}
 		return reply, false
 	}
@@ -2106,11 +2116,9 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 		go s.announcePeerToSessions(addr, verified.Hello.NodeType)
 	}
 
-	// Resolve ConnID once for the ConnID-first tracking helpers below.
-	// handleAuthSession itself stays net.Conn-first until PR 10.3 migrates
-	// frame dispatch; the bridge here is local to this function.
-	connID, _ := s.connIDFor(conn)
-
+	// connID resolved at the top of handleAuthSession (PR 10.3a) —
+	// reuse it for tracking helpers below. handleAuthSession stays
+	// net.Conn-first until PR 10.3b migrates frame dispatch + auth together.
 	if addr := s.inboundPeerAddress(connID); addr != "" {
 		// Log duplicate but allow: see the hello-path comment for the
 		// full rationale — rejecting breaks one-way gossip when both
@@ -2291,29 +2299,27 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	}
 
 	// Downstream helpers (connHasCapability, sendFullTableSyncToInbound,
-	// flushPendingFireAndForget) still take net.Conn as their first argument.
-	// PR 10.3 migrates this downstream to ConnID; temporary net.Conn bridge
-	// via coreForID().Conn(). If the connection has already been unregistered
-	// (race with teardown), skip downstream side-effects — routing and
-	// fire-and-forget drains are inherently tied to a live connection.
+	// flushPendingFireAndForget) are ConnID/*NetCore-first since PR 10.3a.
+	// If the connection has already been unregistered (race with teardown),
+	// skip downstream side-effects — routing and fire-and-forget drains are
+	// inherently tied to a live connection.
 	core := s.netCoreForID(id)
 	if core == nil {
 		return
 	}
-	conn := core.Conn()
 
 	// Routing table: register direct peer using the identity fingerprint,
 	// not the transport address. The relay capability flag ensures only
 	// peers that can accept relay_message become direct routes.
-	s.onPeerSessionEstablished(peerIdentity, s.connHasCapability(conn, domain.CapMeshRelayV1))
+	s.onPeerSessionEstablished(peerIdentity, s.connHasCapability(id, domain.CapMeshRelayV1))
 
 	// Send full table sync to the inbound peer (Phase 1.2: full sync on
 	// connect, symmetric with the outbound path).
 	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
-	if s.connHasCapability(conn, domain.CapMeshRoutingV1) && s.connHasCapability(conn, domain.CapMeshRelayV1) {
-		s.sendFullTableSyncToInbound(conn, peerIdentity)
+	if s.connHasCapability(id, domain.CapMeshRoutingV1) && s.connHasCapability(id, domain.CapMeshRelayV1) {
+		s.sendFullTableSyncToInbound(id, core, peerIdentity)
 	}
 
 	// Drain fire-and-forget frames (push_message, push_notice) that were
@@ -2322,7 +2328,7 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	// conn can carry these frames. Only fire-and-forget frames are safe to
 	// send on the inbound conn because they don't expect a response that
 	// would interleave with the peer's request/reply traffic.
-	s.flushPendingFireAndForget(conn, resolved)
+	s.flushPendingFireAndForget(id, core, resolved)
 }
 
 // trackInboundDisconnect decrements the inbound connection reference count
@@ -2385,17 +2391,11 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 	// Routing table: deregister direct peer when the last relay-capable
 	// inbound session closes. Uses the identity fingerprint, not transport
 	// address, to match what was passed to onPeerSessionEstablished.
-	// connHasCapability is still net.Conn-first; PR 10.3 migrates this
-	// downstream to ConnID — temporary bridge via coreForID().Conn().
-	// If the NetCore is already gone (unregisterConnLocked raced ahead),
-	// the capability check falls back to false, which is the safe default
-	// for a torn-down connection.
+	// connHasCapability is ConnID-first since PR 10.3a — the call falls back
+	// to false when NetCore is already gone (unregisterConnLocked raced
+	// ahead), which is the safe default for a torn-down connection.
 	if wasTracked {
-		var relayCap bool
-		if core := s.netCoreForID(id); core != nil {
-			relayCap = s.connHasCapability(core.Conn(), domain.CapMeshRelayV1)
-		}
-		s.onPeerSessionClosed(peerIdentity, relayCap)
+		s.onPeerSessionClosed(peerIdentity, s.connHasCapability(id, domain.CapMeshRelayV1))
 	}
 }
 
@@ -2411,11 +2411,7 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 //  3. If we have no usable information, return nil (= no filtering, include
 //     all routable addresses).  This is the safe backward-compatible default
 //     for old clients that don't send "networks".
-func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]struct{} {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return nil
-	}
+func (s *Service) connPeerReachableGroups(id domain.ConnID) map[domain.NetGroup]struct{} {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return nil
@@ -2442,8 +2438,8 @@ func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]str
 	// could claim .onion/.i2p reachability to extract overlay addresses
 	// it has no proven right to access. Instead, classify by the actual
 	// TCP remote address.
-	if remote := conn.RemoteAddr(); remote != nil {
-		host, _, err := net.SplitHostPort(remote.String())
+	if remote := pc.RemoteAddr(); remote != "" {
+		host, _, err := net.SplitHostPort(remote)
 		if err == nil {
 			g := classifyAddress(domain.PeerAddress(host))
 			if g != domain.NetGroupUnknown && g != domain.NetGroupLocal {
@@ -2579,11 +2575,16 @@ func (s *Service) decrementIPConn(ip string) {
 	}
 }
 
-func (s *Service) addBanScore(conn net.Conn, delta int) {
-	ip := remoteIP(conn.RemoteAddr())
-	if ip == "" || delta <= 0 {
+func (s *Service) addBanScore(id domain.ConnID, delta int) {
+	pc := s.netCoreForID(id)
+	if pc == nil || delta <= 0 {
 		return
 	}
+	host, _, err := net.SplitHostPort(pc.RemoteAddr())
+	if err != nil || host == "" {
+		return
+	}
+	ip := host
 	s.mu.Lock()
 	entry := s.bans[ip]
 	entry.Score += delta
@@ -2994,11 +2995,11 @@ func (s *Service) handleAckDeleteFrame(conn net.Conn, frame protocol.Frame) (pro
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
 	}
 	if strings.TrimSpace(frame.Address) == "" || strings.TrimSpace(frame.Address) != strings.TrimSpace(hello.Address) || strings.TrimSpace(frame.ID) == "" {
-		s.addBanScore(conn, banIncrementInvalidSig)
+		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "invalid ack identity or id"}, false
 	}
 	if err := identity.VerifyPayload(hello.Address, hello.PubKey, ackDeletePayload(frame.Address, frame.AckType, frame.ID, frame.Status), frame.Signature); err != nil {
-		s.addBanScore(conn, banIncrementInvalidSig)
+		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()}, false
 	}
 
@@ -3950,7 +3951,7 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 
 	connID, _ := s.connIDFor(conn)
 	peerAddr := s.inboundPeerAddress(connID)
-	peerIdentity := s.inboundPeerIdentity(conn)
+	peerIdentity := s.inboundPeerIdentity(connID)
 
 	// Non-DM sender verification: reject messages whose sender is not a
 	// known identity. DM messages have their own cryptographic verification
@@ -3965,7 +3966,7 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 			Str("sender", msg.Sender).
 			Str("topic", msg.Topic).
 			Msg("push_message rejected: non-DM sender identity not verified")
-		s.addBanScore(conn, banIncrementInvalidSig)
+		s.addBanScore(connID, banIncrementInvalidSig)
 		return
 	}
 
@@ -4039,7 +4040,7 @@ func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol
 			Str("receipt_recipient", receipt.Recipient).
 			Str("local_identity", s.identity.Address).
 			Msg("push_delivery_receipt rejected: recipient does not match local identity or active subscriber")
-		s.addBanScore(conn, banIncrementInvalidSig)
+		s.addBanScore(connID, banIncrementInvalidSig)
 		return
 	}
 
@@ -4083,7 +4084,7 @@ func (s *Service) handleInboundRelayDeliveryReceipt(conn net.Conn, frame protoco
 			Str("receipt_recipient", receipt.Recipient).
 			Str("local_identity", s.identity.Address).
 			Msg("relay_delivery_receipt rejected: recipient does not match local identity or active subscriber")
-		s.addBanScore(conn, banIncrementInvalidSig)
+		s.addBanScore(connID, banIncrementInvalidSig)
 		return
 	}
 

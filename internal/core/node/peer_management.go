@@ -2731,7 +2731,11 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 // Only fire-and-forget frames are flushed here — request/reply frames
 // (send_message, relay_message) must go through the outbound session to
 // avoid interleaving with the peer's inbound request dispatch loop.
-func (s *Service) flushPendingFireAndForget(conn net.Conn, address domain.PeerAddress) {
+func (s *Service) flushPendingFireAndForget(id domain.ConnID, core *netcore.NetCore, address domain.PeerAddress) {
+	if core == nil {
+		return
+	}
+	_ = id
 	// If there is already an active outbound session, let flushPendingPeerFrames
 	// handle it to avoid double delivery.
 	if session, ok := s.activePeerSession(address); ok && session != nil {
@@ -2772,9 +2776,11 @@ func (s *Service) flushPendingFireAndForget(conn net.Conn, address domain.PeerAd
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
 
+	// Bridge to net.Conn-first write wrapper; PR 10.3b/10.6 migrates writeJSONFrame.
+	conn := core.Conn()
 	for _, item := range toSend {
 		_ = s.writeJSONFrame(conn, item.Frame)
-		log.Debug().Str("addr", conn.RemoteAddr().String()).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
+		log.Debug().Str("addr", core.RemoteAddr()).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
 	}
 }
 
@@ -2818,8 +2824,14 @@ func nextHeartbeatDuration() time.Duration {
 // liveness. The pong reply is handled by handleCommand which calls markPeerRead.
 // If the peer does not respond within pongStallTimeout after a ping, the
 // connection is closed — same semantics as outbound session heartbeats.
-func (s *Service) inboundHeartbeat(conn net.Conn, address domain.PeerAddress, stop <-chan struct{}) {
+func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, address domain.PeerAddress, stop <-chan struct{}) {
 	defer crashlog.DeferRecover()
+	if core == nil {
+		return
+	}
+	_ = id
+	// Bridge to net.Conn-first write wrapper / Close; PR 10.3b/10.6 migrates these.
+	conn := core.Conn()
 	timer := time.NewTimer(nextHeartbeatDuration())
 	defer timer.Stop()
 
@@ -2911,11 +2923,7 @@ func (s *Service) evictStaleInboundConns() {
 }
 
 // touchConnActivity updates the per-connection last activity timestamp.
-func (s *Service) touchConnActivity(conn net.Conn) {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return
-	}
+func (s *Service) touchConnActivity(id domain.ConnID) {
 	if pc := s.netCoreForID(id); pc != nil {
 		pc.SetLastActivity(time.Now().UTC())
 	}

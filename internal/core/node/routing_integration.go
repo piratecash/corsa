@@ -26,11 +26,7 @@ import (
 // address (transport) for health tracking. NATed peers advertise a
 // non-routable listen address (e.g. 127.0.0.1:64646) that must never
 // be used as a routing identity.
-func (s *Service) inboundPeerIdentity(conn net.Conn) domain.PeerIdentity {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return ""
-	}
+func (s *Service) inboundPeerIdentity(id domain.ConnID) domain.PeerIdentity {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return ""
@@ -276,17 +272,18 @@ func inboundConnKey(conn net.Conn) domain.PeerAddress {
 // outbound full-table sync (Phase 1.2: always full sync on connect).
 // Without this, inbound-only peers would wait until the next periodic
 // or triggered announce cycle before learning the current table.
-func (s *Service) sendFullTableSyncToInbound(conn net.Conn, peerIdentity domain.PeerIdentity) {
-	if peerIdentity == "" {
+func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, core *netcore.NetCore, peerIdentity domain.PeerIdentity) {
+	if peerIdentity == "" || core == nil {
 		return
 	}
+	_ = id
 
 	routes := s.routingTable.AnnounceTo(peerIdentity)
 	if len(routes) == 0 {
 		return
 	}
 
-	sendAddr := inboundConnKey(conn)
+	sendAddr := inboundConnKey(core.Conn())
 	if !s.SendAnnounceRoutes(sendAddr, routes) {
 		log.Warn().
 			Str("peer", string(peerIdentity)).

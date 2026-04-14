@@ -1,8 +1,6 @@
 package node
 
 import (
-	"net"
-
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
@@ -63,11 +61,7 @@ func (s *Service) sessionHasCapability(address domain.PeerAddress, capability do
 
 // connHasCapability returns true when the inbound connection has the specified
 // capability in its negotiated set (stored during the hello handshake).
-func (s *Service) connHasCapability(conn net.Conn, capability domain.Capability) bool {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return false
-	}
+func (s *Service) connHasCapability(id domain.ConnID, capability domain.Capability) bool {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return false

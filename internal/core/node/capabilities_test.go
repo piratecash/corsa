@@ -154,13 +154,15 @@ func TestConnHasCapability(t *testing.T) {
 	})
 	svc.setTestConnEntryLocked(serverConn, &connEntry{core: pc})
 
-	if !svc.connHasCapability(serverConn, domain.CapMeshRelayV1) {
+	serverID, _ := svc.connIDFor(serverConn)
+	clientID, _ := svc.connIDFor(clientConn)
+	if !svc.connHasCapability(serverID, domain.CapMeshRelayV1) {
 		t.Fatal("serverConn should have mesh_relay_v1")
 	}
-	if svc.connHasCapability(serverConn, domain.CapMeshRoutingV1) {
+	if svc.connHasCapability(serverID, domain.CapMeshRoutingV1) {
 		t.Fatal("serverConn should not have mesh_routing_v1")
 	}
-	if svc.connHasCapability(clientConn, domain.CapMeshRelayV1) {
+	if svc.connHasCapability(clientID, domain.CapMeshRelayV1) {
 		t.Fatal("clientConn is not registered, should not match")
 	}
 }

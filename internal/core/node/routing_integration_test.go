@@ -1468,7 +1468,8 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 	}()
 
 	// Call the function under test.
-	svc.sendFullTableSyncToInbound(conn, idPeerB)
+	id, _ := svc.connIDFor(conn)
+	svc.sendFullTableSyncToInbound(id, pc, idPeerB)
 
 	select {
 	case data := <-received:
@@ -1510,13 +1511,16 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.6"), Port: 12346},
 	}
 
+	pc := netcore.New(netcore.ConnID(2), conn, netcore.Inbound, netcore.Options{})
+	defer pc.Close()
 	svc.mu.Lock()
-	svc.setTestConnEntryLocked(conn, &connEntry{tracked: true})
+	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
 	svc.mu.Unlock()
 
 	// Call the function — with only peer-B's own route in the table,
 	// split horizon should filter it out, resulting in no send.
-	svc.sendFullTableSyncToInbound(conn, idPeerB)
+	id, _ := svc.connIDFor(conn)
+	svc.sendFullTableSyncToInbound(id, pc, idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1548,11 +1552,14 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.7"), Port: 12347},
 	}
 
+	pc := netcore.New(netcore.ConnID(3), conn, netcore.Inbound, netcore.Options{})
+	defer pc.Close()
 	svc.mu.Lock()
-	svc.setTestConnEntryLocked(conn, &connEntry{tracked: true})
+	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
 	svc.mu.Unlock()
 
-	svc.sendFullTableSyncToInbound(conn, idPeerB)
+	id, _ := svc.connIDFor(conn)
+	svc.sendFullTableSyncToInbound(id, pc, idPeerB)
 
 	readDone := make(chan int, 1)
 	go func() {
@@ -1657,12 +1664,12 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	svc.mu.Unlock()
 
 	// connHasCapability should return false.
-	if svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
+	connID, _ := svc.connIDFor(conn)
+	if svc.connHasCapability(connID, domain.CapMeshRoutingV1) {
 		t.Fatal("inbound peer should NOT have mesh_routing_v1")
 	}
 
 	// trackInboundConnect should NOT send anything because the gate blocks it.
-	connID, _ := svc.connIDFor(conn)
 	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
@@ -1711,7 +1718,8 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.mu.Unlock()
 
-	if !svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
+	connID, _ := svc.connIDFor(conn)
+	if !svc.connHasCapability(connID, domain.CapMeshRoutingV1) {
 		t.Fatal("inbound peer should have mesh_routing_v1")
 	}
 
@@ -1727,7 +1735,6 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	}()
 
 	// trackInboundConnect should call sendFullTableSyncToInbound.
-	connID, _ := svc.connIDFor(conn)
 	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	select {
@@ -1811,14 +1818,14 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.mu.Unlock()
 
-	if !svc.connHasCapability(conn, domain.CapMeshRoutingV1) {
+	connID, _ := svc.connIDFor(conn)
+	if !svc.connHasCapability(connID, domain.CapMeshRoutingV1) {
 		t.Fatal("inbound peer should have mesh_routing_v1")
 	}
-	if svc.connHasCapability(conn, domain.CapMeshRelayV1) {
+	if svc.connHasCapability(connID, domain.CapMeshRelayV1) {
 		t.Fatal("inbound peer should NOT have mesh_relay_v1")
 	}
 
-	connID, _ := svc.connIDFor(conn)
 	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	readDone := make(chan int, 1)
