@@ -101,7 +101,7 @@ type SessionInfo struct {
 	DialAddress    domain.PeerAddress // actual TCP address used (may differ from Address when fallback port was used)
 	Identity       domain.PeerIdentity
 	Capabilities   []domain.Capability
-	ConnID         uint64
+	ConnID         domain.ConnID
 	Session        *peerSession // non-nil for OnSessionEstablished and OnSessionTeardown; used for pointer-compare ownership guard
 	SlotGeneration uint64       // non-zero only in OnSessionEstablished
 }

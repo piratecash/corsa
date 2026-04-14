@@ -25,7 +25,7 @@ const (
 )
 
 // peerExchangeSkipReason explains why a particular sync did not send
-// get_peers. See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+// get_peers. See docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 type peerExchangeSkipReason string
 
 const (
@@ -57,7 +57,7 @@ const (
 //
 // The policy is re-evaluated at each sync call site, not fixed at startup.
 //
-// See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 2b.
+// See docs/peer-discovery-conditional-get-peers.ru.md Step 2b.
 func (s *Service) shouldRequestPeers() bool {
 	snap := s.AggregateStatus()
 
@@ -85,7 +85,7 @@ func (s *Service) shouldRequestPeers() bool {
 // surface consistent across all four skip sites without adding a parameter to
 // syncPeer / syncPeerSession.
 //
-// See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+// See docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 func (s *Service) logPeerExchangeSkipped(
 	path peerExchangePath,
 	peer domain.PeerAddress,
@@ -110,7 +110,7 @@ func (s *Service) logPeerExchangeSkipped(
 // imported) signals how much of the response was redundant, which is the
 // core steady-state vs cold-start comparison the document promises.
 //
-// See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+// See docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 func (s *Service) logPeerExchangeExecuted(
 	path peerExchangePath,
 	peer domain.PeerAddress,

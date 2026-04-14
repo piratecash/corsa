@@ -197,7 +197,7 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 	// in production where the dial address is an IP:port and the identity
 	// is the Ed25519 fingerprint.
 	// Attach a NetCore to satisfy writeSessionFrame's session.netCore
-	// precondition (session-local reply path, PR 9.4a P1 fix).
+	// precondition on the session-local reply path.
 	session := &peerSession{
 		address:      domain.PeerAddress(transportAddr),
 		peerIdentity: domain.PeerIdentity(peerIdentity),

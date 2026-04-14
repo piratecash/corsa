@@ -462,7 +462,7 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 // end-to-end and inspects the frames observed by the peer on the recovery
 // dial. Future refactors that accidentally re-enable peer exchange on this
 // path will fail here even if the lower-level syncSenderKeys tests still
-// pass. See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 5.
+// pass. See docs/peer-discovery-conditional-get-peers.ru.md Step 5.
 func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T) {
 	t.Parallel()
 

@@ -96,19 +96,19 @@ type Service struct {
 	// outbound mirror). Address-only callers (no conn available, e.g.
 	// peer_exchange) update only the map; by-conn readers must tolerate an
 	// empty NetCore.Identity() and fall back to the map.
-	peerTypes             map[domain.PeerAddress]domain.NodeType
-	peerIDs               map[domain.PeerAddress]domain.PeerIdentity
-	peerVersions          map[domain.PeerAddress]string
-	peerBuilds            map[domain.PeerAddress]int
-	pending               map[domain.PeerAddress][]pendingFrame
-	pendingKeys           map[string]struct{}
-	orphaned              map[domain.PeerAddress][]pendingFrame // legacy fallback-keyed frames that could not be migrated
-	relayRetry            map[string]relayAttempt
-	outbound              map[string]outboundDelivery
-	upstream              map[domain.PeerAddress]struct{}
-	inboundHealthRefs     map[domain.PeerAddress]int    // resolved overlay address → active inbound connection count
-	connWg                sync.WaitGroup                // tracks active handleConn goroutines for graceful shutdown
-	backgroundWg          sync.WaitGroup                // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
+	peerTypes         map[domain.PeerAddress]domain.NodeType
+	peerIDs           map[domain.PeerAddress]domain.PeerIdentity
+	peerVersions      map[domain.PeerAddress]string
+	peerBuilds        map[domain.PeerAddress]int
+	pending           map[domain.PeerAddress][]pendingFrame
+	pendingKeys       map[string]struct{}
+	orphaned          map[domain.PeerAddress][]pendingFrame // legacy fallback-keyed frames that could not be migrated
+	relayRetry        map[string]relayAttempt
+	outbound          map[string]outboundDelivery
+	upstream          map[domain.PeerAddress]struct{}
+	inboundHealthRefs map[domain.PeerAddress]int // resolved overlay address → active inbound connection count
+	connWg            sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
+	backgroundWg      sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
 	// conns is the single source of truth for live connection state (core,
 	// metered counters, tracked flag). It is keyed by netcore.ConnID so the
 	// key is a domain identifier, not a raw net.Conn handle. All reads and
@@ -122,8 +122,8 @@ type Service struct {
 	// the invariant is pinned by TestConnRegistry_InvalidationIsAtomic and
 	// TestConnRegistry_RegisterSyncsSecondaryIndex in
 	// conn_registry_lifecycle_test.go.
-	connIDByNetConn map[net.Conn]netcore.ConnID
-	connIDCounter         uint64                        // monotonic counter for connection IDs (protected by mu)
+	connIDByNetConn       map[net.Conn]netcore.ConnID
+	connIDCounter         uint64 // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
 	listener              net.Listener
@@ -183,7 +183,7 @@ type subscriber struct {
 type peerSession struct {
 	address      domain.PeerAddress
 	peerIdentity domain.PeerIdentity // peer's Ed25519 identity fingerprint from welcome.Address
-	connID       uint64              // monotonic connection ID for diagnostics
+	connID       domain.ConnID       // monotonic connection ID for diagnostics
 	conn         net.Conn
 	metered      *netcore.MeteredConn // tracks bytes for this session; nil when conn is not metered
 	sendCh       chan protocol.Frame
@@ -995,11 +995,11 @@ func (s *Service) handleConn(conn net.Conn) {
 			if errors.Is(err, errFrameTooLarge) {
 				log.Debug().Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: closing connection — frame exceeds max size")
-				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
+				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
 			} else if err != io.EOF {
 				log.Debug().Err(err).Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: closing connection — read error")
-				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
+				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
 			} else {
 				log.Debug().Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: peer closed connection (EOF)")
@@ -1019,7 +1019,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			!s.cmdLimiter.allowCommand(connKey) {
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
-			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
+			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
 			s.addBanScore(conn, banIncrementRateLimit)
 			return
 		}
@@ -1052,7 +1052,7 @@ func (s *Service) handleCommand(conn net.Conn, line string) bool {
 			Str("command", "non-json").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 		return false
 	}
 	return s.dispatchNetworkFrame(conn, line)
@@ -1068,7 +1068,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			Str("command", "").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
+		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
 		return false
 	}
 
@@ -1104,7 +1104,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			s.markPeerRead(addr, frame)
 		}
 		pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-		s.writeJSONFrame(conn, pongFrame)
+		_ = s.writeJSONFrame(conn, pongFrame)
 		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
 			s.markPeerWrite(addr, pongFrame)
 		}
@@ -1125,7 +1125,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// health tracking and capability context.
 		if s.isAuthInitiated(conn) {
 			accepted = false
-			s.writeJSONFrameSync(conn, protocol.Frame{
+			_ = s.writeJSONFrameSync(conn, protocol.Frame{
 				Type:  "error",
 				Code:  protocol.ErrCodeHelloAfterAuth,
 				Error: "re-hello rejected: authentication in progress or completed",
@@ -1135,7 +1135,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		if err := validateProtocolHandshake(frame); err != nil {
 			accepted = false
 			log.Warn().Err(err).Str("addr", conn.RemoteAddr().String()).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
-			s.writeJSONFrame(conn, protocol.Frame{
+			_ = s.writeJSONFrame(conn, protocol.Frame{
 				Type:                   "error",
 				Code:                   protocol.ErrCodeIncompatibleProtocol,
 				Error:                  err.Error(),
@@ -1164,7 +1164,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			if err != nil {
 				accepted = false
 				s.addBanScore(conn, banIncrementInvalidSig)
-				s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
+				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
 			s.SetConnAuthState(conn, authState)
@@ -1172,7 +1172,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
-			s.writeJSONFrame(conn, s.welcomeFrame(authState.Challenge, remoteIP(conn.RemoteAddr())))
+			_ = s.writeJSONFrame(conn, s.welcomeFrame(authState.Challenge, remoteIP(conn.RemoteAddr())))
 			return true
 		}
 		// No identity fields → unauthenticated peer. It stays
@@ -1184,16 +1184,16 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			Str("client", frame.Client).
 			Str("addr", conn.RemoteAddr().String()).
 			Msg("hello_without_identity_fields")
-		s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
+		_ = s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
 	case "auth_session":
 		reply, ok := s.handleAuthSession(conn, frame)
 		if !ok {
 			accepted = false
-			s.writeJSONFrameSync(conn, reply)
+			_ = s.writeJSONFrameSync(conn, reply)
 			return false
 		}
-		s.writeJSONFrame(conn, reply)
+		_ = s.writeJSONFrame(conn, reply)
 		return true
 
 	default:
@@ -1214,11 +1214,11 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// on the error code: known P2P → auth_required, unknown → unknown_command.
 		if isP2PWireCommand(frame.Type) {
 			accepted = false
-			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
+			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
 			return false
 		}
 		accepted = false
-		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 
@@ -1234,7 +1234,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		for i, a := range exchanged {
 			peers[i] = string(a)
 		}
-		s.writeJSONFrame(conn, protocol.Frame{
+		_ = s.writeJSONFrame(conn, protocol.Frame{
 			Type:  "peers",
 			Count: len(peers),
 			Peers: peers,
@@ -1243,16 +1243,16 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 	case "fetch_contacts":
 		// P2P contact sync: authenticated peers fetch the contact list
 		// for key material synchronization (syncPeer, syncContactsViaSession).
-		s.writeJSONFrame(conn, s.contactsFrame())
+		_ = s.writeJSONFrame(conn, s.contactsFrame())
 		return true
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(conn, frame)
 		if !ok {
 			accepted = false
-			s.writeJSONFrameSync(conn, reply)
+			_ = s.writeJSONFrameSync(conn, reply)
 			return false
 		}
-		s.writeJSONFrame(conn, reply)
+		_ = s.writeJSONFrame(conn, reply)
 		return true
 	case "subscribe_inbox":
 		// Auth gate enforced above. Identity binding: the authenticated
@@ -1267,12 +1267,12 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 				Str("peer_identity", string(peerIdentity)).
 				Str("requested_recipient", requestedRecipient).
 				Msg("subscribe_inbox identity mismatch")
-			s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
+			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
 			s.addBanScore(conn, banIncrementInvalidSig)
 			return true
 		}
 		reply, sub := s.subscribeInboxFrame(conn, frame)
-		s.writeJSONFrame(conn, reply)
+		_ = s.writeJSONFrame(conn, reply)
 		if sub != nil {
 			go s.pushBacklogToSubscriber(sub)
 		}
@@ -1283,7 +1283,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// frame in each direction is sufficient for full bidirectional sync.
 		// Sent here (not after auth_ok) so that short-lived connections like
 		// syncPeer — which never send subscribe_inbox — are not affected.
-		s.writeJSONFrame(conn, protocol.Frame{
+		_ = s.writeJSONFrame(conn, protocol.Frame{
 			Type:       "subscribe_inbox",
 			Topic:      "dm",
 			Recipient:  s.identity.Address,
@@ -1325,7 +1325,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// gossip we learn the address, but we do not trust the sender to set
 		// or override the announced peer's local role.
 		if !isKnownNodeType(nodeType) {
-			s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
+			_ = s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 			return true
 		}
 		peers := frame.Peers
@@ -1338,7 +1338,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			}
 			s.promotePeerAddress(domain.PeerAddress(peer))
 		}
-		s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
+		_ = s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
 		return true
 	case "relay_message":
 		// Auth gate enforced above (INV-9).
@@ -1363,7 +1363,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// Empty status means the message was dropped (dedupe, max hops,
 		// client node); no ack is sent for drops (INV-5).
 		if ackStatus != "" {
-			s.writeJSONFrame(conn, protocol.Frame{
+			_ = s.writeJSONFrame(conn, protocol.Frame{
 				Type:   "relay_hop_ack",
 				ID:     frame.ID,
 				Status: ackStatus,
@@ -1412,7 +1412,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		return true
 	default:
 		accepted = false
-		s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 }
@@ -1568,6 +1568,22 @@ func (s *Service) isInboundTracked(conn net.Conn) bool {
 // connWriter is now replaced by NetCore.writerLoop(). The single writer
 // goroutine per inbound connection is started inside netcore.New() and
 // drains NetCore.sendCh. See net_core.go for sendItem and the implementation.
+
+// ErrUnregisteredWrite signals that a write wrapper (writeJSONFrame,
+// writeJSONFrameSync, writeSessionFrame) attempted to send a frame on a
+// connection that has no associated NetCore in s.conns (or no NetCore on
+// the session). Every live connection is registered before the first
+// send (see registerInboundConn and attachOutboundNetCore), so this
+// outcome means the single-writer invariant was violated: the frame is
+// dropped (fail closed) and the error is returned to the caller so it
+// can react (early return, scope cleanup) rather than continuing as if
+// the write had succeeded. The sentinel is matched via errors.Is;
+// callers that intentionally fire-and-forget must acknowledge the
+// return with `_ = s.writeJSONFrame(...)` so errcheck can flag any
+// silently dropped error at lint time — that is the compile-time
+// enforcement of the writer-ownership contract, complementing the
+// runtime logUnregisteredWrite observability baseline.
+var ErrUnregisteredWrite = errors.New("unregistered write: single-writer invariant violated")
 
 type enqueueResult int
 
@@ -1782,7 +1798,17 @@ func tryEnqueuePeerSessionFrame(sess *peerSession, frame protocol.Frame) (accept
 	}
 }
 
-func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
+// writeJSONFrame marshals the frame and enqueues it on the NetCore
+// resolved from s.conns by conn. Returns ErrUnregisteredWrite when the
+// connection has no registered NetCore — a single-writer-invariant
+// violation (see ErrUnregisteredWrite). Returns nil on enqueueSent and
+// on enqueueDropped: a dropped frame (buffer full / channel closed) is
+// an operational condition handled by enqueueFrame (slow-peer disconnect
+// + warn log), not an architectural error the caller must react to.
+// Callers must acknowledge the return: `_ = s.writeJSONFrame(...)` for
+// fire-and-forget paths, `if err := ...; err != nil { ... }` for paths
+// that want to early-return on the invariant violation.
+func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) error {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
@@ -1791,14 +1817,17 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 		emitProtocolTrace(conn, frame, res)
 		if res == enqueueUnregistered {
 			logUnregisteredWrite(conn, frame, "writeJSONFrame.marshal_fallback")
+			return ErrUnregisteredWrite
 		}
-		return
+		return nil
 	}
 	res := s.enqueueFrame(conn, []byte(line))
 	emitProtocolTrace(conn, frame, res)
 	if res == enqueueUnregistered {
 		logUnregisteredWrite(conn, frame, "writeJSONFrame")
+		return ErrUnregisteredWrite
 	}
+	return nil
 }
 
 // enqueueSessionFrame is the session-scoped counterpart of enqueueFrame:
@@ -1808,13 +1837,6 @@ func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) {
 // respondToInboxRequest, subscribe_inbox reply — must not fail closed with
 // unregistered_write just because the registry entry has been reaped or
 // never existed (tests); the authoritative writer is session.netCore.
-//
-// TRANSLATION (RU): аналог enqueueFrame, но без обращения к s.conns —
-// writer берётся напрямую из session.netCore. Используется на всех
-// session-local ответных путях, где peerSession и так держит
-// authoritative transport owner. Снимает зависимость reply-путей от
-// реестра s.conns и устраняет класс unregistered_write на валидных
-// сессиях (см. P1 ревью 9.4a).
 func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueueResult {
 	if session == nil || session.netCore == nil {
 		return enqueueUnregistered
@@ -1848,16 +1870,13 @@ func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueue
 // via enqueueSessionFrame. Use this on session-local reply paths where the
 // peerSession is the authoritative transport owner; callers must not use
 // writeJSONFrame(session.conn, ...) on these paths because that re-resolves
-// the transport through s.conns and fails closed whenever the session
-// exists without a matching registry entry (addressed in P1 review 9.4a).
-//
-// TRANSLATION (RU): обёртка над enqueueSessionFrame: сериализует фрейм и
-// маршрутизирует его через session.netCore. Применять на всех
-// session-local reply-путях — pong, push_message из respondToInboxRequest,
-// subscribe_inbox ответ — где peerSession уже владеет authoritative
-// transport'ом. Заменяет небезопасный writeJSONFrame(session.conn, …) на
-// этих путях.
-func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) {
+// the transport through s.conns and fails closed whenever the session is
+// live but the matching registry entry has been reaped or was never
+// populated (tests), producing a spurious ErrUnregisteredWrite on a
+// valid transport. Returns ErrUnregisteredWrite when the session has no
+// NetCore attached (see ErrUnregisteredWrite and writeJSONFrame for the
+// acknowledgment contract). Returns nil on enqueueSent and enqueueDropped.
+func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) error {
 	var conn net.Conn
 	if session != nil {
 		conn = session.conn
@@ -1870,14 +1889,17 @@ func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) 
 		emitProtocolTrace(conn, frame, res)
 		if res == enqueueUnregistered {
 			logUnregisteredWrite(conn, frame, "writeSessionFrame.marshal_fallback")
+			return ErrUnregisteredWrite
 		}
-		return
+		return nil
 	}
 	res := s.enqueueSessionFrame(session, []byte(line))
 	emitProtocolTrace(conn, frame, res)
 	if res == enqueueUnregistered {
 		logUnregisteredWrite(conn, frame, "writeSessionFrame")
+		return ErrUnregisteredWrite
 	}
+	return nil
 }
 
 // writeJSONFrameSync serialises a protocol frame and blocks until the
@@ -1886,8 +1908,10 @@ func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) 
 // about to return false and the deferred cleanup will close the connection:
 // the sync variant guarantees the error frame reaches the wire before
 // teardown, preserving the "write completed before return" contract that
-// error-path callers rely on.
-func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) {
+// error-path callers rely on. Returns ErrUnregisteredWrite on the
+// single-writer-invariant violation (see writeJSONFrame for the error
+// contract), nil otherwise.
+func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) error {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
@@ -1896,14 +1920,17 @@ func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) {
 		emitProtocolTrace(conn, frame, res)
 		if res == enqueueUnregistered {
 			logUnregisteredWrite(conn, frame, "writeJSONFrameSync.marshal_fallback")
+			return ErrUnregisteredWrite
 		}
-		return
+		return nil
 	}
 	res := s.enqueueFrameSync(conn, []byte(line))
 	emitProtocolTrace(conn, frame, res)
 	if res == enqueueUnregistered {
 		logUnregisteredWrite(conn, frame, "writeJSONFrameSync")
+		return ErrUnregisteredWrite
 	}
+	return nil
 }
 
 // emitProtocolTrace writes the send-side protocol_trace entry after the
@@ -3364,16 +3391,16 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 
 // attachOutboundNetCore creates an outbound NetCore for the given dialled
 // connection, registers it in s.conns (the single primary registry that
-// holds both inbound and outbound entries after checkpoint 9.4a) and
-// wires session.netCore / session.onClose so that peerSession.Close()
-// removes the registration atomically with the NetCore teardown.
+// holds both inbound and outbound entries) and wires session.netCore /
+// session.onClose so that peerSession.Close() removes the registration
+// atomically with the NetCore teardown.
 //
 // The NetCore must exist before peerSessionRequest runs so that the welcome
 // and auth frames are routed through the managed single-writer path instead
 // of raw io.WriteString. This is the Phase 1 gate C1 — all outbound writes
 // share the same back-pressure and deadline discipline as inbound.
 func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
-	pc := netcore.New(netcore.ConnID(session.connID), session.conn, netcore.Outbound, netcore.Options{})
+	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{})
 
 	s.mu.Lock()
 	s.attachOutboundCoreLocked(session.conn, pc)
@@ -3843,8 +3870,8 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 		if peerAddr != "" {
 			// Narrow sender-key recovery: only contact/key sync, no peer
 			// exchange. See docs/peer-discovery-conditional-get-peers.ru.md
-			// § Шаг 5 — частная ошибка (unknown sender key) не должна
-			// превращаться в eager peer exchange.
+			// Step 5: a private error (unknown sender key) must not turn into
+			// eager peer exchange.
 			//
 			// Use s.runCtx as the parent: this handler runs on the inbound
 			// read loop started by handleConn, which is itself bounded by
@@ -3853,7 +3880,7 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 			refreshCtx, cancel := context.WithTimeout(s.runCtx, 1500*time.Millisecond)
 			// Narrow recovery: always skip peer exchange. Logged so this path
 			// is visible in observability alongside the other skip sites.
-			// See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+			// See docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 			s.logPeerExchangeSkipped(peerExchangePathUnknownSenderRecovery, peerAddr, peerExchangeSkipByNarrowRecovery)
 			s.syncPeer(refreshCtx, peerAddr, false)
 			cancel()

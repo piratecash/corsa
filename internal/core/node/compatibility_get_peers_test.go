@@ -15,7 +15,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// Compatibility tests for Шаг 7 of docs/peer-discovery-conditional-get-peers.ru.md.
+// Compatibility tests for Step 7 of docs/peer-discovery-conditional-get-peers.ru.md.
 //
 // These tests protect wire compatibility of the get_peers command against the
 // conditional-get-peers policy change. The policy is a local-only initiator
@@ -125,7 +125,7 @@ func legacyResponderMock(
 // This is the counterpart to TestMixedVersionLegacyPeerExchange
 // (service_test.go:7717) which covers the reverse direction (legacy
 // initiator → new responder). Together they cover both halves of
-// "mixed-version сеть old ↔ new" from Шаг 7 of the design document.
+// the "mixed-version network old ↔ new" scenario from Step 7 of the design document.
 func TestCompatibility_NewInitiatorAgainstLegacyResponder(t *testing.T) {
 	t.Parallel()
 
@@ -168,7 +168,7 @@ func TestCompatibility_NewInitiatorAgainstLegacyResponder(t *testing.T) {
 	}
 
 	// The new initiator must have imported the addresses that the legacy
-	// responder returned. This proves that the response path (which Шаг 7
+	// responder returned. This proves that the response path (which Step 7
 	// must not change) still feeds addPeerAddress().
 	svc.mu.RLock()
 	peerCount := len(svc.peers)
@@ -257,7 +257,7 @@ func TestCompatibility_LegacyInitiatorRespondedPeersShape(t *testing.T) {
 // no active outbound connection exists. The design document calls this
 // "known_only" — it is a deprecated compatibility concept used by Desktop
 // and local operators to learn the address graph before steady-state
-// connectivity is reached. Шаг 7 explicitly requires that this behaviour
+// connectivity is reached. Step 7 explicitly requires that this behaviour
 // stays intact across the policy change.
 //
 // The test feeds a PeerProvider with public candidates, does NOT start a

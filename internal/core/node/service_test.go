@@ -6946,7 +6946,7 @@ func TestConnectedHostsLocked(t *testing.T) {
 	// Simulate an outbound upstream session.
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
 	// Register the real TCP connection as inbound. The unified registry
-	// (PR 9.4a) distinguishes directions via NetCore.Dir(), so the seed must
+	// distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by
 	// connectedHostsLocked's direction filter.
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
@@ -7010,7 +7010,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 
 	svc.mu.Lock()
 	// Register the real TCP connection as inbound. The unified registry
-	// (PR 9.4a) distinguishes directions via NetCore.Dir(), so the seed must
+	// distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by the
 	// direction filter in connectedHostsLocked.
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
@@ -7172,12 +7172,6 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 // persistence cache is a fallback for paths that never call SetIdentity
 // (auth-not-required, legacy tests) — see
 // TestTrackInboundDisconnect_FallsBackToPeerIDsMap below for that branch.
-//
-// TRANSLATION (RU): фиксирует приоритет источника identity на teardown.
-// Когда mirror на NetCore (через core.SetIdentity) и persistence-кэш
-// Service.peerIDs держат разные значения для одного peer'а,
-// trackInboundDisconnect обязан публиковать InboundClosed с identity
-// из NetCore. Persistence-кэш — fallback для путей без SetIdentity.
 func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -7247,10 +7241,6 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 // (Service.peerIDs). Without this branch, auth-not-required flows would
 // emit InboundClosed with an empty identity and break downstream hint
 // consumers.
-//
-// TRANSLATION (RU): fallback-ветка к persistence-кэшу, когда NetCore
-// identity пуст. Покрывает auth-not-required и тест-пути, которые
-// регистрируют conn без полного inbound-auth flow.
 func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	t.Parallel()
 
@@ -9176,7 +9166,7 @@ func TestWriteJSONFrameDropsOnUnregisteredConn(t *testing.T) {
 	}
 	conn := &mockConn{}
 
-	svc.writeJSONFrame(conn, protocol.Frame{Type: "ping"})
+	_ = svc.writeJSONFrame(conn, protocol.Frame{Type: "ping"})
 
 	if written := conn.Written(); len(written) != 0 {
 		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)
@@ -9218,7 +9208,7 @@ func TestWriteJSONFrameSyncDropsOnUnregisteredConn(t *testing.T) {
 	}
 	conn := &mockConn{}
 
-	svc.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+	_ = svc.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 
 	if written := conn.Written(); len(written) != 0 {
 		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)

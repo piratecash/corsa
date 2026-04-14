@@ -496,7 +496,7 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 // recovery) deliberately skip peer exchange even when the aggregate status
 // would otherwise allow it, because those paths are a narrow contact/key
 // sync, not a bootstrap/recovery dial. See
-// docs/peer-discovery-conditional-get-peers.ru.md § Шаг 5.
+// docs/peer-discovery-conditional-get-peers.ru.md Step 5.
 //
 // A fresh connection is used instead of reusing the active session
 // because syncPeer is called from dispatchPeerSessionFrame when a
@@ -590,7 +590,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// Forced-refresh paths pass false to keep the sync narrow. Other future
 	// callers that want the legacy behaviour must evaluate shouldRequestPeers()
 	// themselves before calling. See
-	// docs/peer-discovery-conditional-get-peers.ru.md §§ Шаг 4, Шаг 5.
+	// docs/peer-discovery-conditional-get-peers.ru.md Steps 4 and 5.
 	if requestPeers {
 		if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
 			if st := pc.SendRawSyncBlocking([]byte(line)); st != netcore.SendOK {
@@ -1262,7 +1262,7 @@ func (s *Service) primeStartupBootstrapPeers() {
 // not a self address, not a local/blocked destination, not collapsed onto an
 // existing same-IP entry). Observability callers (peer_exchange_executed log)
 // rely on this signal to report peers actually imported rather than raw
-// response size — see docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+// response size — see docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, peerID domain.PeerIdentity) bool {
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return false
@@ -1561,10 +1561,13 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 			if incoming.Type == "ping" {
 				pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
 				// Route through session.netCore (the authoritative transport
-				// owner) instead of re-resolving via s.conns — see P1 review
-				// for PR 9.4a. writerLoop applies its own per-write deadline
-				// based on Direction, so no manual SetWriteDeadline is needed.
-				s.writeSessionFrame(session, pongFrame)
+				// owner) instead of re-resolving via s.conns: the session may
+				// be live with a valid NetCore while its s.conns entry has
+				// been reaped or never existed (tests), and re-resolving
+				// would fail closed on that path. writerLoop applies its
+				// own per-write deadline based on Direction, so no manual
+				// SetWriteDeadline is needed.
+				_ = s.writeSessionFrame(session, pongFrame)
 				s.markPeerWrite(session.address, pongFrame)
 				continue
 			}
@@ -1618,7 +1621,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 // path identifies the caller for observability (peerExchangePathSessionOutbound
 // for the legacy openPeerSession path, peerExchangePathSessionCM for the
 // ConnectionManager initPeerSession path). See
-// docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+// docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 func (s *Service) syncPeerSession(session *peerSession, requestPeers bool, path peerExchangePath) error {
 	if requestPeers {
 		peersFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers", false)
@@ -1687,13 +1690,13 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 // recovery is a narrow contact/key sync, not a bootstrap/recovery dial, so
 // it must not trigger peer exchange even when the aggregate status would
 // otherwise allow it. See docs/peer-discovery-conditional-get-peers.ru.md
-// § Шаг 5.
+// Step 5.
 //
 // The ctx parameter is the owning lifecycle context (service run / peer
 // session). It is used both to bound the fresh-dial handshake and to cancel
 // the recovery when the owning lifecycle is torn down. A local
 // context.Background() here would lose that cancellation — see
-// CLAUDE.md "context.Context передается первым аргументом".
+// CLAUDE.md: context.Context is passed as the first argument.
 //
 // The syncSession parameter, when non-nil, is used directly instead of
 // looking up a session by address. Callers pass nil when the only candidate
@@ -1708,7 +1711,7 @@ func (s *Service) syncSenderKeys(ctx context.Context, senderAddress domain.PeerA
 		// alongside the fresh-dial fallback — otherwise operators would see
 		// contact recovery happen with no corresponding skip record and could
 		// not tell a consciously-narrow sync from silent observability drift.
-		// See docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+		// See docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 		s.logPeerExchangeSkipped(peerExchangePathSenderKeyViaSession, senderAddress, peerExchangeSkipByNarrowRecovery)
 		imported, err := s.syncContactsViaSession(syncSession)
 		if err == nil {
@@ -1727,7 +1730,7 @@ func (s *Service) syncSenderKeys(ctx context.Context, senderAddress domain.PeerA
 	// requestPeers=false: narrow contact/key recovery only. Logged as a
 	// narrow-recovery skip so operators can tell this path apart from a
 	// steady-state (healthy) policy skip. See
-	// docs/peer-discovery-conditional-get-peers.ru.md § Шаг 6.
+	// docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 	s.logPeerExchangeSkipped(peerExchangePathSenderKeyFreshDial, senderAddress, peerExchangeSkipByNarrowRecovery)
 	return s.syncPeer(dialCtx, senderAddress, false)
 }
@@ -1741,11 +1744,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if session != nil {
 			pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
 			// Route through session.netCore directly — the peerSession
-			// already owns the authoritative transport; there is no need
-			// to re-resolve via s.conns (P1 review for PR 9.4a).
+			// already owns the authoritative transport; re-resolving via
+			// s.conns would fail closed when the registry entry is reaped
+			// or not present (tests) even though the session is live.
 			// writerLoop applies the per-direction write deadline itself,
 			// so no manual SetWriteDeadline is needed.
-			s.writeSessionFrame(session, pongFrame)
+			_ = s.writeSessionFrame(session, pongFrame)
 			s.markPeerWrite(address, pongFrame)
 		}
 		return
@@ -1806,7 +1810,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			// was started with s.runCtx, so this is the effective incoming
 			// context for this session. Threading ctx through the full
 			// dispatch signature is deferred to a separate task to keep this
-			// change focused on Шаг 5 policy (see CLAUDE.md: scope).
+			// change focused on Step 5 policy (see CLAUDE.md: scope).
 			imported := s.syncSenderKeys(s.runCtx, address, nil)
 			stored, _, errCode = s.storeIncomingMessage(msg, true)
 			if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
@@ -1876,9 +1880,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	case "subscribe_inbox":
 		if session != nil {
 			reply, sub := s.subscribeInboxFrame(session.conn, frame)
-			// Session-local reply: route through session.netCore rather
-			// than re-resolving via s.conns (P1 review for PR 9.4a).
-			s.writeSessionFrame(session, reply)
+			// Session-local reply: route through session.netCore, the
+			// authoritative transport owner. Re-resolving via s.conns can
+			// fail closed on a live session when the registry entry is
+			// reaped or absent (tests), so writeSessionFrame is the
+			// correct contract on reply paths owned by peerSession.
+			_ = s.writeSessionFrame(session, reply)
 			if sub != nil {
 				go s.pushBacklogToSubscriber(sub)
 			}
@@ -1972,12 +1979,12 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 			continue
 		}
 		msgFrame := item
-		// Session-local push: route through session.netCore (authoritative
-		// transport owner) instead of re-resolving via s.conns — removes
-		// the unregistered_write failure mode on valid sessions whose
-		// registry entry was not populated by the caller (P1 review
-		// for PR 9.4a).
-		s.writeSessionFrame(session, protocol.Frame{
+		// Session-local push: route through session.netCore, the
+		// authoritative transport owner. Re-resolving via s.conns would
+		// fail closed on a valid session when the registry entry was
+		// not populated by the caller (tests), producing a spurious
+		// unregistered_write on a live transport.
+		_ = s.writeSessionFrame(session, protocol.Frame{
 			Type:      "push_message",
 			Topic:     "dm",
 			Recipient: peerID,
@@ -1990,7 +1997,7 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 		receiptFrame := item
 		// Session-local push: route through session.netCore (see
 		// writeSessionFrame doc for rationale).
-		s.writeSessionFrame(session, protocol.Frame{
+		_ = s.writeSessionFrame(session, protocol.Frame{
 			Type:      "push_delivery_receipt",
 			Recipient: peerID,
 			Receipt:   &receiptFrame,
@@ -2058,7 +2065,7 @@ func (s *Service) buildAckDeleteFrame(ackType string, id protocol.MessageID, sta
 // we acknowledge on the same conn that delivered the message.
 func (s *Service) sendAckDeleteOnConn(conn net.Conn, ackType string, id protocol.MessageID, status string) {
 	frame := s.buildAckDeleteFrame(ackType, id, status)
-	s.writeJSONFrame(conn, frame)
+	_ = s.writeJSONFrame(conn, frame)
 	log.Debug().Str("addr", conn.RemoteAddr().String()).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "inbound_conn").Msg("ack_delete_send")
 }
 
@@ -2247,9 +2254,9 @@ func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
 
 // nextConnIDLocked returns a monotonically increasing connection ID.
 // Must be called with s.mu held (write lock).
-func (s *Service) nextConnIDLocked() uint64 {
+func (s *Service) nextConnIDLocked() domain.ConnID {
 	s.connIDCounter++
-	return s.connIDCounter
+	return domain.ConnID(s.connIDCounter)
 }
 
 // inboundConnIDsLocked returns the connection IDs for all active inbound
@@ -2389,7 +2396,9 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		for dialAddr, session := range s.sessions {
 			if s.resolveHealthAddress(dialAddr) == health.Address {
 				phf.ProtocolVersion = session.version
-				phf.ConnID = session.connID
+				// PeerHealthFrame.ConnID is the wire-level uint64; convert
+				// from the typed session identifier before serialising.
+				phf.ConnID = uint64(session.connID)
 				break
 			}
 		}
@@ -2764,7 +2773,7 @@ func (s *Service) flushPendingFireAndForget(conn net.Conn, address domain.PeerAd
 	s.persistQueueState(snapshot)
 
 	for _, item := range toSend {
-		s.writeJSONFrame(conn, item.Frame)
+		_ = s.writeJSONFrame(conn, item.Frame)
 		log.Debug().Str("addr", conn.RemoteAddr().String()).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
 	}
 }
@@ -2820,7 +2829,7 @@ func (s *Service) inboundHeartbeat(conn net.Conn, address domain.PeerAddress, st
 			return
 		case <-timer.C:
 			pingFrame := protocol.Frame{Type: "ping", Node: nodeName, Network: networkName}
-			s.writeJSONFrame(conn, pingFrame)
+			_ = s.writeJSONFrame(conn, pingFrame)
 			s.markPeerWrite(address, pingFrame)
 
 			// Record the time we sent the ping and wait for pongStallTimeout.

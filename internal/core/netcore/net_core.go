@@ -95,7 +95,13 @@ type sendItem struct {
 
 // ConnID is a monotonic connection identifier. Using a typed integer instead
 // of net.Conn as a map key prevents accidental access to the raw connection.
-type ConnID uint64
+//
+// The canonical declaration lives in the domain package; netcore.ConnID is a
+// type alias so existing call sites that write netcore.ConnID(x) or refer to
+// netcore.ConnID in signatures continue to compile, while session-level and
+// registry-level code can name the identifier through domain.ConnID without
+// introducing a second parallel type.
+type ConnID = domain.ConnID
 
 // Direction indicates whether a connection was initiated by us (outbound)
 // or accepted from a remote peer (inbound).

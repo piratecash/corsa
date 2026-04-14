@@ -1197,7 +1197,7 @@ func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Env
 	inConn := s.inboundConnForAddressLocked(resolved)
 	s.mu.RUnlock()
 	if inConn != nil {
-		s.writeJSONFrame(inConn, frame)
+		_ = s.writeJSONFrame(inConn, frame)
 		log.Info().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "inbound_direct").Msg("gossip_message_attempt")
 		return
 	}
@@ -1239,7 +1239,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	inConn := s.inboundConnForAddressLocked(resolved)
 	s.mu.RUnlock()
 	if inConn != nil {
-		s.writeJSONFrame(inConn, frame)
+		_ = s.writeJSONFrame(inConn, frame)
 		return
 	}
 

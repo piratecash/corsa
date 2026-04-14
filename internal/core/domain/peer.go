@@ -71,7 +71,7 @@ type KnownPeer struct {
 type PeerSessionRef struct {
 	Address      PeerAddress
 	Identity     PeerIdentity
-	ConnID       uint64
+	ConnID       ConnID
 	Version      int
 	Capabilities []Capability
 	AuthOK       bool
@@ -133,7 +133,7 @@ type AggregateStatusSnapshot struct {
 type InboundPeerRef struct {
 	ListenAddress PeerAddress  // listen address declared in hello frame
 	Identity      PeerIdentity // Ed25519 fingerprint from hello.Address
-	ConnID        uint64
+	ConnID        ConnID
 	Capabilities  []Capability
 	Networks      []NetGroup // network groups the peer declared
 }

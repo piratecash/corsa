@@ -18,15 +18,6 @@ import (
 // and the Service-level registration). After the PR 2 single-writer migration
 // peerSessionRequest requires session.netCore to be non-nil; tests that drive
 // an outbound session over net.Pipe use this helper to mirror production.
-//
-// TRANSLATION (RU): хелпер, аналогичный attachOutboundNetCore, для тестов,
-// которые создают peerSession вручную. Создаёт Outbound NetCore для
-// session.conn. Опциональный svc передаётся только чтобы сохранить
-// совместимость вызовов — после перехода session-local reply-путей на
-// writeSessionFrame (P1 ревью 9.4a) регистрация в s.conns больше не
-// требуется для корректной работы pong / push_message / subscribe_inbox
-// ответов.
-//
 // The svc parameter is retained for call-site compatibility but is not
 // used: session-local reply paths route through session.netCore directly
 // via writeSessionFrame, so registration in s.conns is not needed for the

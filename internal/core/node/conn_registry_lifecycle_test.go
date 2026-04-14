@@ -11,13 +11,6 @@ package node
 // necessity: it reaches into the registry directly via the test-only
 // helpers in conn_registry_test_helpers_test.go so a half-invalidated
 // state cannot hide behind a silent miss further down the stack.
-//
-// TRANSLATION (RU): тест фиксирует атомарность снятия записи из реестра.
-// После удаления через lifecycle-хелпер в conn_registry.go ни primary
-// map (conns), ни secondary index (connIDByNetConn) не должны резолвить
-// conn — иначе net.Conn-first аксессоры начнут молча расходиться
-// (один возвращает nil, второй — живую запись). White-box-доступ идёт
-// через test-only хелперы в conn_registry_test_helpers_test.go.
 
 import (
 	"net"

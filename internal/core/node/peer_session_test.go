@@ -58,10 +58,11 @@ func TestPeerSessionCloseWithoutNetCoreClosesConn(t *testing.T) {
 	}
 }
 
-// TestPeerSessionCloseOrderingProtectsSingleWriter locks in the P1 fix:
-// onClose (which unregisters the NetCore from s.conns) must run
-// strictly AFTER netCore.Close() has returned, so that while writerLoop is
-// still alive the map lookup continues to resolve to the managed path.
+// TestPeerSessionCloseOrderingProtectsSingleWriter locks in the
+// close-ordering invariant: onClose (which unregisters the NetCore
+// from s.conns) must run strictly AFTER netCore.Close() has returned,
+// so that while writerLoop is still alive the map lookup continues to
+// resolve to the managed path.
 // Unregistering first would let a concurrent writeJSONFrame fall through
 // to the enqueueUnregistered branch — which, since PR 3, is a hard
 // fail-closed invariant violation that silently drops the frame instead of

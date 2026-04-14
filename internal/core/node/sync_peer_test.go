@@ -122,7 +122,7 @@ func syncPeerMockServer(t *testing.T, ln net.Listener, respondPeers []string) []
 // passes requestPeers=true, syncPeer sends get_peers followed by
 // fetch_contacts and adds discovered peer addresses. This is the path a
 // future bootstrap/recovery caller would take; forced-refresh sender-key
-// recovery paths pass false (see Шаг 5) and are covered separately.
+// recovery paths pass false (see Step 5) and are covered separately.
 func TestSyncPeer_RequestPeersTrue_SendsGetPeers(t *testing.T) {
 	t.Parallel()
 
@@ -178,7 +178,7 @@ func TestSyncPeer_RequestPeersTrue_SendsGetPeers(t *testing.T) {
 // TestSyncPeer_RequestPeersFalse_SkipsGetPeers verifies that when the caller
 // passes requestPeers=false, syncPeer skips get_peers but still sends
 // fetch_contacts. This is the contract relied on by forced-refresh
-// sender-key recovery paths (Шаг 5), where peer exchange must never be
+// sender-key recovery paths (Step 5), where peer exchange must never be
 // triggered regardless of aggregate status.
 func TestSyncPeer_RequestPeersFalse_SkipsGetPeers(t *testing.T) {
 	t.Parallel()
@@ -280,7 +280,7 @@ func TestSyncPeer_SkipGetPeers_FetchContactsStillWorks(t *testing.T) {
 // requests requestPeers=false, addPeerAddress is NOT called. The peer set
 // should continue to grow only through announce_peer and other discovery
 // mechanisms. This is a key invariant for forced-refresh sender-key
-// recovery paths (Шаг 5).
+// recovery paths (Step 5).
 func TestSyncPeer_SkipGetPeers_NoAddPeerAddress(t *testing.T) {
 	t.Parallel()
 
@@ -352,12 +352,12 @@ func TestSyncPeer_PolicyReturnCount(t *testing.T) {
 	}
 }
 
-// TestSyncSenderKeys_FreshDialFallback_SkipsGetPeers is the core Шаг 5
+// TestSyncSenderKeys_FreshDialFallback_SkipsGetPeers is the core Step 5
 // regression test. It verifies that the fresh-dial fallback in
 // syncSenderKeys never triggers peer exchange, even when the aggregate
 // status would otherwise allow it (NetworkStatusOffline). Sender-key
 // recovery is a narrow contact/key sync; escalating it into eager peer
-// exchange on a private failure was the historical behaviour Шаг 5
+// exchange on a private failure was the historical behaviour in Step 5
 // removes.
 //
 // The test also verifies that the call site does not call addPeerAddress,
@@ -417,8 +417,8 @@ func TestSyncSenderKeys_FreshDialFallback_SkipsGetPeers(t *testing.T) {
 // regression: when the owning ctx is already cancelled, the fallback
 // fresh-dial must bail out promptly instead of using a locally-created
 // context.Background() that would ignore shutdown. This enforces the
-// Шаг 5 rule against synthesising root contexts in business logic
-// (CLAUDE.md: context.Context передается первым аргументом).
+// Step 5 rule against synthesising root contexts in business logic
+// (CLAUDE.md: context.Context is passed as the first argument).
 func TestSyncSenderKeys_FreshDialFallback_RespectsCtxCancel(t *testing.T) {
 	t.Parallel()
 

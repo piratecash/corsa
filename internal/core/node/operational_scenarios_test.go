@@ -9,12 +9,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// Operational scenario tests for Шаг 8 of
+// Operational scenario tests for Step 8 of
 // docs/peer-discovery-conditional-get-peers.ru.md.
 //
 // These tests drive the conditional-get-peers policy end-to-end at the
 // scenario level: aggregate status → shouldRequestPeers → syncPeerSession.
-// The intent is not to re-cover wire compatibility (Шаг 7 already does
+// The intent is not to re-cover wire compatibility (Step 7 already does
 // that in compatibility_get_peers_test.go) but to prove that the policy
 // produces the expected decision for each operational scenario called out
 // by the design document:
@@ -27,7 +27,7 @@ import (
 //     next sync cycle;
 //   - loss of all connections: once aggregate drops out of healthy, the
 //     recovery path regains access to get_peers;
-//   - mixed-version: already proven by the Шаг 7 compatibility suite —
+//   - mixed-version: already proven by the Step 7 compatibility suite —
 //     see the comment on TestScenario_MixedVersion_CoveredByCompatSuite.
 //
 // The tests deliberately exercise the full syncPeerSession happy path
@@ -396,7 +396,7 @@ func TestScenario_IntermediateStates_KeepPeerExchangeEnabled(t *testing.T) {
 
 // TestScenario_MixedVersion_CoveredByCompatSuite is a pointer test: it
 // does not exercise additional behaviour itself, but it documents the
-// mixed-version cross-link required by Шаг 8. The actual coverage lives
+// mixed-version cross-link required by Step 8. The actual coverage lives
 // in compatibility_get_peers_test.go:
 //
 //   - TestCompatibility_NewInitiatorAgainstLegacyResponder
