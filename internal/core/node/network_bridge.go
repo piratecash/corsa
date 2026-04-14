@@ -42,12 +42,24 @@ type networkBridge struct {
 // compile-time assertion: bridge satisfies the transport contract.
 var _ netcore.Network = (*networkBridge)(nil)
 
-// Network returns the transport-level API surface of the Service. The
-// returned value is backed by a bridge adapter and shares no state with
-// other callers — invoking Network() multiple times is cheap and safe;
-// every call returns an independent bridge instance over the same
+// Network returns the transport-level API surface of the Service.
+//
+// Default path: the returned value is backed by a bridge adapter and shares
+// no state with other callers — invoking Network() multiple times is cheap
+// and safe; every call returns an independent bridge instance over the same
 // Service. Consumers must not assume pointer identity across calls.
+//
+// Override path: when NewServiceWithNetwork has pinned a caller-supplied
+// netcore.Network (see s.networkOverride), that value is returned verbatim
+// on every call. This is the single injection seam used by tests — the
+// override pointer is intentionally reused across calls so that test
+// backends (internal/core/netcore/netcoretest) can observe Service frames
+// as a single conversation. Pointer identity is still not a documented
+// guarantee of the API and callers must not rely on it.
 func (s *Service) Network() netcore.Network {
+	if s.networkOverride != nil {
+		return s.networkOverride
+	}
 	return &networkBridge{svc: s}
 }
 

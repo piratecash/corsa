@@ -172,6 +172,16 @@ type Service struct {
 	fileStore    *filetransfer.FileStore // content-addressed file storage in transmit dir
 	fileTransfer *filetransfer.Manager   // sender/receiver state machines
 	fileRouter   *filerouter.Router      // routing file commands through the mesh
+
+	// networkOverride, when non-nil, replaces the default networkBridge
+	// returned by Service.Network(). It is the single seam that lets tests
+	// (see internal/core/netcore/netcoretest) drive protocol logic against
+	// an in-memory transport without binding to real sockets. Production
+	// code never sets this — the field is written only by
+	// NewServiceWithNetwork, which is intended solely for test wiring.
+	// When nil, Service.Network() falls back to the standard bridge over
+	// the live s.conns registry.
+	networkOverride netcore.Network
 }
 
 // subscriber describes an active subscribe_inbox registration or a hello-
@@ -739,6 +749,26 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	// reconnecting state — which mis-drives bootstrap policy decisions.
 	svc.refreshAggregateStatusLocked()
 
+	return svc
+}
+
+// NewServiceWithNetwork builds a Service like NewService and then pins its
+// transport surface to a caller-supplied netcore.Network implementation.
+// This is the single injection seam used by tests (see
+// internal/core/netcore/netcoretest) to drive protocol logic against an
+// in-memory transport without binding to real sockets. Production callers
+// must use NewService — passing a non-bridge Network breaks the invariant
+// that Service.Network() reflects the live s.conns registry.
+//
+// When network is nil, the function panics rather than silently downgrading
+// to the default bridge: accepting a nil here would defeat the compile-time
+// opt-in this constructor exists to provide.
+func NewServiceWithNetwork(cfg config.Node, id *identity.Identity, network netcore.Network) *Service {
+	if network == nil {
+		panic("node.NewServiceWithNetwork: network is nil (use NewService for the default bridge)")
+	}
+	svc := NewService(cfg, id)
+	svc.networkOverride = network
 	return svc
 }
 
