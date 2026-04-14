@@ -7,18 +7,19 @@ import (
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
-// network_bridge.go introduces the networkBridge adapter — a transitional
-// mapping from the netcore.Network interface to the existing *Service
-// surface that still holds net.Conn internally. The name is intentionally
-// unexported and honest about its transitional nature: as long as
-// Service methods such as writeJSONFrame, enqueueFrame and
-// dispatchNetworkFrame take net.Conn as their primary argument, the
-// bridge is the only place where a ConnID-keyed transport call lands on
-// them. Once those surfaces migrate to ConnID, the bridge shrinks and
-// eventually disappears together with the last net.Conn-first working
-// call site outside the entry-boundary helpers in conn_registry.go
-// (registerInboundConnLocked, attachOutboundCoreLocked,
-// unregisterConnLocked, connEntryForLocked).
+// network_bridge.go introduces the networkBridge adapter — the mapping
+// from the netcore.Network interface to the *Service surface. The name is
+// intentionally unexported: external packages receive only the Network
+// interface value returned from Service.Network().
+//
+// After PR 10.6 the transitional net.Conn-first working call sites that
+// motivated the bridge have been migrated to ConnID-first signatures
+// (writeJSONFrameByID, enqueueFrameByID, dispatchNetworkFrame already
+// ConnID-first via core lookup). The bridge now calls those ConnID-first
+// methods directly. The only remaining net.Conn-first surface is the
+// permanent carve-out in conn_registry.go (registerInboundConnLocked,
+// attachOutboundCoreLocked, unregisterConnLocked, connEntryForLocked) plus
+// the socket-infra helper enableTCPKeepAlive.
 //
 // The bridge itself holds no state beyond a back-reference to *Service.
 // Every method acquires the necessary locks exactly as the equivalent

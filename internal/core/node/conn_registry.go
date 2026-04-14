@@ -75,24 +75,22 @@ import (
 //
 // Transitional net.Conn-first surface (not part of the frozen carve-out).
 //
-// These functions still accept net.Conn on the current branch because
-// later migration PRs have not yet reached them, not because the
-// signature is structurally required. They are acknowledged here so the
-// permanent list above does not pretend to exhaust every net.Conn-first
-// function in the package. They are expected to shrink over time and
-// eventually disappear; new call sites of them require explicit
-// justification at review.
+// PR 10.6 completed the migration of the write-layer bridges and their
+// helpers (enqueueFrame → enqueueFrameByID, enqueueFrameSync →
+// enqueueFrameSyncByID, writeJSONFrame → writeJSONFrameByID,
+// writeJSONFrameSync → writeJSONFrameSyncByID, emitProtocolTrace and
+// logUnregisteredWrite now take a string addr, sendAckDeleteOnConn →
+// sendAckDeleteByID, isConnTrafficTrustedLocked →
+// isConnTrafficTrustedByIDLocked). After that PR only one non-carve-out
+// net.Conn-first helper remains:
 //
-//   - write-layer bridges in service.go: enqueueFrame, enqueueFrameSync,
-//     writeJSONFrame, writeJSONFrameSync, and their diagnostic helpers
-//     emitProtocolTrace and logUnregisteredWrite.
-//   - write-path helpers outside service.go: sendAckDeleteOnConn in
-//     peer_management.go.
-//   - metering-path helper: isConnTrafficTrustedLocked in metering.go.
 //   - socket-level infrastructure: enableTCPKeepAlive in peer_management.go
 //     (operates on the raw socket by definition; may stay net.Conn-first
 //     indefinitely, but is classified here rather than in the frozen
 //     carve-out because it is not a lifecycle/entry/interface boundary).
+//
+// New net.Conn-first call sites outside the frozen carve-out require
+// explicit justification at review.
 
 // connIDForLocked resolves a net.Conn to its domain.ConnID via the
 // secondary index. Returns zero value and false if the connection is not

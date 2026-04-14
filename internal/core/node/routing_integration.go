@@ -156,19 +156,20 @@ func (s *Service) sendAnnounceRoutesToInbound(key string, frame protocol.Frame) 
 func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol.Frame) bool {
 	remoteAddr := strings.TrimPrefix(string(address), "inbound:")
 
+	var targetID domain.ConnID
+	var found bool
 	s.mu.RLock()
-	var target net.Conn
 	s.forEachTrackedInboundConnLocked(func(core *netcore.NetCore) bool {
-		conn := core.Conn()
-		if conn.RemoteAddr().String() == remoteAddr {
-			target = conn
+		if core.RemoteAddr() == remoteAddr {
+			targetID = core.ConnID()
+			found = true
 			return false // Stop iteration
 		}
 		return true
 	})
 	s.mu.RUnlock()
 
-	if target == nil {
+	if !found {
 		return false
 	}
 
@@ -178,7 +179,7 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 		return false
 	}
 
-	switch s.enqueueFrameSync(target, []byte(line)) {
+	switch s.enqueueFrameSyncByID(targetID, []byte(line)) {
 	case enqueueSent:
 		return true
 	case enqueueUnregistered:
@@ -1197,10 +1198,10 @@ func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Env
 	// the inbound conn without disrupting request/reply traffic.
 	resolved := s.resolveHealthAddress(address)
 	s.mu.RLock()
-	inConn := s.inboundConnForAddressLocked(resolved)
+	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
 	s.mu.RUnlock()
-	if inConn != nil {
-		_ = s.writeJSONFrame(inConn, frame)
+	if haveInbound {
+		_ = s.writeJSONFrameByID(inboundID, frame)
 		log.Info().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "inbound_direct").Msg("gossip_message_attempt")
 		return
 	}
@@ -1239,10 +1240,10 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// Try authenticated inbound connection before expensive TCP dial.
 	resolved := s.resolveHealthAddress(address)
 	s.mu.RLock()
-	inConn := s.inboundConnForAddressLocked(resolved)
+	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
 	s.mu.RUnlock()
-	if inConn != nil {
-		_ = s.writeJSONFrame(inConn, frame)
+	if haveInbound {
+		_ = s.writeJSONFrameByID(inboundID, frame)
 		return
 	}
 

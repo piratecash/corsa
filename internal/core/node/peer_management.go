@@ -2046,7 +2046,7 @@ func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain
 
 // buildAckDeleteFrame constructs a signed ack_delete frame. Extracted from
 // sendAckDeleteToPeer so the same frame can be sent on either an outbound
-// session (enqueuePeerFrame) or an inbound connection (sendAckDeleteOnConn).
+// session (enqueuePeerFrame) or an inbound connection (sendAckDeleteByID).
 func (s *Service) buildAckDeleteFrame(ackType string, id protocol.MessageID, status string) protocol.Frame {
 	return protocol.Frame{
 		Type:      "ack_delete",
@@ -2058,15 +2058,20 @@ func (s *Service) buildAckDeleteFrame(ackType string, id protocol.MessageID, sta
 	}
 }
 
-// sendAckDeleteOnConn writes an ack_delete frame directly on the given
-// connection (typically an inbound TCP conn). This is the inbound-path
-// counterpart of sendAckDeleteToPeer: when we receive a push_message on
-// an inbound connection and there is no outbound session to that peer,
-// we acknowledge on the same conn that delivered the message.
-func (s *Service) sendAckDeleteOnConn(conn net.Conn, ackType string, id protocol.MessageID, status string) {
-	frame := s.buildAckDeleteFrame(ackType, id, status)
-	_ = s.writeJSONFrame(conn, frame)
-	log.Debug().Str("addr", conn.RemoteAddr().String()).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "inbound_conn").Msg("ack_delete_send")
+// sendAckDeleteByID writes an ack_delete frame directly on the inbound
+// connection identified by connID. This is the inbound-path counterpart of
+// sendAckDeleteToPeer: when we receive a push_message on an inbound
+// connection and there is no outbound session to that peer, we acknowledge
+// on the same conn that delivered the message. The ack is silently dropped
+// if the connection has already been unregistered.
+func (s *Service) sendAckDeleteByID(connID domain.ConnID, ackType string, msgID protocol.MessageID, status string) {
+	core := s.netCoreForID(connID)
+	if core == nil {
+		return
+	}
+	frame := s.buildAckDeleteFrame(ackType, msgID, status)
+	_ = s.writeJSONFrameByID(connID, frame)
+	log.Debug().Str("addr", core.RemoteAddr()).Str("type", ackType).Str("id", string(msgID)).Str("status", status).Str("mode", "inbound_conn").Msg("ack_delete_send")
 }
 
 // hasOutboundSessionForInbound checks whether an active outbound session
@@ -2276,12 +2281,16 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	return ids
 }
 
-// inboundConnForAddressLocked returns an authenticated inbound TCP connection
-// for the given overlay address, or nil if none exists. When multiple
-// connections are active, any one of them is returned (all are equally valid
-// for fire-and-forget writes). Must be called with s.mu held (read lock).
-func (s *Service) inboundConnForAddressLocked(address domain.PeerAddress) net.Conn {
-	var result net.Conn
+// inboundConnIDForAddressLocked returns the ConnID of an authenticated
+// inbound connection for the given overlay address, or zero value and
+// false if none exists. When multiple connections are active, any one of
+// them is returned (all are equally valid for fire-and-forget writes).
+// Must be called with s.mu held (read lock). ConnID-first (PR 10.6):
+// callers resolve the transport through the registry rather than holding
+// a raw net.Conn across the lock boundary.
+func (s *Service) inboundConnIDForAddressLocked(address domain.PeerAddress) (domain.ConnID, bool) {
+	var result domain.ConnID
+	var found bool
 	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
 		// Only return tracked connections for the given address
 		if core.Address() != address {
@@ -2289,12 +2298,13 @@ func (s *Service) inboundConnForAddressLocked(address domain.PeerAddress) net.Co
 		}
 		// Check if this connection is tracked
 		if s.isInboundTrackedByIDLocked(core.ConnID()) {
-			result = core.Conn()
+			result = core.ConnID()
+			found = true
 			return false // Stop iteration
 		}
 		return true
 	})
-	return result
+	return result, found
 }
 
 func (s *Service) ensurePeerHealthLocked(address domain.PeerAddress) *peerHealth {
@@ -2776,10 +2786,9 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, core *netcore.NetC
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
 
-	// Bridge to net.Conn-first write wrapper; PR 10.3b/10.6 migrates writeJSONFrame.
-	conn := core.Conn()
+	connID := core.ConnID()
 	for _, item := range toSend {
-		_ = s.writeJSONFrame(conn, item.Frame)
+		_ = s.writeJSONFrameByID(connID, item.Frame)
 		log.Debug().Str("addr", core.RemoteAddr()).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
 	}
 }
@@ -2829,9 +2838,6 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, addr
 	if core == nil {
 		return
 	}
-	_ = id
-	// Bridge to net.Conn-first write wrapper / Close; PR 10.3b/10.6 migrates these.
-	conn := core.Conn()
 	timer := time.NewTimer(nextHeartbeatDuration())
 	defer timer.Stop()
 
@@ -2841,7 +2847,7 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, addr
 			return
 		case <-timer.C:
 			pingFrame := protocol.Frame{Type: "ping", Node: nodeName, Network: networkName}
-			_ = s.writeJSONFrame(conn, pingFrame)
+			_ = s.writeJSONFrameByID(id, pingFrame)
 			s.markPeerWrite(address, pingFrame)
 
 			// Record the time we sent the ping and wait for pongStallTimeout.
@@ -2866,7 +2872,7 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, addr
 			}
 			if !pongReceived {
 				log.Warn().Str("peer", string(address)).Msg("inbound heartbeat failed, peer stalled — closing connection")
-				_ = conn.Close()
+				core.Close()
 				return
 			}
 

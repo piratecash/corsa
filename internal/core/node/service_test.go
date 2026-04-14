@@ -6752,6 +6752,10 @@ func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
 
 	// Register the pipe as an inbound connection — starts connWriter.
 	svc.registerInboundConn(server)
+	connID, ok := svc.connIDFor(server)
+	if !ok {
+		t.Fatalf("registered conn has no ConnID")
+	}
 
 	// Close the server side so the next conn.Write will fail.
 	_ = server.Close()
@@ -6759,7 +6763,7 @@ func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
 	// The writer goroutine is still alive — it's blocking on channel
 	// receive (for item := range sendCh), not on conn.Write. Send a
 	// trigger frame so the writer attempts conn.Write, fails, and exits.
-	svc.enqueueFrame(server, []byte("trigger\n"))
+	svc.enqueueFrameByID(connID, []byte("trigger\n"))
 
 	// Give the writer goroutine a moment to pick up the frame, fail on
 	// conn.Write, exit, and close(writerDone).
@@ -6769,7 +6773,7 @@ func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
 	// unregisterInboundConn has not been called. This is the P1 scenario:
 	// enqueueFrameSync must detect writerDone and return immediately.
 	start := time.Now()
-	result := svc.enqueueFrameSync(server, []byte(`{"type":"error"}`+"\n"))
+	result := svc.enqueueFrameSyncByID(connID, []byte(`{"type":"error"}`+"\n"))
 	elapsed := time.Since(start)
 
 	if result != enqueueDropped {
@@ -6812,9 +6816,13 @@ func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
 
 	// Register the pipe — starts connWriter.
 	svc.registerInboundConn(server)
+	connID, ok := svc.connIDFor(server)
+	if !ok {
+		t.Fatalf("registered conn has no ConnID")
+	}
 
 	// Enqueue one normal frame so the writer is busy.
-	svc.enqueueFrame(server, []byte(`{"type":"pong"}`+"\n"))
+	svc.enqueueFrameByID(connID, []byte(`{"type":"pong"}`+"\n"))
 
 	// Drain the normal frame from the client side so the writer proceeds.
 	buf := make([]byte, 256)
@@ -6825,7 +6833,7 @@ func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
 
 	// Enqueue a sync frame. The writer will pick it up, conn.Write fails,
 	// writer exits without closing ack, writerDone fires.
-	result := svc.enqueueFrameSync(server, []byte(`{"type":"error","code":"test"}`+"\n"))
+	result := svc.enqueueFrameSyncByID(connID, []byte(`{"type":"error","code":"test"}`+"\n"))
 
 	if result != enqueueDropped {
 		t.Fatalf("expected enqueueDropped (write failed), got %v", result)
@@ -9170,7 +9178,10 @@ func TestWriteJSONFrameDropsOnUnregisteredConn(t *testing.T) {
 	}
 	conn := &mockConn{}
 
-	_ = svc.writeJSONFrame(conn, protocol.Frame{Type: "ping"})
+	// Unregistered ConnID: svc.conns is empty so any ID misses the lookup
+	// and the drop-on-unregistered path must fire without ever reaching
+	// the raw socket behind `conn`.
+	_ = svc.writeJSONFrameByID(netcore.ConnID(0), protocol.Frame{Type: "ping"})
 
 	if written := conn.Written(); len(written) != 0 {
 		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)
@@ -9212,7 +9223,9 @@ func TestWriteJSONFrameSyncDropsOnUnregisteredConn(t *testing.T) {
 	}
 	conn := &mockConn{}
 
-	_ = svc.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+	// Unregistered ConnID: svc.conns is empty so the sync drop path must
+	// fire and `conn` must never see any bytes.
+	_ = svc.writeJSONFrameSyncByID(netcore.ConnID(0), protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 
 	if written := conn.Written(); len(written) != 0 {
 		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)

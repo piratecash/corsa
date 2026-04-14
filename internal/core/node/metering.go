@@ -1,7 +1,6 @@
 package node
 
 import (
-	"net"
 	"sort"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -35,16 +34,12 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *netco
 	health.BytesReceived += received
 }
 
-// isConnTrafficTrustedLocked returns true when the connection's claimed
+// isConnTrafficTrustedByIDLocked returns true when the connection's claimed
 // peer address can be trusted for traffic attribution.  On the session-auth
 // path NetCore.auth exists and we require Verified==true; on the legacy
 // (no-session-auth) path auth is nil and attribution is allowed.
 // Caller must hold s.mu (read or write).
-func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
-	id, ok := s.connIDForLocked(conn)
-	if !ok {
-		return false
-	}
+func (s *Service) isConnTrafficTrustedByIDLocked(id domain.ConnID) bool {
 	core := s.coreForIDLocked(id)
 	if core == nil {
 		return false
@@ -69,11 +64,11 @@ func (s *Service) accumulateInboundTraffic(mc *netcore.MeteredConn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.isConnTrafficTrustedLocked(mc) {
-		return
-	}
 	id, ok := s.connIDForLocked(mc)
 	if !ok {
+		return
+	}
+	if !s.isConnTrafficTrustedByIDLocked(id) {
 		return
 	}
 	core := s.coreForIDLocked(id)
@@ -115,7 +110,7 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 		if metered == nil {
 			return true
 		}
-		if !s.isConnTrafficTrustedLocked(core.Conn()) {
+		if !s.isConnTrafficTrustedByIDLocked(core.ConnID()) {
 			return true
 		}
 		if core.Address() == "" {

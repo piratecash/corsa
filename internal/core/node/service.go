@@ -241,9 +241,9 @@ type peerWelcomeMeta struct {
 //
 // The order matters for the single-writer invariant. While writerLoop is
 // still alive, the registration MUST remain visible to netCoreFor() so
-// that any concurrent writeJSONFrame(session.conn, ...) goes through the
-// managed path (enqueueFrame → sendRaw). Unregistering first would cause
-// netCoreFor to return nil and the writeJSONFrame fallback would then call
+// that any concurrent writeJSONFrameByID(connID, ...) goes through the
+// managed path (enqueueFrameByID → sendRaw). Unregistering first would cause
+// netCoreForID to return nil and the writeJSONFrameByID fallback would then call
 // conn.Write / io.WriteString directly — a second writer racing with a
 // still-live writerLoop. Only after netCore.Close() has returned is it
 // safe to remove the map entry: the socket is closed, sendCh is closed,
@@ -1013,11 +1013,11 @@ func (s *Service) handleConn(conn net.Conn) {
 			if errors.Is(err, errFrameTooLarge) {
 				log.Debug().Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: closing connection — frame exceeds max size")
-				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
+				_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
 			} else if err != io.EOF {
 				log.Debug().Err(err).Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: closing connection — read error")
-				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
+				_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
 			} else {
 				log.Debug().Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: peer closed connection (EOF)")
@@ -1037,7 +1037,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			!s.cmdLimiter.allowCommand(connKey) {
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
-			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
+			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
 			s.addBanScore(connID, banIncrementRateLimit)
 			return
 		}
@@ -1082,36 +1082,25 @@ func (s *Service) handleCommand(connID domain.ConnID, core *netcore.NetCore, lin
 			Str("command", "non-json").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		if core != nil {
-			if conn := core.Conn(); conn != nil {
-				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
-			}
-		}
+		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 		return false
 	}
 	return s.dispatchNetworkFrame(connID, core, line)
 }
 
 // dispatchNetworkFrame parses and dispatches an inbound wire frame.
-// ConnID-first (PR 10.3b): callers resolve id and core once at handleConn
-// and pass them through; every ID-based helper (touchConnActivity,
-// connHasCapability, addBanScore, …) is reached by id, and the net.Conn
-// handle is taken from core.Conn() as a bridge for write wrappers until
-// PR 10.6 migrates them.
+// ConnID-first (PR 10.3b/10.6): callers resolve id and core once at
+// handleConn and pass them through; every ID-based helper
+// (touchConnActivity, connHasCapability, addBanScore, writeJSONFrameByID, …)
+// is reached by id.
 func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCore, line string) bool {
-	// Bridge: write wrappers, remoteIP() and the reader-side defer log still
-	// need a net.Conn. We resolve it once up-front from core so that no
-	// downstream branch re-fetches it. A nil conn is treated as a torn-down
-	// connection — we cannot write a reply, so all branches bail out.
-	var conn net.Conn
-	addr := ""
-	if core != nil {
-		conn = core.Conn()
-		addr = core.RemoteAddr()
-	}
-	if conn == nil {
+	if core == nil {
 		return false
 	}
+	addr := core.RemoteAddr()
+	// Some handshake branches still need the remote IP for welcomeFrame's
+	// ObservedAddress. Resolve it from the RemoteAddr string once up-front;
+	// the raw net.Conn handle is no longer required on this path.
 
 	frame, err := protocol.ParseFrameLine(line)
 	if err != nil {
@@ -1122,7 +1111,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			Str("command", "").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
+		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
 		return false
 	}
 
@@ -1157,7 +1146,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			s.markPeerRead(addr, frame)
 		}
 		pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-		_ = s.writeJSONFrame(conn, pongFrame)
+		_ = s.writeJSONFrameByID(connID, pongFrame)
 		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 			s.markPeerWrite(addr, pongFrame)
 		}
@@ -1178,7 +1167,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// health tracking and capability context.
 		if s.isAuthInitiated(connID) {
 			accepted = false
-			_ = s.writeJSONFrameSync(conn, protocol.Frame{
+			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{
 				Type:  "error",
 				Code:  protocol.ErrCodeHelloAfterAuth,
 				Error: "re-hello rejected: authentication in progress or completed",
@@ -1188,7 +1177,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		if err := validateProtocolHandshake(frame); err != nil {
 			accepted = false
 			log.Warn().Err(err).Str("addr", addr).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
-			_ = s.writeJSONFrame(conn, protocol.Frame{
+			_ = s.writeJSONFrameByID(connID, protocol.Frame{
 				Type:                   "error",
 				Code:                   protocol.ErrCodeIncompatibleProtocol,
 				Error:                  err.Error(),
@@ -1217,7 +1206,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			if err != nil {
 				accepted = false
 				s.addBanScore(connID, banIncrementInvalidSig)
-				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
+				_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
 			s.setConnAuthStateByID(connID, authState)
@@ -1225,7 +1214,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
-			_ = s.writeJSONFrame(conn, s.welcomeFrame(authState.Challenge, remoteIP(conn.RemoteAddr())))
+			_ = s.writeJSONFrameByID(connID, s.welcomeFrame(authState.Challenge, remoteIPFromString(addr)))
 			return true
 		}
 		// No identity fields → unauthenticated peer. It stays
@@ -1237,16 +1226,16 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			Str("client", frame.Client).
 			Str("addr", addr).
 			Msg("hello_without_identity_fields")
-		_ = s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
+		_ = s.writeJSONFrameByID(connID, s.welcomeFrame("", remoteIPFromString(addr)))
 		return true
 	case "auth_session":
 		reply, ok := s.handleAuthSession(connID, frame)
 		if !ok {
 			accepted = false
-			_ = s.writeJSONFrameSync(conn, reply)
+			_ = s.writeJSONFrameSyncByID(connID, reply)
 			return false
 		}
-		_ = s.writeJSONFrame(conn, reply)
+		_ = s.writeJSONFrameByID(connID, reply)
 		return true
 
 	default:
@@ -1267,11 +1256,11 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// on the error code: known P2P → auth_required, unknown → unknown_command.
 		if isP2PWireCommand(frame.Type) {
 			accepted = false
-			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
+			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
 			return false
 		}
 		accepted = false
-		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 
@@ -1287,7 +1276,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		for i, a := range exchanged {
 			peers[i] = string(a)
 		}
-		_ = s.writeJSONFrame(conn, protocol.Frame{
+		_ = s.writeJSONFrameByID(connID, protocol.Frame{
 			Type:  "peers",
 			Count: len(peers),
 			Peers: peers,
@@ -1296,16 +1285,16 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 	case "fetch_contacts":
 		// P2P contact sync: authenticated peers fetch the contact list
 		// for key material synchronization (syncPeer, syncContactsViaSession).
-		_ = s.writeJSONFrame(conn, s.contactsFrame())
+		_ = s.writeJSONFrameByID(connID, s.contactsFrame())
 		return true
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(connID, frame)
 		if !ok {
 			accepted = false
-			_ = s.writeJSONFrameSync(conn, reply)
+			_ = s.writeJSONFrameSyncByID(connID, reply)
 			return false
 		}
-		_ = s.writeJSONFrame(conn, reply)
+		_ = s.writeJSONFrameByID(connID, reply)
 		return true
 	case "subscribe_inbox":
 		// Auth gate enforced above. Identity binding: the authenticated
@@ -1320,12 +1309,12 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 				Str("peer_identity", string(peerIdentity)).
 				Str("requested_recipient", requestedRecipient).
 				Msg("subscribe_inbox identity mismatch")
-			_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
+			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
 			s.addBanScore(connID, banIncrementInvalidSig)
 			return true
 		}
 		reply, sub := s.subscribeInboxFrame(connID, core, frame)
-		_ = s.writeJSONFrame(conn, reply)
+		_ = s.writeJSONFrameByID(connID, reply)
 		if sub != nil {
 			go s.pushBacklogToSubscriber(sub)
 		}
@@ -1336,7 +1325,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// frame in each direction is sufficient for full bidirectional sync.
 		// Sent here (not after auth_ok) so that short-lived connections like
 		// syncPeer — which never send subscribe_inbox — are not affected.
-		_ = s.writeJSONFrame(conn, protocol.Frame{
+		_ = s.writeJSONFrameByID(connID, protocol.Frame{
 			Type:       "subscribe_inbox",
 			Topic:      "dm",
 			Recipient:  s.identity.Address,
@@ -1378,7 +1367,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// gossip we learn the address, but we do not trust the sender to set
 		// or override the announced peer's local role.
 		if !isKnownNodeType(nodeType) {
-			_ = s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
+			_ = s.writeJSONFrameByID(connID, protocol.Frame{Type: "announce_peer_ack"})
 			return true
 		}
 		peers := frame.Peers
@@ -1391,7 +1380,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			}
 			s.promotePeerAddress(domain.PeerAddress(peer))
 		}
-		_ = s.writeJSONFrame(conn, protocol.Frame{Type: "announce_peer_ack"})
+		_ = s.writeJSONFrameByID(connID, protocol.Frame{Type: "announce_peer_ack"})
 		return true
 	case "relay_message":
 		// Auth gate enforced above (INV-9).
@@ -1416,7 +1405,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// Empty status means the message was dropped (dedupe, max hops,
 		// client node); no ack is sent for drops (INV-5).
 		if ackStatus != "" {
-			_ = s.writeJSONFrame(conn, protocol.Frame{
+			_ = s.writeJSONFrameByID(connID, protocol.Frame{
 				Type:   "relay_hop_ack",
 				ID:     frame.ID,
 				Status: ackStatus,
@@ -1465,7 +1454,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		return true
 	default:
 		accepted = false
-		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 }
@@ -1639,7 +1628,7 @@ func (s *Service) isInboundTrackedByID(id domain.ConnID) bool {
 // can react (early return, scope cleanup) rather than continuing as if
 // the write had succeeded. The sentinel is matched via errors.Is;
 // callers that intentionally fire-and-forget must acknowledge the
-// return with `_ = s.writeJSONFrame(...)` so errcheck can flag any
+// return with `_ = s.writeJSONFrameByID(...)` so errcheck can flag any
 // silently dropped error at lint time — that is the compile-time
 // enforcement of the writer-ownership contract, complementing the
 // runtime logUnregisteredWrite observability baseline.
@@ -1678,50 +1667,47 @@ func (r enqueueResult) String() string {
 	}
 }
 
-// enqueueFrame sends the serialised bytes to the per-connection writer
+// enqueueFrameByID sends the serialised bytes to the per-connection writer
 // goroutine via NetCore.sendRaw. Fire-and-forget: the caller does not
-// wait for the write.
-func (s *Service) enqueueFrame(conn net.Conn, data []byte) enqueueResult {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return enqueueUnregistered
-	}
+// wait for the write. ConnID-first (PR 10.6): the net.Conn handle is no
+// longer required — slow-peer eviction is performed through NetCore.Close
+// on the already-resolved core.
+func (s *Service) enqueueFrameByID(id domain.ConnID, data []byte) enqueueResult {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return enqueueUnregistered
 	}
+	addr := pc.RemoteAddr()
 	switch st := pc.SendRaw(data); st {
 	case netcore.SendOK:
 		return enqueueSent
 	case netcore.SendBufferFull:
-		// Peer too slow — evict by closing the connection.
-		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
-		_ = conn.Close()
+		// Peer too slow — evict by closing the NetCore (closes raw socket
+		// + sendCh and waits for writer to drain).
+		log.Warn().Str("addr", addr).Msg("send buffer full, disconnecting slow peer")
+		pc.Close()
 		return enqueueDropped
 	case netcore.SendChanClosed:
 		// Connection already shutting down, don't close again.
 		return enqueueDropped
 	default:
 		// netcore.SendStatusInvalid or any unexpected value — programming error.
-		log.Error().Str("addr", conn.RemoteAddr().String()).Str("status", st.String()).Msg("enqueueFrame: unexpected netcore.SendStatus")
+		log.Error().Str("addr", addr).Str("status", st.String()).Msg("enqueueFrameByID: unexpected netcore.SendStatus")
 		return enqueueDropped
 	}
 }
 
-// enqueueFrameSync sends the serialised bytes to the per-connection writer
+// enqueueFrameSyncByID sends the serialised bytes to the per-connection writer
 // goroutine via NetCore.sendRawSync and blocks until the writer has handed
 // the data to the socket.
-// Used by writeJSONFrameSync for error-path frames that must be delivered
+// Used by writeJSONFrameSyncByID for error-path frames that must be delivered
 // before the connection is torn down.
-func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return enqueueUnregistered
-	}
+func (s *Service) enqueueFrameSyncByID(id domain.ConnID, data []byte) enqueueResult {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return enqueueUnregistered
 	}
+	addr := pc.RemoteAddr()
 	// Inbound error paths use fast-fail semantics: a saturated queue
 	// means the peer is unresponsive and must be evicted rather than
 	// kept alive while the caller blocks. Outbound control-plane writes
@@ -1732,12 +1718,12 @@ func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
 	case netcore.SendOK:
 		return enqueueSent
 	case netcore.SendBufferFull:
-		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
-		_ = conn.Close()
+		log.Warn().Str("addr", addr).Msg("send buffer full, disconnecting slow peer")
+		pc.Close()
 		return enqueueDropped
 	case netcore.SendTimeout:
-		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("sync flush timeout, disconnecting peer")
-		_ = conn.Close()
+		log.Warn().Str("addr", addr).Msg("sync flush timeout, disconnecting peer")
+		pc.Close()
 		return enqueueDropped
 	case netcore.SendWriterDone, netcore.SendChanClosed:
 		// Connection already dying — don't close, let handleConn's
@@ -1745,7 +1731,7 @@ func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
 		return enqueueDropped
 	default:
 		// netcore.SendStatusInvalid or any unexpected value — programming error.
-		log.Error().Str("addr", conn.RemoteAddr().String()).Str("status", st.String()).Msg("enqueueFrameSync: unexpected netcore.SendStatus")
+		log.Error().Str("addr", addr).Str("status", st.String()).Msg("enqueueFrameSyncByID: unexpected netcore.SendStatus")
 		return enqueueDropped
 	}
 }
@@ -1866,39 +1852,44 @@ func tryEnqueuePeerSessionFrame(sess *peerSession, frame protocol.Frame) (accept
 	}
 }
 
-// writeJSONFrame marshals the frame and enqueues it on the NetCore
-// resolved from s.conns by conn. Returns ErrUnregisteredWrite when the
+// writeJSONFrameByID marshals the frame and enqueues it on the NetCore
+// resolved from s.conns by ConnID. Returns ErrUnregisteredWrite when the
 // connection has no registered NetCore — a single-writer-invariant
 // violation (see ErrUnregisteredWrite). Returns nil on enqueueSent and
 // on enqueueDropped: a dropped frame (buffer full / channel closed) is
-// an operational condition handled by enqueueFrame (slow-peer disconnect
-// + warn log), not an architectural error the caller must react to.
-// Callers must acknowledge the return: `_ = s.writeJSONFrame(...)` for
-// fire-and-forget paths, `if err := ...; err != nil { ... }` for paths
-// that want to early-return on the invariant violation.
-func (s *Service) writeJSONFrame(conn net.Conn, frame protocol.Frame) error {
+// an operational condition handled by enqueueFrameByID (slow-peer
+// disconnect + warn log), not an architectural error the caller must
+// react to. Callers must acknowledge the return:
+// `_ = s.writeJSONFrameByID(...)` for fire-and-forget paths,
+// `if err := ...; err != nil { ... }` for paths that want to early-return
+// on the invariant violation.
+func (s *Service) writeJSONFrameByID(id domain.ConnID, frame protocol.Frame) error {
+	addr := ""
+	if core := s.netCoreForID(id); core != nil {
+		addr = core.RemoteAddr()
+	}
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
 		data := append(fallback, '\n')
-		res := s.enqueueFrame(conn, data)
-		emitProtocolTrace(conn, frame, res)
+		res := s.enqueueFrameByID(id, data)
+		emitProtocolTrace(addr, frame, res)
 		if res == enqueueUnregistered {
-			logUnregisteredWrite(conn, frame, "writeJSONFrame.marshal_fallback")
+			logUnregisteredWrite(addr, frame, "writeJSONFrameByID.marshal_fallback")
 			return ErrUnregisteredWrite
 		}
 		return nil
 	}
-	res := s.enqueueFrame(conn, []byte(line))
-	emitProtocolTrace(conn, frame, res)
+	res := s.enqueueFrameByID(id, []byte(line))
+	emitProtocolTrace(addr, frame, res)
 	if res == enqueueUnregistered {
-		logUnregisteredWrite(conn, frame, "writeJSONFrame")
+		logUnregisteredWrite(addr, frame, "writeJSONFrameByID")
 		return ErrUnregisteredWrite
 	}
 	return nil
 }
 
-// enqueueSessionFrame is the session-scoped counterpart of enqueueFrame:
+// enqueueSessionFrame is the session-scoped counterpart of enqueueFrameByID:
 // instead of re-resolving the transport via s.conns (netCoreFor), it uses
 // the NetCore that the peerSession already owns. Session-local reply paths
 // — pong on outbound sessions, push_message/push_delivery_receipt on
@@ -1937,65 +1928,71 @@ func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueue
 // writeSessionFrame marshals the frame and enqueues it on session.netCore
 // via enqueueSessionFrame. Use this on session-local reply paths where the
 // peerSession is the authoritative transport owner; callers must not use
-// writeJSONFrame(session.conn, ...) on these paths because that re-resolves
+// writeJSONFrameByID(id, ...) on these paths because that re-resolves
 // the transport through s.conns and fails closed whenever the session is
 // live but the matching registry entry has been reaped or was never
 // populated (tests), producing a spurious ErrUnregisteredWrite on a
 // valid transport. Returns ErrUnregisteredWrite when the session has no
-// NetCore attached (see ErrUnregisteredWrite and writeJSONFrame for the
+// NetCore attached (see ErrUnregisteredWrite and writeJSONFrameByID for the
 // acknowledgment contract). Returns nil on enqueueSent and enqueueDropped.
 func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) error {
-	var conn net.Conn
-	if session != nil {
-		conn = session.conn
+	addr := ""
+	if session != nil && session.conn != nil {
+		if ra := session.conn.RemoteAddr(); ra != nil {
+			addr = ra.String()
+		}
 	}
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
 		data := append(fallback, '\n')
 		res := s.enqueueSessionFrame(session, data)
-		emitProtocolTrace(conn, frame, res)
+		emitProtocolTrace(addr, frame, res)
 		if res == enqueueUnregistered {
-			logUnregisteredWrite(conn, frame, "writeSessionFrame.marshal_fallback")
+			logUnregisteredWrite(addr, frame, "writeSessionFrame.marshal_fallback")
 			return ErrUnregisteredWrite
 		}
 		return nil
 	}
 	res := s.enqueueSessionFrame(session, []byte(line))
-	emitProtocolTrace(conn, frame, res)
+	emitProtocolTrace(addr, frame, res)
 	if res == enqueueUnregistered {
-		logUnregisteredWrite(conn, frame, "writeSessionFrame")
+		logUnregisteredWrite(addr, frame, "writeSessionFrame")
 		return ErrUnregisteredWrite
 	}
 	return nil
 }
 
-// writeJSONFrameSync serialises a protocol frame and blocks until the
+// writeJSONFrameSyncByID serialises a protocol frame and blocks until the
 // per-connection writer goroutine has handed the bytes to the socket.
-// Use this instead of writeJSONFrame on error paths where the caller is
+// Use this instead of writeJSONFrameByID on error paths where the caller is
 // about to return false and the deferred cleanup will close the connection:
 // the sync variant guarantees the error frame reaches the wire before
 // teardown, preserving the "write completed before return" contract that
 // error-path callers rely on. Returns ErrUnregisteredWrite on the
-// single-writer-invariant violation (see writeJSONFrame for the error
+// single-writer-invariant violation (see writeJSONFrameByID for the error
 // contract), nil otherwise.
-func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) error {
+func (s *Service) writeJSONFrameSyncByID(id domain.ConnID, frame protocol.Frame) error {
+	addr := ""
+	if core := s.netCoreForID(id); core != nil {
+		addr = core.RemoteAddr()
+	}
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
 		data := append(fallback, '\n')
-		res := s.enqueueFrameSync(conn, data)
-		emitProtocolTrace(conn, frame, res)
+		res := s.enqueueFrameSyncByID(id, data)
+		emitProtocolTrace(addr, frame, res)
 		if res == enqueueUnregistered {
-			logUnregisteredWrite(conn, frame, "writeJSONFrameSync.marshal_fallback")
+			logUnregisteredWrite(addr, frame, "writeJSONFrameSyncByID.marshal_fallback")
 			return ErrUnregisteredWrite
 		}
 		return nil
 	}
-	res := s.enqueueFrameSync(conn, []byte(line))
-	emitProtocolTrace(conn, frame, res)
+	res := s.enqueueFrameSyncByID(id, []byte(line))
+	emitProtocolTrace(addr, frame, res)
 	if res == enqueueUnregistered {
-		logUnregisteredWrite(conn, frame, "writeJSONFrameSync")
+		logUnregisteredWrite(addr, frame, "writeJSONFrameSyncByID")
 		return ErrUnregisteredWrite
 	}
 	return nil
@@ -2010,13 +2007,12 @@ func (s *Service) writeJSONFrameSync(conn net.Conn, frame protocol.Frame) error 
 // frame, accepted == true only when the frame actually reached the managed
 // writer queue (enqueueSent); any drop path forces accepted=false and adds
 // the concrete outcome so the trace is self-describing.
-func emitProtocolTrace(conn net.Conn, frame protocol.Frame, res enqueueResult) {
-	addr := ""
-	if conn != nil {
-		if ra := conn.RemoteAddr(); ra != nil {
-			addr = ra.String()
-		}
-	}
+//
+// PR 10.6: takes the already-resolved remote address string instead of
+// net.Conn — callers extract addr once from their ConnID/NetCore/session
+// context, which keeps the diagnostic helper free of the net.Conn-first
+// surface.
+func emitProtocolTrace(addr string, frame protocol.Frame, res enqueueResult) {
 	ev := log.Debug().
 		Str("protocol", "json/tcp").
 		Str("addr", addr).
@@ -2039,13 +2035,10 @@ func emitProtocolTrace(conn net.Conn, frame protocol.Frame, res enqueueResult) {
 // write would reintroduce exactly the broken state the migration is closing.
 // The log includes origin, remote address, and the command type so the
 // responsible call-site is immediately identifiable in production logs.
-func logUnregisteredWrite(conn net.Conn, frame protocol.Frame, origin string) {
-	addr := ""
-	if conn != nil {
-		if ra := conn.RemoteAddr(); ra != nil {
-			addr = ra.String()
-		}
-	}
+//
+// PR 10.6: takes the already-resolved remote address string instead of
+// net.Conn. See emitProtocolTrace for the same rationale.
+func logUnregisteredWrite(addr string, frame protocol.Frame, origin string) {
 	log.Error().
 		Str("origin", origin).
 		Str("addr", addr).
@@ -4089,10 +4082,8 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 		// remote peer connected to us but we haven't dialed them back.
 		if session := s.peerSession(peerAddr); session != nil && session.authOK {
 			s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
-		} else if core := s.netCoreForID(connID); core != nil {
-			if c := core.Conn(); c != nil {
-				s.sendAckDeleteOnConn(c, "dm", msg.ID, "")
-			}
+		} else {
+			s.sendAckDeleteByID(connID, "dm", msg.ID, "")
 		}
 	} else if !stored {
 		log.Warn().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", string(peerIdentity)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed")
@@ -4138,10 +4129,8 @@ func (s *Service) handleInboundPushDeliveryReceipt(connID domain.ConnID, frame p
 	s.storeDeliveryReceipt(receipt)
 	if session := s.peerSession(peerAddr); session != nil && session.authOK {
 		s.sendAckDeleteToPeer(peerAddr, "receipt", receipt.MessageID, receipt.Status)
-	} else if core := s.netCoreForID(connID); core != nil {
-		if c := core.Conn(); c != nil {
-			s.sendAckDeleteOnConn(c, "receipt", receipt.MessageID, receipt.Status)
-		}
+	} else {
+		s.sendAckDeleteByID(connID, "receipt", receipt.MessageID, receipt.Status)
 	}
 	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound)")
 }
@@ -4289,11 +4278,6 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 		s.removeSubscriberByID(sub.recipient, sub.id)
 		return
 	}
-	conn := core.Conn()
-	if conn == nil {
-		s.removeSubscriberByID(sub.recipient, sub.id)
-		return
-	}
 
 	log.Debug().
 		Str("protocol", "json/tcp").
@@ -4307,9 +4291,7 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	if err != nil {
 		return
 	}
-	// Bridge to the net.Conn-first write wrapper; PR 10.6 migrates
-	// enqueueFrame to a ConnID-first signature and removes this lookup.
-	if s.enqueueFrame(conn, []byte(line)) != enqueueSent {
+	if s.enqueueFrameByID(sub.connID, []byte(line)) != enqueueSent {
 		// Connection unregistered or send buffer full — remove stale subscriber.
 		s.removeSubscriberByID(sub.recipient, sub.id)
 	}
