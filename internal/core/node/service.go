@@ -1176,7 +1176,16 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			s.markPeerRead(addr, frame)
 		}
 		pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-		_ = s.writeJSONFrameByID(connID, pongFrame)
+		// Route the pong through the Network() surface rather than the
+		// legacy ConnID-first writeJSONFrameByID helper: this keeps the
+		// inbound-ping handler observable to a caller-supplied
+		// netcore.Network (the injection seam installed by
+		// NewServiceWithNetwork), which is what makes protocol-logic
+		// reply paths exercisable without opening a real TCP socket.
+		// s.runCtx is the Service-lifecycle context — non-nil by
+		// constructor contract; per-frame ctx granularity is not
+		// threaded into dispatchNetworkFrame yet.
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, pongFrame)
 		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 			s.markPeerWrite(addr, pongFrame)
 		}
