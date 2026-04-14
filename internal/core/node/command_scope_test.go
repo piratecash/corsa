@@ -336,7 +336,8 @@ func TestIsConnAuthenticated_NilNetCore(t *testing.T) {
 	svc := newTestServiceForAuth()
 	mockConn := newMockNetConn()
 
-	if svc.isConnAuthenticated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be false for nil NetCore")
 	}
 }
@@ -350,7 +351,8 @@ func TestIsConnAuthenticated_NilAuth(t *testing.T) {
 	mockConn := newMockNetConn()
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}})
 
-	if svc.isConnAuthenticated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be false for nil auth")
 	}
 }
@@ -366,7 +368,8 @@ func TestIsConnAuthenticated_UnverifiedAuth(t *testing.T) {
 	nc.SetAuth(&connauth.State{Verified: false})
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
 
-	if svc.isConnAuthenticated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be false for unverified auth")
 	}
 }
@@ -382,7 +385,8 @@ func TestIsConnAuthenticated_VerifiedAuth(t *testing.T) {
 	nc.SetAuth(&connauth.State{Verified: true})
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
 
-	if !svc.isConnAuthenticated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if !svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be true for verified auth")
 	}
 }
@@ -398,7 +402,8 @@ func TestIsAuthInitiated_NilState(t *testing.T) {
 	mockConn := newMockNetConn()
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}})
 
-	if svc.isAuthInitiated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if svc.isAuthInitiated(id) {
 		t.Error("isAuthInitiated should be false for nil auth state")
 	}
 }
@@ -414,7 +419,8 @@ func TestIsAuthInitiated_PendingAuth(t *testing.T) {
 	nc.SetAuth(&connauth.State{Verified: false, Challenge: "test-challenge"})
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
 
-	if !svc.isAuthInitiated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if !svc.isAuthInitiated(id) {
 		t.Error("isAuthInitiated should be true when challenge has been issued")
 	}
 }
@@ -430,7 +436,8 @@ func TestIsAuthInitiated_CompletedAuth(t *testing.T) {
 	nc.SetAuth(&connauth.State{Verified: true})
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
 
-	if !svc.isAuthInitiated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if !svc.isAuthInitiated(id) {
 		t.Error("isAuthInitiated should be true for completed auth")
 	}
 }
@@ -449,7 +456,8 @@ func TestGAP0_ClientFieldDoesNotAffectAuth(t *testing.T) {
 	// frame, the connection is unauthenticated.
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}})
 
-	if svc.isConnAuthenticated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if svc.isConnAuthenticated(id) {
 		t.Fatal("SECURITY: isConnAuthenticated = true for unauth peer — " +
 			"auth must not depend on frame.Client")
 	}
@@ -468,7 +476,8 @@ func TestLoopback_DoesNotElevateAuth(t *testing.T) {
 	}
 	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}}) // no auth
 
-	if svc.isConnAuthenticated(mockConn) {
+	id, _ := svc.connIDFor(mockConn)
+	if svc.isConnAuthenticated(id) {
 		t.Fatal("SECURITY: loopback connection authenticated without auth_session — " +
 			"source IP must not elevate auth")
 	}

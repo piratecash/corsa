@@ -950,6 +950,12 @@ func (s *Service) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	// Resolve ConnID once at the entry boundary — after a successful
+	// registerInboundConn the id is guaranteed to exist. The captured
+	// value is used by ConnID-first call sites below (clearConnAuth).
+	// Downstream helpers that still take net.Conn will migrate in
+	// subsequent PRs.
+	connID, _ := s.connIDFor(metered)
 	defer func() {
 		if addr := s.inboundPeerAddress(metered); addr != "" {
 			s.trackInboundDisconnect(metered, addr)
@@ -963,7 +969,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		_ = metered.Close()
 		s.unregisterInboundConn(metered)
 		s.removeSubscriberConn(metered)
-		s.clearConnAuth(metered)
+		s.clearConnAuth(connID)
 	}()
 
 	log.Info().Str("addr", conn.RemoteAddr().String()).Msg("incoming connection")
@@ -1097,6 +1103,12 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 	// Update per-connection last activity timestamp for staleness checks.
 	s.touchConnActivity(conn)
 
+	// Resolve ConnID once at the entry boundary for ConnID-first helpers
+	// used below (isAuthInitiated, rememberConnPeerAddr, isConnAuthenticated).
+	// If the connection is not registered, connID stays zero and every
+	// ByID helper returns its safe default (nil/false).
+	connID, _ := s.connIDFor(conn)
+
 	// --- Handshake commands (no auth required) ---
 	switch frame.Type {
 	case "ping":
@@ -1123,7 +1135,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// state.Hello — allowing an attacker to authenticate as identity A
 		// but bind the connection to an unverified address B, poisoning
 		// health tracking and capability context.
-		if s.isAuthInitiated(conn) {
+		if s.isAuthInitiated(connID) {
 			accepted = false
 			_ = s.writeJSONFrameSync(conn, protocol.Frame{
 				Type:  "error",
@@ -1168,7 +1180,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 				return false
 			}
 			s.SetConnAuthState(conn, authState)
-			s.rememberConnPeerAddr(conn, frame)
+			s.rememberConnPeerAddr(connID, frame)
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
@@ -1179,7 +1191,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		// unauthenticated with access limited to handshake commands
 		// (hello, ping, pong, auth_session). All P2P wire commands
 		// are blocked until auth_session completes.
-		s.rememberConnPeerAddr(conn, frame)
+		s.rememberConnPeerAddr(connID, frame)
 		log.Debug().
 			Str("client", frame.Client).
 			Str("addr", conn.RemoteAddr().String()).
@@ -1209,7 +1221,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 
 	// Auth gate for P2P commands. Handshake commands returned above;
 	// everything reaching this point is either a P2P command or unknown.
-	if !s.isConnAuthenticated(conn) {
+	if !s.isConnAuthenticated(connID) {
 		// Check whether the command is a known P2P command before deciding
 		// on the error code: known P2P → auth_required, unknown → unknown_command.
 		if isP2PWireCommand(frame.Type) {
@@ -2039,8 +2051,12 @@ func validateProtocolHandshake(frame protocol.Frame) error {
 // auth (NetCore.auth is nil) are considered unauthenticated — they may
 // still issue handshake commands, but they should not trigger high-trust
 // side effects such as peer promotion.
-func (s *Service) isConnAuthenticated(conn net.Conn) bool {
-	state := s.ConnAuthState(conn)
+//
+// ConnID-first: callers that start from a net.Conn cross the boundary
+// via s.connIDFor(conn) once and then operate on ConnID. A zero or
+// unregistered ConnID returns false (fail-safe).
+func (s *Service) isConnAuthenticated(id domain.ConnID) bool {
+	state := s.connAuthStateByID(id)
 	return state != nil && state.Verified
 }
 
@@ -2048,8 +2064,10 @@ func (s *Service) isConnAuthenticated(conn net.Conn) bool {
 // issued, Verified=false) or completed (Verified=true) the auth handshake.
 // Used by the re-hello guard to block identity/address overwrites once
 // PrepareAuth has recorded the initial hello and challenge.
-func (s *Service) isAuthInitiated(conn net.Conn) bool {
-	return s.ConnAuthState(conn) != nil
+//
+// ConnID-first: same boundary convention as isConnAuthenticated.
+func (s *Service) isAuthInitiated(id domain.ConnID) bool {
+	return s.connAuthStateByID(id) != nil
 }
 
 func ackDeletePayload(address, ackType, id, status string) []byte {
@@ -2121,11 +2139,12 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 	return reply, true
 }
 
-func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bool) {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return protocol.Frame{}, false
-	}
+// authenticatedAddressForConn returns the verified hello frame for a
+// successfully authenticated connection, or zero-value + false otherwise.
+// ConnID-first: callers resolve id via s.connIDFor(conn) at the entry
+// boundary (handleConn, dispatchNetworkFrame, handleAckDeleteFrame) and
+// pass it through here.
+func (s *Service) authenticatedAddressForConn(id domain.ConnID) (protocol.Frame, bool) {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return protocol.Frame{}, false
@@ -2137,24 +2156,19 @@ func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bo
 	return state.Hello, true
 }
 
-func (s *Service) clearConnAuth(conn net.Conn) {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return
-	}
+// clearConnAuth drops the auth state from the NetCore owning id. No-op if
+// the connection is not registered or has no auth state.
+func (s *Service) clearConnAuth(id domain.ConnID) {
 	if pc := s.netCoreForID(id); pc != nil {
 		pc.ClearAuth()
 	}
 }
 
-// ConnAuthState implements connauth.AuthStore. Returns the auth state for
-// the connection, or nil if the connection is not registered or has no
-// auth state.
-func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return nil
-	}
+// connAuthStateByID is the ConnID-first primary reader for auth state.
+// Returns nil when the connection is not registered or has no auth state.
+// ConnAuthState is a thin wrapper over this helper retained only to honor
+// the connauth.AuthStore external contract (pinned to net.Conn).
+func (s *Service) connAuthStateByID(id domain.ConnID) *connauth.State {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return nil
@@ -2162,16 +2176,35 @@ func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
 	return pc.Auth()
 }
 
-// SetConnAuthState implements connauth.AuthStore. Stores auth state for
-// the connection. The connection must already be registered.
+// setConnAuthStateByID is the ConnID-first primary writer for auth state.
+// No-op when the connection is not registered. SetConnAuthState is a thin
+// wrapper over this helper retained only to honor connauth.AuthStore.
+func (s *Service) setConnAuthStateByID(id domain.ConnID, state *connauth.State) {
+	if pc := s.netCoreForID(id); pc != nil {
+		pc.SetAuth(state)
+	}
+}
+
+// ConnAuthState implements connauth.AuthStore. Thin wrapper that crosses
+// the net.Conn → ConnID boundary once via connIDFor and delegates to
+// connAuthStateByID. The external interface pins net.Conn, so this
+// carve-out is structural and not subject to Phase 2 migration.
+func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return nil
+	}
+	return s.connAuthStateByID(id)
+}
+
+// SetConnAuthState implements connauth.AuthStore. Same carve-out rationale
+// as ConnAuthState: thin wrapper over the ConnID-first primary writer.
 func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
 	id, ok := s.connIDFor(conn)
 	if !ok {
 		return
 	}
-	if pc := s.netCoreForID(id); pc != nil {
-		pc.SetAuth(state)
-	}
+	s.setConnAuthStateByID(id, state)
 }
 
 // rememberConnPeerAddr populates the NetCore with identity, address,
@@ -2182,14 +2215,12 @@ func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
 // routing purposes. The address field stores the listen address for health
 // tracking. These are kept separate because a NATed peer's listen address
 // (e.g. 127.0.0.1:64646) is not a valid identity fingerprint.
-func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
+//
+// ConnID-first: callers resolve id at the entry boundary.
+func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame) {
 	addr := strings.TrimSpace(hello.Listen)
 	if addr == "" {
 		addr = strings.TrimSpace(hello.Address)
-	}
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return
 	}
 	pc := s.netCoreForID(id)
 	if pc == nil {
@@ -2371,7 +2402,7 @@ func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]str
 	// Authenticated peers: trust declared networks and advertised address
 	// from the hello frame — the identity behind these claims has been
 	// verified by auth_session.
-	if s.isConnAuthenticated(conn) {
+	if s.isConnAuthenticated(id) {
 		if nets := pc.Networks(); len(nets) > 0 {
 			return validateDeclaredNetworks(nets, pc.Address())
 		}
@@ -2932,7 +2963,11 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 }
 
 func (s *Service) handleAckDeleteFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
-	hello, ok := s.authenticatedAddressForConn(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
+	}
+	hello, ok := s.authenticatedAddressForConn(id)
 	if !ok {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
 	}

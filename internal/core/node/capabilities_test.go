@@ -183,7 +183,8 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 		Listen:       "10.0.0.1:64646",
 		Capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
 	}
-	svc.rememberConnPeerAddr(serverConn, hello)
+	id, _ := svc.connIDFor(serverConn)
+	svc.rememberConnPeerAddr(id, hello)
 
 	caps := pc.Capabilities()
 	if caps == nil {
