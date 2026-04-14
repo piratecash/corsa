@@ -1176,15 +1176,12 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			s.markPeerRead(addr, frame)
 		}
 		pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-		// Route the pong through the Network() surface rather than the
-		// legacy ConnID-first writeJSONFrameByID helper: this keeps the
-		// inbound-ping handler observable to a caller-supplied
-		// netcore.Network (the injection seam installed by
-		// NewServiceWithNetwork), which is what makes protocol-logic
-		// reply paths exercisable without opening a real TCP socket.
-		// s.runCtx is the Service-lifecycle context — non-nil by
-		// constructor contract; per-frame ctx granularity is not
-		// threaded into dispatchNetworkFrame yet.
+		// All async reply-writes inside dispatchNetworkFrame go through
+		// sendFrameViaNetwork so the injected netcore.Network (live
+		// registry or a test backend wired via NewServiceWithNetwork)
+		// observes them. s.runCtx is the Service-lifecycle context,
+		// pre-initialised to context.Background() in the constructor so
+		// this is safe even in unit tests that never call Run().
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, pongFrame)
 		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 			s.markPeerWrite(addr, pongFrame)
@@ -1216,7 +1213,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		if err := validateProtocolHandshake(frame); err != nil {
 			accepted = false
 			log.Warn().Err(err).Str("addr", addr).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
-			_ = s.writeJSONFrameByID(connID, protocol.Frame{
+			_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{
 				Type:                   "error",
 				Code:                   protocol.ErrCodeIncompatibleProtocol,
 				Error:                  err.Error(),
@@ -1253,7 +1250,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
-			_ = s.writeJSONFrameByID(connID, s.welcomeFrame(authState.Challenge, remoteIPFromString(addr)))
+			_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame(authState.Challenge, remoteIPFromString(addr)))
 			return true
 		}
 		// No identity fields → unauthenticated peer. It stays
@@ -1265,7 +1262,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			Str("client", frame.Client).
 			Str("addr", addr).
 			Msg("hello_without_identity_fields")
-		_ = s.writeJSONFrameByID(connID, s.welcomeFrame("", remoteIPFromString(addr)))
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame("", remoteIPFromString(addr)))
 		return true
 	case "auth_session":
 		reply, ok := s.handleAuthSession(connID, frame)
@@ -1274,7 +1271,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			_ = s.writeJSONFrameSyncByID(connID, reply)
 			return false
 		}
-		_ = s.writeJSONFrameByID(connID, reply)
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
 		return true
 
 	default:
@@ -1315,7 +1312,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		for i, a := range exchanged {
 			peers[i] = string(a)
 		}
-		_ = s.writeJSONFrameByID(connID, protocol.Frame{
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{
 			Type:  "peers",
 			Count: len(peers),
 			Peers: peers,
@@ -1324,7 +1321,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 	case "fetch_contacts":
 		// P2P contact sync: authenticated peers fetch the contact list
 		// for key material synchronization (syncPeer, syncContactsViaSession).
-		_ = s.writeJSONFrameByID(connID, s.contactsFrame())
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, s.contactsFrame())
 		return true
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(connID, frame)
@@ -1333,7 +1330,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			_ = s.writeJSONFrameSyncByID(connID, reply)
 			return false
 		}
-		_ = s.writeJSONFrameByID(connID, reply)
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
 		return true
 	case "subscribe_inbox":
 		// Auth gate enforced above. Identity binding: the authenticated
@@ -1353,7 +1350,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			return true
 		}
 		reply, sub := s.subscribeInboxFrame(connID, core, frame)
-		_ = s.writeJSONFrameByID(connID, reply)
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
 		if sub != nil {
 			go s.pushBacklogToSubscriber(sub)
 		}
@@ -1364,7 +1361,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// frame in each direction is sufficient for full bidirectional sync.
 		// Sent here (not after auth_ok) so that short-lived connections like
 		// syncPeer — which never send subscribe_inbox — are not affected.
-		_ = s.writeJSONFrameByID(connID, protocol.Frame{
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{
 			Type:       "subscribe_inbox",
 			Topic:      "dm",
 			Recipient:  s.identity.Address,
@@ -1406,7 +1403,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// gossip we learn the address, but we do not trust the sender to set
 		// or override the announced peer's local role.
 		if !isKnownNodeType(nodeType) {
-			_ = s.writeJSONFrameByID(connID, protocol.Frame{Type: "announce_peer_ack"})
+			_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{Type: "announce_peer_ack"})
 			return true
 		}
 		peers := frame.Peers
@@ -1419,7 +1416,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			}
 			s.promotePeerAddress(domain.PeerAddress(peer))
 		}
-		_ = s.writeJSONFrameByID(connID, protocol.Frame{Type: "announce_peer_ack"})
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{Type: "announce_peer_ack"})
 		return true
 	case "relay_message":
 		// Auth gate enforced above (INV-9).
@@ -1444,7 +1441,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// Empty status means the message was dropped (dedupe, max hops,
 		// client node); no ack is sent for drops (INV-5).
 		if ackStatus != "" {
-			_ = s.writeJSONFrameByID(connID, protocol.Frame{
+			_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{
 				Type:   "relay_hop_ack",
 				ID:     frame.ID,
 				Status: ackStatus,

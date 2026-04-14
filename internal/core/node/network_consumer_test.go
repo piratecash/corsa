@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/netcore/netcoretest"
@@ -102,6 +103,161 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 	}
 }
 
+// TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend is the
+// table-driven companion to the ping test above. It locks in the PR 10.9
+// migration: every async reply-write inside dispatchNetworkFrame must
+// route through s.Network().SendFrame (i.e. sendFrameViaNetwork), not
+// through the legacy ConnID-first helpers that resolve *netcore.NetCore
+// from s.conns directly.
+//
+// The table covers a representative cross-section of the switch cases
+// migrated in PR 10.9:
+//
+//   - "hello" with incompatible protocol version — un-auth path, error reply.
+//   - "hello" without identity fields — un-auth path, welcome reply.
+//   - "announce_peer" with unknown node_type — auth-gated, early-return ack.
+//   - "announce_peer" with known node_type and empty Peers — auth-gated,
+//     full-path ack after the (no-op) promotion loop.
+//
+// The remaining 8 migrated call-sites (get_peers, fetch_contacts,
+// ack_delete, subscribe_inbox pair, auth_session success, relay_hop_ack,
+// and welcomeFrame-with-challenge) depend on broader Service state
+// (connManager, contactStore, DeleteTracker, MeshRelayV1 capability)
+// that is out of scope for this POC-style test. Their protection relies
+// on the static §2.9 Gate 6 regex in scripts/enforce-netcore-boundary.sh
+// — if someone reverts those call-sites to writeJSONFrameByID, the gate
+// fails at CI time.
+//
+// Setup pattern per case:
+//
+//  1. Build a fresh Service with a pinned netcoretest.Backend via
+//     NewServiceWithNetwork so Service.Network() returns the backend.
+//  2. Register the synthetic ConnID in backend (for SendFrame) AND in
+//     s.conns via setTestConnEntryLocked (so netCoreForID works for
+//     auth-gated helpers like isConnAuthenticated).
+//  3. For auth-gated cases: attach a Verified=true connauth.State to the
+//     NetCore via pc.SetAuth — that is the production auth seam read
+//     by isConnAuthenticated → connAuthStateByID → pc.Auth().
+//  4. Invoke dispatchNetworkFrame with the crafted frame line.
+//  5. Assert the expected reply type arrives on backend.Outbound(connID)
+//     within 2 seconds.
+func TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name              string
+		authVerified      bool
+		inboundFrameLine  string
+		expectedReplyType string
+	}{
+		{
+			name: "hello_incompatible_protocol",
+			// No identity fields; version=1 is below MinimumProtocolVersion, so
+			// validateProtocolHandshake fails and the branch replies with a
+			// structured error frame via sendFrameViaNetwork.
+			authVerified:      false,
+			inboundFrameLine:  `{"type":"hello","version":1,"client":"node"}`,
+			expectedReplyType: "error",
+		},
+		{
+			name: "hello_no_identity_fields",
+			// Current-version hello without Address/PubKey/BoxKey/BoxSig takes
+			// the unauthenticated branch and replies with welcomeFrame (empty
+			// challenge) via sendFrameViaNetwork.
+			authVerified:      false,
+			inboundFrameLine:  helloNoIdentityLine(),
+			expectedReplyType: "welcome",
+		},
+		{
+			name: "announce_peer_unknown_node_type",
+			// Auth-gated: the branch rejects unknown node_type values by
+			// sending announce_peer_ack immediately via sendFrameViaNetwork.
+			// No peer promotion side-effects execute on this path.
+			authVerified:      true,
+			inboundFrameLine:  `{"type":"announce_peer","node_type":"future-role-v99"}`,
+			expectedReplyType: "announce_peer_ack",
+		},
+		{
+			name: "announce_peer_empty_peers",
+			// Auth-gated, known node_type, no peers — the promotion loop is a
+			// no-op and the branch sends announce_peer_ack via sendFrameViaNetwork.
+			authVerified:      true,
+			inboundFrameLine:  `{"type":"announce_peer","node_type":"full","peers":[]}`,
+			expectedReplyType: "announce_peer_ack",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			backend := netcoretest.New()
+			t.Cleanup(backend.Shutdown)
+
+			svc := NewServiceWithNetwork(config.Node{
+				ListenAddress:    "127.0.0.1:0",
+				AdvertiseAddress: "127.0.0.1:0",
+				Type:             config.NodeTypeFull,
+				TrustStorePath:   t.TempDir() + "/trust.json",
+				QueueStatePath:   t.TempDir() + "/queue.json",
+			}, testIdentityForNetworkConsumerTest(t), backend)
+			t.Cleanup(svc.WaitBackground)
+
+			connID := netcore.ConnID(9100 + uint64Hash(tc.name))
+			backend.Register(connID, netcore.Inbound, "10.0.0.43:54321")
+
+			clientPipe, serverPipe := net.Pipe()
+			t.Cleanup(func() { _ = clientPipe.Close() })
+			t.Cleanup(func() { _ = serverPipe.Close() })
+			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
+			t.Cleanup(pc.Close)
+
+			if tc.authVerified {
+				// Attach Verified=true auth state to the NetCore so
+				// isConnAuthenticated returns true for the auth-gated branch.
+				// This mirrors the production handleAuthSession →
+				// setConnAuthStateByID → pc.SetAuth path at the one seam that
+				// matters for the auth gate: pc.Auth().Verified.
+				pc.SetAuth(&connauth.State{Verified: true})
+			}
+
+			// Dual registration so netCoreForID(connID) — consulted by
+			// isConnAuthenticated, addBanScore, rememberConnPeerAddr, and
+			// connHasCapability — resolves to this test pc. The backend
+			// override still owns the Network.SendFrame path, so the outbound
+			// bytes surface on backend.Outbound regardless.
+			svc.mu.Lock()
+			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
+			svc.mu.Unlock()
+
+			if ok := svc.dispatchNetworkFrame(connID, pc, tc.inboundFrameLine); !ok {
+				t.Fatalf("dispatchNetworkFrame(%s) returned false; expected accepted=true", tc.name)
+			}
+
+			select {
+			case data, ok := <-backend.Outbound(connID):
+				if !ok {
+					t.Fatalf("%s: backend.Outbound(connID) closed before reply arrived", tc.name)
+				}
+				frame, err := parseFrameLineForTest(data)
+				if err != nil {
+					t.Fatalf("%s: parse outbound frame: %v (raw=%q)", tc.name, err, data)
+				}
+				if frame.Type != tc.expectedReplyType {
+					t.Fatalf("%s: expected reply type %q on backend.Outbound, got %q (raw=%q)",
+						tc.name, tc.expectedReplyType, frame.Type, data)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: timed out waiting for reply on backend.Outbound(connID): "+
+					"Service did not route the reply through the injected Network surface — "+
+					"the reply was sent via a legacy helper that bypasses s.Network().SendFrame",
+					tc.name)
+			}
+		})
+	}
+}
+
 // testIdentityForNetworkConsumerTest mints a fresh identity for the POC
 // test. Factored into a helper so the Fatalf on identity.Generate failure
 // keeps the test body focused on the Network()-consumer assertion.
@@ -130,4 +286,38 @@ func parseFrameLineForTest(line []byte) (protocol.Frame, error) {
 		return protocol.Frame{}, err
 	}
 	return f, nil
+}
+
+// helloNoIdentityLine returns a current-protocol-version hello frame
+// carrying no identity fields (no Address / PubKey / BoxKey / BoxSig), so
+// dispatchNetworkFrame takes the "unauthenticated hello" branch and
+// replies with the welcome frame via sendFrameViaNetwork. Built from a
+// protocol.Frame value so the test stays in lockstep with
+// config.ProtocolVersion — hardcoding a literal version number would
+// silently pass the gate after a protocol bump and regress on the next.
+func helloNoIdentityLine() string {
+	line, err := protocol.MarshalFrameLine(protocol.Frame{
+		Type:    "hello",
+		Version: config.ProtocolVersion,
+		Client:  "node",
+	})
+	if err != nil {
+		// MarshalFrameLine on a literal struct cannot realistically fail;
+		// returning an invalid JSON string surfaces the fault at test time
+		// instead of panicking at package init.
+		return `{"type":"hello","broken":true}`
+	}
+	return line
+}
+
+// uint64Hash is a tiny test-local string hash used to derive distinct
+// synthetic ConnIDs per table case, so parallel sub-tests don't collide
+// on backend.Outbound(connID) channel keys.
+func uint64Hash(s string) uint64 {
+	var h uint64 = 1469598103934665603 // FNV-1a offset basis
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211 // FNV-1a prime
+	}
+	return h & 0xFFFF // bounded so the resulting ConnID stays small and readable
 }
