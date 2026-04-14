@@ -47,7 +47,17 @@ test-v:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -v -count=1 -timeout=15m ./...
 
 .PHONY: test-all
-test-all: lint test-v
+test-all: lint enforce-netcore-boundary test-v
+
+# enforce-netcore-boundary runs the §2.9 grep-gate from
+# docs/netcore-migration.md: asserts that forbidden patterns (direct
+# socket writes outside owner, parallel net.Conn registries, stale
+# net.Conn-first wrappers, carve-out membership growth beyond the frozen
+# 14, etc.) have not regressed. Fails non-zero on any drift.
+# See scripts/enforce-netcore-boundary.sh for the concrete baselines.
+.PHONY: enforce-netcore-boundary
+enforce-netcore-boundary:
+	@./scripts/enforce-netcore-boundary.sh
 
 .PHONY: build-node-macos-arm64
 build-node-macos-arm64: build-dirs
