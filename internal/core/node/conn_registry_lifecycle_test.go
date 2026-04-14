@@ -21,6 +21,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
 // memConn is a minimal in-memory net.Conn used purely as a map key for
@@ -50,7 +52,7 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 	// Seed an entry mirroring what registerInboundConn / trackInboundConnect
 	// produce together: core present, tracked flag set. metered is nil —
 	// the test does not need a real MeteredConn to exercise the invariant.
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
 	svc.mu.Lock()

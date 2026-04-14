@@ -19,6 +19,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
@@ -346,7 +347,7 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 // to the same machine.
 // Caller must hold s.mu at least for read.
 func (s *Service) connectedHostsLocked() map[string]struct{} {
-	hosts := make(map[string]struct{}, len(s.upstream)+len(s.conns))
+	hosts := make(map[string]struct{})
 
 	// Outbound sessions.
 	for addr := range s.upstream {
@@ -361,22 +362,20 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 	// shared health state to avoid conflating NATed peers that advertise
 	// the same listen address.
 	//
-	// The unified registry (s.conns, PR 9.4a) now carries both directions;
+	// The unified registry now carries both directions;
 	// filter to Inbound so outbound NetCores are not double-counted here —
 	// they are already represented via s.upstream above.
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
-	for conn, entry := range s.conns {
-		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
-			continue
-		}
-		if la := entry.core.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
-			continue
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+		if la := core.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
+			return true
 		}
 		if ip := remoteIP(conn.RemoteAddr()); ip != "" {
 			hosts[ip] = struct{}{}
 		}
-	}
+		return true
+	})
 
 	return hosts
 }
@@ -523,10 +522,10 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// writeDeadline matches the outer handshake budget (syncHandshakeTimeout)
 	// so the wrapper does not silently extend per-write timing past what the
 	// caller guaranteed with SetDeadline above.
-	pc := newBootstrapNetCore(conn, syncHandshakeTimeout)
+	pc := netcore.NewBootstrap(conn, syncHandshakeTimeout)
 	defer pc.Close()
 
-	if st := pc.sendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != sendOK {
+	if st := pc.SendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != netcore.SendOK {
 		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_hello_write_failed")
 		return 0
 	}
@@ -550,7 +549,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_marshal_failed")
 			return 0
 		}
-		if st := pc.sendRawSyncBlocking([]byte(authLine)); st != sendOK {
+		if st := pc.SendRawSyncBlocking([]byte(authLine)); st != netcore.SendOK {
 			log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_auth_write_failed")
 			return 0
 		}
@@ -594,7 +593,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// docs/peer-discovery-conditional-get-peers.ru.md §§ Шаг 4, Шаг 5.
 	if requestPeers {
 		if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"}); err == nil {
-			if st := pc.sendRawSyncBlocking([]byte(line)); st != sendOK {
+			if st := pc.SendRawSyncBlocking([]byte(line)); st != netcore.SendOK {
 				log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_get_peers_failed")
 				return 0
 			}
@@ -620,7 +619,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 
 	imported := 0
 	if line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "fetch_contacts"}); err == nil {
-		if st := pc.sendRawSyncBlocking([]byte(line)); st != sendOK {
+		if st := pc.SendRawSyncBlocking([]byte(line)); st != netcore.SendOK {
 			log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_fetch_contacts_failed")
 			return 0
 		}
@@ -722,7 +721,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	if err != nil {
 		return false, err
 	}
-	conn := NewMeteredConn(rawConn)
+	conn := netcore.NewMeteredConn(rawConn)
 	var session *peerSession
 	defer func() {
 		s.accumulateSessionTraffic(address, conn)
@@ -893,12 +892,12 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	// failure. The case below re-checks ctx.Err() after writerDone fires
 	// and returns nil on local cancellation, reserving markPeerDisconnected
 	// for genuine remote-side failures. Without this case, a fire-and-forget
-	// Send() that returns sendOK for a frame enqueued moments before the
+	// Send() that returns netcore.SendOK for a frame enqueued moments before the
 	// writer dies (writer hits the write error post-enqueue) would leave
 	// servePeerSession idle until the next heartbeat.
 	var writerDoneCh <-chan struct{}
 	if session.netCore != nil {
-		writerDoneCh = session.netCore.writerDone
+		writerDoneCh = session.netCore.WriterDone()
 	}
 
 	for {
@@ -940,18 +939,18 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				}
 				s.markPeerWrite(session.address, outbound)
 				switch st := session.netCore.Send(outbound); st {
-				case sendOK:
+				case netcore.SendOK:
 					// enqueued
-				case sendBufferFull:
+				case netcore.SendBufferFull:
 					writeErr := fmt.Errorf("fire_and_forget: send buffer full")
 					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Msg("fire_and_forget_buffer_full")
 					s.markPeerDisconnected(session.address, writeErr)
 					return writeErr
-				case sendChanClosed, sendWriterDone:
+				case netcore.SendChanClosed, netcore.SendWriterDone:
 					writeErr := fmt.Errorf("fire_and_forget: connection closing (%s)", st.String())
 					s.markPeerDisconnected(session.address, writeErr)
 					return writeErr
-				case sendMarshalError:
+				case netcore.SendMarshalError:
 					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Msg("fire_and_forget_marshal_error")
 					continue
 				default:
@@ -1515,7 +1514,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
 	// All outbound writes route through the managed single-writer path on
 	// NetCore so that deadline, back-pressure and ordering match inbound.
-	// sendRawSyncBlocking blocks until the writer goroutine flushes the
+	// SendRawSyncBlocking blocks until the writer goroutine flushes the
 	// bytes to the socket, preserving the "write completed before we wait
 	// for reply" contract the request loop relies on.
 	if session.netCore == nil {
@@ -1537,7 +1536,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 	// so relay traffic backlog cannot starve handshake / subscribe_inbox /
 	// heartbeat writes. Inbound error paths keep the fast-fail sendRawSync
 	// contract via enqueueFrameSync.
-	if st := session.netCore.sendRawSyncBlocking(payload); st != sendOK {
+	if st := session.netCore.SendRawSyncBlocking(payload); st != netcore.SendOK {
 		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: send failed: %s", st.String())
 	}
 
@@ -2258,17 +2257,15 @@ func (s *Service) nextConnIDLocked() uint64 {
 // Must be called with s.mu held (read lock).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
-	for _, entry := range s.conns {
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
 		// The registry holds both directions. Outbound
 		// NetCores must stay invisible on inbound-only lookup paths —
 		// they are surfaced through s.sessions once activated.
-		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
-			continue
+		if core.Address() == address {
+			ids = append(ids, core.ConnIDNum())
 		}
-		if entry.core.Address() == address {
-			ids = append(ids, entry.core.ConnIDNum())
-		}
-	}
+		return true
+	})
 	return ids
 }
 
@@ -2277,18 +2274,20 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 // connections are active, any one of them is returned (all are equally valid
 // for fire-and-forget writes). Must be called with s.mu held (read lock).
 func (s *Service) inboundConnForAddressLocked(address domain.PeerAddress) net.Conn {
-	for conn, entry := range s.conns {
-		// entry.tracked already excludes unauthenticated conns; the direction
-		// filter makes the function's contract match its name regardless of
-		// how the registry evolves.
-		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound || entry.core.Address() != address {
-			continue
+	var result net.Conn
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+		// Only return tracked connections for the given address
+		if core.Address() != address {
+			return true
 		}
-		if entry.tracked {
-			return conn
+		// Check if this connection is tracked
+		if entry := s.connEntryForLocked(conn); entry != nil && entry.tracked {
+			result = conn
+			return false // Stop iteration
 		}
-	}
-	return nil
+		return true
+	})
+	return result
 }
 
 func (s *Service) ensurePeerHealthLocked(address domain.PeerAddress) *peerHealth {
@@ -2464,22 +2463,18 @@ func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 	if session := s.resolveSessionLocked(address); session != nil && len(session.capabilities) > 0 {
 		return domain.CapabilityStrings(session.capabilities)
 	}
-	for _, entry := range s.conns {
+	var result []string
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
 		// Outbound NetCores surface their capabilities via s.sessions
 		// (checked above); skip them here so a pre-activation outbound
 		// entry cannot answer on the inbound fallback path.
-		if entry == nil || entry.core == nil {
-			continue
+		if core.Address() == address && len(core.Capabilities()) > 0 {
+			result = domain.CapabilityStrings(core.Capabilities())
+			return false // Stop iteration
 		}
-		pc := entry.core
-		if pc.Dir() != Inbound {
-			continue
-		}
-		if pc.Address() == address && len(pc.Capabilities()) > 0 {
-			return domain.CapabilityStrings(pc.Capabilities())
-		}
-	}
-	return nil
+		return true
+	})
+	return result
 }
 
 func (s *Service) computePeerStateAtLocked(health *peerHealth, now time.Time) string {
@@ -2878,28 +2873,25 @@ func (s *Service) evictStaleInboundConns() {
 
 	s.mu.RLock()
 	var stale []net.Conn
-	for conn, entry := range s.conns {
-		// s.conns holds both directions; evict only inbound stalls.
-		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
-			continue
-		}
-		la := entry.core.LastActivity()
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+		la := core.LastActivity()
 		if la.IsZero() {
-			continue
+			return true
 		}
 		if now.Sub(la) >= stallThreshold {
 			stale = append(stale, conn)
 		}
-	}
+		return true
+	})
 	s.mu.RUnlock()
 
 	for _, conn := range stale {
 		var addr domain.PeerAddress
 		var ident domain.PeerIdentity
 		s.mu.RLock()
-		if entry := s.conns[conn]; entry != nil && entry.core != nil {
-			addr = entry.core.Address()
-			ident = entry.core.Identity()
+		if core := s.coreForConnLocked(conn); core != nil {
+			addr = core.Address()
+			ident = core.Identity()
 		}
 		s.mu.RUnlock()
 		log.Warn().Str("peer", string(addr)).Str("identity", string(ident)).Str("remote", conn.RemoteAddr().String()).Msg("force-closing stale inbound connection")
@@ -3228,7 +3220,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	if err != nil {
 		return nil, err
 	}
-	conn := NewMeteredConn(rawConn)
+	conn := netcore.NewMeteredConn(rawConn)
 
 	// Guard goroutine: close the connection if the parent context is cancelled
 	// during the handshake phase, or if we signal abort via closeConn.

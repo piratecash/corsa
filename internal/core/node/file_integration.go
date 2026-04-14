@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path/filepath"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/service/filerouter"
@@ -211,19 +213,15 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 		consider(sess.peerIdentity, sess.address)
 	}
 
-	for _, entry := range s.conns {
-		// Outbound NetCores surface through s.sessions above; skip them
-		// here so pre-activation outbound entries do not leak into the
-		// file-transfer peer set before the session is established.
-		if entry == nil || entry.core == nil {
-			continue
+	// Outbound NetCores surface through s.sessions above; skip them
+	// here so pre-activation outbound entries do not leak into the
+	// file-transfer peer set before the session is established.
+	s.forEachInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+		if pc.HasCapability(domain.CapFileTransferV1) {
+			consider(pc.Identity(), pc.Address())
 		}
-		pc := entry.core
-		if pc.Dir() != Inbound || !pc.HasCapability(domain.CapFileTransferV1) {
-			continue
-		}
-		consider(pc.Identity(), pc.Address())
-	}
+		return true
+	})
 }
 
 func (s *Service) usableFileTransferPeersLocked(now time.Time) map[domain.PeerIdentity]struct{} {
@@ -256,19 +254,16 @@ func (s *Service) fileTransferPeerUsableAtLocked(peer domain.PeerIdentity, now t
 		consider(sess.address)
 	}
 
-	for _, entry := range s.conns {
-		// Same visibility boundary as forEachUsableFileTransferPeerLocked:
-		// outbound NetCores are reachable via s.sessions above, so skip
-		// them here to keep pre-activation outbound entries hidden.
-		if entry == nil || entry.core == nil {
-			continue
-		}
-		pc := entry.core
-		if pc.Dir() != Inbound || pc.Identity() != peer || !pc.HasCapability(domain.CapFileTransferV1) {
-			continue
+	// Same visibility boundary as forEachUsableFileTransferPeerLocked:
+	// outbound NetCores are reachable via s.sessions above, so skip
+	// them here to keep pre-activation outbound entries hidden.
+	s.forEachInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+		if pc.Identity() != peer || !pc.HasCapability(domain.CapFileTransferV1) {
+			return true
 		}
 		consider(pc.Address())
-	}
+		return true
+	})
 
 	return oldest, found
 }

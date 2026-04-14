@@ -11,6 +11,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/transport"
@@ -194,7 +195,7 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 
 	// Register inbound peer info with NO capabilities (legacy peer).
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 	})
@@ -225,7 +226,7 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 
 	// Register inbound peer info WITH mesh_relay_v1.
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1115,7 +1116,7 @@ func TestResolveRelayAddress_InboundPeer(t *testing.T) {
 	// Set up an inbound connection with relay capability.
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1137,7 +1138,7 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress(idPeerB),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1}, // only relay, no routing
 	})
@@ -1173,7 +1174,7 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1195,7 +1196,7 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 	})
@@ -1441,7 +1442,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 
 	// Register a NetCore so enqueueFrameSync routes through the writer
 	// goroutine instead of falling back to a blocking direct write.
-	pc := newNetCore(1, conn, Inbound, NetCoreOpts{})
+	pc := netcore.New(1, conn, netcore.Inbound, netcore.Options{})
 	defer pc.Close()
 
 	svc.mu.Lock()
@@ -1643,7 +1644,7 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 
 	// Register inbound peer info WITHOUT mesh_routing_v1 (relay-only).
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1694,7 +1695,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	}
 
 	// Register a NetCore so enqueueFrameSync routes through the writer.
-	pc := newNetCore(2, conn, Inbound, NetCoreOpts{
+	pc := netcore.New(2, conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
@@ -1796,7 +1797,7 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 
 	// Register inbound peer info with routing cap but WITHOUT relay cap.
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
@@ -1868,7 +1869,7 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
@@ -2173,7 +2174,7 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 	// Register a NetCore so enqueueFrameSync routes through the writer.
 	// NATed peer: address (listen) = "127.0.0.1:64646", identity = idPeerB.
 	natListenAddr := domain.PeerAddress("127.0.0.1:64646")
-	pc := newNetCore(3, conn, Inbound, NetCoreOpts{
+	pc := netcore.New(3, conn, netcore.Inbound, netcore.Options{
 		Address:  natListenAddr,
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
@@ -2230,7 +2231,7 @@ func TestRoutingCapablePeersUsesIdentityForInbound(t *testing.T) {
 
 	// NATed peer: address is a local listen addr, identity is the fingerprint.
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
@@ -2254,7 +2255,7 @@ func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.52"), Port: 8080}}
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
 		Identity: domain.PeerIdentity(idPeerB),          // real identity
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -2282,7 +2283,7 @@ func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.53"), Port: 7777}}
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), conn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen
 		Identity: domain.PeerIdentity(idPeerB),          // fingerprint
 	})

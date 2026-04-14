@@ -15,6 +15,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -157,15 +158,13 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 
 	s.mu.RLock()
 	var target net.Conn
-	for conn, entry := range s.conns {
-		if entry == nil || !entry.tracked {
-			continue
-		}
+	s.forEachTrackedInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
 		if conn.RemoteAddr().String() == remoteAddr {
 			target = conn
-			break
+			return false // Stop iteration
 		}
-	}
+		return true
+	})
 	s.mu.RUnlock()
 
 	if target == nil {
@@ -240,16 +239,12 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 
 	// Inbound connections — only if identity not already covered by an
 	// outbound session above (dedup by identity).
-	for conn, entry := range s.conns {
-		if entry == nil || !entry.tracked || entry.core == nil {
-			continue
-		}
-		pc := entry.core
+	s.forEachTrackedInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
 		if pc.Identity() == "" {
-			continue
+			return true
 		}
 		if _, dup := seen[pc.Identity()]; dup {
-			continue
+			return true
 		}
 		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			seen[pc.Identity()] = struct{}{}
@@ -258,7 +253,8 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 				Identity: pc.Identity(),
 			})
 		}
-	}
+		return true
+	})
 
 	return targets
 }
@@ -818,20 +814,19 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 	}
 
 	// Inbound connections — synchronous write path.
-	for conn, entry := range s.conns {
-		if entry == nil || !entry.tracked || entry.core == nil {
-			continue
-		}
-		pc := entry.core
+	var result domain.PeerAddress
+	s.forEachTrackedInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
 		if pc.Identity() != peerIdentity {
-			continue
+			return true
 		}
 		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
-			return inboundConnKey(conn)
+			result = inboundConnKey(conn)
+			return false // Stop iteration
 		}
-	}
+		return true
+	})
 
-	return ""
+	return result
 }
 
 // resolveRelayAddress finds a transport address for a peer identity that
@@ -857,20 +852,19 @@ func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.P
 	}
 
 	// Inbound connections.
-	for conn, entry := range s.conns {
-		if entry == nil || !entry.tracked || entry.core == nil {
-			continue
-		}
-		pc := entry.core
+	var result domain.PeerAddress
+	s.forEachTrackedInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
 		if pc.Identity() != peerIdentity {
-			continue
+			return true
 		}
 		if sessionHasCap(pc.Capabilities(), domain.CapMeshRelayV1) {
-			return inboundConnKey(conn)
+			result = inboundConnKey(conn)
+			return false // Stop iteration
 		}
-	}
+		return true
+	})
 
-	return ""
+	return result
 }
 
 // resolveRouteNextHopAddress finds a transport address for a route's
@@ -1017,16 +1011,16 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	// Outbound NetCores are resolved via s.sessions above, so skip them
 	// here — a pre-activation outbound entry must not answer identity
 	// lookups before the session is installed.
-	for conn, entry := range s.conns {
-		if entry == nil || entry.core == nil || entry.core.Dir() != Inbound {
-			continue
-		}
+	var result domain.PeerIdentity
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
 		if conn.RemoteAddr().String() == string(address) {
-			return entry.core.Identity()
+			result = core.Identity()
+			return false // Stop iteration
 		}
-	}
+		return true
+	})
 
-	return ""
+	return result
 }
 
 // executeGossipTargets sends a message to pre-computed gossip targets from a

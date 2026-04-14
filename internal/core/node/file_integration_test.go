@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -235,7 +236,7 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 	defer func() { _ = pipeLocal.Close() }()
 	defer func() { _ = pipeRemote.Close() }()
 
-	pc := newNetCore(connID(1), pipeLocal, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), pipeLocal, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("addr-B"),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -399,7 +400,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	pc := newNetCore(connID(1), inLocal, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), inLocal, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("addr-in"),
 		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -460,7 +461,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	pc := newNetCore(connID(2), inLocal, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(2), inLocal, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("addr-in-fallback"),
 		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -538,7 +539,7 @@ func TestSendFrameToIdentityRejectsInboundBeforeActivation(t *testing.T) {
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	pc := newNetCore(connID(7), inLocal, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(7), inLocal, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("addr-in-preactivation"),
 		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},

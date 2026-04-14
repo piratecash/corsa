@@ -12,6 +12,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -134,7 +135,7 @@ func TestRespondToInboxRequestPushesMessages(t *testing.T) {
 		address:      domain.PeerAddress(peerIdentity),
 		peerIdentity: domain.PeerIdentity(peerIdentity),
 		conn:         clientConn,
-		netCore:      newNetCore(connID(1), clientConn, Outbound, NetCoreOpts{}),
+		netCore:      netcore.New(netcore.ConnID(1), clientConn, netcore.Outbound, netcore.Options{}),
 	}
 
 	go svc.respondToInboxRequest(session)
@@ -201,7 +202,7 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 		address:      domain.PeerAddress(transportAddr),
 		peerIdentity: domain.PeerIdentity(peerIdentity),
 		conn:         clientConn,
-		netCore:      newNetCore(connID(1), clientConn, Outbound, NetCoreOpts{}),
+		netCore:      netcore.New(netcore.ConnID(1), clientConn, netcore.Outbound, netcore.Options{}),
 	}
 
 	go svc.respondToInboxRequest(session)

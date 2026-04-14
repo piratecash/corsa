@@ -9,6 +9,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -90,7 +91,7 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), peerConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("inbound-peer-1"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
@@ -155,7 +156,7 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	pc := newNetCore(connID(2), peerConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(2), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-2"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
@@ -204,7 +205,7 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	pc := newNetCore(connID(3), peerConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(3), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-3"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
@@ -254,7 +255,7 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	pc := newNetCore(connID(4), peerConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(4), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-4"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
@@ -401,7 +402,7 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 	}
 
 	svc.mu.Lock()
-	pc := newNetCore(connID(5), peerConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(5), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("ban-test-peer"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
@@ -490,7 +491,7 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 	// inside handleInboundPushMessage lands on our observable server.
 	relayAddr := domain.PeerAddress(ln.Addr().String())
 	svc.mu.Lock()
-	pc := newNetCore(connID(17), peerConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(17), peerConn, netcore.Inbound, netcore.Options{
 		Address:  relayAddr,
 		Identity: domain.PeerIdentity(peerID.Address),
 	})

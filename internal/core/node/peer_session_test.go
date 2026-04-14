@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
 // TestPeerSessionCloseDelegatesToNetCore verifies that peerSession.Close()
@@ -13,7 +15,7 @@ import (
 // after PR 2 migrated outbound writes onto the managed path.
 func TestPeerSessionCloseDelegatesToNetCore(t *testing.T) {
 	conn := &mockConn{}
-	nc := newNetCore(1, conn, Outbound, NetCoreOpts{})
+	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
 
 	onCloseCalls := 0
 	session := &peerSession{
@@ -67,7 +69,7 @@ func TestPeerSessionCloseWithoutNetCoreClosesConn(t *testing.T) {
 // ordering must be preserved: NetCore stays resolvable until writerDone.
 func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
 	conn := &mockConn{}
-	nc := newNetCore(1, conn, Outbound, NetCoreOpts{})
+	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
 
 	var writerDoneAtOnClose bool
 	session := &peerSession{
@@ -77,7 +79,7 @@ func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
 			// When onClose fires, the writer goroutine must already have
 			// exited — writerDone is closed by writerLoop on return.
 			select {
-			case <-nc.writerDone:
+			case <-nc.WriterDone():
 				writerDoneAtOnClose = true
 			default:
 				writerDoneAtOnClose = false
@@ -98,7 +100,7 @@ func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
 // path) cannot double-fire onClose or double-close the underlying NetCore.
 func TestPeerSessionCloseIsConcurrencySafe(t *testing.T) {
 	conn := &mockConn{}
-	nc := newNetCore(1, conn, Outbound, NetCoreOpts{})
+	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
 
 	var onCloseCalls int32
 	session := &peerSession{

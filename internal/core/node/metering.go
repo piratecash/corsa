@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -18,7 +19,7 @@ type liveTraffic struct {
 
 // accumulateSessionTraffic adds byte counters from an outbound peer session's
 // MeteredConn to the peer's cumulative traffic totals in health.
-func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *MeteredConn) {
+func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *netcore.MeteredConn) {
 	sent := mc.BytesWritten()
 	received := mc.BytesRead()
 	if sent == 0 && received == 0 {
@@ -40,11 +41,11 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *Meter
 // (no-session-auth) path auth is nil and attribution is allowed.
 // Caller must hold s.mu (read or write).
 func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
-	entry := s.conns[conn]
-	if entry == nil || entry.core == nil {
+	core := s.coreForConnLocked(conn)
+	if core == nil {
 		return false
 	}
-	state := entry.core.Auth()
+	state := core.Auth()
 	return state == nil || state.Verified
 }
 
@@ -54,7 +55,7 @@ func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
 // Traffic is only attributed when the connection's identity has been
 // verified (or no session-auth was required), preventing unauthenticated
 // clients from spoofing another peer's traffic counters.
-func (s *Service) accumulateInboundTraffic(mc *MeteredConn) {
+func (s *Service) accumulateInboundTraffic(mc *netcore.MeteredConn) {
 	sent := mc.BytesWritten()
 	received := mc.BytesRead()
 	if sent == 0 && received == 0 {
@@ -67,11 +68,11 @@ func (s *Service) accumulateInboundTraffic(mc *MeteredConn) {
 	if !s.isConnTrafficTrustedLocked(mc) {
 		return
 	}
-	entry := s.conns[mc]
-	if entry == nil || entry.core == nil || entry.core.Address() == "" {
+	core := s.coreForConnLocked(mc)
+	if core == nil || core.Address() == "" {
 		return
 	}
-	address := s.resolveHealthAddress(entry.core.Address())
+	address := s.resolveHealthAddress(core.Address())
 	health := s.ensurePeerHealthLocked(address)
 	health.BytesSent += sent
 	health.BytesReceived += received
@@ -99,27 +100,26 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 	// non-session-auth) connections to prevent address spoofing.
 	//
 	// Iterate the unified registry and filter to inbound direction because
-	// outbound NetCores now share s.conns after PR 9.4a; outbound traffic
+	// outbound NetCores now share s.conns; outbound traffic
 	// is already accumulated via s.sessions above.
-	for conn, entry := range s.conns {
-		if entry == nil || entry.core == nil || entry.metered == nil {
-			continue
-		}
-		if entry.core.Dir() != Inbound {
-			continue
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+		metered := s.meteredForConnLocked(conn)
+		if metered == nil {
+			return true
 		}
 		if !s.isConnTrafficTrustedLocked(conn) {
-			continue
+			return true
 		}
-		if entry.core.Address() == "" {
-			continue
+		if core.Address() == "" {
+			return true
 		}
-		address := s.resolveHealthAddress(entry.core.Address())
+		address := s.resolveHealthAddress(core.Address())
 		lt := result[address]
-		lt.sent += entry.metered.BytesWritten()
-		lt.received += entry.metered.BytesRead()
+		lt.sent += metered.BytesWritten()
+		lt.received += metered.BytesRead()
 		result[address] = lt
-	}
+		return true
+	})
 
 	return result
 }

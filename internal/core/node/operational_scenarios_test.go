@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -58,7 +59,7 @@ func newScenarioSession(
 	s := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: NewMeteredConn(local),
+		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),

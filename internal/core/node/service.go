@@ -24,6 +24,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/service/filerouter"
@@ -61,24 +62,40 @@ type MessageStore interface {
 }
 
 type Service struct {
-	identity              *identity.Identity
-	selfBoxSig            string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
-	cfg                   config.Node
-	trust                 *trustStore
-	mu                    sync.RWMutex
-	peers                 []transport.Peer // dial candidates (typed: Address + Source)
-	known                 map[string]struct{}
-	boxKeys               map[string]string
-	pubKeys               map[string]string
-	boxSigs               map[string]string
-	topics                map[string][]protocol.Envelope
-	receipts              map[string][]protocol.DeliveryReceipt
-	notices               map[string]gazeta.Notice
-	seen                  map[string]struct{}
-	seenReceipts          map[string]struct{}
-	subs                  map[string]map[string]*subscriber
-	sessions              map[domain.PeerAddress]*peerSession
-	health                map[domain.PeerAddress]*peerHealth
+	identity     *identity.Identity
+	selfBoxSig   string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
+	cfg          config.Node
+	trust        *trustStore
+	mu           sync.RWMutex
+	peers        []transport.Peer // dial candidates (typed: Address + Source)
+	known        map[string]struct{}
+	boxKeys      map[string]string
+	pubKeys      map[string]string
+	boxSigs      map[string]string
+	topics       map[string][]protocol.Envelope
+	receipts     map[string][]protocol.DeliveryReceipt
+	notices      map[string]gazeta.Notice
+	seen         map[string]struct{}
+	seenReceipts map[string]struct{}
+	subs         map[string]map[string]*subscriber
+	sessions     map[domain.PeerAddress]*peerSession
+	health       map[domain.PeerAddress]*peerHealth
+	// peerTypes / peerIDs / peerVersions / peerBuilds are persistence caches,
+	// keyed by overlay address, that intentionally outlive the lifetime of any
+	// single net.Conn (see §2.6.10). They record the last-known self-report
+	// from welcome/auth/add_peer so that eviction, gossip, dial scoring,
+	// reverse identity→address lookups (routing_provider.PeerTransport) and
+	// peer.json reload can resolve state for peers that are not currently
+	// connected. They are NOT duplicates of *NetCore state — NetCore owns
+	// transport state for the current conn, these maps own persistence.
+	//
+	// Write-path invariant: every live-conn update that writes to peerIDs
+	// MUST also mirror identity/address onto the associated NetCore via
+	// SetIdentity/SetAddress in the same section (see handleAuthSession for
+	// the inbound mirror; peer_management.go:787–788 / :3307–3308 for the
+	// outbound mirror). Address-only callers (no conn available, e.g.
+	// peer_exchange) update only the map; by-conn readers must tolerate an
+	// empty NetCore.Identity() and fall back to the map.
 	peerTypes             map[domain.PeerAddress]domain.NodeType
 	peerIDs               map[domain.PeerAddress]domain.PeerIdentity
 	peerVersions          map[domain.PeerAddress]string
@@ -155,7 +172,7 @@ type peerSession struct {
 	peerIdentity domain.PeerIdentity // peer's Ed25519 identity fingerprint from welcome.Address
 	connID       uint64              // monotonic connection ID for diagnostics
 	conn         net.Conn
-	metered      *MeteredConn // tracks bytes for this session; nil when conn is not metered
+	metered      *netcore.MeteredConn // tracks bytes for this session; nil when conn is not metered
 	sendCh       chan protocol.Frame
 	inboxCh      chan protocol.Frame
 	errCh        chan error
@@ -168,7 +185,7 @@ type peerSession struct {
 	// before the first peerSessionRequest so that welcome/auth frames go
 	// through the managed writer path. nil only in unit tests that build a
 	// peerSession manually without the service wiring.
-	netCore *NetCore
+	netCore *netcore.NetCore
 
 	// onClose is invoked by Close() before the underlying connection is shut
 	// down. Outbound sessions set it to unregister the netCore from the
@@ -913,7 +930,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	metered := NewMeteredConn(conn)
+	metered := netcore.NewMeteredConn(conn)
 	if !s.registerInboundConn(metered) {
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections").Msg("reject connection")
 		_ = conn.Close()
@@ -1510,27 +1527,19 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 // in syncPeer / routing_integration that intentionally stay on direct
 // io.WriteString — see migration doc 4.4). Inbound and outbound peer
 // sessions are both registered here after PR 2 of checkpoint 9.2.
-func (s *Service) netCoreFor(conn net.Conn) *NetCore {
+func (s *Service) netCoreFor(conn net.Conn) *netcore.NetCore {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry := s.conns[conn]
-	if entry == nil {
-		return nil
-	}
-	return entry.core
+	return s.coreForConnLocked(conn)
 }
 
 // meteredFor returns the MeteredConn wrapper for the given conn, or nil if
 // the conn is not registered or was not wrapped in a MeteredConn (e.g.
 // outbound dials that do not measure bytes).
-func (s *Service) meteredFor(conn net.Conn) *MeteredConn {
+func (s *Service) meteredFor(conn net.Conn) *netcore.MeteredConn {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry := s.conns[conn]
-	if entry == nil {
-		return nil
-	}
-	return entry.metered
+	return s.meteredForConnLocked(conn)
 }
 
 // isInboundTracked returns true when the conn has been promoted via
@@ -1539,17 +1548,11 @@ func (s *Service) meteredFor(conn net.Conn) *MeteredConn {
 func (s *Service) isInboundTracked(conn net.Conn) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry := s.conns[conn]
-	if entry == nil {
-		return false
-	}
-	return entry.tracked
+	return s.isInboundTrackedLocked(conn)
 }
 
-const connWriteTimeout = 30 * time.Second
-
 // connWriter is now replaced by NetCore.writerLoop(). The single writer
-// goroutine per inbound connection is started inside newNetCore() and
+// goroutine per inbound connection is started inside netcore.New() and
 // drains NetCore.sendCh. See net_core.go for sendItem and the implementation.
 
 type enqueueResult int
@@ -1593,25 +1596,23 @@ func (s *Service) enqueueFrame(conn net.Conn, data []byte) enqueueResult {
 	if pc == nil {
 		return enqueueUnregistered
 	}
-	switch st := pc.sendRaw(data); st {
-	case sendOK:
+	switch st := pc.SendRaw(data); st {
+	case netcore.SendOK:
 		return enqueueSent
-	case sendBufferFull:
+	case netcore.SendBufferFull:
 		// Peer too slow — evict by closing the connection.
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
 		_ = conn.Close()
 		return enqueueDropped
-	case sendChanClosed:
+	case netcore.SendChanClosed:
 		// Connection already shutting down, don't close again.
 		return enqueueDropped
 	default:
-		// sendStatusInvalid or any unexpected value — programming error.
-		log.Error().Str("addr", conn.RemoteAddr().String()).Str("status", st.String()).Msg("enqueueFrame: unexpected sendStatus")
+		// netcore.SendStatusInvalid or any unexpected value — programming error.
+		log.Error().Str("addr", conn.RemoteAddr().String()).Str("status", st.String()).Msg("enqueueFrame: unexpected netcore.SendStatus")
 		return enqueueDropped
 	}
 }
-
-const syncFlushTimeout = 5 * time.Second
 
 // enqueueFrameSync sends the serialised bytes to the per-connection writer
 // goroutine via NetCore.sendRawSync and blocks until the writer has handed
@@ -1629,24 +1630,24 @@ func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
 	// that must not be starved by fire-and-forget traffic use the
 	// sendRawSyncBlocking variant via peerSessionRequest — that path
 	// does not reach this helper.
-	switch st := pc.sendRawSync(data); st {
-	case sendOK:
+	switch st := pc.SendRawSync(data); st {
+	case netcore.SendOK:
 		return enqueueSent
-	case sendBufferFull:
+	case netcore.SendBufferFull:
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("send buffer full, disconnecting slow peer")
 		_ = conn.Close()
 		return enqueueDropped
-	case sendTimeout:
+	case netcore.SendTimeout:
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Msg("sync flush timeout, disconnecting peer")
 		_ = conn.Close()
 		return enqueueDropped
-	case sendWriterDone, sendChanClosed:
+	case netcore.SendWriterDone, netcore.SendChanClosed:
 		// Connection already dying — don't close, let handleConn's
 		// deferred cleanup do it.
 		return enqueueDropped
 	default:
-		// sendStatusInvalid or any unexpected value — programming error.
-		log.Error().Str("addr", conn.RemoteAddr().String()).Str("status", st.String()).Msg("enqueueFrameSync: unexpected sendStatus")
+		// netcore.SendStatusInvalid or any unexpected value — programming error.
+		log.Error().Str("addr", conn.RemoteAddr().String()).Str("status", st.String()).Msg("enqueueFrameSync: unexpected netcore.SendStatus")
 		return enqueueDropped
 	}
 }
@@ -1661,7 +1662,7 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	s.mu.RLock()
 	now := time.Now().UTC()
 	var outbound []*peerSession
-	var inbound []*NetCore
+	var inbound []*netcore.NetCore
 
 	// 1. Outbound sessions — preferred path, one writer per session (servePeerSession).
 	//
@@ -1701,23 +1702,20 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	// markPeerConnected. Require health != nil && Connected here too so a
 	// partially-handshaken inbound NetCore cannot receive identity-routed
 	// frames ahead of activation.
-	for _, entry := range s.conns {
-		if entry == nil {
-			continue
-		}
-		pc := entry.core
-		if pc == nil || pc.Dir() != Inbound || pc.Identity() != dst {
-			continue
+	s.forEachInboundConnLocked(func(_ net.Conn, pc *netcore.NetCore) bool {
+		if pc.Identity() != dst {
+			return true
 		}
 		if !pc.HasCapability(requiredCap) {
-			continue
+			return true
 		}
 		health := s.health[s.resolveHealthAddress(pc.Address())]
 		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
-			continue
+			return true
 		}
 		inbound = append(inbound, pc)
-	}
+		return true
+	})
 
 	s.mu.RUnlock()
 
@@ -1745,7 +1743,7 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 		// NetCore writer loop retains the slice after enqueue, so each
 		// candidate gets its own immutable copy.
 		payload := append([]byte(nil), data...)
-		if target.sendRaw(payload) == sendOK {
+		if target.SendRaw(payload) == netcore.SendOK {
 			return true
 		}
 	}
@@ -1807,10 +1805,10 @@ func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueue
 	if session == nil || session.netCore == nil {
 		return enqueueUnregistered
 	}
-	switch st := session.netCore.sendRaw(data); st {
-	case sendOK:
+	switch st := session.netCore.SendRaw(data); st {
+	case netcore.SendOK:
 		return enqueueSent
-	case sendBufferFull:
+	case netcore.SendBufferFull:
 		addr := "unknown"
 		if session.conn != nil {
 			addr = session.conn.RemoteAddr().String()
@@ -1820,14 +1818,14 @@ func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueue
 			_ = session.conn.Close()
 		}
 		return enqueueDropped
-	case sendChanClosed:
+	case netcore.SendChanClosed:
 		return enqueueDropped
 	default:
 		addr := "unknown"
 		if session.conn != nil {
 			addr = session.conn.RemoteAddr().String()
 		}
-		log.Error().Str("addr", addr).Str("status", st.String()).Msg("enqueueSessionFrame: unexpected sendStatus")
+		log.Error().Str("addr", addr).Str("status", st.String()).Msg("enqueueSessionFrame: unexpected netcore.SendStatus")
 		return enqueueDropped
 	}
 }
@@ -2045,6 +2043,17 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 		s.trackInboundConnect(conn, addr, domain.PeerIdentity(verified.Hello.Address))
 		s.addPeerVersion(addr, verified.Hello.ClientVersion)
 		s.addPeerBuild(addr, verified.Hello.ClientBuild)
+
+		// Mirror identity/address onto the NetCore for this conn so that
+		// by-conn readers (e.g. trackInboundDisconnect) can derive identity
+		// from transport state instead of re-reading the address-keyed
+		// persistence cache. See §2.6.10 for the write-path invariant:
+		// every live-conn update of the peerIDs map must also update the
+		// NetCore mirror when a conn is in scope.
+		if pc := s.netCoreFor(conn); pc != nil {
+			pc.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
+			pc.SetAddress(addr)
+		}
 	}
 
 	return reply, true
@@ -2104,7 +2113,7 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 	if pc == nil {
 		return
 	}
-	pc.ApplyOpts(NetCoreOpts{
+	pc.ApplyOpts(netcore.Options{
 		Address:      domain.PeerAddress(addr),
 		Identity:     domain.PeerIdentity(strings.TrimSpace(hello.Address)),
 		LastActivity: time.Now().UTC(),
@@ -2133,8 +2142,8 @@ func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
 // connection for the same address is already tracked.
 func (s *Service) trackedInboundPeerAddress(conn net.Conn) domain.PeerAddress {
 	s.mu.RLock()
-	entry := s.conns[conn]
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
+	entry := s.connEntryForLocked(conn)
 	if entry == nil || !entry.tracked || entry.core == nil {
 		return ""
 	}
@@ -2152,9 +2161,7 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
 	s.inboundHealthRefs[resolved]++
-	if e := s.conns[conn]; e != nil {
-		e.tracked = true
-	}
+	s.setTrackedLocked(conn, true)
 	s.mu.Unlock()
 
 	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
@@ -2196,13 +2203,26 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 // health entries for unauthenticated connections.
 func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddress) {
 	s.mu.Lock()
-	var wasTracked bool
-	if e := s.conns[conn]; e != nil {
-		wasTracked = e.tracked
-		e.tracked = false
+	var (
+		wasTracked   bool
+		peerIdentity domain.PeerIdentity
+	)
+	if entry := s.connEntryForLocked(conn); entry != nil {
+		wasTracked = entry.tracked
+		s.setTrackedLocked(conn, false)
+		// Prefer NetCore as the source of truth for transport-level identity
+		// (§2.6.10): it is updated in the inbound auth mirror next to the
+		// peerIDs map write. Fallback to the persistence cache below keeps
+		// behaviour for paths that never call SetIdentity on the NetCore
+		// (auth-not-required, legacy tests that bypass the inbound-auth path).
+		if entry.core != nil {
+			peerIdentity = entry.core.Identity()
+		}
 	}
 	resolved := s.resolveHealthAddress(address)
-	peerIdentity := s.peerIDs[resolved]
+	if peerIdentity == "" {
+		peerIdentity = s.peerIDs[resolved]
+	}
 	var last bool
 	if wasTracked && s.inboundHealthRefs[resolved] > 0 {
 		s.inboundHealthRefs[resolved]--
@@ -3293,13 +3313,7 @@ func (s *Service) fetchDeliveryReceiptsFrame(recipient string) protocol.Frame {
 // attachOutboundNetCore) are not counted — the inbound cap only governs
 // incoming TCP acceptance. Caller must hold s.mu at least for read.
 func (s *Service) countInboundConnsLocked() int {
-	n := 0
-	for _, e := range s.conns {
-		if e != nil && e.core != nil && e.core.Dir() == Inbound {
-			n++
-		}
-	}
-	return n
+	return s.inboundConnCountLocked()
 }
 
 func (s *Service) registerInboundConn(conn net.Conn) bool {
@@ -3312,16 +3326,16 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 	}
 
 	s.connIDCounter++
-	pc := newNetCore(connID(s.connIDCounter), conn, Inbound, NetCoreOpts{})
+	pc := netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{})
 	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && addr.IP.IsLoopback() {
 		pc.SetLocal(true)
 	}
 
-	entry := &connEntry{core: pc}
-	if mc, ok := conn.(*MeteredConn); ok {
-		entry.metered = mc
+	var mc *netcore.MeteredConn
+	if metered, ok := conn.(*netcore.MeteredConn); ok {
+		mc = metered
 	}
-	s.conns[conn] = entry
+	s.registerInboundConnLocked(conn, pc, mc)
 	return true
 }
 
@@ -3335,18 +3349,18 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 // and auth frames are routed through the managed single-writer path instead
 // of raw io.WriteString. This is the Phase 1 gate C1 — all outbound writes
 // share the same back-pressure and deadline discipline as inbound.
-func (s *Service) attachOutboundNetCore(session *peerSession) *NetCore {
-	pc := newNetCore(connID(session.connID), session.conn, Outbound, NetCoreOpts{})
+func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
+	pc := netcore.New(netcore.ConnID(session.connID), session.conn, netcore.Outbound, netcore.Options{})
 
 	s.mu.Lock()
-	s.conns[session.conn] = &connEntry{core: pc}
+	s.attachOutboundCoreLocked(session.conn, pc)
 	s.mu.Unlock()
 
 	session.netCore = pc
 	conn := session.conn
 	session.onClose = func() {
 		s.mu.Lock()
-		delete(s.conns, conn)
+		s.unregisterConnLocked(conn)
 		s.mu.Unlock()
 	}
 	return pc
@@ -3354,8 +3368,8 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *NetCore {
 
 func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.mu.Lock()
-	entry := s.conns[conn]
-	delete(s.conns, conn)
+	entry := s.connEntryForLocked(conn)
+	s.unregisterConnLocked(conn)
 	s.mu.Unlock()
 
 	// NetCore.Close() handles the full shutdown sequence:
@@ -3376,13 +3390,11 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 // before connWg.Wait().
 func (s *Service) closeAllInboundConns() {
 	s.mu.Lock()
-	inbound := make([]net.Conn, 0, len(s.conns))
-	for c, e := range s.conns {
-		if e == nil || e.core == nil || e.core.Dir() != Inbound {
-			continue
-		}
-		inbound = append(inbound, c)
-	}
+	inbound := make([]net.Conn, 0)
+	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+		inbound = append(inbound, conn)
+		return true
+	})
 	s.mu.Unlock()
 
 	for _, c := range inbound {

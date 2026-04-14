@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -146,7 +147,7 @@ func TestConnHasCapability(t *testing.T) {
 		conns: make(map[net.Conn]*connEntry),
 	}
 
-	pc := newNetCore(connID(1), serverConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("10.0.0.1:64646"),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1},
 	})
@@ -172,7 +173,7 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 		conns: make(map[net.Conn]*connEntry),
 	}
 
-	pc := newNetCore(connID(1), serverConn, Inbound, NetCoreOpts{})
+	pc := netcore.New(netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{})
 	svc.conns[serverConn] = &connEntry{core: pc}
 
 	hello := protocol.Frame{

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
@@ -34,7 +35,7 @@ func attachTestNetCore(_ *Service, session *peerSession) {
 	if session == nil || session.conn == nil || session.netCore != nil {
 		return
 	}
-	session.netCore = newNetCore(connID(1), session.conn, Outbound, NetCoreOpts{})
+	session.netCore = netcore.New(netcore.ConnID(1), session.conn, netcore.Outbound, netcore.Options{})
 }
 
 // newSyncTestService creates a minimal Service for testing syncPeerSession().
@@ -104,7 +105,7 @@ func TestSyncPeerSession_RequestPeersTrue(t *testing.T) {
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: NewMeteredConn(local),
+		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
@@ -178,7 +179,7 @@ func TestSyncPeerSession_RequestPeersFalse(t *testing.T) {
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: NewMeteredConn(local),
+		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
@@ -250,7 +251,7 @@ func TestSyncPeerSession_SkipDoesNotEmitNewPeersDiscovered(t *testing.T) {
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: NewMeteredConn(local),
+		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),
@@ -314,7 +315,7 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: NewMeteredConn(local),
+		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan protocol.Frame, 16),

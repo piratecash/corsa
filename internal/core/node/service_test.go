@@ -23,6 +23,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
@@ -6948,7 +6949,7 @@ func TestConnectedHostsLocked(t *testing.T) {
 	// (PR 9.4a) distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by
 	// connectedHostsLocked's direction filter.
-	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
 	svc.conns[server] = &connEntry{core: pc}
@@ -7012,7 +7013,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	// (PR 9.4a) distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by the
 	// direction filter in connectedHostsLocked.
-	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
 	svc.conns[server] = &connEntry{core: pc}
@@ -7160,6 +7161,138 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	}
 }
 
+// TestTrackInboundDisconnect_PrefersNetCoreIdentity verifies the §2.6.10
+// by-conn reader migration: trackInboundDisconnect emits the InboundClosed
+// hint with the identity taken from the NetCore mirror instead of the
+// address-keyed persistence cache when both are set to different values.
+// The persistence cache remains as fallback for paths that never stamp
+// SetIdentity on the NetCore (auth-not-required, legacy test paths).
+//
+// TRANSLATION (RU): проверяет миграцию by-conn reader'а из §2.6.10:
+// trackInboundDisconnect публикует InboundClosed hint с идентичностью из
+// NetCore mirror, а не из address-keyed persistence-кэша, когда оба
+// установлены в разные значения. Persistence-кэш остаётся fallback'ом для
+// путей, которые не штампуют SetIdentity на NetCore.
+func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	// Attach a CM with the emit gate open but no event loop running so the
+	// hint sits in hintEvents until the test drains it.
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		MaxSlotsFn: func() int { return 4 },
+		NowFn:      func() time.Time { return time.Now() },
+	})
+	cm.accepting.Store(1)
+	svc.connManager = cm
+
+	peer := domain.PeerAddress("10.0.0.7:64646")
+
+	connA, connB := net.Pipe()
+	defer func() { _ = connA.Close() }()
+	defer func() { _ = connB.Close() }()
+
+	if !svc.registerInboundConn(connA) {
+		t.Fatalf("registerInboundConn failed")
+	}
+
+	// Set the NetCore mirror and the persistence cache to different values
+	// so the test can unambiguously attribute which source was used.
+	netcoreIdentity := domain.PeerIdentity("netcore-mirror-identity")
+	mapIdentity := domain.PeerIdentity("persistence-cache-identity")
+
+	svc.mu.Lock()
+	if e := svc.conns[connA]; e != nil && e.core != nil {
+		e.core.SetIdentity(netcoreIdentity)
+	}
+	svc.peerIDs[peer] = mapIdentity
+	svc.mu.Unlock()
+
+	svc.trackInboundConnect(connA, peer, mapIdentity)
+	svc.trackInboundDisconnect(connA, peer)
+
+	select {
+	case hint := <-cm.hintEvents:
+		closed, ok := hint.(InboundClosed)
+		if !ok {
+			t.Fatalf("expected InboundClosed hint, got %T", hint)
+		}
+		if closed.Identity != netcoreIdentity {
+			t.Fatalf("expected hint identity from NetCore mirror (%q), got %q", netcoreIdentity, closed.Identity)
+		}
+	default:
+		t.Fatal("expected InboundClosed hint in hintEvents, channel was empty")
+	}
+}
+
+// TestTrackInboundDisconnect_FallsBackToPeerIDsMap verifies that when the
+// NetCore identity is empty (e.g. a path that never called SetIdentity on
+// the conn), trackInboundDisconnect falls back to the address-keyed
+// persistence cache. This is the safety net documented in §2.6.10 and is
+// what prevents a regression in auth-not-required flows and legacy tests.
+//
+// TRANSLATION (RU): проверяет fallback на persistence-кэш, когда NetCore
+// identity пуст. Это safety-net из §2.6.10, защищающий auth-not-required
+// и тест-пути, обходящие inbound-auth.
+func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+	})
+	defer stop()
+
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		MaxSlotsFn: func() int { return 4 },
+		NowFn:      func() time.Time { return time.Now() },
+	})
+	cm.accepting.Store(1)
+	svc.connManager = cm
+
+	peer := domain.PeerAddress("10.0.0.8:64646")
+
+	connA, connB := net.Pipe()
+	defer func() { _ = connA.Close() }()
+	defer func() { _ = connB.Close() }()
+
+	if !svc.registerInboundConn(connA) {
+		t.Fatalf("registerInboundConn failed")
+	}
+
+	// Deliberately do NOT call SetIdentity on the NetCore — only populate
+	// the persistence cache so the fallback path is exercised.
+	mapIdentity := domain.PeerIdentity("fallback-map-identity")
+	svc.mu.Lock()
+	svc.peerIDs[peer] = mapIdentity
+	svc.mu.Unlock()
+
+	svc.trackInboundConnect(connA, peer, mapIdentity)
+	svc.trackInboundDisconnect(connA, peer)
+
+	select {
+	case hint := <-cm.hintEvents:
+		closed, ok := hint.(InboundClosed)
+		if !ok {
+			t.Fatalf("expected InboundClosed hint, got %T", hint)
+		}
+		if closed.Identity != mapIdentity {
+			t.Fatalf("expected hint identity from persistence cache (%q), got %q", mapIdentity, closed.Identity)
+		}
+	default:
+		t.Fatal("expected InboundClosed hint in hintEvents, channel was empty")
+	}
+}
+
 // TestInboundDedup uses transport-level IP not overlay address.
 // A peer advertising "1.2.3.4:64646" but connecting from 127.0.0.1
 // should reserve 127.0.0.1 in the connected hosts set.
@@ -7198,7 +7331,7 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 
 	svc.mu.Lock()
 	// Register inbound connection + peer info with a different overlay address.
-	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
 	})
 	svc.conns[server] = &connEntry{core: pc}
@@ -8080,7 +8213,7 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 	// Register as inbound connection with per-connection lastActivity
 	// old enough to be considered stale.
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address:      peerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
@@ -8144,7 +8277,7 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 	peerAddr := domain.PeerAddress("10.0.0.88:64646")
 
 	svc.mu.Lock()
-	pc := newNetCore(connID(1), server, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address:      peerAddr,
 		LastActivity: time.Now(), // recent activity — should not be evicted
 	})
@@ -8210,7 +8343,7 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	for c := range svc.conns {
 		delete(svc.conns, c)
 	}
-	pc := newNetCore(connID(1), server1, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(1), server1, netcore.Inbound, netcore.Options{
 		Address:      stalledPeerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
@@ -8489,7 +8622,7 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	defer func() { _ = staleConn.Close() }()
 	defer func() { _ = staleRemote.Close() }()
 	svc.mu.Lock()
-	pc := newNetCore(connID(99), staleConn, Inbound, NetCoreOpts{
+	pc := netcore.New(netcore.ConnID(99), staleConn, netcore.Inbound, netcore.Options{
 		Address:  peerAddr,
 		Identity: domain.PeerIdentity("stale-identity"),
 	})
