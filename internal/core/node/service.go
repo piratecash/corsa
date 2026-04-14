@@ -174,10 +174,16 @@ type Service struct {
 	fileRouter   *filerouter.Router      // routing file commands through the mesh
 }
 
+// subscriber describes an active subscribe_inbox registration or a hello-
+// derived node route. The owning connection is identified by connID so that
+// subscriber state survives independently of net.Conn identity and can be
+// resolved through the ConnID-first registry (netCoreForID). The
+// net.Conn-first write path remains available via netCoreForID(connID).Conn()
+// until PR 10.6 migrates the write wrappers.
 type subscriber struct {
-	id        string
-	recipient string
-	conn      net.Conn
+	id        string        // logical subscription ID (frame.Subscriber or derived)
+	recipient string        // recipient identity/address this subscription serves
+	connID    domain.ConnID // owning connection ID (0 when not tied to a live conn)
 }
 
 type peerSession struct {
@@ -950,12 +956,13 @@ func (s *Service) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	// Resolve ConnID once at the entry boundary — after a successful
-	// registerInboundConn the id is guaranteed to exist. The captured
-	// value is used by ConnID-first call sites below (clearConnAuth).
-	// Downstream helpers that still take net.Conn will migrate in
-	// subsequent PRs.
+	// Resolve ConnID and NetCore once at the entry boundary — after a
+	// successful registerInboundConn both mappings are guaranteed to
+	// exist. The captured values are plumbed through the read loop and
+	// frame dispatch (PR 10.3b). The remaining net.Conn-first helpers
+	// (write wrappers, I/O carve-outs) are reached via core.Conn().
 	connID, _ := s.connIDFor(metered)
+	core := s.netCoreForID(connID)
 	defer func() {
 		if addr := s.inboundPeerAddress(connID); addr != "" {
 			s.trackInboundDisconnect(connID, addr)
@@ -968,7 +975,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		// error, letting the writer exit promptly.
 		_ = metered.Close()
 		s.unregisterInboundConn(metered)
-		s.removeSubscriberConn(metered)
+		s.removeSubscriberConnID(connID)
 		s.clearConnAuth(connID)
 	}()
 
@@ -1030,7 +1037,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			return
 		}
 
-		if !s.handleCommand(conn, strings.TrimSpace(line)) {
+		if !s.handleCommand(connID, core, strings.TrimSpace(line)) {
 			return
 		}
 
@@ -1043,7 +1050,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		if heartbeatStop == nil {
 			if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 				heartbeatStop = make(chan struct{})
-				if core := s.netCoreForID(connID); core != nil {
+				if core != nil {
 					go s.inboundHeartbeat(connID, core, addr, heartbeatStop)
 				} else {
 					close(heartbeatStop)
@@ -1054,27 +1061,58 @@ func (s *Service) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *Service) handleCommand(conn net.Conn, line string) bool {
+// handleCommand validates that the incoming line is JSON framing and then
+// delegates to dispatchNetworkFrame. ConnID-first (PR 10.3b); the net.Conn
+// bridge for write wrappers is resolved from core.Conn().
+func (s *Service) handleCommand(connID domain.ConnID, core *netcore.NetCore, line string) bool {
 	if !protocol.IsJSONLine(line) {
+		addr := ""
+		if core != nil {
+			addr = core.RemoteAddr()
+		}
 		log.Debug().
 			Str("protocol", "json/tcp").
-			Str("addr", conn.RemoteAddr().String()).
+			Str("addr", addr).
 			Str("direction", "recv").
 			Str("command", "non-json").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+		if core != nil {
+			if conn := core.Conn(); conn != nil {
+				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+			}
+		}
 		return false
 	}
-	return s.dispatchNetworkFrame(conn, line)
+	return s.dispatchNetworkFrame(connID, core, line)
 }
 
-func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
+// dispatchNetworkFrame parses and dispatches an inbound wire frame.
+// ConnID-first (PR 10.3b): callers resolve id and core once at handleConn
+// and pass them through; every ID-based helper (touchConnActivity,
+// connHasCapability, addBanScore, …) is reached by id, and the net.Conn
+// handle is taken from core.Conn() as a bridge for write wrappers until
+// PR 10.6 migrates them.
+func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCore, line string) bool {
+	// Bridge: write wrappers, remoteIP() and the reader-side defer log still
+	// need a net.Conn. We resolve it once up-front from core so that no
+	// downstream branch re-fetches it. A nil conn is treated as a torn-down
+	// connection — we cannot write a reply, so all branches bail out.
+	var conn net.Conn
+	addr := ""
+	if core != nil {
+		conn = core.Conn()
+		addr = core.RemoteAddr()
+	}
+	if conn == nil {
+		return false
+	}
+
 	frame, err := protocol.ParseFrameLine(line)
 	if err != nil {
 		log.Debug().
 			Str("protocol", "json/tcp").
-			Str("addr", conn.RemoteAddr().String()).
+			Str("addr", addr).
 			Str("direction", "recv").
 			Str("command", "").
 			Bool("accepted", false).
@@ -1090,27 +1128,19 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 	// send_message, etc.) are not handled here at all — they live
 	// exclusively in handleLocalFrameDispatch / RPC HTTP.
 	//
-	// The role is derived from server-side auth state (ConnAuthState),
-	// never from frame.Client which the attacker controls — eliminating
-	// GAP-0.
+	// The role is derived from server-side auth state, never from
+	// frame.Client which the attacker controls — eliminating GAP-0.
 
 	accepted := true
 	defer func() {
 		log.Debug().
 			Str("protocol", "json/tcp").
-			Str("addr", conn.RemoteAddr().String()).
+			Str("addr", addr).
 			Str("direction", "recv").
 			Str("command", frame.Type).
 			Bool("accepted", accepted).
 			Msg("protocol_trace")
 	}()
-
-	// Resolve ConnID once at the entry boundary for ConnID-first helpers
-	// used below (isAuthInitiated, rememberConnPeerAddr, isConnAuthenticated,
-	// touchConnActivity, connHasCapability, addBanScore, inboundPeerIdentity,
-	// connPeerReachableGroups). If the connection is not registered, connID
-	// stays zero and every ByID helper returns its safe default (nil/false).
-	connID, _ := s.connIDFor(conn)
 
 	// Update per-connection last activity timestamp for staleness checks.
 	s.touchConnActivity(connID)
@@ -1152,7 +1182,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		}
 		if err := validateProtocolHandshake(frame); err != nil {
 			accepted = false
-			log.Warn().Err(err).Str("addr", conn.RemoteAddr().String()).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
+			log.Warn().Err(err).Str("addr", addr).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
 			_ = s.writeJSONFrame(conn, protocol.Frame{
 				Type:                   "error",
 				Code:                   protocol.ErrCodeIncompatibleProtocol,
@@ -1185,7 +1215,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 				_ = s.writeJSONFrameSync(conn, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
-			s.SetConnAuthState(conn, authState)
+			s.setConnAuthStateByID(connID, authState)
 			s.rememberConnPeerAddr(connID, frame)
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
@@ -1200,12 +1230,12 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		s.rememberConnPeerAddr(connID, frame)
 		log.Debug().
 			Str("client", frame.Client).
-			Str("addr", conn.RemoteAddr().String()).
+			Str("addr", addr).
 			Msg("hello_without_identity_fields")
 		_ = s.writeJSONFrame(conn, s.welcomeFrame("", remoteIP(conn.RemoteAddr())))
 		return true
 	case "auth_session":
-		reply, ok := s.handleAuthSession(conn, frame)
+		reply, ok := s.handleAuthSession(connID, frame)
 		if !ok {
 			accepted = false
 			_ = s.writeJSONFrameSync(conn, reply)
@@ -1264,7 +1294,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		_ = s.writeJSONFrame(conn, s.contactsFrame())
 		return true
 	case "ack_delete":
-		reply, ok := s.handleAckDeleteFrame(conn, frame)
+		reply, ok := s.handleAckDeleteFrame(connID, frame)
 		if !ok {
 			accepted = false
 			_ = s.writeJSONFrameSync(conn, reply)
@@ -1289,7 +1319,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			s.addBanScore(connID, banIncrementInvalidSig)
 			return true
 		}
-		reply, sub := s.subscribeInboxFrame(conn, frame)
+		reply, sub := s.subscribeInboxFrame(connID, core, frame)
 		_ = s.writeJSONFrame(conn, reply)
 		if sub != nil {
 			go s.pushBacklogToSubscriber(sub)
@@ -1315,10 +1345,10 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		log.Info().Str("recipient", frame.Recipient).Str("subscriber", frame.Subscriber).Msg("reverse subscription confirmed by outbound peer")
 		return true
 	case "push_message":
-		s.handleInboundPushMessage(conn, frame)
+		s.handleInboundPushMessage(connID, frame)
 		return true
 	case "push_delivery_receipt":
-		s.handleInboundPushDeliveryReceipt(conn, frame)
+		s.handleInboundPushDeliveryReceipt(connID, frame)
 		return true
 	case "relay_delivery_receipt":
 		// Gossip receipt path: a peer forwards a delivery receipt via
@@ -1330,7 +1360,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 		//
 		// Deliberately separated from "send_delivery_receipt" (local-only
 		// RPC command) to maintain the command-isolation boundary.
-		s.handleInboundRelayDeliveryReceipt(conn, frame)
+		s.handleInboundRelayDeliveryReceipt(connID, frame)
 		return true
 	case "push_notice":
 		s.handleInboundPushNotice(frame)
@@ -2085,17 +2115,17 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 // learning, route registration, peer announcement, health tracking).
 //
 // Ban scoring for invalid signatures is applied here because it depends on
-// the connection rate limiter which lives in Service.
-func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
-	// PR 10.3a — addBanScore / touchConnActivity / connHasCapability / etc.
-	// are ConnID-first. handleAuthSession itself stays net.Conn-first until
-	// PR 10.3b migrates dispatch + auth surface together. Resolve id locally.
-	connID, _ := s.connIDFor(conn)
-	state := s.ConnAuthState(conn)
+// the connection rate limiter which lives in Service. Signature is
+// ConnID-first (PR 10.3b); auth state is read/written through the
+// ByID primary helpers, and the net.Conn handle is resolved from the
+// NetCore only where downstream APIs still require it (registerHelloRoute
+// and learnPeerFromFrame's addr-string argument).
+func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (protocol.Frame, bool) {
+	state := s.connAuthStateByID(id)
 	verified, reply, ok := connauth.VerifyAuthSession(state, frame)
 	if !ok {
 		if reply.Code == protocol.ErrCodeInvalidAuthSignature {
-			s.addBanScore(connID, banIncrementInvalidSig)
+			s.addBanScore(id, banIncrementInvalidSig)
 		}
 		return reply, false
 	}
@@ -2104,10 +2134,21 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 		return reply, true
 	}
 
-	s.SetConnAuthState(conn, verified)
+	s.setConnAuthStateByID(id, verified)
 
-	s.learnPeerFromFrame(conn.RemoteAddr().String(), verified.Hello)
-	s.registerHelloRoute(conn, verified.Hello)
+	// NetCore owns the remote address string for this connection after
+	// registration; fall back to an empty remote address string only when
+	// the connection is not (yet) registered, which keeps the downstream
+	// learnPeerFromFrame path safe.
+	core := s.netCoreForID(id)
+	remoteAddr := ""
+	if core != nil {
+		remoteAddr = core.RemoteAddr()
+	}
+	s.learnPeerFromFrame(remoteAddr, verified.Hello)
+	// registerHelloRoute is ConnID-first (PR 10.3b/G1); it silently no-ops
+	// when core is nil or the hello's Client field is not "node".
+	s.registerHelloRoute(id, core, verified.Hello)
 
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
@@ -2116,10 +2157,7 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 		go s.announcePeerToSessions(addr, verified.Hello.NodeType)
 	}
 
-	// connID resolved at the top of handleAuthSession (PR 10.3a) —
-	// reuse it for tracking helpers below. handleAuthSession stays
-	// net.Conn-first until PR 10.3b migrates frame dispatch + auth together.
-	if addr := s.inboundPeerAddress(connID); addr != "" {
+	if addr := s.inboundPeerAddress(id); addr != "" {
 		// Log duplicate but allow: see the hello-path comment for the
 		// full rationale — rejecting breaks one-way gossip when both
 		// sides dial simultaneously.
@@ -2127,25 +2165,21 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
 		s.addPeerID(addr, domain.PeerIdentity(verified.Hello.Address))
-		s.trackInboundConnect(connID, addr, domain.PeerIdentity(verified.Hello.Address))
+		s.trackInboundConnect(id, addr, domain.PeerIdentity(verified.Hello.Address))
 		s.addPeerVersion(addr, verified.Hello.ClientVersion)
 		s.addPeerBuild(addr, verified.Hello.ClientBuild)
 
-		// Mirror identity/address onto the NetCore for this conn so that
-		// by-conn readers (e.g. trackInboundDisconnect) can derive identity
-		// from transport state instead of re-reading the address-keyed
-		// persistence cache. Write-path invariant: every live-conn update
-		// of the peerIDs map must also update the NetCore mirror when a
-		// conn is in scope, so the two sources cannot diverge mid-session.
-		// The precedence of NetCore over peerIDs on the teardown path is
-		// pinned by TestTrackInboundDisconnect_PrefersNetCoreIdentity and
-		// the peerIDs fallback branch by
-		// TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
-		if id, ok := s.connIDFor(conn); ok {
-			if pc := s.netCoreForID(id); pc != nil {
-				pc.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
-				pc.SetAddress(addr)
-			}
+		// Mirror identity/address onto the NetCore so that by-conn readers
+		// (trackInboundDisconnect) can derive identity from transport state
+		// instead of re-reading the address-keyed persistence cache.
+		// Invariant: every live-conn update of peerIDs must also update the
+		// NetCore mirror so the two sources cannot diverge mid-session.
+		// Precedence of NetCore over peerIDs is pinned by
+		// TestTrackInboundDisconnect_PrefersNetCoreIdentity and the peerIDs
+		// fallback branch by TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
+		if core != nil {
+			core.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
+			core.SetAddress(addr)
 		}
 	}
 
@@ -2820,7 +2854,12 @@ func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol
 	}
 }
 
-func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, *subscriber) {
+// subscribeInboxFrame registers a live subscriber for the recipient carried
+// by the frame and returns the acknowledgement plus the created subscriber
+// so the caller can push the backlog. ConnID-first (PR 10.3b/G1): the owning
+// connection is addressed by its NetCore; the remote address string used as
+// a fallback subscriber id is taken from core.RemoteAddr().
+func (s *Service) subscribeInboxFrame(connID domain.ConnID, core *netcore.NetCore, frame protocol.Frame) (protocol.Frame, *subscriber) {
 	topic := strings.TrimSpace(frame.Topic)
 	recipient := strings.TrimSpace(frame.Recipient)
 	if topic != "dm" || recipient == "" {
@@ -2828,22 +2867,22 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) (prot
 	}
 
 	subID := strings.TrimSpace(frame.Subscriber)
-	if subID == "" {
-		subID = conn.RemoteAddr().String()
+	if subID == "" && core != nil {
+		subID = core.RemoteAddr()
 	}
 
 	s.mu.Lock()
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
-	s.removeSubscriberConnLocked(recipient, conn)
+	s.removeSubscriberConnIDLocked(recipient, connID)
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
 	sub := &subscriber{
 		id:        subID,
 		recipient: recipient,
-		conn:      conn,
+		connID:    connID,
 	}
 	s.subs[recipient][subID] = sub
 	count := len(s.subs[recipient])
@@ -2860,7 +2899,13 @@ func (s *Service) subscribeInboxFrame(conn net.Conn, frame protocol.Frame) (prot
 	}, sub
 }
 
-func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
+// registerHelloRoute installs a synthetic "node-route" subscriber that
+// forwards pushes for the node's own address back through the inbound
+// connection. ConnID-first (PR 10.3b/G1): the owning connection is
+// addressed through its NetCore; the remote address string that seeds the
+// subscriber id is taken from core.RemoteAddr() and no longer round-trips
+// through net.Conn.
+func (s *Service) registerHelloRoute(connID domain.ConnID, core *netcore.NetCore, frame protocol.Frame) {
 	if strings.TrimSpace(frame.Client) != "node" {
 		return
 	}
@@ -2869,8 +2914,10 @@ func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
 	if recipient == "" {
 		return
 	}
-
-	subID := "node-route:" + conn.RemoteAddr().String()
+	if core == nil {
+		return
+	}
+	subID := "node-route:" + core.RemoteAddr()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2878,31 +2925,36 @@ func (s *Service) registerHelloRoute(conn net.Conn, frame protocol.Frame) {
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
-	s.removeSubscriberConnLocked(recipient, conn)
+	s.removeSubscriberConnIDLocked(recipient, connID)
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
 
 	existing, exists := s.subs[recipient][subID]
-	if exists && existing.conn == conn {
+	if exists && existing.connID == connID && connID != 0 {
 		return
 	}
 
 	s.subs[recipient][subID] = &subscriber{
 		id:        subID,
 		recipient: recipient,
-		conn:      conn,
+		connID:    connID,
 	}
 	log.Debug().Str("recipient", recipient).Str("subscriber", subID).Int("active", len(s.subs[recipient])).Msg("route_via_hello")
 }
 
-func (s *Service) removeSubscriberConnLocked(recipient string, conn net.Conn) {
-	if recipient == "" || conn == nil {
+// removeSubscriberConnIDLocked removes every subscriber under the given
+// recipient bucket whose connID matches the supplied value. A zero connID is
+// treated as "no live connection" and never matches, so callers resolving an
+// unregistered conn via connIDFor will not accidentally strip unrelated
+// synthetic subscribers.
+func (s *Service) removeSubscriberConnIDLocked(recipient string, connID domain.ConnID) {
+	if recipient == "" || connID == 0 {
 		return
 	}
 	subs := s.subs[recipient]
 	for id, sub := range subs {
-		if sub != nil && sub.conn == conn {
+		if sub != nil && sub.connID == connID {
 			delete(subs, id)
 		}
 	}
@@ -2985,9 +3037,13 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 	return protocol.Frame{Type: "receipt_stored", Recipient: receipt.Recipient, Count: count, ID: string(receipt.MessageID)}
 }
 
-func (s *Service) handleAckDeleteFrame(conn net.Conn, frame protocol.Frame) (protocol.Frame, bool) {
-	id, ok := s.connIDFor(conn)
-	if !ok {
+// handleAckDeleteFrame validates an ack_delete frame against the authenticated
+// peer's identity, applies the backlog deletion, and returns the reply.
+// ConnID-first (PR 10.3b/G1): the caller resolved the id at dispatch; an
+// unregistered id (0) drops through to auth_required because
+// authenticatedAddressForConn returns ok=false.
+func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (protocol.Frame, bool) {
+	if id == 0 {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
 	}
 	hello, ok := s.authenticatedAddressForConn(id)
@@ -3930,7 +3986,7 @@ func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerI
 //     the relay peer itself, this node, or a peer whose public key was
 //     previously exchanged through the identity protocol. Unverified
 //     senders are rejected and the relay peer's ban score is incremented.
-func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) {
+func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.Frame) {
 	if frame.Item == nil {
 		return
 	}
@@ -3949,7 +4005,6 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 		return
 	}
 
-	connID, _ := s.connIDFor(conn)
 	peerAddr := s.inboundPeerAddress(connID)
 	peerIdentity := s.inboundPeerIdentity(connID)
 
@@ -3999,8 +4054,10 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 		// remote peer connected to us but we haven't dialed them back.
 		if session := s.peerSession(peerAddr); session != nil && session.authOK {
 			s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
-		} else {
-			s.sendAckDeleteOnConn(conn, "dm", msg.ID, "")
+		} else if core := s.netCoreForID(connID); core != nil {
+			if c := core.Conn(); c != nil {
+				s.sendAckDeleteOnConn(c, "dm", msg.ID, "")
+			}
 		}
 	} else if !stored {
 		log.Warn().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", string(peerIdentity)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed")
@@ -4018,7 +4075,7 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 // we actively subscribe to via the inbound peer. Without this check an
 // authenticated peer could push a receipt with arbitrary Sender/Recipient and
 // corrupt the delivery state for a conversation it does not participate in.
-func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol.Frame) {
+func (s *Service) handleInboundPushDeliveryReceipt(connID domain.ConnID, frame protocol.Frame) {
 	if frame.Receipt == nil {
 		return
 	}
@@ -4027,7 +4084,6 @@ func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol
 		return
 	}
 
-	connID, _ := s.connIDFor(conn)
 	peerAddr := s.inboundPeerAddress(connID)
 
 	// Identity gate: accept only receipts whose Recipient matches our own
@@ -4047,8 +4103,10 @@ func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol
 	s.storeDeliveryReceipt(receipt)
 	if session := s.peerSession(peerAddr); session != nil && session.authOK {
 		s.sendAckDeleteToPeer(peerAddr, "receipt", receipt.MessageID, receipt.Status)
-	} else {
-		s.sendAckDeleteOnConn(conn, "receipt", receipt.MessageID, receipt.Status)
+	} else if core := s.netCoreForID(connID); core != nil {
+		if c := core.Conn(); c != nil {
+			s.sendAckDeleteOnConn(c, "receipt", receipt.MessageID, receipt.Status)
+		}
 	}
 	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound)")
 }
@@ -4068,13 +4126,12 @@ func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol
 // Without this, any authenticated peer could inject a forged receipt and
 // advance another conversation's delivery state via storeDeliveryReceipt
 // (which clears pending outbound state and updates MessageStore).
-func (s *Service) handleInboundRelayDeliveryReceipt(conn net.Conn, frame protocol.Frame) {
+func (s *Service) handleInboundRelayDeliveryReceipt(connID domain.ConnID, frame protocol.Frame) {
 	receipt, err := receiptFromFrame(frame)
 	if err != nil {
 		return
 	}
 
-	connID, _ := s.connIDFor(conn)
 	peerAddr := s.inboundPeerAddress(connID)
 
 	if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
@@ -4188,9 +4245,24 @@ func (s *Service) hasSubscriber(recipient string) bool {
 func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	defer crashlog.DeferRecover()
 
+	// Resolve the owning connection through the ConnID registry. If the
+	// subscriber's connection has already been unregistered, drop the
+	// subscriber and bail out — the message is safe in s.topics and will be
+	// delivered through backlog on the next subscribe_inbox.
+	core := s.netCoreForID(sub.connID)
+	if core == nil {
+		s.removeSubscriberByID(sub.recipient, sub.id)
+		return
+	}
+	conn := core.Conn()
+	if conn == nil {
+		s.removeSubscriberByID(sub.recipient, sub.id)
+		return
+	}
+
 	log.Debug().
 		Str("protocol", "json/tcp").
-		Str("addr", sub.conn.RemoteAddr().String()).
+		Str("addr", core.RemoteAddr()).
 		Str("direction", "send").
 		Str("command", frame.Type).
 		Bool("accepted", true).
@@ -4200,19 +4272,27 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	if err != nil {
 		return
 	}
-	if s.enqueueFrame(sub.conn, []byte(line)) != enqueueSent {
+	// Bridge to the net.Conn-first write wrapper; PR 10.6 migrates
+	// enqueueFrame to a ConnID-first signature and removes this lookup.
+	if s.enqueueFrame(conn, []byte(line)) != enqueueSent {
 		// Connection unregistered or send buffer full — remove stale subscriber.
 		s.removeSubscriberByID(sub.recipient, sub.id)
 	}
 }
 
-func (s *Service) removeSubscriberConn(conn net.Conn) {
+// removeSubscriberConnID removes every subscriber owned by the given
+// connection. The lifecycle caller (handleConn teardown defer) resolves the
+// ConnID once up-front because removeSubscriberConnID runs after
+// unregisterInboundConn has already stripped the conn→ID mapping.
+func (s *Service) removeSubscriberConnID(connID domain.ConnID) {
+	if connID == 0 {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	for recipient, group := range s.subs {
 		for id, sub := range group {
-			if sub.conn == conn {
+			if sub != nil && sub.connID == connID {
 				delete(group, id)
 			}
 		}

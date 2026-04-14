@@ -78,7 +78,7 @@ func TestHandleInboundPushMessageNilItem(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Must not panic.
-	svc.handleInboundPushMessage(conn, protocol.Frame{
+	svc.handleInboundPushMessage(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type: "push_message",
 		Item: nil,
 	})
@@ -94,7 +94,7 @@ func TestHandleInboundPushDeliveryReceiptNilReceipt(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Must not panic.
-	svc.handleInboundPushDeliveryReceipt(conn, protocol.Frame{
+	svc.handleInboundPushDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:    "push_delivery_receipt",
 		Receipt: nil,
 	})
@@ -302,7 +302,7 @@ func TestPushDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	svc.handleInboundPushDeliveryReceipt(conn, protocol.Frame{
+	svc.handleInboundPushDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:    "push_delivery_receipt",
 		Receipt: &receiptFrame,
 	})
@@ -340,7 +340,7 @@ func TestPushDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	svc.handleInboundPushDeliveryReceipt(conn, protocol.Frame{
+	svc.handleInboundPushDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:    "push_delivery_receipt",
 		Receipt: &receiptFrame,
 	})
@@ -369,10 +369,13 @@ func TestPushDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 	svc.identity = id
 
 	// Register a subscriber for a client identity.
+	// hasSubscriber is the only behaviour exercised here; it reads
+	// len(s.subs[recipient]) and never touches connID. A zero connID keeps
+	// the subscriber synthetic and compatible with the post-PR 10.3b schema.
 	clientID := "client-identity-bbb"
-	subConn := drainPipe(t)
+	_ = drainPipe(t) // preserved for test symmetry; no longer wired to the subscriber.
 	svc.subs[clientID] = map[string]*subscriber{
-		"sub-1": {id: "sub-1", recipient: clientID, conn: subConn},
+		"sub-1": {id: "sub-1", recipient: clientID},
 	}
 
 	conn := drainPipe(t)
@@ -385,7 +388,7 @@ func TestPushDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	svc.handleInboundPushDeliveryReceipt(conn, protocol.Frame{
+	svc.handleInboundPushDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:    "push_delivery_receipt",
 		Receipt: &receiptFrame,
 	})
@@ -415,7 +418,7 @@ func TestRelayDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
 	conn, _ := net.Pipe()
 	defer func() { _ = conn.Close() }()
 
-	svc.handleInboundRelayDeliveryReceipt(conn, protocol.Frame{
+	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:        "relay_delivery_receipt",
 		ID:          "msg-relay-1",
 		Address:     "foreign-sender",
@@ -450,7 +453,7 @@ func TestRelayDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 	conn, _ := net.Pipe()
 	defer func() { _ = conn.Close() }()
 
-	svc.handleInboundRelayDeliveryReceipt(conn, protocol.Frame{
+	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:        "relay_delivery_receipt",
 		ID:          "msg-relay-2",
 		Address:     "some-sender",
@@ -481,17 +484,17 @@ func TestRelayDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 	svc.initMaps()
 	svc.identity = id
 
+	// hasSubscriber only reads len(s.subs[recipient]); connID is irrelevant
+	// for this path after the PR 10.3b subscriber re-key.
 	clientID := "client-identity-ccc"
-	subConn, _ := net.Pipe()
-	defer func() { _ = subConn.Close() }()
 	svc.subs[clientID] = map[string]*subscriber{
-		"sub-1": {id: "sub-1", recipient: clientID, conn: subConn},
+		"sub-1": {id: "sub-1", recipient: clientID},
 	}
 
 	conn, _ := net.Pipe()
 	defer func() { _ = conn.Close() }()
 
-	svc.handleInboundRelayDeliveryReceipt(conn, protocol.Frame{
+	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:        "relay_delivery_receipt",
 		ID:          "msg-relay-3",
 		Address:     "some-sender",

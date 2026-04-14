@@ -1879,7 +1879,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		s.respondToInboxRequest(session)
 	case "subscribe_inbox":
 		if session != nil {
-			reply, sub := s.subscribeInboxFrame(session.conn, frame)
+			reply, sub := s.subscribeInboxFrame(session.connID, session.netCore, frame)
 			// Session-local reply: route through session.netCore, the
 			// authoritative transport owner. Re-resolving via s.conns can
 			// fail closed on a live session when the registry entry is

@@ -102,7 +102,7 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 
 	// Attempt to push a non-DM message with a forged sender that is NOT
 	// the relay peer and has no registered public key.
-	svc.handleInboundPushMessage(peerConn, protocol.Frame{
+	svc.handleInboundPushMessage(mustConnIDForTest(svc, peerConn), protocol.Frame{
 		Type:  "push_message",
 		Topic: "global",
 		Item: &protocol.MessageFrame{
@@ -165,7 +165,7 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
-	svc.handleInboundPushMessage(peerConn, protocol.Frame{
+	svc.handleInboundPushMessage(mustConnIDForTest(svc, peerConn), protocol.Frame{
 		Type:  "push_message",
 		Topic: "global",
 		Item: &protocol.MessageFrame{
@@ -215,7 +215,7 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 
 	// Sender matches the relay peer's identity — direct authorship.
-	svc.handleInboundPushMessage(peerConn, protocol.Frame{
+	svc.handleInboundPushMessage(mustConnIDForTest(svc, peerConn), protocol.Frame{
 		Type:  "push_message",
 		Topic: "global",
 		Item: &protocol.MessageFrame{
@@ -267,7 +267,7 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 	// DM with an unknown sender should NOT be rejected by the non-DM
 	// sender gate. It will fail later at VerifyEnvelope (unknown-sender-key),
 	// which is the correct DM verification path.
-	svc.handleInboundPushMessage(peerConn, protocol.Frame{
+	svc.handleInboundPushMessage(mustConnIDForTest(svc, peerConn), protocol.Frame{
 		Type:  "push_message",
 		Topic: "dm",
 		Item: &protocol.MessageFrame{
@@ -412,7 +412,7 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 
 	// Send a forged non-DM message.
-	svc.handleInboundPushMessage(peerConn, protocol.Frame{
+	svc.handleInboundPushMessage(mustConnIDForTest(svc, peerConn), protocol.Frame{
 		Type:  "push_message",
 		Topic: "announcements",
 		Item: &protocol.MessageFrame{
@@ -503,7 +503,7 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 	// DM with an unknown sender: bypasses the non-DM gate, fails inside
 	// storeIncomingMessage with ErrCodeUnknownSenderKey, triggers the
 	// narrow recovery dial to relayAddr.
-	svc.handleInboundPushMessage(peerConn, protocol.Frame{
+	svc.handleInboundPushMessage(mustConnIDForTest(svc, peerConn), protocol.Frame{
 		Type:  "push_message",
 		Topic: "dm",
 		Item: &protocol.MessageFrame{

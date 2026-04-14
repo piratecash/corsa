@@ -3,8 +3,20 @@ package node
 import (
 	"net"
 
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
+
+// mustConnIDForTest resolves the ConnID for a net.Conn fixture registered
+// through setTestConnEntryLocked. Tests call handler methods with a
+// ConnID-first signature; this helper keeps the test call sites short by
+// performing the lookup inline. Returns 0 when the conn is not registered,
+// which preserves the production "unknown conn" semantics handlers already
+// guard against.
+func mustConnIDForTest(s *Service, conn net.Conn) domain.ConnID {
+	id, _ := s.connIDFor(conn)
+	return id
+}
 
 // setTestConnEntryLocked is the test-only equivalent of the three lifecycle
 // helpers in conn_registry.go (registerInboundConnLocked,
