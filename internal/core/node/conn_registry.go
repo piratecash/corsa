@@ -22,11 +22,16 @@ import (
 // Callers that start from a net.Conn go through connIDForLocked once to
 // cross the boundary, then operate on ConnID.
 //
-// Mutation helpers (setTrackedLocked, registerInboundConnLocked,
-// attachOutboundCoreLocked, unregisterConnLocked) and iteration helpers
-// (forEachInboundConnLocked, forEachTrackedInboundConnLocked,
-// inboundConnCountLocked) still take/return net.Conn and are the scope of
-// PR 9.10b — they require coordinated changes with their call sites.
+// PR 9.10b-2 completed the move: iteration helpers
+// (forEachInboundConnLocked, forEachTrackedInboundConnLocked) now call back
+// with *netcore.NetCore only — NetCore is the single source of identity and
+// exposes Conn()/ConnID() for sites that need them. The tracked-flag mutation
+// helper is now ConnID-first (setTrackedByIDLocked).
+// Lifecycle helpers (registerInboundConnLocked, attachOutboundCoreLocked,
+// unregisterConnLocked) are the intentional carve-out — they create/destroy
+// the (net.Conn, ConnID) binding and stay net.Conn-first by design
+// (see migration doc §5.4 OQ-9.10b/3=a). connEntryLocked is plumbing for
+// connEntryForLocked and also remains net.Conn-first for lifecycle.
 //
 // This seam prevents unbounded churn if the internal shape of s.conns
 // changes in the future: only the helpers here need to be updated, not
@@ -60,8 +65,8 @@ func (s *Service) connIDFor(conn net.Conn) (domain.ConnID, bool) {
 
 // connEntryLocked resolves a net.Conn to its *connEntry via the secondary
 // index, or returns nil if the connection is not registered. Retained as
-// the lookup shape used by setTrackedLocked and the connEntryForLocked
-// escape hatch. The caller must hold s.mu.
+// plumbing for the connEntryForLocked escape hatch used by lifecycle paths.
+// The caller must hold s.mu.
 func (s *Service) connEntryLocked(conn net.Conn) *connEntry {
 	id, ok := s.connIDByNetConn[conn]
 	if !ok {
@@ -112,9 +117,11 @@ func (s *Service) connEntryForLocked(conn net.Conn) *connEntry {
 }
 
 // forEachInboundConnLocked iterates over all registered inbound connections
-// (Direction == Inbound), calling fn for each (conn, core) pair. Iteration stops
-// if fn returns false. The caller must hold s.mu.
-func (s *Service) forEachInboundConnLocked(fn func(net.Conn, *netcore.NetCore) bool) {
+// (Direction == Inbound), calling fn for each NetCore. The NetCore is the
+// single identity currency — call sites that need the underlying net.Conn
+// or ConnID access them explicitly via core.Conn() / core.ConnID().
+// Iteration stops if fn returns false. The caller must hold s.mu.
+func (s *Service) forEachInboundConnLocked(fn func(*netcore.NetCore) bool) {
 	for _, entry := range s.conns {
 		if entry == nil || entry.core == nil {
 			continue
@@ -122,16 +129,16 @@ func (s *Service) forEachInboundConnLocked(fn func(net.Conn, *netcore.NetCore) b
 		if entry.core.Dir() != netcore.Inbound {
 			continue
 		}
-		if !fn(entry.core.Conn(), entry.core) {
+		if !fn(entry.core) {
 			break
 		}
 	}
 }
 
 // forEachTrackedInboundConnLocked iterates over all registered inbound connections
-// that are marked as tracked (i.e., have completed authentication), calling fn for
-// each (conn, core) pair. Iteration stops if fn returns false. The caller must hold s.mu.
-func (s *Service) forEachTrackedInboundConnLocked(fn func(net.Conn, *netcore.NetCore) bool) {
+// that are marked as tracked (i.e., have completed authentication), calling fn
+// for each NetCore. Iteration stops if fn returns false. The caller must hold s.mu.
+func (s *Service) forEachTrackedInboundConnLocked(fn func(*netcore.NetCore) bool) {
 	for _, entry := range s.conns {
 		if entry == nil || entry.core == nil {
 			continue
@@ -142,7 +149,7 @@ func (s *Service) forEachTrackedInboundConnLocked(fn func(net.Conn, *netcore.Net
 		if !entry.tracked {
 			continue
 		}
-		if !fn(entry.core.Conn(), entry.core) {
+		if !fn(entry.core) {
 			break
 		}
 	}
@@ -160,11 +167,14 @@ func (s *Service) inboundConnCountLocked() int {
 	return count
 }
 
-// setTrackedLocked marks the tracked flag on a connection entry.
-// If the connection is not registered, the call is a no-op.
+// setTrackedByIDLocked marks the tracked flag on a connection entry keyed by
+// ConnID. If the connection is not registered, the call is a no-op.
+// ConnID is the single identity currency inside the registry after PR 9.7 —
+// callers that start from a net.Conn must cross the boundary via
+// connIDForLocked once, then operate on ConnID.
 // The caller must hold s.mu.
-func (s *Service) setTrackedLocked(conn net.Conn, tracked bool) {
-	if entry := s.connEntryLocked(conn); entry != nil {
+func (s *Service) setTrackedByIDLocked(id domain.ConnID, tracked bool) {
+	if entry := s.conns[id]; entry != nil {
 		entry.tracked = tracked
 	}
 }

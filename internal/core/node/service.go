@@ -1747,7 +1747,7 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	// markPeerConnected. Require health != nil && Connected here too so a
 	// partially-handshaken inbound NetCore cannot receive identity-routed
 	// frames ahead of activation.
-	s.forEachInboundConnLocked(func(_ net.Conn, pc *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
 		if pc.Identity() != dst {
 			return true
 		}
@@ -2247,7 +2247,9 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
 	s.inboundHealthRefs[resolved]++
-	s.setTrackedLocked(conn, true)
+	if id, ok := s.connIDForLocked(conn); ok {
+		s.setTrackedByIDLocked(id, true)
+	}
 	s.mu.Unlock()
 
 	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
@@ -2295,7 +2297,7 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddre
 	)
 	if entry := s.connEntryForLocked(conn); entry != nil {
 		wasTracked = entry.tracked
-		s.setTrackedLocked(conn, false)
+		entry.tracked = false
 		// Prefer NetCore as the source of truth for transport-level
 		// identity: it is updated in the inbound auth mirror (see the
 		// SetIdentity call next to the peerIDs map write in
@@ -3485,8 +3487,8 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 func (s *Service) closeAllInboundConns() {
 	s.mu.Lock()
 	inbound := make([]net.Conn, 0)
-	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
-		inbound = append(inbound, conn)
+	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
+		inbound = append(inbound, core.Conn())
 		return true
 	})
 	s.mu.Unlock()

@@ -162,7 +162,8 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 
 	s.mu.RLock()
 	var target net.Conn
-	s.forEachTrackedInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+	s.forEachTrackedInboundConnLocked(func(core *netcore.NetCore) bool {
+		conn := core.Conn()
 		if conn.RemoteAddr().String() == remoteAddr {
 			target = conn
 			return false // Stop iteration
@@ -243,7 +244,7 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 
 	// Inbound connections — only if identity not already covered by an
 	// outbound session above (dedup by identity).
-	s.forEachTrackedInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+	s.forEachTrackedInboundConnLocked(func(pc *netcore.NetCore) bool {
 		if pc.Identity() == "" {
 			return true
 		}
@@ -253,7 +254,7 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			seen[pc.Identity()] = struct{}{}
 			targets = append(targets, routing.AnnounceTarget{
-				Address:  inboundConnKey(conn),
+				Address:  inboundConnKey(pc.Conn()),
 				Identity: pc.Identity(),
 			})
 		}
@@ -819,12 +820,12 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 
 	// Inbound connections — synchronous write path.
 	var result domain.PeerAddress
-	s.forEachTrackedInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+	s.forEachTrackedInboundConnLocked(func(pc *netcore.NetCore) bool {
 		if pc.Identity() != peerIdentity {
 			return true
 		}
 		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
-			result = inboundConnKey(conn)
+			result = inboundConnKey(pc.Conn())
 			return false // Stop iteration
 		}
 		return true
@@ -857,12 +858,12 @@ func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.P
 
 	// Inbound connections.
 	var result domain.PeerAddress
-	s.forEachTrackedInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+	s.forEachTrackedInboundConnLocked(func(pc *netcore.NetCore) bool {
 		if pc.Identity() != peerIdentity {
 			return true
 		}
 		if sessionHasCap(pc.Capabilities(), domain.CapMeshRelayV1) {
-			result = inboundConnKey(conn)
+			result = inboundConnKey(pc.Conn())
 			return false // Stop iteration
 		}
 		return true
@@ -1016,8 +1017,8 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	// here — a pre-activation outbound entry must not answer identity
 	// lookups before the session is installed.
 	var result domain.PeerIdentity
-	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
-		if conn.RemoteAddr().String() == string(address) {
+	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
+		if core.Conn().RemoteAddr().String() == string(address) {
 			result = core.Identity()
 			return false // Stop iteration
 		}

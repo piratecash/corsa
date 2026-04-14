@@ -367,11 +367,11 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 	// they are already represented via s.upstream above.
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
-	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
 		if la := core.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
 			return true
 		}
-		if ip := remoteIP(conn.RemoteAddr()); ip != "" {
+		if ip := remoteIP(core.Conn().RemoteAddr()); ip != "" {
 			hosts[ip] = struct{}{}
 		}
 		return true
@@ -2264,7 +2264,7 @@ func (s *Service) nextConnIDLocked() domain.ConnID {
 // Must be called with s.mu held (read lock).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
-	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
 		// The registry holds both directions. Outbound
 		// NetCores must stay invisible on inbound-only lookup paths —
 		// they are surfaced through s.sessions once activated.
@@ -2282,14 +2282,14 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 // for fire-and-forget writes). Must be called with s.mu held (read lock).
 func (s *Service) inboundConnForAddressLocked(address domain.PeerAddress) net.Conn {
 	var result net.Conn
-	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
 		// Only return tracked connections for the given address
 		if core.Address() != address {
 			return true
 		}
 		// Check if this connection is tracked
-		if entry := s.connEntryForLocked(conn); entry != nil && entry.tracked {
-			result = conn
+		if s.isInboundTrackedByIDLocked(core.ConnID()) {
+			result = core.Conn()
 			return false // Stop iteration
 		}
 		return true
@@ -2473,7 +2473,7 @@ func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 		return domain.CapabilityStrings(session.capabilities)
 	}
 	var result []string
-	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
 		// Outbound NetCores surface their capabilities via s.sessions
 		// (checked above); skip them here so a pre-activation outbound
 		// entry cannot answer on the inbound fallback path.
@@ -2882,13 +2882,13 @@ func (s *Service) evictStaleInboundConns() {
 
 	s.mu.RLock()
 	var stale []net.Conn
-	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
 		la := core.LastActivity()
 		if la.IsZero() {
 			return true
 		}
 		if now.Sub(la) >= stallThreshold {
-			stale = append(stale, conn)
+			stale = append(stale, core.Conn())
 		}
 		return true
 	})

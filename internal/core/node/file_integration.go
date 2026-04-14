@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net"
 	"path/filepath"
 	"time"
 
@@ -216,7 +215,7 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 	// Outbound NetCores surface through s.sessions above; skip them
 	// here so pre-activation outbound entries do not leak into the
 	// file-transfer peer set before the session is established.
-	s.forEachInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
 		if pc.HasCapability(domain.CapFileTransferV1) {
 			consider(pc.Identity(), pc.Address())
 		}
@@ -257,7 +256,7 @@ func (s *Service) fileTransferPeerUsableAtLocked(peer domain.PeerIdentity, now t
 	// Same visibility boundary as forEachUsableFileTransferPeerLocked:
 	// outbound NetCores are reachable via s.sessions above, so skip
 	// them here to keep pre-activation outbound entries hidden.
-	s.forEachInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
 		if pc.Identity() != peer || !pc.HasCapability(domain.CapFileTransferV1) {
 			return true
 		}

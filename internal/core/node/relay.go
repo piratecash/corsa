@@ -2,7 +2,6 @@ package node
 
 import (
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 	"time"
@@ -923,7 +922,7 @@ func (s *Service) countCapablePeers(cap domain.Capability) int {
 	// Outbound NetCores are already counted via s.sessions above;
 	// skip them here so pre-activation outbound entries cannot
 	// inflate the capable-peer count.
-	s.forEachInboundConnLocked(func(conn net.Conn, pc *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
 		if _, dup := seen[pc.Identity()]; dup {
 			return true
 		}
