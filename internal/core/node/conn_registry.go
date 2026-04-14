@@ -28,10 +28,14 @@ import (
 // exposes Conn()/ConnID() for sites that need them. The tracked-flag mutation
 // helper is now ConnID-first (setTrackedByIDLocked).
 // Lifecycle helpers (registerInboundConnLocked, attachOutboundCoreLocked,
-// unregisterConnLocked) are the intentional carve-out — they create/destroy
-// the (net.Conn, ConnID) binding and stay net.Conn-first by design
-// (see migration doc §5.4 OQ-9.10b/3=a). connEntryLocked is plumbing for
-// connEntryForLocked and also remains net.Conn-first for lifecycle.
+// unregisterConnLocked) are the intentional carve-out: they are the
+// entry/exit boundary that creates and tears down the (net.Conn, ConnID)
+// binding, so they must accept a raw net.Conn by definition — there is
+// no ConnID to key them on before registerInboundConnLocked runs, and
+// the secondary index s.connIDByNetConn cannot be trimmed on shutdown
+// without the same net.Conn that was registered. connEntryLocked is
+// plumbing for connEntryForLocked and also remains net.Conn-first for
+// the same reason.
 //
 // This seam prevents unbounded churn if the internal shape of s.conns
 // changes in the future: only the helpers here need to be updated, not
@@ -114,6 +118,24 @@ func (s *Service) isInboundTrackedByIDLocked(id domain.ConnID) bool {
 // The caller must hold s.mu.
 func (s *Service) connEntryForLocked(conn net.Conn) *connEntry {
 	return s.connEntryLocked(conn)
+}
+
+// forEachConnLocked iterates over every registered connection regardless
+// of direction, calling fn with (ConnID, NetCore). Iteration stops if fn
+// returns false. The caller must hold s.mu. Used by call sites that need
+// direction-agnostic enumeration and prefer to filter by
+// netcore.Direction themselves; direction-specific walks over inbound
+// connections continue to use forEachInboundConnLocked and
+// forEachTrackedInboundConnLocked which are tuned for their call sites.
+func (s *Service) forEachConnLocked(fn func(domain.ConnID, *netcore.NetCore) bool) {
+	for id, entry := range s.conns {
+		if entry == nil || entry.core == nil {
+			continue
+		}
+		if !fn(id, entry.core) {
+			return
+		}
+	}
 }
 
 // forEachInboundConnLocked iterates over all registered inbound connections

@@ -168,9 +168,9 @@ forward-compatible relay для будущего onion routing. Отслежив
 
 #### Выделение сетевого ядра (`PeerConn` → `NetCore`)
 
-Подробный внутренний план миграции сетевого ядра вынесен в
-[`docs/netcore-migration.md`](netcore-migration.md). Текущий статус:
-см. шапку `docs/netcore-migration.md`.
+Статус: unified in-package модель соединения уже собрана.
+Оставшаяся работа — укрепить package boundary вокруг `internal/core/netcore`
+и довести разделение transport internals и `node.Service` до финальной формы.
 
 ---
 

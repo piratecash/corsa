@@ -162,9 +162,9 @@ Remaining work under this iteration:
 
 #### Network core extraction (`PeerConn` → `NetCore`)
 
-The detailed internal plan for network core migration has been moved to
-[`docs/netcore-migration.md`](netcore-migration.md). Current status: see the
-header of `docs/netcore-migration.md`.
+Status: the unified in-package connection model is already in place.
+Remaining work is the package-boundary hardening around `internal/core/netcore`
+and the final separation of transport internals from `node.Service`.
 
 ---
 
