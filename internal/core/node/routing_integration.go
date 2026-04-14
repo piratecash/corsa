@@ -27,7 +27,11 @@ import (
 // non-routable listen address (e.g. 127.0.0.1:64646) that must never
 // be used as a routing identity.
 func (s *Service) inboundPeerIdentity(conn net.Conn) domain.PeerIdentity {
-	pc := s.netCoreFor(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return ""
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return ""
 	}

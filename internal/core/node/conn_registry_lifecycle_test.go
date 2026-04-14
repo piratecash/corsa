@@ -4,13 +4,14 @@ package node
 // the unified connection registry: once the lifecycle helper in
 // conn_registry.go has removed a conn, Service.conns and
 // Service.connIDByNetConn must no longer resolve it through any accessor.
-// netCoreFor, isInboundTracked, and meteredFor all share the same two-step
-// lookup (connIDByNetConn → conns); if one of the two maps is left
-// populated, these accessors will silently disagree — one returning nil
-// while the other still reports a live entry. The test is white-box by
-// necessity: it reaches into the registry directly via the test-only
-// helpers in conn_registry_test_helpers_test.go so a half-invalidated
-// state cannot hide behind a silent miss further down the stack.
+// connIDFor, netCoreForID, isInboundTrackedByID and meteredForID all
+// route through the same two-step boundary (connIDByNetConn → conns); if
+// one of the two maps is left populated, these accessors will silently
+// disagree — one returning nil/false while the other still reports a
+// live entry. The test is white-box by necessity: it reaches into the
+// registry directly via the test-only helpers in
+// conn_registry_test_helpers_test.go so a half-invalidated state cannot
+// hide behind a silent miss further down the stack.
 
 import (
 	"net"
@@ -56,11 +57,15 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 	svc.mu.Unlock()
 
 	// Pre-condition: every accessor sees the seeded state.
-	if got := svc.netCoreFor(conn); got != pc {
-		t.Fatalf("netCoreFor: got %v, want %v", got, pc)
+	id, ok := svc.connIDFor(conn)
+	if !ok {
+		t.Fatal("connIDFor: got !ok for seeded conn, want ok")
 	}
-	if !svc.isInboundTracked(conn) {
-		t.Fatal("isInboundTracked: got false, want true")
+	if got := svc.netCoreForID(id); got != pc {
+		t.Fatalf("netCoreForID: got %v, want %v", got, pc)
+	}
+	if !svc.isInboundTrackedByID(id) {
+		t.Fatal("isInboundTrackedByID: got false, want true")
 	}
 
 	// Act: single atomic delete — the registry contract is one call-site
@@ -70,14 +75,23 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 	svc.mu.Unlock()
 
 	// Post-condition: every accessor reports "not registered" coherently.
-	if got := svc.netCoreFor(conn); got != nil {
-		t.Errorf("netCoreFor after delete: got %v, want nil", got)
+	// connIDFor is the boundary gate — once it says !ok, no downstream
+	// ConnID-keyed lookup can succeed by construction (they all read the
+	// primary map by id, which was deleted in lock-step). The previous
+	// stale ConnID from the pre-condition is retained so downstream
+	// lookups can be exercised explicitly with a would-be-live id — they
+	// must still report "not registered" because s.conns[id] is gone.
+	if _, ok := svc.connIDFor(conn); ok {
+		t.Error("connIDFor after delete: got ok=true, want ok=false")
 	}
-	if svc.isInboundTracked(conn) {
-		t.Error("isInboundTracked after delete: got true, want false")
+	if got := svc.netCoreForID(id); got != nil {
+		t.Errorf("netCoreForID(stale id) after delete: got %v, want nil", got)
 	}
-	if got := svc.meteredFor(conn); got != nil {
-		t.Errorf("meteredFor after delete: got %v, want nil", got)
+	if svc.isInboundTrackedByID(id) {
+		t.Error("isInboundTrackedByID(stale id) after delete: got true, want false")
+	}
+	if got := svc.meteredForID(id); got != nil {
+		t.Errorf("meteredForID(stale id) after delete: got %v, want nil", got)
 	}
 
 	// The registry itself must not retain a stub entry — neither the
@@ -134,9 +148,19 @@ func TestConnRegistry_RegisterSyncsSecondaryIndex(t *testing.T) {
 		t.Fatal("primary map entry missing or points at wrong NetCore")
 	}
 
-	// Cross-check via the gateway: the net.Conn-first helper must resolve
-	// the same entry the test fetched by hand.
-	if got := svc.netCoreFor(conn); got != pc {
-		t.Fatalf("netCoreFor after register: got %v, want %v", got, pc)
+	// Cross-check via the gateway: the public ConnID-first accessors must
+	// resolve the same entry the test fetched by hand. We go through
+	// connIDFor first (the single boundary between net.Conn and ConnID)
+	// and then netCoreForID, mirroring how production call sites now
+	// reach a NetCore after PR 9.10b-1.
+	gotID, ok := svc.connIDFor(conn)
+	if !ok {
+		t.Fatal("connIDFor after register: got !ok, want ok")
+	}
+	if gotID != pc.ConnID() {
+		t.Fatalf("connIDFor after register: got id=%d, want %d", gotID, pc.ConnID())
+	}
+	if got := svc.netCoreForID(gotID); got != pc {
+		t.Fatalf("netCoreForID after register: got %v, want %v", got, pc)
 	}
 }

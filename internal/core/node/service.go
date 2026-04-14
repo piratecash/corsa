@@ -1536,51 +1536,39 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	}
 }
 
-// netCoreFor returns the NetCore registered for this connection, or nil
-// if the connection predates the managed writer path. The nil case
-// corresponds to the bootstrap/handshake edges that intentionally stay
-// on raw io.WriteString before a NetCore is attached — see the three
-// sentinel call sites in routing_integration.go (the node-hello, auth
-// challenge, and challenge-response writes that run before
-// registerInboundConn / attachOutboundNetCore have published an entry).
-// Every steady-state inbound and outbound peer session is registered
-// via registerInboundConnLocked / attachOutboundCoreLocked, so a nil
-// return from netCoreFor on a post-handshake connection is the hard
-// fail-closed signal consumed by the write wrappers (see
-// ErrUnregisteredWrite).
-func (s *Service) netCoreFor(conn net.Conn) *netcore.NetCore {
+// netCoreForID returns the NetCore registered for the given ConnID, or
+// nil if the connection is not registered (either never attached via
+// registerInboundConnLocked / attachOutboundCoreLocked, or already
+// unregistered). Non-lock-holding call sites that start from a net.Conn
+// cross the boundary once via connIDFor and then operate on ConnID; a
+// nil return here on a steady-state ConnID is the hard fail-closed
+// signal consumed by the write wrappers (see ErrUnregisteredWrite).
+// The bootstrap/handshake edges — see the three sentinel call sites in
+// routing_integration.go (node-hello, auth challenge, challenge-response
+// writes that run before register / attach publish an entry) — never
+// reach this helper because they operate on a raw net.Conn before any
+// ConnID has been minted.
+func (s *Service) netCoreForID(id domain.ConnID) *netcore.NetCore {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	id, ok := s.connIDForLocked(conn)
-	if !ok {
-		return nil
-	}
 	return s.coreForIDLocked(id)
 }
 
-// meteredFor returns the MeteredConn wrapper for the given conn, or nil if
-// the conn is not registered or was not wrapped in a MeteredConn (e.g.
-// outbound dials that do not measure bytes).
-func (s *Service) meteredFor(conn net.Conn) *netcore.MeteredConn {
+// meteredForID returns the MeteredConn wrapper for the given ConnID, or
+// nil if the connection is not registered or was not wrapped in a
+// MeteredConn (e.g. outbound dials that do not measure bytes).
+func (s *Service) meteredForID(id domain.ConnID) *netcore.MeteredConn {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	id, ok := s.connIDForLocked(conn)
-	if !ok {
-		return nil
-	}
 	return s.meteredForIDLocked(id)
 }
 
-// isInboundTracked returns true when the conn has been promoted via
+// isInboundTrackedByID returns true when the ConnID has been promoted via
 // trackInboundConnect (auth complete or auth not required) and has not
 // been untracked yet.
-func (s *Service) isInboundTracked(conn net.Conn) bool {
+func (s *Service) isInboundTrackedByID(id domain.ConnID) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	id, ok := s.connIDForLocked(conn)
-	if !ok {
-		return false
-	}
 	return s.isInboundTrackedByIDLocked(id)
 }
 
@@ -1641,7 +1629,11 @@ func (r enqueueResult) String() string {
 // goroutine via NetCore.sendRaw. Fire-and-forget: the caller does not
 // wait for the write.
 func (s *Service) enqueueFrame(conn net.Conn, data []byte) enqueueResult {
-	pc := s.netCoreFor(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return enqueueUnregistered
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return enqueueUnregistered
 	}
@@ -1669,7 +1661,11 @@ func (s *Service) enqueueFrame(conn net.Conn, data []byte) enqueueResult {
 // Used by writeJSONFrameSync for error-path frames that must be delivered
 // before the connection is torn down.
 func (s *Service) enqueueFrameSync(conn net.Conn, data []byte) enqueueResult {
-	pc := s.netCoreFor(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return enqueueUnregistered
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return enqueueUnregistered
 	}
@@ -2114,9 +2110,11 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 		// pinned by TestTrackInboundDisconnect_PrefersNetCoreIdentity and
 		// the peerIDs fallback branch by
 		// TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
-		if pc := s.netCoreFor(conn); pc != nil {
-			pc.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
-			pc.SetAddress(addr)
+		if id, ok := s.connIDFor(conn); ok {
+			if pc := s.netCoreForID(id); pc != nil {
+				pc.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
+				pc.SetAddress(addr)
+			}
 		}
 	}
 
@@ -2124,7 +2122,11 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 }
 
 func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bool) {
-	pc := s.netCoreFor(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return protocol.Frame{}, false
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return protocol.Frame{}, false
 	}
@@ -2136,7 +2138,11 @@ func (s *Service) authenticatedAddressForConn(conn net.Conn) (protocol.Frame, bo
 }
 
 func (s *Service) clearConnAuth(conn net.Conn) {
-	if pc := s.netCoreFor(conn); pc != nil {
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return
+	}
+	if pc := s.netCoreForID(id); pc != nil {
 		pc.ClearAuth()
 	}
 }
@@ -2145,7 +2151,11 @@ func (s *Service) clearConnAuth(conn net.Conn) {
 // the connection, or nil if the connection is not registered or has no
 // auth state.
 func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
-	pc := s.netCoreFor(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return nil
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return nil
 	}
@@ -2155,7 +2165,11 @@ func (s *Service) ConnAuthState(conn net.Conn) *connauth.State {
 // SetConnAuthState implements connauth.AuthStore. Stores auth state for
 // the connection. The connection must already be registered.
 func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
-	if pc := s.netCoreFor(conn); pc != nil {
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return
+	}
+	if pc := s.netCoreForID(id); pc != nil {
 		pc.SetAuth(state)
 	}
 }
@@ -2173,7 +2187,11 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 	if addr == "" {
 		addr = strings.TrimSpace(hello.Address)
 	}
-	pc := s.netCoreFor(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return
 	}
@@ -2190,7 +2208,11 @@ func (s *Service) rememberConnPeerAddr(conn net.Conn, hello protocol.Frame) {
 // remote peer during the hello handshake, or "" if no address is
 // known yet. The returned address is suitable for health tracking.
 func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
-	pc := s.netCoreFor(conn)
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return ""
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return ""
 	}
@@ -2335,8 +2357,11 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddre
 //     all routable addresses).  This is the safe backward-compatible default
 //     for old clients that don't send "networks".
 func (s *Service) connPeerReachableGroups(conn net.Conn) map[domain.NetGroup]struct{} {
-	pc := s.netCoreFor(conn)
-
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return nil
+	}
+	pc := s.netCoreForID(id)
 	if pc == nil {
 		return nil
 	}

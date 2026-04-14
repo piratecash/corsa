@@ -46,6 +46,18 @@ func (s *Service) connIDForLocked(conn net.Conn) (domain.ConnID, bool) {
 	return id, true
 }
 
+// connIDFor resolves a net.Conn to its domain.ConnID without requiring the
+// caller to hold s.mu. Returns zero value and false if the connection is
+// not registered. This is the public adapter over connIDForLocked used by
+// non-lock-holding call sites to cross the net.Conn → ConnID boundary
+// exactly once; downstream lookups (netCoreForID, meteredForID,
+// isInboundTrackedByID) take ConnID directly.
+func (s *Service) connIDFor(conn net.Conn) (domain.ConnID, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connIDForLocked(conn)
+}
+
 // connEntryLocked resolves a net.Conn to its *connEntry via the secondary
 // index, or returns nil if the connection is not registered. Retained as
 // the lookup shape used by setTrackedLocked and the connEntryForLocked

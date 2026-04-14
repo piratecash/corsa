@@ -2912,7 +2912,11 @@ func (s *Service) evictStaleInboundConns() {
 
 // touchConnActivity updates the per-connection last activity timestamp.
 func (s *Service) touchConnActivity(conn net.Conn) {
-	if pc := s.netCoreFor(conn); pc != nil {
+	id, ok := s.connIDFor(conn)
+	if !ok {
+		return
+	}
+	if pc := s.netCoreForID(id); pc != nil {
 		pc.SetLastActivity(time.Now().UTC())
 	}
 }
