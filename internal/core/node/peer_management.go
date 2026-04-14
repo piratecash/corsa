@@ -2898,9 +2898,11 @@ func (s *Service) evictStaleInboundConns() {
 		var addr domain.PeerAddress
 		var ident domain.PeerIdentity
 		s.mu.RLock()
-		if core := s.coreForConnLocked(conn); core != nil {
-			addr = core.Address()
-			ident = core.Identity()
+		if id, ok := s.connIDForLocked(conn); ok {
+			if core := s.coreForIDLocked(id); core != nil {
+				addr = core.Address()
+				ident = core.Identity()
+			}
 		}
 		s.mu.RUnlock()
 		log.Warn().Str("peer", string(addr)).Str("identity", string(ident)).Str("remote", conn.RemoteAddr().String()).Msg("force-closing stale inbound connection")

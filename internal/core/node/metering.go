@@ -41,7 +41,11 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *netco
 // (no-session-auth) path auth is nil and attribution is allowed.
 // Caller must hold s.mu (read or write).
 func (s *Service) isConnTrafficTrustedLocked(conn net.Conn) bool {
-	core := s.coreForConnLocked(conn)
+	id, ok := s.connIDForLocked(conn)
+	if !ok {
+		return false
+	}
+	core := s.coreForIDLocked(id)
 	if core == nil {
 		return false
 	}
@@ -68,7 +72,11 @@ func (s *Service) accumulateInboundTraffic(mc *netcore.MeteredConn) {
 	if !s.isConnTrafficTrustedLocked(mc) {
 		return
 	}
-	core := s.coreForConnLocked(mc)
+	id, ok := s.connIDForLocked(mc)
+	if !ok {
+		return
+	}
+	core := s.coreForIDLocked(id)
 	if core == nil || core.Address() == "" {
 		return
 	}
@@ -103,7 +111,11 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 	// outbound NetCores now share s.conns; outbound traffic
 	// is already accumulated via s.sessions above.
 	s.forEachInboundConnLocked(func(conn net.Conn, core *netcore.NetCore) bool {
-		metered := s.meteredForConnLocked(conn)
+		id, ok := s.connIDForLocked(conn)
+		if !ok {
+			return true
+		}
+		metered := s.meteredForIDLocked(id)
 		if metered == nil {
 			return true
 		}

@@ -3,6 +3,7 @@ package node
 import (
 	"net"
 
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
@@ -14,21 +15,41 @@ import (
 // Helpers do not acquire locks themselves.
 //
 // PR 9.7 rekeyed s.conns from map[net.Conn]*connEntry to
-// map[netcore.ConnID]*connEntry. Helpers keep their net.Conn-first
-// signatures (OQ-9.7/1=A): callers typically already hold a net.Conn from
-// the read-loop or writer path, and forcing every call site to resolve
-// the ConnID itself would materially expand PR 9.7. The resolution is
-// performed inside the gate via s.connIDByNetConn — a secondary index
-// kept in strict sync with s.conns by the lifecycle helpers in this file.
+// map[netcore.ConnID]*connEntry. Pure-lookup helpers
+// (coreForIDLocked / meteredForIDLocked / isInboundTrackedByIDLocked) take
+// ConnID directly — this moves the inner shape of the registry off net.Conn
+// and keeps ConnID as the single identity currency inside the gate.
+// Callers that start from a net.Conn go through connIDForLocked once to
+// cross the boundary, then operate on ConnID.
+//
+// Mutation helpers (setTrackedLocked, registerInboundConnLocked,
+// attachOutboundCoreLocked, unregisterConnLocked) and iteration helpers
+// (forEachInboundConnLocked, forEachTrackedInboundConnLocked,
+// inboundConnCountLocked) still take/return net.Conn and are the scope of
+// PR 9.10b — they require coordinated changes with their call sites.
 //
 // This seam prevents unbounded churn if the internal shape of s.conns
 // changes in the future: only the helpers here need to be updated, not
 // dozens of call sites throughout the codebase.
 
-// connEntryLocked resolves a net.Conn to its *connEntry via the secondary
-// index, or returns nil if the connection is not registered. Centralised
-// here so every read-only helper shares the same two-step lookup shape.
+// connIDForLocked resolves a net.Conn to its domain.ConnID via the
+// secondary index. Returns zero value and false if the connection is not
+// registered. This is the single point where net.Conn is translated into
+// ConnID for read paths; all pure-lookup helpers below take ConnID directly.
 // The caller must hold s.mu.
+func (s *Service) connIDForLocked(conn net.Conn) (domain.ConnID, bool) {
+	id, ok := s.connIDByNetConn[conn]
+	if !ok {
+		var zero domain.ConnID
+		return zero, false
+	}
+	return id, true
+}
+
+// connEntryLocked resolves a net.Conn to its *connEntry via the secondary
+// index, or returns nil if the connection is not registered. Retained as
+// the lookup shape used by setTrackedLocked and the connEntryForLocked
+// escape hatch. The caller must hold s.mu.
 func (s *Service) connEntryLocked(conn net.Conn) *connEntry {
 	id, ok := s.connIDByNetConn[conn]
 	if !ok {
@@ -37,30 +58,32 @@ func (s *Service) connEntryLocked(conn net.Conn) *connEntry {
 	return s.conns[id]
 }
 
-// coreForConnLocked returns the NetCore for a given connection, or nil if
-// the connection is not registered. The caller must hold s.mu.
-func (s *Service) coreForConnLocked(conn net.Conn) *netcore.NetCore {
-	entry := s.connEntryLocked(conn)
+// coreForIDLocked returns the NetCore for a given ConnID, or nil if the
+// connection is not registered. The caller must hold s.mu.
+func (s *Service) coreForIDLocked(id domain.ConnID) *netcore.NetCore {
+	entry := s.conns[id]
 	if entry == nil {
 		return nil
 	}
 	return entry.core
 }
 
-// meteredForConnLocked returns the MeteredConn wrapper for a given connection,
-// or nil if the connection is not registered or not metered. The caller must hold s.mu.
-func (s *Service) meteredForConnLocked(conn net.Conn) *netcore.MeteredConn {
-	entry := s.connEntryLocked(conn)
+// meteredForIDLocked returns the MeteredConn wrapper for a given ConnID,
+// or nil if the connection is not registered or not metered.
+// The caller must hold s.mu.
+func (s *Service) meteredForIDLocked(id domain.ConnID) *netcore.MeteredConn {
+	entry := s.conns[id]
 	if entry == nil {
 		return nil
 	}
 	return entry.metered
 }
 
-// isInboundTrackedLocked returns whether the connection is marked as tracked
-// (i.e., has completed authentication and health management). The caller must hold s.mu.
-func (s *Service) isInboundTrackedLocked(conn net.Conn) bool {
-	entry := s.connEntryLocked(conn)
+// isInboundTrackedByIDLocked returns whether the connection is marked as
+// tracked (i.e., has completed authentication and health management).
+// The caller must hold s.mu.
+func (s *Service) isInboundTrackedByIDLocked(id domain.ConnID) bool {
+	entry := s.conns[id]
 	if entry == nil {
 		return false
 	}

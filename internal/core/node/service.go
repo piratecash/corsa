@@ -1537,14 +1537,25 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 }
 
 // netCoreFor returns the NetCore registered for this connection, or nil
-// if the connection predates the managed writer path (bootstrap dial edges
-// in syncPeer / routing_integration that intentionally stay on direct
-// io.WriteString — see migration doc 4.4). Inbound and outbound peer
-// sessions are both registered here after PR 2 of checkpoint 9.2.
+// if the connection predates the managed writer path. The nil case
+// corresponds to the bootstrap/handshake edges that intentionally stay
+// on raw io.WriteString before a NetCore is attached — see the three
+// sentinel call sites in routing_integration.go (the node-hello, auth
+// challenge, and challenge-response writes that run before
+// registerInboundConn / attachOutboundNetCore have published an entry).
+// Every steady-state inbound and outbound peer session is registered
+// via registerInboundConnLocked / attachOutboundCoreLocked, so a nil
+// return from netCoreFor on a post-handshake connection is the hard
+// fail-closed signal consumed by the write wrappers (see
+// ErrUnregisteredWrite).
 func (s *Service) netCoreFor(conn net.Conn) *netcore.NetCore {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.coreForConnLocked(conn)
+	id, ok := s.connIDForLocked(conn)
+	if !ok {
+		return nil
+	}
+	return s.coreForIDLocked(id)
 }
 
 // meteredFor returns the MeteredConn wrapper for the given conn, or nil if
@@ -1553,7 +1564,11 @@ func (s *Service) netCoreFor(conn net.Conn) *netcore.NetCore {
 func (s *Service) meteredFor(conn net.Conn) *netcore.MeteredConn {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.meteredForConnLocked(conn)
+	id, ok := s.connIDForLocked(conn)
+	if !ok {
+		return nil
+	}
+	return s.meteredForIDLocked(id)
 }
 
 // isInboundTracked returns true when the conn has been promoted via
@@ -1562,7 +1577,11 @@ func (s *Service) meteredFor(conn net.Conn) *netcore.MeteredConn {
 func (s *Service) isInboundTracked(conn net.Conn) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.isInboundTrackedLocked(conn)
+	id, ok := s.connIDForLocked(conn)
+	if !ok {
+		return false
+	}
+	return s.isInboundTrackedByIDLocked(id)
 }
 
 // connWriter is now replaced by NetCore.writerLoop(). The single writer

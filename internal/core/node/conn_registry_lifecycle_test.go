@@ -102,8 +102,9 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 // (s.connIDByNetConn[conn]) hold matching entries — neither half can
 // be populated without the other. The secondary index is the only path
 // net.Conn-first helpers use to reach the primary key, so divergence
-// would turn every subsequent coreForConnLocked / isInboundTrackedLocked
-// call on this conn into a silent miss even though the entry exists.
+// would turn every subsequent connIDForLocked-based lookup (e.g.
+// coreForIDLocked / isInboundTrackedByIDLocked resolved via the secondary
+// index) on this conn into a silent miss even though the entry exists.
 func TestConnRegistry_RegisterSyncsSecondaryIndex(t *testing.T) {
 	t.Parallel()
 
