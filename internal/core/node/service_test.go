@@ -6952,7 +6952,7 @@ func TestConnectedHostsLocked(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.conns[server] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
 
 	hosts := svc.connectedHostsLocked()
 	svc.mu.Unlock()
@@ -7016,7 +7016,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.conns[server] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
 	svc.mu.Unlock()
 
 	candidates := svc.peerDialCandidates()
@@ -7099,9 +7099,11 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	// Register the connections in the unified registry first — in
 	// production registerInboundConn runs before trackInboundConnect and
 	// creates the connEntry whose tracked flag is then flipped.
-	// After PR 9.4a trackInboundConnect only mutates the existing entry
-	// (no lazy insert) to keep a single creation site and satisfy the
-	// §2.6.7 invariant; tests must follow the same order.
+	// trackInboundConnect only mutates an existing entry (no lazy insert)
+	// so the single-creation-site invariant enforced by the lifecycle
+	// helpers in conn_registry.go is preserved; tests must follow the
+	// same order or they will exercise a codepath that cannot happen in
+	// production.
 	if !svc.registerInboundConn(conn1a) {
 		t.Fatalf("registerInboundConn conn1a failed")
 	}
@@ -7161,18 +7163,21 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	}
 }
 
-// TestTrackInboundDisconnect_PrefersNetCoreIdentity verifies the §2.6.10
-// by-conn reader migration: trackInboundDisconnect emits the InboundClosed
-// hint with the identity taken from the NetCore mirror instead of the
-// address-keyed persistence cache when both are set to different values.
-// The persistence cache remains as fallback for paths that never stamp
-// SetIdentity on the NetCore (auth-not-required, legacy test paths).
+// TestTrackInboundDisconnect_PrefersNetCoreIdentity pins the identity
+// source-of-truth precedence on the teardown path. When both the NetCore
+// mirror (set via core.SetIdentity on the connEntry in conn_registry.go)
+// and the address-keyed persistence cache (Service.peerIDs) carry an
+// identity for the same peer, trackInboundDisconnect must emit the
+// InboundClosed hint with the per-conn NetCore identity. The
+// persistence cache is a fallback for paths that never call SetIdentity
+// (auth-not-required, legacy tests) — see
+// TestTrackInboundDisconnect_FallsBackToPeerIDsMap below for that branch.
 //
-// TRANSLATION (RU): проверяет миграцию by-conn reader'а из §2.6.10:
-// trackInboundDisconnect публикует InboundClosed hint с идентичностью из
-// NetCore mirror, а не из address-keyed persistence-кэша, когда оба
-// установлены в разные значения. Persistence-кэш остаётся fallback'ом для
-// путей, которые не штампуют SetIdentity на NetCore.
+// TRANSLATION (RU): фиксирует приоритет источника identity на teardown.
+// Когда mirror на NetCore (через core.SetIdentity) и persistence-кэш
+// Service.peerIDs держат разные значения для одного peer'а,
+// trackInboundDisconnect обязан публиковать InboundClosed с identity
+// из NetCore. Persistence-кэш — fallback для путей без SetIdentity.
 func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -7209,7 +7214,7 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	mapIdentity := domain.PeerIdentity("persistence-cache-identity")
 
 	svc.mu.Lock()
-	if e := svc.conns[connA]; e != nil && e.core != nil {
+	if e := svc.testConnEntry(connA); e != nil && e.core != nil {
 		e.core.SetIdentity(netcoreIdentity)
 	}
 	svc.peerIDs[peer] = mapIdentity
@@ -7232,15 +7237,20 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	}
 }
 
-// TestTrackInboundDisconnect_FallsBackToPeerIDsMap verifies that when the
-// NetCore identity is empty (e.g. a path that never called SetIdentity on
-// the conn), trackInboundDisconnect falls back to the address-keyed
-// persistence cache. This is the safety net documented in §2.6.10 and is
-// what prevents a regression in auth-not-required flows and legacy tests.
+// TestTrackInboundDisconnect_FallsBackToPeerIDsMap pins the fallback
+// branch of the identity precedence enforced by
+// TestTrackInboundDisconnect_PrefersNetCoreIdentity. When the NetCore
+// mirror is empty (no SetIdentity was ever called on the connEntry —
+// typical for auth-not-required peers and tests that register a conn
+// without running the full inbound auth flow), trackInboundDisconnect
+// must fall back to the address-keyed persistence cache
+// (Service.peerIDs). Without this branch, auth-not-required flows would
+// emit InboundClosed with an empty identity and break downstream hint
+// consumers.
 //
-// TRANSLATION (RU): проверяет fallback на persistence-кэш, когда NetCore
-// identity пуст. Это safety-net из §2.6.10, защищающий auth-not-required
-// и тест-пути, обходящие inbound-auth.
+// TRANSLATION (RU): fallback-ветка к persistence-кэшу, когда NetCore
+// identity пуст. Покрывает auth-not-required и тест-пути, которые
+// регистрируют conn без полного inbound-auth flow.
 func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	t.Parallel()
 
@@ -7334,7 +7344,7 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
 	})
-	svc.conns[server] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
 
 	hosts := svc.connectedHostsLocked()
 	svc.mu.Unlock()
@@ -8217,12 +8227,12 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 		Address:      peerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.conns[server] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
 	svc.mu.Unlock()
 
 	// Verify the connection is in conns before eviction.
 	svc.mu.RLock()
-	_, exists := svc.conns[server]
+	exists := svc.testConnEntry(server) != nil
 	svc.mu.RUnlock()
 	if !exists {
 		t.Fatal("expected server conn in conns before eviction")
@@ -8281,7 +8291,7 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 		Address:      peerAddr,
 		LastActivity: time.Now(), // recent activity — should not be evicted
 	})
-	svc.conns[server] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
 	svc.mu.Unlock()
 
 	svc.evictStaleInboundConns()
@@ -8340,14 +8350,14 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	svc.mu.Lock()
 	// Clear any pre-existing inbound connections left over from
 	// startTestNode's health-check dial to avoid 127.0.0.1 collisions.
-	for c := range svc.conns {
-		delete(svc.conns, c)
+	for c := range svc.connIDByNetConn {
+		svc.deleteTestConn(c)
 	}
 	pc := netcore.New(netcore.ConnID(1), server1, netcore.Inbound, netcore.Options{
 		Address:      stalledPeerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.conns[server1] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(server1, &connEntry{core: pc})
 
 	// Also add an outbound session as control.
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
@@ -8626,7 +8636,7 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 		Address:  peerAddr,
 		Identity: domain.PeerIdentity("stale-identity"),
 	})
-	svc.conns[staleConn] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(staleConn, &connEntry{core: pc})
 	svc.mu.Unlock()
 
 	frames := svc.peerHealthFrames()
@@ -9161,7 +9171,8 @@ func TestWriteJSONFrameDropsOnUnregisteredConn(t *testing.T) {
 	}()
 
 	svc := &Service{
-		conns: map[net.Conn]*connEntry{},
+		conns:           map[netcore.ConnID]*connEntry{},
+		connIDByNetConn: map[net.Conn]netcore.ConnID{},
 	}
 	conn := &mockConn{}
 
@@ -9202,7 +9213,8 @@ func TestWriteJSONFrameSyncDropsOnUnregisteredConn(t *testing.T) {
 	}()
 
 	svc := &Service{
-		conns: map[net.Conn]*connEntry{},
+		conns:           map[netcore.ConnID]*connEntry{},
+		connIDByNetConn: map[net.Conn]netcore.ConnID{},
 	}
 	conn := &mockConn{}
 

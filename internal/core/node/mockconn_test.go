@@ -9,10 +9,9 @@ import (
 
 // mockConn is a minimal net.Conn used by node-package tests that need a
 // stub transport without touching a real socket. The netcore package keeps
-// a parallel copy for its own unit tests — see §2.6.11 on why test fixtures
-// are duplicated across the package boundary instead of shared through an
-// exported testing helper (exposing mockConn publicly would leak test-only
-// plumbing into production API surface).
+// its own parallel copy for its unit tests: exposing mockConn publicly
+// would leak test-only plumbing into production API surface, so each
+// package has its own fixture rather than a shared exported helper.
 type mockConn struct {
 	mu      sync.Mutex
 	buf     bytes.Buffer

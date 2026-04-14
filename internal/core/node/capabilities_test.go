@@ -144,14 +144,15 @@ func TestConnHasCapability(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 
 	svc := &Service{
-		conns: make(map[net.Conn]*connEntry),
+		conns:           make(map[netcore.ConnID]*connEntry),
+		connIDByNetConn: make(map[net.Conn]netcore.ConnID),
 	}
 
 	pc := netcore.New(netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("10.0.0.1:64646"),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1},
 	})
-	svc.conns[serverConn] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(serverConn, &connEntry{core: pc})
 
 	if !svc.connHasCapability(serverConn, domain.CapMeshRelayV1) {
 		t.Fatal("serverConn should have mesh_relay_v1")
@@ -170,11 +171,12 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 
 	svc := &Service{
-		conns: make(map[net.Conn]*connEntry),
+		conns:           make(map[netcore.ConnID]*connEntry),
+		connIDByNetConn: make(map[net.Conn]netcore.ConnID),
 	}
 
 	pc := netcore.New(netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{})
-	svc.conns[serverConn] = &connEntry{core: pc}
+	svc.setTestConnEntryLocked(serverConn, &connEntry{core: pc})
 
 	hello := protocol.Frame{
 		Type:         "hello",

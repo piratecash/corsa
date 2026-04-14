@@ -152,14 +152,14 @@ func New(id ConnID, rawConn net.Conn, dir Direction, opts Options) *NetCore {
 	return pc
 }
 
-// NewBootstrap wraps a one-shot outbound dial (e.g., syncPeer and
-// other §4.4 bootstrap/probe paths) in a NetCore so that every write on
-// conn goes through the single-writer invariant instead of raw
-// io.WriteString. The NetCore is never registered in s.conns —
-// its sole job is to serialise writes on conn while the caller continues
-// to read directly from a bufio.Reader over the same conn. Caller owns
-// lifecycle via Close(), which closes the underlying conn and waits for
-// the writer goroutine to exit.
+// NewBootstrap wraps a one-shot outbound dial (e.g., syncPeer and other
+// bootstrap/probe paths that run before a session is established) in a
+// NetCore so that every write on conn goes through the single-writer
+// invariant instead of raw io.WriteString. The NetCore is never registered
+// in the Service connection registry — its sole job is to serialise writes
+// on conn while the caller continues to read directly from a bufio.Reader
+// over the same conn. Caller owns lifecycle via Close(), which closes the
+// underlying conn and waits for the writer goroutine to exit.
 //
 // writeDeadline is taken from the caller's outer overall-operation budget
 // (e.g., syncHandshakeTimeout for syncPeer) rather than the generic
@@ -450,6 +450,21 @@ func (pc *NetCore) SetAddress(addr domain.PeerAddress) {
 // suitable for diagnostics and logging. Immutable — no lock needed.
 func (pc *NetCore) ConnIDNum() uint64 {
 	return pc.connIDNum
+}
+
+// ConnID returns the typed connection identifier used as primary key in
+// the Service connection registry. Immutable — no lock needed.
+func (pc *NetCore) ConnID() ConnID {
+	return ConnID(pc.connIDNum)
+}
+
+// Conn returns the underlying net.Conn the NetCore owns. Used by iteration
+// helpers in the node-level connection registry that need to surface the
+// raw conn handle in their callbacks after the registry was rekeyed from
+// net.Conn to ConnID in PR 9.7. Immutable — rawConn is set once in New()
+// and never reassigned.
+func (pc *NetCore) Conn() net.Conn {
+	return pc.rawConn
 }
 
 // Auth returns the connection's auth state, or nil for unauthenticated

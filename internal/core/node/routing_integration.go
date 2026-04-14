@@ -1252,11 +1252,14 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
-	// netcore-migration: §4.4 bootstrap exception, pending architectural
-	// review of the inbound-absent dial fallback itself (see §2.6.6). The
-	// forbidden-list in §2.9 enumerates this write explicitly; removing the
-	// sentinel without removing the raw write triggers the grep gate. The
-	// same applies to the two writes below in this function body.
+	// netcore-migration: §4.4 bootstrap exception. This raw write pre-dates
+	// the NetCore managed-write path and is pending architectural review of
+	// the inbound-absent dial fallback itself. A repository-wide forbidden-
+	// list grep gate whitelists this write by explicit line number using
+	// the exact prefix `netcore-migration: §4.4 bootstrap exception` as the
+	// whitelist token — removing the sentinel without removing the raw
+	// write triggers the gate. Same applies to the two writes below in
+	// this function body.
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
 		return
 	}

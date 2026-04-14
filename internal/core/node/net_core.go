@@ -5,22 +5,26 @@ import (
 )
 
 // connEntry is the single-source-of-truth record the Service keeps per
-// registered net.Conn. It consolidates what checkpoint 9.3 previously
-// spread across four parallel maps (inboundConns / inboundMetered /
-// inboundTracked / inboundNetCores). The lifecycle invariant is pinned
-// in doc §2.6.7: all fields are created in registerInboundConn /
-// attachOutboundNetCore, mutated (tracked flag) by trackInboundConnect /
-// trackInboundDisconnect, and invalidated atomically by
-// unregisterInboundConn — there is exactly one delete call site.
+// registered connection, stored in Service.conns under its netcore.ConnID.
+// Its lifecycle is owned entirely by the helpers in conn_registry.go:
 //
-// core is always non-nil for a registered conn.
-// metered is nil for conns that are not wrapped in MeteredConn (e.g.
-// outbound dials that do not measure bytes).
+//   - registerInboundConnLocked creates the entry for an accepted inbound
+//     conn, populating core and (optionally) metered.
+//   - attachOutboundCoreLocked creates the entry for a dialed outbound
+//     conn after the NetCore wrap completes.
+//   - trackInboundConnect flips tracked to true once the peer has passed
+//     auth-complete or auth-not-required promotion.
+//   - trackInboundDisconnect flips tracked back to false on peer teardown.
+//   - unregisterConnLocked is the single delete call site: it removes the
+//     entry from both Service.conns and the secondary connIDByNetConn
+//     index in one step so no accessor can observe a half-invalidated
+//     state.
 //
-// tracked is set to true after the auth-complete / auth-not-required
-// promotion in trackInboundConnect, and flipped back to false by
-// trackInboundDisconnect. Deletion of the whole entry happens only in
-// unregisterInboundConn, keeping the four legacy removals coherent.
+// Field semantics:
+//   - core is always non-nil for a registered conn.
+//   - metered is nil for conns that are not wrapped in MeteredConn (e.g.
+//     outbound dials that do not measure bytes).
+//   - tracked is the auth-promotion flag described above.
 type connEntry struct {
 	core    *netcore.NetCore
 	metered *netcore.MeteredConn

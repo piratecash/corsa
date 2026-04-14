@@ -456,10 +456,10 @@ func TestSyncSenderKeys_FreshDialFallback_RespectsCtxCancel(t *testing.T) {
 // drain/terminate that goroutine before returning. A leak would manifest as
 // goroutine count growing linearly with the iteration count.
 //
-// This is the regression lock on PR 5 §4.4 bootstrap exception for syncPeer:
-// if a future refactor replaces pc.Close() with a raw conn.Close() or
-// forgets the defer, sendCh never closes, writerLoop never exits, and this
-// test catches it deterministically.
+// This is the regression lock on the syncPeer bootstrap path: if a future
+// refactor replaces pc.Close() with a raw conn.Close() or forgets the
+// defer, sendCh never closes, writerLoop never exits, and this test
+// catches it deterministically.
 func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
 	// Intentionally not t.Parallel — goroutine counting is a global signal.
 

@@ -1476,7 +1476,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Identity: domain.PeerIdentity("inbound-peer-1"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
-		svc.conns[c1] = &connEntry{core: pc}
+		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
 		// Activation gate: countCapablePeers requires a present, Connected
 		// health entry (mirrors markPeerConnected in production).
 		svc.health[domain.PeerAddress("inbound-peer-1")] = &peerHealth{
@@ -1494,7 +1494,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 
 		// Cleanup.
 		svc.mu.Lock()
-		delete(svc.conns, c1)
+		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress("inbound-peer-1"))
 		svc.mu.Unlock()
 	})
@@ -1519,7 +1519,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Identity: domain.PeerIdentity(peerID),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
-		svc.conns[c1] = &connEntry{core: pc}
+		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
 		// Activation gate seed (mirrors markPeerConnected).
 		svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{
 			Address:             domain.PeerAddress(peerAddr),
@@ -1537,7 +1537,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress(peerAddr))
-		delete(svc.conns, c1)
+		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress(peerAddr))
 		svc.mu.Unlock()
 	})
@@ -1560,7 +1560,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Identity: domain.PeerIdentity("inbound-id-2"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
-		svc.conns[c1] = &connEntry{core: pc}
+		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
 		// Activation gate seeds for both peers.
 		svc.health[domain.PeerAddress("outbound-peer")] = &peerHealth{
 			Address:             domain.PeerAddress("outbound-peer"),
@@ -1584,7 +1584,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-peer"))
-		delete(svc.conns, c1)
+		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress("outbound-peer"))
 		delete(svc.health, domain.PeerAddress("inbound-peer-2"))
 		svc.mu.Unlock()
@@ -1611,7 +1611,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Identity: domain.PeerIdentity(sharedID),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
-		svc.conns[c1] = &connEntry{core: pc}
+		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
 		// Activation gate seeds for both sides of the duplex — same identity,
 		// different addresses, both must be active for dedup to matter.
 		svc.health[domain.PeerAddress("outbound-addr-X")] = &peerHealth{
@@ -1636,7 +1636,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-addr-X"))
-		delete(svc.conns, c1)
+		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress("outbound-addr-X"))
 		delete(svc.health, domain.PeerAddress("127.0.0.1:64646"))
 		svc.mu.Unlock()
@@ -1664,7 +1664,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			Identity: domain.PeerIdentity("preactivation-id-2"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
-		svc.conns[c1] = &connEntry{core: pc}
+		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
 		// Intentionally no s.health entries — mirrors the insert →
 		// markPeerConnected window on both bring-up paths.
 		svc.mu.Unlock()
@@ -1677,7 +1677,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		// Cleanup.
 		svc.mu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-preactivation"))
-		delete(svc.conns, c1)
+		svc.deleteTestConn(c1)
 		svc.mu.Unlock()
 	})
 }

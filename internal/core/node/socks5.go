@@ -56,6 +56,10 @@ func dialSOCKS5(ctx context.Context, proxyAddr, targetAddr string, timeout time.
 	_ = conn.SetDeadline(deadline)
 
 	// Greeting: VER=5, NMETHODS=1, METHOD=0x00 (no auth)
+	// netcore-migration: §5.3.2 sub-NetCore exception. SOCKS5 handshake runs
+	// against the dialed socket before any NetCore is constructed around it,
+	// so the managed send path does not exist yet at this point. Whitelisted
+	// by explicit line number in §2.9; any drift breaks the grep gate.
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("socks5: send greeting: %w", err)
@@ -82,6 +86,9 @@ func dialSOCKS5(ctx context.Context, proxyAddr, targetAddr string, timeout time.
 	req = append(req, 0x05, 0x01, 0x00, 0x03, byte(len(hostBytes)))
 	req = append(req, hostBytes...)
 	req = append(req, byte(port>>8), byte(port&0xff))
+	// netcore-migration: §5.3.2 sub-NetCore exception. Same rationale as the
+	// greeting write above — SOCKS5 CONNECT request is part of proxy
+	// handshake before the socket enters the managed transport layer.
 	if _, err := conn.Write(req); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("socks5: send connect: %w", err)

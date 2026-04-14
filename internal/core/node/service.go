@@ -82,9 +82,9 @@ type Service struct {
 	health       map[domain.PeerAddress]*peerHealth
 	// peerTypes / peerIDs / peerVersions / peerBuilds are persistence caches,
 	// keyed by overlay address, that intentionally outlive the lifetime of any
-	// single net.Conn (see §2.6.10). They record the last-known self-report
-	// from welcome/auth/add_peer so that eviction, gossip, dial scoring,
-	// reverse identity→address lookups (routing_provider.PeerTransport) and
+	// single net.Conn. They record the last-known self-report from
+	// welcome/auth/add_peer so that eviction, gossip, dial scoring, reverse
+	// identity→address lookups (routing_provider.PeerTransport) and
 	// peer.json reload can resolve state for peers that are not currently
 	// connected. They are NOT duplicates of *NetCore state — NetCore owns
 	// transport state for the current conn, these maps own persistence.
@@ -106,11 +106,24 @@ type Service struct {
 	relayRetry            map[string]relayAttempt
 	outbound              map[string]outboundDelivery
 	upstream              map[domain.PeerAddress]struct{}
-	inboundHealthRefs     map[domain.PeerAddress]int // resolved overlay address → active inbound connection count
-	connWg                sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
-	backgroundWg          sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
-	conns                 map[net.Conn]*connEntry    // primary registry: conn → connEntry (core + metered + tracked). See §2.6.7 of docs/netcore-migration.md for the lifecycle invariant and §2.6.8 for the PR 9.4a consolidation that replaced inboundConns / inboundMetered / inboundTracked / inboundNetCores.
-	connIDCounter         uint64                     // monotonic counter for connection IDs (protected by mu)
+	inboundHealthRefs     map[domain.PeerAddress]int    // resolved overlay address → active inbound connection count
+	connWg                sync.WaitGroup                // tracks active handleConn goroutines for graceful shutdown
+	backgroundWg          sync.WaitGroup                // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
+	// conns is the single source of truth for live connection state (core,
+	// metered counters, tracked flag). It is keyed by netcore.ConnID so the
+	// key is a domain identifier, not a raw net.Conn handle. All reads and
+	// writes go through the helpers in conn_registry.go — nothing outside
+	// that file touches this map directly. Lifecycle entry points:
+	// registerInboundConnLocked, attachOutboundCoreLocked, unregisterConnLocked.
+	conns map[netcore.ConnID]*connEntry
+	// connIDByNetConn is a secondary index that lets net.Conn-first helpers
+	// resolve their input into the primary ConnID key. It is kept strictly
+	// in lock-step with `conns` by the lifecycle helpers in conn_registry.go;
+	// the invariant is pinned by TestConnRegistry_InvalidationIsAtomic and
+	// TestConnRegistry_RegisterSyncsSecondaryIndex in
+	// conn_registry_lifecycle_test.go.
+	connIDByNetConn map[net.Conn]netcore.ConnID
+	connIDCounter         uint64                        // monotonic counter for connection IDs (protected by mu)
 	bans                  map[string]banEntry
 	events                map[chan protocol.LocalChangeEvent]struct{}
 	listener              net.Listener
@@ -572,7 +585,8 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		observedAddrs:         make(map[domain.PeerIdentity]string),
 		reachableGroups:       computeReachableGroups(cfg),
 		inboundHealthRefs:     make(map[domain.PeerAddress]int),
-		conns:                 make(map[net.Conn]*connEntry),
+		conns:                 make(map[netcore.ConnID]*connEntry),
+		connIDByNetConn:       make(map[net.Conn]netcore.ConnID),
 		bans:                  make(map[string]banEntry),
 		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:      make(map[domain.PeerIdentity]int),
@@ -2047,9 +2061,13 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 		// Mirror identity/address onto the NetCore for this conn so that
 		// by-conn readers (e.g. trackInboundDisconnect) can derive identity
 		// from transport state instead of re-reading the address-keyed
-		// persistence cache. See §2.6.10 for the write-path invariant:
-		// every live-conn update of the peerIDs map must also update the
-		// NetCore mirror when a conn is in scope.
+		// persistence cache. Write-path invariant: every live-conn update
+		// of the peerIDs map must also update the NetCore mirror when a
+		// conn is in scope, so the two sources cannot diverge mid-session.
+		// The precedence of NetCore over peerIDs on the teardown path is
+		// pinned by TestTrackInboundDisconnect_PrefersNetCoreIdentity and
+		// the peerIDs fallback branch by
+		// TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
 		if pc := s.netCoreFor(conn); pc != nil {
 			pc.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
 			pc.SetAddress(addr)
@@ -2210,11 +2228,16 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddre
 	if entry := s.connEntryForLocked(conn); entry != nil {
 		wasTracked = entry.tracked
 		s.setTrackedLocked(conn, false)
-		// Prefer NetCore as the source of truth for transport-level identity
-		// (§2.6.10): it is updated in the inbound auth mirror next to the
-		// peerIDs map write. Fallback to the persistence cache below keeps
-		// behaviour for paths that never call SetIdentity on the NetCore
-		// (auth-not-required, legacy tests that bypass the inbound-auth path).
+		// Prefer NetCore as the source of truth for transport-level
+		// identity: it is updated in the inbound auth mirror (see the
+		// SetIdentity call next to the peerIDs map write in
+		// handleAcceptedHello), so the two sources cannot diverge while
+		// the conn is live. Fallback to the persistence cache below
+		// keeps behaviour for paths that never call SetIdentity on the
+		// NetCore (auth-not-required, legacy tests that bypass the
+		// inbound-auth path). This precedence is pinned by
+		// TestTrackInboundDisconnect_PrefersNetCoreIdentity and its
+		// fallback branch TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
 		if entry.core != nil {
 			peerIdentity = entry.core.Identity()
 		}
