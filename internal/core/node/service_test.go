@@ -7112,8 +7112,10 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	}
 
 	// Two inbound connections to the same peer.
-	svc.trackInboundConnect(conn1a, peer, "test-peer-identity")
-	svc.trackInboundConnect(conn2a, peer, "test-peer-identity")
+	id1a, _ := svc.connIDFor(conn1a)
+	id2a, _ := svc.connIDFor(conn2a)
+	svc.trackInboundConnect(id1a, peer, "test-peer-identity")
+	svc.trackInboundConnect(id2a, peer, "test-peer-identity")
 
 	// Peer should be connected.
 	svc.mu.RLock()
@@ -7126,7 +7128,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 
 	// Close the first connection — peer should remain connected.
 	_ = conn1a.Close()
-	svc.trackInboundDisconnect(conn1a, peer)
+	svc.trackInboundDisconnect(id1a, peer)
 
 	svc.mu.RLock()
 	h = svc.health[peer]
@@ -7146,7 +7148,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 
 	// Close the second connection — now the peer should disconnect.
 	_ = conn2a.Close()
-	svc.trackInboundDisconnect(conn2a, peer)
+	svc.trackInboundDisconnect(id2a, peer)
 
 	svc.mu.RLock()
 	h = svc.health[peer]
@@ -7214,8 +7216,9 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	svc.peerIDs[peer] = mapIdentity
 	svc.mu.Unlock()
 
-	svc.trackInboundConnect(connA, peer, mapIdentity)
-	svc.trackInboundDisconnect(connA, peer)
+	idA, _ := svc.connIDFor(connA)
+	svc.trackInboundConnect(idA, peer, mapIdentity)
+	svc.trackInboundDisconnect(idA, peer)
 
 	select {
 	case hint := <-cm.hintEvents:
@@ -7276,8 +7279,9 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	svc.peerIDs[peer] = mapIdentity
 	svc.mu.Unlock()
 
-	svc.trackInboundConnect(connA, peer, mapIdentity)
-	svc.trackInboundDisconnect(connA, peer)
+	idA, _ := svc.connIDFor(connA)
+	svc.trackInboundConnect(idA, peer, mapIdentity)
+	svc.trackInboundDisconnect(idA, peer)
 
 	select {
 	case hint := <-cm.hintEvents:

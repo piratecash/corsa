@@ -665,22 +665,22 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	svc.rememberConnPeerAddr(spoofID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)})
 
 	// Only the first connection completes auth and is promoted.
-	svc.trackInboundConnect(authConn, peerAddr, "test-identity")
+	svc.trackInboundConnect(authID, peerAddr, "test-identity")
 
 	// The authenticated connection should return the address.
-	if got := svc.trackedInboundPeerAddress(authConn); got != peerAddr {
+	if got := svc.trackedInboundPeerAddress(authID); got != peerAddr {
 		t.Fatalf("expected tracked address %q for auth conn, got %q", peerAddr, got)
 	}
 
 	// The spoofed connection must NOT return the address even though
 	// the same address is globally tracked via the auth connection.
-	if got := svc.trackedInboundPeerAddress(spoofConn); got != "" {
+	if got := svc.trackedInboundPeerAddress(spoofID); got != "" {
 		t.Fatalf("expected empty address for untracked conn, got %q", got)
 	}
 
 	// Clean up.
 	_ = authConn.Close()
-	svc.trackInboundDisconnect(authConn, peerAddr)
+	svc.trackInboundDisconnect(authID, peerAddr)
 	_ = spoofConn.Close()
-	svc.trackInboundDisconnect(spoofConn, peerAddr)
+	svc.trackInboundDisconnect(spoofID, peerAddr)
 }

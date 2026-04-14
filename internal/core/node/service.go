@@ -957,8 +957,8 @@ func (s *Service) handleConn(conn net.Conn) {
 	// subsequent PRs.
 	connID, _ := s.connIDFor(metered)
 	defer func() {
-		if addr := s.inboundPeerAddress(metered); addr != "" {
-			s.trackInboundDisconnect(metered, addr)
+		if addr := s.inboundPeerAddress(connID); addr != "" {
+			s.trackInboundDisconnect(connID, addr)
 		}
 		s.accumulateInboundTraffic(metered)
 		// Close TCP before waiting for the writer goroutine to drain.
@@ -1041,7 +1041,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		// so that each node has its own proof of liveness regardless of
 		// who initiated the TCP connection.
 		if heartbeatStop == nil {
-			if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+			if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 				heartbeatStop = make(chan struct{})
 				go s.inboundHeartbeat(conn, addr, heartbeatStop)
 			}
@@ -1112,17 +1112,17 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 	// --- Handshake commands (no auth required) ---
 	switch frame.Type {
 	case "ping":
-		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 			s.markPeerRead(addr, frame)
 		}
 		pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
 		_ = s.writeJSONFrame(conn, pongFrame)
-		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 			s.markPeerWrite(addr, pongFrame)
 		}
 		return true
 	case "pong":
-		if addr := s.trackedInboundPeerAddress(conn); addr != "" {
+		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
 			s.markPeerRead(addr, frame)
 		}
 		return true
@@ -1358,7 +1358,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		senderAddr := s.inboundPeerAddress(conn)
+		senderAddr := s.inboundPeerAddress(connID)
 		if senderAddr == "" {
 			accepted = false
 			return true
@@ -1388,7 +1388,7 @@ func (s *Service) dispatchNetworkFrame(conn net.Conn, line string) bool {
 			accepted = false
 			return true
 		}
-		senderAddr := s.inboundPeerAddress(conn)
+		senderAddr := s.inboundPeerAddress(connID)
 		if senderAddr != "" {
 			s.handleRelayHopAck(domain.PeerAddress(senderAddr), frame)
 		}
@@ -2106,7 +2106,12 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 		go s.announcePeerToSessions(addr, verified.Hello.NodeType)
 	}
 
-	if addr := s.inboundPeerAddress(conn); addr != "" {
+	// Resolve ConnID once for the ConnID-first tracking helpers below.
+	// handleAuthSession itself stays net.Conn-first until PR 10.3 migrates
+	// frame dispatch; the bridge here is local to this function.
+	connID, _ := s.connIDFor(conn)
+
+	if addr := s.inboundPeerAddress(connID); addr != "" {
 		// Log duplicate but allow: see the hello-path comment for the
 		// full rationale — rejecting breaks one-way gossip when both
 		// sides dial simultaneously.
@@ -2114,7 +2119,7 @@ func (s *Service) handleAuthSession(conn net.Conn, frame protocol.Frame) (protoc
 			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
 		s.addPeerID(addr, domain.PeerIdentity(verified.Hello.Address))
-		s.trackInboundConnect(conn, addr, domain.PeerIdentity(verified.Hello.Address))
+		s.trackInboundConnect(connID, addr, domain.PeerIdentity(verified.Hello.Address))
 		s.addPeerVersion(addr, verified.Hello.ClientVersion)
 		s.addPeerBuild(addr, verified.Hello.ClientBuild)
 
@@ -2238,11 +2243,9 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame) {
 // inboundPeerAddress returns the overlay address declared by the
 // remote peer during the hello handshake, or "" if no address is
 // known yet. The returned address is suitable for health tracking.
-func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
-	id, ok := s.connIDFor(conn)
-	if !ok {
-		return ""
-	}
+// ConnID-first: callers that start from a net.Conn cross the boundary
+// once via connIDFor at the entry point and pass the resolved id here.
+func (s *Service) inboundPeerAddress(id domain.ConnID) domain.PeerAddress {
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return ""
@@ -2257,10 +2260,10 @@ func (s *Service) inboundPeerAddress(conn net.Conn) domain.PeerAddress {
 // has not been promoted, preventing unauthenticated connections from
 // creating or refreshing health entries — even if another legitimate
 // connection for the same address is already tracked.
-func (s *Service) trackedInboundPeerAddress(conn net.Conn) domain.PeerAddress {
+func (s *Service) trackedInboundPeerAddress(id domain.ConnID) domain.PeerAddress {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry := s.connEntryForLocked(conn)
+	entry := s.connEntryByIDLocked(id)
 	if entry == nil || !entry.tracked || entry.core == nil {
 		return ""
 	}
@@ -2273,14 +2276,12 @@ func (s *Service) trackedInboundPeerAddress(conn net.Conn) domain.PeerAddress {
 // connection for that address. peerIdentity is the Ed25519 fingerprint
 // from the hello/auth frame — used for routing table registration instead
 // of the transport address.
-func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress, peerIdentity domain.PeerIdentity) {
+func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddress, peerIdentity domain.PeerIdentity) {
 	s.mu.Lock()
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
 	s.inboundHealthRefs[resolved]++
-	if id, ok := s.connIDForLocked(conn); ok {
-		s.setTrackedByIDLocked(id, true)
-	}
+	s.setTrackedByIDLocked(id, true)
 	s.mu.Unlock()
 
 	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
@@ -2288,6 +2289,18 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 	if first {
 		s.markPeerConnected(resolved, peerDirectionInbound)
 	}
+
+	// Downstream helpers (connHasCapability, sendFullTableSyncToInbound,
+	// flushPendingFireAndForget) still take net.Conn as their first argument.
+	// PR 10.3 migrates this downstream to ConnID; temporary net.Conn bridge
+	// via coreForID().Conn(). If the connection has already been unregistered
+	// (race with teardown), skip downstream side-effects — routing and
+	// fire-and-forget drains are inherently tied to a live connection.
+	core := s.netCoreForID(id)
+	if core == nil {
+		return
+	}
+	conn := core.Conn()
 
 	// Routing table: register direct peer using the identity fingerprint,
 	// not the transport address. The relay capability flag ensures only
@@ -2320,13 +2333,13 @@ func (s *Service) trackInboundConnect(conn net.Conn, address domain.PeerAddress,
 // If trackInboundConnect was never called for this connection (e.g. auth
 // failed), the disconnect is silently ignored to avoid creating phantom
 // health entries for unauthenticated connections.
-func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddress) {
+func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAddress) {
 	s.mu.Lock()
 	var (
 		wasTracked   bool
 		peerIdentity domain.PeerIdentity
 	)
-	if entry := s.connEntryForLocked(conn); entry != nil {
+	if entry := s.connEntryByIDLocked(id); entry != nil {
 		wasTracked = entry.tracked
 		entry.tracked = false
 		// Prefer NetCore as the source of truth for transport-level
@@ -2372,8 +2385,17 @@ func (s *Service) trackInboundDisconnect(conn net.Conn, address domain.PeerAddre
 	// Routing table: deregister direct peer when the last relay-capable
 	// inbound session closes. Uses the identity fingerprint, not transport
 	// address, to match what was passed to onPeerSessionEstablished.
+	// connHasCapability is still net.Conn-first; PR 10.3 migrates this
+	// downstream to ConnID — temporary bridge via coreForID().Conn().
+	// If the NetCore is already gone (unregisterConnLocked raced ahead),
+	// the capability check falls back to false, which is the safe default
+	// for a torn-down connection.
 	if wasTracked {
-		s.onPeerSessionClosed(peerIdentity, s.connHasCapability(conn, domain.CapMeshRelayV1))
+		var relayCap bool
+		if core := s.netCoreForID(id); core != nil {
+			relayCap = s.connHasCapability(core.Conn(), domain.CapMeshRelayV1)
+		}
+		s.onPeerSessionClosed(peerIdentity, relayCap)
 	}
 }
 
@@ -3926,7 +3948,8 @@ func (s *Service) handleInboundPushMessage(conn net.Conn, frame protocol.Frame) 
 		return
 	}
 
-	peerAddr := s.inboundPeerAddress(conn)
+	connID, _ := s.connIDFor(conn)
+	peerAddr := s.inboundPeerAddress(connID)
 	peerIdentity := s.inboundPeerIdentity(conn)
 
 	// Non-DM sender verification: reject messages whose sender is not a
@@ -4003,7 +4026,8 @@ func (s *Service) handleInboundPushDeliveryReceipt(conn net.Conn, frame protocol
 		return
 	}
 
-	peerAddr := s.inboundPeerAddress(conn)
+	connID, _ := s.connIDFor(conn)
+	peerAddr := s.inboundPeerAddress(connID)
 
 	// Identity gate: accept only receipts whose Recipient matches our own
 	// identity or an identity with an active inbound subscriber (full-node
@@ -4049,7 +4073,8 @@ func (s *Service) handleInboundRelayDeliveryReceipt(conn net.Conn, frame protoco
 		return
 	}
 
-	peerAddr := s.inboundPeerAddress(conn)
+	connID, _ := s.connIDFor(conn)
+	peerAddr := s.inboundPeerAddress(connID)
 
 	if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
 		log.Warn().

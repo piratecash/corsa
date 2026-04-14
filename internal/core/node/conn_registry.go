@@ -120,6 +120,16 @@ func (s *Service) connEntryForLocked(conn net.Conn) *connEntry {
 	return s.connEntryLocked(conn)
 }
 
+// connEntryByIDLocked returns the entire connEntry keyed by ConnID, or nil
+// if the connection is not registered. Used by ConnID-first call sites that
+// need access to entry-level fields beyond what coreForIDLocked /
+// isInboundTrackedByIDLocked expose (e.g. trackedInboundPeerAddress needs
+// both the tracked flag and core.Address() in a single critical section).
+// The caller must hold s.mu.
+func (s *Service) connEntryByIDLocked(id domain.ConnID) *connEntry {
+	return s.conns[id]
+}
+
 // forEachConnLocked iterates over every registered connection regardless
 // of direction, calling fn with (ConnID, NetCore). Iteration stops if fn
 // returns false. The caller must hold s.mu. Used by call sites that need

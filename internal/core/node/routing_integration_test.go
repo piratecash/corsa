@@ -202,7 +202,8 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.mu.Unlock()
 
-	svc.trackInboundConnect(conn, idPeerB, idPeerB)
+	connID, _ := svc.connIDFor(conn)
+	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -234,7 +235,8 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.mu.Unlock()
 
-	svc.trackInboundConnect(conn, idPeerB, idPeerB)
+	connID, _ := svc.connIDFor(conn)
+	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -1660,7 +1662,8 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	}
 
 	// trackInboundConnect should NOT send anything because the gate blocks it.
-	svc.trackInboundConnect(conn, idPeerB, idPeerB)
+	connID, _ := svc.connIDFor(conn)
+	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1724,7 +1727,8 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	}()
 
 	// trackInboundConnect should call sendFullTableSyncToInbound.
-	svc.trackInboundConnect(conn, idPeerB, idPeerB)
+	connID, _ := svc.connIDFor(conn)
+	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	select {
 	case data := <-received:
@@ -1814,7 +1818,8 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 		t.Fatal("inbound peer should NOT have mesh_relay_v1")
 	}
 
-	svc.trackInboundConnect(conn, idPeerB, idPeerB)
+	connID, _ := svc.connIDFor(conn)
+	svc.trackInboundConnect(connID, idPeerB, idPeerB)
 
 	readDone := make(chan int, 1)
 	go func() {
@@ -2200,7 +2205,8 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 	}()
 
 	// trackInboundConnect must pass peerIdentity (idPeerB), not address.
-	svc.trackInboundConnect(conn, natListenAddr, idPeerB)
+	connID, _ := svc.connIDFor(conn)
+	svc.trackInboundConnect(connID, natListenAddr, idPeerB)
 
 	select {
 	case data := <-received:
