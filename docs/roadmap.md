@@ -162,60 +162,9 @@ Remaining work under this iteration:
 
 #### Network core extraction (`PeerConn` → `NetCore`)
 
-**Problem:** `net.Conn` is exposed across 54 functions and 9 maps in `Service`.
-Any code with a connection reference can call `.Write()` directly, bypassing
-the single-writer goroutine — a class of bugs that has already caused byte
-interleaving on shared TCP sockets (P1 fix during file transfer work). The compiler
-cannot prevent this because `net.Conn` is an interface with a public `Write`
-method.
-
-**Phase 1 — `PeerConn` (in-package refactoring):**
-
-Introduce a `PeerConn` type that owns the connection, its writer goroutine,
-capabilities, identity, and auth state. `net.Conn` becomes a private field —
-the only way to send data is `PeerConn.Send(frame)`, which routes through the
-internal write channel. Nine separate maps in `Service` collapse into one:
-
-```go
-// Before: 9 maps keyed by net.Conn
-inboundConns, inboundMetered, inboundTracked, connAuth,
-connPeerInfo, connSendCh, connWriterDone, inboundByIP, sessions
-
-// After: 1 map keyed by connection ID
-conns map[connID]*PeerConn
-```
-
-Migration is incremental — each map is replaced one at a time, old callers
-are updated, tests stay green at every step.
-
-**Phase 2 — `NetCore` (separate package):**
-
-`PeerConn` moves into a new `internal/core/netcore` package and becomes
-unexported (`peerConn`). `Service` communicates with the network layer through
-an interface:
-
-```go
-type Network interface {
-    Send(dst PeerID, frame Frame) bool
-    SendWithCap(dst PeerID, frame Frame, cap Capability) bool
-    Broadcast(frame Frame, filter func(PeerID) bool)
-    PeersByCapability(cap Capability) []PeerID
-    Disconnect(dst PeerID)
-}
-```
-
-`net.Conn` cannot be imported outside `netcore` — compile-time guarantee that
-no other package can bypass the write queue. This also enables mock-based
-testing of all protocol logic without real TCP sockets.
-
-**Open bugs (blocking Phase 1 completion):**
-
-- [ ] P2: `writeJSONFrame` / `writeJSONFrameSync` fall back to direct `conn.Write` for outbound peer sessions when `enqueueFrame` returns `enqueueUnregistered` — no mutex protects against concurrent writes from `servePeerSession` (`service.go:1391-1399`, `1423-1429`)
-
-**Status:** Phase 1 design complete, implementation pending. Phase 2 planned
-as a follow-up migration after Phase 1 is stable.
-
-**Depends on:** none (internal refactoring, no wire-protocol changes).
+The detailed internal plan for network core migration has been moved to
+[`docs/netcore-migration.md`](netcore-migration.md). Current status: see the
+header of `docs/netcore-migration.md`.
 
 ---
 

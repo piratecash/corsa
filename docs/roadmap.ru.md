@@ -168,62 +168,9 @@ forward-compatible relay для будущего onion routing. Отслежив
 
 #### Выделение сетевого ядра (`PeerConn` → `NetCore`)
 
-**Проблема:** `net.Conn` доступен в 54 функциях и 9 map'ах в `Service`.
-Любой код с ссылкой на соединение может вызвать `.Write()` напрямую,
-обходя единственную writer-горутину — целый класс багов, который уже
-вызвал перемешивание байтов на разделяемых TCP-сокетах (P1 фикс в
-Итерации 21). Компилятор не может этого предотвратить, потому что
-`net.Conn` — интерфейс с публичным методом `Write`.
-
-**Фаза 1 — `PeerConn` (рефакторинг внутри пакета):**
-
-Вводится тип `PeerConn`, который владеет соединением, writer-горутиной,
-capabilities, identity и состоянием авторизации. `net.Conn` становится
-приватным полем — единственный способ отправить данные это
-`PeerConn.Send(frame)`, который маршрутизирует через внутренний канал
-записи. Девять отдельных map'ов в `Service` сворачиваются в один:
-
-```go
-// Было: 9 map по net.Conn
-inboundConns, inboundMetered, inboundTracked, connAuth,
-connPeerInfo, connSendCh, connWriterDone, inboundByIP, sessions
-
-// Стало: 1 map по ID соединения
-conns map[connID]*PeerConn
-```
-
-Миграция инкрементальная — каждый map заменяется по одному, старые
-callers обновляются, тесты остаются зелёными на каждом шаге.
-
-**Фаза 2 — `NetCore` (отдельный пакет):**
-
-`PeerConn` переезжает в новый пакет `internal/core/netcore` и становится
-неэкспортируемым (`peerConn`). `Service` взаимодействует с сетевым слоем
-через интерфейс:
-
-```go
-type Network interface {
-    Send(dst PeerID, frame Frame) bool
-    SendWithCap(dst PeerID, frame Frame, cap Capability) bool
-    Broadcast(frame Frame, filter func(PeerID) bool)
-    PeersByCapability(cap Capability) []PeerID
-    Disconnect(dst PeerID)
-}
-```
-
-`net.Conn` нельзя импортировать за пределами `netcore` — компиляторная
-гарантия, что никакой другой пакет не обойдёт очередь записи. Это также
-позволяет mock-тестирование всей протокольной логики без реальных
-TCP-сокетов.
-
-**Открытые баги (блокируют завершение Фазы 1):**
-
-- [ ] P2: `writeJSONFrame` / `writeJSONFrameSync` откатываются к прямому `conn.Write` для исходящих peer-сессий когда `enqueueFrame` возвращает `enqueueUnregistered` — никакой мьютекс не защищает от конкурентных записей из `servePeerSession` (`service.go:1391-1399`, `1423-1429`)
-
-**Статус:** дизайн Фазы 1 готов, реализация запланирована. Фаза 2
-планируется как миграция после стабилизации Фазы 1.
-
-**Зависит от:** ничего (внутренний рефакторинг, без изменений wire-протокола).
+Подробный внутренний план миграции сетевого ядра вынесен в
+[`docs/netcore-migration.md`](netcore-migration.md). Текущий статус:
+см. шапку `docs/netcore-migration.md`.
 
 ---
 
