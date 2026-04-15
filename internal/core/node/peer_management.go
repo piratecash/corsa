@@ -2070,7 +2070,10 @@ func (s *Service) sendAckDeleteByID(connID domain.ConnID, ackType string, msgID 
 		return
 	}
 	frame := s.buildAckDeleteFrame(ackType, msgID, status)
-	_ = s.writeJSONFrameByID(connID, frame)
+	// Fire-and-forget inbound write — route through the Network interface
+	// so a test backend can intercept it. s.runCtx tracks Service lifecycle;
+	// see network_consumer.go for the full outcome-tree contract.
+	_ = s.sendFrameViaNetwork(s.runCtx, connID, frame)
 	log.Debug().Str("addr", core.RemoteAddr()).Str("type", ackType).Str("id", string(msgID)).Str("status", status).Str("mode", "inbound_conn").Msg("ack_delete_send")
 }
 
@@ -2788,7 +2791,9 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, core *netcore.NetC
 
 	connID := core.ConnID()
 	for _, item := range toSend {
-		_ = s.writeJSONFrameByID(connID, item.Frame)
+		// Fire-and-forget per-item flush — Network-routed for test
+		// observability; ctx is Service lifecycle (s.runCtx).
+		_ = s.sendFrameViaNetwork(s.runCtx, connID, item.Frame)
 		log.Debug().Str("addr", core.RemoteAddr()).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
 	}
 }
@@ -2847,7 +2852,13 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, addr
 			return
 		case <-timer.C:
 			pingFrame := protocol.Frame{Type: "ping", Node: nodeName, Network: networkName}
-			_ = s.writeJSONFrameByID(id, pingFrame)
+			// inboundHeartbeat is a goroutine loop with its own stop
+			// channel; per §2.6.32 invariant the ctx passed to the
+			// Network helper is Service lifecycle (s.runCtx), not a
+			// per-iteration ctx. Heartbeat termination remains driven
+			// by <-stop, the helper's ctx is purely a cancellation
+			// boundary for the underlying SendFrame call.
+			_ = s.sendFrameViaNetwork(s.runCtx, id, pingFrame)
 			s.markPeerWrite(address, pingFrame)
 
 			// Record the time we sent the ping and wait for pongStallTimeout.

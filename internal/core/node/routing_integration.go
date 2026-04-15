@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sort"
@@ -175,22 +176,37 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
+		// Caller-side marshal failure — distinct diagnostic from a
+		// transport drop. Kept on the caller so we can surface
+		// frame_inbound_marshal_failed without going through the
+		// network at all (the strict raw-bytes helper has no
+		// marshal-fallback path; see network_consumer.go).
 		log.Warn().Err(err).Str("peer", remoteAddr).Msg("frame_inbound_marshal_failed")
 		return false
 	}
 
-	switch s.enqueueFrameSyncByID(targetID, []byte(line)) {
-	case enqueueSent:
+	// Network-routed sync send for fail-fast inbound delivery via the
+	// injected Network surface. The raw-bytes helper preserves the full
+	// outcome tree:
+	// nil → sent; ErrUnregisteredWrite → state-inconsistency branch; any
+	// other non-nil (buffer-full / writer-done / chan-closed / sync-timeout
+	// / ctx-error) → transport drop. The legacy 3-state enqueueResult
+	// switch maps directly onto these classes.
+	sendErr := s.sendFrameBytesViaNetworkSync(s.runCtx, targetID, []byte(line))
+	switch {
+	case sendErr == nil:
 		return true
-	case enqueueUnregistered:
+	case errors.Is(sendErr, ErrUnregisteredWrite):
 		// Tracked inbound connection MUST have a NetCore. If it doesn't,
 		// the state is inconsistent — fail closed rather than bypassing
 		// the NetCore writer with a raw conn.Write.
 		log.Warn().Str("peer", remoteAddr).Msg("frame_inbound_unregistered: tracked conn missing NetCore — state inconsistency")
 		return false
 	default:
-		// enqueueDropped — buffer full or conn closing.
-		log.Debug().Str("peer", remoteAddr).Msg("frame_inbound_dropped")
+		// Buffer full, writer/chan closed, sync flush timeout, ctx
+		// canceled, or unknown sentinel — all collapse onto the legacy
+		// frame_inbound_dropped diagnostic.
+		log.Debug().Err(sendErr).Str("peer", remoteAddr).Msg("frame_inbound_dropped")
 		return false
 	}
 }
@@ -1201,7 +1217,9 @@ func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Env
 	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
 	s.mu.RUnlock()
 	if haveInbound {
-		_ = s.writeJSONFrameByID(inboundID, frame)
+		// Fire-and-forget gossip inbound-direct fallback — Network-routed
+		// so a test backend can intercept it; ctx is Service lifecycle.
+		_ = s.sendFrameViaNetwork(s.runCtx, inboundID, frame)
 		log.Info().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "inbound_direct").Msg("gossip_message_attempt")
 		return
 	}
@@ -1243,7 +1261,9 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
 	s.mu.RUnlock()
 	if haveInbound {
-		_ = s.writeJSONFrameByID(inboundID, frame)
+		// Fire-and-forget push_notice inbound-direct fallback — see
+		// gossip-message counterpart above for the same ctx rationale.
+		_ = s.sendFrameViaNetwork(s.runCtx, inboundID, frame)
 		return
 	}
 

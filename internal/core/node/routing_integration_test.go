@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"strings"
@@ -701,6 +702,11 @@ func newTestServiceWithRouting(localIdentity string) *Service {
 		conns:                 make(map[netcore.ConnID]*connEntry),
 		connIDByNetConn:       make(map[net.Conn]netcore.ConnID),
 		done:                  make(chan struct{}),
+		// Match the production NewService default: seed runCtx with
+		// Background so that helpers deriving ctx from s.runCtx (e.g.
+		// sendFrameBytesViaNetworkSync inside writeFrameToInbound) do
+		// not dereference a nil interface in struct-literal fixtures.
+		runCtx: context.Background(),
 	}
 	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(routing.PeerIdentity(localIdentity)))
 	svc.announceLoop = routing.NewAnnounceLoop(

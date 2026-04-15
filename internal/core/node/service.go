@@ -4334,10 +4334,22 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
+		// Caller-side marshal bug — the subscriber is innocent. Leave it
+		// in place and let the next push attempt try again with a fresh
+		// frame. This matches the legacy split: marshal failure is NOT a
+		// transport drop, so it must NOT trigger removeSubscriberByID.
+		// The raw-bytes helper below has no marshal-fallback path
+		// precisely so this branch stays caller-local.
 		return
 	}
-	if s.enqueueFrameByID(sub.connID, []byte(line)) != enqueueSent {
-		// Connection unregistered or send buffer full — remove stale subscriber.
+	// Network-routed push through the injected Network surface: full
+	// outcome tree surfaces through the return. Any non-nil —
+	// ErrUnregisteredWrite, ErrSendBufferFull (post-eviction),
+	// ErrSendWriterDone, ErrSendChanClosed,
+	// ctx-error, or unknown sentinel — means "frame did not reach the peer",
+	// which preserves the legacy `!= enqueueSent → remove` union test
+	// without enumerating each sentinel. ctx is Service lifecycle.
+	if err := s.sendFrameBytesViaNetwork(s.runCtx, sub.connID, []byte(line)); err != nil {
 		s.removeSubscriberByID(sub.recipient, sub.id)
 	}
 }

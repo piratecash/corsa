@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/connauth"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/netcore/netcoretest"
@@ -104,14 +105,16 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 }
 
 // TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend is the
-// table-driven companion to the ping test above. It locks in the PR 10.9
-// migration: every async reply-write inside dispatchNetworkFrame must
-// route through s.Network().SendFrame (i.e. sendFrameViaNetwork), not
-// through the legacy ConnID-first helpers that resolve *netcore.NetCore
-// from s.conns directly.
+// table-driven companion to the ping test above. It asserts the runtime
+// contract of the async reply paths inside dispatchNetworkFrame: every
+// async reply-write must travel through the Service's injected
+// netcore.Network surface via SendFrame, not through a legacy helper
+// that resolves *netcore.NetCore from s.conns directly. If a reply is
+// sent via a legacy helper, the backend's Outbound channel stays empty
+// and the case fails on timeout.
 //
-// The table covers a representative cross-section of the switch cases
-// migrated in PR 10.9:
+// The table covers a representative cross-section of the async switch
+// cases:
 //
 //   - "hello" with incompatible protocol version — un-auth path, error reply.
 //   - "hello" without identity fields — un-auth path, welcome reply.
@@ -119,14 +122,13 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 //   - "announce_peer" with known node_type and empty Peers — auth-gated,
 //     full-path ack after the (no-op) promotion loop.
 //
-// The remaining 8 migrated call-sites (get_peers, fetch_contacts,
-// ack_delete, subscribe_inbox pair, auth_session success, relay_hop_ack,
-// and welcomeFrame-with-challenge) depend on broader Service state
+// Other async reply sites (get_peers, fetch_contacts, ack_delete,
+// subscribe_inbox pair, auth_session success, relay_hop_ack, and
+// welcomeFrame-with-challenge) depend on broader Service state
 // (connManager, contactStore, DeleteTracker, MeshRelayV1 capability)
-// that is out of scope for this POC-style test. Their protection relies
-// on the static §2.9 Gate 6 regex in scripts/enforce-netcore-boundary.sh
-// — if someone reverts those call-sites to writeJSONFrameByID, the gate
-// fails at CI time.
+// that is out of scope for this POC-style test. Those sites are
+// protected by the architectural boundary check run in CI, which fails
+// if a bare legacy-helper call is reintroduced anywhere in the package.
 //
 // Setup pattern per case:
 //
@@ -456,6 +458,264 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 					"Service did not route the reply through the injected Network surface — "+
 					"the reply was sent via writeJSONFrameSyncByID that bypasses s.Network().SendFrameSync",
 					tc.name)
+			}
+		})
+	}
+}
+
+// TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend asserts
+// that writeFrameToInbound (routing_integration.go) classifies sent vs
+// unregistered through the injected backend seam. The inbound-direct path
+// routes through sendFrameBytesViaNetworkSync, which carries the full
+// outcome tree: nil → sent (returns true); ErrUnknownConn →
+// ErrUnregisteredWrite (returns false, diagnostic
+// frame_inbound_unregistered); any other non-nil → transport drop (returns
+// false, diagnostic frame_inbound_dropped).
+//
+// This test pins the "sent" and "unregistered" ends of the outcome tree
+// through the netcoretest.Backend seam:
+//
+//   - sent: connID is registered in BOTH svc.conns (tracked=true, so
+//     forEachTrackedInboundConnLocked finds it) AND backend; the helper
+//     succeeds, writeFrameToInbound returns true, and the marshaled line
+//     surfaces on backend.Outbound.
+//   - unregistered: connID is registered in svc.conns (so the lookup
+//     locates the NetCore and the helper is invoked with a real target)
+//     but NOT in the backend; backend.SendFrameSync returns ErrUnknownConn,
+//     which sendFrameBytesViaNetworkSync maps to ErrUnregisteredWrite, and
+//     writeFrameToInbound returns false.
+//
+// If the outcome tree regresses — e.g. someone reverts
+// sendFrameBytesViaNetworkSync to swallow ErrUnknownConn or writeFrameToInbound
+// flips its classification — one of the subtests fails deterministically.
+func TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name               string
+		registerInBackend  bool
+		expectReturn       bool
+		expectFrameOnWire  bool
+	}{
+		{
+			name:              "sent_registered_in_backend",
+			registerInBackend: true,
+			expectReturn:      true,
+			expectFrameOnWire: true,
+		},
+		{
+			name: "unregistered_missing_in_backend",
+			// svc.conns carries the tracked entry, backend does NOT know
+			// the ConnID. Backend.SendFrameSync → ErrUnknownConn →
+			// ErrUnregisteredWrite → writeFrameToInbound returns false.
+			registerInBackend: false,
+			expectReturn:      false,
+			expectFrameOnWire: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			backend := netcoretest.New()
+			t.Cleanup(backend.Shutdown)
+
+			svc := NewServiceWithNetwork(config.Node{
+				ListenAddress:    "127.0.0.1:0",
+				AdvertiseAddress: "127.0.0.1:0",
+				Type:             config.NodeTypeFull,
+				TrustStorePath:   t.TempDir() + "/trust.json",
+				QueueStatePath:   t.TempDir() + "/queue.json",
+			}, testIdentityForNetworkConsumerTest(t), backend)
+			t.Cleanup(svc.WaitBackground)
+
+			connID := netcore.ConnID(9300 + uint64Hash(tc.name))
+
+			// Inbound NetCore built on a net.Pipe; RemoteAddr() returns
+			// "pipe", which writeFrameToInbound matches against the
+			// strip-"inbound:"-prefix address below.
+			clientPipe, serverPipe := net.Pipe()
+			t.Cleanup(func() { _ = clientPipe.Close() })
+			t.Cleanup(func() { _ = serverPipe.Close() })
+			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
+			t.Cleanup(pc.Close)
+
+			// Tracked inbound entry — required so
+			// forEachTrackedInboundConnLocked locates this NetCore by
+			// RemoteAddr and hands its ConnID to the bytes helper.
+			svc.mu.Lock()
+			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc, tracked: true})
+			svc.mu.Unlock()
+
+			if tc.registerInBackend {
+				backend.Register(connID, netcore.Inbound, pc.RemoteAddr())
+			}
+
+			addr := domain.PeerAddress("inbound:" + pc.RemoteAddr())
+			frame := protocol.Frame{Type: "ping"}
+
+			got := svc.writeFrameToInbound(addr, frame)
+			if got != tc.expectReturn {
+				t.Fatalf("%s: writeFrameToInbound returned %v, want %v",
+					tc.name, got, tc.expectReturn)
+			}
+
+			if tc.expectFrameOnWire {
+				select {
+				case data, ok := <-backend.Outbound(connID):
+					if !ok {
+						t.Fatalf("%s: backend.Outbound closed before frame arrived", tc.name)
+					}
+					f, err := parseFrameLineForTest(data)
+					if err != nil {
+						t.Fatalf("%s: parse outbound frame: %v (raw=%q)", tc.name, err, data)
+					}
+					if f.Type != "ping" {
+						t.Fatalf("%s: expected ping on the wire, got %q", tc.name, f.Type)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatalf("%s: timed out waiting for frame on backend.Outbound(connID)",
+						tc.name)
+				}
+			} else {
+				// Unregistered path must not have produced any outbound
+				// bytes — Outbound(connID) is nil (connID never registered
+				// in backend). If a future regression routed the frame
+				// through a second Network call-site, this would still
+				// read nil and we would not detect it here; the pair
+				// signal is the bool return above, which the sentinel
+				// mapping in sendFrameBytesViaNetworkSync owns.
+				if ch := backend.Outbound(connID); ch != nil {
+					select {
+					case data := <-ch:
+						t.Fatalf("%s: unexpected frame on backend.Outbound: %q",
+							tc.name, data)
+					default:
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestWritePushFrame_RemovesSubscriberOnTransportDrop asserts that
+// writePushFrame (service.go) keeps subscribers on local marshal bugs but
+// removes them on transport drops. The push path routes through
+// sendFrameBytesViaNetwork so that any non-nil return from the Network
+// surface maps to removeSubscriberByID, while a caller-side marshal error
+// returns silently with the subscriber retained.
+//
+// Two subcases pin the behaviour:
+//
+//   - sent: the backend accepts the bytes, the helper returns nil,
+//     writePushFrame does NOT remove the subscriber. The subscriber row in
+//     s.subs[recipient] remains after the call, and the push bytes surface
+//     on backend.Outbound.
+//   - transport_drop_buffer_full: the backend is registered with a tiny
+//     outbound buffer that is pre-filled; SendFrame returns ErrSendBufferFull,
+//     sendFrameBytesViaNetwork performs the eviction Close and returns the
+//     sentinel, writePushFrame invokes removeSubscriberByID. The subscriber
+//     row is gone afterwards.
+//
+// If someone regresses the helper to swallow ErrSendBufferFull (breaking
+// the explicit non-nil-for-drop invariant) or unhooks the
+// removeSubscriberByID call, the drop subtest fails.
+func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name             string
+		outboundBuffer   int
+		prefillBuffer    bool
+		expectSubscriber bool
+	}{
+		{
+			name:             "sent_retains_subscriber",
+			outboundBuffer:   0, // default depth
+			prefillBuffer:    false,
+			expectSubscriber: true,
+		},
+		{
+			name: "transport_drop_buffer_full_removes_subscriber",
+			// Depth 1 + one prefill frame → SendFrame returns
+			// ErrSendBufferFull on the real push. Helper calls
+			// network.Close(ctx, id) and returns the sentinel; writePushFrame
+			// removes the subscriber.
+			outboundBuffer:   1,
+			prefillBuffer:    true,
+			expectSubscriber: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var backend *netcoretest.Backend
+			if tc.outboundBuffer > 0 {
+				backend = netcoretest.NewWithOptions(netcoretest.Options{
+					OutboundBuffer: tc.outboundBuffer,
+				})
+			} else {
+				backend = netcoretest.New()
+			}
+			t.Cleanup(backend.Shutdown)
+
+			svc := NewServiceWithNetwork(config.Node{
+				ListenAddress:    "127.0.0.1:0",
+				AdvertiseAddress: "127.0.0.1:0",
+				Type:             config.NodeTypeFull,
+				TrustStorePath:   t.TempDir() + "/trust.json",
+				QueueStatePath:   t.TempDir() + "/queue.json",
+			}, testIdentityForNetworkConsumerTest(t), backend)
+			t.Cleanup(svc.WaitBackground)
+
+			connID := netcore.ConnID(9400 + uint64Hash(tc.name))
+
+			clientPipe, serverPipe := net.Pipe()
+			t.Cleanup(func() { _ = clientPipe.Close() })
+			t.Cleanup(func() { _ = serverPipe.Close() })
+			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
+			t.Cleanup(pc.Close)
+
+			// svc.conns entry is mandatory: writePushFrame short-circuits
+			// when netCoreForID returns nil (that is the "already
+			// unregistered" legacy path and would mask the bytes-helper
+			// outcome we are asserting).
+			svc.mu.Lock()
+			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
+			// Install the subscriber we expect writePushFrame to either
+			// keep (sent) or evict (drop).
+			recipient := "recip-" + tc.name
+			subID := "sub-1"
+			svc.subs[recipient] = map[string]*subscriber{
+				subID: {id: subID, recipient: recipient, connID: connID},
+			}
+			svc.mu.Unlock()
+
+			backend.Register(connID, netcore.Inbound, pc.RemoteAddr())
+
+			if tc.prefillBuffer {
+				// Push one frame ahead of time so the outbound channel
+				// is at capacity when writePushFrame runs.
+				if err := backend.SendFrame(svc.runCtx, connID, []byte("{\"type\":\"prefill\"}\n")); err != nil {
+					t.Fatalf("prefill SendFrame: %v", err)
+				}
+			}
+
+			sub := &subscriber{id: subID, recipient: recipient, connID: connID}
+			svc.writePushFrame(sub, protocol.Frame{Type: "inbox_item", Recipient: recipient})
+
+			svc.mu.RLock()
+			_, stillPresent := svc.subs[recipient][subID]
+			svc.mu.RUnlock()
+
+			if stillPresent != tc.expectSubscriber {
+				t.Fatalf("%s: subscriber present=%v, want %v",
+					tc.name, stillPresent, tc.expectSubscriber)
 			}
 		})
 	}
