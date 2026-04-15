@@ -285,23 +285,34 @@ func inboundConnKey(core *netcore.NetCore) domain.PeerAddress {
 	return domain.PeerAddress("inbound:" + core.RemoteAddr())
 }
 
+// inboundConnKeyForID derives the same routing-key shape as inboundConnKey
+// from a ConnID via the netcore.Network registry, without materialising
+// a *netcore.NetCore handle. An empty RemoteAddr (registry miss) yields
+// the literal "inbound:" prefix; callers that care about a live connection
+// must guard separately.
+func (s *Service) inboundConnKeyForID(id domain.ConnID) domain.PeerAddress {
+	return domain.PeerAddress("inbound:" + s.Network().RemoteAddr(id))
+}
+
 // sendFullTableSyncToInbound sends the current routing table to a newly
 // connected inbound peer. This is the inbound-path counterpart of the
 // outbound full-table sync (Phase 1.2: always full sync on connect).
 // Without this, inbound-only peers would wait until the next periodic
 // or triggered announce cycle before learning the current table.
-func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, core *netcore.NetCore, peerIdentity domain.PeerIdentity) {
-	if peerIdentity == "" || core == nil {
+func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, peerIdentity domain.PeerIdentity) {
+	if peerIdentity == "" {
 		return
 	}
-	_ = id
+	if s.Network().RemoteAddr(id) == "" {
+		return
+	}
 
 	routes := s.routingTable.AnnounceTo(peerIdentity)
 	if len(routes) == 0 {
 		return
 	}
 
-	sendAddr := inboundConnKey(core)
+	sendAddr := s.inboundConnKeyForID(id)
 	if !s.SendAnnounceRoutes(sendAddr, routes) {
 		log.Warn().
 			Str("peer", string(peerIdentity)).

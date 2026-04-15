@@ -71,18 +71,14 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 	connID := netcore.ConnID(9001)
 	backend.Register(connID, netcore.Inbound, "10.0.0.42:64646")
 
-	// dispatchNetworkFrame guards `core == nil` and reads core.RemoteAddr()
-	// for protocol_trace logging. A netcore.NetCore fixture backed by a
-	// net.Pipe satisfies both without involving the write path — the
-	// actual pong bytes are routed through the Network override, not pc.
-	clientPipe, serverPipe := net.Pipe()
-	t.Cleanup(func() { _ = clientPipe.Close() })
-	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	// dispatchNetworkFrame resolves the remote address it logs through
+	// s.Network().RemoteAddr(connID); the backend.Register call above
+	// satisfies that lookup, so no production *netcore.NetCore fixture is
+	// needed on this path. The reply itself routes via s.Network().SendFrame
+	// → backend.Outbound below.
 
 	pingLine := `{"type":"ping"}`
-	if ok := svc.dispatchNetworkFrame(connID, pc, pingLine); !ok {
+	if ok := svc.dispatchNetworkFrame(connID, pingLine); !ok {
 		t.Fatalf("dispatchNetworkFrame(ping) returned false; expected accepted=true")
 	}
 
@@ -233,7 +229,7 @@ func TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend(t *testing.T) 
 			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
 			svc.mu.Unlock()
 
-			if ok := svc.dispatchNetworkFrame(connID, pc, tc.inboundFrameLine); !ok {
+			if ok := svc.dispatchNetworkFrame(connID, tc.inboundFrameLine); !ok {
 				t.Fatalf("dispatchNetworkFrame(%s) returned false; expected accepted=true", tc.name)
 			}
 
@@ -434,7 +430,7 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 			// async-reply path asserted above, so we do not check the
 			// return here — we check that the reply surfaces on the
 			// injected Network surface.
-			svc.dispatchNetworkFrame(connID, pc, tc.inboundFrameLine)
+			svc.dispatchNetworkFrame(connID, tc.inboundFrameLine)
 
 			select {
 			case data, ok := <-backend.Outbound(connID):
@@ -752,18 +748,14 @@ func TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend(t *testing.T) {
 	connID := netcore.ConnID(9200)
 	backend.Register(connID, netcore.Inbound, "10.0.0.44:55544")
 
-	// handleCommand guards `core == nil` for the downstream protocol_trace
-	// addr field. A minimal NetCore over a net.Pipe satisfies the guard;
-	// the actual reply bytes travel through the Network override.
-	clientPipe, serverPipe := net.Pipe()
-	t.Cleanup(func() { _ = clientPipe.Close() })
-	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	// handleCommand resolves the protocol_trace addr through
+	// s.Network().RemoteAddr(connID); the backend.Register call above is
+	// the single seam needed for that lookup. The reply bytes travel
+	// through s.Network().SendFrameSync to backend.Outbound below.
 
 	// A line that fails protocol.IsJSONLine — the invalid-JSON branch at
 	// the top of handleCommand fires and emits an error frame.
-	if ok := svc.handleCommand(connID, pc, "not-json-framing"); ok {
+	if ok := svc.handleCommand(connID, "not-json-framing"); ok {
 		t.Fatalf("handleCommand(non-json) returned true; expected false (invalid-JSON branch)")
 	}
 

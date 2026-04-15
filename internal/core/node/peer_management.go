@@ -1878,7 +1878,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		s.respondToInboxRequest(session)
 	case "subscribe_inbox":
 		if session != nil {
-			reply, sub := s.subscribeInboxFrame(session.connID, session.netCore, frame)
+			reply, sub := s.subscribeInboxFrame(session.connID, frame)
 			// Session-local reply: route through the injected Network
 			// surface so test backends observe the subscribe_inbox reply,
 			// with the session.netCore fallback (via enqueueSessionFrame)
@@ -2742,11 +2742,7 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 // Only fire-and-forget frames are flushed here — request/reply frames
 // (send_message, relay_message) must go through the outbound session to
 // avoid interleaving with the peer's inbound request dispatch loop.
-func (s *Service) flushPendingFireAndForget(id domain.ConnID, core *netcore.NetCore, address domain.PeerAddress) {
-	if core == nil {
-		return
-	}
-	_ = id
+func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.PeerAddress) {
 	// If there is already an active outbound session, let flushPendingPeerFrames
 	// handle it to avoid double delivery.
 	if session, ok := s.activePeerSession(address); ok && session != nil {
@@ -2787,12 +2783,12 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, core *netcore.NetC
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
 
-	connID := core.ConnID()
+	remoteAddr := s.Network().RemoteAddr(id)
 	for _, item := range toSend {
 		// Fire-and-forget per-item flush — Network-routed for test
 		// observability; ctx is Service lifecycle (s.runCtx).
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, item.Frame)
-		log.Debug().Str("addr", core.RemoteAddr()).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
+		_ = s.sendFrameViaNetwork(s.runCtx, id, item.Frame)
+		log.Debug().Str("addr", remoteAddr).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
 	}
 }
 
@@ -2836,11 +2832,8 @@ func nextHeartbeatDuration() time.Duration {
 // liveness. The pong reply is handled by handleCommand which calls markPeerRead.
 // If the peer does not respond within pongStallTimeout after a ping, the
 // connection is closed — same semantics as outbound session heartbeats.
-func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, address domain.PeerAddress, stop <-chan struct{}) {
+func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress, stop <-chan struct{}) {
 	defer crashlog.DeferRecover()
-	if core == nil {
-		return
-	}
 	timer := time.NewTimer(nextHeartbeatDuration())
 	defer timer.Stop()
 
@@ -2850,12 +2843,12 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, addr
 			return
 		case <-timer.C:
 			pingFrame := protocol.Frame{Type: "ping", Node: nodeName, Network: networkName}
-			// inboundHeartbeat is a goroutine loop with its own stop
-			// channel; per §2.6.32 invariant the ctx passed to the
-			// Network helper is Service lifecycle (s.runCtx), not a
-			// per-iteration ctx. Heartbeat termination remains driven
-			// by <-stop, the helper's ctx is purely a cancellation
-			// boundary for the underlying SendFrame call.
+			// inboundHeartbeat is a long-lived goroutine: loop
+			// termination is driven by <-stop, so the ctx handed to the
+			// Network helper is Service lifecycle (s.runCtx) rather than
+			// a per-iteration value. The ctx is only a cancellation
+			// boundary for the underlying SendFrame call — it must not
+			// double as the loop-exit signal.
 			_ = s.sendFrameViaNetwork(s.runCtx, id, pingFrame)
 			s.markPeerWrite(address, pingFrame)
 
@@ -2881,7 +2874,11 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, core *netcore.NetCore, addr
 			}
 			if !pongReceived {
 				log.Warn().Str("peer", string(address)).Msg("inbound heartbeat failed, peer stalled — closing connection")
-				core.Close()
+				// Force-disconnect via netcore.Network so the registry
+				// (live bridge or netcoretest.Backend) owns the close;
+				// the previous *netcore.NetCore.Close() bypassed test
+				// observability.
+				_ = s.Network().Close(s.runCtx, id)
 				return
 			}
 

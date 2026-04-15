@@ -1475,7 +1475,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 
 	// Call the function under test.
 	id, _ := svc.connIDFor(conn)
-	svc.sendFullTableSyncToInbound(id, pc, idPeerB)
+	svc.sendFullTableSyncToInbound(id, idPeerB)
 
 	select {
 	case data := <-received:
@@ -1526,7 +1526,7 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 	// Call the function — with only peer-B's own route in the table,
 	// split horizon should filter it out, resulting in no send.
 	id, _ := svc.connIDFor(conn)
-	svc.sendFullTableSyncToInbound(id, pc, idPeerB)
+	svc.sendFullTableSyncToInbound(id, idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1565,7 +1565,7 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 	svc.mu.Unlock()
 
 	id, _ := svc.connIDFor(conn)
-	svc.sendFullTableSyncToInbound(id, pc, idPeerB)
+	svc.sendFullTableSyncToInbound(id, idPeerB)
 
 	readDone := make(chan int, 1)
 	go func() {
