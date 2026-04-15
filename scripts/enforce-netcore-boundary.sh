@@ -175,15 +175,50 @@ expect_count "legacy forEach…Locked(func(net.Conn,…))" 0 -- \
        internal/core/node
 
 # Gate 11: carve-out membership — net.Conn-accepting functions and methods.
-# Expected baseline = 14 exactly (13 frozen §2.6.26 Service methods + 1
+# Expected baseline = 12 exactly (11 frozen §2.6.26 Service methods + 1
 # socket-infra package-level enableTCPKeepAlive). Any growth is either
 # regression or a new net.Conn entry point outside the frozen list.
 # The regex is broadened over §2.9 literal to include package-level funcs:
 # `func ( ... )? Name(... net.Conn ...)` — otherwise enableTCPKeepAlive is
-# not counted and the baseline would drift to 13.
-expect_count "carve-out membership (net.Conn-accepting methods / functions)" 14 -- \
+# not counted and the baseline would drift to 11.
+# Note: PR 10.16 follow-up removed connEntryLocked / connEntryForLocked
+# once their production call-sites migrated to ConnID-first helpers
+# (trackedInboundAddressByIDLocked, connIdentityByIDLocked, connEntryByIDLocked).
+# Baseline dropped 14 → 12 accordingly.
+expect_count "carve-out membership (net.Conn-accepting methods / functions)" 12 -- \
     rg -n --glob '!**/*_test.go' \
        'func (\([^)]*\) )?[A-Za-z_][A-Za-z0-9_]*\([^)]*net\.Conn' \
+       internal/core/node
+
+# Gate 13: scope (v) — direct `entry.core` access outside conn_registry.go.
+# After PR 10.16 the *netcore.NetCore handle behind connEntry is hidden from
+# all production call sites; reads go through coreForIDLocked (handshake-time
+# carve-out) or the value-typed connInfo snapshot returned by the walkers.
+# Test fixtures in conn_registry_test_helpers_test.go / conn_registry_lifecycle_test.go
+# legitimately read entry.core for assertion plumbing — they are excluded by
+# the !**/*_test.go glob.
+expect_count "entry.core.* outside conn_registry.go (scope v)" 0 -- \
+    rg -n --glob '!**/*_test.go' --glob '!**/conn_registry.go' \
+       'entry\.core\.' \
+       internal/core/node
+
+# Gate 14: scope (v) — walker callback signature taking *netcore.NetCore.
+# The three forEach…ConnLocked walkers hand callers a connInfo snapshot,
+# never the live *netcore.NetCore. A regression to the old shape would let
+# call sites mutate identity/address/auth concurrently with handshake-time
+# writes — exactly the race that PR 10.16 closed.
+expect_count "legacy forEach…ConnLocked(func(…*netcore.NetCore…))" 0 -- \
+    rg -n --glob '!**/*_test.go' \
+       'forEach(Inbound|TrackedInbound|)?ConnLocked\(func\([^)]*\*netcore\.NetCore' \
+       internal/core/node
+
+# Gate 15: scope (v) — legacy package-level inboundConnKey helper.
+# After PR 10.16 the only routing-key constructor is the ConnID-first method
+# inboundConnKeyForID. The bare-name helper accepted *netcore.NetCore and
+# was the last consumer of *NetCore inside routing_integration.go.
+expect_count "legacy inboundConnKey(*netcore.NetCore) helper" 0 -- \
+    rg -n --glob '!**/*_test.go' \
+       'inboundConnKey\(' \
        internal/core/node
 
 # Gate 12: architectural boundary — `net` stdlib import in internal/core/node.

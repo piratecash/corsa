@@ -2,10 +2,72 @@ package node
 
 import (
 	"net"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
+
+// connInfo is a read-only snapshot of registry state for a single connection,
+// captured under s.mu and handed to walker callbacks. It is the abstraction
+// boundary that keeps callers off the *netcore.NetCore handle and off the
+// connEntry shape: walkers no longer leak the live core pointer, so callbacks
+// cannot inadvertently mutate identity/address/auth or race with the
+// handshake-time writes that coreForIDLocked still permits.
+//
+// All fields are value-typed; the capabilities slice is a defensive copy so
+// callers cannot scribble back into the live *netcore.NetCore. Walkers must
+// populate every field — partial snapshots are a contract violation.
+type connInfo struct {
+	id           domain.ConnID
+	remoteAddr   string
+	address      domain.PeerAddress
+	identity     domain.PeerIdentity
+	capabilities []domain.Capability
+	dir          netcore.Direction
+	lastActivity time.Time
+	tracked      bool
+}
+
+// HasCapability reports whether the snapshot lists cap. The lookup is linear
+// because peer capability sets are tiny (typically <=4 entries) and the
+// snapshot is short-lived; introducing a map here would cost more than it
+// saves.
+func (c connInfo) HasCapability(cap domain.Capability) bool {
+	for _, have := range c.capabilities {
+		if have == cap {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotEntryLocked builds a connInfo from a registry entry. The capability
+// slice is copied so the caller never aliases NetCore-owned storage. Returns
+// the zero value and false if the entry or its core is missing — the caller
+// must treat that as "skip this connection". The caller must hold s.mu.
+func snapshotEntryLocked(id domain.ConnID, entry *connEntry) (connInfo, bool) {
+	if entry == nil || entry.core == nil {
+		return connInfo{}, false
+	}
+	core := entry.core
+	caps := core.Capabilities()
+	var capsCopy []domain.Capability
+	if len(caps) > 0 {
+		capsCopy = make([]domain.Capability, len(caps))
+		copy(capsCopy, caps)
+	}
+	return connInfo{
+		id:           id,
+		remoteAddr:   core.RemoteAddr(),
+		address:      core.Address(),
+		identity:     core.Identity(),
+		capabilities: capsCopy,
+		dir:          core.Dir(),
+		lastActivity: core.LastActivity(),
+		tracked:      entry.tracked,
+	}, true
+}
 
 // conn_registry.go contains the narrow helper layer that encapsulates all
 // direct access to s.conns and its secondary index s.connIDByNetConn.
@@ -22,20 +84,26 @@ import (
 // Callers that start from a net.Conn go through connIDForLocked once to
 // cross the boundary, then operate on ConnID.
 //
-// PR 9.10b-2 completed the move: iteration helpers
-// (forEachInboundConnLocked, forEachTrackedInboundConnLocked) now call back
-// with *netcore.NetCore only — NetCore is the single source of identity and
-// exposes Conn()/ConnID() for sites that need them. The tracked-flag mutation
-// helper is now ConnID-first (setTrackedByIDLocked).
+// PR 9.10b-2 moved iteration helpers (forEachInboundConnLocked,
+// forEachTrackedInboundConnLocked) onto *netcore.NetCore as the single
+// identity currency, and made the tracked-flag mutation helper ConnID-first
+// (setTrackedByIDLocked). PR 10.16 completed the closure: those walkers and
+// forEachConnLocked now hand callers a value-typed connInfo snapshot, so
+// the live *netcore.NetCore pointer no longer escapes the registry. Reads
+// of identity / address / capabilities / tracked / direction / activity at
+// callback sites go through the snapshot fields; mutating writes
+// (SetIdentity, SetAddress, SetAuth) keep their handshake-time path through
+// coreForIDLocked, which remains the single carve-out for the live handle.
+// Two ConnID-first lookup helpers — trackedInboundAddressByIDLocked and
+// connIdentityByIDLocked — replace the last entry.core.Address() /
+// entry.core.Identity() reads in service.go.
 // Lifecycle helpers (registerInboundConnLocked, attachOutboundCoreLocked,
 // unregisterConnLocked) are the intentional carve-out: they are the
 // entry/exit boundary that creates and tears down the (net.Conn, ConnID)
 // binding, so they must accept a raw net.Conn by definition — there is
 // no ConnID to key them on before registerInboundConnLocked runs, and
 // the secondary index s.connIDByNetConn cannot be trimmed on shutdown
-// without the same net.Conn that was registered. connEntryLocked is
-// plumbing for connEntryForLocked and also remains net.Conn-first for
-// the same reason.
+// without the same net.Conn that was registered.
 //
 // This seam prevents unbounded churn if the internal shape of s.conns
 // changes in the future: only the helpers here need to be updated, not
@@ -62,8 +130,8 @@ import (
 // canonical list is:
 //
 //   - in this file (conn_registry.go): connIDForLocked, connIDFor,
-//     connEntryLocked, connEntryForLocked, registerInboundConnLocked,
-//     attachOutboundCoreLocked, unregisterConnLocked.
+//     registerInboundConnLocked, attachOutboundCoreLocked,
+//     unregisterConnLocked.
 //   - in service.go: handleConn (inbound entry boundary), public lifecycle
 //     wrappers registerInboundConn / unregisterInboundConn,
 //     pre-registration IP policy isBlacklistedConn, and the
@@ -118,18 +186,6 @@ func (s *Service) connIDFor(conn net.Conn) (domain.ConnID, bool) {
 	return s.connIDForLocked(conn)
 }
 
-// connEntryLocked resolves a net.Conn to its *connEntry via the secondary
-// index, or returns nil if the connection is not registered. Retained as
-// plumbing for the connEntryForLocked escape hatch used by lifecycle paths.
-// The caller must hold s.mu.
-func (s *Service) connEntryLocked(conn net.Conn) *connEntry {
-	id, ok := s.connIDByNetConn[conn]
-	if !ok {
-		return nil
-	}
-	return s.conns[id]
-}
-
 // coreForIDLocked returns the NetCore for a given ConnID, or nil if the
 // connection is not registered. The caller must hold s.mu.
 func (s *Service) coreForIDLocked(id domain.ConnID) *netcore.NetCore {
@@ -162,15 +218,6 @@ func (s *Service) isInboundTrackedByIDLocked(id domain.ConnID) bool {
 	return entry.tracked
 }
 
-// connEntryForLocked returns the entire connEntry for a given connection,
-// or nil if not registered. This is an escape hatch used only by lifecycle
-// methods (registerInboundConn, attachOutboundNetCore, unregisterInboundConnLocked)
-// that need access to the whole entry. Regular call sites must not use this.
-// The caller must hold s.mu.
-func (s *Service) connEntryForLocked(conn net.Conn) *connEntry {
-	return s.connEntryLocked(conn)
-}
-
 // connEntryByIDLocked returns the entire connEntry keyed by ConnID, or nil
 // if the connection is not registered. Used by ConnID-first call sites that
 // need access to entry-level fields beyond what coreForIDLocked /
@@ -182,64 +229,100 @@ func (s *Service) connEntryByIDLocked(id domain.ConnID) *connEntry {
 }
 
 // forEachConnLocked iterates over every registered connection regardless
-// of direction, calling fn with (ConnID, NetCore). Iteration stops if fn
-// returns false. The caller must hold s.mu. Used by call sites that need
-// direction-agnostic enumeration and prefer to filter by
-// netcore.Direction themselves; direction-specific walks over inbound
-// connections continue to use forEachInboundConnLocked and
-// forEachTrackedInboundConnLocked which are tuned for their call sites.
-func (s *Service) forEachConnLocked(fn func(domain.ConnID, *netcore.NetCore) bool) {
+// of direction, calling fn with a connInfo snapshot per entry. Iteration
+// stops if fn returns false. The caller must hold s.mu. Walkers no longer
+// expose *netcore.NetCore — callbacks receive a value-typed snapshot so
+// they cannot mutate identity/address/auth concurrently with the
+// handshake-time writes that coreForIDLocked still permits. Direction-
+// specific walks over inbound connections continue to use
+// forEachInboundConnLocked and forEachTrackedInboundConnLocked which are
+// tuned for their call sites.
+func (s *Service) forEachConnLocked(fn func(connInfo) bool) {
 	for id, entry := range s.conns {
-		if entry == nil || entry.core == nil {
+		info, ok := snapshotEntryLocked(id, entry)
+		if !ok {
 			continue
 		}
-		if !fn(id, entry.core) {
+		if !fn(info) {
 			return
 		}
 	}
 }
 
 // forEachInboundConnLocked iterates over all registered inbound connections
-// (Direction == Inbound), calling fn for each NetCore. The NetCore is the
-// single identity currency — call sites that need the underlying net.Conn
-// or ConnID access them explicitly via core.Conn() / core.ConnID().
+// (Direction == Inbound), calling fn with a connInfo snapshot per entry.
 // Iteration stops if fn returns false. The caller must hold s.mu.
-func (s *Service) forEachInboundConnLocked(fn func(*netcore.NetCore) bool) {
-	for _, entry := range s.conns {
-		if entry == nil || entry.core == nil {
+func (s *Service) forEachInboundConnLocked(fn func(connInfo) bool) {
+	for id, entry := range s.conns {
+		info, ok := snapshotEntryLocked(id, entry)
+		if !ok {
 			continue
 		}
-		if entry.core.Dir() != netcore.Inbound {
+		if info.dir != netcore.Inbound {
 			continue
 		}
-		if !fn(entry.core) {
+		if !fn(info) {
 			break
 		}
 	}
 }
 
-// forEachTrackedInboundConnLocked iterates over all registered inbound connections
-// that are marked as tracked (i.e., have completed authentication), calling fn
-// for each NetCore. Iteration stops if fn returns false. The caller must hold s.mu.
-func (s *Service) forEachTrackedInboundConnLocked(fn func(*netcore.NetCore) bool) {
-	for _, entry := range s.conns {
-		if entry == nil || entry.core == nil {
+// forEachTrackedInboundConnLocked iterates over all registered inbound
+// connections that are marked as tracked (i.e., have completed
+// authentication), calling fn with a connInfo snapshot per entry. Iteration
+// stops if fn returns false. The caller must hold s.mu.
+func (s *Service) forEachTrackedInboundConnLocked(fn func(connInfo) bool) {
+	for id, entry := range s.conns {
+		info, ok := snapshotEntryLocked(id, entry)
+		if !ok {
 			continue
 		}
-		if entry.core.Dir() != netcore.Inbound {
+		if info.dir != netcore.Inbound {
 			continue
 		}
-		if !entry.tracked {
+		if !info.tracked {
 			continue
 		}
-		if !fn(entry.core) {
+		if !fn(info) {
 			break
 		}
 	}
+}
+
+// trackedInboundAddressByIDLocked returns the overlay address declared by
+// the inbound connection at id, but only when the connection has been
+// promoted via trackInboundConnect. Returns the zero PeerAddress when the
+// id is unknown, points at an outbound entry, or has not been promoted.
+// Callers use this to gate health-mutating side-effects on tracked status
+// without materialising *netcore.NetCore. The caller must hold s.mu.
+func (s *Service) trackedInboundAddressByIDLocked(id domain.ConnID) domain.PeerAddress {
+	entry := s.conns[id]
+	if entry == nil || entry.core == nil || !entry.tracked {
+		return ""
+	}
+	if entry.core.Dir() != netcore.Inbound {
+		return ""
+	}
+	return entry.core.Address()
+}
+
+// connIdentityByIDLocked returns the peer identity recorded on the
+// connection at id, or the zero PeerIdentity when the id is unknown.
+// Callers use this on disconnect / reconciliation paths that previously
+// reached for entry.core.Identity() directly. The caller must hold s.mu.
+func (s *Service) connIdentityByIDLocked(id domain.ConnID) domain.PeerIdentity {
+	entry := s.conns[id]
+	if entry == nil || entry.core == nil {
+		return ""
+	}
+	return entry.core.Identity()
 }
 
 // inboundConnCountLocked returns the number of registered inbound connections.
-// The caller must hold s.mu.
+// The caller must hold s.mu. Implementation reads entry.core.Dir() directly
+// because this is one of the conn_registry-internal sites that owns the
+// entry.core access shape; external call sites must go through the walker
+// snapshots above.
 func (s *Service) inboundConnCountLocked() int {
 	count := 0
 	for _, entry := range s.conns {

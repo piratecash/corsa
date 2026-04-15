@@ -18,8 +18,8 @@ import (
 // ConnID-first via core lookup). The bridge now calls those ConnID-first
 // methods directly. The only remaining net.Conn-first surface is the
 // permanent carve-out in conn_registry.go (registerInboundConnLocked,
-// attachOutboundCoreLocked, unregisterConnLocked, connEntryForLocked) plus
-// the socket-infra helper enableTCPKeepAlive.
+// attachOutboundCoreLocked, unregisterConnLocked) plus the socket-infra
+// helper enableTCPKeepAlive.
 //
 // The bridge itself holds no state beyond a back-reference to *Service.
 // Every method acquires the necessary locks exactly as the equivalent
@@ -119,11 +119,11 @@ func (b *networkBridge) Enumerate(ctx context.Context, dir netcore.Direction, fn
 	}
 	b.svc.mu.RLock()
 	defer b.svc.mu.RUnlock()
-	b.svc.forEachConnLocked(func(id domain.ConnID, core *netcore.NetCore) bool {
-		if core.Dir() != dir {
+	b.svc.forEachConnLocked(func(info connInfo) bool {
+		if info.dir != dir {
 			return true
 		}
-		return fn(id)
+		return fn(info.id)
 	})
 }
 

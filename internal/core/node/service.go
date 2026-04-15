@@ -1793,7 +1793,7 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	s.mu.RLock()
 	now := time.Now().UTC()
 	var outbound []*peerSession
-	var inbound []*netcore.NetCore
+	var inbound []domain.ConnID
 
 	// 1. Outbound sessions — preferred path, one writer per session (servePeerSession).
 	//
@@ -1833,18 +1833,18 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	// markPeerConnected. Require health != nil && Connected here too so a
 	// partially-handshaken inbound NetCore cannot receive identity-routed
 	// frames ahead of activation.
-	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
-		if pc.Identity() != dst {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		if info.identity != dst {
 			return true
 		}
-		if !pc.HasCapability(requiredCap) {
+		if !info.HasCapability(requiredCap) {
 			return true
 		}
-		health := s.health[s.resolveHealthAddress(pc.Address())]
+		health := s.health[s.resolveHealthAddress(info.address)]
 		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
 			return true
 		}
-		inbound = append(inbound, pc)
+		inbound = append(inbound, info.id)
 		return true
 	})
 
@@ -1870,11 +1870,15 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	}
 
 	data := []byte(line)
-	for _, target := range inbound {
+	network := s.Network()
+	for _, id := range inbound {
 		// NetCore writer loop retains the slice after enqueue, so each
-		// candidate gets its own immutable copy.
+		// candidate gets its own immutable copy. Send via the Network
+		// surface so the call path no longer threads *netcore.NetCore
+		// through identity-based dispatch — registry resolution and
+		// SendStatus → error mapping live behind the bridge.
 		payload := append([]byte(nil), data...)
-		if target.SendRaw(payload) == netcore.SendOK {
+		if network.SendFrame(s.runCtx, id, payload) == nil {
 			return true
 		}
 	}
@@ -2321,11 +2325,7 @@ func (s *Service) inboundPeerAddress(id domain.ConnID) domain.PeerAddress {
 func (s *Service) trackedInboundPeerAddress(id domain.ConnID) domain.PeerAddress {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry := s.connEntryByIDLocked(id)
-	if entry == nil || !entry.tracked || entry.core == nil {
-		return ""
-	}
-	return entry.core.Address()
+	return s.trackedInboundAddressByIDLocked(id)
 }
 
 // trackInboundConnect increments the inbound connection reference count
@@ -2408,9 +2408,11 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 		// inbound-auth path). This precedence is pinned by
 		// TestTrackInboundDisconnect_PrefersNetCoreIdentity and its
 		// fallback branch TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
-		if entry.core != nil {
-			peerIdentity = entry.core.Identity()
-		}
+		// connIdentityByIDLocked returns "" both when the entry is missing
+		// and when it has no core; the entry-not-nil guard above is held by
+		// the surrounding block so the only nil case left for the helper is
+		// a missing core, which the fallback handles.
+		peerIdentity = s.connIdentityByIDLocked(id)
 	}
 	resolved := s.resolveHealthAddress(address)
 	if peerIdentity == "" {
@@ -3620,22 +3622,32 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 // s.connIDByNetConn cannot be trimmed without the same net.Conn that
 // registerInboundConn registered.
 func (s *Service) unregisterInboundConn(conn net.Conn) {
-	s.mu.Lock()
-	entry := s.connEntryForLocked(conn)
-	s.unregisterConnLocked(conn)
-	s.mu.Unlock()
-
-	// NetCore.Close() handles the full shutdown sequence:
-	// 1. rawConn.Close() — unblocks writer stuck in conn.Write
-	// 2. close(sendCh) — signals writer to drain and exit
-	// 3. <-writerDone — waits for drain to complete
+	// Resolve the ConnID under the lock, then run the teardown via the
+	// netcore.Network surface BEFORE unregister so the bridge can still
+	// look the entry up. NetCore.Close() handles the full shutdown
+	// sequence:
+	//   1. rawConn.Close() — unblocks writer stuck in conn.Write
+	//   2. close(sendCh) — signals writer to drain and exit
+	//   3. <-writerDone — waits for drain to complete
 	//
 	// Note: handleConn calls metered.Close() before unregisterInboundConn,
 	// which is now redundant (NetCore.Close does it). The double Close on
 	// net.Conn is safe — subsequent calls return an error but don't panic.
-	if entry != nil && entry.core != nil {
-		entry.core.Close()
+	s.mu.RLock()
+	id, ok := s.connIDForLocked(conn)
+	s.mu.RUnlock()
+
+	if ok {
+		// Errors here mean the conn was already torn down on a parallel
+		// path (ErrUnknownConn) or the runCtx is cancelled — both are
+		// expected during shutdown. The eviction below is idempotent and
+		// must run regardless.
+		_ = s.Network().Close(s.runCtx, id)
 	}
+
+	s.mu.Lock()
+	s.unregisterConnLocked(conn)
+	s.mu.Unlock()
 }
 
 // closeAllInboundConns closes every tracked inbound connection so that

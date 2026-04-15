@@ -105,18 +105,18 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 	// Iterate the unified registry and filter to inbound direction because
 	// outbound NetCores now share s.conns; outbound traffic
 	// is already accumulated via s.sessions above.
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
-		metered := s.meteredForIDLocked(core.ConnID())
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		metered := s.meteredForIDLocked(info.id)
 		if metered == nil {
 			return true
 		}
-		if !s.isConnTrafficTrustedByIDLocked(core.ConnID()) {
+		if !s.isConnTrafficTrustedByIDLocked(info.id) {
 			return true
 		}
-		if core.Address() == "" {
+		if info.address == "" {
 			return true
 		}
-		address := s.resolveHealthAddress(core.Address())
+		address := s.resolveHealthAddress(info.address)
 		lt := result[address]
 		lt.sent += metered.BytesWritten()
 		lt.received += metered.BytesRead()

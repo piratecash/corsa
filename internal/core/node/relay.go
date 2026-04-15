@@ -10,7 +10,6 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -922,15 +921,15 @@ func (s *Service) countCapablePeers(cap domain.Capability) int {
 	// Outbound NetCores are already counted via s.sessions above;
 	// skip them here so pre-activation outbound entries cannot
 	// inflate the capable-peer count.
-	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
-		if _, dup := seen[pc.Identity()]; dup {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		if _, dup := seen[info.identity]; dup {
 			return true
 		}
-		if !isActive(pc.Address()) {
+		if !isActive(info.address) {
 			return true
 		}
-		if pc.HasCapability(cap) {
-			seen[pc.Identity()] = struct{}{}
+		if info.HasCapability(cap) {
+			seen[info.identity] = struct{}{}
 		}
 		return true
 	})

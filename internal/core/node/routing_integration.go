@@ -16,7 +16,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
-	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -110,7 +109,7 @@ func (s *Service) tryForwardViaRoutingTable(recipient domain.PeerIdentity, frame
 // SendAnnounceRoutes implements routing.PeerSender. It builds an
 // announce_routes frame and sends it to the peer. Supports both outbound
 // sessions (by session address) and inbound connections (by "inbound:"
-// prefixed address from inboundConnKey).
+// prefixed address from inboundConnKeyForID).
 func (s *Service) SendAnnounceRoutes(peerAddress domain.PeerAddress, routes []routing.AnnounceEntry) bool {
 	if len(routes) == 0 {
 		return true
@@ -160,9 +159,9 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 	var targetID domain.ConnID
 	var found bool
 	s.mu.RLock()
-	s.forEachTrackedInboundConnLocked(func(core *netcore.NetCore) bool {
-		if core.RemoteAddr() == remoteAddr {
-			targetID = core.ConnID()
+	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
+		if info.remoteAddr == remoteAddr {
+			targetID = info.id
 			found = true
 			return false // Stop iteration
 		}
@@ -257,18 +256,18 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 
 	// Inbound connections — only if identity not already covered by an
 	// outbound session above (dedup by identity).
-	s.forEachTrackedInboundConnLocked(func(pc *netcore.NetCore) bool {
-		if pc.Identity() == "" {
+	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
+		if info.identity == "" {
 			return true
 		}
-		if _, dup := seen[pc.Identity()]; dup {
+		if _, dup := seen[info.identity]; dup {
 			return true
 		}
-		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
-			seen[pc.Identity()] = struct{}{}
+		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
+			seen[info.identity] = struct{}{}
 			targets = append(targets, routing.AnnounceTarget{
-				Address:  inboundConnKey(pc),
-				Identity: pc.Identity(),
+				Address:  s.inboundConnKeyForID(info.id),
+				Identity: info.identity,
 			})
 		}
 		return true
@@ -277,19 +276,15 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	return targets
 }
 
-// inboundConnKey returns a unique key for an inbound connection that can be
-// used as an AnnounceTarget address. Prefixed with "inbound:" to distinguish
-// from outbound session addresses. Keyed off *NetCore rather than net.Conn so
-// the routing layer does not pull the raw socket handle through the call path.
-func inboundConnKey(core *netcore.NetCore) domain.PeerAddress {
-	return domain.PeerAddress("inbound:" + core.RemoteAddr())
-}
-
-// inboundConnKeyForID derives the same routing-key shape as inboundConnKey
-// from a ConnID via the netcore.Network registry, without materialising
-// a *netcore.NetCore handle. An empty RemoteAddr (registry miss) yields
-// the literal "inbound:" prefix; callers that care about a live connection
-// must guard separately.
+// inboundConnKeyForID derives the routing-key shape used for inbound
+// AnnounceTarget addresses (and any other table entry that needs to
+// distinguish an inbound conn from an outbound session) from a ConnID via
+// the netcore.Network registry, without materialising a *netcore.NetCore
+// handle. The "inbound:" prefix keeps these keys disjoint from outbound
+// session addresses. An empty RemoteAddr (registry miss) yields the literal
+// "inbound:" prefix; callers that care about a live connection must guard
+// separately — the only call sites today are walker callbacks where the
+// snapshot guarantees the entry is currently registered.
 func (s *Service) inboundConnKeyForID(id domain.ConnID) domain.PeerAddress {
 	return domain.PeerAddress("inbound:" + s.Network().RemoteAddr(id))
 }
@@ -846,12 +841,12 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 
 	// Inbound connections — synchronous write path.
 	var result domain.PeerAddress
-	s.forEachTrackedInboundConnLocked(func(pc *netcore.NetCore) bool {
-		if pc.Identity() != peerIdentity {
+	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
+		if info.identity != peerIdentity {
 			return true
 		}
-		if sessionHasBothCaps(pc.Capabilities(), domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
-			result = inboundConnKey(pc)
+		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
+			result = s.inboundConnKeyForID(info.id)
 			return false // Stop iteration
 		}
 		return true
@@ -884,12 +879,12 @@ func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.P
 
 	// Inbound connections.
 	var result domain.PeerAddress
-	s.forEachTrackedInboundConnLocked(func(pc *netcore.NetCore) bool {
-		if pc.Identity() != peerIdentity {
+	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
+		if info.identity != peerIdentity {
 			return true
 		}
-		if sessionHasCap(pc.Capabilities(), domain.CapMeshRelayV1) {
-			result = inboundConnKey(pc)
+		if sessionHasCap(info.capabilities, domain.CapMeshRelayV1) {
+			result = s.inboundConnKeyForID(info.id)
 			return false // Stop iteration
 		}
 		return true
@@ -1043,9 +1038,9 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	// here — a pre-activation outbound entry must not answer identity
 	// lookups before the session is installed.
 	var result domain.PeerIdentity
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
-		if core.RemoteAddr() == string(address) {
-			result = core.Identity()
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		if info.remoteAddr == string(address) {
+			result = info.identity
 			return false // Stop iteration
 		}
 		return true

@@ -12,7 +12,6 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/service/filerouter"
@@ -215,9 +214,9 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 	// Outbound NetCores surface through s.sessions above; skip them
 	// here so pre-activation outbound entries do not leak into the
 	// file-transfer peer set before the session is established.
-	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
-		if pc.HasCapability(domain.CapFileTransferV1) {
-			consider(pc.Identity(), pc.Address())
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		if info.HasCapability(domain.CapFileTransferV1) {
+			consider(info.identity, info.address)
 		}
 		return true
 	})
@@ -256,11 +255,11 @@ func (s *Service) fileTransferPeerUsableAtLocked(peer domain.PeerIdentity, now t
 	// Same visibility boundary as forEachUsableFileTransferPeerLocked:
 	// outbound NetCores are reachable via s.sessions above, so skip
 	// them here to keep pre-activation outbound entries hidden.
-	s.forEachInboundConnLocked(func(pc *netcore.NetCore) bool {
-		if pc.Identity() != peer || !pc.HasCapability(domain.CapFileTransferV1) {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		if info.identity != peer || !info.HasCapability(domain.CapFileTransferV1) {
 			return true
 		}
-		consider(pc.Address())
+		consider(info.address)
 		return true
 	})
 

@@ -367,11 +367,11 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 	// they are already represented via s.upstream above.
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
-		if la := core.LastActivity(); !la.IsZero() && now.Sub(la) >= stallThreshold {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		if !info.lastActivity.IsZero() && now.Sub(info.lastActivity) >= stallThreshold {
 			return true
 		}
-		if ip := remoteIPFromString(core.RemoteAddr()); ip != "" {
+		if ip := remoteIPFromString(info.remoteAddr); ip != "" {
 			hosts[ip] = struct{}{}
 		}
 		return true
@@ -2270,12 +2270,12 @@ func (s *Service) nextConnIDLocked() domain.ConnID {
 // Must be called with s.mu held (read lock).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
 		// The registry holds both directions. Outbound
 		// NetCores must stay invisible on inbound-only lookup paths —
 		// they are surfaced through s.sessions once activated.
-		if core.Address() == address {
-			ids = append(ids, core.ConnIDNum())
+		if info.address == address {
+			ids = append(ids, uint64(info.id))
 		}
 		return true
 	})
@@ -2292,14 +2292,16 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 func (s *Service) inboundConnIDForAddressLocked(address domain.PeerAddress) (domain.ConnID, bool) {
 	var result domain.ConnID
 	var found bool
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
-		// Only return tracked connections for the given address
-		if core.Address() != address {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		// Only return tracked connections for the given address.
+		if info.address != address {
 			return true
 		}
-		// Check if this connection is tracked
-		if s.isInboundTrackedByIDLocked(core.ConnID()) {
-			result = core.ConnID()
+		// The walker already filters to inbound; the snapshot's tracked
+		// flag is the single source of truth here, no second registry
+		// hop required.
+		if info.tracked {
+			result = info.id
 			found = true
 			return false // Stop iteration
 		}
@@ -2484,12 +2486,12 @@ func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 		return domain.CapabilityStrings(session.capabilities)
 	}
 	var result []string
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
 		// Outbound NetCores surface their capabilities via s.sessions
 		// (checked above); skip them here so a pre-activation outbound
 		// entry cannot answer on the inbound fallback path.
-		if core.Address() == address && len(core.Capabilities()) > 0 {
-			result = domain.CapabilityStrings(core.Capabilities())
+		if info.address == address && len(info.capabilities) > 0 {
+			result = domain.CapabilityStrings(info.capabilities)
 			return false // Stop iteration
 		}
 		return true
@@ -2913,17 +2915,16 @@ func (s *Service) evictStaleInboundConns() {
 
 	s.mu.RLock()
 	var stale []staleEntry
-	s.forEachInboundConnLocked(func(core *netcore.NetCore) bool {
-		la := core.LastActivity()
-		if la.IsZero() {
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		if info.lastActivity.IsZero() {
 			return true
 		}
-		if now.Sub(la) >= stallThreshold {
+		if now.Sub(info.lastActivity) >= stallThreshold {
 			stale = append(stale, staleEntry{
-				id:     core.ConnID(),
-				addr:   core.Address(),
-				ident:  core.Identity(),
-				remote: core.RemoteAddr(),
+				id:     info.id,
+				addr:   info.address,
+				ident:  info.identity,
+				remote: info.remoteAddr,
 			})
 		}
 		return true
