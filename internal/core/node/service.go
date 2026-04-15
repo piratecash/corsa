@@ -1043,11 +1043,11 @@ func (s *Service) handleConn(conn net.Conn) {
 			if errors.Is(err, errFrameTooLarge) {
 				log.Debug().Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: closing connection — frame exceeds max size")
-				_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
+				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
 			} else if err != io.EOF {
 				log.Debug().Err(err).Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: closing connection — read error")
-				_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
+				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
 			} else {
 				log.Debug().Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: peer closed connection (EOF)")
@@ -1067,7 +1067,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			!s.cmdLimiter.allowCommand(connKey) {
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
-			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
+			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
 			s.addBanScore(connID, banIncrementRateLimit)
 			return
 		}
@@ -1112,7 +1112,7 @@ func (s *Service) handleCommand(connID domain.ConnID, core *netcore.NetCore, lin
 			Str("command", "non-json").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
+		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 		return false
 	}
 	return s.dispatchNetworkFrame(connID, core, line)
@@ -2017,6 +2017,15 @@ func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) 
 // error-path callers rely on. Returns ErrUnregisteredWrite on the
 // single-writer-invariant violation (see writeJSONFrameByID for the error
 // contract), nil otherwise.
+//
+// Post-PR 10.12 the helper has no production call-sites — top-of-loop
+// error replies in handleConn / handleCommand (frame-too-large / read-error
+// / rate-limited / invalid-JSON) moved to sendFrameViaNetworkSync through
+// the injected Network surface. The helper is retained solely because its
+// "unregistered ConnID" fallback test in service_test.go pins the
+// protocol_trace send_outcome=unregistered invariant. Removal belongs to
+// §6.4(a) scope (iv)/(v) cleanup, once the NetCore-backed enqueueFrame*
+// helpers themselves can fold behind the Network interface.
 func (s *Service) writeJSONFrameSyncByID(id domain.ConnID, frame protocol.Frame) error {
 	addr := ""
 	if core := s.netCoreForID(id); core != nil {

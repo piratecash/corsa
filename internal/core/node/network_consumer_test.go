@@ -720,3 +720,75 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend asserts that the
+// top-of-loop invalid-JSON branch of handleCommand routes its error reply
+// through the injected Network surface, not through the legacy
+// writeJSONFrameSyncByID helper that resolves *netcore.NetCore from
+// s.conns directly.
+//
+// This is the runtime counterpart of the §6.4(a) scope (ii.c) migration:
+// handleCommand, along with three sibling call-sites inside handleConn
+// (frame-too-large, read-error, rate-limited), now emits its error frame
+// via sendFrameViaNetworkSync(s.runCtx, connID, frame). The other three
+// sites are structurally identical to this one — the only non-trivial
+// branch is the JSON-framing guard exercised here; a regression on any
+// of them would look the same on the Network surface (no frame arrives
+// on backend.Outbound).
+//
+// If someone reverts handleCommand's reply-write to writeJSONFrameSyncByID,
+// the backend Outbound channel stays empty, the read times out, and this
+// test fails deterministically.
+func TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend(t *testing.T) {
+	t.Parallel()
+
+	backend := netcoretest.New()
+	t.Cleanup(backend.Shutdown)
+
+	svc := NewServiceWithNetwork(config.Node{
+		ListenAddress:    "127.0.0.1:0",
+		AdvertiseAddress: "127.0.0.1:0",
+		Type:             config.NodeTypeFull,
+		TrustStorePath:   t.TempDir() + "/trust.json",
+		QueueStatePath:   t.TempDir() + "/queue.json",
+	}, testIdentityForNetworkConsumerTest(t), backend)
+	t.Cleanup(svc.WaitBackground)
+
+	connID := netcore.ConnID(9200)
+	backend.Register(connID, netcore.Inbound, "10.0.0.44:55544")
+
+	// handleCommand guards `core == nil` for the downstream protocol_trace
+	// addr field. A minimal NetCore over a net.Pipe satisfies the guard;
+	// the actual reply bytes travel through the Network override.
+	clientPipe, serverPipe := net.Pipe()
+	t.Cleanup(func() { _ = clientPipe.Close() })
+	t.Cleanup(func() { _ = serverPipe.Close() })
+	pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
+	t.Cleanup(pc.Close)
+
+	// A line that fails protocol.IsJSONLine — the invalid-JSON branch at
+	// the top of handleCommand fires and emits an error frame.
+	if ok := svc.handleCommand(connID, pc, "not-json-framing"); ok {
+		t.Fatalf("handleCommand(non-json) returned true; expected false (invalid-JSON branch)")
+	}
+
+	select {
+	case data, ok := <-backend.Outbound(connID):
+		if !ok {
+			t.Fatal("backend.Outbound(connID) closed before invalid-JSON reply arrived")
+		}
+		frame, err := parseFrameLineForTest(data)
+		if err != nil {
+			t.Fatalf("parse outbound frame: %v (raw=%q)", err, data)
+		}
+		if frame.Type != "error" {
+			t.Fatalf("expected error frame, got type %q (raw=%q)", frame.Type, data)
+		}
+		if frame.Code != protocol.ErrCodeInvalidJSON {
+			t.Fatalf("expected code %q, got %q (raw=%q)", protocol.ErrCodeInvalidJSON, frame.Code, data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for invalid-JSON error frame on backend.Outbound(connID): " +
+			"handleCommand did not route the reply through the injected Network surface — the frame was sent via writeJSONFrameSyncByID that bypasses s.Network().SendFrameSync")
+	}
+}
