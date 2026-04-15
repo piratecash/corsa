@@ -3,13 +3,16 @@ package node
 // network_consumer.go holds the first Service-internal consumer of the
 // netcore.Network interface returned by Service.Network().
 //
-// Every other outbound write inside Service currently flows through the
-// ConnID-first helpers (writeJSONFrameByID / enqueueFrameByID) or the
-// session-scoped writeSessionFrame carve-out. Both paths resolve
-// *netcore.NetCore from s.conns and call pc.SendRaw directly, bypassing
-// the Network() injection seam — which means a test harness wired via
-// NewServiceWithNetwork (e.g. netcoretest.Backend) cannot observe those
-// frames, because the override is never consulted on the write path.
+// The ConnID-first legacy helpers (writeJSONFrameByID / enqueueFrameByID)
+// resolve *netcore.NetCore from s.conns and call pc.SendRaw directly,
+// bypassing the Network() injection seam — which means a test harness
+// wired via NewServiceWithNetwork (e.g. netcoretest.Backend) cannot
+// observe frames emitted through them. Helpers in this file route writes
+// through the Network surface so the override IS consulted on the write
+// path. The session-scoped fallback inside sendSessionFrameViaNetwork
+// (Network probe → enqueueSessionFrame on netcore.ErrUnknownConn) and
+// the writeJSONFrameSyncByID test seam are the only remaining entry
+// points to the legacy path.
 //
 // sendFrameViaNetwork and sendFrameViaNetworkSync exist so production
 // reply paths route through s.Network().SendFrame / .SendFrameSync: when
@@ -27,10 +30,15 @@ package node
 // (writeFrameToInbound, writePushFrame) marshal themselves so
 // they can distinguish a caller-side encode bug from a transport drop.
 //
-// writeSessionFrame and the handleConn / handleCommand top-of-loop
-// error replies still resolve *netcore.NetCore through the legacy
-// helpers — expanding the migration to those call-sites is out of
-// scope for this file.
+// sendSessionFrameViaNetwork is the session-scoped Network consumer:
+// it routes session-local reply paths (pong, subscribe_inbox reply,
+// push_message, push_delivery_receipt) through s.Network() keyed by
+// session.connID, with a carve-out fallback to enqueueSessionFrame on
+// netcore.ErrUnknownConn. The fallback preserves delivery for the
+// live-session-with-reaped-or-absent-registry case (transient registry
+// race windows in production, manually-built sessions in tests) where
+// the authoritative writer is session.netCore directly rather than the
+// registry-resolved transport.
 
 import (
 	"context"
@@ -373,6 +381,109 @@ func logUnregisteredWriteRaw(addr, origin string) {
 		Str("origin", origin).
 		Str("addr", addr).
 		Msg("unregistered_write: conn missing NetCore — single-writer invariant violation, frame dropped")
+}
+
+// sendSessionFrameViaNetwork is the session-scoped, Network-injection-aware
+// helper for session-local replies. It marshals frame and routes the wire
+// bytes through s.Network().SendFrame keyed by session.connID so
+// netcore.Network test backends (e.g. netcoretest.Backend) observe the
+// outbound frame.
+//
+// Carve-out fallback: when Network returns ErrUnknownConn — registry has
+// no entry for session.connID, either because s.conns was reaped on a
+// still-live session or because a test fixture never populated s.conns —
+// the helper falls back to enqueueSessionFrame, which talks to
+// session.netCore directly. session.netCore is the authoritative writer
+// for outbound peerSession transports; the registry-resolved NetCore
+// (when present) points at the same instance, so the fallback is a
+// path-redirect rather than a duplicate transport.
+//
+// Marshal failure is handled in-helper: the original frame is replaced
+// with a minimal ErrCodeEncodeFailed frame so the peer learns about the
+// encode bug instead of getting a silent drop.
+//
+// Outcome-tree:
+//   - nil — Network accepted the frame (production path) OR the carve-out
+//     enqueueSessionFrame returned enqueueSent / enqueueDropped.
+//     enqueueDropped is reported as nil intentionally: a slow-peer
+//     eviction is an operational condition handled by the writer
+//     goroutine, not an architectural error the fire-and-forget caller
+//     must react to.
+//   - ErrUnregisteredWrite — neither Network nor session.netCore could
+//     deliver: registry has no entry AND session.netCore is nil. This is
+//     the single-writer-invariant violation reported on logUnregisteredWrite
+//     for diagnostics.
+//
+// All five production call-sites use `_ = s.sendSessionFrameViaNetwork(...)`
+// fire-and-forget. The error is returned (not bool) so future call-sites
+// that need to classify can opt in via `if err :=`.
+//
+// ctx is the caller-provided operation context. Production call-sites pass
+// s.runCtx (Service-lifecycle context) per §2.6.32 invariant.
+func (s *Service) sendSessionFrameViaNetwork(ctx context.Context, session *peerSession, frame protocol.Frame) error {
+	if session == nil {
+		// Defensive: a nil session has no transport at all. Fail closed
+		// with the single-writer-invariant sentinel and a diagnostic log
+		// line rather than panicking on a downstream dereference.
+		logUnregisteredWrite("", frame, "sendSessionFrameViaNetwork.nil_session")
+		return ErrUnregisteredWrite
+	}
+	addr := ""
+	if session.conn != nil {
+		if ra := session.conn.RemoteAddr(); ra != nil {
+			addr = ra.String()
+		}
+	}
+
+	line, marshalErr := protocol.MarshalFrameLine(frame)
+	var data []byte
+	if marshalErr != nil {
+		// Marshal-fallback: build an ErrCodeEncodeFailed frame so the
+		// peer learns the encode bug instead of getting a silent drop.
+		// The original frame bytes are unrecoverable; the fallback frame
+		// is what reaches the wire.
+		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: marshalErr.Error()})
+		data = append(fallback, '\n')
+	} else {
+		data = []byte(line)
+	}
+
+	// Primary path: route through Network so test backends observe the
+	// frame. In production session.connID is registered in s.conns, so
+	// networkBridge resolves to the same NetCore session.netCore points to.
+	netErr := s.Network().SendFrame(ctx, session.connID, data)
+	if netErr == nil {
+		emitProtocolTrace(addr, frame, enqueueSent)
+		return nil
+	}
+
+	// Carve-out: ErrUnknownConn means the registry has no entry for
+	// session.connID. The session may still be live (reaped registry on a
+	// healthy session, or a test fixture that never registered). Fall back
+	// to the session-owned writer via enqueueSessionFrame, which talks to
+	// session.netCore directly.
+	if errors.Is(netErr, netcore.ErrUnknownConn) {
+		res := s.enqueueSessionFrame(session, data)
+		emitProtocolTrace(addr, frame, res)
+		if res == enqueueUnregistered {
+			origin := "sendSessionFrameViaNetwork.carveout"
+			if marshalErr != nil {
+				origin = "sendSessionFrameViaNetwork.carveout.marshal_fallback"
+			}
+			logUnregisteredWrite(addr, frame, origin)
+			return ErrUnregisteredWrite
+		}
+		return nil
+	}
+
+	// Any other sentinel from the Network outcome-tree (buffer-full
+	// after slow-peer eviction, writer-done, chan-closed, ctx-error,
+	// invalid-status) — operational drop from the protocol_trace point of
+	// view, identical classification to enqueueDropped. Fire-and-forget
+	// callers receive nil because session-local reply paths tolerate
+	// transport drops; the writer goroutine handles the eviction.
+	emitProtocolTrace(addr, frame, enqueueDropped)
+	return nil
 }
 
 // classifyNetworkSendResult maps a netcore.Network send outcome to the

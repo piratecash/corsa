@@ -1560,14 +1560,14 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 			}
 			if incoming.Type == "ping" {
 				pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-				// Route through session.netCore (the authoritative transport
-				// owner) instead of re-resolving via s.conns: the session may
-				// be live with a valid NetCore while its s.conns entry has
-				// been reaped or never existed (tests), and re-resolving
-				// would fail closed on that path. writerLoop applies its
-				// own per-write deadline based on Direction, so no manual
-				// SetWriteDeadline is needed.
-				_ = s.writeSessionFrame(session, pongFrame)
+				// Route through the injected Network surface (visible to
+				// netcoretest.Backend); on ErrUnknownConn the helper falls
+				// back to session.netCore via enqueueSessionFrame, which is
+				// the carve-out for a live session whose registry entry
+				// has been reaped or was never populated.
+				// writerLoop applies its own per-write deadline based on
+				// Direction, so no manual SetWriteDeadline is needed.
+				_ = s.sendSessionFrameViaNetwork(s.runCtx, session, pongFrame)
 				s.markPeerWrite(session.address, pongFrame)
 				continue
 			}
@@ -1743,13 +1743,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	if frame.Type == "ping" {
 		if session != nil {
 			pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
-			// Route through session.netCore directly — the peerSession
-			// already owns the authoritative transport; re-resolving via
-			// s.conns would fail closed when the registry entry is reaped
-			// or not present (tests) even though the session is live.
-			// writerLoop applies the per-direction write deadline itself,
-			// so no manual SetWriteDeadline is needed.
-			_ = s.writeSessionFrame(session, pongFrame)
+			// Route through the injected Network surface; helper falls back
+			// to session.netCore on ErrUnknownConn so live sessions with
+			// reaped or absent (tests) registry entries still get the pong
+			// out without a spurious unregistered_write log. writerLoop
+			// owns the per-direction write deadline.
+			_ = s.sendSessionFrameViaNetwork(s.runCtx, session, pongFrame)
 			s.markPeerWrite(address, pongFrame)
 		}
 		return
@@ -1880,12 +1879,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	case "subscribe_inbox":
 		if session != nil {
 			reply, sub := s.subscribeInboxFrame(session.connID, session.netCore, frame)
-			// Session-local reply: route through session.netCore, the
-			// authoritative transport owner. Re-resolving via s.conns can
-			// fail closed on a live session when the registry entry is
-			// reaped or absent (tests), so writeSessionFrame is the
-			// correct contract on reply paths owned by peerSession.
-			_ = s.writeSessionFrame(session, reply)
+			// Session-local reply: route through the injected Network
+			// surface so test backends observe the subscribe_inbox reply,
+			// with the session.netCore fallback (via enqueueSessionFrame)
+			// preserving the carve-out for live sessions whose s.conns
+			// entry is reaped or never populated (tests).
+			_ = s.sendSessionFrameViaNetwork(s.runCtx, session, reply)
 			if sub != nil {
 				go s.pushBacklogToSubscriber(sub)
 			}
@@ -1979,12 +1978,11 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 			continue
 		}
 		msgFrame := item
-		// Session-local push: route through session.netCore, the
-		// authoritative transport owner. Re-resolving via s.conns would
-		// fail closed on a valid session when the registry entry was
-		// not populated by the caller (tests), producing a spurious
-		// unregistered_write on a live transport.
-		_ = s.writeSessionFrame(session, protocol.Frame{
+		// Session-local push: route through the injected Network surface;
+		// helper falls back to session.netCore via enqueueSessionFrame on
+		// ErrUnknownConn so live sessions with absent registry entries
+		// (tests) keep delivering without a spurious unregistered_write.
+		_ = s.sendSessionFrameViaNetwork(s.runCtx, session, protocol.Frame{
 			Type:      "push_message",
 			Topic:     "dm",
 			Recipient: peerID,
@@ -1995,9 +1993,9 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 	receipts := s.fetchDeliveryReceiptsFrame(peerID)
 	for _, item := range receipts.Receipts {
 		receiptFrame := item
-		// Session-local push: route through session.netCore (see
-		// writeSessionFrame doc for rationale).
-		_ = s.writeSessionFrame(session, protocol.Frame{
+		// Session-local push: route through the injected Network surface
+		// (see sendSessionFrameViaNetwork doc for the carve-out fallback).
+		_ = s.sendSessionFrameViaNetwork(s.runCtx, session, protocol.Frame{
 			Type:      "push_delivery_receipt",
 			Recipient: peerID,
 			Receipt:   &receiptFrame,

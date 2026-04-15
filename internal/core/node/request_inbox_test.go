@@ -127,10 +127,12 @@ func TestRespondToInboxRequestPushesMessages(t *testing.T) {
 	defer func() { _ = serverConn.Close() }()
 	defer func() { _ = clientConn.Close() }()
 
-	// respondToInboxRequest writes through writeSessionFrame, which
-	// routes via session.netCore — attach a NetCore just like
-	// attachOutboundNetCore does in production so the managed writer
-	// loop drains the pipe.
+	// respondToInboxRequest's session-local reply path probes s.Network()
+	// first and falls back to session.netCore when the ConnID is absent
+	// from the backend/registry. This test deliberately skips backend
+	// registration to exercise the fallback, so attach a NetCore just
+	// like attachOutboundNetCore does in production — the managed writer
+	// loop is what drains the pipe on the fallback branch.
 	session := &peerSession{
 		address:      domain.PeerAddress(peerIdentity),
 		peerIdentity: domain.PeerIdentity(peerIdentity),
@@ -196,8 +198,10 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 	// Transport address differs from identity — this is the normal case
 	// in production where the dial address is an IP:port and the identity
 	// is the Ed25519 fingerprint.
-	// Attach a NetCore to satisfy writeSessionFrame's session.netCore
-	// precondition on the session-local reply path.
+	// Attach a NetCore so the session-local reply path has a working
+	// transport: this test does not register the ConnID with a backend,
+	// so the Network() probe misses and the path falls back to
+	// session.netCore.
 	session := &peerSession{
 		address:      domain.PeerAddress(transportAddr),
 		peerIdentity: domain.PeerIdentity(peerIdentity),

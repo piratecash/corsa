@@ -15,13 +15,15 @@ import (
 
 // attachTestNetCore wires a standalone outbound NetCore onto a peerSession
 // that was constructed manually (without going through attachOutboundNetCore
-// and the Service-level registration). After the PR 2 single-writer migration
-// peerSessionRequest requires session.netCore to be non-nil; tests that drive
-// an outbound session over net.Pipe use this helper to mirror production.
+// and the Service-level registration). peerSessionRequest requires
+// session.netCore to be non-nil under the single-writer invariant; tests
+// that drive an outbound session over net.Pipe use this helper to mirror
+// production.
 // The svc parameter is retained for call-site compatibility but is not
-// used: session-local reply paths route through session.netCore directly
-// via writeSessionFrame, so registration in s.conns is not needed for the
-// session reply invariant.
+// used: session-local reply paths probe s.Network() first and fall back to
+// session.netCore when the ConnID is absent from the backend/registry — so
+// a manually-built session whose ConnID was never registered still
+// delivers reply frames through this attached NetCore.
 func attachTestNetCore(_ *Service, session *peerSession) {
 	if session == nil || session.conn == nil || session.netCore != nil {
 		return

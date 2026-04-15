@@ -1664,9 +1664,9 @@ func (s *Service) isInboundTrackedByID(id domain.ConnID) bool {
 // drains NetCore.sendCh. See net_core.go for sendItem and the implementation.
 
 // ErrUnregisteredWrite signals that a write wrapper (writeJSONFrame,
-// writeJSONFrameSync, writeSessionFrame) attempted to send a frame on a
-// connection that has no associated NetCore in s.conns (or no NetCore on
-// the session). Every live connection is registered before the first
+// writeJSONFrameSync, sendSessionFrameViaNetwork's carve-out fallback)
+// attempted to send a frame on a connection that has no associated
+// NetCore in s.conns (or no NetCore on the session). Every live connection is registered before the first
 // send (see registerInboundConn and attachOutboundNetCore), so this
 // outcome means the single-writer invariant was violated: the frame is
 // dropped (fail closed) and the error is returned to the caller so it
@@ -1968,44 +1968,6 @@ func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueue
 		log.Error().Str("addr", addr).Str("status", st.String()).Msg("enqueueSessionFrame: unexpected netcore.SendStatus")
 		return enqueueDropped
 	}
-}
-
-// writeSessionFrame marshals the frame and enqueues it on session.netCore
-// via enqueueSessionFrame. Use this on session-local reply paths where the
-// peerSession is the authoritative transport owner; callers must not use
-// writeJSONFrameByID(id, ...) on these paths because that re-resolves
-// the transport through s.conns and fails closed whenever the session is
-// live but the matching registry entry has been reaped or was never
-// populated (tests), producing a spurious ErrUnregisteredWrite on a
-// valid transport. Returns ErrUnregisteredWrite when the session has no
-// NetCore attached (see ErrUnregisteredWrite and writeJSONFrameByID for the
-// acknowledgment contract). Returns nil on enqueueSent and enqueueDropped.
-func (s *Service) writeSessionFrame(session *peerSession, frame protocol.Frame) error {
-	addr := ""
-	if session != nil && session.conn != nil {
-		if ra := session.conn.RemoteAddr(); ra != nil {
-			addr = ra.String()
-		}
-	}
-	line, err := protocol.MarshalFrameLine(frame)
-	if err != nil {
-		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: err.Error()})
-		data := append(fallback, '\n')
-		res := s.enqueueSessionFrame(session, data)
-		emitProtocolTrace(addr, frame, res)
-		if res == enqueueUnregistered {
-			logUnregisteredWrite(addr, frame, "writeSessionFrame.marshal_fallback")
-			return ErrUnregisteredWrite
-		}
-		return nil
-	}
-	res := s.enqueueSessionFrame(session, []byte(line))
-	emitProtocolTrace(addr, frame, res)
-	if res == enqueueUnregistered {
-		logUnregisteredWrite(addr, frame, "writeSessionFrame")
-		return ErrUnregisteredWrite
-	}
-	return nil
 }
 
 // writeJSONFrameSyncByID serialises a protocol frame and blocks until the

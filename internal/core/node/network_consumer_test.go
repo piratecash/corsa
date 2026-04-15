@@ -721,24 +721,19 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 	}
 }
 
-// TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend asserts that the
-// top-of-loop invalid-JSON branch of handleCommand routes its error reply
-// through the injected Network surface, not through the legacy
-// writeJSONFrameSyncByID helper that resolves *netcore.NetCore from
-// s.conns directly.
+// TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend pins the top-of-loop
+// invalid-JSON branch of handleCommand: its error reply must route through
+// the injected Network surface (visible on backend.Outbound(connID)), not
+// through a path that resolves *netcore.NetCore from s.conns directly and
+// bypasses the injection seam.
 //
-// This is the runtime counterpart of the §6.4(a) scope (ii.c) migration:
-// handleCommand, along with three sibling call-sites inside handleConn
-// (frame-too-large, read-error, rate-limited), now emits its error frame
-// via sendFrameViaNetworkSync(s.runCtx, connID, frame). The other three
-// sites are structurally identical to this one — the only non-trivial
-// branch is the JSON-framing guard exercised here; a regression on any
-// of them would look the same on the Network surface (no frame arrives
-// on backend.Outbound).
-//
-// If someone reverts handleCommand's reply-write to writeJSONFrameSyncByID,
-// the backend Outbound channel stays empty, the read times out, and this
-// test fails deterministically.
+// The three sibling top-of-loop branches inside handleConn
+// (frame-too-large, read-error, rate-limited) share the same transport
+// shape — they emit a single error frame via the same sync send path —
+// so a regression on any of them would look identical on the Network
+// surface: no frame arrives on backend.Outbound, the read times out, and
+// the test fails deterministically. Only the JSON-framing guard has a
+// non-trivial input shape worth driving end-to-end here.
 func TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend(t *testing.T) {
 	t.Parallel()
 
@@ -790,5 +785,133 @@ func TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for invalid-JSON error frame on backend.Outbound(connID): " +
 			"handleCommand did not route the reply through the injected Network surface — the frame was sent via writeJSONFrameSyncByID that bypasses s.Network().SendFrameSync")
+	}
+}
+
+// TestSendSessionFrameViaNetwork_NetworkPathVisibleToBackend pins the
+// runtime contract of session-local reply paths (the pong on outbound +
+// inbound ping handlers, the subscribe_inbox reply, push_message and
+// push_delivery_receipt on respondToInboxRequest):
+//
+//   - When the session's ConnID is registered with the injected
+//     netcore.Network, replies must route through that surface and become
+//     observable on backend.Outbound(connID). Bypassing Network() so the
+//     frame goes directly via session.netCore would defeat the injection
+//     seam tests rely on for protocol-level assertions.
+//   - When the ConnID is absent from the backend/registry (live session
+//     whose s.conns entry was reaped or never populated — the case that
+//     tests building sessions manually exercise), replies must fall back
+//     to session.netCore so the frame still reaches the peer. Without
+//     this fallback such sessions would silently lose frames.
+//
+// The two sub-cases assert both halves. A regression that drops the
+// Network() probe (frame never visible to the backend) fails
+// "network_path_visible_to_backend" by timeout; a regression that drops
+// the session.netCore fallback (frame never reaches the pipe when the
+// backend has no entry) fails "carveout_fallback_when_unregistered" by
+// timeout.
+func TestSendSessionFrameViaNetwork_NetworkPathVisibleToBackend(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		registerInBack bool
+		assertVia      string // "backend" or "pipe"
+	}{
+		{
+			name:           "network_path_visible_to_backend",
+			registerInBack: true,
+			assertVia:      "backend",
+		},
+		{
+			name:           "carveout_fallback_when_unregistered",
+			registerInBack: false,
+			assertVia:      "pipe",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			backend := netcoretest.New()
+			t.Cleanup(backend.Shutdown)
+
+			svc := NewServiceWithNetwork(config.Node{
+				ListenAddress:    "127.0.0.1:0",
+				AdvertiseAddress: "127.0.0.1:0",
+				Type:             config.NodeTypeFull,
+				TrustStorePath:   t.TempDir() + "/trust.json",
+				QueueStatePath:   t.TempDir() + "/queue.json",
+			}, testIdentityForNetworkConsumerTest(t), backend)
+			t.Cleanup(svc.WaitBackground)
+
+			connID := netcore.ConnID(9300)
+
+			// Always build a real net.Pipe + NetCore for session.netCore
+			// so the carve-out fallback has a working transport when the
+			// backend is intentionally not registered for this case.
+			peerSide, sessionSide := net.Pipe()
+			t.Cleanup(func() { _ = peerSide.Close() })
+			t.Cleanup(func() { _ = sessionSide.Close() })
+			pc := netcore.New(connID, sessionSide, netcore.Outbound, netcore.Options{})
+			t.Cleanup(pc.Close)
+
+			session := &peerSession{
+				address:      domain.PeerAddress("test-peer"),
+				peerIdentity: domain.PeerIdentity("test-id"),
+				conn:         sessionSide,
+				connID:       connID,
+				netCore:      pc,
+			}
+
+			if tc.registerInBack {
+				backend.Register(connID, netcore.Outbound, "10.0.0.55:55555")
+			}
+
+			frame := protocol.Frame{Type: "pong", Node: "node-A", Network: "net-X"}
+			if err := svc.sendSessionFrameViaNetwork(svc.runCtx, session, frame); err != nil {
+				t.Fatalf("sendSessionFrameViaNetwork returned %v; want nil for both paths", err)
+			}
+
+			switch tc.assertVia {
+			case "backend":
+				select {
+				case data, ok := <-backend.Outbound(connID):
+					if !ok {
+						t.Fatal("backend.Outbound(connID) closed before session frame arrived")
+					}
+					got, err := parseFrameLineForTest(data)
+					if err != nil {
+						t.Fatalf("parse outbound frame: %v (raw=%q)", err, data)
+					}
+					if got.Type != "pong" {
+						t.Fatalf("expected pong frame on backend.Outbound, got type %q (raw=%q)", got.Type, data)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for session frame on backend.Outbound(connID): " +
+						"sendSessionFrameViaNetwork did not route through the injected Network surface — " +
+						"the frame likely went straight to session.netCore, or session.connID was not propagated to the Network call")
+				}
+			case "pipe":
+				// Carve-out path: read the wire bytes from the peer end of
+				// the pipe (the writer goroutine inside pc forwards them
+				// from session.netCore.SendRaw).
+				_ = peerSide.SetReadDeadline(time.Now().Add(2 * time.Second))
+				buf := make([]byte, 256)
+				n, err := peerSide.Read(buf)
+				if err != nil {
+					t.Fatalf("read carve-out path bytes from peerSide: %v", err)
+				}
+				got, err := parseFrameLineForTest(buf[:n])
+				if err != nil {
+					t.Fatalf("parse carve-out frame: %v (raw=%q)", err, buf[:n])
+				}
+				if got.Type != "pong" {
+					t.Fatalf("expected pong frame via carve-out, got type %q (raw=%q)", got.Type, buf[:n])
+				}
+			}
+		})
 	}
 }

@@ -180,11 +180,20 @@ func TestBackend_Close_PerConnID(t *testing.T) {
 	id := domain.ConnID(99)
 	b.Register(id, netcore.Inbound, "203.0.113.77:7777")
 
+	// Capture the outbound channel reference before Close. Outbound's
+	// documented contract returns nil for an unregistered id (and Close
+	// removes the registration), so observing the closed-channel signal
+	// requires holding the channel reference from the registered window.
+	out := b.Outbound(id)
+	if out == nil {
+		t.Fatal("Outbound returned nil for registered id")
+	}
+
 	ctx := context.Background()
 	if err := b.Network().Close(ctx, id); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, ok := <-b.Outbound(id); ok {
+	if _, ok := <-out; ok {
 		t.Fatal("Outbound channel must be closed after per-ConnID Close")
 	}
 	if err := b.Network().Close(ctx, id); !errors.Is(err, netcore.ErrUnknownConn) {

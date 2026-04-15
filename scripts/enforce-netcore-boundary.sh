@@ -146,9 +146,9 @@ expect_count "s.conns / s.connIDByNetConn outside conn_registry.go" 0 -- \
 # Gate 6: un-ack'd write-wrapper call-sites. Primary check is errcheck in
 # `make lint`; this is a fast backup. ByID variants are the canonical names
 # after PR 10.6.
-expect_count "un-ack'd write-wrappers (async + sync: writeJSONFrame*ByID / enqueueFrame*ByID / writeSessionFrame / sendFrameViaNetwork + sendFrameViaNetworkSync / sendFrameBytesViaNetwork + sendFrameBytesViaNetworkSync)" 0 -- \
+expect_count "un-ack'd write-wrappers (async + sync: writeJSONFrame*ByID / enqueueFrame*ByID / sendFrameViaNetwork + sendFrameViaNetworkSync / sendFrameBytesViaNetwork + sendFrameBytesViaNetworkSync / sendSessionFrameViaNetwork)" 0 -- \
     rg -nU --glob '!**/*_test.go' \
-       '^\s*(svc|s)\.(writeJSONFrameByID|writeJSONFrameSyncByID|enqueueFrameByID|enqueueFrameSyncByID|writeSessionFrame|sendFrameViaNetwork|sendFrameViaNetworkSync|sendFrameBytesViaNetwork|sendFrameBytesViaNetworkSync)\(' \
+       '^\s*(svc|s)\.(writeJSONFrameByID|writeJSONFrameSyncByID|enqueueFrameByID|enqueueFrameSyncByID|sendFrameViaNetwork|sendFrameViaNetworkSync|sendFrameBytesViaNetwork|sendFrameBytesViaNetworkSync|sendSessionFrameViaNetwork)\(' \
        internal/core/node
 
 # Gate 7: untyped uint64 identity regression.
