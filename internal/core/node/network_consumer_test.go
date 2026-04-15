@@ -321,3 +321,142 @@ func uint64Hash(s string) uint64 {
 	}
 	return h & 0xFFFF // bounded so the resulting ConnID stays small and readable
 }
+
+// TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync asserts
+// the runtime contract of the sync reply paths inside dispatchNetworkFrame:
+// every fail-fast error reply with `accepted = false` must travel through
+// the Service's injected netcore.Network surface via SendFrameSync, not
+// through a legacy helper that resolves *netcore.NetCore from s.conns
+// directly. If a reply is sent via the legacy helper, the backend's
+// Outbound channel stays empty and this test fails on timeout.
+//
+// The table covers a representative cross-section of the sync call-sites:
+//
+//   - invalid_json — un-auth fail-fast at function entry (json.Unmarshal
+//     error branch).
+//   - auth_required_unknown_command — auth-gate sync path: P2P command
+//     received on an unauthenticated connection.
+//   - unknown_command_authenticated — default-case sync path: unknown
+//     frame type on an authenticated connection.
+//
+// Other sync reply sites (re-hello-reject, invalid-auth-signature,
+// auth_session-reply-on-fail, ack_delete-on-fail,
+// subscribe_inbox-identity-mismatch) depend on broader Service state
+// (connauth initiation map, ban tracking, auth handler internals,
+// DeleteTracker, inboundPeerIdentity) whose fixture-wall is out of
+// proportion with the value of a runtime POC. Those sites are protected
+// by the architectural boundary check run in CI, which fails if a bare
+// legacy-helper call is reintroduced anywhere in the package.
+//
+// Setup pattern per case — identical to the async variant above: pinned
+// netcoretest.Backend, dual registration (backend.Register +
+// setTestConnEntryLocked), pc.SetAuth for auth-gated cases.
+func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name              string
+		authVerified      bool
+		inboundFrameLine  string
+		expectedReplyType string
+		expectedReplyCode string
+	}{
+		{
+			name: "invalid_json",
+			// json.Unmarshal fails on the leading fail-fast branch and the
+			// reply is sent via sendFrameViaNetworkSync. No auth setup.
+			authVerified:      false,
+			inboundFrameLine:  `{not json`,
+			expectedReplyType: "error",
+			expectedReplyCode: protocol.ErrCodeInvalidJSON,
+		},
+		{
+			name: "auth_required_unknown_command",
+			// isP2PWireCommand("get_peers") == true on an unauthenticated
+			// connection → error reply with ErrCodeAuthRequired via
+			// sendFrameViaNetworkSync.
+			authVerified:      false,
+			inboundFrameLine:  `{"type":"get_peers"}`,
+			expectedReplyType: "error",
+			expectedReplyCode: protocol.ErrCodeAuthRequired,
+		},
+		{
+			name: "unknown_command_authenticated",
+			// Verified=true, unknown frame type → falls through to the
+			// default-case sync reply with ErrCodeUnknownCommand via
+			// sendFrameViaNetworkSync.
+			authVerified:      true,
+			inboundFrameLine:  `{"type":"some_unknown_cmd_v99"}`,
+			expectedReplyType: "error",
+			expectedReplyCode: protocol.ErrCodeUnknownCommand,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			backend := netcoretest.New()
+			t.Cleanup(backend.Shutdown)
+
+			svc := NewServiceWithNetwork(config.Node{
+				ListenAddress:    "127.0.0.1:0",
+				AdvertiseAddress: "127.0.0.1:0",
+				Type:             config.NodeTypeFull,
+				TrustStorePath:   t.TempDir() + "/trust.json",
+				QueueStatePath:   t.TempDir() + "/queue.json",
+			}, testIdentityForNetworkConsumerTest(t), backend)
+			t.Cleanup(svc.WaitBackground)
+
+			connID := netcore.ConnID(9200 + uint64Hash(tc.name))
+			backend.Register(connID, netcore.Inbound, "10.0.0.44:55555")
+
+			clientPipe, serverPipe := net.Pipe()
+			t.Cleanup(func() { _ = clientPipe.Close() })
+			t.Cleanup(func() { _ = serverPipe.Close() })
+			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
+			t.Cleanup(pc.Close)
+
+			if tc.authVerified {
+				pc.SetAuth(&connauth.State{Verified: true})
+			}
+
+			svc.mu.Lock()
+			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
+			svc.mu.Unlock()
+
+			// Sync error paths return accepted=false; the dispatch return
+			// value still says "false" because the frame was not accepted
+			// as a protocol operation. That is orthogonal to the pong /
+			// async-reply path asserted above, so we do not check the
+			// return here — we check that the reply surfaces on the
+			// injected Network surface.
+			svc.dispatchNetworkFrame(connID, pc, tc.inboundFrameLine)
+
+			select {
+			case data, ok := <-backend.Outbound(connID):
+				if !ok {
+					t.Fatalf("%s: backend.Outbound(connID) closed before reply arrived", tc.name)
+				}
+				frame, err := parseFrameLineForTest(data)
+				if err != nil {
+					t.Fatalf("%s: parse outbound frame: %v (raw=%q)", tc.name, err, data)
+				}
+				if frame.Type != tc.expectedReplyType {
+					t.Fatalf("%s: expected reply type %q on backend.Outbound, got %q (raw=%q)",
+						tc.name, tc.expectedReplyType, frame.Type, data)
+				}
+				if frame.Code != tc.expectedReplyCode {
+					t.Fatalf("%s: expected reply code %q on backend.Outbound, got %q (raw=%q)",
+						tc.name, tc.expectedReplyCode, frame.Code, data)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: timed out waiting for sync reply on backend.Outbound(connID): "+
+					"Service did not route the reply through the injected Network surface — "+
+					"the reply was sent via writeJSONFrameSyncByID that bypasses s.Network().SendFrameSync",
+					tc.name)
+			}
+		})
+	}
+}

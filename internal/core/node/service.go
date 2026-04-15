@@ -1141,7 +1141,16 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			Str("command", "").
 			Bool("accepted", false).
 			Msg("protocol_trace")
-		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
+		// All sync reply paths below route through sendFrameViaNetworkSync so
+		// the injected Network (production bridge or netcoretest.Backend)
+		// owns the write. s.runCtx is the lifecycle ctx seeded by
+		// NewService and replaced by Run(ctx); we do not fabricate a
+		// per-call ctx here. See network_consumer.go for outcome-tree
+		// documentation — notably, this helper explicitly evicts on both
+		// ErrSendBufferFull and ErrSendTimeout to preserve the legacy
+		// enqueueFrameSyncByID pc.Close semantics that bridge.SendFrameSync
+		// does not replicate.
+		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON, Error: err.Error()})
 		return false
 	}
 
@@ -1203,7 +1212,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// health tracking and capability context.
 		if s.isAuthInitiated(connID) {
 			accepted = false
-			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{
+			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{
 				Type:  "error",
 				Code:  protocol.ErrCodeHelloAfterAuth,
 				Error: "re-hello rejected: authentication in progress or completed",
@@ -1242,7 +1251,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 			if err != nil {
 				accepted = false
 				s.addBanScore(connID, banIncrementInvalidSig)
-				_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
+				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
 				return false
 			}
 			s.setConnAuthStateByID(connID, authState)
@@ -1268,7 +1277,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		reply, ok := s.handleAuthSession(connID, frame)
 		if !ok {
 			accepted = false
-			_ = s.writeJSONFrameSyncByID(connID, reply)
+			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
 			return false
 		}
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
@@ -1292,11 +1301,11 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		// on the error code: known P2P → auth_required, unknown → unknown_command.
 		if isP2PWireCommand(frame.Type) {
 			accepted = false
-			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
+			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
 			return false
 		}
 		accepted = false
-		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 
@@ -1327,7 +1336,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		reply, ok := s.handleAckDeleteFrame(connID, frame)
 		if !ok {
 			accepted = false
-			_ = s.writeJSONFrameSyncByID(connID, reply)
+			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
 			return false
 		}
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
@@ -1345,7 +1354,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 				Str("peer_identity", string(peerIdentity)).
 				Str("requested_recipient", requestedRecipient).
 				Msg("subscribe_inbox identity mismatch")
-			_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
+			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
 			s.addBanScore(connID, banIncrementInvalidSig)
 			return true
 		}
@@ -1490,7 +1499,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, core *netcore.NetCo
 		return true
 	default:
 		accepted = false
-		_ = s.writeJSONFrameSyncByID(connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
+		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
 	}
 }
