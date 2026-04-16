@@ -32,9 +32,32 @@ The repository contains the current Go-based CORSA stack:
 - `internal/core/node`: mesh node, trust store, peer sync, relay (see [mesh.md](mesh.md) for the full mesh network documentation). Does not own message persistence — delegates to a registered `MessageStore` handler (see [chatlog.md](chatlog.md)).
 - `internal/core/service`: desktop-facing application service layer (see [dm_router.md](dm_router.md) for the DMRouter service layer). `DesktopClient` owns `chatlog.Store` and implements `node.MessageStore`.
 - `internal/core/protocol`: protocol models (see [protocol/](protocol/) for the full protocol specification)
+- `internal/core/netcore`: transport core — owns the raw `net.Conn`, the writer goroutine and the framing loop; exposes the typed `netcore.Network` boundary (`SendFrame`, `SendFrameSync`, `Enumerate`, `Close`, `RemoteAddr`, all keyed by `domain.ConnID`) that `node.Service` goes through. See [protocol/network_core.md](protocol/network_core.md).
 - `internal/core/transport`: p2p transport abstractions
 - `internal/platform/mobile`: future mobile bindings
 - see [debug.md](debug.md) for log levels and protocol tracing
+
+### Network core boundary
+
+`internal/core/netcore` owns the transport core. Production read-side and
+send paths on `node.Service` go through the `netcore.Network` interface;
+read walks over the registry receive a value-typed `connInfo` snapshot, not
+a `*netcore.NetCore` pointer. A small lifecycle / handshake carve-out
+remains internal to `node/conn_registry.go`: `coreForIDLocked` returns the
+live `*netcore.NetCore` handle during handshake-time identity / address /
+auth writes, and the registry helpers that create or tear down the
+`(net.Conn, ConnID)` binding (`registerInboundConnLocked`,
+`attachOutboundCoreLocked`, `unregisterConnLocked`) necessarily touch the
+raw `net.Conn`. Outside that carve-out, direct `net.Conn` usage in
+`internal/core/node` is confined to accept entry, pre-registration IP
+policy, `enableTCPKeepAlive`, and the `connauth.AuthStore` implementation
+pinned by an external interface.
+
+The boundary is not aspirational: it is enforced automatically by
+`make enforce-netcore-boundary` (see [protocol/network_core.md](protocol/network_core.md))
+and the same job runs in CI. New `net.Conn`-first call sites inside
+`internal/core/node`, or new `net` stdlib imports outside the whitelisted
+carve-out files, fail the build.
 
 ### Runtime model
 
@@ -116,9 +139,32 @@ Current trust and discovery flow:
 - `internal/core/node`: mesh-нода, trust store, peer sync, relay (см. [mesh.md](mesh.md) для полной документации mesh-сети). Не владеет хранением сообщений — делегирует зарегистрированному обработчику `MessageStore` (см. [chatlog.md](chatlog.md)).
 - `internal/core/service`: сервисный слой для desktop-клиента (см. [dm_router.md](dm_router.md) для сервисного слоя DMRouter). `DesktopClient` владеет `chatlog.Store` и реализует `node.MessageStore`.
 - `internal/core/protocol`: модели протокола (см. [protocol/](protocol/) для полной спецификации протокола)
+- `internal/core/netcore`: сетевое ядро — владеет raw `net.Conn`, writer-горутиной и циклом фреймирования; предоставляет типизированную границу `netcore.Network` (`SendFrame`, `SendFrameSync`, `Enumerate`, `Close`, `RemoteAddr`, все ключены `domain.ConnID`), через которую ходит `node.Service`. См. [protocol/network_core.md](protocol/network_core.md).
 - `internal/core/transport`: p2p-абстракции транспорта
 - `internal/platform/mobile`: будущие mobile bindings
 - см. [debug.md](debug.md) для уровней логирования и трассировки протокола
+
+### Граница сетевого ядра
+
+`internal/core/netcore` владеет transport core. Production read-side и
+send-пути `node.Service` идут через интерфейс `netcore.Network`;
+read-обходы реестра получают value-типизированный снимок `connInfo`, а не
+указатель `*netcore.NetCore`. Небольшой lifecycle / handshake carve-out
+остаётся внутри `node/conn_registry.go`: `coreForIDLocked` возвращает
+живой handle `*netcore.NetCore` на время handshake-time записей
+identity / address / auth, а registry-хелперы, создающие или разрушающие
+биндинг `(net.Conn, ConnID)` (`registerInboundConnLocked`,
+`attachOutboundCoreLocked`, `unregisterConnLocked`), неизбежно трогают
+raw `net.Conn`. За пределами этого carve-out'а прямое использование
+`net.Conn` в `internal/core/node` ограничено accept entry,
+pre-registration IP policy, `enableTCPKeepAlive` и реализацией
+`connauth.AuthStore`, сигнатура которой диктуется внешним интерфейсом.
+
+Граница не декларативная: она удерживается автоматически через
+`make enforce-netcore-boundary` (см. [protocol/network_core.md](protocol/network_core.md)),
+и тот же job крутится в CI. Новые `net.Conn`-first call-sites внутри
+`internal/core/node` или новые импорты `net` из stdlib вне whitelist'а
+carve-out файлов — это failed build.
 
 ### Модель запуска
 

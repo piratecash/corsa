@@ -162,9 +162,15 @@ Remaining work under this iteration:
 
 #### Network core extraction (`PeerConn` → `NetCore`)
 
-Status: the unified in-package connection model is already in place.
-Remaining work is the package-boundary hardening around `internal/core/netcore`
-and the final separation of transport internals from `node.Service`.
+Status: **completed.** The transport core lives in `internal/core/netcore`
+and exposes a typed boundary (`netcore.Network`) to `node.Service`. Read-side
+registry state crosses the boundary as a value-typed `connInfo` snapshot —
+`*netcore.NetCore` does not escape the registry. The remaining `net.Conn`
+usage inside `internal/core/node` is confined to a frozen lifecycle
+carve-out (accept / register / unregister / pre-registration IP policy /
+the `connauth.AuthStore` implementation). The boundary is enforced
+automatically by `make enforce-netcore-boundary` and its CI job —
+see [protocol/network_core.md](protocol/network_core.md).
 
 ---
 
@@ -238,7 +244,6 @@ and the final separation of transport internals from `node.Service`.
 The core removal already landed: `ConsolePeersJSON()` and `buildConsolePeersPayload()` no longer exist in the codebase, the local `get_peers` RPC handler returns `protocol.Frame{Type: "peers", Count, Peers}` with no `connected` / `pending` / `known_only` fields, and Desktop / CLI consumers were migrated off the old shape. The protocol-level remote `get_peers` frame was never in scope. What is still stale is peripheral:
 
 - [ ] Remove dead i18n keys `console.peers.connected`, `console.peers.pending`, `console.peers.known_only` from `internal/app/desktop/i18n.go` across all locales — no call site references them.
-- [ ] Update `docs/connection-manager.md` section «`get_peers` — backward compatibility + extension»: it still describes the old `ConsolePeersJSON()` JSON shape (`connected` / `pending` / `known_only`) and the non-existent `buildConsolePeersPayload`. Rewrite to match the current `{type, count, peers}` contract.
 
 ---
 

@@ -168,9 +168,15 @@ forward-compatible relay для будущего onion routing. Отслежив
 
 #### Выделение сетевого ядра (`PeerConn` → `NetCore`)
 
-Статус: unified in-package модель соединения уже собрана.
-Оставшаяся работа — укрепить package boundary вокруг `internal/core/netcore`
-и довести разделение transport internals и `node.Service` до финальной формы.
+Статус: **завершено.** Transport core вынесен в пакет `internal/core/netcore`
+и предоставляет `node.Service` типизированную границу (`netcore.Network`).
+Read-side состояние реестра пересекает границу через value-типизированный
+снимок `connInfo` — `*netcore.NetCore` не покидает реестр. Оставшееся
+использование `net.Conn` внутри `internal/core/node` ограничено замороженным
+lifecycle carve-out'ом (accept / register / unregister / pre-registration
+IP policy / реализация `connauth.AuthStore`). Граница удерживается
+автоматически через `make enforce-netcore-boundary` и соответствующий CI-job —
+см. [protocol/network_core.md](protocol/network_core.md).
 
 ---
 
@@ -245,7 +251,6 @@ forward-compatible relay для будущего onion routing. Отслежив
 Основная часть уже сделана: функций `ConsolePeersJSON()` и `buildConsolePeersPayload()` в кодовой базе больше нет, локальный RPC-хендлер `get_peers` возвращает `protocol.Frame{Type: "peers", Count, Peers}` без полей `connected` / `pending` / `known_only`, Desktop и CLI мигрированы. Протокольный remote `get_peers` в scope не входил. Остаётся периферия:
 
 - [ ] Удалить мёртвые i18n-ключи `console.peers.connected`, `console.peers.pending`, `console.peers.known_only` из `internal/app/desktop/i18n.go` во всех локалях — на них нет ни одной ссылки из кода.
-- [ ] Переписать раздел «`get_peers` — обратная совместимость + расширение» в `docs/connection-manager.md`: там до сих пор описан старый JSON-формат ответа `ConsolePeersJSON()` (`connected` / `pending` / `known_only`) и несуществующий `buildConsolePeersPayload`. Привести к актуальному контракту `{type, count, peers}`.
 
 ---
 

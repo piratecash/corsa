@@ -1,420 +1,424 @@
-# Network Core — PeerConn Abstraction
+# Network core (`internal/core/netcore`)
 
-## Problem
+## English
 
-The `Service` struct in `internal/core/node/service.go` stores connection
-state across 9 separate maps keyed by `net.Conn`:
+### Purpose
 
-| Map | Type | Purpose |
-|-----|------|---------|
-| `inboundConns` | `map[net.Conn]struct{}` | All active inbound connections |
-| `inboundMetered` | `map[net.Conn]*MeteredConn` | Inbound conn → metered wrapper |
-| `inboundTracked` | `map[net.Conn]struct{}` | Promoted connections (auth complete) |
-| `connAuth` | `map[net.Conn]*connauth.State` | Authentication state |
-| `connPeerInfo` | `map[net.Conn]*connPeerHello` | Identity, capabilities, staleness |
-| `connSendCh` | `map[net.Conn]chan sendItem` | Per-connection write channel |
-| `connWriterDone` | `map[net.Conn]chan struct{}` | Writer goroutine exit signal |
-| `sessions` | `map[PeerAddress]*peerSession` | Outbound sessions (embeds net.Conn) |
-| `inboundByIP` | `map[string]int` | Per-IP connection count |
+`internal/core/netcore` is the transport core of the node. It owns every
+raw `net.Conn` managed by the process, the writer goroutine that serialises
+bytes onto the socket, the per-connection framing loop and the metered
+wrapper that counts bytes in and out. Everything above the socket —
+routing, auth, peer health, ban score, inbox dispatch, reachability — lives
+on `node.Service` and is not part of this package.
 
-54 functions accept `net.Conn` as a parameter. Any of them can call
-`.Write()` directly, bypassing the designated single-writer goroutine.
-The compiler cannot prevent this because `net.Conn` is an interface with
-a public `Write` method.
+The package replaced an earlier in-package `PeerConn` design where
+`node.Service` kept nine parallel maps keyed by `net.Conn` and reached
+straight into the socket from dozens of call-sites. Under the current
+shape `net.Conn` is private to `netcore` and `node.Service` talks to the
+transport only through a typed interface.
 
-Two of the three original unsafe write paths have been fixed:
-`file_command` frames now go through `sendCh` (serialized by
-`servePeerSession`), and `writeFrameToInbound` returns `false` on
-`enqueueUnregistered` instead of falling back to direct `io.WriteString`.
-The remaining unsafe path (`writeJSONFrame` / `writeJSONFrameSync`
-falling back to direct `conn.Write` for outbound sessions) is tracked
-in the roadmap.
+### Boundary: `netcore.Network`
 
-## Design
-
-### PeerConn type
+`netcore.Network` is the narrow API surface the rest of the node uses to
+move frames. It is ConnID-keyed, ctx-first and exposes only frame I/O,
+enumeration, shutdown and a lightweight address accessor:
 
 ```go
-// PeerConn owns a single network connection and enforces the
-// single-writer invariant at the type level. net.Conn is private —
-// the only way to send data is through Send().
-type PeerConn struct {
-    id         connID
-    direction  Direction           // inbound | outbound
-    identity   domain.PeerIdentity // empty until handshake complete
-    address    domain.PeerAddress
-    caps       []domain.Capability
-    networks   map[domain.NetGroup]struct{}
-
-    // Writer — channel-serialized, one goroutine drains to socket.
-    sendCh     chan sendItem
-    writerDone chan struct{}
-
-    // Reader — frames parsed by a dedicated goroutine.
-    inboxCh    chan protocol.Frame  // outbound sessions only (request-reply)
-    errCh      chan error           // outbound sessions only
-
-    // Auth state (inbound only, nil for outbound).
-    auth       *connauth.State
-
-    // Metering.
-    metered    *MeteredConn
-
-    // Private — never exposed outside PeerConn methods.
-    rawConn    net.Conn
-    closeOnce  sync.Once
-
-    // Staleness tracking.
-    lastActivity time.Time
-    connIDNum    uint64  // monotonic ID for diagnostics
-}
-
-type connID uint64
-
-type Direction int
-
-const (
-    Inbound  Direction = iota
-    Outbound
-)
-```
-
-### Public API
-
-```go
-// Send enqueues a frame for writing. Non-blocking. Returns false if
-// the write queue is full or the connection is closing.
-func (pc *PeerConn) Send(frame protocol.Frame) bool
-
-// SendSync enqueues a frame and blocks until the writer goroutine
-// flushes it to the socket. Returns false on timeout or conn close.
-func (pc *PeerConn) SendSync(frame protocol.Frame) bool
-
-// HasCapability checks negotiated capabilities.
-func (pc *PeerConn) HasCapability(cap domain.Capability) bool
-
-// Identity returns the peer's Ed25519 fingerprint (empty before handshake).
-func (pc *PeerConn) Identity() domain.PeerIdentity
-
-// Close shuts down the connection (idempotent).
-func (pc *PeerConn) Close()
-
-// SetIdentity is called once during handshake when the peer's
-// identity is established. After this call, the PeerConn can be
-// indexed by identity in the Service.conns map.
-func (pc *PeerConn) SetIdentity(id domain.PeerIdentity)
-
-// SetCapabilities records the negotiated capability set.
-func (pc *PeerConn) SetCapabilities(caps []domain.Capability)
-
-// RemoteAddr returns the remote address (for logging/diagnostics only).
-func (pc *PeerConn) RemoteAddr() string
-
-// Direction returns Inbound or Outbound.
-func (pc *PeerConn) Direction() Direction
-
-// TouchActivity updates the last-activity timestamp.
-func (pc *PeerConn) TouchActivity()
-```
-
-### What disappears
-
-`net.Conn` is never passed to any function outside of `PeerConn` methods
-and the handshake setup code. Functions that currently accept `net.Conn`
-will accept `*PeerConn` instead. The 9 maps collapse into:
-
-```go
-// Primary index — all connections, inbound and outbound.
-conns map[connID]*PeerConn
-
-// Secondary indices (derived, rebuilt from conns).
-connsByIdentity map[domain.PeerIdentity][]*PeerConn
-connsByAddress  map[domain.PeerAddress]*PeerConn  // outbound only
-```
-
-### Writer goroutine lifecycle
-
-```
-NewPeerConn(rawConn, direction)
-    │
-    ├── spawns writerGoroutine(sendCh, rawConn)
-    │       └── for item := range sendCh { rawConn.Write(item.data) }
-    │
-    ├── Send(frame) → sendCh <- item  (non-blocking)
-    ├── SendSync(frame) → sendCh <- item{ack} → <-ack  (blocking)
-    │
-    └── Close()
-            ├── close(sendCh)    → writer drains and exits
-            ├── <-writerDone     → wait for drain
-            └── rawConn.Close()  → TCP FIN
-```
-
-### Handshake flow
-
-During handshake (hello/welcome exchange), `PeerConn` does not yet have
-identity or capabilities. The handshake code uses `PeerConn.Send()` for
-writing and reads from a `bufio.Reader` on `PeerConn.rawConn` — but only
-within the single goroutine that owns the connection at that point.
-
-```
-1. Accept TCP connection → NewPeerConn(conn, Inbound)
-2. handleConn reads hello frame (single goroutine, no concurrent writers)
-3. pc.SetIdentity(hello.Address)
-4. pc.SetCapabilities(negotiated)
-5. Service registers pc in conns, connsByIdentity
-6. From this point: Send() is the only write path
-```
-
-For outbound sessions, `servePeerSession` is the single owner:
-
-```
-1. Dial TCP → NewPeerConn(conn, Outbound)
-2. servePeerSession sends hello via pc.Send()
-3. Reads welcome, sets identity/caps
-4. Service registers pc
-5. Main loop: reads from pc.inboxCh, writes via pc.Send()
-```
-
-### Migration phases
-
-**Step 1:** Create `peer_conn.go` with `PeerConn` type. Both inbound
-`connWriter` and outbound `servePeerSession` write paths are unified
-inside `PeerConn.writerGoroutine`.
-
-**Step 2:** Replace `connSendCh` and `connWriterDone` maps with
-`PeerConn.sendCh` and `PeerConn.writerDone`. Functions that called
-`enqueueFrame(conn, data)` now call `pc.Send(frame)`.
-
-**Step 3:** Replace `connPeerInfo` with `PeerConn.identity`, `.caps`,
-`.networks`. Functions that looked up `connPeerInfo[conn]` now receive
-`*PeerConn` directly.
-
-**Step 4:** Replace `connAuth` with `PeerConn.auth`. Replace
-`inboundConns`, `inboundMetered`, `inboundTracked` with queries on
-`Service.conns`.
-
-**Step 5:** Replace `peerSession` with `PeerConn` (outbound direction).
-The `sessions` map becomes `connsByAddress`.
-
-**Step 6:** Remove `net.Conn` from all function signatures. Replace
-with `*PeerConn`. The `writeJSONFrame(conn, frame)` function becomes
-`pc.Send(frame)` — no fallback path, no direct writes.
-
-Each step is a self-contained commit. Tests pass after every step.
-
-### Fallback elimination
-
-The three unsafe fallback paths disappear:
-
-| Before | After |
-|--------|-------|
-| `writeFrameToInbound`: `enqueueUnregistered` → direct `io.WriteString` | `pc.Send()` — always goes through channel; no fallback |
-| `writeJSONFrame`: `enqueueUnregistered` → direct `conn.Write` | `pc.Send()` — unified for both directions |
-| `writeJSONFrameSync`: `enqueueUnregistered` → direct `conn.Write` | `pc.SendSync()` — blocks on ack channel |
-
-If the write channel is full or closed, `Send()` returns `false`. The
-caller handles the failure (log + close connection). No silent fallback
-to unprotected writes.
-
-## Future: NetCore package (Phase 2)
-
-After `PeerConn` is stable, the entire type and its writer goroutine
-move into `internal/core/netcore`. `Service` communicates through an
-interface:
-
-```go
-// internal/core/netcore/network.go
 type Network interface {
-    Send(dst PeerID, frame Frame) bool
-    SendWithCap(dst PeerID, frame Frame, cap Capability) bool
-    Broadcast(frame Frame, filter func(PeerID) bool)
-    PeersByCapability(cap Capability) []PeerID
-    Disconnect(dst PeerID)
+    SendFrame(ctx context.Context, id domain.ConnID, frame []byte) error
+    SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error
+    Enumerate(ctx context.Context, dir Direction, fn func(domain.ConnID) bool)
+    Close(ctx context.Context, id domain.ConnID) error
+    RemoteAddr(id domain.ConnID) string
 }
 ```
 
-`net.Conn` is not importable outside `netcore`. Any attempt to bypass
-the write queue is a compile error, not a code review finding.
+The interface deliberately does **not** expose accept / register /
+unregister, does not expose `*netcore.NetCore` and does not expose
+`net.Conn`. Auth, tracking, capabilities, peer health and any other
+policy concern stay on `node.Service` — they are not the transport's job.
+
+The production implementation is `networkBridge` in
+`internal/core/node/network_bridge.go`: a thin adapter that resolves
+`ConnID → *netcore.NetCore` under the registry lock, then delegates to
+`NetCore.SendRaw` / `SendRawSync` / `Close` / `RemoteAddr`. The bridge
+holds no state of its own and multiple calls to `Service.Network()` are
+safe and cheap.
+
+### Identity currency
+
+The public key of `Network` is `domain.ConnID`. It is the transport-layer
+identity of a single socket and is stable only for that socket's lifetime.
+`domain.PeerIdentity` — the business / routing identity that survives
+reconnects — does not appear in the transport interface; resolution
+between `PeerIdentity` and `ConnID` is a concern of `node.Service`.
+
+Inside `node.Service` the connection registry (`s.conns`) is keyed by
+`ConnID`. A secondary index `s.connIDByNetConn` exists only so the
+lifecycle carve-out (accept / unregister) can cross the `net.Conn` →
+`ConnID` boundary exactly once per event; every other call site is
+ConnID-first from the start.
+
+### Read-side snapshot (`connInfo`)
+
+Read walks over the registry do not hand callers a `*netcore.NetCore`
+pointer. `forEachConnLocked` / `forEachInboundConnLocked` /
+`forEachTrackedInboundConnLocked` call back with a value-typed `connInfo`
+snapshot captured under `s.mu`:
+
+```go
+type connInfo struct {
+    id           domain.ConnID
+    remoteAddr   string
+    address      domain.PeerAddress
+    identity     domain.PeerIdentity
+    capabilities []domain.Capability
+    dir          netcore.Direction
+    lastActivity time.Time
+    tracked      bool
+}
+```
+
+`capabilities` is a defensive copy; the caller cannot scribble back into
+NetCore-owned storage. Writes to identity / address / auth keep their
+handshake-time path through `coreForIDLocked`, which remains the single
+carve-out that returns the live handle. The snapshot shape guarantees
+that a walk callback cannot race with those writes.
+
+### Single-writer invariant
+
+Every `NetCore` owns its `net.Conn` privately. Frames reach the wire only
+through one of two entry points:
+
+- `NetCore.SendRaw(frame) SendStatus` — asynchronous; enqueues on the
+  writer channel.
+- `NetCore.SendRawSync(frame) SendStatus` — synchronous; enqueues and
+  blocks on a per-frame ack until the writer flushes or the sync
+  deadline elapses.
+
+Both feed a single dedicated writer goroutine per connection. No other
+code path writes to the socket. The goroutine owns `conn.Write` and is
+the only place where partial-write / short-write can occur, so the
+slow-peer eviction signal is well-defined: buffer saturation is the
+writer's contention with the peer, not a race with an unrelated caller.
+
+`SendStatus` is an internal enum of partial-failure outcomes (`SendOK`,
+`SendBufferFull`, `SendWriterDone`, `SendTimeout`, `SendChanClosed`,
+`SendMarshalError`, `SendStatusInvalid`). At the bridge boundary
+`SendStatusToError` maps each value to the corresponding exported
+sentinel (`ErrSendBufferFull`, `ErrSendWriterDone`, `ErrSendTimeout`,
+`ErrSendChanClosed`, `ErrSendMarshalError`, `ErrSendInvalidStatus`) plus
+`ErrUnknownConn` for the pre-flight registry miss. Callers discriminate
+via `errors.Is`, never by string.
+
+### Lifecycle carve-out
+
+`Network` is the working API for frames on already-registered
+connections; it is not a factory for them. Accept, register and
+unregister stay `net.Conn`-first inside `internal/core/node` because
+the signature is dictated by structural role: a raw socket has no
+`ConnID` until it is bound, and the `(net.Conn, ConnID)` binding is
+the thing being created or torn down.
+
+The frozen carve-out is exactly twelve functions:
+
+- `internal/core/node/conn_registry.go` — `connIDForLocked`,
+  `connIDFor`, `registerInboundConnLocked`, `attachOutboundCoreLocked`,
+  `unregisterConnLocked`.
+- `internal/core/node/service.go` — `handleConn` (inbound entry
+  boundary), `registerInboundConn`, `unregisterInboundConn`,
+  `isBlacklistedConn` (pre-registration IP policy), `ConnAuthState`
+  and `SetConnAuthState` (pinned by the external `connauth.AuthStore`
+  interface).
+- `internal/core/node/peer_management.go` — `enableTCPKeepAlive`
+  (operates on the raw socket by definition).
+
+New `net.Conn`-first call sites outside that list are boundary
+violations and must either migrate to ConnID-first or justify an
+explicit extension of the carve-out at review.
+
+### Test backend (`internal/core/netcore/netcoretest`)
+
+Protocol-level tests do not open real TCP sockets. `netcoretest.Backend`
+is an in-memory implementation of `netcore.Network` wired into `Service`
+via `node.NewServiceWithNetwork(..., backend)`. It preserves the same
+sentinel-error contract and the same per-ConnID ordering invariant as
+the production bridge, and collapses the writer-goroutine model into a
+buffered outbound channel (depth 128, matching the production
+`sendChBuffer`). Tests observe what `Service` sends by draining
+`backend.Outbound(id)` and drive inbound traffic with `backend.Inject`.
+
+The naming convention mirrors `net/http/httptest`. The lifetime method
+is `Backend.Shutdown()` rather than `Close()` because `netcore.Network`
+already pins `Close(ctx, id)` for per-connection close and Go does not
+allow two methods with the same name.
+
+### Boundary enforcement: `make enforce-netcore-boundary`
+
+The boundary is not aspirational. `scripts/enforce-netcore-boundary.sh`
+is the canonical runner; `make enforce-netcore-boundary` is the CI
+target. It runs fifteen grep-based gates plus a `net` stdlib import
+whitelist against `internal/core/node` and asserts each against a
+frozen baseline. Any drift — a new occurrence of a forbidden pattern,
+a new `net.Conn`-accepting function beyond the frozen twelve, or a
+new file in `internal/core/node` that imports `net` outside the
+carve-out whitelist — exits non-zero.
+
+The gates cover, in one line each:
+
+1–4. Direct socket writes (`conn.Write` / `io.WriteString`) outside the
+     transport owner, broken out per carve-out file so the expected
+     baseline is exact.
+
+5.   Raw `session.conn.Write` / `WriteTo` in `peer_management.go`.
+
+6.   Parallel `map[net.Conn]*NetCore` registry.
+
+7.   Primary registry regressed to `map[net.Conn]*connEntry`.
+
+8.   Direct access to `s.conns` / `s.connIDByNetConn` outside
+     `conn_registry.go`.
+
+9.   Un-ack'd write-wrapper call-sites (`writeJSONFrame*ByID`,
+     `enqueueFrame*ByID`, `sendFrameViaNetwork[Sync]`,
+     `sendFrameBytesViaNetwork[Sync]`, `sendSessionFrameViaNetwork`).
+
+10.  Untyped `uint64` ConnID identity in `node` / `domain`.
+
+11.  Deleted `netCoreFor` / `meteredFor` / `isInboundTracked` public
+     wrappers.
+
+12.  `net` stdlib import whitelist in `internal/core/node` — the
+     carve-out files plus `peer_provider.go` (peer-address policy)
+     and `netgroup.go` (reachability grouping).
+
+13.  Deleted `setTrackedLocked` mutation.
+
+14.  Legacy walker signatures `forEach…ConnLocked(func(net.Conn, …))`
+     and `(func(…*netcore.NetCore…))`.
+
+15.  Legacy `inboundConnKey(*netcore.NetCore)` helper.
+
+And the membership gate on the carve-out itself: exactly twelve
+`net.Conn`-accepting functions / methods in `internal/core/node`
+(eleven frozen `Service` methods plus `enableTCPKeepAlive`). Any growth
+is a regression and fails the build.
+
+The gate runs in CI on every push. Adding a new file or call-site that
+requires loosening a gate is an explicit review decision, not a
+drive-by edit.
 
 ---
 
-# Сетевое ядро — абстракция PeerConn
+## Русский
 
-## Проблема
+### Назначение
 
-Структура `Service` в `internal/core/node/service.go` хранит состояние
-соединений в 9 отдельных map'ах с ключом `net.Conn`:
+`internal/core/netcore` — сетевое ядро узла. Оно владеет каждым raw
+`net.Conn`, writer-горутиной, которая сериализует байты на сокет,
+циклом фреймирования для отдельной связи и metered-обёрткой, считающей
+входящие и исходящие байты. Всё, что выше сокета — маршрутизация,
+auth, peer health, ban score, inbox dispatch, reachability — живёт на
+`node.Service` и к этому пакету отношения не имеет.
 
-| Map | Тип | Назначение |
-|-----|-----|------------|
-| `inboundConns` | `map[net.Conn]struct{}` | Все активные входящие соединения |
-| `inboundMetered` | `map[net.Conn]*MeteredConn` | Входящее соед. → обёртка для метрик |
-| `inboundTracked` | `map[net.Conn]struct{}` | Промотированные соединения (auth complete) |
-| `connAuth` | `map[net.Conn]*connauth.State` | Состояние аутентификации |
-| `connPeerInfo` | `map[net.Conn]*connPeerHello` | Identity, capabilities, staleness |
-| `connSendCh` | `map[net.Conn]chan sendItem` | Канал записи для каждого соединения |
-| `connWriterDone` | `map[net.Conn]chan struct{}` | Сигнал выхода writer-горутины |
-| `sessions` | `map[PeerAddress]*peerSession` | Исходящие сессии (содержит net.Conn) |
-| `inboundByIP` | `map[string]int` | Количество соединений по IP |
+Пакет заменил более раннюю in-package схему `PeerConn`, где
+`node.Service` держал девять параллельных `map`, ключёванных
+`net.Conn`, и дёргал сокет из десятков call-sites напрямую. В текущей
+форме `net.Conn` приватен внутри `netcore`, а `node.Service` общается
+с транспортом только через типизированный интерфейс.
 
-54 функции принимают `net.Conn` как параметр. Любая из них может вызвать
-`.Write()` напрямую, обходя назначенную writer-горутину. Компилятор не
-может этого предотвратить, потому что `net.Conn` — интерфейс с публичным
-методом `Write`.
+### Граница: `netcore.Network`
 
-Два из трёх исходных небезопасных путей записи исправлены:
-фреймы `file_command` теперь идут через `sendCh` (сериализуются
-`servePeerSession`), а `writeFrameToInbound` возвращает `false` при
-`enqueueUnregistered` вместо отката к прямому `io.WriteString`.
-Оставшийся небезопасный путь (`writeJSONFrame` / `writeJSONFrameSync`
-откатываются к прямому `conn.Write` для исходящих сессий) отслеживается
-в roadmap.
-
-## Дизайн
-
-### Тип PeerConn
-
-```go
-// PeerConn владеет одним сетевым соединением и обеспечивает инвариант
-// единственного writer'а на уровне типа. net.Conn приватен — единственный
-// способ отправить данные — через Send().
-type PeerConn struct {
-    id         connID
-    direction  Direction           // inbound | outbound
-    identity   domain.PeerIdentity // пуст до завершения handshake
-    address    domain.PeerAddress
-    caps       []domain.Capability
-    networks   map[domain.NetGroup]struct{}
-
-    // Writer — сериализация через канал, одна горутина пишет в сокет.
-    sendCh     chan sendItem
-    writerDone chan struct{}
-
-    // Reader — фреймы разбираются выделенной горутиной.
-    inboxCh    chan protocol.Frame  // только для исходящих сессий
-    errCh      chan error           // только для исходящих сессий
-
-    // Состояние авторизации (только для входящих, nil для исходящих).
-    auth       *connauth.State
-
-    // Метрики.
-    metered    *MeteredConn
-
-    // Приватное — никогда не выставляется за пределы методов PeerConn.
-    rawConn    net.Conn
-    closeOnce  sync.Once
-
-    // Трекинг активности.
-    lastActivity time.Time
-    connIDNum    uint64
-}
-```
-
-### Публичный API
-
-```go
-func (pc *PeerConn) Send(frame protocol.Frame) bool       // неблокирующий
-func (pc *PeerConn) SendSync(frame protocol.Frame) bool   // блокирующий с ack
-func (pc *PeerConn) HasCapability(cap domain.Capability) bool
-func (pc *PeerConn) Identity() domain.PeerIdentity
-func (pc *PeerConn) Close()
-func (pc *PeerConn) SetIdentity(id domain.PeerIdentity)
-func (pc *PeerConn) SetCapabilities(caps []domain.Capability)
-func (pc *PeerConn) RemoteAddr() string
-func (pc *PeerConn) Direction() Direction
-func (pc *PeerConn) TouchActivity()
-```
-
-### Что исчезает
-
-`net.Conn` никогда не передаётся ни одной функции за пределами методов
-`PeerConn` и кода инициализации handshake. Функции, которые сейчас
-принимают `net.Conn`, будут принимать `*PeerConn`. 9 map'ов сворачиваются в:
-
-```go
-conns           map[connID]*PeerConn
-connsByIdentity map[domain.PeerIdentity][]*PeerConn
-connsByAddress  map[domain.PeerAddress]*PeerConn  // только исходящие
-```
-
-### Жизненный цикл writer-горутины
-
-```
-NewPeerConn(rawConn, direction)
-    │
-    ├── запускает writerGoroutine(sendCh, rawConn)
-    │       └── for item := range sendCh { rawConn.Write(item.data) }
-    │
-    ├── Send(frame) → sendCh <- item  (неблокирующий)
-    ├── SendSync(frame) → sendCh <- item{ack} → <-ack  (блокирующий)
-    │
-    └── Close()
-            ├── close(sendCh)    → writer дренирует и завершается
-            ├── <-writerDone     → ожидание дренажа
-            └── rawConn.Close()  → TCP FIN
-```
-
-### Поток handshake
-
-Во время handshake (обмен hello/welcome) `PeerConn` ещё не имеет
-identity или capabilities. Код handshake использует `PeerConn.Send()`
-для записи и читает из `bufio.Reader` на `PeerConn.rawConn` — но
-только внутри единственной горутины, владеющей соединением в этот момент.
-
-### Фазы миграции
-
-**Шаг 1:** Создать `peer_conn.go` с типом `PeerConn`. Оба пути записи
-(inbound `connWriter` и outbound `servePeerSession`) унифицируются
-внутри `PeerConn.writerGoroutine`.
-
-**Шаг 2:** Заменить map'ы `connSendCh` и `connWriterDone` на поля
-`PeerConn`. Функции, вызывавшие `enqueueFrame(conn, data)`, теперь
-вызывают `pc.Send(frame)`.
-
-**Шаг 3:** Заменить `connPeerInfo` на `PeerConn.identity`, `.caps`,
-`.networks`.
-
-**Шаг 4:** Заменить `connAuth` на `PeerConn.auth`. Заменить
-`inboundConns`, `inboundMetered`, `inboundTracked` запросами к
-`Service.conns`.
-
-**Шаг 5:** Заменить `peerSession` на `PeerConn` (outbound direction).
-Map `sessions` становится `connsByAddress`.
-
-**Шаг 6:** Удалить `net.Conn` из всех сигнатур функций. Заменить на
-`*PeerConn`. Функция `writeJSONFrame(conn, frame)` становится
-`pc.Send(frame)` — без fallback-пути, без прямых записей.
-
-Каждый шаг — отдельный коммит. Тесты проходят после каждого шага.
-
-### Устранение fallback-путей
-
-Три небезопасных fallback-пути исчезают:
-
-| До | После |
-|----|-------|
-| `writeFrameToInbound`: `enqueueUnregistered` → прямой `io.WriteString` | `pc.Send()` — всегда через канал; нет fallback |
-| `writeJSONFrame`: `enqueueUnregistered` → прямой `conn.Write` | `pc.Send()` — унифицирован для обоих направлений |
-| `writeJSONFrameSync`: `enqueueUnregistered` → прямой `conn.Write` | `pc.SendSync()` — блокируется на ack-канале |
-
-Если канал записи полон или закрыт, `Send()` возвращает `false`.
-Вызывающий код обрабатывает ошибку (log + закрытие соединения).
-Никаких молчаливых откатов к незащищённым записям.
-
-## Будущее: пакет NetCore (Фаза 2)
-
-После стабилизации `PeerConn` весь тип и его writer-горутина переезжают
-в `internal/core/netcore`. `Service` взаимодействует через интерфейс:
+`netcore.Network` — узкая API-поверхность, через которую остальная
+нода перемещает фреймы. ConnID-keyed, ctx-first, экспонирует только
+frame I/O, enumeration, shutdown и лёгкий accessor адреса:
 
 ```go
 type Network interface {
-    Send(dst PeerID, frame Frame) bool
-    SendWithCap(dst PeerID, frame Frame, cap Capability) bool
-    Broadcast(frame Frame, filter func(PeerID) bool)
-    PeersByCapability(cap Capability) []PeerID
-    Disconnect(dst PeerID)
+    SendFrame(ctx context.Context, id domain.ConnID, frame []byte) error
+    SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error
+    Enumerate(ctx context.Context, dir Direction, fn func(domain.ConnID) bool)
+    Close(ctx context.Context, id domain.ConnID) error
+    RemoteAddr(id domain.ConnID) string
 }
 ```
 
-`net.Conn` невозможно импортировать за пределами `netcore`. Любая попытка
-обойти очередь записи — ошибка компиляции, а не находка на code review.
+Интерфейс намеренно **не** выставляет accept / register / unregister,
+не выставляет `*netcore.NetCore` и не выставляет `net.Conn`. Auth,
+tracking, capabilities, peer health и прочие policy-заботы остаются
+на `node.Service` — это не дело транспорта.
+
+Production-реализация — `networkBridge` в
+`internal/core/node/network_bridge.go`: тонкий adapter, который
+резолвит `ConnID → *netcore.NetCore` под lock реестра и делегирует в
+`NetCore.SendRaw` / `SendRawSync` / `Close` / `RemoteAddr`. Мост не
+хранит собственного состояния, повторные вызовы `Service.Network()`
+безопасны и дешёвы.
+
+### Валюта идентичности
+
+Публичным ключом `Network` является `domain.ConnID`. Это
+transport-layer identity одного сокета, стабильная только на время
+его жизни. `domain.PeerIdentity` — business / routing identity,
+переживающая reconnects — в интерфейсе транспорта не появляется;
+разрешение между `PeerIdentity` и `ConnID` — забота `node.Service`.
+
+Внутри `node.Service` реестр соединений (`s.conns`) ключёван `ConnID`.
+Secondary-индекс `s.connIDByNetConn` существует только для того,
+чтобы lifecycle carve-out (accept / unregister) пересекал границу
+`net.Conn → ConnID` ровно один раз на событие; все остальные
+call-sites ConnID-first с самого начала.
+
+### Read-side snapshot (`connInfo`)
+
+Обход реестра на чтение не отдаёт caller'у указатель
+`*netcore.NetCore`. `forEachConnLocked` /
+`forEachInboundConnLocked` / `forEachTrackedInboundConnLocked`
+вызывают callback с value-типизированным снимком `connInfo`,
+снятым под `s.mu`:
+
+```go
+type connInfo struct {
+    id           domain.ConnID
+    remoteAddr   string
+    address      domain.PeerAddress
+    identity     domain.PeerIdentity
+    capabilities []domain.Capability
+    dir          netcore.Direction
+    lastActivity time.Time
+    tracked      bool
+}
+```
+
+`capabilities` — защитная копия; caller не может писать обратно в
+хранилище, принадлежащее NetCore. Запись identity / address / auth
+остаётся на handshake-time пути через `coreForIDLocked`, который и
+есть единственный carve-out, возвращающий живой handle. Форма снимка
+гарантирует, что callback walker'а не гоняется с этими записями.
+
+### Инвариант single-writer
+
+Каждый `NetCore` владеет своим `net.Conn` приватно. Фреймы выходят на
+провод только через одну из двух точек входа:
+
+- `NetCore.SendRaw(frame) SendStatus` — асинхронно; энкью на writer
+  канал.
+- `NetCore.SendRawSync(frame) SendStatus` — синхронно; энкью и блок
+  на per-frame ack, пока writer не сбросит или не сработает sync
+  deadline.
+
+Оба питают одну дедицированную writer-горутину на соединение. Никакой
+другой code path в сокет не пишет. Горутина владеет `conn.Write` и
+является единственным местом, где возможен partial-write /
+short-write, так что сигнал slow-peer eviction чётко определён:
+насыщение буфера — это contention writer'а с peer'ом, а не race со
+сторонним caller'ом.
+
+`SendStatus` — внутренний enum partial-failure исходов (`SendOK`,
+`SendBufferFull`, `SendWriterDone`, `SendTimeout`, `SendChanClosed`,
+`SendMarshalError`, `SendStatusInvalid`). На границе bridge
+`SendStatusToError` мапит каждое значение в соответствующий
+экспортированный sentinel (`ErrSendBufferFull`, `ErrSendWriterDone`,
+`ErrSendTimeout`, `ErrSendChanClosed`, `ErrSendMarshalError`,
+`ErrSendInvalidStatus`) плюс `ErrUnknownConn` для pre-flight miss
+реестра. Caller'ы дискриминируют через `errors.Is`, никогда не по
+строке.
+
+### Lifecycle carve-out
+
+`Network` — working API для фреймов уже зарегистрированных
+соединений; это не factory для них. Accept, register и unregister
+остаются `net.Conn`-first внутри `internal/core/node`, потому что
+сигнатура диктуется структурной ролью: у raw-сокета нет `ConnID`,
+пока он не привязан, и биндинг `(net.Conn, ConnID)` — это то самое,
+что создаётся или разрушается.
+
+Замороженный carve-out — ровно двенадцать функций:
+
+- `internal/core/node/conn_registry.go` — `connIDForLocked`,
+  `connIDFor`, `registerInboundConnLocked`,
+  `attachOutboundCoreLocked`, `unregisterConnLocked`.
+- `internal/core/node/service.go` — `handleConn` (entry boundary
+  для inbound), `registerInboundConn`, `unregisterInboundConn`,
+  `isBlacklistedConn` (pre-registration IP policy), `ConnAuthState`
+  и `SetConnAuthState` (сигнатура пинится внешним интерфейсом
+  `connauth.AuthStore`).
+- `internal/core/node/peer_management.go` — `enableTCPKeepAlive`
+  (по определению работает с raw-сокетом).
+
+Новые `net.Conn`-first call-sites вне этого списка — нарушение
+границы и должны либо мигрировать в ConnID-first, либо явно
+обосновать расширение carve-out на ревью.
+
+### Test backend (`internal/core/netcore/netcoretest`)
+
+Protocol-level тесты не открывают реальных TCP-сокетов.
+`netcoretest.Backend` — in-memory реализация `netcore.Network`,
+которая втыкается в `Service` через
+`node.NewServiceWithNetwork(..., backend)`. Она держит тот же
+sentinel-error контракт и тот же инвариант per-ConnID ordering, что
+и production bridge, и схлопывает модель writer-горутины в
+buffered outbound канал (глубина 128 — совпадает с production
+`sendChBuffer`). Тесты наблюдают, что посылает `Service`, дренируя
+`backend.Outbound(id)`, и драйвят inbound трафик через
+`backend.Inject`.
+
+Naming convention зеркалит `net/http/httptest`. Lifetime-метод —
+`Backend.Shutdown()`, а не `Close()`, потому что `netcore.Network`
+уже пинит `Close(ctx, id)` за per-connection close, а Go не
+разрешает два метода с одинаковым именем.
+
+### Удержание границы: `make enforce-netcore-boundary`
+
+Граница не декларативная. `scripts/enforce-netcore-boundary.sh` —
+канонический runner; `make enforce-netcore-boundary` — CI-target.
+Он прогоняет пятнадцать grep-based гейтов плюс whitelist импорта
+stdlib `net` против `internal/core/node` и проверяет каждый против
+замороженного baseline'а. Любой дрейф — новое вхождение запрещённого
+паттерна, новая `net.Conn`-принимающая функция сверх двенадцати,
+или новый файл в `internal/core/node`, импортирующий `net` вне
+whitelist'а carve-out файлов — выходит non-zero.
+
+Гейты покрывают, по строке на каждый:
+
+1–4. Прямые socket writes (`conn.Write` / `io.WriteString`) вне
+     транспортного владельца, разбитые по carve-out файлам так,
+     чтобы ожидаемый baseline был точным.
+
+5.   Raw `session.conn.Write` / `WriteTo` в `peer_management.go`.
+
+6.   Параллельный `map[net.Conn]*NetCore` реестр.
+
+7.   Primary реестр, регрессировавший к `map[net.Conn]*connEntry`.
+
+8.   Прямой доступ к `s.conns` / `s.connIDByNetConn` вне
+     `conn_registry.go`.
+
+9.   Un-ack'd write-wrapper call-sites (`writeJSONFrame*ByID`,
+     `enqueueFrame*ByID`, `sendFrameViaNetwork[Sync]`,
+     `sendFrameBytesViaNetwork[Sync]`, `sendSessionFrameViaNetwork`).
+
+10.  Untyped `uint64` ConnID identity в `node` / `domain`.
+
+11.  Удалённые `netCoreFor` / `meteredFor` / `isInboundTracked`
+     публичные wrapper'ы.
+
+12.  Whitelist импорта `net` в `internal/core/node` — carve-out
+     файлы плюс `peer_provider.go` (peer-address policy) и
+     `netgroup.go` (reachability grouping).
+
+13.  Удалённая мутация `setTrackedLocked`.
+
+14.  Legacy walker-сигнатуры `forEach…ConnLocked(func(net.Conn, …))`
+     и `(func(…*netcore.NetCore…))`.
+
+15.  Legacy helper `inboundConnKey(*netcore.NetCore)`.
+
+Плюс membership-gate на сам carve-out: ровно двенадцать
+`net.Conn`-принимающих функций / методов в `internal/core/node`
+(одиннадцать замороженных методов `Service` плюс
+`enableTCPKeepAlive`). Любой рост — регрессия и валит сборку.
+
+Гейт крутится в CI на каждом push. Добавление нового файла или
+call-site, требующего ослабления гейта, — явное решение ревью, а
+не мимоходом правка.
