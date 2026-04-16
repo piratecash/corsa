@@ -68,10 +68,11 @@ type consoleSuggestion struct {
 // peerCardSelectables holds widget.Selectable instances for each text field
 // in a peer health card, enabling mouse text selection and copy.
 type peerCardSelectables struct {
-	Address widget.Selectable
-	Version widget.Selectable
-	Meta    widget.Selectable
-	Error   widget.Selectable
+	Address       widget.Selectable
+	Version       widget.Selectable
+	Meta          widget.Selectable
+	Error         widget.Selectable
+	RecordingInfo widget.Selectable
 }
 
 type consoleDonateEntry struct {
@@ -120,8 +121,9 @@ type ConsoleWindow struct {
 	suggestSnapshot   []consoleSuggestion
 	cachedCommands    []consoleSuggestion // loaded from CommandTable at init
 	donateEntries     []consoleDonateEntry
-	donateLink        widget.Selectable
-	donateLinkButton  widget.Clickable
+	donateLink           widget.Selectable
+	donateLinkButton     widget.Clickable
+	stopRecordingButton  widget.Clickable
 }
 
 func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
@@ -1223,17 +1225,39 @@ func effectiveSlotState(p service.PeerHealth) string {
 // group as a titled section. Groups appear in a fixed priority order:
 // Active → Dialing → Reconnecting → Queued → Retry Wait → Inbound.
 func (c *ConsoleWindow) layoutActivePeersContent(gtx layout.Context, peers []service.PeerHealth) layout.Dimensions {
+	// Handle stop-recording button click.
+	if c.stopRecordingButton.Clicked(gtx) {
+		go func() {
+			_, _ = c.executeCommand("stopPeerTrafficRecording scope=all")
+		}()
+	}
+
 	grouped := make(map[string][]service.PeerHealth, len(peerSlotGroups))
+	hasRecording := false
 	for _, p := range peers {
 		key := effectiveSlotState(p)
 		grouped[key] = append(grouped[key], p)
+		if p.Recording {
+			hasRecording = true
+		}
 	}
 
 	type section struct {
 		top    unit.Dp
 		render func(layout.Context) layout.Dimensions
 	}
-	sections := make([]section, 0, len(peerSlotGroups))
+	sections := make([]section, 0, len(peerSlotGroups)+1)
+
+	// Global stop-recording banner when at least one peer is recording.
+	if hasRecording {
+		sections = append(sections, section{
+			top: 0,
+			render: func(gtx layout.Context) layout.Dimensions {
+				return c.layoutStopRecordingBanner(gtx)
+			},
+		})
+	}
+
 	for _, g := range peerSlotGroups {
 		items := grouped[g.state]
 		if len(items) == 0 {
@@ -1389,18 +1413,19 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 	commands := table.Commands()
 
 	// Group by category, preserving display order.
-	categoryOrder := []string{"system", "network", "routing", "metrics", "identity", "message", "file", "chatlog", "notice", "view"}
+	categoryOrder := []string{"system", "network", "routing", "metrics", "diagnostic", "identity", "message", "file", "chatlog", "notice", "view"}
 	categoryLabels := map[string]string{
-		"system":   "Control",
-		"network":  "Network",
-		"routing":  "Routing",
-		"metrics":  "Metrics",
-		"identity": "Identity & Contacts",
-		"message":  "Messages",
-		"file":     "File Transfer",
-		"chatlog":  "Chat History",
-		"notice":   "Notices",
-		"view":     "Desktop Views",
+		"system":     "Control",
+		"network":    "Network",
+		"routing":    "Routing",
+		"metrics":    "Metrics",
+		"diagnostic": "Diagnostic",
+		"identity":   "Identity & Contacts",
+		"message":    "Messages",
+		"file":       "File Transfer",
+		"chatlog":    "Chat History",
+		"notice":     "Notices",
+		"view":       "Desktop Views",
 	}
 	grouped := make(map[string][]rpc.CommandInfo)
 	for _, cmd := range commands {
@@ -1517,6 +1542,14 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 							return c.layoutSelectableText(gtx, &sel.Address, item.Address, color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							if !item.Recording {
+								return layout.Dimensions{}
+							}
+							return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return c.layoutRecordingDot(gtx)
+							})
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							// Prefer CM slot state for badge when available;
 							// fall back to health-derived state for inbound-only peers.
 							badgeState := item.State
@@ -1549,6 +1582,15 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 					}
 					return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						return c.layoutSelectableText(gtx, &sel.Error, item.LastError, color.NRGBA{R: 255, G: 168, B: 168, A: 255})
+					})
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if !item.Recording {
+						return layout.Dimensions{}
+					}
+					info := c.recordingInfoText(item)
+					return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return c.layoutSelectableText(gtx, &sel.RecordingInfo, info, color.NRGBA{R: 255, G: 100, B: 100, A: 255})
 					})
 				}),
 			)
@@ -1614,6 +1656,61 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 		return fmt.Sprintf("%s%s | uptime %s | pending %d | recv %s | pong %s | fails %d | score %d | in %s | out %s%s", connected, dirLabel, uptime, item.PendingCount, lastRecv, lastPong, item.ConsecutiveFailures, item.Score, formatBytes(item.BytesReceived), formatBytes(item.BytesSent), slotSuffix)
 	}
 	return text + " | uptime " + uptime + slotSuffix
+}
+
+// layoutStopRecordingBanner renders a red-tinted banner with a "Stop all recordings"
+// button, visible only when at least one peer has an active capture.
+func (c *ConsoleWindow) layoutStopRecordingBanner(gtx layout.Context) layout.Dimensions {
+	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		fill(gtx, color.NRGBA{R: 60, G: 25, B: 25, A: 255})
+		return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return c.layoutRecordingDot(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					label := material.Body2(c.theme, "Traffic recording active")
+					label.Color = color.NRGBA{R: 255, G: 180, B: 180, A: 255}
+					return label.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(c.theme, &c.stopRecordingButton, "Stop all")
+					btn.Background = color.NRGBA{R: 180, G: 40, B: 40, A: 255}
+					btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+					return btn.Layout(gtx)
+				}),
+			)
+		})
+	})
+}
+
+// layoutRecordingDot draws a small red filled circle as the recording indicator.
+func (c *ConsoleWindow) layoutRecordingDot(gtx layout.Context) layout.Dimensions {
+	size := gtx.Dp(unit.Dp(10))
+	defer clip.Ellipse{Max: image.Pt(size, size)}.Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: color.NRGBA{R: 230, G: 50, B: 50, A: 255}}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	return layout.Dimensions{Size: image.Pt(size, size)}
+}
+
+// recordingInfoText builds a human-readable summary of the active capture for a peer card.
+func (c *ConsoleWindow) recordingInfoText(item service.PeerHealth) string {
+	startedAt := ""
+	if item.RecordingStartedAt != nil {
+		startedAt = item.RecordingStartedAt.Format("15:04:05")
+	}
+	text := fmt.Sprintf("REC %s | %s", item.RecordingScope, item.RecordingFile)
+	if startedAt != "" {
+		text += " | since " + startedAt
+	}
+	if item.RecordingDroppedEvents > 0 {
+		text += fmt.Sprintf(" | dropped %d", item.RecordingDroppedEvents)
+	}
+	if item.RecordingError != "" {
+		text += " | err: " + item.RecordingError
+	}
+	return text
 }
 
 // formatBytes formats a byte count into a human-readable string (B, KB, MB, GB, TB).

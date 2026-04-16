@@ -57,6 +57,13 @@ type NetCore struct {
 	// (127.0.0.0/8, ::1). Set once at registration time, immutable after.
 	isLocal bool
 
+	// captureSink receives a copy of every outbound write payload together
+	// with its write outcome. Set once via SetCaptureSink from the lifecycle
+	// layer; nil means capture is not active for this connection.
+	// NetCore does not perform rule lookup — decision "this connection is
+	// capture-enabled" is made outside, per plan §7.1.
+	captureSink CaptureSink
+
 	// Writer goroutine state.
 	sendCh     chan sendItem
 	writerDone chan struct{}
@@ -205,7 +212,17 @@ func (pc *NetCore) writerLoop() {
 	defer close(pc.writerDone)
 	for item := range pc.sendCh {
 		_ = pc.rawConn.SetWriteDeadline(time.Now().Add(pc.writeDeadline))
-		if _, err := pc.rawConn.Write(item.data); err != nil {
+		_, err := pc.rawConn.Write(item.data)
+		writeOK := err == nil
+
+		// Capture tap: emit event after write attempt so the event
+		// carries the correct outcome (plan §7.1). Non-blocking — the
+		// sink must not stall the writer goroutine.
+		if sink := pc.loadCaptureSink(); sink != nil {
+			sink.OnSendAttempt(item.data, writeOK)
+		}
+
+		if !writeOK {
 			return
 		}
 		if item.ack != nil {

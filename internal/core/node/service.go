@@ -16,6 +16,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/capture"
 	"github.com/piratecash/corsa/internal/core/domain"
 
 	"github.com/piratecash/corsa/internal/core/config"
@@ -172,6 +173,12 @@ type Service struct {
 	fileStore    *filetransfer.FileStore // content-addressed file storage in transmit dir
 	fileTransfer *filetransfer.Manager   // sender/receiver state machines
 	fileRouter   *filerouter.Router      // routing file commands through the mesh
+
+	// Traffic capture subsystem — diagnostic feature for recording raw
+	// wire traffic of selected peer connections to disk (plan §4.1).
+	// Created by initCaptureManager() in Run(); nil before Run and in
+	// unit tests that do not need capture.
+	captureManager *capture.Manager
 
 	// networkOverride, when non-nil, replaces the default networkBridge
 	// returned by Service.Network(). It is the single seam that lets tests
@@ -790,6 +797,10 @@ func (s *Service) Run(ctx context.Context) error {
 	// against a half-torn-down Service during shutdown.
 	defer close(s.done)
 
+	// Traffic capture manager — diagnostic feature (plan §4.5).
+	s.initCaptureManager()
+	defer s.captureManager.Close()
+
 	// Wire relay state persistence: when the TTL ticker evicts expired
 	// entries, persist the updated state so disk stays in sync with memory.
 	s.relayStates.onEvict = func() { s.persistRelayState() }
@@ -999,7 +1010,16 @@ func (s *Service) handleConn(conn net.Conn) {
 	// registry (RemoteAddr, SendFrame, Close) instead of holding a
 	// *netcore.NetCore handle.
 	connID, _ := s.connIDFor(metered)
+
+	// Capture lifecycle hook: notify manager about the new inbound
+	// connection so standing rules (by_ip, all) can auto-start capture.
+	// Also attach the capture sink to the NetCore for outbound tap.
+	s.notifyCaptureNewConn(connID, metered)
+
 	defer func() {
+		// Capture lifecycle hook: stop capture for this connection.
+		s.notifyCaptureConnClosed(connID)
+
 		if addr := s.inboundPeerAddress(connID); addr != "" {
 			s.trackInboundDisconnect(connID, addr)
 		}
@@ -1042,6 +1062,8 @@ func (s *Service) handleConn(conn net.Conn) {
 		line, err := readFrameLine(reader, maxCommandLineBytes)
 		if err != nil {
 			if errors.Is(err, errFrameTooLarge) {
+				// Capture frame-too-large as a diagnostic event before closing.
+				s.captureInboundRecvFrameTooLarge(connID)
 				log.Debug().Str("addr", conn.RemoteAddr().String()).
 					Msg("inbound_read_loop: closing connection — frame exceeds max size")
 				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
@@ -1055,6 +1077,11 @@ func (s *Service) handleConn(conn net.Conn) {
 			}
 			return
 		}
+
+		// Capture tap: record raw inbound line before any parsing (plan §7.2).
+		// Strip only the transport newline, not all whitespace — leading
+		// spaces/tabs are part of the wire payload for diagnostic purposes.
+		s.captureInboundRecv(connID, strings.TrimRight(line, "\r\n"))
 
 		// Per-connection command rate limiting — prevents a single peer
 		// from flooding with valid commands to exhaust CPU.
@@ -3606,9 +3633,15 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 	s.attachOutboundCoreLocked(session.conn, pc)
 	s.mu.Unlock()
 
+	// Capture lifecycle hook: attach sink and notify manager.
+	s.notifyCaptureNewConn(session.connID, session.conn)
+
 	session.netCore = pc
 	conn := session.conn
+	connID := session.connID
 	session.onClose = func() {
+		// Capture lifecycle hook: stop capture before registry removal.
+		s.notifyCaptureConnClosed(connID)
 		s.mu.Lock()
 		s.unregisterConnLocked(conn)
 		s.mu.Unlock()

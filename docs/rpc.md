@@ -46,6 +46,8 @@ graph TB
         DP["DMRouterProvider<br/>Snapshot() · SendMessage() · SendFileAnnounce()"]
         DC["DesktopClient<br/>(chatlog.Store / SQLite)"]
         DMR["DMRouter<br/>(UI state, conversations,<br/>message routing)"]
+        CAP["CaptureProvider<br/>StartCapture*() · StopCapture*()"]
+        CM["CaptureManager<br/>(per-conn ring buffers,<br/>file writers)"]
     end
 
     MESH["TCP Mesh Network<br/>(peer-to-peer)"]
@@ -65,6 +67,7 @@ graph TB
     CT --> MP
     CT -.->|"nil on standalone node"| CP
     CT -.->|"nil on standalone node"| DP
+    CT -.->|"nil on standalone node"| CAP
 
     NP --> NODE
     MP --> MC
@@ -73,11 +76,13 @@ graph TB
     DP --> DMR
     DMR --> NODE
     DMR --> DC
+    CAP --> CM
+    CM -->|"wire taps"| NODE
     NODE --> MESH
 ```
 *Diagram 1 — Overall architecture.*
 
-Core Node layer is always present and includes CommandTable, NodeProvider, MetricsProvider, and HTTP wrapper. Desktop Providers (ChatlogProvider, DMRouterProvider) are optional — on standalone node they are nil, their commands return 503 and are hidden from help. MetricsProvider (metrics.Collector) collects traffic samples from node.Service via `fetchNetworkStats` and stores them in a ring buffer for `fetchTrafficHistory`.
+Core Node layer is always present and includes CommandTable, NodeProvider, MetricsProvider, and HTTP wrapper. Desktop Providers (ChatlogProvider, DMRouterProvider, CaptureProvider) are optional — on standalone node they are nil, their commands return 503 and are hidden from help. MetricsProvider (metrics.Collector) collects traffic samples from node.Service via `fetchNetworkStats` and stores them in a ring buffer for `fetchTrafficHistory`. CaptureProvider (CaptureManager) manages per-connection wire traffic recording via three tap points in the network I/O path (see [debug.md](debug.md) for the capture architecture diagram).
 
 #### Request Processing Flow
 
@@ -516,6 +521,8 @@ graph TB
         DP["DMRouterProvider<br/>Snapshot() · SendMessage() · SendFileAnnounce()"]
         DC["DesktopClient<br/>(chatlog.Store / SQLite)"]
         DMR["DMRouter<br/>(состояние UI, разговоры,<br/>маршрутизация сообщений)"]
+        CAP["CaptureProvider<br/>StartCapture*() · StopCapture*()"]
+        CM["CaptureManager<br/>(ring buffer на соединение,<br/>file writers)"]
     end
 
     MESH["TCP Mesh-сеть<br/>(peer-to-peer)"]
@@ -535,6 +542,7 @@ graph TB
     CT --> MP
     CT -.->|"nil на standalone-ноде"| CP
     CT -.->|"nil на standalone-ноде"| DP
+    CT -.->|"nil на standalone-ноде"| CAP
 
     NP --> NODE
     MP --> MC
@@ -543,11 +551,13 @@ graph TB
     DP --> DMR
     DMR --> NODE
     DMR --> DC
+    CAP --> CM
+    CM -->|"wire taps"| NODE
     NODE --> MESH
 ```
 *Диаграмма 1 — Общая архитектура.*
 
-Слой ядра ноды всегда присутствует и включает CommandTable, NodeProvider, MetricsProvider и HTTP-обёртку. Desktop-провайдеры (ChatlogProvider, DMRouterProvider) опциональны — на standalone-ноде они равны nil, их команды возвращают 503 и скрыты из help. MetricsProvider (metrics.Collector) собирает сэмплы трафика от node.Service через `fetchNetworkStats` и хранит их в кольцевом буфере для `fetchTrafficHistory`.
+Слой ядра ноды всегда присутствует и включает CommandTable, NodeProvider, MetricsProvider и HTTP-обёртку. Desktop-провайдеры (ChatlogProvider, DMRouterProvider, CaptureProvider) опциональны — на standalone-ноде они равны nil, их команды возвращают 503 и скрыты из help. MetricsProvider (metrics.Collector) собирает сэмплы трафика от node.Service через `fetchNetworkStats` и хранит их в кольцевом буфере для `fetchTrafficHistory`. CaptureProvider (CaptureManager) управляет записью wire-трафика по соединениям через три tap-точки в сетевом I/O (подробности — [debug.md](debug.md)).
 
 #### Поток обработки запроса
 

@@ -18,6 +18,8 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | [Mesh](mesh.md) | `fetchRelayStatus` | [mesh.md](mesh.md) |
 | [Metrics](metrics.md) | `fetchTrafficHistory` | [metrics.md](metrics.md) |
 | [Routing](routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [routing.md](routing.md) |
+| [Diagnostic](diagnostic.md) | `recordPeerTrafficByConnID`, `recordPeerTrafficByIP`, `recordAllPeerTraffic`, `stopPeerTrafficRecording` | [diagnostic.md](diagnostic.md) |
+
 ### Universal Dispatch
 
 **POST /rpc/v1/exec** — execute any registered command.
@@ -68,6 +70,8 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | [Mesh](mesh.md) | `fetchRelayStatus` | [mesh.md](mesh.md) |
 | [Метрики](metrics.md) | `fetchTrafficHistory` | [metrics.md](metrics.md) |
 | [Маршрутизация](routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [routing.md](routing.md) |
+| [Диагностика](diagnostic.md) | `recordPeerTrafficByConnID`, `recordPeerTrafficByIP`, `recordAllPeerTraffic`, `stopPeerTrafficRecording` | [diagnostic.md](diagnostic.md) |
+
 ### Универсальная диспетчеризация
 
 **POST /rpc/v1/exec** — выполнение любой зарегистрированной команды.

@@ -90,6 +90,16 @@ var canonicalNames = map[string]string{
 	"fetch_route_table":      "fetchRouteTable",
 	"fetch_route_summary":    "fetchRouteSummary",
 	"fetch_route_lookup":     "fetchRouteLookup",
+	// Traffic capture commands — camelCase (lowered) aliases.
+	"recordpeertrafficbyconnid": "recordPeerTrafficByConnID",
+	"recordpeertrafficbyip":     "recordPeerTrafficByIP",
+	"recordallpeertraffic":      "recordAllPeerTraffic",
+	"stoppeertrafficrecording": "stopPeerTrafficRecording",
+	// Traffic capture commands — snake_case aliases.
+	"record_peer_traffic_by_conn_id": "recordPeerTrafficByConnID",
+	"record_peer_traffic_by_ip":      "recordPeerTrafficByIP",
+	"record_all_peer_traffic":        "recordAllPeerTraffic",
+	"stop_peer_traffic_recording":    "stopPeerTrafficRecording",
 }
 
 // canonicalize returns the canonical camelCase form of a lowercased command name.
@@ -348,6 +358,8 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		"fetch_dm_headers": true, "fetch_relay_status": true,
 		"fetch_route_table": true, "fetch_route_summary": true,
 		"fetch_traffic_history": true, "fetch_reachable_ids": true,
+		// recordAllPeerTraffic with no args uses default format.
+		"recordallpeertraffic": true, "record_all_peer_traffic": true,
 	}
 
 	if noArgCommands[cmd] {

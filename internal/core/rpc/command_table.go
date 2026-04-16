@@ -264,6 +264,12 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 	}
 	RegisterConnectionCommands(t, cd)
 
+	var cp CaptureProvider
+	if c, ok := node.(CaptureProvider); ok {
+		cp = c
+	}
+	RegisterCaptureCommands(t, cp)
+
 	registerSnakeCaseAliases(t)
 }
 
@@ -312,8 +318,12 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_route_summary":     "fetchRouteSummary",
 		"fetch_route_lookup":      "fetchRouteLookup",
 		"get_active_peers":        "getActivePeers",
-		"list_peers":              "listPeers",
-		"list_banned":             "listBanned",
+		"list_peers":                     "listPeers",
+		"list_banned":                    "listBanned",
+		"record_peer_traffic_by_conn_id": "recordPeerTrafficByConnID",
+		"record_peer_traffic_by_ip":      "recordPeerTrafficByIP",
+		"record_all_peer_traffic":        "recordAllPeerTraffic",
+		"stop_peer_traffic_recording":    "stopPeerTrafficRecording",
 	}
 	for old, canonical := range aliases {
 		t.RegisterAlias(old, canonical)

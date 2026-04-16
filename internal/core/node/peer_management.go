@@ -1463,6 +1463,8 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 				log.Debug().Str("peer", string(session.address)).
 					Msg("peer_session_read: remote closed connection (EOF)")
 			} else if errors.Is(err, errFrameTooLarge) {
+				// Capture frame_too_large diagnostic event.
+				s.captureOutboundRecvFrameTooLarge(session.connID)
 				log.Debug().Str("peer", string(session.address)).
 					Msg("peer_session_read: frame exceeds max response size")
 			} else {
@@ -1475,6 +1477,11 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			}
 			return
 		}
+
+		// Capture tap: record raw outbound-session recv line before
+		// parsing (plan §7.2). Strip only the transport newline — leading
+		// whitespace is part of the wire payload for diagnostics.
+		s.captureOutboundRecv(session.connID, strings.TrimRight(line, "\r\n"))
 
 		trimmed := strings.TrimSpace(line)
 		frame, err := protocol.ParseFrameLine(trimmed)
@@ -2362,6 +2369,22 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		}
 	}
 
+	// Collect capture snapshots before taking s.mu to avoid nested locking
+	// (captureManager.SessionSnapshotByID acquires its own mu).
+	captureByConn := make(map[domain.ConnID]captureSnap)
+	if cm := s.captureManager; cm != nil {
+		for _, snap := range cm.AllSessionSnapshots() {
+			captureByConn[snap.ConnID] = captureSnap{
+				Recording:  snap.Recording,
+				File:       snap.FilePath,
+				StartedAt:  snap.StartedAt.UTC().Format(time.RFC3339Nano),
+				Scope:      snap.Scope.String(),
+				Error:      snap.Error,
+				DroppedEvt: snap.DroppedEvents,
+			}
+		}
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	now := time.Now().UTC()
@@ -2430,6 +2453,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		// overlay address.
 		if phf.ConnID != 0 {
 			// Outbound session present — single authoritative row.
+			enrichCaptureFields(&phf, captureByConn)
 			items = append(items, phf)
 		} else {
 			inboundConns := s.inboundConnIDsLocked(health.Address)
@@ -2438,6 +2462,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 					row := phf
 					row.ConnID = cid
 					row.Direction = string(peerDirectionInbound)
+					enrichCaptureFields(&row, captureByConn)
 					items = append(items, row)
 				}
 			} else {
@@ -2468,13 +2493,54 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		if session, ok := s.sessions[addr]; ok {
 			inboundPHF.ProtocolVersion = session.version
 		}
-		items = append(items, inboundPHF)
+		// Emit one row per inbound conn_id (same pattern as health-based
+		// inbound peers) so capture enrichment can match by ConnID.
+		inboundConns := s.inboundConnIDsLocked(addr)
+		if len(inboundConns) > 0 {
+			for _, cid := range inboundConns {
+				row := inboundPHF
+				row.ConnID = cid
+				enrichCaptureFields(&row, captureByConn)
+				items = append(items, row)
+			}
+		} else {
+			items = append(items, inboundPHF)
+		}
 	}
 
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Address < items[j].Address
 	})
 	return items
+}
+
+// captureSnap is the pre-fetched, lock-free view of a capture session
+// used to enrich PeerHealthFrame without holding s.mu and m.mu together.
+type captureSnap struct {
+	Recording  bool
+	File       string
+	StartedAt  string
+	Scope      string
+	Error      string
+	DroppedEvt int64
+}
+
+// enrichCaptureFields populates the recording_* fields on a PeerHealthFrame
+// from the pre-fetched capture snapshot map. ConnID must already be set.
+func enrichCaptureFields(phf *protocol.PeerHealthFrame, snaps map[domain.ConnID]captureSnap) {
+	if phf.ConnID == 0 {
+		return
+	}
+	snap, ok := snaps[domain.ConnID(phf.ConnID)]
+	if !ok {
+		return
+	}
+	phf.Recording = snap.Recording
+	phf.RecordingFile = snap.File
+	phf.RecordingStartedAt = snap.StartedAt
+	phf.RecordingScope = snap.Scope
+	phf.RecordingError = snap.Error
+	phf.RecordingDroppedEvents = snap.DroppedEvt
 }
 
 // peerCapabilitiesLocked returns the negotiated capabilities for a peer
@@ -3644,23 +3710,55 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 // buildPeerExchangeResponse merges CM Active slots and PeerProvider Candidates,
 // deduplicates by IP (active has priority), and optionally filters by caller's
 // network groups. Used for both remote peer exchange and local RPC enrichment.
-// ActivePeersJSON returns a JSON-encoded snapshot of ConnectionManager slots.
+// ActivePeersJSON returns a JSON-encoded snapshot of ConnectionManager slots
+// plus active capture recordings (plan §8.3).
 // Implements rpc.ConnectionDiagnosticProvider.
 func (s *Service) ActivePeersJSON() (json.RawMessage, error) {
+	type recordingEntry struct {
+		ConnID    uint64 `json:"conn_id"`
+		RemoteIP  string `json:"remote_ip"`
+		PeerDir   string `json:"peer_direction"`
+		Format    string `json:"format"`
+		Scope     string `json:"scope"`
+		FilePath  string `json:"file_path"`
+		StartedAt string `json:"started_at"`
+		Error     string `json:"error,omitempty"`
+		Dropped   int64  `json:"dropped_events,omitempty"`
+	}
 	type response struct {
-		Slots    []SlotInfo `json:"slots"`
-		Count    int        `json:"count"`
-		MaxSlots int        `json:"max_slots"`
+		Slots      []SlotInfo       `json:"slots"`
+		Count      int              `json:"count"`
+		MaxSlots   int              `json:"max_slots"`
+		Recordings []recordingEntry `json:"recordings,omitempty"`
 	}
 
 	var slots []SlotInfo
 	if s.connManager != nil {
 		slots = s.connManager.Slots()
 	}
+
+	var recordings []recordingEntry
+	if cm := s.captureManager; cm != nil {
+		for _, snap := range cm.AllSessionSnapshots() {
+			recordings = append(recordings, recordingEntry{
+				ConnID:    uint64(snap.ConnID),
+				RemoteIP:  snap.RemoteIP.String(),
+				PeerDir:   snap.PeerDirection.String(),
+				Format:    snap.Format.String(),
+				Scope:     snap.Scope.String(),
+				FilePath:  snap.FilePath,
+				StartedAt: snap.StartedAt.UTC().Format(time.RFC3339Nano),
+				Error:     snap.Error,
+				Dropped:   snap.DroppedEvents,
+			})
+		}
+	}
+
 	resp := response{
-		Slots:    slots,
-		Count:    len(slots),
-		MaxSlots: s.cfg.EffectiveMaxOutgoingPeers(),
+		Slots:      slots,
+		Count:      len(slots),
+		MaxSlots:   s.cfg.EffectiveMaxOutgoingPeers(),
+		Recordings: recordings,
 	}
 	return json.Marshal(resp)
 }

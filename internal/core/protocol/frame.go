@@ -142,6 +142,14 @@ type PeerHealthFrame struct {
 	SlotRetryCount      int      `json:"slot_retry_count,omitempty"`       // how many consecutive dial retries the slot has performed
 	SlotGeneration      uint64   `json:"slot_generation,omitempty"`        // monotonic generation counter for stale-event suppression
 	SlotConnectedAddr   string   `json:"slot_connected_address,omitempty"` // actual TCP address used for the active connection
+
+	// Capture state — per-connection recording diagnostics (plan §8.1).
+	Recording             bool   `json:"recording,omitempty"`
+	RecordingFile         string `json:"recording_file,omitempty"`
+	RecordingStartedAt    string `json:"recording_started_at,omitempty"`
+	RecordingScope        string `json:"recording_scope,omitempty"`
+	RecordingError        string `json:"recording_error,omitempty"`
+	RecordingDroppedEvents int64 `json:"recording_dropped_events,omitempty"`
 }
 
 // NetworkStatsFrame provides aggregated traffic statistics for the entire node.

@@ -288,12 +288,14 @@ flowchart TD
         MSG[Messages: sendDm,<br/>fetchMessages]
         CHAT[Chatlog: fetchChatlogPreviews]
         METRICS[Metrics: fetchTrafficHistory]
+        DIAG[Diagnostic: recordPeerTraffic*,<br/>stopPeerTrafficRecording]
     end
 
     subgraph Core["Core services"]
         NODE[node.Service]
         ROUTER[DMRouter]
         CHATLOG[chatlog.Store]
+        CAP[CaptureManager]
     end
 
     CLI --> HTTP
@@ -306,17 +308,29 @@ flowchart TD
     CMD --> MSG
     CMD --> CHAT
     CMD --> METRICS
+    CMD --> DIAG
     SYS --> NODE
     NET --> NODE
     ID --> NODE
     MSG --> NODE
     MSG --> ROUTER
     CHAT --> CHATLOG
+    DIAG --> CAP
 ```
 
 *RPC architecture*
 
 The `CommandTable` is a single registry of all available commands. Desktop UI calls `Execute()` directly (no HTTP round-trip). External clients go through the HTTP server which wraps the same `CommandTable`.
+
+### Console Window — Traffic Recording Indicators
+
+The Console Window (opened via the header console button) displays per-peer diagnostic information. When a capture session is active, the following UI elements appear:
+
+- **Recording dot** — a small red ellipse on the peer card header next to the peer address. Visible when `PeerHealth.Recording == true` for any `conn_id` of the peer.
+- **Recording info row** — displayed below the peer card health data. Shows scope (`conn_id` / `ip` / `all`), file path (selectable text), capture start time, and dropped event count if non-zero. An error string is shown if the capture writer encountered a disk error.
+- **Stop all recording banner** — a red banner at the top of the peers tab. Visible when at least one peer has `Recording == true`. Contains a "Stop all" button that dispatches `stopPeerTrafficRecording scope=all` via `CommandTable.Execute()`.
+
+Recording state is sourced exclusively from `fetchPeerHealth` (`PeerHealth` rows). The UI does not maintain independent recording state — it derives visibility from the periodic health snapshot.
 
 ---
 
@@ -568,12 +582,14 @@ flowchart TD
         MSG[Messages: sendDm,<br/>fetchMessages]
         CHAT[Chatlog: fetchChatlogPreviews]
         METRICS[Metrics: fetchTrafficHistory]
+        DIAG[Diagnostic: recordPeerTraffic*,<br/>stopPeerTrafficRecording]
     end
 
     subgraph Core["Core сервисы"]
         NODE[node.Service]
         ROUTER[DMRouter]
         CHATLOG[chatlog.Store]
+        CAP[CaptureManager]
     end
 
     CLI --> HTTP
@@ -586,15 +602,25 @@ flowchart TD
     CMD --> MSG
     CMD --> CHAT
     CMD --> METRICS
+    CMD --> DIAG
     SYS --> NODE
     NET --> NODE
     ID --> NODE
     MSG --> NODE
     MSG --> ROUTER
     CHAT --> CHATLOG
+    DIAG --> CAP
 ```
 
 *Архитектура RPC*
 
 `CommandTable` — единый реестр всех доступных команд. Desktop UI вызывает `Execute()` напрямую (без HTTP round-trip). Внешние клиенты работают через HTTP сервер, который оборачивает тот же `CommandTable`.
+
+### Окно консоли — индикаторы записи трафика
+
+Окно консоли (открывается кнопкой консоли в заголовке) отображает диагностическую информацию по каждому peer'у. Когда capture-сессия активна, появляются следующие UI-элементы:
+
+- **Точка записи** — маленький красный эллипс на заголовке peer-карточки рядом с адресом. Виден когда `PeerHealth.Recording == true` для любого `conn_id` этого peer'а.
+- **Строка информации о записи** — отображается под данными здоровья peer-карточки. Показывает scope (`conn_id` / `ip` / `all`), путь к файлу (выделяемый текст), время старта записи и количество потерянных событий если ненулевое. Строка ошибки показывается если capture writer столкнулся с ошибкой диска.
+- **Баннер остановки записи** — красный баннер вверху вкладки peers. Виден когда хотя бы один peer имеет `Recording == true`. Содержит кнопку "Stop all", которая отправляет `stopPeerTrafficRecording scope=all` через `CommandTable.Execute()`.
 

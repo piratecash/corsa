@@ -89,6 +89,14 @@ type PeerHealth struct {
 	SlotRetryCount      int
 	SlotGeneration      uint64
 	SlotConnectedAddr   string // actual TCP address for the active connection
+
+	// Capture state — per-connection recording diagnostics (plan §8.1).
+	Recording              bool
+	RecordingFile          string
+	RecordingStartedAt     *time.Time
+	RecordingScope         string
+	RecordingError         string
+	RecordingDroppedEvents int64
 }
 
 type DirectMessage struct {
@@ -541,10 +549,16 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			BytesSent:           item.BytesSent,
 			BytesReceived:       item.BytesReceived,
 			TotalTraffic:        item.TotalTraffic,
-			SlotState:           item.SlotState,
-			SlotRetryCount:      item.SlotRetryCount,
-			SlotGeneration:      item.SlotGeneration,
-			SlotConnectedAddr:   item.SlotConnectedAddr,
+			SlotState:              item.SlotState,
+			SlotRetryCount:         item.SlotRetryCount,
+			SlotGeneration:         item.SlotGeneration,
+			SlotConnectedAddr:      item.SlotConnectedAddr,
+			Recording:              item.Recording,
+			RecordingFile:          item.RecordingFile,
+			RecordingStartedAt:     parseOptionalTime(item.RecordingStartedAt),
+			RecordingScope:         item.RecordingScope,
+			RecordingError:         item.RecordingError,
+			RecordingDroppedEvents: item.RecordingDroppedEvents,
 		})
 	}
 	return items

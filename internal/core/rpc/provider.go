@@ -106,6 +106,23 @@ type ConnectionDiagnosticProvider interface {
 	ListBannedJSON() (json.RawMessage, error)
 }
 
+// CaptureProvider abstracts access to the traffic capture subsystem.
+// When nil (capture not available), commands are registered as unavailable.
+type CaptureProvider interface {
+	// StartCaptureByConnIDs starts recording for the given conn_ids.
+	StartCaptureByConnIDs(connIDs []uint64, format string) (json.RawMessage, error)
+	// StartCaptureByIPs starts recording for the given remote IPs.
+	StartCaptureByIPs(ips []string, format string) (json.RawMessage, error)
+	// StartCaptureAll starts recording for all peer connections.
+	StartCaptureAll(format string) (json.RawMessage, error)
+	// StopCaptureByConnIDs stops recording for the given conn_ids.
+	StopCaptureByConnIDs(connIDs []uint64) (json.RawMessage, error)
+	// StopCaptureByIPs stops recording for the given remote IPs.
+	StopCaptureByIPs(ips []string) (json.RawMessage, error)
+	// StopCaptureAll stops all recording.
+	StopCaptureAll() (json.RawMessage, error)
+}
+
 // DiagnosticProvider abstracts access to desktop-level identity metadata.
 // Only the desktop client implements this; standalone node uses the base
 // handlers from RegisterSystemCommands.
