@@ -52,6 +52,7 @@ type Window struct {
 	recipientEditor      widget.Editor
 	identitySearchEditor widget.Editor
 	messageEditor        widget.Editor
+	focusComposerPending bool
 	contactsList         widget.List
 	chatList             widget.List
 	consoleButton        widget.Clickable
@@ -599,6 +600,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 			}
 			w.router.SelectPeer(remaining[nextIdx])
 			w.recipientEditor.SetText(string(remaining[nextIdx]))
+			w.focusComposerPending = true
 		}
 
 		if w.window != nil {
@@ -1011,6 +1013,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 			w.recipientEditor.SetText(fpStr)
 			w.router.SetSendStatus(w.t("status.chat_selected"))
 			w.router.SelectPeer(fingerprint)
+			w.focusComposerPending = true
 		}
 
 		// Detect right-click (secondary button) for context menu.
@@ -1041,6 +1044,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 				// Auto-select this identity so the user sees the chat.
 				w.recipientEditor.SetText(fpStr)
 				w.router.SelectPeer(fingerprint)
+				w.focusComposerPending = true
 			}
 		}
 
@@ -1173,6 +1177,7 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 	recipient := w.snap.ActivePeer
 	status := w.snap.NodeStatus
 	sendStatus := w.snap.SendStatus
+	maxInputHeight := max(gtx.Constraints.Max.Y/3-gtx.Dp(unit.Dp(76)), gtx.Dp(unit.Dp(62)))
 
 	return w.card(gtx, "", nil, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{
@@ -1188,7 +1193,7 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 				return w.layoutReplyPreview(gtx)
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return w.messageInputCard(gtx, recipient)
+				return w.messageInputCard(gtx, recipient, maxInputHeight)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1381,16 +1386,38 @@ func networkStateColors(state string) (color.NRGBA, color.NRGBA) {
 	}
 }
 
-func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity) layout.Dimensions {
+func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity, maxInputHeight int) layout.Dimensions {
 	borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
 	backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
-
-	// Card height adapts to content: base 96dp, grows when file chip is attached.
-	baseHeight := unit.Dp(96)
+	editorBg := backgroundColor
+	scrollTrack := color.NRGBA{R: 38, G: 46, B: 58, A: 255}
+	scrollThumb := color.NRGBA{R: 112, G: 132, B: 164, A: 255}
+	lineStep := gtx.Dp(unit.Dp(18))
+	baseEditorHeight := gtx.Dp(unit.Dp(36))
+	chromeHeight := gtx.Dp(unit.Dp(26))
 	if w.attachedFile != "" {
-		baseHeight = unit.Dp(136)
+		chromeHeight += gtx.Dp(unit.Dp(40))
 	}
-	cardHeight := gtx.Dp(baseHeight)
+
+	if w.focusComposerPending {
+		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
+		w.focusComposerPending = false
+	}
+
+	line, _ := w.messageEditor.CaretPos()
+	totalLines := max(line+1, strings.Count(w.messageEditor.Text(), "\n")+1)
+	extraLines := max(0, totalLines-2)
+	editorHeight := baseEditorHeight + extraLines*lineStep
+	maxEditorHeight := maxInputHeight - chromeHeight
+	if maxEditorHeight < baseEditorHeight {
+		maxEditorHeight = baseEditorHeight
+	}
+	if editorHeight > maxEditorHeight {
+		editorHeight = maxEditorHeight
+	}
+	cardHeight := chromeHeight + editorHeight
+	visibleLines := max(2, editorHeight/lineStep)
+	showScrollbar := totalLines > visibleLines
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.Y = cardHeight
@@ -1400,12 +1427,10 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 		return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			fill(gtx, backgroundColor)
 
-			inset := layout.UniformInset(unit.Dp(8))
-			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(1), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{
 					Axis: layout.Vertical,
 				}.Layout(gtx,
-					// Recipient header.
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if recipient == "" {
 							label := material.Body2(w.theme, w.t("compose.body"))
@@ -1446,51 +1471,136 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 							}),
 						)
 					}),
-					// Attached file chip (visible only when file is selected).
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if w.attachedFile == "" {
 							return layout.Dimensions{}
 						}
 						return w.layoutAttachedFilePreview(gtx)
 					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-					// Input row: [+] button + editor.
+					layout.Rigid(layout.Spacer{Height: unit.Dp(0)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{
 							Axis:      layout.Horizontal,
 							Alignment: layout.Middle,
 						}.Layout(gtx,
-							// Attach file button "+".
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								btn := material.Button(w.theme, &w.attachButton, w.t("file.attach_icon"))
 								btn.Background = color.NRGBA{R: 55, G: 65, B: 85, A: 255}
 								btn.Color = color.NRGBA{R: 200, G: 210, B: 230, A: 255}
 								btn.TextSize = unit.Sp(18)
-								btn.Inset = layout.UniformInset(unit.Dp(4))
-								gtx.Constraints.Min.X = gtx.Dp(unit.Dp(32))
-								gtx.Constraints.Max.X = gtx.Dp(unit.Dp(32))
-								gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(32))
-								gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(32))
+								btn.Inset = layout.UniformInset(unit.Dp(2))
+								gtx.Constraints.Min.X = gtx.Dp(unit.Dp(28))
+								gtx.Constraints.Max.X = gtx.Dp(unit.Dp(28))
+								gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(28))
+								gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(28))
 								return btn.Layout(gtx)
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-							// Message editor.
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 								w.messageEditor.SingleLine = false
+								w.messageEditor.Submit = false
 								editor := material.Editor(w.theme, &w.messageEditor, w.t("compose.placeholder"))
 								editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
 								editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
+								editor.TextSize = unit.Sp(15)
+								editor.LineHeight = unit.Sp(18)
 
-								height := gtx.Dp(unit.Dp(28))
-								gtx.Constraints.Min.Y = height
-								gtx.Constraints.Max.Y = height
-								return editor.Layout(gtx)
+								radius := gtx.Dp(unit.Dp(12))
+								defer clip.UniformRRect(image.Rectangle{Max: image.Pt(gtx.Constraints.Max.X, editorHeight)}, radius).Push(gtx.Ops).Pop()
+								return layout.Stack{}.Layout(gtx,
+									layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+										gtx.Constraints.Min.Y = editorHeight
+										gtx.Constraints.Max.Y = editorHeight
+										fill(gtx, editorBg)
+										return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, editorHeight)}
+									}),
+									layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+										gtx.Constraints.Min.Y = editorHeight
+										gtx.Constraints.Max.Y = editorHeight
+										return layout.Inset{
+											Top:    unit.Dp(0),
+											Bottom: unit.Dp(0),
+											Left:   unit.Dp(9),
+											Right:  unit.Dp(6),
+										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return layout.Flex{
+												Axis:      layout.Horizontal,
+												Alignment: layout.Middle,
+											}.Layout(gtx,
+												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+													return editor.Layout(gtx)
+												}),
+												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+													if !showScrollbar {
+														return layout.Dimensions{}
+													}
+													return w.layoutComposerScrollbar(gtx, totalLines, visibleLines, editorHeight, scrollTrack, scrollThumb)
+												}),
+											)
+										})
+									}),
+								)
 							}),
 						)
 					}),
 				)
 			})
 		})
+	})
+}
+
+func (w *Window) layoutComposerScrollbar(gtx layout.Context, totalLines, visibleLines, editorHeight int, track, thumb color.NRGBA) layout.Dimensions {
+	if totalLines <= visibleLines {
+		return layout.Dimensions{}
+	}
+
+	width := gtx.Dp(unit.Dp(4))
+	height := editorHeight - gtx.Dp(unit.Dp(4))
+	minHeight := gtx.Dp(unit.Dp(16))
+	if height < minHeight {
+		height = minHeight
+	}
+	if height <= 0 {
+		return layout.Dimensions{}
+	}
+
+	caretLine, _ := w.messageEditor.CaretPos()
+	maxOffset := totalLines - visibleLines
+	scrollOffset := caretLine - (visibleLines - 1)
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+	if scrollOffset > maxOffset {
+		scrollOffset = maxOffset
+	}
+
+	thumbHeight := height * visibleLines / totalLines
+	minThumb := gtx.Dp(unit.Dp(10))
+	if thumbHeight < minThumb {
+		thumbHeight = minThumb
+	}
+	if thumbHeight > height {
+		thumbHeight = height
+	}
+
+	thumbOffset := 0
+	if maxOffset > 0 && height > thumbHeight {
+		thumbOffset = (height - thumbHeight) * scrollOffset / maxOffset
+	}
+
+	return layout.Inset{Left: unit.Dp(8), Right: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Min = image.Pt(width, height)
+		gtx.Constraints.Max = image.Pt(width, height)
+
+		defer clip.UniformRRect(image.Rectangle{Max: image.Pt(width, height)}, width/2).Push(gtx.Ops).Pop()
+		paint.ColorOp{Color: track}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+
+		thumbRect := image.Rect(0, thumbOffset, width, thumbOffset+thumbHeight)
+		defer clip.UniformRRect(thumbRect, width/2).Push(gtx.Ops).Pop()
+		paint.ColorOp{Color: thumb}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		return layout.Dimensions{Size: image.Pt(width, height)}
 	})
 }
 
@@ -2176,6 +2286,7 @@ func (w *Window) ensureSelectedRecipient(recipients []domain.PeerIdentity) {
 	// the same way SelectPeer does — the chat is on screen.
 	w.router.AutoSelectPeer(recipients[0])
 	w.recipientEditor.SetText(string(recipients[0]))
+	w.focusComposerPending = true
 }
 
 func mergeRecipientOrder(recipients, order []domain.PeerIdentity) []domain.PeerIdentity {
