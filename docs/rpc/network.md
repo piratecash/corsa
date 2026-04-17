@@ -39,6 +39,47 @@ Add a peer. This is the explicit operator override mechanism: in addition to add
 
 Request: `{"address": "host:port"}`
 
+### POST /rpc/v1/network/active_connections
+
+Snapshot of all currently live peer connections (both inbound and outbound). Unlike `getActivePeers` which returns ConnectionManager slot snapshots, this command returns connection-oriented data from the health subsystem — every TCP socket that has completed the handshake and is in a healthy, degraded, or stalled state.
+
+Command name: `getActiveConnections` (snake_case alias: `get_active_connections`).
+
+Response:
+```json
+{
+  "version": 1,
+  "connections": [
+    {
+      "peer_address": "65.108.204.190:64646",
+      "remote_address": "65.108.204.190:64646",
+      "identity": "abc123def456...",
+      "direction": "outbound",
+      "network": "ipv4",
+      "state": "healthy",
+      "conn_id": 42,
+      "slot_state": "active"
+    }
+  ],
+  "count": 1
+}
+```
+
+Field semantics:
+
+- `peer_address` — the address the node dials or accepts from (host:port).
+- `remote_address` — the actual TCP endpoint; may differ from `peer_address` when the CM resolved a different port during connection.
+- `identity` — peer's cryptographic identity string. Always present in the JSON (never omitted), but may be an empty string for peers that haven't completed identity exchange.
+- `direction` — `"inbound"` or `"outbound"`.
+- `network` — network group classification: `ipv4`, `ipv6`, `torv3`, `torv2`, `i2p`, `cjdns`, `local`, `unknown`. This is an open string enum — future versions may add new values without a version bump; clients should handle unknown values gracefully.
+- `state` — connection health state: `healthy`, `degraded`, `stalled`.
+- `conn_id` — unique connection identifier (nonzero for active connections).
+- `slot_state` — CM slot state (`"active"`, `"initializing"`); omitted when no CM slot is associated with the connection.
+
+Sort order: outbound connections first, then sorted by peer_address, remote_address, conn_id.
+
+The `version` field enables forward-compatible evolution. See the design document (`docs/active-connections-rpc-design.md` §9) for the versioning contract and two-phase decode strategy.
+
 ---
 
 ## Русский
@@ -79,3 +120,44 @@ Request: `{"address": "host:port"}`
 Добавление пира. Это явный механизм override оператора: помимо добавления/повышения приоритета пира и сброса бана, команда также обнуляет всю диагностику несовместимых версий (`IncompatibleVersionAttempts`, `LastErrorCode`, поля наблюдаемых версий) и удаляет персистированный version lockout. Version policy пересчитывается немедленно, чтобы lockout больше не влиял на `update_available`. Дозвон к пиру запускается сразу после override.
 
 Запрос: `{"address": "host:port"}`
+
+### POST /rpc/v1/network/active_connections
+
+Снимок всех текущих живых соединений с пирами (входящих и исходящих). В отличие от `getActivePeers`, который возвращает снимок слотов ConnectionManager, эта команда возвращает данные, ориентированные на соединения, из подсистемы health — каждый TCP-сокет, прошедший handshake и находящийся в состоянии healthy, degraded или stalled.
+
+Имя команды: `getActiveConnections` (snake_case алиас: `get_active_connections`).
+
+Ответ:
+```json
+{
+  "version": 1,
+  "connections": [
+    {
+      "peer_address": "65.108.204.190:64646",
+      "remote_address": "65.108.204.190:64646",
+      "identity": "abc123def456...",
+      "direction": "outbound",
+      "network": "ipv4",
+      "state": "healthy",
+      "conn_id": 42,
+      "slot_state": "active"
+    }
+  ],
+  "count": 1
+}
+```
+
+Семантика полей:
+
+- `peer_address` — адрес, по которому нода подключается или принимает подключение (host:port).
+- `remote_address` — фактический TCP-эндпоинт; может отличаться от `peer_address`, когда CM разрешил другой порт при подключении.
+- `identity` — криптографический идентификатор пира. Всегда присутствует в JSON (никогда не пропускается), но может быть пустой строкой для пиров, не завершивших обмен идентификацией.
+- `direction` — `"inbound"` или `"outbound"`.
+- `network` — классификация сетевой группы: `ipv4`, `ipv6`, `torv3`, `torv2`, `i2p`, `cjdns`, `local`, `unknown`. Это открытый строковый enum — будущие версии могут добавить новые значения без увеличения version; клиенты должны корректно обрабатывать неизвестные значения.
+- `state` — состояние здоровья соединения: `healthy`, `degraded`, `stalled`.
+- `conn_id` — уникальный идентификатор соединения (ненулевой для активных соединений).
+- `slot_state` — состояние слота CM (`"active"`, `"initializing"`); пропускается, если с соединением не связан слот CM.
+
+Порядок сортировки: исходящие соединения первыми, затем сортировка по peer_address, remote_address, conn_id.
+
+Поле `version` обеспечивает forward-compatible эволюцию. Контракт версионирования и стратегия двухфазного декодирования описаны в проектном документе (`docs/active-connections-rpc-design.md` §9).

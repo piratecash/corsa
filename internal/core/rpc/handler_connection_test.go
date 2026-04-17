@@ -51,6 +51,14 @@ func (m *mockConnDiagProvider) ListBannedJSON() (json.RawMessage, error) {
 	}{BannedIPs: []interface{}{}, Count: 0})
 }
 
+func (m *mockConnDiagProvider) ActiveConnectionsJSON() (json.RawMessage, error) {
+	return json.Marshal(struct {
+		Version     int           `json:"version"`
+		Connections []interface{} `json:"connections"`
+		Count       int           `json:"count"`
+	}{Version: 1, Connections: []interface{}{}, Count: 0})
+}
+
 // nodeWithConnDiag combines NodeProvider + ConnectionDiagnosticProvider for
 // RegisterAllCommands tests. Type assertion inside RegisterAllCommands discovers
 // the ConnectionDiagnosticProvider capability.
@@ -67,7 +75,7 @@ func TestConnectionCommandsRegistered(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, &nodeWithConnDiag{}, nil, nil, nil)
 
-	expected := []string{"getActivePeers", "listPeers", "listBanned"}
+	expected := []string{"getActivePeers", "getActiveConnections", "listPeers", "listBanned"}
 	commands := table.Commands()
 	cmdSet := make(map[string]struct{}, len(commands))
 	for _, c := range commands {
@@ -91,7 +99,7 @@ func TestConnectionCommandsUnavailableWhenNil(t *testing.T) {
 		cmdSet[c.Name] = struct{}{}
 	}
 
-	for _, name := range []string{"getActivePeers", "listPeers", "listBanned"} {
+	for _, name := range []string{"getActivePeers", "getActiveConnections", "listPeers", "listBanned"} {
 		if _, ok := cmdSet[name]; ok {
 			t.Errorf("command %q should be unavailable (hidden) when provider is nil", name)
 		}
@@ -106,7 +114,7 @@ func TestConnectionCommandsSnakeCaseAliases(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, &nodeWithConnDiag{}, nil, nil, nil)
 
-	for _, alias := range []string{"get_active_peers", "list_peers", "list_banned"} {
+	for _, alias := range []string{"get_active_peers", "get_active_connections", "list_peers", "list_banned"} {
 		resp := table.Execute(rpc.CommandRequest{Name: alias})
 		if resp.Error != nil {
 			t.Errorf("snake_case alias %q returned error: %v", alias, resp.Error)
@@ -122,7 +130,7 @@ func TestConnectionCommandsEmptyState(t *testing.T) {
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, &nodeWithConnDiag{}, nil, nil, nil)
 
-	for _, cmd := range []string{"getActivePeers", "listPeers", "listBanned"} {
+	for _, cmd := range []string{"getActivePeers", "getActiveConnections", "listPeers", "listBanned"} {
 		resp := table.Execute(rpc.CommandRequest{Name: cmd})
 		if resp.Error != nil {
 			t.Errorf("%s returned error: %v", cmd, resp.Error)

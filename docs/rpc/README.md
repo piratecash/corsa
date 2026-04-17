@@ -9,7 +9,7 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | Group | Commands | File |
 |---|---|---|
 | [System](system.md) | `help`, `ping`, `hello`, `version` | [system.md](system.md) |
-| [Network](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds` | [network.md](network.md) |
+| [Network](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds`, `getActiveConnections` | [network.md](network.md) |
 | [Identity](identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts`, `deleteTrustedContact`, `importContacts` | [identity.md](identity.md) |
 | [Message](message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm`, `sendMessage`, `importMessage`, `sendDeliveryReceipt` | [message.md](message.md) |
 | [File Transfer](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload` | [file.md](file.md) |
@@ -61,7 +61,7 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | Группа | Команды | Файл |
 |---|---|---|
 | [Системные](system.md) | `help`, `ping`, `hello`, `version` | [system.md](system.md) |
-| [Сеть](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds` | [network.md](network.md) |
+| [Сеть](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds`, `getActiveConnections` | [network.md](network.md) |
 | [Идентификация](identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts`, `deleteTrustedContact`, `importContacts` | [identity.md](identity.md) |
 | [Сообщения](message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm`, `sendMessage`, `importMessage`, `sendDeliveryReceipt` | [message.md](message.md) |
 | [Файловый трансфер](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload` | [file.md](file.md) |

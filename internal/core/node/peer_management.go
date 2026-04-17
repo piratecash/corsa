@@ -4161,6 +4161,131 @@ func (s *Service) ListBannedJSON() (json.RawMessage, error) {
 	return json.Marshal(resp)
 }
 
+// ActiveConnectionsJSON returns a JSON-encoded snapshot of all currently
+// live peer connections (both inbound and outbound).
+// Implements rpc.ConnectionDiagnosticProvider.
+func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
+	// Internal domain model for a live connection entry.
+	type activeConnection struct {
+		PeerAddress   domain.PeerAddress
+		RemoteAddress domain.PeerAddress
+		Identity      domain.PeerIdentity
+		Direction     domain.PeerDirection
+		Network       domain.NetGroup
+		State         string
+		ConnID        domain.ConnID
+		SlotState     string
+	}
+
+	// Wire DTO projected at serialization boundary.
+	type activeConnectionJSON struct {
+		PeerAddress   string `json:"peer_address"`
+		RemoteAddress string `json:"remote_address"`
+		Identity      string `json:"identity"`
+		Direction     string `json:"direction"`
+		Network       string `json:"network"`
+		State         string `json:"state"`
+		ConnID        uint64 `json:"conn_id"`
+		SlotState     string `json:"slot_state,omitempty"`
+	}
+
+	type activeConnectionsResponse struct {
+		Version     int                    `json:"version"`
+		Connections []activeConnectionJSON `json:"connections"`
+		Count       int                    `json:"count"`
+	}
+
+	frames := s.peerHealthFrames()
+
+	var connections []activeConnection
+	for _, f := range frames {
+		if !f.Connected {
+			continue
+		}
+		if f.ConnID == 0 {
+			continue
+		}
+
+		state := f.State
+		// Only healthy/degraded/stalled are valid for active connections.
+		// reconnecting means Connected==false in practice, but guard anyway.
+		if state != peerStateHealthy && state != peerStateDegraded && state != peerStateStalled {
+			continue
+		}
+
+		// Filter slot_state: only active and initializing are allowed for
+		// live connections. Other slot states (queued, dialing, retry_wait,
+		// reconnecting) mean no established transport.
+		slotState := f.SlotState
+		if slotState != "" && slotState != "active" && slotState != "initializing" {
+			continue
+		}
+
+		addr := domain.PeerAddress(f.Address)
+		remoteAddr := addr
+		if f.SlotConnectedAddr != "" {
+			remoteAddr = domain.PeerAddress(f.SlotConnectedAddr)
+		}
+
+		dir := domain.PeerDirectionInbound
+		if f.Direction == string(domain.PeerDirectionOutbound) {
+			dir = domain.PeerDirectionOutbound
+		}
+
+		net, _ := domain.ParseNetGroup(f.Network)
+
+		connections = append(connections, activeConnection{
+			PeerAddress:   addr,
+			RemoteAddress: remoteAddr,
+			Identity:      domain.PeerIdentity(f.PeerID),
+			Direction:     dir,
+			Network:       net,
+			State:         state,
+			ConnID:        domain.ConnID(f.ConnID),
+			SlotState:     slotState,
+		})
+	}
+
+	// Deterministic sort: direction (outbound first), then peer_address,
+	// then remote_address, then conn_id.
+	sort.Slice(connections, func(i, j int) bool {
+		di, dj := connections[i].Direction, connections[j].Direction
+		if di != dj {
+			// outbound < inbound
+			return di == domain.PeerDirectionOutbound
+		}
+		if connections[i].PeerAddress != connections[j].PeerAddress {
+			return string(connections[i].PeerAddress) < string(connections[j].PeerAddress)
+		}
+		if connections[i].RemoteAddress != connections[j].RemoteAddress {
+			return string(connections[i].RemoteAddress) < string(connections[j].RemoteAddress)
+		}
+		return connections[i].ConnID < connections[j].ConnID
+	})
+
+	// Project domain model to wire DTO.
+	entries := make([]activeConnectionJSON, len(connections))
+	for i, c := range connections {
+		entries[i] = activeConnectionJSON{
+			PeerAddress:   string(c.PeerAddress),
+			RemoteAddress: string(c.RemoteAddress),
+			Identity:      string(c.Identity),
+			Direction:     c.Direction.String(),
+			Network:       c.Network.String(),
+			State:         c.State,
+			ConnID:        uint64(c.ConnID),
+			SlotState:     c.SlotState,
+		}
+	}
+
+	resp := activeConnectionsResponse{
+		Version:     1,
+		Connections: entries,
+		Count:       len(entries),
+	}
+	return json.Marshal(resp)
+}
+
 func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]struct{}) []domain.PeerAddress {
 	seenIPs := make(map[string]struct{})
 

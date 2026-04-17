@@ -104,6 +104,11 @@ type ConnectionDiagnosticProvider interface {
 	// ListBannedJSON returns a JSON-encoded list of banned IPs:
 	// {"banned_ips": [...], "count": N}
 	ListBannedJSON() (json.RawMessage, error)
+
+	// ActiveConnectionsJSON returns a JSON-encoded snapshot of all
+	// currently live peer connections (both inbound and outbound):
+	// {"version": 1, "connections": [...], "count": N}
+	ActiveConnectionsJSON() (json.RawMessage, error)
 }
 
 // CaptureProvider abstracts access to the traffic capture subsystem.

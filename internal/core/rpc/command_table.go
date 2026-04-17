@@ -317,7 +317,8 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_route_table":       "fetchRouteTable",
 		"fetch_route_summary":     "fetchRouteSummary",
 		"fetch_route_lookup":      "fetchRouteLookup",
-		"get_active_peers":        "getActivePeers",
+		"get_active_peers":               "getActivePeers",
+		"get_active_connections":         "getActiveConnections",
 		"list_peers":                     "listPeers",
 		"list_banned":                    "listBanned",
 		"record_peer_traffic_by_conn_id": "recordPeerTrafficByConnID",
@@ -518,17 +519,20 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	)
 }
 
-// RegisterConnectionCommands registers getActivePeers, listPeers, listBanned.
+// RegisterConnectionCommands registers getActivePeers, getActiveConnections,
+// listPeers, listBanned.
 // When the ConnectionDiagnosticProvider is nil (CM/PP not wired), commands
 // are registered as unavailable — hidden from help/autocomplete and returning
 // 503 on execution.
 func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider) {
 	activePeersInfo := CommandInfo{Name: "getActivePeers", Description: "Get ConnectionManager slot snapshot", Category: "network"}
+	activeConnsInfo := CommandInfo{Name: "getActiveConnections", Description: "Get all live peer connections (inbound + outbound)", Category: "network"}
 	listPeersInfo := CommandInfo{Name: "listPeers", Description: "Get all known peers with exclude reasons", Category: "network"}
 	listBannedInfo := CommandInfo{Name: "listBanned", Description: "Get banned IPs with reasons", Category: "network"}
 
 	if cd == nil {
 		t.RegisterUnavailable(activePeersInfo)
+		t.RegisterUnavailable(activeConnsInfo)
 		t.RegisterUnavailable(listPeersInfo)
 		t.RegisterUnavailable(listBannedInfo)
 		return
@@ -539,6 +543,16 @@ func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider
 			data, err := cd.ActivePeersJSON()
 			if err != nil {
 				return internalError(fmt.Errorf("active peers: %w", err))
+			}
+			return CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(activeConnsInfo,
+		func(req CommandRequest) CommandResponse {
+			data, err := cd.ActiveConnectionsJSON()
+			if err != nil {
+				return internalError(fmt.Errorf("active connections: %w", err))
 			}
 			return CommandResponse{Data: data}
 		},
