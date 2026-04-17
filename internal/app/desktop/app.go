@@ -58,20 +58,33 @@ func Run() error {
 	rpc.RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector)
 	rpc.RegisterDesktopOverrides(cmdTable, client, nodeService)
 
-	// Start HTTP RPC server for external access (corsa-cli, third-party tools)
-	rpcServer, err := rpc.NewServer(cfg.RPC, cmdTable, nodeService)
-	if err != nil {
-		log.Fatal().Err(err).Msg("rpc server config invalid")
+	// Fail-fast on partial RPC auth (only username or only password set).
+	if err := cfg.RPC.ValidateAuth(); err != nil {
+		log.Fatal().Err(err).Msg("rpc config invalid")
 	}
 
-	if err := rpcServer.StartAsync(); err != nil {
-		log.Error().Err(err).Msg("rpc server failed to start")
-	}
-	defer func() {
-		if err := rpcServer.Shutdown(); err != nil {
-			log.Error().Err(err).Msg("rpc server shutdown failed")
+	// Start HTTP RPC server for external access (corsa-cli, third-party tools).
+	// RPC is only started when authentication credentials are configured
+	// (CORSA_RPC_USERNAME + CORSA_RPC_PASSWORD). Without auth, the server
+	// is not created — prevents port conflicts when running multiple
+	// instances and avoids exposing an unauthenticated control plane.
+	if cfg.RPC.AuthEnabled() {
+		rpcServer, err := rpc.NewServer(cfg.RPC, cmdTable, nodeService)
+		if err != nil {
+			log.Fatal().Err(err).Msg("rpc server config invalid")
 		}
-	}()
+
+		if err := rpcServer.StartAsync(); err != nil {
+			log.Error().Err(err).Msg("rpc server failed to start")
+		}
+		defer func() {
+			if err := rpcServer.Shutdown(); err != nil {
+				log.Error().Err(err).Msg("rpc server shutdown failed")
+			}
+		}()
+	} else {
+		log.Info().Msg("rpc server disabled: CORSA_RPC_USERNAME and CORSA_RPC_PASSWORD not set")
+	}
 
 	// Desktop UI gets CommandTable directly — no HTTP round-trip needed.
 	window := NewWindow(client, router, cmdTable, runtime, prefs)
