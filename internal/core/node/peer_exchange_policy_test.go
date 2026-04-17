@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -85,11 +86,13 @@ func TestShouldRequestPeers_Healthy(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.3:1000", Connected: true, State: peerStateDegraded, LastUsefulReceiveAt: now.Add(-heartbeatInterval - time.Second)},
-	})
+	// Need >= 8 (DefaultOutgoingPeers) usable peers for Healthy.
+	entries := make([]*peerHealth, 8)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 	svc.refreshAggregateStatusLocked()
 
 	if svc.aggregateStatus.Status != domain.NetworkStatusHealthy {
@@ -107,10 +110,13 @@ func TestShouldRequestPeers_TransitionHealthyToLimited(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-	})
+	// Start with 8 healthy peers to reach Healthy.
+	entries := make([]*peerHealth, 8)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 	svc.refreshAggregateStatusLocked()
 
 	// Precondition: healthy — policy forbids get_peers.
@@ -118,9 +124,12 @@ func TestShouldRequestPeers_TransitionHealthyToLimited(t *testing.T) {
 		t.Fatal("expected shouldRequestPeers=false in healthy state")
 	}
 
-	// Simulate losing one peer: limited (only 1 usable).
-	svc.health[domain.PeerAddress("10.0.0.2:1000")].Connected = false
-	svc.health[domain.PeerAddress("10.0.0.2:1000")].State = peerStateReconnecting
+	// Disconnect 7 peers → 1 usable → Limited.
+	for i := 1; i < 8; i++ {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		svc.health[addr].Connected = false
+		svc.health[addr].State = peerStateReconnecting
+	}
 	svc.refreshAggregateStatusLocked()
 
 	if svc.aggregateStatus.Status != domain.NetworkStatusLimited {
@@ -167,12 +176,14 @@ func TestShouldRequestPeers_PeersJsonDoesNotOverrideNodeState(t *testing.T) {
 
 	now := time.Now().UTC()
 
-	// Healthy with only 2 peers — even though peer set is small,
-	// aggregate status is healthy, so policy says skip.
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-	})
+	// Healthy with 8 usable peers (= target) — aggregate is healthy,
+	// so policy says skip.
+	entries := make([]*peerHealth, 8)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 	svc.refreshAggregateStatusLocked()
 
 	if svc.shouldRequestPeers() {
@@ -184,48 +195,49 @@ func TestShouldRequestPeers_PeersJsonDoesNotOverrideNodeState(t *testing.T) {
 // the policy BEFORE registering a new peer (markPeerConnected) produces the
 // same result in both session-based call paths.
 //
-// Scenario: node has 1 usable peer (aggregate=limited). A second peer
-// connects. If we evaluate shouldRequestPeers() before markPeerConnected,
-// the snapshot still shows limited → get_peers allowed (true).
-// If we evaluated after markPeerConnected, the snapshot would show
-// healthy → get_peers skipped (false). This test confirms the "before"
-// behavior, which is the normalized contract for both call sites.
+// Scenario: node has 7 usable peers (aggregate=warning, below target 8). An
+// 8th peer connects. Before markPeerConnected the snapshot still shows
+// warning → get_peers allowed (true). After markPeerConnected the snapshot
+// shows healthy → get_peers skipped (false).
 func TestShouldRequestPeers_SnapshotBeforeRegistration(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-	})
+	// 7 usable peers → warning (below target 8).
+	entries := make([]*peerHealth, 7)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 	svc.refreshAggregateStatusLocked()
 
-	// Precondition: 1 usable peer → limited.
-	if svc.aggregateStatus.Status != domain.NetworkStatusLimited {
-		t.Fatalf("precondition: expected limited, got %s", svc.aggregateStatus.Status)
+	// Precondition: 7 usable peers → warning (target/2 ≤ 7 < target).
+	if svc.aggregateStatus.Status != domain.NetworkStatusWarning {
+		t.Fatalf("precondition: expected warning, got %s", svc.aggregateStatus.Status)
 	}
 
-	// Snapshot taken BEFORE registering the second peer — both call paths
-	// do this now, so aggregate still shows limited.
+	// Snapshot taken BEFORE registering the 8th peer — aggregate shows warning.
 	if !svc.shouldRequestPeers() {
-		t.Fatal("expected shouldRequestPeers=true before second peer registration (limited)")
+		t.Fatal("expected shouldRequestPeers=true before 8th peer registration (warning)")
 	}
 
-	// Now simulate what markPeerConnected does for the second peer.
-	svc.health[domain.PeerAddress("10.0.0.2:1000")] = &peerHealth{
-		Address:             "10.0.0.2:1000",
+	// Now simulate what markPeerConnected does for the 8th peer.
+	svc.health[domain.PeerAddress("10.0.0.8:1000")] = &peerHealth{
+		Address:             "10.0.0.8:1000",
 		Connected:           true,
 		State:               peerStateHealthy,
 		LastUsefulReceiveAt: now,
 	}
-	svc.pending[domain.PeerAddress("10.0.0.2:1000")] = nil
+	svc.pending[domain.PeerAddress("10.0.0.8:1000")] = nil
 	svc.refreshAggregateStatusLocked()
 
-	// After registration: 2 usable peers → healthy → policy says skip.
+	// After registration: 8 usable peers == target → healthy → policy says skip.
 	if svc.aggregateStatus.Status != domain.NetworkStatusHealthy {
 		t.Fatalf("after registration: expected healthy, got %s", svc.aggregateStatus.Status)
 	}
 	if svc.shouldRequestPeers() {
-		t.Fatal("expected shouldRequestPeers=false after second peer registration (healthy)")
+		t.Fatal("expected shouldRequestPeers=false after 8th peer registration (healthy)")
 	}
 }
 

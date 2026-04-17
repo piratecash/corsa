@@ -115,6 +115,15 @@ const (
 	reconnectBackoffBase = 2 * time.Second
 	reconnectBackoffMax  = 10 * time.Second
 	hintEventBuffer      = 8
+
+	// periodicFillInterval controls how often the event loop re-runs
+	// fill() regardless of incoming events. Without this, the CM is
+	// purely reactive: if bootstrap fill() finds 0 eligible candidates
+	// (all in cooldown) and no slot/hint events arrive, the node sits
+	// at whatever connection count it has indefinitely. The ticker
+	// ensures newly-eligible peers (cooldown expired, ban expired) are
+	// picked up within this window.
+	periodicFillInterval = 30 * time.Second
 )
 
 // slotEventBuffer returns the buffer size for slotEvents channel.
@@ -188,6 +197,10 @@ type ConnectionManagerConfig struct {
 
 	// NowFn returns current time. Injected for testability.
 	NowFn func() time.Time
+
+	// FillInterval overrides periodicFillInterval for testing.
+	// When zero, the default periodicFillInterval is used.
+	FillInterval time.Duration
 }
 
 // ConnectionManager manages the lifecycle of outbound connection slots.
@@ -431,6 +444,19 @@ func (cm *ConnectionManager) Run(ctx context.Context) {
 	// channel doesn't wake every select iteration.
 	bootstrapSel := cm.bootstrapCh
 
+	// Periodic fill ticker: ensures newly-eligible peers (cooldown
+	// expired, ban expired) are picked up even when no events arrive.
+	// Without this, the CM is purely reactive and can get stuck at
+	// zero outbound slots if all candidates are in cooldown at startup.
+	// Only active after bootstrap completes — pre-bootstrap fills are
+	// suppressed because the peer list is not yet loaded.
+	fillInterval := cm.config.FillInterval
+	if fillInterval == 0 {
+		fillInterval = periodicFillInterval
+	}
+	fillTicker := time.NewTicker(fillInterval)
+	defer fillTicker.Stop()
+
 	for {
 		// Phase 1: drain all pending slot events (priority).
 		select {
@@ -440,7 +466,7 @@ func (cm *ConnectionManager) Run(ctx context.Context) {
 		default:
 		}
 
-		// Phase 2: slot events, hint events, bootstrap, or shutdown.
+		// Phase 2: slot events, hint events, bootstrap, periodic fill, or shutdown.
 		select {
 		case ev := <-cm.slotEvents:
 			cm.handleSlotEvent(ctx, ev)
@@ -450,6 +476,10 @@ func (cm *ConnectionManager) Run(ctx context.Context) {
 			cm.bootstrapped = true
 			bootstrapSel = nil // stop re-selecting on closed channel
 			cm.fill(ctx)
+		case <-fillTicker.C:
+			if cm.bootstrapped {
+				cm.fill(ctx)
+			}
 		case <-ctx.Done():
 			cm.shutdown()
 			return

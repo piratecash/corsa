@@ -1820,3 +1820,108 @@ func TestCM_SessionInitReady_StaleGeneration(t *testing.T) {
 		t.Fatalf("slot state = %q, want 'initializing' (stale gen should be ignored)", slots[0].State)
 	}
 }
+
+// TestCM_PeriodicFill_RetriesAfterCooldownExpiry verifies that the periodic
+// fill ticker picks up peers whose cooldown has expired, even when no other
+// events arrive. Without the periodic ticker, the CM is purely reactive:
+// if bootstrap fill() finds 0 eligible candidates (all in cooldown), no
+// slots are created, no slot events fire, and fill() is never called again.
+func TestCM_PeriodicFill_RetriesAfterCooldownExpiry(t *testing.T) {
+	t.Parallel()
+
+	b := testCMConfig("10.0.0.1:64646", "10.0.0.2:64646")
+
+	// Put both peers in cooldown: ConsecutiveFailures = 5, disconnected
+	// 1 minute ago. With the fixed NowFn (2026-04-11 12:00:00), cooldown
+	// = peerCooldownDuration(4) = 30s * 2^3 = 240s. Time since disconnect
+	// = 60s < 240s → in cooldown.
+	nowFixed := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+	b.health["10.0.0.1:64646"] = &PeerHealthView{
+		ConsecutiveFailures: 5,
+		LastDisconnectedAt:  nowFixed.Add(-1 * time.Minute),
+		Score:               -25,
+	}
+	b.health["10.0.0.2:64646"] = &PeerHealthView{
+		ConsecutiveFailures: 5,
+		LastDisconnectedAt:  nowFixed.Add(-1 * time.Minute),
+		Score:               -25,
+	}
+
+	// Fast periodic fill for testing.
+	b.Cfg.FillInterval = 50 * time.Millisecond
+
+	cm := b.Build()
+	cancel := runCM(cm)
+	defer cancel()
+
+	// Trigger bootstrap.
+	cm.NotifyBootstrapReady()
+	time.Sleep(30 * time.Millisecond)
+
+	// After bootstrap, 0 slots should be created (all in cooldown).
+	if count := cm.ActiveCount(); count != 0 {
+		t.Fatalf("expected 0 active slots after bootstrap (all in cooldown), got %d", count)
+	}
+	if len(cm.Slots()) != 0 {
+		t.Fatalf("expected 0 slots after bootstrap, got %d", len(cm.Slots()))
+	}
+
+	// Simulate cooldown expiry: clear the health failures so the peers
+	// become eligible on the next fill() call.
+	b.mu.Lock()
+	b.health["10.0.0.1:64646"] = &PeerHealthView{
+		ConsecutiveFailures: 0,
+		Score:               0,
+	}
+	b.health["10.0.0.2:64646"] = &PeerHealthView{
+		ConsecutiveFailures: 0,
+		Score:               0,
+	}
+	b.mu.Unlock()
+
+	// Wait for periodic fill ticker to fire and create slots.
+	waitFor(t, 2*time.Second, "periodic fill creates slots after cooldown expiry", func() bool {
+		return len(cm.Slots()) > 0
+	})
+
+	slots := cm.Slots()
+	if len(slots) < 1 {
+		t.Fatalf("periodic fill should have created slots, got %d", len(slots))
+	}
+}
+
+// TestCM_PeriodicFill_SuppressedBeforeBootstrap verifies that the periodic
+// fill ticker does not call fill() before bootstrap completes. This ensures
+// the peer list is fully loaded before any dial attempts begin.
+func TestCM_PeriodicFill_SuppressedBeforeBootstrap(t *testing.T) {
+	t.Parallel()
+
+	b := testCMConfig("10.0.0.1:64646")
+	b.Cfg.FillInterval = 20 * time.Millisecond
+
+	dialCalled := make(chan struct{}, 10)
+	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
+		dialCalled <- struct{}{}
+		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
+	}
+
+	cm := b.Build()
+	cancel := runCM(cm)
+	defer cancel()
+
+	// Do NOT call NotifyBootstrapReady. Wait for several periodic ticks.
+	time.Sleep(150 * time.Millisecond)
+
+	// No slots should exist — fill() is suppressed before bootstrap.
+	if len(cm.Slots()) != 0 {
+		t.Fatalf("expected 0 slots before bootstrap, got %d", len(cm.Slots()))
+	}
+
+	select {
+	case <-dialCalled:
+		t.Fatal("dial should not be called before bootstrap")
+	default:
+		// expected: no dial
+	}
+}

@@ -3638,7 +3638,10 @@ func TestPromotePeerAddressDoesNotClearIPWideBanForAlternatePort(t *testing.T) {
 	primary := domain.PeerAddress("10.0.0.99:64646")
 	alternate := domain.PeerAddress("10.0.0.99:7777")
 	svc.addPeerAddress(primary, "full", "peer-99")
-	svc.penalizeOldProtocolPeer(primary)
+	// Simulate 4 incompatible-version attempts to trigger the timed ban.
+	for i := 0; i < 4; i++ {
+		svc.penalizeOldProtocolPeer(primary, 0, 0)
+	}
 
 	svc.promotePeerAddress(alternate)
 
@@ -3849,6 +3852,106 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 		if p.Address == "10.0.0.1:64646" {
 			t.Fatal("perpetually-failing peer should be evicted (AddedAt > 24h, never connected)")
 		}
+	}
+}
+
+// TestEvictStalePeers_ProtectsActiveVersionLockout verifies that a peer with
+// an active VersionLockout in persistedMeta is never evicted, even when its
+// score is far below the eviction threshold and it has been stale for longer
+// than the eviction window. Without this guard, evictStalePeers would delete
+// s.health, s.persistedMeta (including the VersionLockout), and s.peerVersions,
+// making the peer dialable again immediately — defeating the lockout.
+func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             domain.NodeTypeFull,
+	})
+	defer stop()
+
+	lockedAddr := domain.PeerAddress("10.0.0.1:64646")
+	normalAddr := domain.PeerAddress("10.0.0.2:64646")
+
+	svc.addPeerAddress(lockedAddr, "full", "peer-locked")
+	svc.addPeerAddress(normalAddr, "full", "peer-normal")
+
+	now := time.Now()
+	staleTime := now.Add(-48 * time.Hour)
+
+	svc.mu.Lock()
+
+	// Locked peer: terrible score, stale, but has an active VersionLockout.
+	svc.health[lockedAddr] = &peerHealth{
+		Address:             lockedAddr,
+		Score:               peerScoreMin, // -50, well below eviction threshold
+		ConsecutiveFailures: 20,
+		LastConnectedAt:     staleTime,
+		LastDisconnectedAt:  staleTime.Add(time.Minute),
+	}
+	if pm := svc.persistedMeta[lockedAddr]; pm != nil {
+		pm.VersionLockout = domain.VersionLockoutSnapshot{
+			ObservedProtocolVersion:        12,
+			ObservedMinimumProtocolVersion: 10,
+			LockedAtLocalVersion: domain.LocalVersionFingerprint{
+				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
+				ClientBuild:     config.ClientBuild,
+			},
+			Reason:   domain.VersionLockoutReasonIncompatible,
+			LockedAt: now.Add(-1 * time.Hour),
+		}
+	}
+
+	// Normal peer: same terrible score, same staleness, but no lockout.
+	svc.health[normalAddr] = &peerHealth{
+		Address:             normalAddr,
+		Score:               peerScoreMin,
+		ConsecutiveFailures: 20,
+		LastConnectedAt:     staleTime,
+		LastDisconnectedAt:  staleTime.Add(time.Minute),
+	}
+
+	svc.lastPeerEvict = time.Time{} // allow immediate eviction
+	svc.mu.Unlock()
+
+	svc.evictStalePeers()
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+
+	// Locked peer must survive.
+	foundLocked := false
+	foundNormal := false
+	for _, p := range svc.peers {
+		if p.Address == lockedAddr {
+			foundLocked = true
+		}
+		if p.Address == normalAddr {
+			foundNormal = true
+		}
+	}
+	if !foundLocked {
+		t.Fatal("peer with active VersionLockout must not be evicted")
+	}
+	if foundNormal {
+		t.Fatal("normal stale peer without lockout should have been evicted")
+	}
+
+	// Verify that the lockout data in persistedMeta survived.
+	pm := svc.persistedMeta[lockedAddr]
+	if pm == nil {
+		t.Fatal("persistedMeta for locked peer must survive eviction")
+	}
+	if !pm.VersionLockout.IsActive() {
+		t.Fatal("VersionLockout must remain active after eviction sweep")
+	}
+
+	// Verify that health entry survived.
+	if svc.health[lockedAddr] == nil {
+		t.Fatal("health entry for locked peer must survive eviction")
 	}
 }
 

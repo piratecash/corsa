@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -129,15 +130,59 @@ func TestComputeAggregateStatusLocked_Healthy(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.3:1000", Connected: true, State: peerStateDegraded, LastUsefulReceiveAt: now.Add(-heartbeatInterval - time.Second)},
-	})
+	// DefaultOutgoingPeers = 8, so we need >= 8 usable peers for Healthy.
+	entries := make([]*peerHealth, 8)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 	snap := svc.computeAggregateStatusLocked(now)
 
 	if snap.Status != domain.NetworkStatusHealthy {
 		t.Fatalf("expected healthy, got %s", snap.Status)
+	}
+	if snap.UsablePeers != 8 {
+		t.Fatalf("expected 8 usable peers, got %d", snap.UsablePeers)
+	}
+}
+
+func TestComputeAggregateStatusLocked_WarningBelowTarget(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	// 5 usable out of target 8: >= target/2 (4) but < target (8) → Warning.
+	entries := make([]*peerHealth, 5)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
+	snap := svc.computeAggregateStatusLocked(now)
+
+	if snap.Status != domain.NetworkStatusWarning {
+		t.Fatalf("expected warning, got %s", snap.Status)
+	}
+	if snap.UsablePeers != 5 {
+		t.Fatalf("expected 5 usable peers, got %d", snap.UsablePeers)
+	}
+}
+
+func TestComputeAggregateStatusLocked_LimitedBelowHalfTarget(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	// 3 usable out of target 8: >= 2 but < target/2 (4) → Limited.
+	entries := make([]*peerHealth, 3)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
+	snap := svc.computeAggregateStatusLocked(now)
+
+	if snap.Status != domain.NetworkStatusLimited {
+		t.Fatalf("expected limited, got %s", snap.Status)
 	}
 	if snap.UsablePeers != 3 {
 		t.Fatalf("expected 3 usable peers, got %d", snap.UsablePeers)
@@ -208,33 +253,53 @@ func TestRefreshAggregateStatusLocked_TransitionsCorrectly(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-	})
+	// Use 8 peers to hit Healthy with default target = 8.
+	entries := make([]*peerHealth, 8)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 
 	// Initial state is offline (set in constructor).
 	if svc.aggregateStatus.Status != domain.NetworkStatusOffline {
 		t.Fatalf("expected initial offline, got %s", svc.aggregateStatus.Status)
 	}
 
-	// Refresh should transition to healthy.
+	// Refresh should transition to healthy (8 usable == target).
 	svc.refreshAggregateStatusLocked()
 	if svc.aggregateStatus.Status != domain.NetworkStatusHealthy {
 		t.Fatalf("expected healthy after refresh, got %s", svc.aggregateStatus.Status)
 	}
 
-	// Disconnect one peer, should transition to limited.
-	svc.health[domain.PeerAddress("10.0.0.2:1000")].Connected = false
-	svc.health[domain.PeerAddress("10.0.0.2:1000")].State = peerStateReconnecting
+	// Disconnect peers until below target → warning (5 usable < 8 target).
+	for i := 5; i < 8; i++ {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		svc.health[addr].Connected = false
+		svc.health[addr].State = peerStateReconnecting
+	}
 	svc.refreshAggregateStatusLocked()
-	if svc.aggregateStatus.Status != domain.NetworkStatusLimited {
-		t.Fatalf("expected limited after disconnect, got %s", svc.aggregateStatus.Status)
+	if svc.aggregateStatus.Status != domain.NetworkStatusWarning {
+		t.Fatalf("expected warning after partial disconnect, got %s", svc.aggregateStatus.Status)
 	}
 
-	// Disconnect all peers, should transition to reconnecting.
-	svc.health[domain.PeerAddress("10.0.0.1:1000")].Connected = false
-	svc.health[domain.PeerAddress("10.0.0.1:1000")].State = peerStateReconnecting
+	// Disconnect more until below target/2 → limited (2 usable < 4 half-target).
+	for i := 2; i < 5; i++ {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		svc.health[addr].Connected = false
+		svc.health[addr].State = peerStateReconnecting
+	}
+	svc.refreshAggregateStatusLocked()
+	if svc.aggregateStatus.Status != domain.NetworkStatusLimited {
+		t.Fatalf("expected limited after more disconnects, got %s", svc.aggregateStatus.Status)
+	}
+
+	// Disconnect all peers → reconnecting.
+	for i := 0; i < 2; i++ {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		svc.health[addr].Connected = false
+		svc.health[addr].State = peerStateReconnecting
+	}
 	svc.refreshAggregateStatusLocked()
 	if svc.aggregateStatus.Status != domain.NetworkStatusReconnecting {
 		t.Fatalf("expected reconnecting after all disconnect, got %s", svc.aggregateStatus.Status)
@@ -245,10 +310,13 @@ func TestAggregateStatus_ConcurrentSafe(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-	})
+	// Use 8 peers to reach Healthy with default target.
+	entries := make([]*peerHealth, 8)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 	svc.refreshAggregateStatusLocked()
 
 	// AggregateStatus() takes RLock, should not deadlock.
@@ -282,11 +350,14 @@ func TestAggregateStatusFrame_ReturnsCorrectFrame(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.3:1000", Connected: false, State: peerStateReconnecting},
-	})
+	// 8 usable + 1 reconnecting = healthy with default target 8.
+	entries := make([]*peerHealth, 9)
+	for i := 0; i < 8; i++ {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	entries[8] = &peerHealth{Address: "10.0.0.9:1000", Connected: false, State: peerStateReconnecting}
+	svc := newTestServiceWithHealth(entries)
 	svc.refreshAggregateStatusLocked()
 
 	frame := svc.aggregateStatusFrame()
@@ -300,14 +371,14 @@ func TestAggregateStatusFrame_ReturnsCorrectFrame(t *testing.T) {
 	if frame.AggregateStatus.Status != "healthy" {
 		t.Fatalf("expected status healthy, got %s", frame.AggregateStatus.Status)
 	}
-	if frame.AggregateStatus.UsablePeers != 2 {
-		t.Fatalf("expected 2 usable peers, got %d", frame.AggregateStatus.UsablePeers)
+	if frame.AggregateStatus.UsablePeers != 8 {
+		t.Fatalf("expected 8 usable peers, got %d", frame.AggregateStatus.UsablePeers)
 	}
-	if frame.AggregateStatus.ConnectedPeers != 2 {
-		t.Fatalf("expected 2 connected peers, got %d", frame.AggregateStatus.ConnectedPeers)
+	if frame.AggregateStatus.ConnectedPeers != 8 {
+		t.Fatalf("expected 8 connected peers, got %d", frame.AggregateStatus.ConnectedPeers)
 	}
-	if frame.AggregateStatus.TotalPeers != 3 {
-		t.Fatalf("expected 3 total peers, got %d", frame.AggregateStatus.TotalPeers)
+	if frame.AggregateStatus.TotalPeers != 9 {
+		t.Fatalf("expected 9 total peers, got %d", frame.AggregateStatus.TotalPeers)
 	}
 }
 
@@ -315,10 +386,13 @@ func TestHandleLocalFrame_FetchAggregateStatus(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-		{Address: "10.0.0.2:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-	})
+	// 8 usable peers to reach Healthy with default target.
+	entries := make([]*peerHealth, 8)
+	for i := range entries {
+		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:1000", i+1))
+		entries[i] = &peerHealth{Address: addr, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
+	}
+	svc := newTestServiceWithHealth(entries)
 	svc.refreshAggregateStatusLocked()
 
 	reply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_aggregate_status"})

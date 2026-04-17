@@ -18,7 +18,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/rpc"
@@ -2597,7 +2596,7 @@ func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
-	if !w.hasNewerPeerBuild() {
+	if !w.nodeUpdateAvailable() {
 		return layout.Dimensions{}
 	}
 	btn := material.Button(w.theme, &w.updateButton, w.t("header.update"))
@@ -2606,36 +2605,14 @@ func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
 	return btn.Layout(gtx)
 }
 
-// hasNewerPeerBuild returns true when at least 2 distinct peer identities
-// report a ClientBuild higher than ours. A single peer is not enough
-// because someone could build a custom version with an inflated build
-// number to trigger false upgrade prompts across the network.
-// Deduplication uses PeerID (the peer's mesh identity) so that the same
-// node appearing under multiple addresses counts only once.
-func (w *Window) hasNewerPeerBuild() bool {
-	myBuild := config.ClientBuild
-	seen := make(map[string]struct{})
-	count := 0
-	for _, ph := range w.snap.NodeStatus.PeerHealth {
-		if ph.ClientBuild <= myBuild {
-			continue
-		}
-		// Deduplicate by peer identity. Fall back to Address when the
-		// identity is not yet known (pre-handshake health entries).
-		key := ph.PeerID
-		if key == "" {
-			key = ph.Address
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		count++
-		if count >= 2 {
-			return true
-		}
+// nodeUpdateAvailable returns the node-computed update_available signal.
+// The policy decision (which peers reported, how many, threshold) lives
+// in the node layer — Desktop only renders the pre-computed result.
+func (w *Window) nodeUpdateAvailable() bool {
+	if w.snap.NodeStatus.AggregateStatus == nil {
+		return false
 	}
-	return false
+	return w.snap.NodeStatus.AggregateStatus.UpdateAvailable
 }
 
 func openBrowser(url string) {

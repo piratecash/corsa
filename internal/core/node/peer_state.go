@@ -23,6 +23,23 @@ type peerEntry struct {
 	AddedAt             *time.Time         `json:"added_at,omitempty"`     // first time this address was seen
 	Score               int                `json:"score"`                  // higher = better; decays on failure, grows on success
 	BannedUntil         *time.Time         `json:"banned_until,omitempty"` // peer is not dialled until this time expires
+
+	// Machine-readable version diagnostics — persisted so the operator-visible
+	// peerHealthFrames() snapshot retains the exact evidence that created a
+	// lockout across restarts. Without persistence these fields reset to zero
+	// while the lockout itself survives, creating an information gap.
+	LastErrorCode              string                 `json:"last_error_code,omitempty"`
+	LastDisconnectCode         string                 `json:"last_disconnect_code,omitempty"`
+	IncompatibleVersionAttempts domain.AttemptCount    `json:"incompatible_version_attempts,omitempty"`
+	LastIncompatibleVersionAt  *time.Time             `json:"last_incompatible_version_at,omitempty"`
+	ObservedPeerVersion        domain.ProtocolVersion `json:"observed_peer_version,omitempty"`
+	ObservedPeerMinimumVersion domain.ProtocolVersion `json:"observed_peer_minimum_version,omitempty"`
+
+	// Version lockout: persisted context from a confirmed incompatible-version
+	// rejection. When active, this peer is excluded from dial candidates until
+	// the local version changes. Cleared on startup when LocalVersionFingerprint
+	// differs from the running node (protocol version or client build increased).
+	VersionLockout domain.VersionLockoutSnapshot `json:"version_lockout,omitempty"`
 }
 
 // bannedIPEntry is the on-disk representation of an IP-wide ban.
@@ -49,8 +66,10 @@ const (
 	peerScoreConnect     = 10             // awarded on successful TCP handshake
 	peerScoreDisconnect  = -2             // applied on clean disconnect
 	peerScoreFailure     = -5             // applied on dial/protocol failure
-	peerScoreOldProtocol = -50            // applied when peer protocol version is too old; pushes to bottom of dial list
-	peerBanIncompatible  = 24 * time.Hour // ban duration for peers with incompatible protocol version
+	peerScoreOldProtocol           = -50            // applied when peer protocol version is too old; pushes to bottom of dial list
+	peerBanIncompatible            = 24 * time.Hour // ban duration for peers with incompatible protocol version
+	peerBanIncrementIncompatible   = 250            // overlay-level penalty per incompatible-version attempt
+	peerBanThresholdIncompatible   = 1000           // overlay penalty sum that triggers the timed ban
 	peerScoreMax         = 100
 	peerScoreMin         = -50
 	maxPersistedPeers    = 500
@@ -163,9 +182,39 @@ func peerTime(t *time.Time) time.Time {
 	return *t
 }
 
+// trimPeerEntries caps the persisted peer list at maxPersistedPeers.
+// Entries with an active VersionLockout are always retained regardless
+// of score — without this, a low-scoring locked-out peer would be
+// discarded by the top-N trim and become dialable again after restart,
+// defeating the purpose of the lockout. The remaining budget is filled
+// with the highest-scored non-lockout entries (already sorted by
+// sortPeerEntries). This mirrors the separate persistence bucket for
+// IP-wide bans (bannedIPs section in peerStateFile).
 func trimPeerEntries(entries []peerEntry) []peerEntry {
 	if len(entries) <= maxPersistedPeers {
 		return entries
 	}
-	return entries[:maxPersistedPeers]
+
+	// Partition: locked-out entries are always kept.
+	var locked, rest []peerEntry
+	for _, e := range entries {
+		if e.VersionLockout.IsActive() {
+			locked = append(locked, e)
+		} else {
+			rest = append(rest, e)
+		}
+	}
+
+	// If locked entries alone exceed the budget, keep all of them
+	// (this is an extreme edge case — it would require 500+ distinct
+	// incompatible peers, which is operationally implausible).
+	budget := maxPersistedPeers - len(locked)
+	if budget <= 0 {
+		return locked
+	}
+
+	if len(rest) > budget {
+		rest = rest[:budget]
+	}
+	return append(locked, rest...)
 }

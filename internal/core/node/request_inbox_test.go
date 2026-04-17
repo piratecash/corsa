@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -409,15 +410,32 @@ func TestPushDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 // relay_delivery_receipt identity binding tests
 // ---------------------------------------------------------------------------
 
-// TestRelayDeliveryReceiptRejectsUnrelatedRecipient verifies that
-// handleInboundRelayDeliveryReceipt drops a relay receipt whose Recipient
-// does not match the local identity and has no active subscriber.
-func TestRelayDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
+// TestRelayDeliveryReceiptGossipsFallbackForUnrelatedRecipient verifies that
+// handleInboundRelayDeliveryReceipt falls back to gossip for a receipt whose
+// Recipient does not match the local identity, has no active subscriber, and
+// has no relay forwarding state. The receipt is not stored locally but is
+// broadcast via gossipReceipt to routing targets — consistent with the
+// relay contract in retryRelayDeliveries.
+func TestRelayDeliveryReceiptGossipsFallbackForUnrelatedRecipient(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{}
 	svc.initMaps()
 	svc.identity = &identity.Identity{Address: "local-identity-aaa"}
+
+	// Seed a gossip target peer so routingTargetsForRecipient returns
+	// a non-empty list and gossipReceipt has somewhere to send.
+	gossipTarget := domain.PeerAddress("gossip-target-peer:64646")
+	svc.sessions[gossipTarget] = &peerSession{
+		address:      gossipTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	svc.health[gossipTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
 
 	conn, _ := net.Pipe()
 	defer func() { _ = conn.Close() }()
@@ -431,11 +449,749 @@ func TestRelayDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	})
 
+	// Receipt must NOT be stored locally.
 	svc.mu.RLock()
 	count := len(svc.receipts["foreign-recipient"])
+	banCount := len(svc.bans)
 	svc.mu.RUnlock()
 	if count != 0 {
 		t.Fatalf("relay receipt with unrelated Recipient should not be stored, got %d", count)
+	}
+	// No ban scoring — transit receipts are legitimate traffic, not abuse.
+	if banCount != 0 {
+		t.Fatalf("transit receipt must not populate blacklist, got %d ban entries", banCount)
+	}
+
+	// Verify that gossipReceipt actually forwarded the receipt to the
+	// routing target. gossipReceipt runs in a goroutine and spawns
+	// another goroutine per target, so use a short deadline.
+	select {
+	case gossipped := <-svc.sessions[gossipTarget].sendCh:
+		if gossipped.Type != "relay_delivery_receipt" {
+			t.Fatalf("gossipped frame type = %q, want relay_delivery_receipt", gossipped.Type)
+		}
+		if gossipped.ID != "msg-relay-1" {
+			t.Fatalf("gossipped frame ID = %q, want msg-relay-1", gossipped.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("gossip fallback did not deliver receipt to routing target within timeout")
+	}
+}
+
+// TestRelayDeliveryReceiptForwardsTransitReceipt verifies that
+// handleInboundRelayDeliveryReceipt forwards a non-local receipt
+// along the relay chain when relay forwarding state exists for the
+// message ID. The receipt must not be stored locally and must not
+// trigger ban scoring.
+func TestRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "transit-node-aaa"}
+
+	// Seed relay state: receipt for "msg-transit-1" should be forwarded
+	// to "original-sender-bbb".
+	forwardTarget := domain.PeerAddress("original-sender-bbb")
+	svc.relayStates.states["msg-transit-1"] = &relayForwardState{
+		MessageID:        "msg-transit-1",
+		ReceiptForwardTo: forwardTarget,
+		RemainingTTL:     5,
+	}
+
+	// Create a session for the forward target with mesh_relay_v1
+	// capability and a buffered sendCh so enqueuePeerFrame succeeds.
+	svc.sessions[forwardTarget] = &peerSession{
+		address:      forwardTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 1),
+		authOK:       true,
+	}
+	// activePeerSession requires Connected health with a recent pong
+	// to avoid peerStateStalled — seed a minimal health entry.
+	svc.health[forwardTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-transit-1",
+		Address:     "some-sender",
+		Recipient:   "remote-recipient-ccc",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Receipt must NOT be stored locally — this node is only a transit hop.
+	svc.mu.RLock()
+	localCount := len(svc.receipts["remote-recipient-ccc"])
+	transitBanCount := len(svc.bans)
+	svc.mu.RUnlock()
+	if localCount != 0 {
+		t.Fatalf("transit receipt should not be stored locally, got %d", localCount)
+	}
+	// No ban scoring — forwarded transit receipts are legitimate traffic.
+	if transitBanCount != 0 {
+		t.Fatalf("transit forwarding must not populate blacklist, got %d ban entries", transitBanCount)
+	}
+
+	// Verify the receipt was forwarded via the session sendCh.
+	select {
+	case forwarded := <-svc.sessions[forwardTarget].sendCh:
+		if forwarded.Type != "relay_delivery_receipt" {
+			t.Fatalf("forwarded frame type = %q, want relay_delivery_receipt", forwarded.Type)
+		}
+		if forwarded.ID != "msg-transit-1" {
+			t.Fatalf("forwarded frame ID = %q, want msg-transit-1", forwarded.ID)
+		}
+	default:
+		t.Fatal("receipt was not forwarded to the relay chain target")
+	}
+}
+
+// TestSessionRelayDeliveryReceiptForwardsTransitReceipt verifies that
+// dispatchPeerSessionFrame forwards a non-local relay_delivery_receipt
+// along the relay chain when relay state exists. This is the primary
+// production path — authenticated peers exchange frames via sessions,
+// not raw inbound TCP.
+func TestSessionRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "transit-session-node"}
+
+	// Seed relay state: receipt for "msg-sess-transit-1" should be
+	// forwarded to "original-sender-sess".
+	forwardTarget := domain.PeerAddress("original-sender-sess")
+	svc.relayStates.states["msg-sess-transit-1"] = &relayForwardState{
+		MessageID:        "msg-sess-transit-1",
+		ReceiptForwardTo: forwardTarget,
+		RemainingTTL:     5,
+	}
+
+	// Create a session for the forward target with mesh_relay_v1 and
+	// a buffered sendCh so enqueuePeerFrame succeeds.
+	svc.sessions[forwardTarget] = &peerSession{
+		address:      forwardTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 1),
+		authOK:       true,
+	}
+	svc.health[forwardTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	// Simulate the sending peer (where the receipt arrives from).
+	senderAddr := domain.PeerAddress("relay-hop-peer")
+	senderSession := &peerSession{
+		address: senderAddr,
+		sendCh:  make(chan protocol.Frame, 1),
+		authOK:  true,
+	}
+
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-sess-transit-1",
+		Address:     "some-sender",
+		Recipient:   "remote-recipient-ddd",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Receipt must NOT be stored locally.
+	svc.mu.RLock()
+	localCount := len(svc.receipts["remote-recipient-ddd"])
+	sessBanCount := len(svc.bans)
+	svc.mu.RUnlock()
+	if localCount != 0 {
+		t.Fatalf("transit receipt via session should not be stored locally, got %d", localCount)
+	}
+	if sessBanCount != 0 {
+		t.Fatalf("session transit forwarding must not populate blacklist, got %d ban entries", sessBanCount)
+	}
+
+	// Verify the receipt was forwarded to the relay chain target.
+	select {
+	case forwarded := <-svc.sessions[forwardTarget].sendCh:
+		if forwarded.Type != "relay_delivery_receipt" {
+			t.Fatalf("forwarded frame type = %q, want relay_delivery_receipt", forwarded.Type)
+		}
+		if forwarded.ID != "msg-sess-transit-1" {
+			t.Fatalf("forwarded frame ID = %q, want msg-sess-transit-1", forwarded.ID)
+		}
+	default:
+		t.Fatal("session-path receipt was not forwarded to the relay chain target")
+	}
+}
+
+// TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown verifies that
+// dispatchPeerSessionFrame falls back to gossip for a relay_delivery_receipt
+// with no local relevance and no relay forwarding state. The receipt is not
+// stored locally but is broadcast via gossipReceipt to routing targets.
+func TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "session-node-local"}
+
+	// Seed a gossip target peer for routingTargetsForRecipient.
+	gossipTarget := domain.PeerAddress("gossip-target-sess:64646")
+	svc.sessions[gossipTarget] = &peerSession{
+		address:      gossipTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	svc.health[gossipTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	senderAddr := domain.PeerAddress("some-peer")
+	senderSession := &peerSession{
+		address: senderAddr,
+		sendCh:  make(chan protocol.Frame, 1),
+		authOK:  true,
+	}
+
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-unknown-1",
+		Address:     "foreign-sender",
+		Recipient:   "foreign-recipient",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Receipt must NOT be stored locally.
+	svc.mu.RLock()
+	count := len(svc.receipts["foreign-recipient"])
+	sessGossipBanCount := len(svc.bans)
+	svc.mu.RUnlock()
+	if count != 0 {
+		t.Fatalf("unknown receipt via session should not be stored, got %d", count)
+	}
+	if sessGossipBanCount != 0 {
+		t.Fatalf("session gossip fallback must not populate blacklist, got %d ban entries", sessGossipBanCount)
+	}
+
+	// Verify gossip fallback delivered the receipt to the routing target.
+	select {
+	case gossipped := <-svc.sessions[gossipTarget].sendCh:
+		if gossipped.Type != "relay_delivery_receipt" {
+			t.Fatalf("gossipped frame type = %q, want relay_delivery_receipt", gossipped.Type)
+		}
+		if gossipped.ID != "msg-unknown-1" {
+			t.Fatalf("gossipped frame ID = %q, want msg-unknown-1", gossipped.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session-path gossip fallback did not deliver receipt to routing target within timeout")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Transit receipt deduplication tests
+// ---------------------------------------------------------------------------
+
+// TestRelayDeliveryReceiptDedupeGossipInbound verifies that a duplicate
+// transit receipt arriving on the inbound TCP path is silently dropped
+// instead of being re-gossiped. The first call must gossip; the second
+// identical call must produce no additional frame on the gossip target.
+func TestRelayDeliveryReceiptDedupeGossipInbound(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "dedupe-inbound-local"}
+
+	gossipTarget := domain.PeerAddress("dedupe-gossip-target:7777")
+	svc.sessions[gossipTarget] = &peerSession{
+		address:      gossipTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 8),
+		authOK:       true,
+	}
+	svc.health[gossipTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	frame := protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-dedupe-gossip-1",
+		Address:     "some-sender",
+		Recipient:   "foreign-recipient-zzz",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	connID := mustConnIDForTest(svc, conn)
+
+	// First call — must gossip.
+	svc.handleInboundRelayDeliveryReceipt(connID, frame)
+
+	select {
+	case got := <-svc.sessions[gossipTarget].sendCh:
+		if got.ID != "msg-dedupe-gossip-1" {
+			t.Fatalf("first gossip frame ID = %q, want msg-dedupe-gossip-1", got.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first call did not gossip receipt to routing target within timeout")
+	}
+
+	// Second call with identical receipt — must be suppressed.
+	svc.handleInboundRelayDeliveryReceipt(connID, frame)
+
+	select {
+	case extra := <-svc.sessions[gossipTarget].sendCh:
+		t.Fatalf("duplicate transit receipt was re-gossiped: got frame ID=%q", extra.ID)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: no frame within a reasonable window.
+	}
+}
+
+// TestRelayDeliveryReceiptDedupeForwardInbound verifies that a duplicate
+// transit receipt arriving on the inbound TCP path is not re-forwarded via
+// the relay chain. The first call must forward; the second must be dropped.
+func TestRelayDeliveryReceiptDedupeForwardInbound(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "dedupe-forward-local"}
+
+	forwardTarget := domain.PeerAddress("dedupe-forward-target")
+	svc.relayStates.states["msg-dedupe-fwd-1"] = &relayForwardState{
+		MessageID:        "msg-dedupe-fwd-1",
+		ReceiptForwardTo: forwardTarget,
+		RemainingTTL:     5,
+	}
+	svc.sessions[forwardTarget] = &peerSession{
+		address:      forwardTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	svc.health[forwardTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	frame := protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-dedupe-fwd-1",
+		Address:     "some-sender",
+		Recipient:   "remote-recipient-yyy",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	connID := mustConnIDForTest(svc, conn)
+
+	// First call — must forward via relay chain.
+	svc.handleInboundRelayDeliveryReceipt(connID, frame)
+
+	select {
+	case got := <-svc.sessions[forwardTarget].sendCh:
+		if got.ID != "msg-dedupe-fwd-1" {
+			t.Fatalf("first forwarded frame ID = %q, want msg-dedupe-fwd-1", got.ID)
+		}
+	default:
+		t.Fatal("first call did not forward receipt via relay chain")
+	}
+
+	// Second call with identical receipt — must be suppressed by dedupe.
+	svc.handleInboundRelayDeliveryReceipt(connID, frame)
+
+	select {
+	case extra := <-svc.sessions[forwardTarget].sendCh:
+		t.Fatalf("duplicate transit receipt was re-forwarded: got frame ID=%q", extra.ID)
+	default:
+		// Expected: no frame — dedupe suppressed the duplicate.
+	}
+}
+
+// TestSessionRelayDeliveryReceiptDedupeGossip verifies that a duplicate
+// transit receipt arriving on the session path is silently dropped instead
+// of being re-gossiped. Mirrors TestRelayDeliveryReceiptDedupeGossipInbound
+// for the dispatchPeerSessionFrame entry point.
+func TestSessionRelayDeliveryReceiptDedupeGossip(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "dedupe-sess-gossip-local"}
+
+	gossipTarget := domain.PeerAddress("dedupe-sess-gossip-target:8888")
+	svc.sessions[gossipTarget] = &peerSession{
+		address:      gossipTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 8),
+		authOK:       true,
+	}
+	svc.health[gossipTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	senderAddr := domain.PeerAddress("dedupe-sender-peer")
+	senderSession := &peerSession{
+		address: senderAddr,
+		sendCh:  make(chan protocol.Frame, 1),
+		authOK:  true,
+	}
+
+	frame := protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-dedupe-sess-gossip-1",
+		Address:     "some-sender",
+		Recipient:   "foreign-recipient-xxx",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// First call — must gossip.
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, frame)
+
+	select {
+	case got := <-svc.sessions[gossipTarget].sendCh:
+		if got.ID != "msg-dedupe-sess-gossip-1" {
+			t.Fatalf("first gossip frame ID = %q, want msg-dedupe-sess-gossip-1", got.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first call did not gossip receipt to routing target within timeout")
+	}
+
+	// Second call — must be suppressed.
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, frame)
+
+	select {
+	case extra := <-svc.sessions[gossipTarget].sendCh:
+		t.Fatalf("duplicate transit receipt was re-gossiped via session: got frame ID=%q", extra.ID)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: no frame.
+	}
+}
+
+// TestSessionRelayDeliveryReceiptDedupeForward verifies that a duplicate
+// transit receipt arriving on the session path is not re-forwarded via
+// the relay chain. Mirrors TestRelayDeliveryReceiptDedupeForwardInbound
+// for the dispatchPeerSessionFrame entry point.
+func TestSessionRelayDeliveryReceiptDedupeForward(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "dedupe-sess-fwd-local"}
+
+	forwardTarget := domain.PeerAddress("dedupe-sess-fwd-target")
+	svc.relayStates.states["msg-dedupe-sess-fwd-1"] = &relayForwardState{
+		MessageID:        "msg-dedupe-sess-fwd-1",
+		ReceiptForwardTo: forwardTarget,
+		RemainingTTL:     5,
+	}
+	svc.sessions[forwardTarget] = &peerSession{
+		address:      forwardTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	svc.health[forwardTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	senderAddr := domain.PeerAddress("dedupe-sess-sender")
+	senderSession := &peerSession{
+		address: senderAddr,
+		sendCh:  make(chan protocol.Frame, 1),
+		authOK:  true,
+	}
+
+	frame := protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-dedupe-sess-fwd-1",
+		Address:     "some-sender",
+		Recipient:   "remote-recipient-www",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// First call — must forward via relay chain.
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, frame)
+
+	select {
+	case got := <-svc.sessions[forwardTarget].sendCh:
+		if got.ID != "msg-dedupe-sess-fwd-1" {
+			t.Fatalf("first forwarded frame ID = %q, want msg-dedupe-sess-fwd-1", got.ID)
+		}
+	default:
+		t.Fatal("first call did not forward receipt via relay chain (session)")
+	}
+
+	// Second call — must be suppressed by dedupe.
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, frame)
+
+	select {
+	case extra := <-svc.sessions[forwardTarget].sendCh:
+		t.Fatalf("duplicate transit receipt was re-forwarded via session: got frame ID=%q", extra.ID)
+	default:
+		// Expected: no frame.
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Transit receipt dedupe recovery tests
+// ---------------------------------------------------------------------------
+
+// TestRelayDeliveryReceiptRetryAfterNoTargetsInbound verifies that a transit
+// receipt is NOT permanently suppressed when the first arrival finds no routing
+// targets. Scenario: receipt arrives → no relay path, no gossip targets → NOT
+// marked as seen → gossip target appears → same receipt arrives again → gossip
+// succeeds. This prevents one-shot loss of transiently unroutable receipts.
+func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "recovery-inbound-local"}
+
+	conn, _ := net.Pipe()
+	defer func() { _ = conn.Close() }()
+
+	frame := protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-recovery-1",
+		Address:     "some-sender",
+		Recipient:   "foreign-recipient-recovery",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	connID := mustConnIDForTest(svc, conn)
+
+	// First call — no relay state, no gossip targets. Receipt must NOT be
+	// marked as seen so it can be retried.
+	svc.handleInboundRelayDeliveryReceipt(connID, frame)
+
+	// Verify: receipt not stored locally and not marked in seenReceipts.
+	svc.mu.RLock()
+	key := "foreign-recipient-recovery:msg-recovery-1:delivered"
+	_, markedAfterFirst := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if markedAfterFirst {
+		t.Fatal("receipt must NOT be marked as seen when no targets exist on first arrival")
+	}
+
+	// Now simulate route recovery: add a gossip target peer.
+	gossipTarget := domain.PeerAddress("recovery-gossip-target:7777")
+	svc.sessions[gossipTarget] = &peerSession{
+		address:      gossipTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	svc.health[gossipTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	// Second call — same receipt, now with targets. Must be gossiped.
+	svc.handleInboundRelayDeliveryReceipt(connID, frame)
+
+	select {
+	case got := <-svc.sessions[gossipTarget].sendCh:
+		if got.ID != "msg-recovery-1" {
+			t.Fatalf("recovered gossip frame ID = %q, want msg-recovery-1", got.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("receipt was not gossiped after route recovery — one-shot loss detected")
+	}
+
+	// Verify: now marked as seen after successful gossip.
+	svc.mu.RLock()
+	_, markedAfterSecond := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if !markedAfterSecond {
+		t.Fatal("receipt must be marked as seen after successful gossip delivery")
+	}
+}
+
+// TestSessionRelayDeliveryReceiptRetryAfterNoTargets mirrors the inbound
+// recovery test for the session path (dispatchPeerSessionFrame).
+func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "recovery-session-local"}
+
+	senderAddr := domain.PeerAddress("recovery-sender-peer")
+	senderSession := &peerSession{
+		address: senderAddr,
+		sendCh:  make(chan protocol.Frame, 1),
+		authOK:  true,
+	}
+
+	frame := protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          "msg-recovery-sess-1",
+		Address:     "some-sender",
+		Recipient:   "foreign-recipient-sess-recovery",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// First call — no relay state, no gossip targets.
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, frame)
+
+	// Verify: not marked as seen.
+	svc.mu.RLock()
+	key := "foreign-recipient-sess-recovery:msg-recovery-sess-1:delivered"
+	_, markedAfterFirst := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if markedAfterFirst {
+		t.Fatal("receipt must NOT be marked as seen when no targets exist (session)")
+	}
+
+	// Simulate route recovery.
+	gossipTarget := domain.PeerAddress("recovery-sess-gossip-target:8888")
+	svc.sessions[gossipTarget] = &peerSession{
+		address:      gossipTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	svc.health[gossipTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+
+	// Second call — same receipt, targets available.
+	svc.dispatchPeerSessionFrame(senderAddr, senderSession, frame)
+
+	select {
+	case got := <-svc.sessions[gossipTarget].sendCh:
+		if got.ID != "msg-recovery-sess-1" {
+			t.Fatalf("recovered gossip frame ID = %q, want msg-recovery-sess-1", got.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("receipt was not gossiped after route recovery (session) — one-shot loss detected")
+	}
+
+	// Verify: marked as seen after success.
+	svc.mu.RLock()
+	_, markedAfterSecond := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if !markedAfterSecond {
+		t.Fatal("receipt must be marked as seen after successful gossip delivery (session)")
+	}
+}
+
+// TestRelayDeliveryReceiptRetryAfterAllSendsFail verifies that
+// gossipTransitReceipt does NOT permanently suppress a transit receipt when
+// routing targets exist but every sendReceiptToPeer call fails (all sendCh
+// channels full, pending queues saturated). The receipt must remain eligible
+// for retry on a future call after capacity recovers.
+//
+// gossipTransitReceipt is the shared helper invoked by both
+// handleInboundRelayDeliveryReceipt and dispatchPeerSessionFrame, so a
+// single direct-call test covers the retry/dedupe logic for both paths.
+// Dispatcher wiring (handler → go gossipTransitReceipt) is independently
+// pinned by TestRelayDeliveryReceiptGossipsFallbackForUnrelatedRecipient
+// (inbound) and TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown
+// (session), which synchronize on sendCh delivery via time.After.
+//
+// Direct invocation makes all assertions fully synchronous — no sleeps or
+// timing assumptions.
+func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	svc.initMaps()
+	svc.identity = &identity.Identity{Address: "sendfail-inbound-local"}
+
+	// Create a gossip target with a sendCh of capacity 1, pre-filled so
+	// the next non-blocking send fails. Also fill the pending queue to
+	// maxPendingFramesPerPeer so queuePeerFrame also fails.
+	gossipTarget := domain.PeerAddress("sendfail-gossip-target:9999")
+	fullCh := make(chan protocol.Frame, 1)
+	fullCh <- protocol.Frame{Type: "filler"}
+	svc.sessions[gossipTarget] = &peerSession{
+		address:      gossipTarget,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       fullCh,
+		authOK:       true,
+	}
+	svc.health[gossipTarget] = &peerHealth{
+		Connected:  true,
+		LastPongAt: time.Now().UTC(),
+	}
+	// Fill the pending queue so queuePeerFrame also returns false.
+	fillerFrames := make([]pendingFrame, maxPendingFramesPerPeer)
+	for i := range fillerFrames {
+		fillerFrames[i] = pendingFrame{Frame: protocol.Frame{Type: "filler", ID: fmt.Sprintf("filler-%d", i)}}
+	}
+	svc.pending[gossipTarget] = fillerFrames
+
+	receipt := protocol.DeliveryReceipt{
+		MessageID:   "msg-sendfail-1",
+		Sender:      "some-sender",
+		Recipient:   "foreign-recipient-sendfail",
+		Status:      "delivered",
+		DeliveredAt: time.Now().UTC(),
+	}
+
+	// Direct call — synchronous, no goroutine wrapper. All sends fail,
+	// receipt must NOT be marked.
+	svc.gossipTransitReceipt(receipt)
+
+	svc.mu.RLock()
+	key := "foreign-recipient-sendfail:msg-sendfail-1:delivered"
+	_, markedAfterFail := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if markedAfterFail {
+		t.Fatal("receipt must NOT be marked as seen when all sends failed")
+	}
+
+	// Simulate recovery: drain the filler frame to free sendCh capacity,
+	// and clear the pending queue so queuePeerFrame can also succeed.
+	<-svc.sessions[gossipTarget].sendCh
+	svc.mu.Lock()
+	svc.pending[gossipTarget] = nil
+	svc.mu.Unlock()
+
+	// Retry — same receipt, capacity recovered. Must deliver and mark.
+	svc.gossipTransitReceipt(receipt)
+
+	select {
+	case got := <-svc.sessions[gossipTarget].sendCh:
+		if got.ID != "msg-sendfail-1" {
+			t.Fatalf("recovered gossip frame ID = %q, want msg-sendfail-1", got.ID)
+		}
+	default:
+		t.Fatal("receipt was not gossiped after send recovery — one-shot loss detected")
+	}
+
+	// Verify: now marked as seen after successful delivery.
+	svc.mu.RLock()
+	_, markedAfterSuccess := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if !markedAfterSuccess {
+		t.Fatal("receipt must be marked as seen after successful send")
 	}
 }
 

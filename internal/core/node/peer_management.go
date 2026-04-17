@@ -169,6 +169,13 @@ func (s *Service) evictStalePeers() {
 			kept = append(kept, peer)
 			continue
 		}
+		// Never evict peers with an active version lockout — eviction
+		// would delete the VersionLockout from persistedMeta, making
+		// the peer dialable again before the next flush to disk.
+		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.VersionLockout.IsActive() {
+			kept = append(kept, peer)
+			continue
+		}
 		// Evict if score is terrible AND last successful connection (or
 		// first discovery, if never connected) was more than staleWindow ago.
 		// Importantly, LastDisconnectedAt is NOT used here — it refreshes on
@@ -279,6 +286,23 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 				t := health.BannedUntil
 				entry.BannedUntil = &t
 			}
+			// Machine-readable version diagnostics — persisted so the
+			// operator-visible snapshot survives restarts.
+			entry.LastErrorCode = health.LastErrorCode
+			entry.LastDisconnectCode = health.LastDisconnectCode
+			entry.IncompatibleVersionAttempts = health.IncompatibleVersionAttempts
+			if !health.LastIncompatibleVersionAt.IsZero() {
+				t := health.LastIncompatibleVersionAt
+				entry.LastIncompatibleVersionAt = &t
+			}
+			entry.ObservedPeerVersion = health.ObservedPeerVersion
+			entry.ObservedPeerMinimumVersion = health.ObservedPeerMinimumVersion
+		}
+		// Preserve version lockout from persistedMeta (set by
+		// penalizeOldProtocolPeer when version-evidence confirms
+		// that our protocol version is too old for this peer).
+		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.VersionLockout.IsActive() {
+			entry.VersionLockout = pm.VersionLockout
 		}
 		// Fall back to runtime classification only when persisted Network
 		// is absent (new peer or pre-Network peers.json). Persisted value
@@ -431,6 +455,13 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 					continue
 				}
 			}
+		}
+		// Version lockout: skip peers that already confirmed our
+		// protocol version is too old. A futile dial wastes resources
+		// and risks remote-side ban escalation. Lockout is cleared
+		// when the local version changes (startup path).
+		if s.isPeerVersionLockedOutLocked(primaryAddr) {
+			continue
 		}
 
 		for _, address := range s.dialAttemptAddressesLocked(primaryAddr) {
@@ -762,7 +793,18 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	}
 	if err := validateProtocolHandshake(welcome); err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
-		s.penalizeOldProtocolPeer(address)
+		// Pre-populate the client version cache so that
+		// penalizeOldProtocolPeer → setVersionLockoutLocked writes the
+		// complete diagnostics. On the failure path, learnIdentityFromWelcome /
+		// addPeerVersion never run, so without this the lockout would store
+		// an empty ObservedClientVersion.
+		if welcome.ClientVersion != "" {
+			s.mu.Lock()
+			healthKey := s.resolveHealthAddress(address)
+			s.peerVersions[healthKey] = welcome.ClientVersion
+			s.mu.Unlock()
+		}
+		s.penalizeOldProtocolPeer(address, domain.ProtocolVersion(welcome.Version), domain.ProtocolVersion(welcome.MinimumProtocolVersion))
 		return false, fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
 	}
 	session.version = welcome.Version
@@ -1149,14 +1191,67 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 		}
 	}
 
-	// Reset cooldown and ban so the peer is dialled immediately.
-	// A manual add_peer is an explicit operator action that overrides
-	// any automated penalty (incompatible protocol, exponential backoff).
+	// Reset cooldown, ban, and version lockout so the peer is dialled
+	// immediately. A manual add_peer is an explicit operator action that
+	// overrides any automated penalty (incompatible protocol, exponential
+	// backoff, version lockout).
 	if h := s.health[peerAddress]; h != nil {
-		h.ConsecutiveFailures = 0
-		h.LastDisconnectedAt = time.Time{}
-		h.BannedUntil = time.Time{}
+		resetPeerHealthForRecoveryLocked(h)
 	}
+
+	// Clear persisted version lockout — the operator explicitly wants
+	// to retry this peer regardless of prior incompatibility evidence.
+	// Identity-wide clearing: lockouts are propagated across all addresses
+	// of the same identity (see setVersionLockoutLocked), so clearing must
+	// also be identity-wide. Otherwise sibling addresses remain suppressed
+	// and can keep the lockout-based update signal alive unexpectedly.
+	peerID := s.peerIDs[peerAddress]
+	if pm := s.persistedMeta[peerAddress]; pm != nil {
+		if pm.VersionLockout.IsActive() {
+			log.Info().
+				Str("peer", string(peerAddress)).
+				Str("identity", string(peerID)).
+				Str("reason", string(pm.VersionLockout.Reason)).
+				Msg("version_lockout_cleared_operator_override")
+			pm.VersionLockout = domain.VersionLockoutSnapshot{}
+		}
+	}
+	if peerID != "" {
+		// Remove from the incompatible-reporter dedup set so the
+		// operator override also reduces the reporter count.
+		if s.versionPolicy != nil {
+			delete(s.versionPolicy.incompatibleReporters, peerID)
+		}
+		// Clear lockout, health diagnostics, and dial-suppression state
+		// for all sibling addresses of the same identity. Without this,
+		// stale ban/cooldown fields keep siblings out of candidate
+		// selection even though the operator explicitly overrode the
+		// penalty on the primary address.
+		for otherAddr, otherID := range s.peerIDs {
+			if otherAddr == peerAddress || otherID != peerID {
+				continue
+			}
+			if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
+				log.Info().
+					Str("peer", string(otherAddr)).
+					Str("peer_identity", string(peerID)).
+					Str("source_address", string(peerAddress)).
+					Msg("version_lockout_cleared_by_identity_on_operator_override")
+				otherEntry.VersionLockout = domain.VersionLockoutSnapshot{}
+			}
+			if siblingHealth := s.health[otherAddr]; siblingHealth != nil {
+				resetPeerHealthForRecoveryLocked(siblingHealth)
+			}
+			// Clear the IP-wide ban for the sibling's IP.
+			if ip, _, ok := splitHostPort(string(otherAddr)); ok {
+				delete(s.bannedIPSet, ip)
+			}
+		}
+	}
+
+	// Recompute version policy since we may have removed lockouts and/or
+	// a reporter that were contributing to the update_available signal.
+	s.recomputeVersionPolicyLocked(time.Now().UTC())
 
 	// Also clear the IP-wide ban — without this, buildBannedIPsSet still
 	// excludes the peer from Candidates() even though per-address health
@@ -1860,25 +1955,54 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		s.enqueueAckDeleteOnSession(session, address, "receipt", receipt.MessageID, receipt.Status)
 		log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
 	case "relay_delivery_receipt":
-		// Gossip receipt path using flat Frame fields (mirrors the inbound
-		// TCP handler handleInboundRelayDeliveryReceipt).
+		// Gossip receipt path using flat Frame fields. Three paths mirror
+		// handleInboundRelayDeliveryReceipt: local delivery, transit
+		// forwarding via relay chain, or gossip fallback. No ban scoring.
+		// Dedupe marking is deferred until delivery succeeds — see
+		// gossipTransitReceipt and markTransitReceiptSeen comments.
 		receipt, err := receiptFromFrame(frame)
 		if err != nil {
 			return
 		}
-		// Identity gate: same as push_delivery_receipt — the receipt's
-		// Recipient must match our identity or an active subscriber.
-		if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
-			log.Warn().
-				Str("peer", string(address)).
-				Str("message_id", string(receipt.MessageID)).
-				Str("receipt_recipient", receipt.Recipient).
-				Str("local_identity", s.identity.Address).
-				Msg("relay_delivery_receipt rejected: recipient does not match local identity or active subscriber")
+		// Fast path: receipt is addressed to this node or an active subscriber.
+		if receipt.Recipient == s.identity.Address || s.hasSubscriber(receipt.Recipient) {
+			s.storeDeliveryReceipt(receipt)
+			log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt")
 			return
 		}
-		s.storeDeliveryReceipt(receipt)
-		log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt")
+		// Fast-path dedupe: read-only check suppresses already-delivered receipts.
+		if s.isTransitReceiptSeen(receipt) {
+			log.Debug().
+				Str("peer", string(address)).
+				Str("message_id", string(receipt.MessageID)).
+				Str("recipient", receipt.Recipient).
+				Msg("relay_delivery_receipt dropped: duplicate transit receipt (session)")
+			return
+		}
+		// Transit path: forward the receipt along the relay chain.
+		// On success, mark as seen to suppress duplicates. On failure,
+		// fall back to gossip — consistent with the contract in
+		// handleRelayReceipt and the pattern in retryRelayDeliveries.
+		if s.handleRelayReceipt(receipt) {
+			s.markTransitReceiptSeen(receipt)
+			log.Info().
+				Str("peer", string(address)).
+				Str("message_id", string(receipt.MessageID)).
+				Str("recipient", receipt.Recipient).
+				Msg("relay_delivery_receipt forwarded via relay chain (session)")
+			return
+		}
+		// Gossip fallback: no reverse relay path or send failed.
+		// gossipTransitReceipt marks as seen only after at least one target
+		// accepts; if no targets exist or all sends fail, receipt stays
+		// eligible for retry.
+		go s.gossipTransitReceipt(receipt)
+		log.Debug().
+			Str("peer", string(address)).
+			Str("message_id", string(receipt.MessageID)).
+			Str("receipt_recipient", receipt.Recipient).
+			Str("local_identity", s.identity.Address).
+			Msg("relay_delivery_receipt gossip fallback: no relay path or send failed (session)")
 	case "push_notice":
 		s.handleInboundPushNotice(frame)
 	case "request_inbox":
@@ -2126,9 +2250,10 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	// before any ping/pong or data exchange has occurred.
 	health.LastUsefulReceiveAt = now
 	s.updatePeerStateLocked(health, peerStateHealthy)
-	health.LastError = ""
-	health.ConsecutiveFailures = 0
-	health.BannedUntil = time.Time{} // successful handshake proves compatibility
+	// Clear all failure-related health state. A completed handshake is
+	// definitive proof that the peer is compatible — stale error strings,
+	// version counters, bans, cooldowns, and score penalties are all invalid.
+	resetPeerHealthForRecoveryLocked(health)
 	health.Score = clampScore(health.Score + peerScoreConnect)
 
 	// A completed handshake proves the peer (and its IP) is compatible.
@@ -2137,6 +2262,54 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	if ip, _, ok := splitHostPort(string(address)); ok {
 		delete(s.bannedIPSet, ip)
 	}
+
+	// Remove from the incompatible-reporter dedup set if present.
+	peerID := s.peerIDs[address]
+	if peerID != "" && s.versionPolicy != nil {
+		delete(s.versionPolicy.incompatibleReporters, peerID)
+	}
+
+	// Clear persisted version lockout — the peer just proved compatibility.
+	// Identity-wide clearing: lockouts are propagated across all addresses
+	// of the same identity (see setVersionLockoutLocked), so clearing must
+	// also be identity-wide. Otherwise sibling addresses remain locked out
+	// even though the peer has proven compatibility.
+	if pm := s.persistedMeta[address]; pm != nil && pm.VersionLockout.IsActive() {
+		log.Info().
+			Str("peer", string(address)).
+			Str("identity", string(peerID)).
+			Str("reason", string(pm.VersionLockout.Reason)).
+			Msg("version_lockout_cleared_by_successful_handshake")
+		pm.VersionLockout = domain.VersionLockoutSnapshot{}
+	}
+	// Propagate lockout and health clearing to all sibling addresses of
+	// the same identity — mirrors setVersionLockoutLocked propagation.
+	if peerID != "" {
+		for otherAddr, otherID := range s.peerIDs {
+			if otherAddr == address || otherID != peerID {
+				continue
+			}
+			if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
+				log.Info().
+					Str("peer", string(otherAddr)).
+					Str("peer_identity", string(peerID)).
+					Str("source_address", string(address)).
+					Msg("version_lockout_cleared_by_identity_on_handshake")
+				otherEntry.VersionLockout = domain.VersionLockoutSnapshot{}
+			}
+			if siblingHealth := s.health[otherAddr]; siblingHealth != nil {
+				resetPeerHealthForRecoveryLocked(siblingHealth)
+			}
+			// Clear the IP-wide ban for the sibling's IP so that
+			// Candidates() and list_banned are consistent.
+			if ip, _, ok := splitHostPort(string(otherAddr)); ok {
+				delete(s.bannedIPSet, ip)
+			}
+		}
+	}
+
+	// Recompute version policy to reflect the cleared evidence.
+	s.recomputeVersionPolicyLocked(now)
 }
 
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
@@ -2154,52 +2327,140 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 		health.ConsecutiveFailures++
 		health.LastError = err.Error()
 		health.Score = clampScore(health.Score + peerScoreFailure)
+		// Set machine-readable disconnect code when the error wraps a
+		// known protocol error (e.g. frame-too-large, rate-limited).
+		// The generic "protocol-error" sentinel is excluded — it carries
+		// no diagnostic value beyond "something went wrong".
+		if code := protocol.ErrorCode(err); code != protocol.ErrCodeProtocol {
+			health.LastDisconnectCode = code
+		} else {
+			health.LastDisconnectCode = ""
+		}
 	} else {
+		// Clean disconnect — clear the code so stale values from a
+		// previous error-disconnect do not persist in diagnostics.
 		health.ConsecutiveFailures = 0
+		health.LastDisconnectCode = ""
 		health.Score = clampScore(health.Score + peerScoreDisconnect)
 	}
 	if peerID := s.peerIDs[address]; peerID != "" {
 		delete(s.observedAddrs, peerID)
 	}
+
+	// Remove session-scoped metadata so disconnected peers do not
+	// influence the build-based update signal or stale version checks.
+	// These maps are repopulated on the next successful handshake.
+	delete(s.peerBuilds, address)
+	delete(s.peerVersions, address)
+
+	// Recompute version policy so that the build signal immediately
+	// reflects the loss of this peer's vote.
+	s.recomputeVersionPolicyLocked(time.Now().UTC())
 }
 
-// penalizeOldProtocolPeer applies a heavy score penalty and a temporary ban
-// to a peer whose protocol version is below MinimumProtocolVersion. The ban
-// prevents the dial loop from retrying the peer for peerBanIncompatible
-// (24 h). After the ban expires the peer is retried — it may have upgraded.
-func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress) {
+// penalizeOldProtocolPeer applies a score penalty and accumulates ban score
+// for a peer whose protocol version is below MinimumProtocolVersion. The
+// penalty increments towards the ban threshold — on the 4th incompatible
+// attempt the peer gets banned for peerBanIncompatible (24 h).
+//
+// peerVersion and peerMinimum carry the remote peer's version evidence
+// when available (from the wire error frame or welcome); pass 0 when unknown.
+func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersion, peerMinimum domain.ProtocolVersion) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	health.Score = clampScore(health.Score + peerScoreOldProtocol)
-	health.ConsecutiveFailures++
-	health.LastError = "protocol version too old"
-	bannedUntil := time.Now().UTC().Add(peerBanIncompatible)
-	health.BannedUntil = bannedUntil
 
-	// Propagate ban to the IP level so that other ports on the same
-	// host are also excluded from dial candidates.
-	if ip, _, ok := splitHostPort(string(address)); ok {
-		// Snapshot affected peer addresses at ban time so the list
-		// round-trips through peers.json even if peers are later
-		// trimmed from the top-500 list.
-		var affected []domain.PeerAddress
-		for _, p := range s.peers {
-			if pIP, _, ok2 := splitHostPort(string(p.Address)); ok2 && pIP == ip {
-				affected = append(affected, p.Address)
-			}
-		}
-		s.bannedIPSet[ip] = domain.BannedIPEntry{
-			IP:            ip,
-			BannedUntil:   bannedUntil,
-			BanOrigin:     address,
-			BanReason:     "incompatible_protocol",
-			AffectedPeers: affected,
-		}
+	// Machine-readable error codes. A pre-handshake incompatible reject
+	// supersedes any prior post-handshake disconnect code — keeping an old
+	// LastDisconnectCode (e.g. "frame-too-large") alongside the new
+	// LastErrorCode ("incompatible-protocol-version") creates a mixed
+	// diagnostic snapshot that misrepresents the peer's current state.
+	health.LastErrorCode = protocol.ErrCodeIncompatibleProtocol
+	health.LastError = "protocol version too old"
+	health.LastDisconnectCode = ""
+	health.IncompatibleVersionAttempts++
+	health.LastIncompatibleVersionAt = time.Now().UTC()
+
+	// Store observed version evidence for diagnostics.
+	if peerVersion > 0 {
+		health.ObservedPeerVersion = peerVersion
+	}
+	if peerMinimum > 0 {
+		health.ObservedPeerMinimumVersion = peerMinimum
 	}
 
-	log.Info().Str("peer", string(address)).Time("banned_until", bannedUntil).Msg("peer_banned_incompatible_protocol")
+	// Accumulating overlay-level penalty: each incompatible attempt
+	// adds peerScoreOldProtocol to the peer quality score.
+	health.Score = clampScore(health.Score + peerScoreOldProtocol)
+	health.ConsecutiveFailures++
+
+	// Accumulating ban: peerBanIncrementIncompatible per attempt,
+	// ban activates when cumulative penalty reaches the overlay ban threshold.
+	overlayPenalty := int(health.IncompatibleVersionAttempts) * peerBanIncrementIncompatible
+	if overlayPenalty >= peerBanThresholdIncompatible {
+		bannedUntil := time.Now().UTC().Add(peerBanIncompatible)
+		health.BannedUntil = bannedUntil
+
+		// Propagate ban to the IP level so that other ports on the same
+		// host are also excluded from dial candidates.
+		if ip, _, ok := splitHostPort(string(address)); ok {
+			var affected []domain.PeerAddress
+			for _, p := range s.peers {
+				if pIP, _, ok2 := splitHostPort(string(p.Address)); ok2 && pIP == ip {
+					affected = append(affected, p.Address)
+				}
+			}
+			s.bannedIPSet[ip] = domain.BannedIPEntry{
+				IP:            ip,
+				BannedUntil:   bannedUntil,
+				BanOrigin:     address,
+				BanReason:     "incompatible_protocol",
+				AffectedPeers: affected,
+			}
+		}
+
+		log.Info().
+			Str("peer", string(address)).
+			Time("banned_until", bannedUntil).
+			Int("attempts", int(health.IncompatibleVersionAttempts)).
+			Msg("peer_banned_incompatible_protocol")
+	} else {
+		log.Info().
+			Str("peer", string(address)).
+			Int("attempts", int(health.IncompatibleVersionAttempts)).
+			Int("overlay_penalty", overlayPenalty).
+			Int("threshold", peerBanThresholdIncompatible).
+			Msg("peer_incompatible_version_penalty_accumulated")
+	}
+
+	// Record observation for node-owned update policy and set persisted
+	// lockout — but ONLY when the remote peer's minimum exceeds our local
+	// protocol version. This enforces two invariants simultaneously:
+	//   Invariant A: no evidence → no lockout (peerMinimum must confirm
+	//                incompatibility before suppressing dials).
+	//   Invariant C: direction guard — only the "they think we're old"
+	//                direction feeds the reporter set and lockout. When a
+	//                remote peer is below OUR minimum (inbound reject of
+	//                an old peer), the ban scoring above still applies, but
+	//                the observation must NOT feed the reporter set —
+	//                otherwise old peers connecting to us would incorrectly
+	//                trigger the "you need to upgrade" signal.
+	now := time.Now().UTC()
+	if peerMinimum > domain.ProtocolVersion(config.ProtocolVersion) {
+		peerID := s.peerIDs[address]
+		s.recordIncompatibleObservationLocked(peerID, peerVersion, peerMinimum, now)
+
+		peerClientVer := domain.ClientVersion(s.peerVersions[address])
+		s.setVersionLockoutLocked(address, peerVersion, peerMinimum, peerClientVer)
+
+		// Recompute after lockout write: the persisted lockout contributes
+		// to update_available via the lockoutSignal path, but
+		// recordIncompatibleObservationLocked recomputed before the lockout
+		// existed. Without this second recompute the snapshot would be
+		// stale until the next unrelated event.
+		s.recomputeVersionPolicyLocked(now)
+	}
 }
 
 func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame) {
@@ -2329,6 +2590,40 @@ func (s *Service) ensurePeerHealthLocked(address domain.PeerAddress) *peerHealth
 	return health
 }
 
+// resetPeerHealthForRecoveryLocked clears all failure-related fields on a
+// peerHealth entry. This is the single source of truth for the "compatibility
+// recovery" contract: every code path that proves a peer is compatible
+// (markPeerConnected) or explicitly overrides penalties (addPeerFrame)
+// calls this helper instead of resetting fields inline.
+//
+// Cleared fields and their effects:
+//   - LastError, LastErrorCode, LastDisconnectCode — diagnostic strings
+//     (LastError depresses ranking via len(health.LastError) in rankPeerHealth)
+//   - IncompatibleVersionAttempts, LastIncompatibleVersionAt — version ban counters
+//   - ObservedPeerVersion, ObservedPeerMinimumVersion — stale version evidence
+//   - ConsecutiveFailures, LastDisconnectedAt — exponential cooldown inputs
+//   - BannedUntil — address-level ban
+//   - Score floor to 0 — neutralises stale peerScoreOldProtocol penalties
+//     without inflating peers that already have positive scores
+//
+// The caller remains responsible for IP-wide ban clearing and score bonuses
+// (e.g. peerScoreConnect on handshake) because those depend on call-site context.
+func resetPeerHealthForRecoveryLocked(h *peerHealth) {
+	h.LastError = ""
+	h.LastErrorCode = ""
+	h.LastDisconnectCode = ""
+	h.IncompatibleVersionAttempts = 0
+	h.LastIncompatibleVersionAt = time.Time{}
+	h.ObservedPeerVersion = 0
+	h.ObservedPeerMinimumVersion = 0
+	h.ConsecutiveFailures = 0
+	h.LastDisconnectedAt = time.Time{}
+	h.BannedUntil = time.Time{}
+	if h.Score < 0 {
+		h.Score = 0
+	}
+}
+
 func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 	if health.State == next {
 		return
@@ -2425,6 +2720,15 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			BytesReceived:       recv,
 			TotalTraffic:        sent + recv,
 			Capabilities:        s.peerCapabilitiesLocked(health.Address),
+
+			// Machine-readable disconnect diagnostics.
+			LastErrorCode:               health.LastErrorCode,
+			LastDisconnectCode:          health.LastDisconnectCode,
+			IncompatibleVersionAttempts: int(health.IncompatibleVersionAttempts),
+			LastIncompatibleVersionAt:   formatTime(health.LastIncompatibleVersionAt),
+			ObservedPeerVersion:         int(health.ObservedPeerVersion),
+			ObservedPeerMinimumVersion:  int(health.ObservedPeerMinimumVersion),
+			VersionLockoutActive:        s.isPeerVersionLockedOutLocked(health.Address),
 		}
 		// sessions is keyed by dial address which may differ from the
 		// health address when a fallback port was used. Iterate to find
@@ -3382,9 +3686,15 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		closeOnError()
 		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
 		// Do NOT call penalizeOldProtocolPeer here — the caller (CM dial worker)
-		// propagates errIncompatibleProtocol to onCMDialFailed, which applies the
-		// penalty exactly once.
-		return nil, fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
+		// propagates the error to onCMDialFailed, which applies the penalty
+		// exactly once. The structured error carries confirmed version evidence
+		// so the penalty path can set lockouts and feed the reporter set.
+		return nil, &incompatibleProtocolError{
+			PeerVersion:   domain.ProtocolVersion(welcome.Version),
+			PeerMinimum:   domain.ProtocolVersion(welcome.MinimumProtocolVersion),
+			ClientVersion: welcome.ClientVersion,
+			Cause:         err,
+		}
 	}
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
@@ -3701,7 +4011,28 @@ func (s *Service) onCMStaleSession(session *peerSession) {
 // Updates health/ban state BEFORE fill() re-queries Candidates().
 func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompatible bool) {
 	if incompatible {
-		s.penalizeOldProtocolPeer(address)
+		// Extract confirmed version evidence from the structured error
+		// returned by openPeerSessionForCM. Without evidence, the penalty
+		// path still applies ban scoring but correctly skips the reporter
+		// set and persisted lockout (direction guard requires non-zero
+		// peerMinimum > local protocol version).
+		var peerVersion, peerMinimum domain.ProtocolVersion
+		var ipe *incompatibleProtocolError
+		if errors.As(err, &ipe) {
+			peerVersion = ipe.PeerVersion
+			peerMinimum = ipe.PeerMinimum
+			// Pre-populate the peerVersions cache so that
+			// penalizeOldProtocolPeer → setVersionLockoutLocked can read the
+			// client version for persisted diagnostics. On the CM path the
+			// handshake failed before onCMSessionEstablished could populate
+			// these maps from the welcome frame.
+			if ipe.ClientVersion != "" {
+				s.mu.Lock()
+				s.peerVersions[address] = ipe.ClientVersion
+				s.mu.Unlock()
+			}
+		}
+		s.penalizeOldProtocolPeer(address, peerVersion, peerMinimum)
 	} else {
 		s.markPeerDisconnected(address, err)
 	}

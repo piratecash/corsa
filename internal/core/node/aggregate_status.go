@@ -50,6 +50,8 @@ func (s *Service) computeAggregateStatusLocked(now time.Time) domain.AggregateSt
 	connected := usable + stalled
 	total := connected + reconnecting
 
+	target := s.cfg.EffectiveMaxOutgoingPeers()
+
 	var status domain.NetworkStatus
 	switch {
 	case total == 0:
@@ -62,9 +64,16 @@ func (s *Service) computeAggregateStatusLocked(now time.Time) domain.AggregateSt
 	case usable == 1:
 		status = domain.NetworkStatusLimited
 	case usable*2 < connected:
-		// Less than half of currently live peers are usable.
+		// More than half of currently live peers are stalled — network issues.
+		status = domain.NetworkStatusWarning
+	case usable < target/2:
+		// Below 50% of outbound target — still building connectivity.
+		status = domain.NetworkStatusLimited
+	case usable < target:
+		// Progressing toward target but not yet at full capacity.
 		status = domain.NetworkStatusWarning
 	default:
+		// Usable peers meet or exceed target — fully healthy.
 		status = domain.NetworkStatusHealthy
 	}
 
@@ -82,6 +91,12 @@ func (s *Service) computeAggregateStatusLocked(now time.Time) domain.AggregateSt
 // transition. Must be called with s.mu held (write lock).
 func (s *Service) refreshAggregateStatusLocked() {
 	now := time.Now().UTC()
+
+	// Periodic repair path for version policy: expire stale reporter
+	// observations within a bounded window (versionPolicyRepairInterval)
+	// even when no new observation events arrive.
+	s.maybeRecomputeVersionPolicyPeriodic(now)
+
 	next := s.computeAggregateStatusLocked(now)
 
 	prev := s.aggregateStatus
@@ -122,6 +137,7 @@ func (s *Service) AggregateStatus() domain.AggregateStatusSnapshot {
 // fetch_aggregate_status local RPC command.
 func (s *Service) aggregateStatusFrame() protocol.Frame {
 	snap := s.AggregateStatus()
+	vpSnap := s.VersionPolicySnapshot()
 	return protocol.Frame{
 		Type: "aggregate_status",
 		AggregateStatus: &protocol.AggregateStatusFrame{
@@ -130,6 +146,12 @@ func (s *Service) aggregateStatusFrame() protocol.Frame {
 			ConnectedPeers:  snap.ConnectedPeers,
 			TotalPeers:      snap.TotalPeers,
 			PendingMessages: snap.PendingMessages,
+
+			UpdateAvailable:              vpSnap.UpdateAvailable,
+			UpdateReason:                 string(vpSnap.UpdateReason),
+			IncompatibleVersionReporters: int(vpSnap.IncompatibleVersionReporters),
+			MaxObservedPeerBuild:         vpSnap.MaxObservedPeerBuild,
+			MaxObservedPeerVersion:       int(vpSnap.MaxObservedPeerVersion),
 		},
 	}
 }

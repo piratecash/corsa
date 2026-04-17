@@ -159,6 +159,11 @@ type Service struct {
 	// Protected by s.mu.
 	aggregateStatus domain.AggregateStatusSnapshot
 
+	// versionPolicy holds the runtime state for the node-owned version
+	// upgrade detection policy. Nil until first observation; created
+	// lazily. Protected by s.mu.
+	versionPolicy *versionPolicyState
+
 	// runCtx is the context passed to Run(). Stored so that callbacks
 	// (e.g. onCMSessionEstablished) can start goroutines bound to the
 	// Service lifecycle instead of context.Background().
@@ -308,6 +313,41 @@ type peerHealth struct {
 	BannedUntil         time.Time // peer is not dialled until this time expires
 	BytesSent           int64     // total bytes sent to this peer across all sessions
 	BytesReceived       int64     // total bytes received from this peer across all sessions
+
+	// Machine-readable error codes — Phase 1 of version upgrade detection.
+	//
+	// LastErrorCode is the protocol.ErrorCode of the most recent *pre-handshake*
+	// protocol rejection (e.g. incompatible-protocol-version). Set by
+	// penalizeOldProtocolPeer when the peer is rejected before or during
+	// handshake. Cleared on successful reconnect (markPeerConnected) and
+	// by operator override (add_peer). Survives across failed reconnects.
+	LastErrorCode string
+	// LastDisconnectCode is the protocol.ErrorCode that caused the most recent
+	// *post-handshake* socket teardown. Set in markPeerDisconnected when the
+	// disconnect error wraps a known protocol error (e.g. frame-too-large,
+	// rate-limited). Empty string when the disconnect was clean (err == nil),
+	// non-protocol (network timeout, EOF), or the error maps to the generic
+	// "protocol-error" sentinel. Cleared on successful reconnect
+	// (markPeerConnected). Not set for pre-handshake rejections — those go
+	// into LastErrorCode via penalizeOldProtocolPeer.
+	LastDisconnectCode string
+
+	// Version incompatibility diagnostics — per-address counters.
+	//
+	// IncompatibleVersionAttempts is the source of truth for per-address
+	// ban scoring: each attempt adds peerBanIncrementIncompatible to the
+	// overlay ban, and the ban fires when cumulative penalty reaches the
+	// threshold. This counter is NOT used for the update_available signal.
+	//
+	// The update_available signal is driven by a separate per-identity
+	// dedup set in versionPolicyState.incompatibleReporters, which counts
+	// distinct peer identities that reported incompatibility within the
+	// observation window. The two counters measure different things:
+	// attempts-per-address (ban scoring) vs reporters-per-identity (update signal).
+	IncompatibleVersionAttempts domain.AttemptCount    // cumulative per-address attempts for ban scoring
+	LastIncompatibleVersionAt   time.Time              // timestamp of the last incompatible event
+	ObservedPeerVersion         domain.ProtocolVersion // last observed remote protocol version
+	ObservedPeerMinimumVersion  domain.ProtocolVersion // last observed remote minimum version
 }
 
 type pendingFrame struct {
@@ -350,7 +390,7 @@ const (
 	maxPendingFrameRetries          = 5
 	banThreshold                    = 1000
 	banIncrementInvalidSig          = 100
-	banIncrementIncompatibleVersion = 1000 // immediate blacklist: incompatible protocol wastes resources on every connect
+	banIncrementIncompatibleVersion = 250 // accumulating: 4 attempts to reach banThreshold (1000)
 	banIncrementRateLimit           = 200  // command rate limit violation signals intentional abuse
 	banDuration                     = 24 * time.Hour
 	// nodeName and networkName are the protocol-level identifiers included
@@ -539,6 +579,14 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 			ConsecutiveFailures: entry.ConsecutiveFailures,
 			LastError:           entry.LastError,
 			Score:               entry.Score,
+			// Machine-readable version diagnostics — restored so the
+			// operator-visible peerHealthFrames() snapshot retains the
+			// exact evidence that created the lockout.
+			LastErrorCode:               entry.LastErrorCode,
+			LastDisconnectCode:          entry.LastDisconnectCode,
+			IncompatibleVersionAttempts: entry.IncompatibleVersionAttempts,
+			ObservedPeerVersion:         entry.ObservedPeerVersion,
+			ObservedPeerMinimumVersion:  entry.ObservedPeerMinimumVersion,
 		}
 		if entry.LastConnectedAt != nil {
 			h.LastConnectedAt = *entry.LastConnectedAt
@@ -549,7 +597,22 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		if entry.BannedUntil != nil && time.Now().UTC().Before(*entry.BannedUntil) {
 			h.BannedUntil = *entry.BannedUntil
 		}
+		if entry.LastIncompatibleVersionAt != nil {
+			h.LastIncompatibleVersionAt = *entry.LastIncompatibleVersionAt
+		}
 		restoredHealth[addr] = h
+	}
+
+	// Restore peerVersions from persisted lockout data so that
+	// peerHealthFrames() can surface ClientVersion for locked-out
+	// peers that haven't reconnected since restart. Without this,
+	// the operator-visible snapshot loses the remote client version
+	// string even though the lockout and diagnostic evidence survive.
+	restoredVersions := make(map[domain.PeerAddress]string)
+	for addr, entry := range persistedByAddr {
+		if cv := string(entry.VersionLockout.ObservedClientVersion); cv != "" {
+			restoredVersions[addr] = cv
+		}
 	}
 
 	// Migrate queueState maps from string-keyed to domain.PeerAddress-keyed.
@@ -596,7 +659,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		health:                restoredHealth,
 		peerTypes:             make(map[domain.PeerAddress]domain.NodeType),
 		peerIDs:               make(map[domain.PeerAddress]domain.PeerIdentity),
-		peerVersions:          make(map[domain.PeerAddress]string),
+		peerVersions:          restoredVersions,
 		peerBuilds:            make(map[domain.PeerAddress]int),
 		pending:               pending,
 		pendingKeys:           pendingKeys,
@@ -668,6 +731,11 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 			}
 			return result
 		},
+		VersionLockedOutFn: func(addr domain.PeerAddress) bool {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			return svc.isPeerVersionLockedOutLocked(addr)
+		},
 		ListenAddr:  domain.ListenAddress(cfg.ListenAddress),
 		DefaultPort: config.DefaultPeerPort,
 	})
@@ -709,6 +777,11 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 			}
 		}
 	}
+
+	// Eagerly clear version lockouts whose local version fingerprint is stale
+	// (the node upgraded since the lockout was recorded). This runs before
+	// PeerProvider and CM are operational, so no concurrent access yet.
+	svc.clearStaleVersionLockoutsLocked()
 
 	// Initialize ConnectionManager (Stage 3: connection management integration).
 	svc.connManager = NewConnectionManager(ConnectionManagerConfig{
@@ -1261,14 +1334,29 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			// Immediate IP blacklist (transport level): prevents the same
 			// remote IP from opening new TCP connections for 24 hours.
 			s.addBanScore(connID, banIncrementIncompatibleVersion)
-			// Health-level ban (overlay level): if the hello declares a
-			// listen address that matches a known peer, apply the same
-			// BannedUntil + score penalty as the outbound path so that
-			// peerDialCandidates also skips outbound dials to this peer.
+			// Overlay-level penalty: if the hello declares a listen address
+			// that matches a known peer, accumulate incompatible-version
+			// penalty (ban triggers after repeated attempts, not immediately).
+			// The remote peer's version comes from the hello frame it just sent.
+			peerVer := domain.ProtocolVersion(frame.Version)
+			peerMin := domain.ProtocolVersion(frame.MinimumProtocolVersion)
 			if peerAddr := strings.TrimSpace(frame.Listen); peerAddr != "" {
-				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr))
+				// Pre-populate client version so the lockout has complete
+				// diagnostics. On the inbound rejection path the hello
+				// frame is the only source of this metadata.
+				if frame.ClientVersion != "" {
+					s.mu.Lock()
+					s.peerVersions[domain.PeerAddress(peerAddr)] = frame.ClientVersion
+					s.mu.Unlock()
+				}
+				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr), peerVer, peerMin)
 			} else if peerAddr = strings.TrimSpace(frame.Address); peerAddr != "" {
-				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr))
+				if frame.ClientVersion != "" {
+					s.mu.Lock()
+					s.peerVersions[domain.PeerAddress(peerAddr)] = frame.ClientVersion
+					s.mu.Unlock()
+				}
+				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr), peerVer, peerMin)
 			}
 			return true
 		}
@@ -3422,6 +3510,97 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	return true, count
 }
 
+// isTransitReceiptSeen returns true if the receipt was already recorded in
+// seenReceipts (read-only check — does not mark). Used as a fast-path guard
+// at the handler level to avoid redundant relay-chain or gossip processing
+// for receipts that were already successfully delivered on a prior arrival.
+func (s *Service) isTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
+	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+
+	s.mu.RLock()
+	_, ok := s.seenReceipts[key]
+	s.mu.RUnlock()
+	return ok
+}
+
+// markTransitReceiptSeen records a transit receipt in seenReceipts and returns
+// true if this receipt was already seen (duplicate — caller should drop it).
+// Unlike storeDeliveryReceipt, this does NOT store the receipt locally or clear
+// outbound/pending/relayRetry state — those side-effects are only meaningful
+// for receipts addressed to this node. The shared seenReceipts key format
+// ensures that a receipt seen via local delivery is also suppressed on the
+// transit path and vice versa.
+//
+// Callers must only invoke this method AFTER confirming that the receipt can
+// actually be delivered (relay chain forwarded successfully, or gossip has
+// usable routing targets). Marking before delivery confirmation would
+// permanently suppress retries for transiently unroutable receipts.
+func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
+	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+
+	s.mu.Lock()
+	if _, ok := s.seenReceipts[key]; ok {
+		s.mu.Unlock()
+		return true
+	}
+	s.seenReceipts[key] = struct{}{}
+	s.mu.Unlock()
+	return false
+}
+
+// gossipTransitReceipt is the transit-receipt variant of gossipReceipt.
+// It resolves routing targets first; if none exist the receipt is NOT marked
+// as seen — allowing a future arrival of the same receipt to retry after
+// routes recover. When targets exist, sends are attempted synchronously
+// (sendReceiptToPeer is an in-memory channel/queue write, not a network I/O
+// call) and the receipt is marked as seen only after at least one target
+// actually accepted it. If every send fails (all channels full, all sessions
+// stalled), the receipt remains unmarked and eligible for retry on a future
+// arrival.
+//
+// Concurrency note: two simultaneous arrivals of the same receipt can both
+// enter this function and both send before either marks. This produces a
+// one-time wire duplicate to each target — acceptable because the receiving
+// node's isTransitReceiptSeen check will suppress re-processing. The
+// alternative (pre-mark + rollback on failure) would add complexity without
+// meaningful benefit, since duplicate sends are harmless and self-limiting.
+func (s *Service) gossipTransitReceipt(receipt protocol.DeliveryReceipt) {
+	defer crashlog.DeferRecover()
+
+	targets := s.routingTargetsForRecipient(receipt.Recipient)
+	if len(targets) == 0 {
+		log.Debug().
+			Str("message_id", string(receipt.MessageID)).
+			Str("recipient", receipt.Recipient).
+			Msg("transit receipt gossip skipped: no routing targets, receipt eligible for retry")
+		return
+	}
+
+	delivered := false
+	for _, address := range targets {
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		if s.sendReceiptToPeer(address, receipt) {
+			delivered = true
+		}
+	}
+
+	if !delivered {
+		log.Debug().
+			Str("message_id", string(receipt.MessageID)).
+			Str("recipient", receipt.Recipient).
+			Int("targets", len(targets)).
+			Msg("transit receipt gossip: all sends failed, receipt eligible for retry")
+		return
+	}
+
+	// At least one target accepted the receipt — mark as seen to suppress
+	// future duplicates. The mark is placed AFTER confirmed delivery so
+	// that transient send failures do not permanently suppress the receipt.
+	s.markTransitReceiptSeen(receipt)
+}
+
 func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) {
 	if strings.TrimSpace(string(messageID)) == "" {
 		return
@@ -4208,11 +4387,23 @@ func (s *Service) handleInboundPushDeliveryReceipt(connID domain.ConnID, frame p
 // "send_delivery_receipt" to enforce command-isolation: local RPC commands
 // must never be callable from the P2P wire (see docs/command-isolation.md).
 //
-// Identity binding: same gate as push_delivery_receipt — the receipt's
-// Recipient must match this node's identity or an active subscriber.
-// Without this, any authenticated peer could inject a forged receipt and
-// advance another conversation's delivery state via storeDeliveryReceipt
-// (which clears pending outbound state and updates MessageStore).
+// Identity binding: the receipt's Recipient must match this node's identity
+// or an active subscriber for local delivery. If neither matches, the node
+// checks relay state — a transit node may need to forward this receipt one
+// hop back along the relay chain. When no relay path exists, the receipt
+// is broadcast via gossipReceipt as a last resort.
+//
+// Deduplication: transit receipts are recorded in seenReceipts only after
+// confirming that delivery can proceed (relay chain forwarded successfully,
+// or gossip has usable routing targets). If neither path is available on
+// the first observation, the receipt is NOT marked — allowing a later
+// arrival of the same receipt to retry after routes recover, instead of
+// being permanently suppressed.
+//
+// No ban scoring is applied at this handler level. Malformed frames are
+// silently dropped (consistent with push_delivery_receipt and other receipt
+// handlers). Non-local receipts are legitimate hop-by-hop transit traffic
+// and must not penalise the sending peer.
 func (s *Service) handleInboundRelayDeliveryReceipt(connID domain.ConnID, frame protocol.Frame) {
 	receipt, err := receiptFromFrame(frame)
 	if err != nil {
@@ -4221,19 +4412,52 @@ func (s *Service) handleInboundRelayDeliveryReceipt(connID domain.ConnID, frame 
 
 	peerAddr := s.inboundPeerAddress(connID)
 
-	if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
-		log.Warn().
-			Str("peer", string(peerAddr)).
-			Str("message_id", string(receipt.MessageID)).
-			Str("receipt_recipient", receipt.Recipient).
-			Str("local_identity", s.identity.Address).
-			Msg("relay_delivery_receipt rejected: recipient does not match local identity or active subscriber")
-		s.addBanScore(connID, banIncrementInvalidSig)
+	// Fast path: receipt is addressed to this node or an active subscriber.
+	if receipt.Recipient == s.identity.Address || s.hasSubscriber(receipt.Recipient) {
+		s.storeDeliveryReceipt(receipt)
+		log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt (inbound)")
 		return
 	}
 
-	s.storeDeliveryReceipt(receipt)
-	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt (inbound)")
+	// Fast-path dedupe: read-only check suppresses receipts that were already
+	// successfully delivered on a prior arrival. Does not mark — marking only
+	// happens after confirmed delivery (relay success or gossip-with-targets).
+	if s.isTransitReceiptSeen(receipt) {
+		log.Debug().
+			Str("peer", string(peerAddr)).
+			Str("message_id", string(receipt.MessageID)).
+			Str("recipient", receipt.Recipient).
+			Msg("relay_delivery_receipt dropped: duplicate transit receipt (inbound)")
+		return
+	}
+
+	// Transit path: attempt to forward the receipt along the relay chain.
+	// On success, mark as seen to suppress duplicates. On failure, fall back
+	// to gossip — consistent with the contract in handleRelayReceipt
+	// ("caller is responsible for gossip fallback") and the pattern in
+	// retryRelayDeliveries.
+	if s.handleRelayReceipt(receipt) {
+		s.markTransitReceiptSeen(receipt)
+		log.Info().
+			Str("peer", string(peerAddr)).
+			Str("message_id", string(receipt.MessageID)).
+			Str("recipient", receipt.Recipient).
+			Msg("relay_delivery_receipt forwarded via relay chain")
+		return
+	}
+
+	// Gossip fallback: no reverse relay path or send failed — broadcast
+	// the receipt to routing targets so it can still reach the sender.
+	// gossipTransitReceipt marks the receipt as seen only after at least one
+	// target accepts; if no targets exist or all sends fail, the receipt
+	// remains eligible for retry on a future arrival.
+	go s.gossipTransitReceipt(receipt)
+	log.Debug().
+		Str("peer", string(peerAddr)).
+		Str("message_id", string(receipt.MessageID)).
+		Str("receipt_recipient", receipt.Recipient).
+		Str("local_identity", s.identity.Address).
+		Msg("relay_delivery_receipt gossip fallback: no relay path or send failed")
 }
 
 // handleInboundPushNotice processes a push_notice frame received on an

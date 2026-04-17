@@ -97,6 +97,15 @@ type PeerHealth struct {
 	RecordingScope         string
 	RecordingError         string
 	RecordingDroppedEvents int64
+
+	// Machine-readable disconnect diagnostics (version upgrade detection §5.1).
+	LastErrorCode               string
+	LastDisconnectCode          string
+	IncompatibleVersionAttempts int
+	LastIncompatibleVersionAt   *time.Time
+	ObservedPeerVersion         int
+	ObservedPeerMinimumVersion  int
+	VersionLockoutActive        bool
 }
 
 type DirectMessage struct {
@@ -176,6 +185,13 @@ type AggregateStatus struct {
 	ConnectedPeers  int
 	TotalPeers      int
 	PendingMessages int
+
+	// Version policy snapshot — node-computed update signal.
+	UpdateAvailable              bool
+	UpdateReason                 string
+	IncompatibleVersionReporters int
+	MaxObservedPeerBuild         int
+	MaxObservedPeerVersion       int
 }
 
 func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service) *DesktopClient {
@@ -559,6 +575,14 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			RecordingScope:         item.RecordingScope,
 			RecordingError:         item.RecordingError,
 			RecordingDroppedEvents: item.RecordingDroppedEvents,
+
+			LastErrorCode:               item.LastErrorCode,
+			LastDisconnectCode:          item.LastDisconnectCode,
+			IncompatibleVersionAttempts: item.IncompatibleVersionAttempts,
+			LastIncompatibleVersionAt:   parseOptionalTime(item.LastIncompatibleVersionAt),
+			ObservedPeerVersion:         item.ObservedPeerVersion,
+			ObservedPeerMinimumVersion:  item.ObservedPeerMinimumVersion,
+			VersionLockoutActive:        item.VersionLockoutActive,
 		})
 	}
 	return items
@@ -578,6 +602,12 @@ func aggregateStatusFromFrame(frame protocol.Frame) *AggregateStatus {
 		ConnectedPeers:  frame.AggregateStatus.ConnectedPeers,
 		TotalPeers:      frame.AggregateStatus.TotalPeers,
 		PendingMessages: frame.AggregateStatus.PendingMessages,
+
+		UpdateAvailable:              frame.AggregateStatus.UpdateAvailable,
+		UpdateReason:                 frame.AggregateStatus.UpdateReason,
+		IncompatibleVersionReporters: frame.AggregateStatus.IncompatibleVersionReporters,
+		MaxObservedPeerBuild:         frame.AggregateStatus.MaxObservedPeerBuild,
+		MaxObservedPeerVersion:       frame.AggregateStatus.MaxObservedPeerVersion,
 	}
 }
 

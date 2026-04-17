@@ -82,6 +82,11 @@ type PeerProviderConfig struct {
 	// from Service.bannedIPSet. Must be a new map each call.
 	BannedIPsFn func() map[string]domain.BannedIPEntry
 
+	// VersionLockedOutFn reports whether a peer has a persisted version
+	// lockout (our protocol version was too old, peer rejected us). The
+	// peer should not be dialled until the local version changes.
+	VersionLockedOutFn func(domain.PeerAddress) bool
+
 	// ListenAddr is this node's own listen address (for self-filtering).
 	ListenAddr domain.ListenAddress
 
@@ -316,6 +321,12 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 
 		// 6c: skip banned IPs.
 		if _, banned := bannedIPs[kp.IP]; banned {
+			continue
+		}
+
+		// 6c.1: skip version-locked-out peers — they rejected our
+		// protocol version and a retry would be futile until we upgrade.
+		if cfg.VersionLockedOutFn != nil && cfg.VersionLockedOutFn(kp.Address) {
 			continue
 		}
 

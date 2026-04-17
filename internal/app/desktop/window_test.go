@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/service"
 )
@@ -84,77 +83,41 @@ func TestEllipsize(t *testing.T) {
 // on the number of usable peers (healthy + degraded) among currently live
 // peers. Stalled peers count as connected-but-not-usable, while reconnecting
 // peers are diagnostic only unless there are no live peers at all.
-// TestHasNewerPeerBuildRequiresQuorum verifies that a single peer with a
-// higher build number is not enough to trigger the update badge. At least
-// 2 distinct peer identities must report a higher build to prevent a
-// malicious custom build from causing false upgrade prompts across the
-// network. The same identity appearing under multiple addresses counts
-// only once.
-func TestHasNewerPeerBuildRequiresQuorum(t *testing.T) {
+// TestNodeUpdateAvailable verifies that the Desktop UI reads the pre-computed
+// update_available flag from AggregateStatus rather than computing it locally.
+// The policy decision (which peers, thresholds, dedup) lives in the node layer;
+// the UI only renders the result.
+func TestNodeUpdateAvailable(t *testing.T) {
 	t.Parallel()
 
-	myBuild := config.ClientBuild
-
 	tests := []struct {
-		name  string
-		peers []service.PeerHealth
-		want  bool
+		name string
+		agg  *service.AggregateStatus
+		want bool
 	}{
 		{
-			name:  "no peers",
-			peers: nil,
-			want:  false,
-		},
-		{
-			name:  "single peer with same build",
-			peers: []service.PeerHealth{{ClientBuild: myBuild, PeerID: "a"}},
-			want:  false,
-		},
-		{
-			name:  "single peer with higher build is not enough",
-			peers: []service.PeerHealth{{ClientBuild: myBuild + 1, PeerID: "a"}},
-			want:  false,
-		},
-		{
-			name: "two distinct peers with higher build triggers update",
-			peers: []service.PeerHealth{
-				{ClientBuild: myBuild + 1, PeerID: "a"},
-				{ClientBuild: myBuild + 1, PeerID: "b"},
-			},
-			want: true,
-		},
-		{
-			name: "same identity under two addresses does not satisfy quorum",
-			peers: []service.PeerHealth{
-				{ClientBuild: myBuild + 1, PeerID: "a", Address: "1.2.3.4:100"},
-				{ClientBuild: myBuild + 1, PeerID: "a", Address: "5.6.7.8:200"},
-			},
+			name: "nil aggregate status",
+			agg:  nil,
 			want: false,
 		},
 		{
-			name: "two peers higher among many same",
-			peers: []service.PeerHealth{
-				{ClientBuild: myBuild, PeerID: "a"},
-				{ClientBuild: myBuild + 1, PeerID: "b"},
-				{ClientBuild: myBuild, PeerID: "c"},
-				{ClientBuild: myBuild + 2, PeerID: "d"},
-			},
-			want: true,
-		},
-		{
-			name: "all peers lower",
-			peers: []service.PeerHealth{
-				{ClientBuild: myBuild - 1, PeerID: "a"},
-				{ClientBuild: myBuild - 2, PeerID: "b"},
-			},
+			name: "update not available",
+			agg:  &service.AggregateStatus{UpdateAvailable: false},
 			want: false,
 		},
 		{
-			name: "peers without identity fall back to address dedup",
-			peers: []service.PeerHealth{
-				{ClientBuild: myBuild + 1, Address: "1.2.3.4:100"},
-				{ClientBuild: myBuild + 1, Address: "5.6.7.8:200"},
-			},
+			name: "update available from node policy — peer build",
+			agg:  &service.AggregateStatus{UpdateAvailable: true, UpdateReason: "peer_build_newer"},
+			want: true,
+		},
+		{
+			name: "update available from node policy — incompatible reporters",
+			agg:  &service.AggregateStatus{UpdateAvailable: true, UpdateReason: "incompatible_version_reporters"},
+			want: true,
+		},
+		{
+			name: "update available from node policy — both signals",
+			agg:  &service.AggregateStatus{UpdateAvailable: true, UpdateReason: "peer_build_and_incompatible_version"},
 			want: true,
 		},
 	}
@@ -163,12 +126,12 @@ func TestHasNewerPeerBuildRequiresQuorum(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			w := &Window{
 				snap: service.RouterSnapshot{
-					NodeStatus: service.NodeStatus{PeerHealth: tt.peers},
+					NodeStatus: service.NodeStatus{AggregateStatus: tt.agg},
 				},
 			}
-			got := w.hasNewerPeerBuild()
+			got := w.nodeUpdateAvailable()
 			if got != tt.want {
-				t.Errorf("hasNewerPeerBuild() = %v, want %v", got, tt.want)
+				t.Errorf("nodeUpdateAvailable() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -144,12 +144,32 @@ type PeerHealthFrame struct {
 	SlotConnectedAddr   string   `json:"slot_connected_address,omitempty"` // actual TCP address used for the active connection
 
 	// Capture state — per-connection recording diagnostics (plan §8.1).
-	Recording             bool   `json:"recording,omitempty"`
-	RecordingFile         string `json:"recording_file,omitempty"`
-	RecordingStartedAt    string `json:"recording_started_at,omitempty"`
-	RecordingScope        string `json:"recording_scope,omitempty"`
-	RecordingError        string `json:"recording_error,omitempty"`
-	RecordingDroppedEvents int64 `json:"recording_dropped_events,omitempty"`
+	Recording              bool   `json:"recording,omitempty"`
+	RecordingFile          string `json:"recording_file,omitempty"`
+	RecordingStartedAt     string `json:"recording_started_at,omitempty"`
+	RecordingScope         string `json:"recording_scope,omitempty"`
+	RecordingError         string `json:"recording_error,omitempty"`
+	RecordingDroppedEvents int64  `json:"recording_dropped_events,omitempty"`
+
+	// Machine-readable disconnect diagnostics.
+	//
+	// LastErrorCode: protocol.ErrorCode of the most recent pre-handshake
+	// rejection (e.g. "incompatible-protocol-version"). Set by
+	// penalizeOldProtocolPeer. Cleared on successful reconnect and by
+	// operator add_peer override.
+	//
+	// LastDisconnectCode: protocol.ErrorCode that caused the most recent
+	// post-handshake socket teardown (e.g. "frame-too-large",
+	// "rate-limited"). Empty when the disconnect was clean, non-protocol,
+	// or the error maps to the generic "protocol-error" sentinel. Cleared
+	// on successful reconnect.
+	LastErrorCode      string `json:"last_error_code,omitempty"`
+	LastDisconnectCode string `json:"last_disconnect_code,omitempty"`
+	IncompatibleVersionAttempts int   `json:"incompatible_version_attempts,omitempty"`
+	LastIncompatibleVersionAt  string `json:"last_incompatible_version_at,omitempty"`
+	ObservedPeerVersion        int    `json:"observed_peer_version,omitempty"`
+	ObservedPeerMinimumVersion int    `json:"observed_peer_minimum_version,omitempty"`
+	VersionLockoutActive       bool   `json:"version_lockout_active,omitempty"`
 }
 
 // NetworkStatsFrame provides aggregated traffic statistics for the entire node.
@@ -180,6 +200,25 @@ type AggregateStatusFrame struct {
 	ConnectedPeers  int    `json:"connected_peers"`  // usable + stalled
 	TotalPeers      int    `json:"total_peers"`      // connected + reconnecting
 	PendingMessages int    `json:"pending_messages"`
+
+	// Version policy snapshot — embedded directly in AggregateStatusFrame
+	// (not a separate top-level block). All fields are omitempty for
+	// backward compatibility with consumers that predate version detection.
+	//
+	// UpdateReason is a closed enum with exactly four values:
+	//   ""                                        — no signal (update_available=false)
+	//   "peer_build_newer"                        — build heuristic only
+	//   "incompatible_version_reporters"          — version evidence or lockout
+	//   "peer_build_and_incompatible_version"     — both active
+	//
+	// Precedence: both > incompatible_version > peer_build > none.
+	UpdateAvailable              bool   `json:"update_available,omitempty"`
+	UpdateReason                 string `json:"update_reason,omitempty"`
+	IncompatibleVersionReporters int    `json:"incompatible_version_reporters,omitempty"`
+	MaxObservedPeerBuild         int    `json:"max_observed_peer_build,omitempty"`
+	// MaxObservedPeerVersion is the highest protocol version among incompatible
+	// peers (runtime reporters + persisted lockouts). See domain.VersionPolicySnapshot.
+	MaxObservedPeerVersion       int    `json:"max_observed_peer_version,omitempty"`
 }
 
 // TrafficHistoryFrame holds a rolling window of per-second traffic samples.
