@@ -889,16 +889,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
 	if session.peerIdentity != "" && s.sessionHasCapability(address, domain.CapMeshRoutingV1) && s.sessionHasCapability(address, domain.CapMeshRelayV1) {
-		routes := s.routingTable.AnnounceTo(session.peerIdentity)
-		if len(routes) > 0 {
-			if !s.SendAnnounceRoutes(address, routes) {
-				log.Warn().
-					Str("peer", string(session.peerIdentity)).
-					Str("address", string(address)).
-					Int("routes", len(routes)).
-					Msg("routing_outbound_full_sync_failed")
-			}
-		}
+		s.sendOutboundFullTableSync(session.peerIdentity, address)
 	}
 
 	return true, s.servePeerSession(ctx, session)
@@ -3847,16 +3838,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 
 		// Send full table sync to the new peer (Phase 1.2).
 		if session.peerIdentity != "" && s.sessionHasCapability(dialAddress, domain.CapMeshRoutingV1) && s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1) {
-			routes := s.routingTable.AnnounceTo(session.peerIdentity)
-			if len(routes) > 0 {
-				if !s.SendAnnounceRoutes(dialAddress, routes) {
-					log.Warn().
-						Str("peer", string(session.peerIdentity)).
-						Str("address", string(dialAddress)).
-						Int("routes", len(routes)).
-						Msg("routing_outbound_full_sync_failed")
-				}
-			}
+			s.sendOutboundFullTableSync(session.peerIdentity, dialAddress)
 		}
 
 		// --- Phase 3: main session loop ---

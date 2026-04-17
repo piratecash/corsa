@@ -583,6 +583,103 @@ func TestAnnounceToHops15SentAsIs(t *testing.T) {
 	}
 }
 
+func TestAnnounceToIncludesOwnOriginTombstones(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(
+		WithClock(fixedClock(now)),
+		WithLocalOrigin("node-A"),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	// Add a direct peer, then remove it to create an own-origin tombstone.
+	if _, err := tbl.AddDirectPeer("peer-B"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := tbl.RemoveDirectPeer("peer-B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Withdrawals) == 0 {
+		t.Fatal("expected withdrawal entries")
+	}
+
+	// AnnounceTo should include the own-origin tombstone (hops=16).
+	entries := tbl.AnnounceTo("peer-C")
+	found := false
+	for _, e := range entries {
+		if e.Identity == "peer-B" && e.Hops == HopsInfinity {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("own-origin tombstone should appear in AnnounceTo, got %+v", entries)
+	}
+}
+
+func TestAnnounceToExcludesTransitTombstones(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(
+		WithClock(fixedClock(now)),
+		WithLocalOrigin("node-A"),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	// Insert a transit route (origin != localOrigin), then withdraw it.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "peer-X", NextHop: "peer-B",
+		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+	// Withdraw with higher SeqNo.
+	tbl.WithdrawRoute("alice", "peer-X", "peer-B", 2)
+
+	// AnnounceTo should NOT include the transit tombstone.
+	entries := tbl.AnnounceTo("peer-C")
+	for _, e := range entries {
+		if e.Identity == "alice" && e.Hops >= HopsInfinity {
+			t.Fatal("transit tombstone should NOT appear in AnnounceTo")
+		}
+	}
+}
+
+func TestAnnounceToOwnOriginTombstoneExpiresNaturally(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	tbl := NewTable(
+		WithClock(clock),
+		WithLocalOrigin("node-A"),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	if _, err := tbl.AddDirectPeer("peer-B"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tbl.RemoveDirectPeer("peer-B"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tombstone visible immediately.
+	entries := tbl.AnnounceTo("peer-C")
+	hasTombstone := false
+	for _, e := range entries {
+		if e.Identity == "peer-B" && e.Hops == HopsInfinity {
+			hasTombstone = true
+		}
+	}
+	if !hasTombstone {
+		t.Fatal("tombstone should be visible before expiry")
+	}
+
+	// Advance clock past TTL — tombstone should disappear.
+	now = now.Add(121 * time.Second)
+	entries = tbl.AnnounceTo("peer-C")
+	for _, e := range entries {
+		if e.Identity == "peer-B" {
+			t.Fatalf("tombstone should have expired, still present: %+v", e)
+		}
+	}
+}
+
 // --- Withdrawal ---
 
 func TestWithdrawRouteSetHopsInfinity(t *testing.T) {

@@ -294,6 +294,10 @@ func (s *Service) inboundConnKeyForID(id domain.ConnID) domain.PeerAddress {
 // outbound full-table sync (Phase 1.2: always full sync on connect).
 // Without this, inbound-only peers would wait until the next periodic
 // or triggered announce cycle before learning the current table.
+//
+// The per-peer announce cache is updated on successful send so that the
+// next announce cycle can compute a meaningful delta instead of
+// re-sending the full table.
 func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, peerIdentity domain.PeerIdentity) {
 	if peerIdentity == "" {
 		return
@@ -302,19 +306,59 @@ func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, peerIdentity doma
 		return
 	}
 
+	sendAddr := s.inboundConnKeyForID(id)
+	s.sendConnectTimeFullSync(peerIdentity, sendAddr)
+}
+
+// sendOutboundFullTableSync sends the current routing table to an outbound
+// peer and updates the per-peer announce cache on success. This is the
+// outbound-path counterpart of sendFullTableSyncToInbound. Both paths
+// delegate to sendConnectTimeFullSync which builds a canonical snapshot
+// so that subsequent announce cycles can compute meaningful deltas.
+func (s *Service) sendOutboundFullTableSync(peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
+	s.sendConnectTimeFullSync(peerIdentity, address)
+}
+
+// sendConnectTimeFullSync is the shared core for inbound and outbound
+// connect-time full table sync. It builds a canonical snapshot of routes
+// visible to the peer (split horizon applied), sends them via
+// SendAnnounceRoutes, and updates the per-peer announce cache on
+// success. When the snapshot is empty, the empty baseline is recorded
+// without sending a wire frame — the protocol is additive so an empty
+// table needs no explicit announcement.
+func (s *Service) sendConnectTimeFullSync(peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
 	routes := s.routingTable.AnnounceTo(peerIdentity)
-	if len(routes) == 0 {
+	snapshot := routing.BuildAnnounceSnapshot(routes)
+	registry := s.announceLoop.StateRegistry()
+
+	now := registry.Clock()
+	peerState := registry.GetOrCreate(peerIdentity)
+
+	if len(snapshot.Entries) == 0 {
+		// No routes to send, but register the empty baseline so that future
+		// announce cycles can compute meaningful deltas. No wire frame is
+		// needed — the protocol is additive (not a destructive snapshot), so
+		// an empty table is correctly represented by sending nothing.
+		peerState.RecordFullSyncSuccess(snapshot, now)
+		log.Debug().
+			Str("peer", string(peerIdentity)).
+			Str("address", string(address)).
+			Msg("routing_connect_time_full_sync_empty_baseline")
 		return
 	}
 
-	sendAddr := s.inboundConnKeyForID(id)
-	if !s.SendAnnounceRoutes(sendAddr, routes) {
+	peerState.RecordFullSyncAttempt(now)
+
+	if !s.SendAnnounceRoutes(address, snapshot.Entries) {
 		log.Warn().
 			Str("peer", string(peerIdentity)).
-			Str("address", string(sendAddr)).
-			Int("routes", len(routes)).
-			Msg("routing_inbound_full_sync_failed")
+			Str("address", string(address)).
+			Int("routes", len(snapshot.Entries)).
+			Msg("routing_connect_time_full_sync_failed")
+		return
 	}
+
+	peerState.RecordFullSyncSuccess(snapshot, now)
 }
 
 // handleAnnounceRoutes processes an incoming announce_routes frame from a
@@ -574,6 +618,9 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 		Bool("penalized", result.Penalized).
 		Msg("routing_direct_peer_added")
 
+	// Register or reset per-peer announce state for this routing-capable peer.
+	s.announceLoop.StateRegistry().MarkReconnected(peerIdentity)
+
 	// When flap detection penalizes a peer, skip the triggered announce.
 	// The route will be picked up by the next periodic announce cycle,
 	// giving the link time to stabilize.
@@ -663,7 +710,14 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 		return
 	}
 
+	// Mark per-peer announce state as disconnected. The next announce
+	// cycle for this peer (if it reconnects) will require a forced full sync.
+	s.announceLoop.StateRegistry().MarkDisconnected(peerIdentity)
+
 	// Send wire withdrawals to all routing-capable peers.
+	// This is the immediate own-origin withdrawal path — it bypasses the
+	// announce loop and per-peer cache intentionally (see section 8.2.1
+	// of the routing-announce-traffic-optimization plan).
 	if len(result.Withdrawals) > 0 {
 		peers := s.routingCapablePeers()
 		for _, peer := range peers {

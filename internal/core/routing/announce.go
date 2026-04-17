@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -13,6 +14,16 @@ const (
 	// Every 30 seconds, the node sends its routing table to all peers
 	// that support mesh_routing_v1.
 	DefaultAnnounceInterval = 30 * time.Second
+
+	// ForcedFullSyncMultiplier controls how often a forced full sync is
+	// sent to each peer: every ForcedFullSyncMultiplier * DefaultAnnounceInterval.
+	// At 30s interval this means a full sync roughly every 5 minutes.
+	ForcedFullSyncMultiplier = 10
+
+	// MinForcedFullSyncInterval is the minimum time between forced full
+	// sync attempts for a single peer. Prevents flood when a peer is
+	// repeatedly marked NeedsFullResync.
+	MinForcedFullSyncInterval = DefaultAnnounceInterval
 )
 
 // PeerSender abstracts the ability to send announce_routes frames to a
@@ -35,6 +46,14 @@ type PeerSender interface {
 // and sends the local routing table to all capable peers. Triggered
 // updates (connect, disconnect) bypass the timer and send immediately.
 //
+// The loop uses per-peer announce state (via AnnounceStateRegistry) to:
+//   - aggregate raw table entries into canonical peer-specific snapshots;
+//   - compare each snapshot with the previously sent one;
+//   - send only changed entries (delta) to peers that already received
+//     a full sync;
+//   - suppress no-op sends when the snapshot is unchanged;
+//   - force periodic full sync at configurable intervals.
+//
 // The loop is designed to be started once from node.Service.Run and
 // stopped on context cancellation.
 type AnnounceLoop struct {
@@ -50,8 +69,15 @@ type AnnounceLoop struct {
 	// mesh_routing_v1. Each entry is (transport_address, identity).
 	peersFn func() []AnnounceTarget
 
+	// stateRegistry manages per-peer announce send state. Owned by the
+	// AnnounceLoop but architecturally belongs to the service layer.
+	stateRegistry *AnnounceStateRegistry
+
 	mu      sync.Mutex
 	running bool
+
+	// cycleCounter provides a monotonic announce_cycle_id for log correlation.
+	cycleCounter atomic.Uint64
 }
 
 // AnnounceTarget identifies a peer for announcement purposes.
@@ -69,6 +95,14 @@ type AnnounceLoopOption func(*AnnounceLoop)
 func WithAnnounceInterval(d time.Duration) AnnounceLoopOption {
 	return func(a *AnnounceLoop) {
 		a.interval = d
+	}
+}
+
+// WithStateRegistry injects an existing state registry. When not set,
+// a default registry is created.
+func WithStateRegistry(r *AnnounceStateRegistry) AnnounceLoopOption {
+	return func(a *AnnounceLoop) {
+		a.stateRegistry = r
 	}
 }
 
@@ -90,7 +124,17 @@ func NewAnnounceLoop(
 	for _, opt := range opts {
 		opt(a)
 	}
+	if a.stateRegistry == nil {
+		a.stateRegistry = NewAnnounceStateRegistry()
+	}
 	return a
+}
+
+// StateRegistry returns the per-peer announce state registry. Used by
+// node.Service to integrate session lifecycle events (connect, disconnect)
+// with the announce state.
+func (a *AnnounceLoop) StateRegistry() *AnnounceStateRegistry {
+	return a.stateRegistry
 }
 
 // Run starts the periodic announce loop. It blocks until ctx is cancelled.
@@ -117,9 +161,9 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.announceToAllPeers()
+			a.announceToAllPeers(ctx)
 		case <-a.triggerCh:
-			a.announceToAllPeers()
+			a.announceToAllPeers(ctx)
 			// Reset the ticker so we don't double-announce shortly after
 			// a triggered update.
 			ticker.Reset(a.interval)
@@ -152,17 +196,11 @@ func (a *AnnounceLoop) PendingTrigger() bool {
 }
 
 // announceToAllPeers sends the routing table to every capable peer,
-// applying split horizon per peer. Before sending, it refreshes the TTL
-// of own-origin direct routes so they do not expire while peers remain
-// connected.
-func (a *AnnounceLoop) announceToAllPeers() {
-	// Refresh TTL of own-origin direct routes unconditionally, before
-	// checking for announce targets. Direct routes are created for any
-	// relay-capable peer (mesh_relay_v1), but announce targets require
-	// both mesh_routing_v1 and mesh_relay_v1. A node with only
-	// relay-only direct peers would have zero announce targets, and
-	// without this early refresh, TickTTL would expire the live direct
-	// routes after defaultTTL.
+// applying split horizon per peer and per-peer delta/cache logic.
+func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
+	cycleID := a.cycleCounter.Add(1)
+
+	// Refresh TTL of own-origin direct routes unconditionally.
 	a.table.RefreshDirectPeers()
 
 	peers := a.peersFn()
@@ -170,20 +208,144 @@ func (a *AnnounceLoop) announceToAllPeers() {
 		return
 	}
 
+	// Periodic eviction of stale disconnected peer state.
+	a.stateRegistry.EvictStale()
+
+	totalRaw := 0
+	totalAggregated := 0
+	totalDelta := 0
+	skippedNoop := 0
+	forcedFull := 0
+	coalescedTrigger := 0
+
+	now := a.stateRegistry.clock()
+	forcedFullSyncInterval := time.Duration(ForcedFullSyncMultiplier) * a.interval
+
 	for _, peer := range peers {
-		routes := a.table.AnnounceTo(peer.Identity)
-		if len(routes) == 0 {
-			continue
+		// Check for context cancellation between peers so that a long
+		// announce cycle (many peers) can be interrupted promptly.
+		if ctx.Err() != nil {
+			return
 		}
-		if !a.sender.SendAnnounceRoutes(peer.Address, routes) {
-			log.Debug().
-				Str("peer", string(peer.Address)).
-				Int("routes", len(routes)).
-				Msg("announce_routes_send_failed")
+
+		peerState := a.stateRegistry.GetOrCreate(peer.Identity)
+
+		// Build peer-specific raw entries from table.
+		rawRoutes := a.table.AnnounceTo(peer.Identity)
+		totalRaw += len(rawRoutes)
+
+		// Build canonical aggregated snapshot.
+		snapshot := BuildAnnounceSnapshot(rawRoutes)
+		totalAggregated += len(snapshot.Entries)
+
+		// Read peer state atomically to decide send mode.
+		view := peerState.View()
+		needsFull := view.NeedsFullResync || view.LastSentSnapshot == nil
+
+		// Check if periodic forced full sync is due.
+		if !needsFull && !view.LastSuccessfulFullSyncAt.IsZero() {
+			if now.Sub(view.LastSuccessfulFullSyncAt) > forcedFullSyncInterval {
+				needsFull = true
+			}
+		}
+
+		if needsFull {
+			// Rate limit forced full sync attempts — but only when the peer
+			// already has a baseline. A peer that never received any data
+			// (LastSentSnapshot==nil, e.g. after a failed first attempt)
+			// must retry without delay.
+			if view.LastSentSnapshot != nil &&
+				!view.LastFullSyncAttemptAt.IsZero() &&
+				now.Sub(view.LastFullSyncAttemptAt) < MinForcedFullSyncInterval {
+				// Too soon — skip this cycle for this peer.
+				coalescedTrigger++
+				continue
+			}
+
+			a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, now)
+			forcedFull++
+		} else {
+			// Delta path.
+			delta := ComputeDelta(view.LastSentSnapshot, snapshot)
+			totalDelta += len(delta)
+
+			if len(delta) == 0 {
+				// No changes — suppress send.
+				skippedNoop++
+				continue
+			}
+
+			a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
 		}
 	}
 
 	log.Debug().
+		Uint64("announce_cycle_id", cycleID).
 		Int("peers", len(peers)).
+		Int("raw_routes_count", totalRaw).
+		Int("aggregated_routes_count", totalAggregated).
+		Int("delta_routes_count", totalDelta).
+		Int("announce_skipped_noop", skippedNoop).
+		Int("announce_forced_full", forcedFull).
+		Int("announce_trigger_coalesced", coalescedTrigger).
 		Msg("announce_cycle_complete")
+}
+
+// sendFullAnnounce sends a complete announce snapshot to the peer and
+// updates cache state on success via thread-safe Record* methods.
+func (a *AnnounceLoop) sendFullAnnounce(
+	_ context.Context,
+	cycleID uint64,
+	peer AnnounceTarget,
+	state *AnnouncePeerState,
+	snapshot *AnnounceSnapshot,
+	now time.Time,
+) {
+	state.RecordFullSyncAttempt(now)
+
+	// Empty snapshot after split horizon / empty table: record a successful
+	// full-sync baseline without sending a wire frame. The peer learns
+	// nothing new, and the cache is primed so subsequent cycles use delta.
+	if len(snapshot.Entries) == 0 {
+		state.RecordFullSyncSuccess(snapshot, now)
+		return
+	}
+
+	if !a.sender.SendAnnounceRoutes(peer.Address, snapshot.Entries) {
+		log.Debug().
+			Uint64("announce_cycle_id", cycleID).
+			Str("peer_identity", string(peer.Identity)).
+			Str("peer_address", string(peer.Address)).
+			Int("routes", len(snapshot.Entries)).
+			Msg("announce_full_send_failed")
+		// Cache remains in previous state; next cycle will retry.
+		return
+	}
+	state.RecordFullSyncSuccess(snapshot, now)
+}
+
+// sendIncrementalAnnounce sends only changed entries to the peer and
+// updates cache to the full new snapshot on success via thread-safe
+// Record* methods.
+func (a *AnnounceLoop) sendIncrementalAnnounce(
+	_ context.Context,
+	cycleID uint64,
+	peer AnnounceTarget,
+	state *AnnouncePeerState,
+	fullSnapshot *AnnounceSnapshot,
+	delta []AnnounceEntry,
+	now time.Time,
+) {
+	if !a.sender.SendAnnounceRoutes(peer.Address, delta) {
+		log.Debug().
+			Uint64("announce_cycle_id", cycleID).
+			Str("peer_identity", string(peer.Identity)).
+			Str("peer_address", string(peer.Address)).
+			Int("delta_routes", len(delta)).
+			Msg("announce_delta_send_failed")
+		// Cache remains in previous state; next cycle will retry.
+		return
+	}
+	// Cache stores the full snapshot, not just the delta payload.
+	state.RecordDeltaSendSuccess(fullSnapshot, now)
 }

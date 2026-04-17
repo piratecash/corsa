@@ -728,7 +728,17 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 			if r.Origin == excludeVia {
 				continue
 			}
-			if r.IsWithdrawn() || r.IsExpired(now) {
+			if r.IsExpired(now) {
+				continue
+			}
+			if r.IsWithdrawn() {
+				// Own-origin tombstones are included so that the announce
+				// delta mechanism can retry withdrawal delivery to peers
+				// where the immediate send failed. Only the origin may
+				// emit wire withdrawals — transit tombstones are excluded.
+				if t.localOrigin != "" && r.Origin == t.localOrigin {
+					result = append(result, r.ToAnnounceEntry())
+				}
 				continue
 			}
 			result = append(result, r.ToAnnounceEntry())

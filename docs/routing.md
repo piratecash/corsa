@@ -6,7 +6,7 @@ Related documentation:
 - [roadmap.md](roadmap.md) — full iteration plan
 - [protocol.md](protocol.md) — wire protocol
 
-Source: `internal/core/domain/peer.go`, `internal/core/routing/types.go`, `internal/core/routing/table.go`, `internal/core/routing/announce.go`, `internal/core/node/table_router.go`, `internal/core/node/routing_integration.go`, `internal/core/node/routing_provider.go`, `internal/core/rpc/routing_commands.go`
+Source: `internal/core/domain/peer.go`, `internal/core/routing/types.go`, `internal/core/routing/table.go`, `internal/core/routing/announce.go`, `internal/core/routing/announce_builder.go`, `internal/core/routing/announce_state.go`, `internal/core/node/table_router.go`, `internal/core/node/routing_integration.go`, `internal/core/node/routing_provider.go`, `internal/core/rpc/routing_commands.go`
 
 ### Overview
 
@@ -36,6 +36,18 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 `RouteUpdateStatus` — трёхзначный результат `UpdateRoute`: `RouteAccepted` (новый или улучшенный маршрут вставлен), `RouteUnchanged` (существующий живой маршрут подтверждён — тот же SeqNo, те же или худшие trust/hops, не истёкший), `RouteRejected` (блокировка tombstone, устаревший SeqNo, или истёкший unchanged). Вызывающий код использует это для разделения новых routing-событий и штатных подтверждений: `handleAnnounceRoutes` дрейнит pending и при `RouteAccepted`, и при `RouteUnchanged`, и логирует три отдельных счётчика (accepted, unchanged, rejected) вместо прежних двух (accepted, rejected).
 
+`AnnounceSnapshot` is a canonical, aggregated, peer-specific view of route entries ready for wire transmission. After full aggregation each `(Identity, Origin)` pair appears at most once. Entries are sorted deterministically by `(Identity, Origin)` so that equality comparison between two snapshots is stable and independent of table iteration order. Produced by `BuildAnnounceSnapshot` (`routing/announce_builder.go`). A nil `*AnnounceSnapshot` represents "no snapshot sent yet" (empty state) and is semantically different from a snapshot with zero entries.
+
+`AnnouncePeerState` holds per-peer announce send state: the last successfully sent snapshot, timestamps for full sync attempts/successes and delta sends, a `needsFullResync` flag, and disconnect tracking for eviction. All mutable fields are accessed exclusively through thread-safe methods (`View()`, `RecordFullSyncAttempt()`, `RecordFullSyncSuccess()`, `RecordDeltaSendSuccess()`). Direct field access from outside the package is forbidden. Owned by `AnnounceStateRegistry`.
+
+`AnnounceStateRegistry` manages per-peer `AnnouncePeerState` instances. Thread-safe for concurrent access from the announce loop and session lifecycle callbacks. Provides `GetOrCreate`, `MarkDisconnected`, `MarkReconnected`, `EvictStale`, `MarkInvalid`, and `Cleanup`. Disconnected state is evicted after `2 * flapWindow`. The clock source is injectable for tests.
+
+`AnnounceSnapshot` — каноническое, агрегированное, peer-specific представление записей маршрутов, готовое к передаче. После полной агрегации каждая пара `(Identity, Origin)` присутствует не более одного раза. Записи отсортированы детерминированно по `(Identity, Origin)`. Создаётся через `BuildAnnounceSnapshot` (`routing/announce_builder.go`). Nil `*AnnounceSnapshot` означает «ни один snapshot ещё не отправлен» и семантически отличается от snapshot с нулём записей.
+
+`AnnouncePeerState` — per-peer состояние отправки анонсов: последний успешно отправленный snapshot, timestamps попыток/успехов full sync и delta send, флаг `needsFullResync`, отслеживание disconnect для eviction. Все мутабельные поля доступны только через потокобезопасные методы (`View()`, `RecordFullSyncAttempt()`, `RecordFullSyncSuccess()`, `RecordDeltaSendSuccess()`). Владелец — `AnnounceStateRegistry`.
+
+`AnnounceStateRegistry` — реестр per-peer `AnnouncePeerState`. Потокобезопасный для одновременного доступа из цикла анонсов и колбэков жизненного цикла сессий. Предоставляет `GetOrCreate`, `MarkDisconnected`, `MarkReconnected`, `EvictStale`, `MarkInvalid` и `Cleanup`. Disconnected-состояние удаляется через `2 * flapWindow`. Источник времени внедряется для тестов.
+
 ### Key invariants
 
 **Origin-aware SeqNo.** Sequence numbers are scoped per `(Identity, Origin)` pair. Only the origin node may advance the SeqNo. A route with a higher SeqNo unconditionally replaces one with a lower SeqNo for the same triple. For own-origin routes, the `Table` owns the monotonic counter (`seqCounters`) and advances it automatically in `AddDirectPeer` and `RemoveDirectPeer`. This ensures SeqNo discipline is enforced at the data structure level, not delegated to the caller.
@@ -44,7 +56,13 @@ The routing package implements a distance-vector routing table for the CORSA mes
 
 **Split horizon.** When building an announcement for peer A, routes where `NextHop == A` are omitted. No fake `hops=16` withdrawal is sent — that would violate the per-origin SeqNo invariant.
 
-**Withdrawal semantics.** A withdrawal sets `Hops = 16` (infinity) and requires strictly `SeqNo > old.SeqNo`. On the wire, only the origin may send a withdrawal. On peer disconnect, `RemoveDirectPeer` withdraws own-origin direct routes (returned as wire-ready `[]AnnounceEntry` with SeqNo already incremented) and silently invalidates transit routes locally. Transit nodes do not emit wire withdrawals for routes they did not originate.
+**Withdrawal semantics.** A withdrawal sets `Hops = 16` (infinity) and requires strictly `SeqNo > old.SeqNo`. On the wire, only the origin may send a withdrawal. On peer disconnect, `RemoveDirectPeer` withdraws own-origin direct routes (returned as wire-ready `[]AnnounceEntry` with SeqNo already incremented) and silently invalidates transit routes locally. Transit nodes do not emit wire withdrawals for routes they did not originate. Own-origin tombstones remain in the table for `defaultTTL` (120s) and are included in `AnnounceTo` output so that the announce delta mechanism retries withdrawal delivery to peers where the immediate send failed. Transit tombstones are excluded from `AnnounceTo` — only the origin may emit wire withdrawals.
+
+**Семантика отзыва.** Отзыв устанавливает `Hops = 16` (бесконечность) и требует строго `SeqNo > old.SeqNo`. На проводе только origin может отправить withdrawal. При отключении peer'а `RemoveDirectPeer` отзывает own-origin direct routes (возвращаемые как wire-ready `[]AnnounceEntry` с уже инкрементированным SeqNo) и молча инвалидирует transit routes локально. Transit-узлы не отправляют wire withdrawals для маршрутов, которые они не порождали. Own-origin tombstones остаются в таблице на `defaultTTL` (120s) и включаются в вывод `AnnounceTo`, чтобы механизм announce delta повторил доставку withdrawal peer'ам, где немедленная отправка не прошла. Transit tombstones исключаются из `AnnounceTo` — только origin имеет право отправлять wire withdrawals.
+
+**Announce frame is not a destructive snapshot.** A single `announce_routes` frame is **not** a complete authoritative snapshot of the sender's entire routing table. The absence of a route entry in a particular `announce_routes` frame does **not** imply withdrawal and does **not** mean implicit deletion. A receiver must not remove previously learned routes solely because they are missing from the latest announce frame. Withdrawal is expressed exclusively through an explicit route entry with `hops >= HopsInfinity`, which only the origin has the right to send. This invariant is critical for the correctness of partial (delta) announcements: a sender may legitimately send only changed entries in an `announce_routes` frame, and the receiver must continue to use previously learned routes that were not included in the update.
+
+**Announce-кадр не является деструктивным снимком.** Один кадр `announce_routes` **не является** полным авторитетным снимком всей таблицы маршрутизации отправителя. Отсутствие записи маршрута в конкретном кадре `announce_routes` **не означает** withdrawal и **не означает** неявного удаления. Получатель не должен удалять ранее изученные маршруты только потому, что они отсутствуют в последнем announce-кадре. Withdrawal выражается исключительно через явную запись маршрута с `hops >= HopsInfinity`, которую имеет право отправлять только origin. Этот инвариант критически важен для корректности частичных (delta) анонсов: отправитель может законно отправить только изменившиеся записи в кадре `announce_routes`, а получатель должен продолжать использовать ранее изученные маршруты, не включённые в обновление.
 
 **Self-route (local identity).** When `localOrigin` is configured, `Lookup()` and `Snapshot()` synthesize a local route entry for the node's own identity (`Hops=0`, `Source=RouteSourceLocal`). This route is not stored in the table — it is injected on read. It never expires, is never withdrawn, and is never included in announcements (`AnnounceTo`/`Announceable`). Peers discover this node via their own direct routes. The self-route ensures that a node can always resolve itself in the routing table without requiring an external peer session. `Snapshot().TotalEntries` and `Snapshot().ActiveEntries` do not count the synthetic self-route — these counters describe persisted table state and stay consistent with `ActiveSize()`. `reachableFromSnapshot`, `reachableIDsFrame`, and `fetch_route_summary` exclude `RouteSourceLocal` entries because reachability is about remote peers, not the node itself. `UpdateRoute` rejects `RouteSourceLocal` with `ErrLocalSourceReserved` — this source is purely synthetic and must never be persisted.
 
@@ -134,7 +152,47 @@ sequenceDiagram
 ```
 *Diagram — Table-directed relay with hop_ack confirmation*
 
-**Convergence.** The announce loop (`routing/announce.go`) runs periodic announcements every 30 seconds and supports triggered updates on connect/disconnect events. Incoming `announce_routes` frames are processed by `handleAnnounceRoutes` in `node/routing_integration.go` — each route gets +1 hop on the receiver side. Withdrawals (hops=16) are applied via `Table.WithdrawRoute`, but only from the origin sender (`Origin == senderIdentity`). When `WithdrawRoute` receives a withdrawal for an unseen (identity, origin, nextHop) triple, it creates a tombstone entry (hops=HopsInfinity) with the withdrawal's SeqNo. This prevents a delayed older announcement from resurrecting a withdrawn lineage — the tombstone's SeqNo blocks any stale update for the same triple. Tombstones expire via normal TTL. The `mesh_routing_v1` capability is now advertised during handshake. The announce loop covers both outbound sessions and inbound-only connections. Target discovery via `routingCapablePeers()` requires both `mesh_routing_v1` and `mesh_relay_v1` — a routing-only peer (no relay) is excluded because routes through it would create non-deliverable paths.
+**Convergence.** The announce loop (`routing/announce.go`) runs periodic announcements every 30 seconds and supports triggered updates on connect/disconnect events. The loop uses per-peer announce state (`routing/announce_state.go`) to track what was last sent to each peer. On each cycle, raw route entries from `Table.AnnounceTo(peer)` are aggregated into a canonical peer-specific snapshot (`routing/announce_builder.go`): wire-duplicate entries are removed, for each `(Identity, Origin)` lineage only the best entry (max SeqNo, min Hops, deterministic Extra tie-break) is kept, and entries are sorted by `(Identity, Origin)`. If the snapshot is unchanged from the last send, no frame is emitted (no-op suppression). If only a subset changed, only the delta entries are sent in an `announce_routes` frame. A forced full sync is performed on new peer connect and periodically every 10 announce intervals (~5 minutes). If the peer-specific snapshot is empty at full-sync time (e.g. split horizon filtered all routes when announcing back to a single-route peer), the full-sync baseline is recorded as successful without sending a wire frame — the peer learns nothing new, and subsequent cycles use the delta path normally (empty-baseline). Forced full sync attempts are rate-limited by `MinForcedFullSyncInterval` (equal to the announce interval, default 30s) to prevent flooding when a peer is repeatedly marked `NeedsFullResync`; however, this rate limit is bypassed for peers that have never successfully received any data (`LastSentSnapshot == nil`) — a failed first attempt must not block retry. Incoming `announce_routes` frames are processed by `handleAnnounceRoutes` in `node/routing_integration.go` — each route gets +1 hop on the receiver side. Withdrawals (hops=16) are applied via `Table.WithdrawRoute`, but only from the origin sender (`Origin == senderIdentity`). When `WithdrawRoute` receives a withdrawal for an unseen (identity, origin, nextHop) triple, it creates a tombstone entry (hops=HopsInfinity) with the withdrawal's SeqNo. This prevents a delayed older announcement from resurrecting a withdrawn lineage — the tombstone's SeqNo blocks any stale update for the same triple. Tombstones expire via normal TTL. The `mesh_routing_v1` capability is now advertised during handshake. The announce loop covers both outbound sessions and inbound-only connections. Target discovery via `routingCapablePeers()` requires both `mesh_routing_v1` and `mesh_relay_v1` — a routing-only peer (no relay) is excluded because routes through it would create non-deliverable paths.
+
+```mermaid
+flowchart TD
+    A["Event: connect / disconnect / withdrawal / periodic tick"] --> B["Build peer-specific canonical snapshot\n(Table.AnnounceTo → BuildAnnounceSnapshot)"]
+    B --> C["Compare with per-peer cache"]
+    C --> D{"New peer\nor forced full?"}
+    D -- "Yes" --> E0{"Snapshot empty?"}
+    E0 -- "Yes" --> E1["Record empty baseline\n(no wire frame)"]
+    E0 -- "No" --> E["Send full announce_routes"]
+    D -- "No" --> F{"Diff vs last send?"}
+    F -- "No" --> G["No-op: skip send"]
+    F -- "Yes" --> H["Send announce_routes\nwith changed entries only"]
+    E1 --> I["Update per-peer cache"]
+    E --> I
+    H --> I
+```
+*Diagram — Announce loop: per-peer send decision / Диаграмма — Цикл анонсов: решение об отправке per-peer*
+
+**Extra invariant in aggregation.** `Extra` (opaque `json.RawMessage`) MUST be identical for all table entries sharing the same `(Identity, Origin, SeqNo)` lineage. The origin node sets `Extra` once per SeqNo; every relay forwards it unchanged. If `BuildAnnounceSnapshot` detects differing `Extra` values for the same lineage during Stage 2 aggregation, it logs a warning (`announce_aggregation_extra_mismatch`) and falls back to deterministic tie-break (larger canonical `Extra` wins). Such divergence indicates relay data corruption or protocol version mismatch and requires investigation.
+
+**Инвариант Extra при агрегации.** `Extra` (опаковый `json.RawMessage`) ДОЛЖЕН быть идентичным для всех записей таблицы с одинаковым lineage `(Identity, Origin, SeqNo)`. Origin-нода устанавливает `Extra` один раз для каждого SeqNo; каждый relay пересылает его без изменений. Если `BuildAnnounceSnapshot` обнаруживает расхождение `Extra` для одного lineage при агрегации Stage 2, логируется предупреждение (`announce_aggregation_extra_mismatch`) и применяется детерминированный tie-break (побеждает больший канонический `Extra`). Такое расхождение указывает на повреждение данных relay или несовместимость версий протокола и требует расследования.
+
+**Конвергенция.** Цикл анонсов (`routing/announce.go`) выполняет периодические анонсы каждые 30 секунд и поддерживает triggered-обновления при подключении/отключении. Цикл использует per-peer состояние анонсов (`routing/announce_state.go`) для отслеживания того, что было отправлено каждому peer'у. На каждом цикле raw-записи маршрутов из `Table.AnnounceTo(peer)` агрегируются в канонический peer-specific snapshot (`routing/announce_builder.go`): wire-дубликаты удаляются, для каждого lineage `(Identity, Origin)` сохраняется только лучшая запись (max SeqNo, min Hops, детерминированный tie-break по Extra), записи сортируются по `(Identity, Origin)`. Если snapshot не изменился по сравнению с последней отправкой, кадр не отправляется (no-op suppression). Если изменилась только часть, отправляются только delta-записи в кадре `announce_routes`. Принудительная полная синхронизация выполняется при подключении нового peer'а и периодически каждые 10 интервалов анонса (~5 минут). Если peer-specific snapshot пуст на момент full sync (например, split horizon отфильтровал все маршруты при анонсе обратно single-route peer'у), baseline записывается как успешный без отправки wire-кадра — peer не узнаёт ничего нового, а последующие циклы используют delta path как обычно (empty-baseline). Попытки forced full sync ограничены `MinForcedFullSyncInterval` (равен интервалу анонса, по умолчанию 30s) для предотвращения flood при повторном `NeedsFullResync`; однако rate limit обходится для peer'ов, которые никогда успешно не получали данных (`LastSentSnapshot == nil`) — неудачная первая попытка не должна блокировать retry.
+
+```mermaid
+flowchart TD
+    A["Событие: connect / disconnect / withdrawal / periodic tick"] --> B["Построить peer-specific канонический snapshot\n(Table.AnnounceTo → BuildAnnounceSnapshot)"]
+    B --> C["Сравнить с per-peer cache"]
+    C --> D{"Новый peer\nили forced full?"}
+    D -- "Да" --> E0{"Snapshot пуст?"}
+    E0 -- "Да" --> E1["Записать empty baseline\n(без wire frame)"]
+    E0 -- "Нет" --> E["Отправить full announce_routes"]
+    D -- "Нет" --> F{"Есть diff\nпо сравнению с прошлой отправкой?"}
+    F -- "Нет" --> G["No-op: пропустить отправку"]
+    F -- "Да" --> H["Отправить announce_routes\nтолько с изменившимися entries"]
+    E1 --> I["Обновить per-peer cache"]
+    E --> I
+    H --> I
+```
+*Диаграмма — Цикл анонсов: решение об отправке per-peer*
 
 **Receive-path validation.** `handleAnnounceRoutes` enforces three safety invariants before accepting any wire announcement: (1) **Sender identity validation** — the sender identity must be a valid 40-char lowercase hex fingerprint (`identity.IsValidAddress`). For inbound connections, the identity is read from `connPeerHello.identity` (the hello frame's `Address` field), not from `connPeerHello.address` (the listen address used for health tracking). This distinction is critical for NATed peers that advertise a non-routable listen address (e.g. `127.0.0.1:64646`) — using the listen address as routing identity would cause all announcements from such peers to be rejected as malformed. For outbound sessions, the identity is read from `session.peerIdentity` (set from the welcome frame). (2) **Own-origin rejection** — announcements where `Origin == localIdentity` from a foreign sender are silently dropped. Only this node may originate routes under its own identity; accepting a forged own-origin entry would let a neighbor poison the monotonic SeqNo counter via `syncSeqCounterLocked`. (3) **Transit withdrawal rejection** — wire withdrawals (`hops >= 16`) where `Origin != senderIdentity` are silently dropped. Only the origin may emit a wire withdrawal; transit nodes must invalidate locally and stop advertising. All three guards are enforced before `UpdateRoute`/`WithdrawRoute` to prevent malformed data from reaching the table.
 
@@ -142,7 +200,7 @@ sequenceDiagram
 
 **Multi-session identity with dual counters.** `node.Service` maintains two per-identity counters: `identitySessions` (total active sessions) and `identityRelaySessions` (relay-capable sessions only). `AddDirectPeer()` is called on the `identityRelaySessions` 0→1 transition (first relay-capable session). `RemoveDirectPeer()` is called on the `identityRelaySessions` 1→0 transition (last relay-capable session closes). This means a non-relay first session does not block a later relay session from creating the direct route, and closing the last relay session withdraws the route even if legacy sessions remain. `onPeerSessionClosed(peerIdentity, hasRelayCap)` mirrors the `hasRelayCap` flag to keep both counters balanced. Total session count cleanup happens independently.
 
-**Full-table sync on connect.** Both outbound and inbound connection paths send an immediate full-table sync (`routingTable.AnnounceTo(peerIdentity)`) to the newly connected peer. This ensures symmetric initial convergence regardless of connection direction. The sync is gated on both `mesh_routing_v1` and `mesh_relay_v1` capabilities — matching the steady-state announce loop contract. A routing-only peer (mesh_routing_v1 without mesh_relay_v1) would learn routes it cannot deliver on the data plane, so it is excluded from connect-time sync as well. The outbound path checks `sessionHasCapability(address, capMeshRoutingV1) && sessionHasCapability(address, capMeshRelayV1)` in `establishPeerSession`. The inbound path checks `connHasCapability(conn, capMeshRoutingV1) && connHasCapability(conn, capMeshRelayV1)` in `trackInboundConnect`. Both paths pass the peer's Ed25519 identity fingerprint (`peerIdentity`) to `AnnounceTo` — not the transport or listen address. This is critical for NATed inbound peers whose listen address (e.g. `127.0.0.1:64646`) differs from their identity fingerprint; passing the transport address would break split horizon filtering. Legacy peers without either capability are silently skipped. Split horizon is applied — routes learned from the connecting peer are excluded. If the send fails (session queue full, connection lost between handshake and sync), a warning is logged (`routing_outbound_full_sync_failed` or `routing_inbound_full_sync_failed`). The peer will still receive the table on the next periodic announce cycle.
+**Full-table sync on connect.** Both outbound and inbound connection paths send an immediate full-table sync (`routingTable.AnnounceTo(peerIdentity)`) to the newly connected peer. This ensures symmetric initial convergence regardless of connection direction. The sync is gated on both `mesh_routing_v1` and `mesh_relay_v1` capabilities — matching the steady-state announce loop contract. A routing-only peer (mesh_routing_v1 without mesh_relay_v1) would learn routes it cannot deliver on the data plane, so it is excluded from connect-time sync as well. The outbound path checks `sessionHasCapability(address, capMeshRoutingV1) && sessionHasCapability(address, capMeshRelayV1)` in `establishPeerSession`. The inbound path checks `connHasCapability(conn, capMeshRoutingV1) && connHasCapability(conn, capMeshRelayV1)` in `trackInboundConnect`. Both paths pass the peer's Ed25519 identity fingerprint (`peerIdentity`) to `AnnounceTo` — not the transport or listen address. This is critical for NATed inbound peers whose listen address (e.g. `127.0.0.1:64646`) differs from their identity fingerprint; passing the transport address would break split horizon filtering. Legacy peers without either capability are silently skipped. Split horizon is applied — routes learned from the connecting peer are excluded. If the resulting peer-specific snapshot is empty (e.g. the only route is the peer's own direct route, excluded by split horizon), the full-sync baseline is recorded without sending a wire frame (empty-baseline); subsequent announce cycles use the delta path normally. If the send fails (session queue full, connection lost between handshake and sync), a warning is logged (`routing_outbound_full_sync_failed` or `routing_inbound_full_sync_failed`). The peer will still receive the table on the next periodic announce cycle.
 
 **Flap dampening.** The routing table tracks per-peer disconnect frequency to prevent link flaps from churning routes and flooding the network with announcements. Each `RemoveDirectPeer` call records a withdrawal timestamp. When a peer accumulates `flapThreshold` (default 3) disconnects within `flapWindow` (default 120s), it enters hold-down state for `holdDownDuration` (default 30s). During hold-down, `AddDirectPeer` still creates the route (connectivity is preserved), but the `AddDirectPeerResult.Penalized` flag signals to the caller that the triggered announce should be suppressed — the route will be picked up by the next periodic announce cycle, reducing announcement churn. Direct routes themselves have no TTL (see Direct route lifecycle above), so flap dampening affects only the announce timing, not route expiry. `TickTTL` cleans up stale flap state once both hold-down and the flap window have expired. All thresholds are configurable via `WithFlapWindow`, `WithFlapThreshold`, `WithHoldDownDuration`, and `WithPenalizedTTL` options.
 
@@ -340,17 +398,24 @@ A directly connected relay-only peer (no `mesh_routing_v1`) is still usable as a
 
 ```
 internal/core/routing/
-    types.go          — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
-    table.go          — Table with all CRUD, query, disconnect, and wire-projection operations
-    announce.go       — AnnounceLoop: periodic (30s) + triggered announce_routes sender
-    types_test.go     — unit tests for type invariants, validation, wire projection
-    table_test.go     — unit tests for table operations and invariants
-    announce_test.go  — unit tests for announce loop, triggered updates, split horizon
+    types.go                    — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
+    table.go                    — Table with all CRUD, query, disconnect, and wire-projection operations
+    announce.go                 — AnnounceLoop: periodic (30s) + triggered announce_routes sender
+    announce_builder.go         — BuildAnnounceSnapshot: 3-stage aggregation, AnnounceSnapshot, ComputeDelta
+    announce_state.go           — AnnouncePeerState, AnnounceStateRegistry: per-peer send state lifecycle
+    types_test.go               — unit tests for type invariants, validation, wire projection
+    table_test.go               — unit tests for table operations and invariants
+    announce_test.go            — unit tests for announce loop, triggered updates, split horizon
+    announce_builder_test.go    — unit tests for aggregation, snapshot equality, delta, Extra normalization
+    announce_state_test.go      — unit tests for per-peer state lifecycle, View/Record methods
+    announce_loop_cache_test.go — integration tests for noop suppression, delta-only, failed send retry,
+                                  rate limiting, reconnect forced full sync, withdrawal retry via delta
 
 internal/core/node/
     table_router.go              — TableRouter: routing table lookup with gossip fallback
     routing_integration.go       — Service integration: announce_routes handling, session tracking,
-                                   hop_ack confirmation, TTL loop, PeerSender implementation
+                                   hop_ack confirmation, TTL loop, PeerSender implementation,
+                                   connect-time full sync with empty-baseline support
     routing_provider.go          — RoutingProvider implementation on node.Service
     table_router_test.go         — unit tests for TableRouter
     routing_integration_test.go  — unit tests for routing integration
@@ -389,6 +454,12 @@ internal/core/rpc/
 `AddDirectPeerResult` — результат подключения peer'а: `RouteEntry`, созданный или обновлённый, и флаг `Penalized`, указывающий, что flap detection применил укороченный TTL.
 
 `RemoveDirectPeerResult` — результат отключения peer'а: wire-ready `[]AnnounceEntry` withdrawals (SeqNo уже инкрементирован, Hops=16) для own-origin direct-маршрутов, плюс количество transit-маршрутов, молча инвалидированных локально, плюс `ExposedBackups []PeerIdentity` — identity, у которых инвалидация обнажила выживший не-withdrawn backup route (используется `onPeerSessionClosed` для запуска дрейна).
+
+`AnnounceSnapshot` — каноническое, агрегированное, peer-specific представление записей маршрутов, готовое к передаче. После полной агрегации каждая пара `(Identity, Origin)` присутствует не более одного раза. Записи отсортированы детерминированно по `(Identity, Origin)`. Создаётся через `BuildAnnounceSnapshot` (`routing/announce_builder.go`). Nil `*AnnounceSnapshot` означает «ни один snapshot ещё не отправлен» и семантически отличается от snapshot с нулём записей.
+
+`AnnouncePeerState` — per-peer состояние отправки анонсов: последний успешно отправленный snapshot, timestamps попыток/успехов full sync и delta send, флаг `needsFullResync`, отслеживание disconnect для eviction. Все мутабельные поля доступны только через потокобезопасные методы (`View()`, `RecordFullSyncAttempt()`, `RecordFullSyncSuccess()`, `RecordDeltaSendSuccess()`). Владелец — `AnnounceStateRegistry`.
+
+`AnnounceStateRegistry` — реестр per-peer `AnnouncePeerState`. Потокобезопасный для одновременного доступа из цикла анонсов и колбэков жизненного цикла сессий. Предоставляет `GetOrCreate`, `MarkDisconnected`, `MarkReconnected`, `EvictStale`, `MarkInvalid` и `Cleanup`. Disconnected-состояние удаляется через `2 * flapWindow`. Источник времени внедряется для тестов.
 
 ### Ключевые инварианты
 
@@ -468,7 +539,7 @@ sequenceDiagram
 
 **Multi-session identity с двойными счётчиками.** `node.Service` ведёт два per-identity счётчика: `identitySessions` (всего активных сессий) и `identityRelaySessions` (только relay-capable сессий). `AddDirectPeer()` вызывается при переходе `identityRelaySessions` 0→1 (первая relay-capable сессия). `RemoveDirectPeer()` вызывается при переходе `identityRelaySessions` 1→0 (последняя relay-capable сессия закрывается). Это означает, что non-relay первая сессия не блокирует создание direct route более поздней relay сессией, и закрытие последней relay сессии отзывает маршрут, даже если legacy сессии остаются. `onPeerSessionClosed(peerIdentity, hasRelayCap)` зеркально использует флаг `hasRelayCap` для поддержания баланса обоих счётчиков. Очистка total session count происходит независимо.
 
-**Полная синхронизация таблицы при подключении.** Как outbound, так и inbound пути подключения отправляют немедленную полную синхронизацию таблицы (`routingTable.AnnounceTo(peerIdentity)`) новому подключённому peer'у. Это обеспечивает симметричную начальную сходимость независимо от направления подключения. Синхронизация закрыта гейтом обеих capability: `mesh_routing_v1` и `mesh_relay_v1` — в соответствии с контрактом цикла анонсов. Routing-only peer (mesh_routing_v1 без mesh_relay_v1) получил бы маршруты, которые он не может доставить на data plane, поэтому исключается из connect-time синхронизации. Outbound-путь проверяет `sessionHasCapability(address, capMeshRoutingV1) && sessionHasCapability(address, capMeshRelayV1)` в `establishPeerSession`. Inbound-путь проверяет `connHasCapability(conn, capMeshRoutingV1) && connHasCapability(conn, capMeshRelayV1)` в `trackInboundConnect`. Оба пути передают Ed25519 identity fingerprint peer'а (`peerIdentity`) в `AnnounceTo` — не transport/listen адрес. Это критично для NATed inbound peer'ов, чей listen-адрес (например, `127.0.0.1:64646`) отличается от fingerprint'а; передача transport-адреса сломала бы фильтрацию split horizon. Legacy peer'ы без любой из capability пропускаются без ошибки. Применяется split horizon — маршруты, полученные от подключающегося peer'a, исключаются. Если отправка не удалась (очередь сессии переполнена, соединение потеряно между handshake и sync), записывается предупреждение (`routing_outbound_full_sync_failed` или `routing_inbound_full_sync_failed`). Peer всё равно получит таблицу в следующем периодическом цикле анонсов.
+**Полная синхронизация таблицы при подключении.** Как outbound, так и inbound пути подключения отправляют немедленную полную синхронизацию таблицы (`routingTable.AnnounceTo(peerIdentity)`) новому подключённому peer'у. Это обеспечивает симметричную начальную сходимость независимо от направления подключения. Синхронизация закрыта гейтом обеих capability: `mesh_routing_v1` и `mesh_relay_v1` — в соответствии с контрактом цикла анонсов. Routing-only peer (mesh_routing_v1 без mesh_relay_v1) получил бы маршруты, которые он не может доставить на data plane, поэтому исключается из connect-time синхронизации. Outbound-путь проверяет `sessionHasCapability(address, capMeshRoutingV1) && sessionHasCapability(address, capMeshRelayV1)` в `establishPeerSession`. Inbound-путь проверяет `connHasCapability(conn, capMeshRoutingV1) && connHasCapability(conn, capMeshRelayV1)` в `trackInboundConnect`. Оба пути передают Ed25519 identity fingerprint peer'а (`peerIdentity`) в `AnnounceTo` — не transport/listen адрес. Это критично для NATed inbound peer'ов, чей listen-адрес (например, `127.0.0.1:64646`) отличается от fingerprint'а; передача transport-адреса сломала бы фильтрацию split horizon. Legacy peer'ы без любой из capability пропускаются без ошибки. Применяется split horizon — маршруты, полученные от подключающегося peer'a, исключаются. Если результирующий peer-specific snapshot пуст (например, единственный маршрут — это direct route самого peer'а, исключённый split horizon), baseline записывается без отправки wire-кадра (empty-baseline); последующие циклы анонсов используют delta path как обычно. Если отправка не удалась (очередь сессии переполнена, соединение потеряно между handshake и sync), записывается предупреждение (`routing_outbound_full_sync_failed` или `routing_inbound_full_sync_failed`). Peer всё равно получит таблицу в следующем периодическом цикле анонсов.
 
 **Демпфирование flap'ов.** Routing table отслеживает частоту отключений per-peer для предотвращения спама маршрутами при нестабильных линках. Каждый вызов `RemoveDirectPeer` записывает timestamp отключения. Когда peer накапливает `flapThreshold` (по умолчанию 3) отключений в пределах `flapWindow` (по умолчанию 120с), он переходит в состояние hold-down на `holdDownDuration` (по умолчанию 30с). В режиме hold-down `AddDirectPeer` по-прежнему создаёт маршрут (связность сохраняется), но флаг `AddDirectPeerResult.Penalized` сигнализирует caller'у, что triggered announce должен быть подавлен — маршрут будет подхвачен следующим периодическим циклом анонсов, снижая спам анонсами. Direct-маршруты не имеют TTL (см. Жизненный цикл direct-маршрутов выше), поэтому демпфирование flap'ов влияет только на тайминг анонсов, а не на истечение маршрутов. `TickTTL` очищает устаревшее flap-состояние после истечения и hold-down, и flap window. Все пороги настраиваются через опции `WithFlapWindow`, `WithFlapThreshold`, `WithHoldDownDuration` и `WithPenalizedTTL`.
 
@@ -666,17 +737,24 @@ Capability `mesh_routing_v1` рекламируется при handshake. Тол
 
 ```
 internal/core/routing/
-    types.go          — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
-    table.go          — Table со всеми CRUD, query, disconnect и wire-projection операциями
-    announce.go       — AnnounceLoop: периодический (30с) + triggered отправитель announce_routes
-    types_test.go     — юнит-тесты инвариантов типов, валидации, wire-проекции
-    table_test.go     — юнит-тесты операций таблицы и инвариантов
-    announce_test.go  — юнит-тесты цикла анонсов, triggered updates, split horizon
+    types.go                    — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
+    table.go                    — Table со всеми CRUD, query, disconnect и wire-projection операциями
+    announce.go                 — AnnounceLoop: периодический (30с) + triggered отправитель announce_routes
+    announce_builder.go         — BuildAnnounceSnapshot: 3-ступенчатая агрегация, AnnounceSnapshot, ComputeDelta
+    announce_state.go           — AnnouncePeerState, AnnounceStateRegistry: per-peer состояние отправки
+    types_test.go               — юнит-тесты инвариантов типов, валидации, wire-проекции
+    table_test.go               — юнит-тесты операций таблицы и инвариантов
+    announce_test.go            — юнит-тесты цикла анонсов, triggered updates, split horizon
+    announce_builder_test.go    — юнит-тесты агрегации, snapshot equality, delta, нормализация Extra
+    announce_state_test.go      — юнит-тесты жизненного цикла per-peer state, методов View/Record
+    announce_loop_cache_test.go — интеграционные тесты: noop suppression, delta-only, retry после ошибки,
+                                  rate limiting, forced full sync после reconnect, retry withdrawal через delta
 
 internal/core/node/
     table_router.go              — TableRouter: lookup в routing table с gossip fallback
     routing_integration.go       — Интеграция с Service: обработка announce_routes, трекинг сессий,
-                                   подтверждение hop_ack, TTL loop, реализация PeerSender
+                                   подтверждение hop_ack, TTL loop, реализация PeerSender,
+                                   connect-time full sync с поддержкой empty-baseline
     routing_provider.go          — Реализация RoutingProvider на node.Service
     table_router_test.go         — юнит-тесты TableRouter
     routing_integration_test.go  — юнит-тесты интеграции маршрутизации
