@@ -14,7 +14,7 @@ import (
 // defer, openPeerSessionForCM's closeOnError and the CM teardown goroutine
 // after PR 2 migrated outbound writes onto the managed path.
 func TestPeerSessionCloseDelegatesToNetCore(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
 
 	onCloseCalls := 0
@@ -30,9 +30,7 @@ func TestPeerSessionCloseDelegatesToNetCore(t *testing.T) {
 	if onCloseCalls != 1 {
 		t.Fatalf("onClose should fire exactly once, got %d", onCloseCalls)
 	}
-	if !conn.IsClosed() {
-		t.Fatal("underlying connection must be closed via NetCore.Close")
-	}
+	conn.AssertCalled(t, "Close")
 
 	// Second Close must be a no-op (idempotent teardown contract).
 	if err := session.Close(); err != nil {
@@ -47,15 +45,13 @@ func TestPeerSessionCloseDelegatesToNetCore(t *testing.T) {
 // used by unit-test fixtures that build a peerSession directly without the
 // service-wired NetCore.
 func TestPeerSessionCloseWithoutNetCoreClosesConn(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	session := &peerSession{conn: conn}
 
 	if err := session.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
-	if !conn.IsClosed() {
-		t.Fatal("conn must be closed when netCore is nil")
-	}
+	conn.AssertCalled(t, "Close")
 }
 
 // TestPeerSessionCloseOrderingProtectsSingleWriter locks in the
@@ -69,7 +65,7 @@ func TestPeerSessionCloseWithoutNetCoreClosesConn(t *testing.T) {
 // reaching the writer. Either way (pre-PR3 race, post-PR3 data loss) the
 // ordering must be preserved: NetCore stays resolvable until writerDone.
 func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
 
 	var writerDoneAtOnClose bool
@@ -100,7 +96,7 @@ func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
 // built on sync.Once, so racing callers (defer + ctx-watcher + CM failure
 // path) cannot double-fire onClose or double-close the underlying NetCore.
 func TestPeerSessionCloseIsConcurrencySafe(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
 
 	var onCloseCalls int32

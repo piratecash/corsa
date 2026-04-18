@@ -4,28 +4,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 )
 
-// mockDiagnosticProvider implements rpc.DiagnosticProvider for testing.
-type mockDiagnosticProvider struct {
-	desktopVersion string
-}
-
-func (m *mockDiagnosticProvider) DesktopVersion() string {
-	if m.desktopVersion == "" {
-		return "1.0.0-test"
-	}
-	return m.desktopVersion
+// newMockDiagnosticProvider creates a MockDiagnosticProvider with given version.
+func newMockDiagnosticProvider(t *testing.T, version string) *rpcmocks.MockDiagnosticProvider {
+	t.Helper()
+	m := rpcmocks.NewMockDiagnosticProvider(t)
+	m.On("DesktopVersion").Return(version).Maybe()
+	return m
 }
 
 func TestSystemVersion(t *testing.T) {
-	node := &mockNodeProvider{
-		address: "peer-addr-12345",
-		version: "0.16-alpha",
-	}
+	node := newNodeProviderWithMeta(t, "peer-addr-12345", "0.16-alpha")
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/version", map[string]interface{}{})
@@ -37,7 +33,7 @@ func TestSystemVersion(t *testing.T) {
 }
 
 func TestSystemVersionDefaultValues(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/version", map[string]interface{}{})
@@ -49,17 +45,15 @@ func TestSystemVersionDefaultValues(t *testing.T) {
 
 func TestSystemPing(t *testing.T) {
 	expectedPeers := []interface{}{"peer1", "peer2", "peer3"}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "ping" {
-				return protocol.Frame{
-					Type:  "ping_response",
-					Peers: []string{"peer1", "peer2", "peer3"},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "ping" {
+			return protocol.Frame{
+				Type:  "ping_response",
+				Peers: []string{"peer1", "peer2", "peer3"},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/ping", map[string]interface{}{})
@@ -67,7 +61,6 @@ func TestSystemPing(t *testing.T) {
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "type", "ping_response")
 
-	// Check peers array
 	peers, ok := result["peers"].([]interface{})
 	if !ok {
 		t.Errorf("expected peers to be array, got %T", result["peers"])
@@ -79,14 +72,12 @@ func TestSystemPing(t *testing.T) {
 }
 
 func TestSystemPingEmptyPeers(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			return protocol.Frame{
-				Type:  "ping_response",
-				Peers: []string{},
-			}
-		},
-	}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		return protocol.Frame{
+			Type:  "ping_response",
+			Peers: []string{},
+		}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/ping", map[string]interface{}{})
@@ -96,17 +87,15 @@ func TestSystemPingEmptyPeers(t *testing.T) {
 }
 
 func TestSystemHello(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "hello" {
-				return protocol.Frame{
-					Type:    "hello_response",
-					Address: "my-address",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "hello" {
+			return protocol.Frame{
+				Type:    "hello_response",
+				Address: "my-address",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/hello", map[string]interface{}{})
@@ -117,17 +106,15 @@ func TestSystemHello(t *testing.T) {
 }
 
 func TestSystemHelloSendsProtocolMetadata(t *testing.T) {
-	// The hello handler must populate protocol version and client info
-	// in the frame it sends to HandleLocalFrame. Without these fields,
-	// a real node.Service rejects the handshake with "protocol version 0 is too old".
 	var receivedFrame protocol.Frame
-	node := &mockNodeProvider{
-		version: "test-1.0",
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			receivedFrame = frame
-			return protocol.Frame{Type: "welcome"}
-		},
-	}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		receivedFrame = frame
+		return protocol.Frame{Type: "welcome"}
+	})
+	// Override ClientVersion for this specific test.
+	node.ExpectedCalls = filterCalls(node.ExpectedCalls, "ClientVersion")
+	node.On("ClientVersion").Return("test-1.0").Maybe()
+
 	server := setupTestServer(t, node, nil)
 
 	code, _ := postJSON(t, server, "/rpc/v1/system/hello", map[string]interface{}{})
@@ -146,30 +133,25 @@ func TestSystemHelloSendsProtocolMetadata(t *testing.T) {
 }
 
 func TestDesktopOverridePingNotReplaced(t *testing.T) {
-	// After RegisterDesktopOverrides, raw ping must retain its base
-	// semantics (pong frame), not return the enriched view payload.
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "ping" {
-				return protocol.Frame{
-					Type:  "pong",
-					Peers: []string{"peer1"},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "ping" {
+			return protocol.Frame{
+				Type:  "pong",
+				Peers: []string{"peer1"},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
-	diag := &mockDiagnosticProvider{}
+	diag := newMockDiagnosticProvider(t, "1.0.0-test")
 	rpc.RegisterDesktopOverrides(table, diag, node)
 
 	resp := table.Execute(rpc.CommandRequest{Name: "ping"})
 	if resp.Error != nil {
 		t.Fatalf("raw ping error: %v", resp.Error)
 	}
-	// Raw ping returns a pong frame, not enriched diagnostic JSON.
 	if strings.Contains(string(resp.Data), `"count"`) {
 		t.Errorf("raw ping should not contain enriched fields, got %s", string(resp.Data))
 	}
@@ -179,31 +161,25 @@ func TestDesktopOverridePingNotReplaced(t *testing.T) {
 }
 
 func TestDesktopOverrideGetPeersNotReplaced(t *testing.T) {
-	// After RegisterDesktopOverrides, raw getPeers must retain its base
-	// semantics (peer-exchange frame), not return the enriched view payload.
-	// Production node returns Frame{Type: "peers", Peers: [...]} for get_peers.
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "get_peers" {
-				return protocol.Frame{
-					Type:  "peers",
-					Peers: []string{"peer-a", "peer-b"},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "get_peers" {
+			return protocol.Frame{
+				Type:  "peers",
+				Peers: []string{"peer-a", "peer-b"},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
-	diag := &mockDiagnosticProvider{}
+	diag := newMockDiagnosticProvider(t, "1.0.0-test")
 	rpc.RegisterDesktopOverrides(table, diag, node)
 
 	resp := table.Execute(rpc.CommandRequest{Name: "getPeers"})
 	if resp.Error != nil {
 		t.Fatalf("raw getPeers error: %v", resp.Error)
 	}
-	// Raw getPeers returns the node's wire frame, not enriched view JSON.
 	if strings.Contains(string(resp.Data), `"total"`) {
 		t.Errorf("raw getPeers should not contain enriched fields, got %s", string(resp.Data))
 	}
@@ -216,8 +192,7 @@ func TestDesktopOverrideGetPeersNotReplaced(t *testing.T) {
 }
 
 func TestDesktopOverrideNilSkips(t *testing.T) {
-	// RegisterDesktopOverrides(nil) should not panic or change anything.
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 	rpc.RegisterDesktopOverrides(table, nil, node)
@@ -228,8 +203,6 @@ func TestDesktopOverrideNilSkips(t *testing.T) {
 	}
 }
 
-// TestDesktopOverrideNilNodePanics verifies that passing a non-nil DiagnosticProvider
-// with a nil NodeProvider panics early instead of crashing later in a handler.
 func TestDesktopOverrideNilNodePanics(t *testing.T) {
 	defer func() {
 		r := recover()
@@ -242,19 +215,17 @@ func TestDesktopOverrideNilNodePanics(t *testing.T) {
 		}
 	}()
 
-	diag := &mockDiagnosticProvider{}
+	diag := newMockDiagnosticProvider(t, "1.0.0-test")
 	table := rpc.NewCommandTable()
 	rpc.RegisterDesktopOverrides(table, diag, nil) // should panic
 }
 
 func TestDesktopOverrideHelloIdentifiesAsDesktop(t *testing.T) {
 	var capturedFrame protocol.Frame
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			capturedFrame = frame
-			return protocol.Frame{Type: "welcome"}
-		},
-	}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		capturedFrame = frame
+		return protocol.Frame{Type: "welcome"}
+	})
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
@@ -267,7 +238,7 @@ func TestDesktopOverrideHelloIdentifiesAsDesktop(t *testing.T) {
 		t.Errorf("base hello: expected Client='rpc', got %q", capturedFrame.Client)
 	}
 
-	diag := &mockDiagnosticProvider{desktopVersion: "2.5.0"}
+	diag := newMockDiagnosticProvider(t, "2.5.0")
 	rpc.RegisterDesktopOverrides(table, diag, node)
 
 	// After override: desktop handler identifies as "desktop".
@@ -287,7 +258,7 @@ func TestDesktopOverrideHelloIdentifiesAsDesktop(t *testing.T) {
 }
 
 func TestSystemHelp(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/help", map[string]interface{}{})
@@ -295,19 +266,16 @@ func TestSystemHelp(t *testing.T) {
 	expectStatusCode(t, code, 200)
 	expectFieldExists(t, result, "commands")
 
-	// Verify commands is an array
 	commands, ok := result["commands"].([]interface{})
 	if !ok {
 		t.Errorf("expected commands to be array, got %T", result["commands"])
 		return
 	}
 
-	// Verify we have multiple commands from all services
 	if len(commands) < 5 {
 		t.Errorf("expected at least 5 commands, got %d", len(commands))
 	}
 
-	// Verify system commands are present
 	found := make(map[string]bool)
 	for _, cmd := range commands {
 		cmdMap, ok := cmd.(map[string]interface{})
@@ -328,8 +296,8 @@ func TestSystemHelp(t *testing.T) {
 }
 
 func TestSystemHelpIncludesAllCategories(t *testing.T) {
-	node := &mockNodeProvider{}
-	chatlog := &mockChatlogProvider{}
+	node := newDefaultNodeProvider(t)
+	chatlog := newDefaultChatlogProvider(t)
 	server := setupTestServer(t, node, chatlog)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/help", map[string]interface{}{})
@@ -341,7 +309,6 @@ func TestSystemHelpIncludesAllCategories(t *testing.T) {
 		t.Fatalf("expected commands to be array")
 	}
 
-	// Extract all command names and categories
 	categories := make(map[string]int)
 	for _, cmd := range commands {
 		cmdMap, ok := cmd.(map[string]interface{})
@@ -353,7 +320,6 @@ func TestSystemHelpIncludesAllCategories(t *testing.T) {
 		}
 	}
 
-	// Verify we have commands from different categories
 	expectedCategories := []string{"system", "network", "identity", "message", "file", "chatlog", "notice"}
 	for _, cat := range expectedCategories {
 		if _, exists := categories[cat]; !exists {
@@ -363,7 +329,7 @@ func TestSystemHelpIncludesAllCategories(t *testing.T) {
 }
 
 func TestSystemCommandMetadata(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/help", map[string]interface{}{})
@@ -375,14 +341,11 @@ func TestSystemCommandMetadata(t *testing.T) {
 		t.Fatalf("expected commands to be array")
 	}
 
-	// Verify that commands have required fields
 	for _, cmd := range commands {
 		cmdMap, ok := cmd.(map[string]interface{})
 		if !ok {
 			continue
 		}
-
-		// Check required fields
 		if _, hasName := cmdMap["name"]; !hasName {
 			t.Error("command missing 'name' field")
 		}
@@ -396,16 +359,12 @@ func TestSystemCommandMetadata(t *testing.T) {
 }
 
 func TestSystemHelpUsagePresent(t *testing.T) {
-	// Commands that accept arguments must expose a non-empty "usage" field
-	// in help output. The desktop console renders suggestion templates from
-	// this field — if it regresses to empty, the UI loses argument hints.
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, nil, nil, nil)
 
 	commands := table.Commands()
 
-	// Commands that take arguments and MUST have Usage set.
 	requireUsage := map[string]bool{
 		"addPeer":               true,
 		"fetchMessages":         true,
@@ -430,7 +389,6 @@ func TestSystemHelpUsagePresent(t *testing.T) {
 		t.Errorf("expected to find %d argument-taking commands in help, found %d — some may be missing from registration", len(requireUsage), found)
 	}
 
-	// No-arg commands must NOT have Usage (keeps help clean).
 	noArgCommands := map[string]bool{
 		"help": true, "ping": true, "hello": true, "version": true,
 		"getPeers": true, "fetchPeerHealth": true,
@@ -446,11 +404,9 @@ func TestSystemHelpUsagePresent(t *testing.T) {
 }
 
 func TestSystemHelpUsageModeGatedCommands(t *testing.T) {
-	// When providers are present, mode-gated commands (send_dm, chatlog)
-	// must also have Usage set for desktop console suggestion templates.
-	node := &mockNodeProvider{}
-	chatlog := &mockChatlogProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+	chatlog := newDefaultChatlogProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, node, chatlog, dmRouter, nil)
@@ -475,4 +431,17 @@ func TestSystemHelpUsageModeGatedCommands(t *testing.T) {
 	if found != len(modeGatedWithUsage) {
 		t.Errorf("expected %d mode-gated commands visible with providers, found %d", len(modeGatedWithUsage), found)
 	}
+}
+
+// filterCalls removes expectations for the given method name from a call list.
+// Used when a default helper registered a Maybe() expectation that needs to be
+// overridden with a specific return value.
+func filterCalls(calls []*mock.Call, method string) []*mock.Call {
+	filtered := make([]*mock.Call, 0, len(calls))
+	for _, c := range calls {
+		if c.Method != method {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
 }

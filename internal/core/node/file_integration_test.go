@@ -16,7 +16,7 @@ import (
 // a direct outbound session carrying file_transfer_v1 is reported reachable.
 func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -39,7 +39,7 @@ func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 // session lacking file_transfer_v1 is NOT considered reachable for file transfer.
 func TestIsPeerReachable_DirectSessionWithoutCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -74,7 +74,7 @@ func announceRouteVia(svc *Service, nextHopID domain.PeerIdentity, targetID doma
 // is reachable when the next-hop has file_transfer_v1 capability.
 func TestIsPeerReachable_RouteViaFileCapableNextHop(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	// Relay peer-B has file_transfer_v1.
@@ -102,7 +102,7 @@ func TestIsPeerReachable_RouteViaFileCapableNextHop(t *testing.T) {
 // This is the core regression test for the false-positive reachability bug.
 func TestIsPeerReachable_RouteViaNextHopWithoutFileCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	// Relay peer-B has relay + routing but NOT file_transfer_v1.
@@ -129,7 +129,7 @@ func TestIsPeerReachable_RouteViaNextHopWithoutFileCapability(t *testing.T) {
 // routes exist, the peer is reachable if at least one next-hop has file_transfer_v1.
 func TestIsPeerReachable_MultipleRoutesOneCapable(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	// Peer-B: relay only, no file transfer.
@@ -169,7 +169,7 @@ func TestIsPeerReachable_MultipleRoutesOneCapable(t *testing.T) {
 // is reported as unreachable.
 func TestIsPeerReachable_NoPeerNoRoute(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	if svc.isPeerReachable(idTargetX) {
 		t.Fatal("unknown peer with no sessions or routes should NOT be reachable")
@@ -181,7 +181,7 @@ func TestIsPeerReachable_NoPeerNoRoute(t *testing.T) {
 // the local node has file_transfer_v1 capability.
 func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	// The local node has file_transfer_v1 — so it appears in fileCapable.
@@ -229,7 +229,7 @@ func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 // connected via an inbound connection with file_transfer_v1 is reachable.
 func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	pipeLocal, pipeRemote := net.Pipe()
@@ -256,7 +256,7 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 func TestIsPeerReachable_DirectSessionStalled(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
@@ -277,7 +277,7 @@ func TestIsPeerReachable_DirectSessionStalled(t *testing.T) {
 func TestIsPeerReachable_RouteViaStalledNextHop(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
@@ -299,7 +299,7 @@ func TestIsPeerReachable_RouteViaStalledNextHop(t *testing.T) {
 func TestFileTransferPeerUsableAtPrefersOldestHealthyConnection(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	svc.sessions[domain.PeerAddress("addr-old")] = &peerSession{
@@ -337,7 +337,7 @@ func TestFileTransferPeerUsableAtPrefersOldestHealthyConnection(t *testing.T) {
 func TestFileTransferPeerUsableAtRejectsStalledPeer(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	svc.sessions[domain.PeerAddress("addr-stalled")] = &peerSession{
@@ -359,7 +359,7 @@ func TestFileTransferPeerUsableAtRejectsStalledPeer(t *testing.T) {
 func TestFileTransferPeerUsableAtRejectsPeerWithoutHealth(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	svc.sessions[domain.PeerAddress("addr-no-health")] = &peerSession{
 		address:      domain.PeerAddress("addr-no-health"),
 		peerIdentity: idPeerB,
@@ -374,7 +374,7 @@ func TestFileTransferPeerUsableAtRejectsPeerWithoutHealth(t *testing.T) {
 func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	outLocal, outRemote := net.Pipe()
@@ -435,7 +435,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
 	outLocal, outRemote := net.Pipe()
@@ -501,7 +501,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 func TestSendFrameToIdentityRejectsOutboundBeforeActivation(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	outLocal, outRemote := net.Pipe()
 	defer func() { _ = outLocal.Close() }()
@@ -533,7 +533,7 @@ func TestSendFrameToIdentityRejectsOutboundBeforeActivation(t *testing.T) {
 func TestSendFrameToIdentityRejectsInboundBeforeActivation(t *testing.T) {
 	t.Parallel()
 
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	inLocal, inRemote := net.Pipe()
 	defer func() { _ = inLocal.Close() }()

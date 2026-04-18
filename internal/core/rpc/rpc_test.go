@@ -8,141 +8,119 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 	"github.com/piratecash/corsa/internal/core/service"
 )
 
-// mockNodeProvider is a test double for NodeProvider.
-// It allows configurable responses for testing different scenarios.
-type mockNodeProvider struct {
-	handleFunc func(frame protocol.Frame) protocol.Frame
-	address    string
-	version    string
+// ---------------------------------------------------------------------------
+// MockNodeProvider helpers
+// ---------------------------------------------------------------------------
+
+// newDefaultNodeProvider creates a MockNodeProvider with all methods returning
+// sensible defaults. All expectations use Maybe() so uncalled methods don't
+// cause test failures. Equivalent to the old `&mockNodeProvider{}`.
+func newDefaultNodeProvider(t *testing.T) *rpcmocks.MockNodeProvider {
+	t.Helper()
+	m := rpcmocks.NewMockNodeProvider(t)
+	m.On("HandleLocalFrame", mock.Anything).Return(protocol.Frame{Type: "ok"}).Maybe()
+	m.On("Address").Return("test-address-abc123").Maybe()
+	m.On("ClientVersion").Return("0.16-alpha").Maybe()
+	m.On("FetchFileTransfers").Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("FetchFileMappings").Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("RetryFileChunk", mock.Anything).Return(nil).Maybe()
+	m.On("StartFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
+	return m
 }
 
-// HandleLocalFrame returns either the custom handleFunc result or a default response.
-func (m *mockNodeProvider) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
-	if m.handleFunc != nil {
-		return m.handleFunc(frame)
-	}
-	return protocol.Frame{Type: "ok"}
+// newNodeProviderWithHandler creates a MockNodeProvider that delegates
+// HandleLocalFrame to fn. Other methods return sensible defaults.
+// Equivalent to the old `&mockNodeProvider{handleFunc: fn}`.
+func newNodeProviderWithHandler(t *testing.T, fn func(protocol.Frame) protocol.Frame) *rpcmocks.MockNodeProvider {
+	t.Helper()
+	m := rpcmocks.NewMockNodeProvider(t)
+	m.EXPECT().HandleLocalFrame(mock.Anything).RunAndReturn(fn).Maybe()
+	m.On("Address").Return("test-address-abc123").Maybe()
+	m.On("ClientVersion").Return("0.16-alpha").Maybe()
+	m.On("FetchFileTransfers").Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("FetchFileMappings").Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("RetryFileChunk", mock.Anything).Return(nil).Maybe()
+	m.On("StartFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
+	return m
 }
 
-// Address returns the configured address or a default test address.
-func (m *mockNodeProvider) Address() string {
-	if m.address != "" {
-		return m.address
-	}
-	return "test-address-abc123"
+// newNodeProviderWithMeta creates a MockNodeProvider with custom Address
+// and ClientVersion. HandleLocalFrame returns {Type: "ok"} by default.
+// Equivalent to the old `&mockNodeProvider{address: addr, version: ver}`.
+func newNodeProviderWithMeta(t *testing.T, address, version string) *rpcmocks.MockNodeProvider {
+	t.Helper()
+	m := rpcmocks.NewMockNodeProvider(t)
+	m.On("HandleLocalFrame", mock.Anything).Return(protocol.Frame{Type: "ok"}).Maybe()
+	m.On("Address").Return(address).Maybe()
+	m.On("ClientVersion").Return(version).Maybe()
+	m.On("FetchFileTransfers").Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("FetchFileMappings").Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("RetryFileChunk", mock.Anything).Return(nil).Maybe()
+	m.On("StartFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
+	return m
 }
 
-// ClientVersion returns the configured version or a default version.
-func (m *mockNodeProvider) ClientVersion() string {
-	if m.version != "" {
-		return m.version
-	}
-	return "0.16-alpha"
+// ---------------------------------------------------------------------------
+// MockDMRouterProvider helpers
+// ---------------------------------------------------------------------------
+
+// newDefaultDMRouterProvider creates a MockDMRouterProvider with all methods
+// set to reasonable defaults. Equivalent to the old `&mockDMRouterProvider{}`.
+func newDefaultDMRouterProvider(t *testing.T) *rpcmocks.MockDMRouterProvider {
+	t.Helper()
+	m := rpcmocks.NewMockDMRouterProvider(t)
+	m.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
+	m.On("SendMessage", mock.Anything, mock.Anything).Maybe()
+	m.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	return m
 }
 
-// FetchFileTransfers returns an empty JSON array for tests.
-func (m *mockNodeProvider) FetchFileTransfers() (json.RawMessage, error) {
-	return json.RawMessage("[]"), nil
+// ---------------------------------------------------------------------------
+// MockChatlogProvider helpers
+// ---------------------------------------------------------------------------
+
+// newDefaultChatlogProvider creates a MockChatlogProvider with all methods
+// set to reasonable defaults. Equivalent to the old `&mockChatlogProvider{}`.
+func newDefaultChatlogProvider(t *testing.T) *rpcmocks.MockChatlogProvider {
+	t.Helper()
+	m := rpcmocks.NewMockChatlogProvider(t)
+	m.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	m.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
+	m.On("FetchConversations").Return("[]", nil).Maybe()
+	m.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	return m
 }
 
-// FetchFileMappings returns an empty JSON array for tests.
-func (m *mockNodeProvider) FetchFileMappings() (json.RawMessage, error) {
-	return json.RawMessage("[]"), nil
+// ---------------------------------------------------------------------------
+// MockMetricsProvider helpers
+// ---------------------------------------------------------------------------
+
+// newMockMetricsProvider creates a MockMetricsProvider that returns the given snapshot.
+func newMockMetricsProvider(t *testing.T, snapshot protocol.Frame) *rpcmocks.MockMetricsProvider {
+	t.Helper()
+	m := rpcmocks.NewMockMetricsProvider(t)
+	m.On("TrafficSnapshot").Return(snapshot).Maybe()
+	return m
 }
 
-// RetryFileChunk is a no-op stub for tests.
-func (m *mockNodeProvider) RetryFileChunk(_ domain.FileID) error {
-	return nil
-}
-
-// StartFileDownload is a no-op stub for tests.
-func (m *mockNodeProvider) StartFileDownload(_ domain.FileID) error {
-	return nil
-}
-
-// CancelFileDownload is a no-op stub for tests.
-func (m *mockNodeProvider) CancelFileDownload(_ domain.FileID) error {
-	return nil
-}
-
-// RestartFileDownload is a no-op stub for tests.
-func (m *mockNodeProvider) RestartFileDownload(_ domain.FileID) error {
-	return nil
-}
-
-// mockChatlogProvider is a test double for ChatlogProvider.
-// It allows configurable responses for testing different scenarios.
-type mockChatlogProvider struct {
-	chatlogResult       string
-	chatlogErr          error
-	chatlogTopic        string
-	chatlogPeerAddress  string
-	previewsResult      string
-	previewsErr         error
-	conversationsResult string
-	conversationsErr    error
-	// knownEntries maps "peerAddress:messageID" to existence.
-	// Used by HasEntryInConversation for reply_to validation tests.
-	knownEntries map[string]bool
-}
-
-// FetchChatlog returns the configured chatlog result or error.
-// Captures topic and peerAddress for test assertions.
-func (m *mockChatlogProvider) FetchChatlog(topic, peerAddress string) (string, error) {
-	m.chatlogTopic = topic
-	m.chatlogPeerAddress = peerAddress
-	return m.chatlogResult, m.chatlogErr
-}
-
-// FetchChatlogPreviews returns the configured previews result or error.
-func (m *mockChatlogProvider) FetchChatlogPreviews() (string, error) {
-	return m.previewsResult, m.previewsErr
-}
-
-// FetchConversations returns the configured conversations result or error.
-func (m *mockChatlogProvider) FetchConversations() (string, error) {
-	return m.conversationsResult, m.conversationsErr
-}
-
-// HasEntryInConversation checks knownEntries map for "peerAddress:messageID".
-func (m *mockChatlogProvider) HasEntryInConversation(peerAddress, messageID string) bool {
-	if m.knownEntries == nil {
-		return false
-	}
-	return m.knownEntries[peerAddress+":"+messageID]
-}
-
-// mockDMRouterProvider is a test double for DMRouterProvider.
-type mockDMRouterProvider struct {
-	lastTo            string
-	lastMsg           domain.OutgoingDM
-	fileAnnounceError error // if set, SendFileAnnounce returns this error
-}
-
-func (m *mockDMRouterProvider) Snapshot() service.RouterSnapshot {
-	return service.RouterSnapshot{}
-}
-
-func (m *mockDMRouterProvider) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
-	m.lastTo = string(to)
-	m.lastMsg = msg
-}
-
-func (m *mockDMRouterProvider) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, _ domain.FileAnnouncePayload, _ func()) error {
-	if m.fileAnnounceError != nil {
-		return m.fileAnnounceError
-	}
-	m.lastTo = string(to)
-	m.lastMsg = msg
-	return nil
-}
+// ---------------------------------------------------------------------------
+// Test table and server setup
+// ---------------------------------------------------------------------------
 
 // buildTestTable creates a CommandTable with all commands registered using given providers.
 // Pass nil for chatlogProvider, dmRouter, or metricsProvider to simulate modes where
@@ -183,6 +161,10 @@ func setupTestServerWithDMRouterAndChatlog(t *testing.T, nodeProvider rpc.NodePr
 	t.Helper()
 	return setupTestServerWithDMRouter(t, nodeProvider, chatlogProvider, dmRouter)
 }
+
+// ---------------------------------------------------------------------------
+// Request / assertion helpers
+// ---------------------------------------------------------------------------
 
 // postJSON sends a POST request with JSON body and returns status code and parsed response.
 // Returns the response body as a map[string]interface{} or raw string in "_raw" key if unmarshal fails.

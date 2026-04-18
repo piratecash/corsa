@@ -18,6 +18,10 @@ install-hooks:
 hooks-status:
 	git config --get core.hooksPath
 
+.PHONY: mocks
+mocks:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/vektra/mockery/v3@v3.7.0
+
 .PHONY: lint
 lint:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.0 run ./... --timeout=7m --color always

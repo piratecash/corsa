@@ -3,20 +3,10 @@ package rpc_test
 import (
 	"testing"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
-
-	"github.com/piratecash/corsa/internal/core/config"
 )
-
-// mockMetricsProvider implements rpc.MetricsProvider for testing.
-type mockMetricsProvider struct {
-	snapshot protocol.Frame
-}
-
-func (m *mockMetricsProvider) TrafficSnapshot() protocol.Frame {
-	return m.snapshot
-}
 
 func setupTestServerWithMetrics(t *testing.T, node rpc.NodeProvider, metrics rpc.MetricsProvider) *rpc.Server {
 	t.Helper()
@@ -34,18 +24,16 @@ func TestMetricsTrafficHistory(t *testing.T) {
 		{Timestamp: "2026-03-27T10:00:00Z", BytesSentPS: 100, BytesRecvPS: 200, TotalSent: 100, TotalReceived: 200},
 		{Timestamp: "2026-03-27T10:00:01Z", BytesSentPS: 150, BytesRecvPS: 250, TotalSent: 250, TotalReceived: 450},
 	}
-	metrics := &mockMetricsProvider{
-		snapshot: protocol.Frame{
-			Type: "traffic_history",
-			TrafficHistory: &protocol.TrafficHistoryFrame{
-				IntervalSeconds: 1,
-				Capacity:        3600,
-				Count:           2,
-				Samples:         samples,
-			},
+	metrics := newMockMetricsProvider(t, protocol.Frame{
+		Type: "traffic_history",
+		TrafficHistory: &protocol.TrafficHistoryFrame{
+			IntervalSeconds: 1,
+			Capacity:        3600,
+			Count:           2,
+			Samples:         samples,
 		},
-	}
-	node := &mockNodeProvider{}
+	})
+	node := newDefaultNodeProvider(t)
 	server := setupTestServerWithMetrics(t, node, metrics)
 
 	code, result := postJSON(t, server, "/rpc/v1/metrics/traffic_history", map[string]interface{}{})
@@ -67,7 +55,7 @@ func TestMetricsTrafficHistory(t *testing.T) {
 }
 
 func TestMetricsTrafficHistoryNilProvider(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServerWithMetrics(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/metrics/traffic_history", map[string]interface{}{})
@@ -78,7 +66,7 @@ func TestMetricsTrafficHistoryNilProvider(t *testing.T) {
 
 func TestMetricsCommandHiddenWhenProviderNil(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil)
+	rpc.RegisterAllCommands(table, newDefaultNodeProvider(t), nil, nil, nil)
 
 	for _, cmd := range table.Commands() {
 		if cmd.Name == "fetchTrafficHistory" {
@@ -86,7 +74,6 @@ func TestMetricsCommandHiddenWhenProviderNil(t *testing.T) {
 		}
 	}
 
-	// Verify it still returns 503 on execution (registered as unavailable, not missing).
 	resp := table.Execute(rpc.CommandRequest{Name: "fetchTrafficHistory"})
 	if resp.ErrorKind != rpc.ErrUnavailable {
 		t.Errorf("expected ErrUnavailable, got %v", resp.ErrorKind)
@@ -95,10 +82,11 @@ func TestMetricsCommandHiddenWhenProviderNil(t *testing.T) {
 
 func TestMetricsCommandVisibleWhenProviderSet(t *testing.T) {
 	table := rpc.NewCommandTable()
-	metrics := &mockMetricsProvider{
-		snapshot: protocol.Frame{Type: "traffic_history", TrafficHistory: &protocol.TrafficHistoryFrame{}},
-	}
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, metrics)
+	metrics := newMockMetricsProvider(t, protocol.Frame{
+		Type:           "traffic_history",
+		TrafficHistory: &protocol.TrafficHistoryFrame{},
+	})
+	rpc.RegisterAllCommands(table, newDefaultNodeProvider(t), nil, nil, metrics)
 
 	found := false
 	for _, cmd := range table.Commands() {
@@ -113,27 +101,25 @@ func TestMetricsCommandVisibleWhenProviderSet(t *testing.T) {
 }
 
 func TestNetworkStatsCommand(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_network_stats" {
-				return protocol.Frame{
-					Type: "network_stats",
-					NetworkStats: &protocol.NetworkStatsFrame{
-						TotalBytesSent:     1024,
-						TotalBytesReceived: 2048,
-						TotalTraffic:       3072,
-						ConnectedPeers:     2,
-						KnownPeers:         3,
-						PeerTraffic: []protocol.PeerTrafficFrame{
-							{Address: "peer1:8000", BytesSent: 512, BytesReceived: 1024, TotalTraffic: 1536, Connected: true},
-							{Address: "peer2:8000", BytesSent: 512, BytesReceived: 1024, TotalTraffic: 1536, Connected: true},
-						},
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_network_stats" {
+			return protocol.Frame{
+				Type: "network_stats",
+				NetworkStats: &protocol.NetworkStatsFrame{
+					TotalBytesSent:     1024,
+					TotalBytesReceived: 2048,
+					TotalTraffic:       3072,
+					ConnectedPeers:     2,
+					KnownPeers:         3,
+					PeerTraffic: []protocol.PeerTrafficFrame{
+						{Address: "peer1:8000", BytesSent: 512, BytesReceived: 1024, TotalTraffic: 1536, Connected: true},
+						{Address: "peer2:8000", BytesSent: 512, BytesReceived: 1024, TotalTraffic: 1536, Connected: true},
 					},
-				}
+				},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/stats", map[string]interface{}{})

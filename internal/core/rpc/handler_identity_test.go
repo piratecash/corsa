@@ -1,23 +1,22 @@
 package rpc_test
 
 import (
-	"github.com/piratecash/corsa/internal/core/protocol"
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func TestIdentityFetchIdentities(t *testing.T) {
 	identities := []string{"identity-1", "identity-2", "identity-3"}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_identities" {
-				return protocol.Frame{
-					Type:       "identities_response",
-					Identities: identities,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_identities" {
+			return protocol.Frame{
+				Type:       "identities_response",
+				Identities: identities,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/identities", map[string]interface{}{})
@@ -36,17 +35,15 @@ func TestIdentityFetchIdentities(t *testing.T) {
 }
 
 func TestIdentityFetchIdentitiesEmpty(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_identities" {
-				return protocol.Frame{
-					Type:       "identities_response",
-					Identities: []string{},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_identities" {
+			return protocol.Frame{
+				Type:       "identities_response",
+				Identities: []string{},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/identities", map[string]interface{}{})
@@ -70,17 +67,15 @@ func TestIdentityFetchContacts(t *testing.T) {
 			BoxSig:  "boxsig-2",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_contacts" {
-				return protocol.Frame{
-					Type:     "contacts_response",
-					Contacts: contacts,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_contacts" {
+			return protocol.Frame{
+				Type:     "contacts_response",
+				Contacts: contacts,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/contacts", map[string]interface{}{})
@@ -114,17 +109,15 @@ func TestIdentityFetchContacts(t *testing.T) {
 }
 
 func TestIdentityFetchContactsEmpty(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_contacts" {
-				return protocol.Frame{
-					Type:     "contacts_response",
-					Contacts: []protocol.ContactFrame{},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_contacts" {
+			return protocol.Frame{
+				Type:     "contacts_response",
+				Contacts: []protocol.ContactFrame{},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/contacts", map[string]interface{}{})
@@ -142,17 +135,15 @@ func TestIdentityFetchTrustedContacts(t *testing.T) {
 			BoxSig:  "trusted-boxsig-1",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_trusted_contacts" {
-				return protocol.Frame{
-					Type:     "trusted_contacts_response",
-					Contacts: contacts,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_trusted_contacts" {
+			return protocol.Frame{
+				Type:     "trusted_contacts_response",
+				Contacts: contacts,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/trusted_contacts", map[string]interface{}{})
@@ -171,17 +162,15 @@ func TestIdentityFetchTrustedContacts(t *testing.T) {
 }
 
 func TestIdentityFetchTrustedContactsEmpty(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_trusted_contacts" {
-				return protocol.Frame{
-					Type:     "trusted_contacts_response",
-					Contacts: []protocol.ContactFrame{},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_trusted_contacts" {
+			return protocol.Frame{
+				Type:     "trusted_contacts_response",
+				Contacts: []protocol.ContactFrame{},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/trusted_contacts", map[string]interface{}{})
@@ -191,17 +180,15 @@ func TestIdentityFetchTrustedContactsEmpty(t *testing.T) {
 }
 
 func TestIdentityFetchContactsNodeError(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_contacts" {
-				return protocol.Frame{
-					Type:  "error",
-					Error: "contacts not available",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_contacts" {
+			return protocol.Frame{
+				Type:  "error",
+				Error: "contacts not available",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/contacts", map[string]interface{}{})
@@ -212,17 +199,15 @@ func TestIdentityFetchContactsNodeError(t *testing.T) {
 }
 
 func TestIdentityFetchIdentitiesNodeError(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_identities" {
-				return protocol.Frame{
-					Type:  "error",
-					Error: "identities not available",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_identities" {
+			return protocol.Frame{
+				Type:  "error",
+				Error: "identities not available",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/identity/identities", map[string]interface{}{})

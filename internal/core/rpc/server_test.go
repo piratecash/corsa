@@ -8,9 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 )
 
 // newAuthServer creates a Server with auth config and system commands registered.
@@ -26,7 +29,7 @@ func newAuthServer(t *testing.T, node rpc.NodeProvider, cfg config.RPC) *rpc.Ser
 }
 
 func TestServerAuthMiddlewareWithAuth(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	cfg := config.RPC{
 		Host:     "127.0.0.1",
 		Port:     "0",
@@ -43,10 +46,7 @@ func TestServerAuthMiddlewareWithAuth(t *testing.T) {
 }
 
 func TestServerAuthMiddlewareWithValidCredentials(t *testing.T) {
-	node := &mockNodeProvider{
-		address: "test-addr",
-		version: "0.16-alpha",
-	}
+	node := newNodeProviderWithMeta(t, "test-addr", "0.16-alpha")
 	cfg := config.RPC{
 		Host:     "127.0.0.1",
 		Port:     "0",
@@ -64,7 +64,7 @@ func TestServerAuthMiddlewareWithValidCredentials(t *testing.T) {
 }
 
 func TestServerAuthMiddlewareWithInvalidCredentials(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	cfg := config.RPC{
 		Host:     "127.0.0.1",
 		Port:     "0",
@@ -81,7 +81,7 @@ func TestServerAuthMiddlewareWithInvalidCredentials(t *testing.T) {
 }
 
 func TestServerAuthMiddlewareWithWrongUsername(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	cfg := config.RPC{
 		Host:     "127.0.0.1",
 		Port:     "0",
@@ -97,10 +97,7 @@ func TestServerAuthMiddlewareWithWrongUsername(t *testing.T) {
 }
 
 func TestServerNoAuthWhenNotConfigured(t *testing.T) {
-	node := &mockNodeProvider{
-		address: "test-addr",
-		version: "0.16-alpha",
-	}
+	node := newNodeProviderWithMeta(t, "test-addr", "0.16-alpha")
 	cfg := config.RPC{
 		Host: "127.0.0.1",
 		Port: "0",
@@ -114,7 +111,7 @@ func TestServerNoAuthWhenNotConfigured(t *testing.T) {
 }
 
 func TestServerMissingAuthHeader(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	cfg := config.RPC{
 		Host:     "127.0.0.1",
 		Port:     "0",
@@ -130,7 +127,7 @@ func TestServerMissingAuthHeader(t *testing.T) {
 }
 
 func TestServerInvalidAuthHeaderFormat(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	cfg := config.RPC{
 		Host:     "127.0.0.1",
 		Port:     "0",
@@ -154,7 +151,7 @@ func TestServerAuthReturnsWWWAuthenticate(t *testing.T) {
 		Username: "testuser",
 		Password: "testpass",
 	}
-	server := newAuthServer(t, &mockNodeProvider{}, cfg)
+	server := newAuthServer(t, newDefaultNodeProvider(t), cfg)
 
 	scenarios := []struct {
 		name   string
@@ -193,7 +190,7 @@ func TestServerAuthReturnsWWWAuthenticate(t *testing.T) {
 }
 
 func TestServerHelpEndpoint(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/help", map[string]interface{}{})
@@ -213,7 +210,7 @@ func TestServerHelpEndpoint(t *testing.T) {
 }
 
 func TestServerHelpEndpointWithoutAuth(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/help", map[string]interface{}{})
@@ -223,7 +220,7 @@ func TestServerHelpEndpointWithoutAuth(t *testing.T) {
 }
 
 func TestServerMultipleCommandCategories(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	table := rpc.NewCommandTable()
 	rpc.RegisterSystemCommands(table, node)
 	rpc.RegisterNetworkCommands(table, node)
@@ -265,7 +262,7 @@ func TestServerMultipleCommandCategories(t *testing.T) {
 }
 
 func TestCommandTableCommands(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	table := buildTestTable(node, nil, nil, nil)
 
 	allCommands := table.Commands()
@@ -290,9 +287,9 @@ func TestCommandTableCommands(t *testing.T) {
 // TestCommandTableCommandsSortedByName verifies that Commands() returns
 // a deterministic list sorted by name, so help and autocomplete are stable.
 func TestCommandTableCommandsSortedByName(t *testing.T) {
-	node := &mockNodeProvider{}
-	chatlog := &mockChatlogProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+	chatlog := newDefaultChatlogProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
 	table := buildTestTable(node, chatlog, dmRouter, nil)
 
 	commands := table.Commands()
@@ -315,7 +312,7 @@ func TestCommandTableCommandsSortedByName(t *testing.T) {
 }
 
 func TestServerAuthWithBase64InvalidEncoding(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	cfg := config.RPC{
 		Host:     "127.0.0.1",
 		Port:     "0",
@@ -340,7 +337,7 @@ func TestServerAuthBasicEncoding(t *testing.T) {
 }
 
 func TestServerListensOnConfiguredAddress(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, _ := postJSON(t, server, "/rpc/v1/system/version", map[string]interface{}{})
@@ -400,7 +397,7 @@ func TestServerNoAuthValidates(t *testing.T) {
 }
 
 func TestServerUnregisteredEndpoint(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, _ := postJSON(t, server, "/rpc/v1/nonexistent/endpoint", map[string]interface{}{})
@@ -412,10 +409,7 @@ func TestServerUnregisteredEndpoint(t *testing.T) {
 
 // TestUniversalExecEndpoint tests the /rpc/v1/exec dispatch endpoint.
 func TestUniversalExecEndpoint(t *testing.T) {
-	node := &mockNodeProvider{
-		address: "test-addr",
-		version: "0.16-alpha",
-	}
+	node := newNodeProviderWithMeta(t, "test-addr", "0.16-alpha")
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
@@ -428,7 +422,7 @@ func TestUniversalExecEndpoint(t *testing.T) {
 }
 
 func TestUniversalExecUnknownCommand(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
@@ -440,7 +434,7 @@ func TestUniversalExecUnknownCommand(t *testing.T) {
 }
 
 func TestUniversalExecCaseInsensitive(t *testing.T) {
-	node := &mockNodeProvider{version: "test"}
+	node := newNodeProviderWithMeta(t, "test-address-abc123", "test")
 	server := setupTestServer(t, node, nil)
 
 	// Mixed-case command names must work through /exec just like
@@ -457,7 +451,7 @@ func TestUniversalExecCaseInsensitive(t *testing.T) {
 }
 
 func TestUniversalExecEmptyCommand(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
@@ -471,7 +465,7 @@ func TestUniversalExecEmptyCommand(t *testing.T) {
 // TestLegacyArgHandlerMalformedJSON verifies that malformed JSON body
 // is rejected with 400 instead of silently treated as empty args.
 func TestLegacyArgHandlerMalformedJSON(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	req := httptest.NewRequest("POST", "/rpc/v1/message/list", strings.NewReader("{broken json"))
@@ -498,17 +492,15 @@ func TestLegacyArgHandlerMalformedJSON(t *testing.T) {
 // TestLegacyArgHandlerEmptyBody verifies that empty body is still accepted
 // (commands with defaults should work without a body).
 func TestLegacyArgHandlerEmptyBody(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_delivery_receipts" {
-				return protocol.Frame{
-					Type:      "receipts_response",
-					Recipient: frame.Recipient,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_delivery_receipts" {
+			return protocol.Frame{
+				Type:      "receipts_response",
+				Recipient: frame.Recipient,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	req := httptest.NewRequest("POST", "/rpc/v1/message/receipts", nil)
@@ -527,7 +519,7 @@ func TestLegacyArgHandlerEmptyBody(t *testing.T) {
 // TestUniversalExecUnavailableCommand verifies that mode-gated commands
 // return 503 through /exec, matching the legacy endpoint behavior.
 func TestUniversalExecUnavailableCommand(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil) // chatlog=nil, dmRouter=nil, metricsProvider=nil
 
 	unavailableCases := []struct {
@@ -551,7 +543,7 @@ func TestUniversalExecUnavailableCommand(t *testing.T) {
 // TestUniversalExecUnavailableSendDM verifies send_dm returns 503 via /exec
 // when DMRouter is nil, same as legacy route.
 func TestUniversalExecUnavailableSendDM(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil) // dmRouter=nil
 
 	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
@@ -566,7 +558,7 @@ func TestUniversalExecUnavailableSendDM(t *testing.T) {
 // TestCommandsExcludesUnavailable verifies that Commands() does not return
 // unavailable (mode-gated) commands.
 func TestCommandsExcludesUnavailable(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	table := buildTestTable(node, nil, nil, nil) // chatlog=nil, dmRouter=nil
 
 	commands := table.Commands()
@@ -588,7 +580,7 @@ func TestCommandsExcludesUnavailable(t *testing.T) {
 // TestHasReturnsTrueForUnavailable verifies that Has() returns true for
 // unavailable commands (they are registered, just return 503).
 func TestHasReturnsTrueForUnavailable(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	table := buildTestTable(node, nil, nil, nil) // chatlog=nil, dmRouter=nil
 
 	unavailableNames := []string{
@@ -606,7 +598,7 @@ func TestHasReturnsTrueForUnavailable(t *testing.T) {
 // TestExecAndLegacyConsistency verifies that /exec and legacy routes return
 // the same status code for mode-gated commands.
 func TestExecAndLegacyConsistency(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil) // chatlog=nil
 
 	// Via legacy route
@@ -642,12 +634,10 @@ func setupTestServerWithNode(t *testing.T, node rpc.NodeProvider) *rpc.Server {
 // supplied fields like Client/ClientVersion are not preserved for registered types.
 func TestFrameEndpointDispatchesThroughCommandTable(t *testing.T) {
 	var receivedFrame protocol.Frame
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			receivedFrame = frame
-			return protocol.Frame{Type: "welcome", Version: frame.Version}
-		},
-	}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		receivedFrame = frame
+		return protocol.Frame{Type: "welcome", Version: frame.Version}
+	})
 	server := setupTestServerWithNode(t, node)
 
 	code, _ := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
@@ -672,12 +662,10 @@ func TestFrameEndpointDispatchesThroughCommandTable(t *testing.T) {
 // level frames (relay_message, push_message, subscribe_inbox) bypassing P2P
 // authentication. Now only CommandTable-registered types are accepted.
 func TestFrameEndpointRejectsUnknownType(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			t.Fatal("HandleLocalFrame should not be called for unknown frame types")
-			return protocol.Frame{}
-		},
-	}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		t.Fatal("HandleLocalFrame should not be called for unknown frame types")
+		return protocol.Frame{}
+	})
 	server := setupTestServerWithNode(t, node)
 
 	code, body := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
@@ -708,10 +696,17 @@ func TestFrameEndpointRejectsUnknownType(t *testing.T) {
 // through CommandTable (via ChatlogProvider) instead of HandleLocalFrame.
 func TestFrameEndpointChatlogDispatch(t *testing.T) {
 	chatlogJSON := `{"entries":[{"id":"1","text":"hello"}]}`
-	chatlog := &mockChatlogProvider{
-		chatlogResult: chatlogJSON,
-	}
-	node := &mockNodeProvider{}
+	chatlog := rpcmocks.NewMockChatlogProvider(t)
+	var chatlogPeerAddress string
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			chatlogPeerAddress = args.String(1)
+		}).Return(chatlogJSON, nil)
+	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
+	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+
+	node := newDefaultNodeProvider(t)
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
@@ -737,15 +732,15 @@ func TestFrameEndpointChatlogDispatch(t *testing.T) {
 	}
 
 	// Verify normalizeFrameArgs mapped "address" → "peer_address".
-	if chatlog.chatlogPeerAddress != "peer-addr-123" {
-		t.Errorf("expected peer_address='peer-addr-123', got %q", chatlog.chatlogPeerAddress)
+	if chatlogPeerAddress != "peer-addr-123" {
+		t.Errorf("expected peer_address='peer-addr-123', got %q", chatlogPeerAddress)
 	}
 }
 
 // TestFrameEndpointUnavailableChatlog verifies that chatlog frame types return
 // 503 when ChatlogProvider is nil (standalone node mode).
 func TestFrameEndpointUnavailableChatlog(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 
 	cfg := config.RPC{Host: "127.0.0.1", Port: "0"}
 	table := rpc.NewCommandTable()
@@ -765,7 +760,7 @@ func TestFrameEndpointUnavailableChatlog(t *testing.T) {
 }
 
 func TestFrameEndpointRejectsMissingType(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServerWithNode(t, node)
 
 	code, result := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
@@ -777,7 +772,7 @@ func TestFrameEndpointRejectsMissingType(t *testing.T) {
 }
 
 func TestFrameEndpointNotRegisteredWithoutNode(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	// setupTestServer does NOT pass NodeProvider to NewServer
 	server := setupTestServer(t, node, nil)
 

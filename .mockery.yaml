@@ -1,0 +1,62 @@
+log-level: error
+packages:
+  # --- RPC layer providers ---
+  github.com/piratecash/corsa/internal/core/rpc:
+    config: &defaults
+      dir: '{{.InterfaceDir}}/mocks'
+      structname: 'Mock{{.InterfaceName}}'
+      filename: '{{ .InterfaceName | snakecase }}.go'
+      template: testify
+      template-data:
+        unroll-variadic: true
+    interfaces:
+      NodeProvider: {}
+      ChatlogProvider: {}
+      DMRouterProvider: {}
+      MetricsProvider: {}
+      RoutingProvider: {}
+      ConnectionDiagnosticProvider: {}
+      CaptureProvider: {}
+      DiagnosticProvider: {}
+  # --- Metrics collector ---
+  github.com/piratecash/corsa/internal/core/metrics:
+    config: *defaults
+    interfaces:
+      TrafficSource: {}
+  # --- Routing announce loop ---
+  github.com/piratecash/corsa/internal/core/routing:
+    config: *defaults
+    interfaces:
+      PeerSender: {}
+  # --- Capture subsystem ---
+  github.com/piratecash/corsa/internal/core/capture:
+    config: *defaults
+    interfaces:
+      ConnResolver: {}
+      Writer: {}
+  # --- Node service dependencies ---
+  # Same-package test mocks: generated as _test.go files inside node/
+  # so there is no cross-package import and therefore no circular dependency.
+  github.com/piratecash/corsa/internal/core/node:
+    config:
+      dir: '{{.InterfaceDir}}'
+      structname: 'Mock{{.InterfaceName}}'
+      filename: 'mock_{{ .InterfaceName | snakecase }}_test.go'
+      template: testify
+      template-data:
+        unroll-variadic: true
+    interfaces:
+      MessageStore: {}
+      Router: {}
+  # --- stdlib: net.Conn for node/netcore tests ---
+  net:
+    config:
+      dir: 'internal/testutil/netmocks'
+      structname: 'Mock{{.InterfaceName}}'
+      pkgname: 'netmocks'
+      filename: '{{ .InterfaceName | snakecase }}.go'
+      template: testify
+      template-data:
+        unroll-variadic: true
+    interfaces:
+      Conn: {}

@@ -4,67 +4,48 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 )
 
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
 
-type connTestNodeProvider struct{}
-
-func (m *connTestNodeProvider) HandleLocalFrame(protocol.Frame) protocol.Frame {
-	return protocol.Frame{Type: "ok"}
-}
-func (m *connTestNodeProvider) Address() string                              { return "test:64646" }
-func (m *connTestNodeProvider) ClientVersion() string                        { return "test/1.0" }
-func (m *connTestNodeProvider) FetchFileTransfers() (json.RawMessage, error) { return nil, nil }
-func (m *connTestNodeProvider) FetchFileMappings() (json.RawMessage, error)  { return nil, nil }
-func (m *connTestNodeProvider) RetryFileChunk(domain.FileID) error           { return nil }
-func (m *connTestNodeProvider) StartFileDownload(domain.FileID) error        { return nil }
-func (m *connTestNodeProvider) CancelFileDownload(domain.FileID) error       { return nil }
-func (m *connTestNodeProvider) RestartFileDownload(domain.FileID) error      { return nil }
-
-type mockConnDiagProvider struct{}
-
-func (m *mockConnDiagProvider) ActivePeersJSON() (json.RawMessage, error) {
-	return json.Marshal(struct {
+func newMockConnDiagProvider(t *testing.T) *rpcmocks.MockConnectionDiagnosticProvider {
+	t.Helper()
+	m := rpcmocks.NewMockConnectionDiagnosticProvider(t)
+	emptySlots, _ := json.Marshal(struct {
 		Slots    []interface{} `json:"slots"`
 		Count    int           `json:"count"`
 		MaxSlots int           `json:"max_slots"`
-	}{Slots: []interface{}{}, Count: 0, MaxSlots: 8})
-}
-
-func (m *mockConnDiagProvider) ListPeersJSON() (json.RawMessage, error) {
-	return json.Marshal(struct {
+	}{[]interface{}{}, 0, 8})
+	m.On("ActivePeersJSON").Return(json.RawMessage(emptySlots), nil).Maybe()
+	emptyPeers, _ := json.Marshal(struct {
 		Peers []interface{} `json:"peers"`
 		Count int           `json:"count"`
-	}{Peers: []interface{}{}, Count: 0})
-}
-
-func (m *mockConnDiagProvider) ListBannedJSON() (json.RawMessage, error) {
-	return json.Marshal(struct {
+	}{[]interface{}{}, 0})
+	m.On("ListPeersJSON").Return(json.RawMessage(emptyPeers), nil).Maybe()
+	emptyBanned, _ := json.Marshal(struct {
 		BannedIPs []interface{} `json:"banned_ips"`
 		Count     int           `json:"count"`
-	}{BannedIPs: []interface{}{}, Count: 0})
-}
-
-func (m *mockConnDiagProvider) ActiveConnectionsJSON() (json.RawMessage, error) {
-	return json.Marshal(struct {
+	}{[]interface{}{}, 0})
+	m.On("ListBannedJSON").Return(json.RawMessage(emptyBanned), nil).Maybe()
+	emptyConns, _ := json.Marshal(struct {
 		Version     int           `json:"version"`
 		Connections []interface{} `json:"connections"`
 		Count       int           `json:"count"`
-	}{Version: 1, Connections: []interface{}{}, Count: 0})
+	}{1, []interface{}{}, 0})
+	m.On("ActiveConnectionsJSON").Return(json.RawMessage(emptyConns), nil).Maybe()
+	return m
 }
 
 // nodeWithConnDiag combines NodeProvider + ConnectionDiagnosticProvider for
 // RegisterAllCommands tests. Type assertion inside RegisterAllCommands discovers
 // the ConnectionDiagnosticProvider capability.
 type nodeWithConnDiag struct {
-	connTestNodeProvider
-	mockConnDiagProvider
+	*rpcmocks.MockNodeProvider
+	*rpcmocks.MockConnectionDiagnosticProvider
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +54,7 @@ type nodeWithConnDiag struct {
 
 func TestConnectionCommandsRegistered(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &nodeWithConnDiag{}, nil, nil, nil)
+	rpc.RegisterAllCommands(table, &nodeWithConnDiag{newDefaultNodeProvider(t), newMockConnDiagProvider(t)}, nil, nil, nil)
 
 	expected := []string{"getActivePeers", "getActiveConnections", "listPeers", "listBanned"}
 	commands := table.Commands()
@@ -91,7 +72,7 @@ func TestConnectionCommandsRegistered(t *testing.T) {
 
 func TestConnectionCommandsUnavailableWhenNil(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &connTestNodeProvider{}, nil, nil, nil)
+	rpc.RegisterAllCommands(table, newDefaultNodeProvider(t), nil, nil, nil)
 
 	commands := table.Commands()
 	cmdSet := make(map[string]struct{}, len(commands))
@@ -112,7 +93,7 @@ func TestConnectionCommandsUnavailableWhenNil(t *testing.T) {
 
 func TestConnectionCommandsSnakeCaseAliases(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &nodeWithConnDiag{}, nil, nil, nil)
+	rpc.RegisterAllCommands(table, &nodeWithConnDiag{newDefaultNodeProvider(t), newMockConnDiagProvider(t)}, nil, nil, nil)
 
 	for _, alias := range []string{"get_active_peers", "get_active_connections", "list_peers", "list_banned"} {
 		resp := table.Execute(rpc.CommandRequest{Name: alias})
@@ -128,7 +109,7 @@ func TestConnectionCommandsSnakeCaseAliases(t *testing.T) {
 
 func TestConnectionCommandsEmptyState(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &nodeWithConnDiag{}, nil, nil, nil)
+	rpc.RegisterAllCommands(table, &nodeWithConnDiag{newDefaultNodeProvider(t), newMockConnDiagProvider(t)}, nil, nil, nil)
 
 	for _, cmd := range []string{"getActivePeers", "getActiveConnections", "listPeers", "listBanned"} {
 		resp := table.Execute(rpc.CommandRequest{Name: cmd})

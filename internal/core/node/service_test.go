@@ -16,6 +16,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/connauth"
@@ -5082,23 +5083,39 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 
 // --- MessageStore integration tests ---
 
-// testMessageStore is a mock MessageStore for verifying that the node
-// delegates persistence to the registered store.
-type testMessageStore struct {
+// storeRecorder captures StoreMessage and UpdateDeliveryStatus calls
+// issued through a MockMessageStore.
+type storeRecorder struct {
+	mu       sync.Mutex
 	stored   []protocol.Envelope
 	outFlags []bool
 	receipts []protocol.DeliveryReceipt
 }
 
-func (m *testMessageStore) StoreMessage(envelope protocol.Envelope, isOutgoing bool) StoreResult {
-	m.stored = append(m.stored, envelope)
-	m.outFlags = append(m.outFlags, isOutgoing)
-	return StoreInserted
-}
-
-func (m *testMessageStore) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool {
-	m.receipts = append(m.receipts, receipt)
-	return true
+// newRecordingMockMessageStore creates a MockMessageStore that records
+// every call into a storeRecorder for later assertions.
+func newRecordingMockMessageStore(t *testing.T) (*MockMessageStore, *storeRecorder) {
+	t.Helper()
+	rec := &storeRecorder{}
+	m := NewMockMessageStore(t)
+	m.EXPECT().StoreMessage(mock.Anything, mock.Anything).RunAndReturn(
+		func(e protocol.Envelope, isOutgoing bool) StoreResult {
+			rec.mu.Lock()
+			rec.stored = append(rec.stored, e)
+			rec.outFlags = append(rec.outFlags, isOutgoing)
+			rec.mu.Unlock()
+			return StoreInserted
+		},
+	).Maybe()
+	m.EXPECT().UpdateDeliveryStatus(mock.Anything).RunAndReturn(
+		func(r protocol.DeliveryReceipt) bool {
+			rec.mu.Lock()
+			rec.receipts = append(rec.receipts, r)
+			rec.mu.Unlock()
+			return true
+		},
+	).Maybe()
+	return m, rec
 }
 
 // TestMessageStoreCalledForLocalDM verifies that storeIncomingMessage
@@ -5114,8 +5131,8 @@ func TestMessageStoreCalledForLocalDM(t *testing.T) {
 	})
 	defer cleanup()
 
-	store := &testMessageStore{}
-	svc.RegisterMessageStore(store)
+	storeMock, rec := newRecordingMockMessageStore(t)
+	svc.RegisterMessageStore(storeMock)
 
 	peerID, _ := identity.Generate()
 	peerAddr := peerID.Address
@@ -5165,13 +5182,22 @@ func TestMessageStoreCalledForLocalDM(t *testing.T) {
 	}
 
 	// Verify MessageStore.StoreMessage was called.
-	if len(store.stored) != 1 {
-		t.Fatalf("expected 1 stored message, got %d", len(store.stored))
+	rec.mu.Lock()
+	storedCount := len(rec.stored)
+	storedID := ""
+	outFlag := false
+	if storedCount > 0 {
+		storedID = string(rec.stored[0].ID)
+		outFlag = rec.outFlags[0]
 	}
-	if string(store.stored[0].ID) != string(msgID) {
-		t.Fatalf("expected message ID %s, got %s", msgID, store.stored[0].ID)
+	rec.mu.Unlock()
+	if storedCount != 1 {
+		t.Fatalf("expected 1 stored message, got %d", storedCount)
 	}
-	if store.outFlags[0] {
+	if storedID != string(msgID) {
+		t.Fatalf("expected message ID %s, got %s", msgID, storedID)
+	}
+	if outFlag {
 		t.Fatal("expected isOutgoing=false for incoming message")
 	}
 }
@@ -5194,13 +5220,13 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 
 	// A store that returns StoreDuplicate on the second call.
 	calls := 0
-	dupStore := &duplicateAwareStore{storeFunc: func(envelope protocol.Envelope, isOutgoing bool) StoreResult {
+	dupStore := newCustomStoreMock(t, func(envelope protocol.Envelope, isOutgoing bool) StoreResult {
 		calls++
 		if calls == 1 {
 			return StoreInserted
 		}
 		return StoreDuplicate
-	}}
+	})
 	svc.RegisterMessageStore(dupStore)
 
 	peerID, _ := identity.Generate()
@@ -5333,13 +5359,13 @@ func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
 	defer cleanup()
 
 	calls := 0
-	dupStore := &duplicateAwareStore{storeFunc: func(envelope protocol.Envelope, isOutgoing bool) StoreResult {
+	dupStore := newCustomStoreMock(t, func(envelope protocol.Envelope, isOutgoing bool) StoreResult {
 		calls++
 		if calls == 1 {
 			return StoreInserted
 		}
 		return StoreDuplicate
-	}}
+	})
 	svc.RegisterMessageStore(dupStore)
 
 	peerID, _ := identity.Generate()
@@ -5415,16 +5441,16 @@ func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
 	}
 }
 
-// duplicateAwareStore is a test MessageStore where the caller controls
-// the return value of StoreMessage.
-type duplicateAwareStore struct {
-	storeFunc func(protocol.Envelope, bool) StoreResult
+// newCustomStoreMock creates a MockMessageStore with a caller-supplied
+// StoreMessage function. Used for tests that need to control the return
+// value (e.g. StoreDuplicate on second call).
+func newCustomStoreMock(t *testing.T, storeFunc func(protocol.Envelope, bool) StoreResult) *MockMessageStore {
+	t.Helper()
+	m := NewMockMessageStore(t)
+	m.EXPECT().StoreMessage(mock.Anything, mock.Anything).RunAndReturn(storeFunc).Maybe()
+	m.EXPECT().UpdateDeliveryStatus(mock.Anything).Return(true).Maybe()
+	return m
 }
-
-func (d *duplicateAwareStore) StoreMessage(e protocol.Envelope, o bool) StoreResult {
-	return d.storeFunc(e, o)
-}
-func (d *duplicateAwareStore) UpdateDeliveryStatus(protocol.DeliveryReceipt) bool { return true }
 
 func peerAddr(id *identity.Identity) string { return id.Address }
 
@@ -5448,8 +5474,8 @@ func TestMessageStoreNotCalledForTransitDM(t *testing.T) {
 	}, relayID)
 	defer cleanup()
 
-	store := &testMessageStore{}
-	svc.RegisterMessageStore(store)
+	storeMock, rec := newRecordingMockMessageStore(t)
+	svc.RegisterMessageStore(storeMock)
 
 	eventCh, cancelSub := svc.SubscribeLocalChanges()
 	defer cancelSub()
@@ -5487,8 +5513,11 @@ func TestMessageStoreNotCalledForTransitDM(t *testing.T) {
 	}
 
 	// MessageStore must NOT be called for transit messages.
-	if len(store.stored) != 0 {
-		t.Fatalf("transit DM must NOT call MessageStore, got %d stored", len(store.stored))
+	rec.mu.Lock()
+	transitStoredCount := len(rec.stored)
+	rec.mu.Unlock()
+	if transitStoredCount != 0 {
+		t.Fatalf("transit DM must NOT call MessageStore, got %d stored", transitStoredCount)
 	}
 
 	// Transit DM must NOT emit SubscribeLocalChanges.
@@ -5615,8 +5644,8 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 		Type:             domain.NodeTypeFull,
 	}, senderID)
 
-	store := &testMessageStore{}
-	svc.RegisterMessageStore(store)
+	storeMock, rec := newRecordingMockMessageStore(t)
+	svc.RegisterMessageStore(storeMock)
 
 	svc.addKnownPubKey(recipientID.Address, identity.PublicKeyBase64(recipientID.PublicKey))
 
@@ -5672,14 +5701,22 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 	}
 
 	// Verify MessageStore.UpdateDeliveryStatus was called.
-	if len(store.receipts) != 1 {
-		t.Fatalf("expected 1 receipt update, got %d", len(store.receipts))
+	rec.mu.Lock()
+	receiptCount := len(rec.receipts)
+	var receiptMsgID, receiptStatus string
+	if receiptCount > 0 {
+		receiptMsgID = string(rec.receipts[0].MessageID)
+		receiptStatus = rec.receipts[0].Status
 	}
-	if string(store.receipts[0].MessageID) != "race-msg-1" {
-		t.Fatalf("expected receipt for race-msg-1, got %s", store.receipts[0].MessageID)
+	rec.mu.Unlock()
+	if receiptCount != 1 {
+		t.Fatalf("expected 1 receipt update, got %d", receiptCount)
 	}
-	if store.receipts[0].Status != "delivered" {
-		t.Fatalf("expected status 'delivered', got %q", store.receipts[0].Status)
+	if receiptMsgID != "race-msg-1" {
+		t.Fatalf("expected receipt for race-msg-1, got %s", receiptMsgID)
+	}
+	if receiptStatus != "delivered" {
+		t.Fatalf("expected status 'delivered', got %q", receiptStatus)
 	}
 }
 
@@ -9279,14 +9316,15 @@ func TestWriteJSONFrameDropsOnUnregisteredConn(t *testing.T) {
 		conns:           map[netcore.ConnID]*connEntry{},
 		connIDByNetConn: map[net.Conn]netcore.ConnID{},
 	}
-	conn := &mockConn{}
+	conn, cb := newBufferedMockConn(t)
+	_ = conn // conn is not registered with svc; exists only to verify no writes
 
 	// Unregistered ConnID: svc.conns is empty so any ID misses the lookup
 	// and the drop-on-unregistered path must fire without ever reaching
 	// the raw socket behind `conn`.
 	_ = svc.writeJSONFrameByID(netcore.ConnID(0), protocol.Frame{Type: "ping"})
 
-	if written := conn.Written(); len(written) != 0 {
+	if written := cb.Written(); len(written) != 0 {
 		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)
 	}
 
@@ -9324,13 +9362,14 @@ func TestWriteJSONFrameSyncDropsOnUnregisteredConn(t *testing.T) {
 		conns:           map[netcore.ConnID]*connEntry{},
 		connIDByNetConn: map[net.Conn]netcore.ConnID{},
 	}
-	conn := &mockConn{}
+	conn, cb := newBufferedMockConn(t)
+	_ = conn // conn is not registered with svc; exists only to verify no writes
 
 	// Unregistered ConnID: svc.conns is empty so the sync drop path must
 	// fire and `conn` must never see any bytes.
 	_ = svc.writeJSONFrameSyncByID(netcore.ConnID(0), protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 
-	if written := conn.Written(); len(written) != 0 {
+	if written := cb.Written(); len(written) != 0 {
 		t.Fatalf("unregistered conn must not receive any bytes via direct-write fallback, got %d bytes: %q", len(written), written)
 	}
 

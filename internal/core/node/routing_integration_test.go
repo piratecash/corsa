@@ -9,12 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
+	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
@@ -33,7 +36,7 @@ const (
 )
 
 func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	frame := protocol.Frame{
 		Type: "announce_routes",
@@ -61,7 +64,7 @@ func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// First, add a route.
 	frame := protocol.Frame{
@@ -93,7 +96,7 @@ func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesSkipsSelf(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Route about ourselves should be skipped.
 	frame := protocol.Frame{
@@ -115,7 +118,7 @@ func TestHandleAnnounceRoutesSkipsSelf(t *testing.T) {
 }
 
 func TestMultiSessionAwareness_FirstConnect(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, true)
 
@@ -129,7 +132,7 @@ func TestMultiSessionAwareness_FirstConnect(t *testing.T) {
 }
 
 func TestMultiSessionAwareness_SecondSessionNoChurn(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, true)
 	routes1 := svc.routingTable.Lookup(idPeerB)
@@ -148,7 +151,7 @@ func TestMultiSessionAwareness_SecondSessionNoChurn(t *testing.T) {
 }
 
 func TestMultiSessionAwareness_CloseOneSessionRouteRemains(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, true)
 	svc.onPeerSessionEstablished(idPeerB, true) // 2 sessions
@@ -165,7 +168,7 @@ func TestMultiSessionAwareness_CloseOneSessionRouteRemains(t *testing.T) {
 }
 
 func TestMultiSessionAwareness_CloseLastSessionWithdrawsRoute(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, true)
 	svc.onPeerSessionClosed(idPeerB, true) // last session
@@ -183,7 +186,7 @@ func TestMultiSessionAwareness_CloseLastSessionWithdrawsRoute(t *testing.T) {
 // routing table. A non-relay peer cannot accept relay_message frames, so
 // advertising it as a direct destination would create a non-deliverable path.
 func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	pipeLocal, pipeRemote := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -215,7 +218,7 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 // TestTrackInboundConnectCreatesDirectRouteWithRelayCap verifies that an
 // inbound peer WITH mesh_relay_v1 gets a direct route as expected.
 func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	pipeLocal, pipeRemote := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -253,7 +256,7 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 // direct route in the routing table. The session counter is still
 // incremented so that onPeerSessionClosed can safely decrement.
 func TestOnPeerSessionEstablishedSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, false)
 
@@ -278,7 +281,7 @@ func TestOnPeerSessionEstablishedSuppressesDirectRouteWithoutRelayCap(t *testing
 // session WITH mesh_relay_v1 creates the direct route on its 0→1 relay
 // transition.
 func TestMixedCap_LegacyFirstThenRelayCreatesRoute(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// First session: legacy, no relay cap → no direct route.
 	svc.onPeerSessionEstablished(idPeerB, false)
@@ -305,7 +308,7 @@ func TestMixedCap_LegacyFirstThenRelayCreatesRoute(t *testing.T) {
 // direct route is withdrawn. The legacy session cannot accept relay_message,
 // so the route must not survive.
 func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Two sessions: one relay-capable, one legacy.
 	svc.onPeerSessionEstablished(idPeerB, true)  // creates direct route
@@ -341,7 +344,7 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 // two relay-capable sessions exist and one closes, the direct route remains
 // because one relay session is still active.
 func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, true)
 	svc.onPeerSessionEstablished(idPeerB, true)
@@ -361,7 +364,7 @@ func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
 // a non-relay session does not withdraw the direct route created by an
 // active relay session.
 func TestMixedCap_LegacyCloseDoesNotWithdrawRelayRoute(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, true)  // creates direct route
 	svc.onPeerSessionEstablished(idPeerB, false) // legacy session
@@ -383,7 +386,7 @@ func TestMixedCap_LegacyCloseDoesNotWithdrawRelayRoute(t *testing.T) {
 // receive-path gate now blocks announcements from such peers, this is
 // defense-in-depth for routes that may have been accepted before the gate.
 func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Simulate a routing-only peer connecting (no relay cap).
 	svc.onPeerSessionEstablished(idPeerB, false)
@@ -436,7 +439,7 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 // of multiple sessions for a routing-only peer does NOT invalidate transit
 // routes — only the last session closure triggers invalidation.
 func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, false)
 	svc.onPeerSessionEstablished(idPeerB, false) // 2 sessions
@@ -487,7 +490,7 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Add an announcement route via peer-B.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -520,7 +523,7 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 // Without this, re-announces after hop_ack confirmation would silently
 // drop future wire fields (e.g. onion_box).
 func TestConfirmRouteViaHopAck_PreservesExtra(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	extra := json.RawMessage(`{"onion_box":"deadbeef","future":true}`)
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -557,7 +560,7 @@ func TestConfirmRouteViaHopAck_PreservesExtra(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Route via peer-B.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -587,7 +590,7 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Route already at hop_ack — should not change.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -612,7 +615,7 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Direct route should not be touched by hop_ack confirmation.
 	svc.onPeerSessionEstablished(idTargetX, true)
@@ -629,7 +632,7 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Simulate an outbound session: transport address "tcp://1.2.3.4:9000"
 	// maps to peer identity "peer-B".
@@ -666,7 +669,7 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 }
 
 func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Add a route.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -693,7 +696,8 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 
 // newTestServiceWithRouting creates a minimal Service with routing table
 // initialized, suitable for unit tests that don't need network I/O.
-func newTestServiceWithRouting(localIdentity string) *Service {
+func newTestServiceWithRouting(t *testing.T, localIdentity string) *Service {
+	t.Helper()
 	svc := &Service{
 		identity:              &identity.Identity{Address: localIdentity},
 		identitySessions:      make(map[domain.PeerIdentity]int),
@@ -711,7 +715,7 @@ func newTestServiceWithRouting(localIdentity string) *Service {
 	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(routing.PeerIdentity(localIdentity)))
 	svc.announceLoop = routing.NewAnnounceLoop(
 		svc.routingTable,
-		&noopPeerSender{},
+		newNoopMockPeerSender(t),
 		func() []routing.AnnounceTarget { return nil },
 	)
 	return svc
@@ -722,7 +726,7 @@ func newTestServiceWithRouting(localIdentity string) *Service {
 // (hops=1) and both caps for transit next-hops (hops>1).
 
 func TestResolveRouteNextHop_DirectPeerRelayOnlySuffices(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// peer-B has only mesh_relay_v1, no mesh_routing_v1.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -741,7 +745,7 @@ func TestResolveRouteNextHop_DirectPeerRelayOnlySuffices(t *testing.T) {
 }
 
 func TestResolveRouteNextHop_TransitNeedsBothCaps(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// peer-B has only mesh_relay_v1.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -768,7 +772,7 @@ func TestResolveRouteNextHop_TransitNeedsBothCaps(t *testing.T) {
 }
 
 func TestResolveRouteNextHop_NoCapsRejectsAll(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// peer-B has no relevant capabilities.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -789,7 +793,7 @@ func TestResolveRouteNextHop_NoCapsRejectsAll(t *testing.T) {
 // (learned via announcement) are silently invalidated locally.
 
 func TestRouteSessionBinding_DirectRouteWithdrawnOnWire(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Connect peer-B → creates direct route.
 	svc.onPeerSessionEstablished(idPeerB, true)
@@ -818,7 +822,7 @@ func TestRouteSessionBinding_DirectRouteWithdrawnOnWire(t *testing.T) {
 }
 
 func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Connect peer-B so we have a session.
 	svc.onPeerSessionEstablished(idPeerB, true)
@@ -860,7 +864,7 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 }
 
 func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Connect peer-B.
 	svc.onPeerSessionEstablished(idPeerB, true)
@@ -897,7 +901,7 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 // entry that matches. Different origin or different identity must not be affected.
 
 func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Two routes to target-X via peer-B, but different origins.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -957,7 +961,7 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 }
 
 func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Two routes to target-X via peer-B, different origins.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -1016,7 +1020,7 @@ func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
 }
 
 func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Route to target-X via peer-B.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -1069,7 +1073,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 }
 
 func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Two routes to target-X from same origin, different next-hops.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -1120,7 +1124,7 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 // Resolvers must find inbound-only peers and return "inbound:" prefixed keys.
 
 func TestResolveRelayAddress_InboundPeer(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Set up an inbound connection with relay capability.
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
@@ -1143,7 +1147,7 @@ func TestResolveRelayAddress_InboundPeer(t *testing.T) {
 }
 
 func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
@@ -1173,7 +1177,7 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 }
 
 func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Set up both outbound session and inbound connection for same peer.
 	svc.sessions[domain.PeerAddress("outbound-addr-B")] = &peerSession{
@@ -1201,7 +1205,7 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 // --- resolvePeerIdentity inbound contract test ---
 
 func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.mu.Lock()
@@ -1275,7 +1279,7 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 // the per-origin SeqNo and withdrawal-only-by-origin invariants.
 
 func TestHandleAnnounceRoutesRejectsForgedOwnOrigin(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// A foreign sender (peer-B) advertises a route with Origin == node-A.
 	// This must be rejected: only node-A may originate routes under its
@@ -1305,7 +1309,7 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOrigin(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// First, add a legitimate direct peer route.
 	if _, err := svc.routingTable.AddDirectPeer(idTargetX); err != nil {
@@ -1333,7 +1337,7 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Add a route originated by origin-C, learned via peer-B.
 	frame := protocol.Frame{
@@ -1371,7 +1375,7 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutesAcceptsOriginWithdrawal(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Add a route where origin == sender (origin-C sends its own route).
 	frame := protocol.Frame{
@@ -1410,17 +1414,20 @@ type fakeConn struct {
 
 func (c *fakeConn) RemoteAddr() net.Addr { return c.remoteAddr }
 
-// noopPeerSender does nothing — used in tests where sending is not under test.
-type noopPeerSender struct{}
-
-func (n *noopPeerSender) SendAnnounceRoutes(routing.PeerAddress, []routing.AnnounceEntry) bool {
-	return true
+// newNoopMockPeerSender creates a MockPeerSender that accepts any call and
+// returns true — used in tests where sending is not under test.
+func newNoopMockPeerSender(t *testing.T) *routingmocks.MockPeerSender {
+	t.Helper()
+	m := routingmocks.NewMockPeerSender(t)
+	m.EXPECT().SendAnnounceRoutes(mock.Anything, mock.Anything).Return(true).Maybe()
+	return m
 }
 
 // newTestServiceWithRoutingAndHealth extends newTestServiceWithRouting with
 // the maps required for trackInboundConnect (health tracking, ref counting).
-func newTestServiceWithRoutingAndHealth(localIdentity string) *Service {
-	svc := newTestServiceWithRouting(localIdentity)
+func newTestServiceWithRoutingAndHealth(t *testing.T, localIdentity string) *Service {
+	t.Helper()
+	svc := newTestServiceWithRouting(t, localIdentity)
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
 	svc.inboundHealthRefs = make(map[domain.PeerAddress]int)
 	svc.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
@@ -1433,7 +1440,7 @@ func newTestServiceWithRoutingAndHealth(localIdentity string) *Service {
 // peer receives an immediate full-table sync — symmetric with the outbound
 // connect path.
 func TestSendFullTableSyncToInbound(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	// Populate the routing table with a route that the inbound peer
 	// should learn about on connect.
@@ -1498,7 +1505,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 // sync to an inbound peer applies split horizon — routes learned from that
 // peer are not sent back to it.
 func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	// Add a route that was learned FROM peer-B (the connecting inbound peer).
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -1547,7 +1554,7 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 // TestSendFullTableSyncToInboundEmptyTable verifies that no frame is sent
 // when the routing table is empty.
 func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	pipeLocal, pipeRemote := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -1588,7 +1595,7 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 // connect path does NOT send announce_routes when the peer lacks
 // mesh_routing_v1 capability.
 func TestOutboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	// Populate the routing table so there ARE routes to announce.
 	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
@@ -1619,7 +1626,7 @@ func TestOutboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 // TestOutboundFullSyncSentWithRoutingCap verifies that the outbound connect
 // path DOES send announce_routes when the peer has mesh_routing_v1.
 func TestOutboundFullSyncSentWithRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
@@ -1644,7 +1651,7 @@ func TestOutboundFullSyncSentWithRoutingCap(t *testing.T) {
 // TestInboundFullSyncSkippedWithoutRoutingCap verifies that inbound full-table
 // sync is NOT sent when the inbound peer lacks mesh_routing_v1.
 func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
@@ -1697,7 +1704,7 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 // TestInboundFullSyncSentWithRoutingCap verifies that inbound full-table sync
 // IS sent when the inbound peer has both mesh_routing_v1 and mesh_relay_v1.
 func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
@@ -1767,7 +1774,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 // but lacks mesh_relay_v1 (routing-only peer). Such a peer cannot carry relay
 // traffic, so sending routes to it creates non-deliverable paths.
 func TestOutboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
@@ -1799,7 +1806,7 @@ func TestOutboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 // full-table sync is NOT sent when the inbound peer has mesh_routing_v1
 // but lacks mesh_relay_v1 (routing-only peer).
 func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
 		t.Fatalf("AddDirectPeer failed: %v", err)
@@ -1853,7 +1860,7 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 // routingCapablePeers() excludes peers with mesh_routing_v1 but without
 // mesh_relay_v1. The announce loop must not target routing-only peers.
 func TestRoutingCapablePeersExcludesRoutingOnlyPeer(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// peer-B: routing-only (no relay) — should be excluded.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -1878,7 +1885,7 @@ func TestRoutingCapablePeersExcludesRoutingOnlyPeer(t *testing.T) {
 // TestRoutingCapablePeersExcludesRoutingOnlyInbound verifies that an inbound
 // routing-only peer is also excluded from routingCapablePeers().
 func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	pipeLocal, _ := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -1910,7 +1917,7 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 // resolution: a transit next-hop (hops > 1) must have both mesh_relay_v1
 // and mesh_routing_v1. A relay-only session should NOT be selected.
 func TestRetryResolutionTransitRequiresBothCaps(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// peer-B has only relay capability — insufficient for transit.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -1928,7 +1935,7 @@ func TestRetryResolutionTransitRequiresBothCaps(t *testing.T) {
 // TestRetryResolutionTransitWithBothCapsResolves verifies that a peer with
 // both capabilities is resolved for transit next-hops.
 func TestRetryResolutionTransitWithBothCapsResolves(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
@@ -1944,7 +1951,7 @@ func TestRetryResolutionTransitWithBothCapsResolves(t *testing.T) {
 // TestRetryResolutionDestinationRelayOnlySuffices verifies that a destination
 // next-hop (hops=1) can resolve with relay-only capability.
 func TestRetryResolutionDestinationRelayOnlySuffices(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
@@ -1961,7 +1968,7 @@ func TestRetryResolutionDestinationRelayOnlySuffices(t *testing.T) {
 // sets RelayNextHopHops from the selected RouteEntry so that the retry path
 // in sendTableDirectedRelay has the correct hop role for re-resolution.
 func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Set up a transit route (3 hops) and a session with both caps.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -1996,7 +2003,7 @@ func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
 // so that the intermediate relay hop can persist it in relayForwardState
 // for triple-scoped hop_ack confirmation.
 func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeB)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 
 	// Add a route to target-X via peer-C with origin "origin-D".
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -2038,7 +2045,7 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 // TestTryForwardViaRoutingTableExcludesSender verifies split horizon on
 // the relay path — the sender's identity is excluded from next-hop selection.
 func TestTryForwardViaRoutingTableExcludesSender(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeB)
+	svc := newTestServiceWithRouting(t, idNodeB)
 
 	// Only route is via peer-A (the sender).
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -2067,7 +2074,7 @@ func TestTryForwardViaRoutingTableExcludesSender(t *testing.T) {
 
 // TestTryForwardViaRoutingTableNoRoute verifies empty result when no route exists.
 func TestTryForwardViaRoutingTableNoRoute(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeB)
+	svc := newTestServiceWithRouting(t, idNodeB)
 
 	frame := protocol.Frame{
 		Type:      "relay_message",
@@ -2109,7 +2116,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 	)
 	svc.announceLoop = routing.NewAnnounceLoop(
 		svc.routingTable,
-		&noopPeerSender{},
+		newNoopMockPeerSender(t),
 		func() []routing.AnnounceTarget { return nil },
 	)
 
@@ -2138,7 +2145,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 // custom TTL is configured, the table's default (routing.DefaultTTL) is
 // still applied consistently via the table's own UpdateRoute path.
 func TestHandleAnnounceRoutesDefaultTTLWithoutConfig(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	frame := protocol.Frame{
 		Type: "announce_routes",
@@ -2168,7 +2175,7 @@ func TestHandleAnnounceRoutesDefaultTTLWithoutConfig(t *testing.T) {
 // For NATed peers these differ, and split horizon must filter by
 // identity to avoid sending a peer its own routes.
 func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
-	svc := newTestServiceWithRoutingAndHealth(idNodeA)
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 
 	// Peer-B advertises a route for target-X. Split horizon should
 	// suppress this route when syncing back to peer-B.
@@ -2241,7 +2248,7 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 // routingCapablePeers uses info.identity (not info.address) to build
 // announce targets and dedup against outbound sessions.
 func TestRoutingCapablePeersUsesIdentityForInbound(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	pipeLocal, _ := net.Pipe()
 	defer func() { _ = pipeLocal.Close() }()
@@ -2273,7 +2280,7 @@ func TestRoutingCapablePeersUsesIdentityForInbound(t *testing.T) {
 // TestResolveRelayAddressUsesIdentityForInbound verifies that
 // resolveRelayAddress matches on info.identity, not info.address.
 func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.52"), Port: 8080}}
 	svc.mu.Lock()
@@ -2301,7 +2308,7 @@ func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
 // TestResolvePeerIdentityReturnsIdentityNotAddress verifies that
 // resolvePeerIdentity returns info.identity, not info.address.
 func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
-	svc := newTestServiceWithRouting(idNodeA)
+	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.53"), Port: 7777}}
 	svc.mu.Lock()
@@ -2323,8 +2330,9 @@ func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
 // newTestServiceWithPendingDrain creates a Service with all fields required
 // by drainPendingForIdentities: pending queue, routing table, relay states,
 // and a TableRouter that performs real route lookups.
-func newTestServiceWithPendingDrain(localIdentity string) *Service {
-	svc := newTestServiceWithRouting(localIdentity)
+func newTestServiceWithPendingDrain(t *testing.T, localIdentity string) *Service {
+	t.Helper()
+	svc := newTestServiceWithRouting(t, localIdentity)
 	svc.pending = make(map[domain.PeerAddress][]pendingFrame)
 	svc.pendingKeys = make(map[string]struct{})
 	svc.outbound = make(map[string]outboundDelivery)
@@ -2340,7 +2348,7 @@ func newTestServiceWithPendingDrain(localIdentity string) *Service {
 }
 
 func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with a relay-capable session so the router can find it.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -2419,7 +2427,7 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with route to idTargetX.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -2464,7 +2472,7 @@ func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_SkipsNonMatchingRecipient(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	addrA := domain.PeerAddress("10.0.0.1:9000")
 	now := time.Now().UTC()
@@ -2496,7 +2504,7 @@ func TestDrainPendingForIdentities_SkipsNonMatchingRecipient(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_EmptyIdentitiesNoop(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	addrA := domain.PeerAddress("10.0.0.1:9000")
 	now := time.Now().UTC()
@@ -2528,7 +2536,7 @@ func TestDrainPendingForIdentities_EmptyIdentitiesNoop(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with route.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -2585,7 +2593,7 @@ func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_NoRouteFrameStays(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// No routes configured — router will return no RelayNextHop.
 	addrA := domain.PeerAddress("10.0.0.1:9000")
@@ -2630,7 +2638,7 @@ func TestDrainPendingForIdentities_NoRouteFrameStays(t *testing.T) {
 // no false "retrying" transition, no LastAttemptAt update. Route churn events
 // must not pollute outbound state when no real send was attempted.
 func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// No routes configured — drain will return attempted=false.
 	addrA := domain.PeerAddress("10.0.0.1:9000")
@@ -2673,7 +2681,7 @@ func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_SendFailureReturnsFrame(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Add a route to idTargetX via peer-B.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -2750,7 +2758,7 @@ func TestDrainPendingForIdentities_SendFailureReturnsFrame(t *testing.T) {
 // triggered drains that burned maxPendingFrameRetries without any real
 // delivery attempt.
 func TestDrainPendingForIdentities_NoRouteDrainDoesNotExhaustRetries(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	addrA := domain.PeerAddress("10.0.0.1:9000")
 	now := time.Now().UTC()
@@ -2800,7 +2808,7 @@ func TestDrainPendingForIdentities_NoRouteDrainDoesNotExhaustRetries(t *testing.
 // order across recipients sharing the same peer address.
 // Regression test for P2 where drain reordered DM delivery after route churn.
 func TestDrainPendingForIdentities_FailedFramesPreserveOrder(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// No routes configured — all drain attempts will return false/not-attempted,
 	// so extracted frames must come back to the queue.
@@ -2851,7 +2859,7 @@ func TestDrainPendingForIdentities_FailedFramesPreserveOrder(t *testing.T) {
 // ordering when some extracted frames are delivered and others fail.
 // The gaps left by delivered frames must not shift kept frames.
 func TestDrainPendingForIdentities_PartialDeliveryPreservesOrder(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up a route to idTargetX via peer-B so that drain actually
 	// attempts delivery.
@@ -2919,7 +2927,7 @@ func TestDrainPendingForIdentities_PartialDeliveryPreservesOrder(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with a session and route.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -2986,7 +2994,7 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 }
 
 func TestDrainPendingForIdentities_SkipsReceipt(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Queue a relay_delivery_receipt targeting idTargetX.
 	// Receipts are not route-recoverable — they use relayStates hop chain,
@@ -3018,7 +3026,7 @@ func TestDrainPendingForIdentities_SkipsReceipt(t *testing.T) {
 }
 
 func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -3083,7 +3091,7 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 // in the routing table, the event-driven drain fires so pending send_message
 // frames can be delivered via the backup route immediately.
 func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-C with a relay session (the backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
@@ -3219,7 +3227,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	)
 	svc.announceLoop = routing.NewAnnounceLoop(
 		svc.routingTable,
-		&noopPeerSender{},
+		newNoopMockPeerSender(t),
 		func() []routing.AnnounceTarget { return nil },
 	)
 	svc.router = NewTableRouter(svc, svc.routingTable)
@@ -3419,7 +3427,7 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 // identity, drainPendingForIdentities fires and delivers the pending frame
 // via the surviving backup route.
 func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with a relay session (primary route goes through B).
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -3528,7 +3536,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 // TestDisconnectNoBackupNoDrain verifies that when a peer disconnects and
 // no backup route survives, no drain is triggered.
 func TestDisconnectNoBackupNoDrain(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with a relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -3590,7 +3598,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 // (new/improved) routes triggered drain; unchanged reconfirmations were
 // silently counted as rejected and never reached the drain path.
 func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
@@ -3670,7 +3678,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 // TestHandleAnnounceRoutes_RejectedRouteNoDrain verifies that truly rejected
 // routes (stale SeqNo, tombstone-blocked) do NOT trigger drain.
 func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
-	svc := newTestServiceWithPendingDrain(idNodeA)
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")

@@ -1,63 +1,36 @@
-package rpc
+package rpc_test
 
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/mock"
+
+	"github.com/piratecash/corsa/internal/core/rpc"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 )
 
-// ---------------------------------------------------------------------------
-// Stub CaptureProvider for tests
-// ---------------------------------------------------------------------------
-
-type stubCaptureProvider struct {
-	startConnIDsCalled bool
-	startIPsCalled     bool
-	startAllCalled     bool
-	stopConnIDsCalled  bool
-	stopIPsCalled      bool
-	stopAllCalled      bool
+// newMockCaptureProvider creates a MockCaptureProvider with default expectations
+// for all methods. Each expectation is marked Maybe() so that tests only need
+// to assert the calls they care about.
+func newMockCaptureProvider(t *testing.T) *rpcmocks.MockCaptureProvider {
+	t.Helper()
+	m := rpcmocks.NewMockCaptureProvider(t)
+	m.On("StartCaptureByConnIDs", mock.Anything, mock.Anything).Return(json.RawMessage(`{"started":[]}`), nil).Maybe()
+	m.On("StartCaptureByIPs", mock.Anything, mock.Anything).Return(json.RawMessage(`{"started":[]}`), nil).Maybe()
+	m.On("StartCaptureAll", mock.Anything).Return(json.RawMessage(`{"started":[]}`), nil).Maybe()
+	m.On("StopCaptureByConnIDs", mock.Anything).Return(json.RawMessage(`{"stopped":[]}`), nil).Maybe()
+	m.On("StopCaptureByIPs", mock.Anything).Return(json.RawMessage(`{"stopped":[]}`), nil).Maybe()
+	m.On("StopCaptureAll").Return(json.RawMessage(`{"stopped":[]}`), nil).Maybe()
+	return m
 }
-
-func (s *stubCaptureProvider) StartCaptureByConnIDs(_ []uint64, _ string) (json.RawMessage, error) {
-	s.startConnIDsCalled = true
-	return json.RawMessage(`{"started":[]}`), nil
-}
-
-func (s *stubCaptureProvider) StartCaptureByIPs(_ []string, _ string) (json.RawMessage, error) {
-	s.startIPsCalled = true
-	return json.RawMessage(`{"started":[]}`), nil
-}
-
-func (s *stubCaptureProvider) StartCaptureAll(_ string) (json.RawMessage, error) {
-	s.startAllCalled = true
-	return json.RawMessage(`{"started":[]}`), nil
-}
-
-func (s *stubCaptureProvider) StopCaptureByConnIDs(_ []uint64) (json.RawMessage, error) {
-	s.stopConnIDsCalled = true
-	return json.RawMessage(`{"stopped":[]}`), nil
-}
-
-func (s *stubCaptureProvider) StopCaptureByIPs(_ []string) (json.RawMessage, error) {
-	s.stopIPsCalled = true
-	return json.RawMessage(`{"stopped":[]}`), nil
-}
-
-func (s *stubCaptureProvider) StopCaptureAll() (json.RawMessage, error) {
-	s.stopAllCalled = true
-	return json.RawMessage(`{"stopped":[]}`), nil
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 func TestCaptureCommands_StartByConnIDs(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "recordPeerTrafficByConnID",
 		Args: map[string]interface{}{"conn_ids": "41,42"},
 	})
@@ -65,17 +38,15 @@ func TestCaptureCommands_StartByConnIDs(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if !provider.startConnIDsCalled {
-		t.Fatal("expected StartCaptureByConnIDs to be called")
-	}
+	provider.AssertCalled(t, "StartCaptureByConnIDs", mock.Anything, mock.Anything)
 }
 
 func TestCaptureCommands_StartByConnIDs_MissingArg(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "recordPeerTrafficByConnID",
 		Args: map[string]interface{}{},
 	})
@@ -83,14 +54,15 @@ func TestCaptureCommands_StartByConnIDs_MissingArg(t *testing.T) {
 	if resp.Error == nil {
 		t.Fatal("expected validation error for missing conn_ids")
 	}
+	provider.AssertNotCalled(t, "StartCaptureByConnIDs", mock.Anything, mock.Anything)
 }
 
 func TestCaptureCommands_StartByIPs(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "recordPeerTrafficByIP",
 		Args: map[string]interface{}{"ips": "203.0.113.10"},
 	})
@@ -98,17 +70,15 @@ func TestCaptureCommands_StartByIPs(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if !provider.startIPsCalled {
-		t.Fatal("expected StartCaptureByIPs to be called")
-	}
+	provider.AssertCalled(t, "StartCaptureByIPs", mock.Anything, mock.Anything)
 }
 
 func TestCaptureCommands_StartAll(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "recordAllPeerTraffic",
 		Args: map[string]interface{}{},
 	})
@@ -116,17 +86,15 @@ func TestCaptureCommands_StartAll(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if !provider.startAllCalled {
-		t.Fatal("expected StartCaptureAll to be called")
-	}
+	provider.AssertCalled(t, "StartCaptureAll", mock.Anything)
 }
 
 func TestCaptureCommands_StopByConnIDs(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "stopPeerTrafficRecording",
 		Args: map[string]interface{}{"conn_ids": "41,42"},
 	})
@@ -134,17 +102,15 @@ func TestCaptureCommands_StopByConnIDs(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if !provider.stopConnIDsCalled {
-		t.Fatal("expected StopCaptureByConnIDs to be called")
-	}
+	provider.AssertCalled(t, "StopCaptureByConnIDs", mock.Anything)
 }
 
 func TestCaptureCommands_StopByIPs(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "stopPeerTrafficRecording",
 		Args: map[string]interface{}{"ips": "203.0.113.10"},
 	})
@@ -152,17 +118,15 @@ func TestCaptureCommands_StopByIPs(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if !provider.stopIPsCalled {
-		t.Fatal("expected StopCaptureByIPs to be called")
-	}
+	provider.AssertCalled(t, "StopCaptureByIPs", mock.Anything)
 }
 
 func TestCaptureCommands_StopAll(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "stopPeerTrafficRecording",
 		Args: map[string]interface{}{"scope": "all"},
 	})
@@ -170,17 +134,15 @@ func TestCaptureCommands_StopAll(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if !provider.stopAllCalled {
-		t.Fatal("expected StopCaptureAll to be called")
-	}
+	provider.AssertCalled(t, "StopCaptureAll")
 }
 
 func TestCaptureCommands_StopNoArgs(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "stopPeerTrafficRecording",
 		Args: map[string]interface{}{},
 	})
@@ -191,11 +153,11 @@ func TestCaptureCommands_StopNoArgs(t *testing.T) {
 }
 
 func TestCaptureCommands_StopInvalidScope(t *testing.T) {
-	table := NewCommandTable()
-	provider := &stubCaptureProvider{}
-	RegisterCaptureCommands(table, provider)
+	table := rpc.NewCommandTable()
+	provider := newMockCaptureProvider(t)
+	rpc.RegisterCaptureCommands(table, provider)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "stopPeerTrafficRecording",
 		Args: map[string]interface{}{"scope": "partial"},
 	})
@@ -206,10 +168,10 @@ func TestCaptureCommands_StopInvalidScope(t *testing.T) {
 }
 
 func TestCaptureCommands_NilProvider(t *testing.T) {
-	table := NewCommandTable()
-	RegisterCaptureCommands(table, nil)
+	table := rpc.NewCommandTable()
+	rpc.RegisterCaptureCommands(table, nil)
 
-	resp := table.Execute(CommandRequest{
+	resp := table.Execute(rpc.CommandRequest{
 		Name: "recordAllPeerTraffic",
 		Args: map[string]interface{}{},
 	})
@@ -237,7 +199,7 @@ func TestParseUint64CSV(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseUint64CSV(tt.input)
+			got, err := rpc.ParseUint64CSVForTest(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("parseUint64CSV(%q) err=%v, wantErr=%v", tt.input, err, tt.wantErr)
 			}

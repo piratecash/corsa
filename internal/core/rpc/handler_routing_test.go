@@ -5,41 +5,55 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/rpc"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 )
 
-// mockRoutingProvider implements rpc.RoutingProvider for tests.
-type mockRoutingProvider struct {
-	snapshot       routing.Snapshot
-	peerTransports map[domain.PeerIdentity][2]string // identity → [address, network]
-}
-
-func (m *mockRoutingProvider) RoutingSnapshot() routing.Snapshot {
-	return m.snapshot
-}
-
-func (m *mockRoutingProvider) PeerTransport(peerIdentity domain.PeerIdentity) (domain.PeerAddress, domain.NetGroup) {
-	if m.peerTransports == nil {
-		return "", ""
-	}
-	t := m.peerTransports[peerIdentity]
-	return domain.PeerAddress(t[0]), domain.NetGroup(t[1])
-}
-
-// nodeWithRouting combines NodeProvider + RoutingProvider for RegisterAllCommands tests.
-// Type assertion inside RegisterAllCommands discovers the RoutingProvider capability.
+// nodeWithRouting combines MockNodeProvider + MockRoutingProvider so that
+// RegisterAllCommands can discover the RoutingProvider capability via type assertion.
 type nodeWithRouting struct {
-	mockNodeProvider
-	mockRoutingProvider
+	*rpcmocks.MockNodeProvider
+	*rpcmocks.MockRoutingProvider
+}
+
+// newMockRoutingProvider creates a MockRoutingProvider that returns the given
+// snapshot from RoutingSnapshot() and resolves PeerTransport calls using the
+// supplied map. When peerTransports is nil the mock returns empty values for
+// any peer identity (simulating disconnected peers).
+func newMockRoutingProvider(
+	t *testing.T,
+	snapshot routing.Snapshot,
+	peerTransports map[domain.PeerIdentity][2]string,
+) *rpcmocks.MockRoutingProvider {
+	t.Helper()
+	m := rpcmocks.NewMockRoutingProvider(t)
+	m.On("RoutingSnapshot").Return(snapshot).Maybe()
+
+	if peerTransports != nil {
+		m.EXPECT().PeerTransport(mock.Anything).RunAndReturn(
+			func(id domain.PeerIdentity) (domain.PeerAddress, domain.NetGroup) {
+				if entry, ok := peerTransports[id]; ok {
+					return domain.PeerAddress(entry[0]), domain.NetGroup(entry[1])
+				}
+				return "", ""
+			},
+		).Maybe()
+	} else {
+		m.On("PeerTransport", mock.Anything).Return(domain.PeerAddress(""), domain.NetGroup("")).Maybe()
+	}
+
+	return m
 }
 
 // --- Tests ---
 
 func TestRoutingCommandsUnavailableWhenProviderNil(t *testing.T) {
 	table := rpc.NewCommandTable()
-	rpc.RegisterAllCommands(table, &mockNodeProvider{}, nil, nil, nil)
+	rpc.RegisterAllCommands(table, newDefaultNodeProvider(t), nil, nil, nil)
 
 	commands := []string{"fetchRouteTable", "fetchRouteSummary", "fetchRouteLookup"}
 	for _, cmd := range commands {
@@ -60,12 +74,11 @@ func TestRoutingCommandsUnavailableWhenProviderNil(t *testing.T) {
 
 func TestRoutingCommandsVisibleWhenProviderSet(t *testing.T) {
 	node := &nodeWithRouting{
-		mockRoutingProvider: mockRoutingProvider{
-			snapshot: routing.Snapshot{
-				Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
-				TakenAt: time.Now(),
-			},
-		},
+		MockNodeProvider: newDefaultNodeProvider(t),
+		MockRoutingProvider: newMockRoutingProvider(t, routing.Snapshot{
+			Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
+			TakenAt: time.Now(),
+		}, nil),
 	}
 
 	table := rpc.NewCommandTable()
@@ -95,37 +108,35 @@ func TestRoutingCommandsVisibleWhenProviderSet(t *testing.T) {
 
 func TestFetchRouteTable(t *testing.T) {
 	now := time.Now()
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"peer-A": {
-					{
-						Identity:  "peer-A",
-						Origin:    "self",
-						NextHop:   "peer-A",
-						Hops:      1,
-						SeqNo:     5,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(100 * time.Second),
-					},
-				},
-				"peer-B": {
-					{
-						Identity:  "peer-B",
-						Origin:    "peer-A",
-						NextHop:   "peer-A",
-						Hops:      2,
-						SeqNo:     3,
-						Source:    routing.RouteSourceAnnouncement,
-						ExpiresAt: now.Add(50 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"peer-A": {
+				{
+					Identity:  "peer-A",
+					Origin:    "self",
+					NextHop:   "peer-A",
+					Hops:      1,
+					SeqNo:     5,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(100 * time.Second),
 				},
 			},
-			TakenAt:       now,
-			TotalEntries:  3,
-			ActiveEntries: 2,
+			"peer-B": {
+				{
+					Identity:  "peer-B",
+					Origin:    "peer-A",
+					NextHop:   "peer-A",
+					Hops:      2,
+					SeqNo:     3,
+					Source:    routing.RouteSourceAnnouncement,
+					ExpiresAt: now.Add(50 * time.Second),
+				},
+			},
 		},
-	}
+		TakenAt:       now,
+		TotalEntries:  3,
+		ActiveEntries: 2,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -158,29 +169,26 @@ func TestFetchRouteTable(t *testing.T) {
 
 func TestFetchRouteTableNextHopObject(t *testing.T) {
 	now := time.Now()
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"peer-A": {
-					{
-						Identity:  "peer-A",
-						Origin:    "self",
-						NextHop:   "peer-A",
-						Hops:      1,
-						SeqNo:     1,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(60 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"peer-A": {
+				{
+					Identity:  "peer-A",
+					Origin:    "self",
+					NextHop:   "peer-A",
+					Hops:      1,
+					SeqNo:     1,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(60 * time.Second),
 				},
 			},
-			TakenAt:       now,
-			TotalEntries:  1,
-			ActiveEntries: 1,
 		},
-		peerTransports: map[domain.PeerIdentity][2]string{
-			"peer-A": {"65.108.204.190:64646", "ipv4"},
-		},
-	}
+		TakenAt:       now,
+		TotalEntries:  1,
+		ActiveEntries: 1,
+	}, map[domain.PeerIdentity][2]string{
+		"peer-A": {"65.108.204.190:64646", "ipv4"},
+	})
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -218,27 +226,24 @@ func TestFetchRouteTableNextHopObject(t *testing.T) {
 
 func TestFetchRouteTableNextHopDisconnected(t *testing.T) {
 	now := time.Now()
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"peer-A": {
-					{
-						Identity:  "peer-A",
-						Origin:    "self",
-						NextHop:   "peer-A",
-						Hops:      1,
-						SeqNo:     1,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(60 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"peer-A": {
+				{
+					Identity:  "peer-A",
+					Origin:    "self",
+					NextHop:   "peer-A",
+					Hops:      1,
+					SeqNo:     1,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(60 * time.Second),
 				},
 			},
-			TakenAt:       now,
-			TotalEntries:  1,
-			ActiveEntries: 1,
 		},
-		// No peerTransports — peer disconnected.
-	}
+		TakenAt:       now,
+		TotalEntries:  1,
+		ActiveEntries: 1,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -277,34 +282,32 @@ func TestFetchRouteTableNextHopDisconnected(t *testing.T) {
 
 func TestFetchRouteSummary(t *testing.T) {
 	now := time.Now()
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"peer-A": {
-					{
-						Identity:  "peer-A",
-						Origin:    "self",
-						NextHop:   "peer-A",
-						Hops:      1,
-						SeqNo:     5,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(100 * time.Second),
-					},
-				},
-			},
-			TakenAt:       now,
-			TotalEntries:  1,
-			ActiveEntries: 1,
-			FlapState: []routing.FlapEntry{
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"peer-A": {
 				{
-					PeerIdentity:      "flappy-peer",
-					RecentWithdrawals: 4,
-					InHoldDown:        true,
-					HoldDownUntil:     now.Add(20 * time.Second),
+					Identity:  "peer-A",
+					Origin:    "self",
+					NextHop:   "peer-A",
+					Hops:      1,
+					SeqNo:     5,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(100 * time.Second),
 				},
 			},
 		},
-	}
+		TakenAt:       now,
+		TotalEntries:  1,
+		ActiveEntries: 1,
+		FlapState: []routing.FlapEntry{
+			{
+				PeerIdentity:      "flappy-peer",
+				RecentWithdrawals: 4,
+				InHoldDown:        true,
+				HoldDownUntil:     now.Add(20 * time.Second),
+			},
+		},
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -354,33 +357,31 @@ func TestFetchRouteSummary(t *testing.T) {
 
 func TestFetchRouteLookup(t *testing.T) {
 	now := time.Now()
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44": {
-					{
-						Identity:  "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
-						Origin:    "self",
-						NextHop:   "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
-						Hops:      1,
-						SeqNo:     10,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(100 * time.Second),
-					},
-					{
-						Identity:  "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
-						Origin:    "neighbor",
-						NextHop:   "neighbor",
-						Hops:      2,
-						SeqNo:     7,
-						Source:    routing.RouteSourceAnnouncement,
-						ExpiresAt: now.Add(80 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44": {
+				{
+					Identity:  "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
+					Origin:    "self",
+					NextHop:   "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
+					Hops:      1,
+					SeqNo:     10,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(100 * time.Second),
+				},
+				{
+					Identity:  "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
+					Origin:    "neighbor",
+					NextHop:   "neighbor",
+					Hops:      2,
+					SeqNo:     7,
+					Source:    routing.RouteSourceAnnouncement,
+					ExpiresAt: now.Add(80 * time.Second),
 				},
 			},
-			TakenAt: now,
 		},
-	}
+		TakenAt: now,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -412,12 +413,11 @@ func TestFetchRouteLookup(t *testing.T) {
 }
 
 func TestFetchRouteLookupRequiresIdentity(t *testing.T) {
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
-			TakenAt: time.Now(),
-		},
-	}
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
+		TakenAt: time.Now(),
+	}, nil)
+
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
@@ -431,12 +431,11 @@ func TestFetchRouteLookupRequiresIdentity(t *testing.T) {
 }
 
 func TestFetchRouteLookupRejectsMalformedIdentity(t *testing.T) {
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
-			TakenAt: time.Now(),
-		},
-	}
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes:  make(map[routing.PeerIdentity][]routing.RouteEntry),
+		TakenAt: time.Now(),
+	}, nil)
+
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
 
@@ -460,12 +459,10 @@ func TestFetchRouteLookupRejectsMalformedIdentity(t *testing.T) {
 }
 
 func TestFetchRouteLookupNoRoutes(t *testing.T) {
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
-			TakenAt: time.Now(),
-		},
-	}
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
+		TakenAt: time.Now(),
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -491,26 +488,24 @@ func TestFetchRouteTableUsesSnapshotTime(t *testing.T) {
 	// Snapshot taken 10s ago with a route expiring 50s after snapshot time.
 	// TTL and expired should be computed from snap.TakenAt, not wall clock.
 	snapTime := time.Now().Add(-10 * time.Second)
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"peer-A": {
-					{
-						Identity:  "peer-A",
-						Origin:    "self",
-						NextHop:   "peer-A",
-						Hops:      1,
-						SeqNo:     1,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: snapTime.Add(50 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"peer-A": {
+				{
+					Identity:  "peer-A",
+					Origin:    "self",
+					NextHop:   "peer-A",
+					Hops:      1,
+					SeqNo:     1,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: snapTime.Add(50 * time.Second),
 				},
 			},
-			TakenAt:       snapTime,
-			TotalEntries:  1,
-			ActiveEntries: 1,
 		},
-	}
+		TakenAt:       snapTime,
+		TotalEntries:  1,
+		ActiveEntries: 1,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -546,26 +541,24 @@ func TestFetchRouteTableUsesSnapshotTime(t *testing.T) {
 func TestFetchRouteSummaryUsesSnapshotTime(t *testing.T) {
 	// Route expired 5s before wall clock but still alive at snapshot time.
 	snapTime := time.Now().Add(-10 * time.Second)
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"peer-A": {
-					{
-						Identity:  "peer-A",
-						Origin:    "self",
-						NextHop:   "peer-A",
-						Hops:      1,
-						SeqNo:     1,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: snapTime.Add(8 * time.Second), // expired by now, alive at snapshot
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"peer-A": {
+				{
+					Identity:  "peer-A",
+					Origin:    "self",
+					NextHop:   "peer-A",
+					Hops:      1,
+					SeqNo:     1,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: snapTime.Add(8 * time.Second), // expired by now, alive at snapshot
 				},
 			},
-			TakenAt:       snapTime,
-			TotalEntries:  1,
-			ActiveEntries: 1,
 		},
-	}
+		TakenAt:       snapTime,
+		TotalEntries:  1,
+		ActiveEntries: 1,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -592,24 +585,22 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 	// TTL should be ~50s (from snapshot), not ~40s (from wall clock).
 	snapTime := time.Now().Add(-10 * time.Second)
 	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				targetID: {
-					{
-						Identity:  targetID,
-						Origin:    "self",
-						NextHop:   targetID,
-						Hops:      1,
-						SeqNo:     1,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: snapTime.Add(50 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			targetID: {
+				{
+					Identity:  targetID,
+					Origin:    "self",
+					NextHop:   targetID,
+					Hops:      1,
+					SeqNo:     1,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: snapTime.Add(50 * time.Second),
 				},
 			},
-			TakenAt: snapTime,
 		},
-	}
+		TakenAt: snapTime,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -642,33 +633,31 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 	now := time.Now()
 	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				targetID: {
-					{
-						Identity:  targetID,
-						Origin:    "remote",
-						NextHop:   "remote",
-						Hops:      3,
-						SeqNo:     1,
-						Source:    routing.RouteSourceAnnouncement,
-						ExpiresAt: now.Add(60 * time.Second),
-					},
-					{
-						Identity:  targetID,
-						Origin:    "self",
-						NextHop:   targetID,
-						Hops:      1,
-						SeqNo:     5,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(100 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			targetID: {
+				{
+					Identity:  targetID,
+					Origin:    "remote",
+					NextHop:   "remote",
+					Hops:      3,
+					SeqNo:     1,
+					Source:    routing.RouteSourceAnnouncement,
+					ExpiresAt: now.Add(60 * time.Second),
+				},
+				{
+					Identity:  targetID,
+					Origin:    "self",
+					NextHop:   targetID,
+					Hops:      1,
+					SeqNo:     5,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(100 * time.Second),
 				},
 			},
-			TakenAt: now,
 		},
-	}
+		TakenAt: now,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -701,42 +690,40 @@ func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 	now := time.Now()
 	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				targetID: {
-					{
-						Identity:  targetID,
-						Origin:    "self",
-						NextHop:   targetID,
-						Hops:      1,
-						SeqNo:     5,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(100 * time.Second),
-					},
-					{
-						Identity:  targetID,
-						Origin:    "remote-withdrawn",
-						NextHop:   "relay",
-						Hops:      16, // withdrawn
-						SeqNo:     3,
-						Source:    routing.RouteSourceAnnouncement,
-						ExpiresAt: now.Add(60 * time.Second),
-					},
-					{
-						Identity:  targetID,
-						Origin:    "remote-expired",
-						NextHop:   "relay2",
-						Hops:      2,
-						SeqNo:     4,
-						Source:    routing.RouteSourceAnnouncement,
-						ExpiresAt: now.Add(-10 * time.Second), // expired
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			targetID: {
+				{
+					Identity:  targetID,
+					Origin:    "self",
+					NextHop:   targetID,
+					Hops:      1,
+					SeqNo:     5,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(100 * time.Second),
+				},
+				{
+					Identity:  targetID,
+					Origin:    "remote-withdrawn",
+					NextHop:   "relay",
+					Hops:      16, // withdrawn
+					SeqNo:     3,
+					Source:    routing.RouteSourceAnnouncement,
+					ExpiresAt: now.Add(60 * time.Second),
+				},
+				{
+					Identity:  targetID,
+					Origin:    "remote-expired",
+					NextHop:   "relay2",
+					Hops:      2,
+					SeqNo:     4,
+					Source:    routing.RouteSourceAnnouncement,
+					ExpiresAt: now.Add(-10 * time.Second), // expired
 				},
 			},
-			TakenAt: now,
 		},
-	}
+		TakenAt: now,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -813,39 +800,37 @@ func TestFetchRouteSummaryExcludesSelfRoute(t *testing.T) {
 	// Snapshot that includes a synthetic local self-route alongside a real
 	// direct peer route. The summary must not count the self-route in
 	// reachable_identities or direct_peers.
-	provider := &mockRoutingProvider{
-		snapshot: routing.Snapshot{
-			Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-				"nodeA": {
-					// Synthetic local self-route (as injected by Table.Snapshot).
-					{
-						Identity: "nodeA",
-						Origin:   "nodeA",
-						NextHop:  "nodeA",
-						Hops:     0,
-						SeqNo:    0,
-						Source:   routing.RouteSourceLocal,
-					},
-				},
-				"peer-B": {
-					{
-						Identity:  "peer-B",
-						Origin:    "nodeA",
-						NextHop:   "peer-B",
-						Hops:      1,
-						SeqNo:     3,
-						Source:    routing.RouteSourceDirect,
-						ExpiresAt: now.Add(100 * time.Second),
-					},
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			"nodeA": {
+				// Synthetic local self-route (as injected by Table.Snapshot).
+				{
+					Identity: "nodeA",
+					Origin:   "nodeA",
+					NextHop:  "nodeA",
+					Hops:     0,
+					SeqNo:    0,
+					Source:   routing.RouteSourceLocal,
 				},
 			},
-			TakenAt: now,
-			// Counters describe persisted state only — the synthetic
-			// self-route is not counted, matching Table.Snapshot() behaviour.
-			TotalEntries:  1,
-			ActiveEntries: 1,
+			"peer-B": {
+				{
+					Identity:  "peer-B",
+					Origin:    "nodeA",
+					NextHop:   "peer-B",
+					Hops:      1,
+					SeqNo:     3,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: now.Add(100 * time.Second),
+				},
+			},
 		},
-	}
+		TakenAt: now,
+		// Counters describe persisted state only — the synthetic
+		// self-route is not counted, matching Table.Snapshot() behaviour.
+		TotalEntries:  1,
+		ActiveEntries: 1,
+	}, nil)
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)

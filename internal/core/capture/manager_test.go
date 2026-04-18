@@ -1,4 +1,4 @@
-package capture
+package capture_test
 
 import (
 	"bytes"
@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+
+	"github.com/piratecash/corsa/internal/core/capture"
+	capturemocks "github.com/piratecash/corsa/internal/core/capture/mocks"
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
@@ -16,77 +20,103 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// memWriter is an in-memory Writer for tests.
-type memWriter struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+// writerBuffer captures bytes written through a MockWriter for assertions.
+type writerBuffer struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	closed bool
 }
 
-func (w *memWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.Write(p)
+func (wb *writerBuffer) String() string {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
+	return wb.buf.String()
 }
 
-func (w *memWriter) Close() error { return nil }
-func (w *memWriter) Sync() error  { return nil }
-
-func (w *memWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.String()
+func (wb *writerBuffer) IsClosed() bool {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
+	return wb.closed
 }
 
-// writerTracker collects all created writers for inspection.
-type writerTracker struct {
+// newMockWriterWithBuffer creates a standalone MockWriter backed by a
+// writerBuffer. Used by session tests that need a single Writer instance.
+func newMockWriterWithBuffer(t *testing.T) (*capturemocks.MockWriter, *writerBuffer) {
+	t.Helper()
+	wb := &writerBuffer{}
+	m := capturemocks.NewMockWriter(t)
+	m.EXPECT().Write(mock.Anything).RunAndReturn(func(p []byte) (int, error) {
+		wb.mu.Lock()
+		defer wb.mu.Unlock()
+		return wb.buf.Write(p)
+	}).Maybe()
+	m.EXPECT().Close().RunAndReturn(func() error {
+		wb.mu.Lock()
+		defer wb.mu.Unlock()
+		wb.closed = true
+		return nil
+	}).Maybe()
+	m.EXPECT().Sync().Return(nil).Maybe()
+	return m, wb
+}
+
+// mockWriterTracker creates MockWriter instances per file path and collects
+// their output buffers for inspection.
+type mockWriterTracker struct {
+	t       *testing.T
 	mu      sync.Mutex
-	writers map[string]*memWriter
+	buffers map[string]*writerBuffer
 }
 
-func newWriterTracker() *writerTracker {
-	return &writerTracker{writers: make(map[string]*memWriter)}
+func newMockWriterTracker(t *testing.T) *mockWriterTracker {
+	return &mockWriterTracker{t: t, buffers: make(map[string]*writerBuffer)}
 }
 
-func (t *writerTracker) factory(path string) (Writer, error) {
-	w := &memWriter{}
-	t.mu.Lock()
-	t.writers[path] = w
-	t.mu.Unlock()
-	return w, nil
+func (tr *mockWriterTracker) factory(path string) (capture.Writer, error) {
+	m, wb := newMockWriterWithBuffer(tr.t)
+	tr.mu.Lock()
+	tr.buffers[path] = wb
+	tr.mu.Unlock()
+	return m, nil
 }
 
-// stubResolver implements ConnResolver for tests.
-type stubResolver struct {
-	conns map[domain.ConnID]ConnInfo
-}
-
-func (r *stubResolver) ConnInfoByID(id domain.ConnID) (ConnInfo, bool) {
-	c, ok := r.conns[id]
-	return c, ok
-}
-
-func (r *stubResolver) ConnInfoByIP(ip netip.Addr) []ConnInfo {
-	var result []ConnInfo
-	for _, c := range r.conns {
-		if c.RemoteIP == ip {
+// testResolver creates a MockConnResolver backed by a mutable map.
+// Returns both the mock and the map so tests can add/remove entries
+// after construction.
+func testResolver(t *testing.T, conns ...capture.ConnInfo) (*capturemocks.MockConnResolver, map[domain.ConnID]capture.ConnInfo) {
+	t.Helper()
+	connMap := make(map[domain.ConnID]capture.ConnInfo)
+	for _, c := range conns {
+		connMap[c.ConnID] = c
+	}
+	m := capturemocks.NewMockConnResolver(t)
+	m.EXPECT().ConnInfoByID(mock.Anything).RunAndReturn(func(id domain.ConnID) (capture.ConnInfo, bool) {
+		c, ok := connMap[id]
+		return c, ok
+	}).Maybe()
+	m.EXPECT().ConnInfoByIP(mock.Anything).RunAndReturn(func(ip netip.Addr) []capture.ConnInfo {
+		var result []capture.ConnInfo
+		for _, c := range connMap {
+			if c.RemoteIP == ip {
+				result = append(result, c)
+			}
+		}
+		return result
+	}).Maybe()
+	m.EXPECT().AllConnInfo().RunAndReturn(func() []capture.ConnInfo {
+		result := make([]capture.ConnInfo, 0, len(connMap))
+		for _, c := range connMap {
 			result = append(result, c)
 		}
-	}
-	return result
+		return result
+	}).Maybe()
+	return m, connMap
 }
 
-func (r *stubResolver) AllConnInfo() []ConnInfo {
-	result := make([]ConnInfo, 0, len(r.conns))
-	for _, c := range r.conns {
-		result = append(result, c)
-	}
-	return result
-}
-
-func testManager(t *testing.T, resolver ConnResolver) (*Manager, *writerTracker) {
+func testManager(t *testing.T, resolver capture.ConnResolver) (*capture.Manager, *mockWriterTracker) {
 	t.Helper()
-	tracker := newWriterTracker()
-	m := NewManager(context.Background(), ManagerOpts{
+	tracker := newMockWriterTracker(t)
+	m := capture.NewManager(context.Background(), capture.ManagerOpts{
 		BaseDir:      t.TempDir(),
 		Clock:        func() time.Time { return time.Date(2026, 4, 14, 12, 44, 3, 0, time.UTC) },
 		ConnResolver: resolver,
@@ -98,21 +128,14 @@ func testManager(t *testing.T, resolver ConnResolver) (*Manager, *writerTracker)
 
 var testIP = netip.MustParseAddr("203.0.113.10")
 
-func testResolver(conns ...ConnInfo) *stubResolver {
-	r := &stubResolver{conns: make(map[domain.ConnID]ConnInfo)}
-	for _, c := range conns {
-		r.conns[c.ConnID] = c
-	}
-	return r
-}
-
 // ---------------------------------------------------------------------------
 // StartByConnIDs
 // ---------------------------------------------------------------------------
 
 func TestManager_StartByConnIDs_Success(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	result := m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
 
@@ -128,7 +151,8 @@ func TestManager_StartByConnIDs_Success(t *testing.T) {
 }
 
 func TestManager_StartByConnIDs_NotFound(t *testing.T) {
-	m, _ := testManager(t, testResolver())
+	resolver, _ := testResolver(t)
+	m, _ := testManager(t, resolver)
 
 	result := m.StartByConnIDs([]domain.ConnID{99}, domain.CaptureFormatCompact)
 
@@ -138,8 +162,9 @@ func TestManager_StartByConnIDs_NotFound(t *testing.T) {
 }
 
 func TestManager_StartByConnIDs_Idempotent(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
 	result := m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
@@ -153,8 +178,9 @@ func TestManager_StartByConnIDs_Idempotent(t *testing.T) {
 }
 
 func TestManager_StartByConnIDs_FormatConflict(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
 	result := m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatPretty)
@@ -169,8 +195,9 @@ func TestManager_StartByConnIDs_FormatConflict(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_StartByIPs_Success(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionInbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionInbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	result := m.StartByIPs([]netip.Addr{testIP}, domain.CaptureFormatCompact)
 
@@ -186,7 +213,8 @@ func TestManager_StartByIPs_Success(t *testing.T) {
 }
 
 func TestManager_StartByIPs_NoCurrentConns(t *testing.T) {
-	m, _ := testManager(t, testResolver())
+	resolver, _ := testResolver(t)
+	m, _ := testManager(t, resolver)
 
 	result := m.StartByIPs([]netip.Addr{testIP}, domain.CaptureFormatCompact)
 
@@ -203,9 +231,10 @@ func TestManager_StartByIPs_NoCurrentConns(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_StartAll(t *testing.T) {
-	info1 := ConnInfo{ConnID: 1, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	info2 := ConnInfo{ConnID: 2, RemoteIP: netip.MustParseAddr("198.51.100.7"), PeerDir: domain.PeerDirectionInbound}
-	m, _ := testManager(t, testResolver(info1, info2))
+	info1 := capture.ConnInfo{ConnID: 1, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	info2 := capture.ConnInfo{ConnID: 2, RemoteIP: netip.MustParseAddr("198.51.100.7"), PeerDir: domain.PeerDirectionInbound}
+	resolver, _ := testResolver(t, info1, info2)
+	m, _ := testManager(t, resolver)
 
 	result := m.StartAll(domain.CaptureFormatPretty)
 
@@ -225,8 +254,9 @@ func TestManager_StartAll(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_StopByConnIDs(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
 	result := m.StopByConnIDs([]domain.ConnID{42})
@@ -240,7 +270,8 @@ func TestManager_StopByConnIDs(t *testing.T) {
 }
 
 func TestManager_StopByConnIDs_NotFound(t *testing.T) {
-	m, _ := testManager(t, testResolver())
+	resolver, _ := testResolver(t)
+	m, _ := testManager(t, resolver)
 	result := m.StopByConnIDs([]domain.ConnID{99})
 
 	if len(result.NotFound) != 1 {
@@ -249,8 +280,9 @@ func TestManager_StopByConnIDs_NotFound(t *testing.T) {
 }
 
 func TestManager_StopByIPs(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	m.StartByIPs([]netip.Addr{testIP}, domain.CaptureFormatCompact)
 	result := m.StopByIPs([]netip.Addr{testIP})
@@ -264,9 +296,10 @@ func TestManager_StopByIPs(t *testing.T) {
 }
 
 func TestManager_StopAll(t *testing.T) {
-	info1 := ConnInfo{ConnID: 1, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	info2 := ConnInfo{ConnID: 2, RemoteIP: netip.MustParseAddr("198.51.100.7"), PeerDir: domain.PeerDirectionInbound}
-	m, _ := testManager(t, testResolver(info1, info2))
+	info1 := capture.ConnInfo{ConnID: 1, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	info2 := capture.ConnInfo{ConnID: 2, RemoteIP: netip.MustParseAddr("198.51.100.7"), PeerDir: domain.PeerDirectionInbound}
+	resolver, _ := testResolver(t, info1, info2)
+	m, _ := testManager(t, resolver)
 
 	m.StartAll(domain.CaptureFormatCompact)
 	result := m.StopAll()
@@ -287,8 +320,9 @@ func TestManager_StopAll(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_Enqueue_WritesToFile(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, tracker := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, tracker := testManager(t, resolver)
 
 	result := m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
 	if len(result.Started) != 1 {
@@ -306,7 +340,7 @@ func TestManager_Enqueue_WritesToFile(t *testing.T) {
 
 	filePath := result.Started[0].FilePath
 	tracker.mu.Lock()
-	w, ok := tracker.writers[filePath]
+	w, ok := tracker.buffers[filePath]
 	tracker.mu.Unlock()
 	if !ok {
 		t.Fatalf("writer not found for path %s", filePath)
@@ -326,16 +360,16 @@ func TestManager_Enqueue_WritesToFile(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_OnNewConnection_MatchesByIPRule(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	resolver := testResolver(info)
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, connMap := testResolver(t, info)
 	m, tracker := testManager(t, resolver)
 
 	// Install by_ip rule with no current connections initially.
 	m.StartByIPs([]netip.Addr{testIP}, domain.CaptureFormatCompact)
 
 	// Simulate a new connection arriving.
-	newInfo := ConnInfo{ConnID: 100, RemoteIP: testIP, PeerDir: domain.PeerDirectionInbound}
-	resolver.conns[100] = newInfo
+	newInfo := capture.ConnInfo{ConnID: 100, RemoteIP: testIP, PeerDir: domain.PeerDirectionInbound}
+	connMap[100] = newInfo
 	m.OnNewConnection(newInfo)
 
 	// The session should be registered synchronously (pending state).
@@ -363,7 +397,7 @@ func TestManager_OnNewConnection_MatchesByIPRule(t *testing.T) {
 
 	filePath := stopResult.Stopped[0].FilePath
 	tracker.mu.Lock()
-	w, ok := tracker.writers[filePath]
+	w, ok := tracker.buffers[filePath]
 	tracker.mu.Unlock()
 	if !ok {
 		t.Fatalf("writer not found for path %s", filePath)
@@ -379,8 +413,9 @@ func TestManager_OnNewConnection_MatchesByIPRule(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_OnConnectionClosed(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
 
@@ -403,8 +438,9 @@ func TestManager_OnConnectionClosed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_EvictFailedSession(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	// Directly test evictFailedSession by injecting a failed session.
 	m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
@@ -413,17 +449,9 @@ func TestManager_EvictFailedSession(t *testing.T) {
 		t.Fatal("expected active capture")
 	}
 
-	// Simulate the writer goroutine calling evictFailedSession.
-	m.mu.Lock()
-	s := m.sessions[42]
-	m.mu.Unlock()
-
-	// Force state to failed.
-	s.mu.Lock()
-	s.state = sessionFailed
-	s.mu.Unlock()
-
-	m.evictFailedSession(42)
+	// Force state to failed and evict via exported test helpers.
+	m.ForceSessionFailed(42)
+	m.EvictFailedSessionForTest(42)
 
 	if m.HasActiveCaptures() {
 		t.Fatal("expected failed session to be evicted")
@@ -456,12 +484,12 @@ func TestManager_AutoStartCleanup_DoesNotWipeReplacement(t *testing.T) {
 	// This ensures StartByIPs installs the rule without calling the factory
 	// synchronously (no current matches). The first factory call will come
 	// from the OnNewConnection goroutine, which is what we want to gate.
-	resolver := testResolver()
+	resolver, connMap := testResolver(t)
 
 	var once sync.Once
-	tracker := newWriterTracker()
+	tracker := newMockWriterTracker(t)
 
-	gatedFactory := func(path string) (Writer, error) {
+	gatedFactory := func(path string) (capture.Writer, error) {
 		blocked := false
 		once.Do(func() { blocked = true })
 
@@ -476,7 +504,7 @@ func TestManager_AutoStartCleanup_DoesNotWipeReplacement(t *testing.T) {
 		return tracker.factory(path)
 	}
 
-	m := NewManager(context.Background(), ManagerOpts{
+	m := capture.NewManager(context.Background(), capture.ManagerOpts{
 		BaseDir:      t.TempDir(),
 		Clock:        func() time.Time { return time.Date(2026, 4, 14, 12, 44, 3, 0, time.UTC) },
 		ConnResolver: resolver,
@@ -491,8 +519,8 @@ func TestManager_AutoStartCleanup_DoesNotWipeReplacement(t *testing.T) {
 	// Now add conn_id=100 to the resolver and trigger auto-start.
 	// OnNewConnection registers a pending session synchronously, then
 	// spawns a goroutine that does MkdirAll + gatedFactory.
-	newInfo := ConnInfo{ConnID: 100, RemoteIP: testIP, PeerDir: domain.PeerDirectionInbound}
-	resolver.conns[100] = newInfo
+	newInfo := capture.ConnInfo{ConnID: 100, RemoteIP: testIP, PeerDir: domain.PeerDirectionInbound}
+	connMap[100] = newInfo
 	m.OnNewConnection(newInfo)
 
 	// Wait until the goroutine is blocked inside the factory call.
@@ -538,8 +566,9 @@ func TestManager_AutoStartCleanup_DoesNotWipeReplacement(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestManager_SessionSnapshot(t *testing.T) {
-	info := ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	m, _ := testManager(t, testResolver(info))
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
 
 	m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
 
@@ -567,9 +596,10 @@ func TestManager_SessionSnapshot(t *testing.T) {
 }
 
 func TestManager_AllSessionSnapshots(t *testing.T) {
-	info1 := ConnInfo{ConnID: 1, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
-	info2 := ConnInfo{ConnID: 2, RemoteIP: netip.MustParseAddr("198.51.100.7"), PeerDir: domain.PeerDirectionInbound}
-	m, _ := testManager(t, testResolver(info1, info2))
+	info1 := capture.ConnInfo{ConnID: 1, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	info2 := capture.ConnInfo{ConnID: 2, RemoteIP: netip.MustParseAddr("198.51.100.7"), PeerDir: domain.PeerDirectionInbound}
+	resolver, _ := testResolver(t, info1, info2)
+	m, _ := testManager(t, resolver)
 
 	m.StartAll(domain.CaptureFormatCompact)
 

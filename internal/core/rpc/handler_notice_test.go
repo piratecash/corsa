@@ -1,8 +1,9 @@
 package rpc_test
 
 import (
-	"github.com/piratecash/corsa/internal/core/protocol"
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func TestNoticeFetchNotices(t *testing.T) {
@@ -18,17 +19,15 @@ func TestNoticeFetchNotices(t *testing.T) {
 			Ciphertext: "encrypted-data-2",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_notices" {
-				return protocol.Frame{
-					Type:    "notices_response",
-					Notices: notices,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_notices" {
+			return protocol.Frame{
+				Type:    "notices_response",
+				Notices: notices,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/notice/list", map[string]interface{}{})
@@ -65,17 +64,15 @@ func TestNoticeFetchNotices(t *testing.T) {
 }
 
 func TestNoticeFetchNoticesEmpty(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_notices" {
-				return protocol.Frame{
-					Type:    "notices_response",
-					Notices: []protocol.NoticeFrame{},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_notices" {
+			return protocol.Frame{
+				Type:    "notices_response",
+				Notices: []protocol.NoticeFrame{},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/notice/list", map[string]interface{}{})
@@ -97,17 +94,15 @@ func TestNoticeFetchNoticesEmpty(t *testing.T) {
 }
 
 func TestNoticeFetchNoticesNodeError(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_notices" {
-				return protocol.Frame{
-					Type:  "error",
-					Error: "notices not available",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_notices" {
+			return protocol.Frame{
+				Type:  "error",
+				Error: "notices not available",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/notice/list", map[string]interface{}{})
@@ -125,17 +120,15 @@ func TestNoticeFetchNoticesSingleNotice(t *testing.T) {
 			Ciphertext: "encrypted-single",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_notices" {
-				return protocol.Frame{
-					Type:    "notices_response",
-					Notices: notices,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_notices" {
+			return protocol.Frame{
+				Type:    "notices_response",
+				Notices: notices,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/notice/list", map[string]interface{}{})
@@ -167,17 +160,15 @@ func TestNoticeFetchNoticesMultipleCiphertexts(t *testing.T) {
 		{ID: "notice-3", ExpiresAt: 1711627200, Ciphertext: "cipher-3"},
 		{ID: "notice-4", ExpiresAt: 1711713600, Ciphertext: "cipher-4"},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_notices" {
-				return protocol.Frame{
-					Type:    "notices_response",
-					Notices: notices,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_notices" {
+			return protocol.Frame{
+				Type:    "notices_response",
+				Notices: notices,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/notice/list", map[string]interface{}{})

@@ -1,8 +1,9 @@
 package node
 
 import (
-	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -60,34 +61,33 @@ func TestRouterInterfaceAcceptsEnvelope(t *testing.T) {
 	_ = msg
 }
 
-// recordingRouter captures Route calls for test assertions.
-type recordingRouter struct {
-	mu    sync.Mutex
-	calls []protocol.Envelope
-	// decision returned to callers
-	decision RoutingDecision
+// newRecordingMockRouter creates a MockRouter that captures every Route
+// call for later assertions and returns the given decision.
+func newRecordingMockRouter(t *testing.T, decision RoutingDecision) (*MockRouter, *[]protocol.Envelope) {
+	t.Helper()
+	calls := &[]protocol.Envelope{}
+	m := NewMockRouter(t)
+	m.EXPECT().Route(mock.Anything).RunAndReturn(
+		func(msg protocol.Envelope) RoutingDecision {
+			*calls = append(*calls, msg)
+			return decision
+		},
+	).Maybe()
+	return m, calls
 }
 
-func (r *recordingRouter) Route(msg protocol.Envelope) RoutingDecision {
-	r.mu.Lock()
-	r.calls = append(r.calls, msg)
-	r.mu.Unlock()
-	return r.decision
-}
-
-func TestRecordingRouterSatisfiesInterface(t *testing.T) {
-	var _ Router = (*recordingRouter)(nil)
+func TestMockRouterSatisfiesInterface(t *testing.T) {
+	m := NewMockRouter(t)
+	var _ Router = m
 }
 
 // TestServiceRouterFieldIsUsed verifies that Service.router is actually the
-// field consulted during delivery. We inject a recordingRouter and trigger
+// field consulted during delivery. We inject a MockRouter and trigger
 // the store-message path to prove calls go through s.router.
 func TestServiceRouterFieldIsUsed(t *testing.T) {
-	rec := &recordingRouter{
-		decision: RoutingDecision{
-			GossipTargets: []domain.PeerAddress{}, // empty so no sends attempted
-		},
-	}
+	rec, _ := newRecordingMockRouter(t, RoutingDecision{
+		GossipTargets: []domain.PeerAddress{}, // empty so no sends attempted
+	})
 
 	svc := &Service{
 		router: rec,
@@ -95,7 +95,7 @@ func TestServiceRouterFieldIsUsed(t *testing.T) {
 
 	// Verify the injected router is the one returned
 	if svc.router != rec {
-		t.Fatal("Service.router should be the injected recordingRouter")
+		t.Fatal("Service.router should be the injected MockRouter")
 	}
 }
 

@@ -1022,11 +1022,22 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 	}
 
 	// Verify: now marked as seen after successful gossip.
-	svc.mu.RLock()
-	_, markedAfterSecond := svc.seenReceipts[key]
-	svc.mu.RUnlock()
-	if !markedAfterSecond {
-		t.Fatal("receipt must be marked as seen after successful gossip delivery")
+	// gossipTransitReceipt runs in a goroutine and calls markTransitReceiptSeen
+	// AFTER enqueuePeerFrame writes to sendCh, so we must poll briefly to let
+	// the goroutine finish the mark step.
+	deadline := time.After(2 * time.Second)
+	for {
+		svc.mu.RLock()
+		_, markedAfterSecond := svc.seenReceipts[key]
+		svc.mu.RUnlock()
+		if markedAfterSecond {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("receipt must be marked as seen after successful gossip delivery")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 
@@ -1093,11 +1104,22 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	}
 
 	// Verify: marked as seen after success.
-	svc.mu.RLock()
-	_, markedAfterSecond := svc.seenReceipts[key]
-	svc.mu.RUnlock()
-	if !markedAfterSecond {
-		t.Fatal("receipt must be marked as seen after successful gossip delivery (session)")
+	// gossipTransitReceipt runs in a goroutine and calls markTransitReceiptSeen
+	// AFTER enqueuePeerFrame writes to sendCh, so we must poll briefly to let
+	// the goroutine finish the mark step.
+	deadline2 := time.After(2 * time.Second)
+	for {
+		svc.mu.RLock()
+		_, markedAfterSecond := svc.seenReceipts[key]
+		svc.mu.RUnlock()
+		if markedAfterSecond {
+			break
+		}
+		select {
+		case <-deadline2:
+			t.Fatal("receipt must be marked as seen after successful gossip delivery (session)")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 

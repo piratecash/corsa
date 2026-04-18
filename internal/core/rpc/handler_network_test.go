@@ -1,23 +1,22 @@
 package rpc_test
 
 import (
-	"github.com/piratecash/corsa/internal/core/protocol"
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func TestNetworkPeers(t *testing.T) {
 	expectedPeers := []string{"peer1:8000", "peer2:8000", "peer3:8000"}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "get_peers" {
-				return protocol.Frame{
-					Type:  "peers_response",
-					Peers: expectedPeers,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "get_peers" {
+			return protocol.Frame{
+				Type:  "peers_response",
+				Peers: expectedPeers,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/peers", map[string]interface{}{})
@@ -25,7 +24,6 @@ func TestNetworkPeers(t *testing.T) {
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "type", "peers_response")
 
-	// Check peers array
 	peers, ok := result["peers"].([]interface{})
 	if !ok {
 		t.Errorf("expected peers to be array, got %T", result["peers"])
@@ -37,17 +35,15 @@ func TestNetworkPeers(t *testing.T) {
 }
 
 func TestNetworkPeersEmpty(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "get_peers" {
-				return protocol.Frame{
-					Type:  "peers_response",
-					Peers: []string{},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "get_peers" {
+			return protocol.Frame{
+				Type:  "peers_response",
+				Peers: []string{},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/peers", map[string]interface{}{})
@@ -65,17 +61,15 @@ func TestNetworkHealth(t *testing.T) {
 			LastConnectedAt: "2026-03-26T10:00:00Z",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_peer_health" {
-				return protocol.Frame{
-					Type:       "health_response",
-					PeerHealth: healthData,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_peer_health" {
+			return protocol.Frame{
+				Type:       "health_response",
+				PeerHealth: healthData,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/health", map[string]interface{}{})
@@ -86,17 +80,15 @@ func TestNetworkHealth(t *testing.T) {
 }
 
 func TestNetworkAddPeerValidAddress(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "add_peer" && len(frame.Peers) > 0 {
-				return protocol.Frame{
-					Type:   "add_peer_response",
-					Status: "success",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "add_peer" && len(frame.Peers) > 0 {
+			return protocol.Frame{
+				Type:   "add_peer_response",
+				Status: "success",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/add_peer", map[string]interface{}{
@@ -109,7 +101,7 @@ func TestNetworkAddPeerValidAddress(t *testing.T) {
 }
 
 func TestNetworkAddPeerMissingAddress(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/add_peer", map[string]interface{}{
@@ -121,7 +113,7 @@ func TestNetworkAddPeerMissingAddress(t *testing.T) {
 }
 
 func TestNetworkAddPeerMissingBody(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/add_peer", map[string]interface{}{})
@@ -131,7 +123,7 @@ func TestNetworkAddPeerMissingBody(t *testing.T) {
 }
 
 func TestNetworkAddPeerWhitespaceAddress(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/add_peer", map[string]interface{}{
@@ -143,17 +135,15 @@ func TestNetworkAddPeerWhitespaceAddress(t *testing.T) {
 }
 
 func TestNetworkAddPeerNodeError(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "add_peer" {
-				return protocol.Frame{
-					Type:  "error",
-					Error: "peer already connected",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "add_peer" {
+			return protocol.Frame{
+				Type:  "error",
+				Error: "peer already connected",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/network/add_peer", map[string]interface{}{
@@ -175,17 +165,15 @@ func TestNetworkAddPeerComplexAddress(t *testing.T) {
 
 	for _, addr := range tests {
 		t.Run(addr, func(t *testing.T) {
-			node := &mockNodeProvider{
-				handleFunc: func(frame protocol.Frame) protocol.Frame {
-					if frame.Type == "add_peer" && len(frame.Peers) > 0 {
-						return protocol.Frame{
-							Type:   "add_peer_response",
-							Status: "added",
-						}
+			node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+				if frame.Type == "add_peer" && len(frame.Peers) > 0 {
+					return protocol.Frame{
+						Type:   "add_peer_response",
+						Status: "added",
 					}
-					return protocol.Frame{Type: "ok"}
-				},
-			}
+				}
+				return protocol.Frame{Type: "ok"}
+			})
 			server := setupTestServer(t, node, nil)
 
 			code, result := postJSON(t, server, "/rpc/v1/network/add_peer", map[string]interface{}{

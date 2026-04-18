@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/netcore"
@@ -334,9 +333,9 @@ func TestIsConnAuthenticated_NilNetCore(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
+	mc := newSimpleMockConn(t)
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be false for nil NetCore")
 	}
@@ -348,10 +347,10 @@ func TestIsConnAuthenticated_NilAuth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}})
+	mc := newSimpleMockConn(t)
+	svc.setTestConnEntryLocked(mc, &connEntry{core: &netcore.NetCore{}})
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be false for nil auth")
 	}
@@ -363,12 +362,12 @@ func TestIsConnAuthenticated_UnverifiedAuth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
+	mc := newSimpleMockConn(t)
 	nc := &netcore.NetCore{}
 	nc.SetAuth(&connauth.State{Verified: false})
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
+	svc.setTestConnEntryLocked(mc, &connEntry{core: nc})
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be false for unverified auth")
 	}
@@ -380,12 +379,12 @@ func TestIsConnAuthenticated_VerifiedAuth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
+	mc := newSimpleMockConn(t)
 	nc := &netcore.NetCore{}
 	nc.SetAuth(&connauth.State{Verified: true})
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
+	svc.setTestConnEntryLocked(mc, &connEntry{core: nc})
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if !svc.isConnAuthenticated(id) {
 		t.Error("isConnAuthenticated should be true for verified auth")
 	}
@@ -399,10 +398,10 @@ func TestIsAuthInitiated_NilState(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}})
+	mc := newSimpleMockConn(t)
+	svc.setTestConnEntryLocked(mc, &connEntry{core: &netcore.NetCore{}})
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if svc.isAuthInitiated(id) {
 		t.Error("isAuthInitiated should be false for nil auth state")
 	}
@@ -414,12 +413,12 @@ func TestIsAuthInitiated_PendingAuth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
+	mc := newSimpleMockConn(t)
 	nc := &netcore.NetCore{}
 	nc.SetAuth(&connauth.State{Verified: false, Challenge: "test-challenge"})
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
+	svc.setTestConnEntryLocked(mc, &connEntry{core: nc})
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if !svc.isAuthInitiated(id) {
 		t.Error("isAuthInitiated should be true when challenge has been issued")
 	}
@@ -431,12 +430,12 @@ func TestIsAuthInitiated_CompletedAuth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
+	mc := newSimpleMockConn(t)
 	nc := &netcore.NetCore{}
 	nc.SetAuth(&connauth.State{Verified: true})
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: nc})
+	svc.setTestConnEntryLocked(mc, &connEntry{core: nc})
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if !svc.isAuthInitiated(id) {
 		t.Error("isAuthInitiated should be true for completed auth")
 	}
@@ -451,12 +450,12 @@ func TestGAP0_ClientFieldDoesNotAffectAuth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := newMockNetConn()
+	mc := newSimpleMockConn(t)
 	// No auth state — regardless of what Client field might say in the hello
 	// frame, the connection is unauthenticated.
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}})
+	svc.setTestConnEntryLocked(mc, &connEntry{core: &netcore.NetCore{}})
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if svc.isConnAuthenticated(id) {
 		t.Fatal("SECURITY: isConnAuthenticated = true for unauth peer — " +
 			"auth must not depend on frame.Client")
@@ -470,54 +469,15 @@ func TestLoopback_DoesNotElevateAuth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceForAuth()
-	mockConn := &mockNetConnWithAddr{
-		local:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
-		remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 54321},
-	}
-	svc.setTestConnEntryLocked(mockConn, &connEntry{core: &netcore.NetCore{}}) // no auth
+	mc := newMockConnWithAddr(t,
+		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 54321},
+	)
+	svc.setTestConnEntryLocked(mc, &connEntry{core: &netcore.NetCore{}}) // no auth
 
-	id, _ := svc.connIDFor(mockConn)
+	id, _ := svc.connIDFor(mc)
 	if svc.isConnAuthenticated(id) {
 		t.Fatal("SECURITY: loopback connection authenticated without auth_session — " +
 			"source IP must not elevate auth")
 	}
 }
-
-// --- mock helpers ---
-
-// mockNetConnSimple is a minimal net.Conn for unit tests that don't need real I/O.
-type mockNetConnSimple struct {
-	local  net.Addr
-	remote net.Addr
-}
-
-func newMockNetConn() net.Conn {
-	return &mockNetConnSimple{
-		local:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 12345},
-		remote: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 54321},
-	}
-}
-
-func (m *mockNetConnSimple) Read(b []byte) (n int, err error)   { return 0, nil }
-func (m *mockNetConnSimple) Write(b []byte) (n int, err error)  { return len(b), nil }
-func (m *mockNetConnSimple) Close() error                       { return nil }
-func (m *mockNetConnSimple) LocalAddr() net.Addr                { return m.local }
-func (m *mockNetConnSimple) RemoteAddr() net.Addr               { return m.remote }
-func (m *mockNetConnSimple) SetDeadline(t time.Time) error      { return nil }
-func (m *mockNetConnSimple) SetReadDeadline(t time.Time) error  { return nil }
-func (m *mockNetConnSimple) SetWriteDeadline(t time.Time) error { return nil }
-
-// mockNetConnWithAddr allows tests to specify arbitrary local/remote addresses.
-type mockNetConnWithAddr struct {
-	local  net.Addr
-	remote net.Addr
-}
-
-func (m *mockNetConnWithAddr) Read(b []byte) (n int, err error)   { return 0, nil }
-func (m *mockNetConnWithAddr) Write(b []byte) (n int, err error)  { return len(b), nil }
-func (m *mockNetConnWithAddr) Close() error                       { return nil }
-func (m *mockNetConnWithAddr) LocalAddr() net.Addr                { return m.local }
-func (m *mockNetConnWithAddr) RemoteAddr() net.Addr               { return m.remote }
-func (m *mockNetConnWithAddr) SetDeadline(t time.Time) error      { return nil }
-func (m *mockNetConnWithAddr) SetReadDeadline(t time.Time) error  { return nil }
-func (m *mockNetConnWithAddr) SetWriteDeadline(t time.Time) error { return nil }

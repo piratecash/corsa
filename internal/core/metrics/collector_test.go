@@ -1,45 +1,61 @@
-package metrics
+package metrics_test
 
 import (
 	"testing"
 
+	"github.com/piratecash/corsa/internal/core/metrics"
+	metricsmocks "github.com/piratecash/corsa/internal/core/metrics/mocks"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/stretchr/testify/mock"
 )
 
-// mockTrafficSource simulates node.Service for testing.
-type mockTrafficSource struct {
-	sent int64
-	recv int64
+// newMutableMockTrafficSource creates a mock that reads sent/recv through
+// pointers, allowing the caller to change values between calls.
+func newMutableMockTrafficSource(t *testing.T, sent, recv *int64) *metricsmocks.MockTrafficSource {
+	t.Helper()
+	m := metricsmocks.NewMockTrafficSource(t)
+	m.EXPECT().HandleLocalFrame(mock.Anything).RunAndReturn(func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_network_stats" {
+			return protocol.Frame{
+				Type: "network_stats",
+				NetworkStats: &protocol.NetworkStatsFrame{
+					TotalBytesSent:     *sent,
+					TotalBytesReceived: *recv,
+					TotalTraffic:       *sent + *recv,
+				},
+			}
+		}
+		return protocol.Frame{Type: "error", Error: "unknown"}
+	}).Maybe()
+	return m
 }
 
-func (m *mockTrafficSource) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
-	if frame.Type == "fetch_network_stats" {
-		return protocol.Frame{
-			Type: "network_stats",
-			NetworkStats: &protocol.NetworkStatsFrame{
-				TotalBytesSent:     m.sent,
-				TotalBytesReceived: m.recv,
-				TotalTraffic:       m.sent + m.recv,
-			},
-		}
-	}
-	return protocol.Frame{Type: "error", Error: "unknown"}
+// newNilStatsSource creates a mock that returns a frame with nil NetworkStats.
+func newNilStatsSource(t *testing.T) *metricsmocks.MockTrafficSource {
+	t.Helper()
+	m := metricsmocks.NewMockTrafficSource(t)
+	m.EXPECT().HandleLocalFrame(mock.Anything).RunAndReturn(func(frame protocol.Frame) protocol.Frame {
+		return protocol.Frame{Type: "network_stats"}
+	}).Maybe()
+	return m
 }
 
 func TestCollectorCollectsSamples(t *testing.T) {
-	source := &mockTrafficSource{sent: 100, recv: 200}
-	collector := NewCollector(source)
+	sent := int64(100)
+	recv := int64(200)
+	source := newMutableMockTrafficSource(t, &sent, &recv)
+	collector := metrics.NewCollector(source)
 
 	// Drive collection directly instead of sleeping for real ticks.
-	collector.collectTrafficSample()
-	collector.collectTrafficSample()
-	collector.collectTrafficSample()
+	collector.CollectTrafficSample()
+	collector.CollectTrafficSample()
+	collector.CollectTrafficSample()
 
 	// Change traffic mid-collection.
-	source.sent = 500
-	source.recv = 800
+	sent = 500
+	recv = 800
 
-	collector.collectTrafficSample()
+	collector.CollectTrafficSample()
 
 	frame := collector.TrafficSnapshot()
 	if frame.Type != "traffic_history" {
@@ -69,13 +85,13 @@ func TestCollectorCollectsSamples(t *testing.T) {
 }
 
 func TestCollectorHandlesNilNetworkStats(t *testing.T) {
-	nilSource := &nilStatsSource{}
-	collector := NewCollector(nilSource)
+	source := newNilStatsSource(t)
+	collector := metrics.NewCollector(source)
 
 	// Drive collection directly — nil NetworkStats should be skipped.
-	collector.collectTrafficSample()
-	collector.collectTrafficSample()
-	collector.collectTrafficSample()
+	collector.CollectTrafficSample()
+	collector.CollectTrafficSample()
+	collector.CollectTrafficSample()
 
 	frame := collector.TrafficSnapshot()
 	if frame.TrafficHistory.Count != 0 {
@@ -83,26 +99,22 @@ func TestCollectorHandlesNilNetworkStats(t *testing.T) {
 	}
 }
 
-type nilStatsSource struct{}
-
-func (n *nilStatsSource) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
-	return protocol.Frame{Type: "network_stats"} // NetworkStats is nil
-}
-
 func TestCollectorTrafficSnapshotFrame(t *testing.T) {
-	source := &mockTrafficSource{sent: 1000, recv: 2000}
-	collector := NewCollector(source)
+	sent := int64(1000)
+	recv := int64(2000)
+	source := newMutableMockTrafficSource(t, &sent, &recv)
+	collector := metrics.NewCollector(source)
 
 	// Manually record data via the traffic history buffer.
-	collector.traffic.Record(1000, 2000)
-	collector.traffic.Record(1500, 2800)
+	collector.CollectorTraffic().Record(1000, 2000)
+	collector.CollectorTraffic().Record(1500, 2800)
 
 	frame := collector.TrafficSnapshot()
 	if frame.TrafficHistory.Count != 2 {
 		t.Fatalf("expected 2 samples, got %d", frame.TrafficHistory.Count)
 	}
-	if frame.TrafficHistory.Capacity != trafficHistoryCapacity {
-		t.Errorf("expected capacity=%d, got %d", trafficHistoryCapacity, frame.TrafficHistory.Capacity)
+	if frame.TrafficHistory.Capacity != metrics.TrafficHistoryCapacityForTest {
+		t.Errorf("expected capacity=%d, got %d", metrics.TrafficHistoryCapacityForTest, frame.TrafficHistory.Capacity)
 	}
 
 	// Verify second sample has correct deltas.

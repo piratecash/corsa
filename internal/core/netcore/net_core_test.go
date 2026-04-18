@@ -7,56 +7,66 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/testutil/netmocks"
 )
 
-// mockConn is a minimal net.Conn for testing NetCore writer behavior.
-type mockConn struct {
-	mu      sync.Mutex
-	buf     bytes.Buffer
-	closed  bool
-	writeFn func([]byte) (int, error) // optional override
+// connBuffer is a thread-safe write buffer used alongside netmocks.MockConn.
+type connBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
-func (m *mockConn) Read(b []byte) (int, error) { return 0, nil }
-func (m *mockConn) Write(b []byte) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.writeFn != nil {
-		return m.writeFn(b)
-	}
-	return m.buf.Write(b)
+func (cb *connBuffer) Written() []byte {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.buf.Bytes()
 }
 
-func (m *mockConn) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.closed = true
-	return nil
+// newBufferedMockConn creates a MockConn that captures all Write calls into a
+// shared connBuffer. The caller inspects cb.Written() instead of the old
+// mockConn.Written().
+func newBufferedMockConn(t *testing.T) (*netmocks.MockConn, *connBuffer) {
+	t.Helper()
+	cb := &connBuffer{}
+	m := netmocks.NewMockConn(t)
+	m.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		cb.mu.Lock()
+		defer cb.mu.Unlock()
+		return cb.buf.Write(b)
+	}).Maybe()
+	m.On("Read", mock.Anything).Return(0, nil).Maybe()
+	m.On("Close").Return(nil).Maybe()
+	m.On("LocalAddr").Return(&net.TCPAddr{}).Maybe()
+	m.On("RemoteAddr").Return(&net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 64646}).Maybe()
+	m.On("SetDeadline", mock.Anything).Return(nil).Maybe()
+	m.On("SetReadDeadline", mock.Anything).Return(nil).Maybe()
+	m.On("SetWriteDeadline", mock.Anything).Return(nil).Maybe()
+	return m, cb
 }
-func (m *mockConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
-func (m *mockConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 64646} }
-func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
-func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
-func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 
-func (m *mockConn) Written() []byte {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.buf.Bytes()
-}
-
-func (m *mockConn) IsClosed() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.closed
+// newMockConnWithWriter creates a MockConn with a custom write function.
+func newMockConnWithWriter(t *testing.T, writeFn func([]byte) (int, error)) *netmocks.MockConn {
+	t.Helper()
+	m := netmocks.NewMockConn(t)
+	m.EXPECT().Write(mock.Anything).RunAndReturn(writeFn).Maybe()
+	m.On("Read", mock.Anything).Return(0, nil).Maybe()
+	m.On("Close").Return(nil).Maybe()
+	m.On("LocalAddr").Return(&net.TCPAddr{}).Maybe()
+	m.On("RemoteAddr").Return(&net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 64646}).Maybe()
+	m.On("SetDeadline", mock.Anything).Return(nil).Maybe()
+	m.On("SetReadDeadline", mock.Anything).Return(nil).Maybe()
+	m.On("SetWriteDeadline", mock.Anything).Return(nil).Maybe()
+	return m
 }
 
 // TestNetCoreSendWritesToSocket verifies that Send() routes a frame through
 // the writer goroutine to the underlying socket.
 func TestNetCoreSendWritesToSocket(t *testing.T) {
-	conn := &mockConn{}
+	conn, cb := newBufferedMockConn(t)
 	pc := New(1, conn, Inbound, Options{})
 	defer pc.Close()
 
@@ -68,7 +78,7 @@ func TestNetCoreSendWritesToSocket(t *testing.T) {
 	// Give the writer goroutine time to drain.
 	time.Sleep(50 * time.Millisecond)
 
-	written := conn.Written()
+	written := cb.Written()
 	if len(written) == 0 {
 		t.Fatal("expected data written to socket, got nothing")
 	}
@@ -80,7 +90,7 @@ func TestNetCoreSendWritesToSocket(t *testing.T) {
 // TestNetCoreSendSyncBlocksUntilWrite verifies that SendSync() blocks until
 // the writer goroutine has flushed the frame to the socket.
 func TestNetCoreSendSyncBlocksUntilWrite(t *testing.T) {
-	conn := &mockConn{}
+	conn, cb := newBufferedMockConn(t)
 	pc := New(2, conn, Inbound, Options{})
 	defer pc.Close()
 
@@ -90,7 +100,7 @@ func TestNetCoreSendSyncBlocksUntilWrite(t *testing.T) {
 	}
 
 	// After SendSync returns true, data must already be in the socket.
-	written := conn.Written()
+	written := cb.Written()
 	if !bytes.Contains(written, []byte(`"type":"pong"`)) {
 		t.Fatalf("expected pong frame written, got: %s", written)
 	}
@@ -102,13 +112,15 @@ func TestNetCoreSendSyncBlocksUntilWrite(t *testing.T) {
 // dialled sessions keeps the same back-pressure window it had before
 // outbound writes were routed through the managed send path.
 func TestNetCoreWriteDeadlinePerDirection(t *testing.T) {
-	inbound := New(100, &mockConn{}, Inbound, Options{})
+	inConn, _ := newBufferedMockConn(t)
+	inbound := New(100, inConn, Inbound, Options{})
 	defer inbound.Close()
 	if inbound.writeDeadline != connWriteTimeout {
 		t.Fatalf("inbound writeDeadline = %v, want %v", inbound.writeDeadline, connWriteTimeout)
 	}
 
-	outbound := New(101, &mockConn{}, Outbound, Options{})
+	outConn, _ := newBufferedMockConn(t)
+	outbound := New(101, outConn, Outbound, Options{})
 	defer outbound.Close()
 	if outbound.writeDeadline != sessionWriteTimeout {
 		t.Fatalf("outbound writeDeadline = %v, want %v", outbound.writeDeadline, sessionWriteTimeout)
@@ -132,13 +144,11 @@ func TestNetCoreSendReturnsFalseWhenQueueFull(t *testing.T) {
 	writerStarted := make(chan struct{})
 	blocker := make(chan struct{})
 	var once sync.Once
-	conn := &mockConn{
-		writeFn: func(b []byte) (int, error) {
-			once.Do(func() { close(writerStarted) })
-			<-blocker
-			return len(b), nil
-		},
-	}
+	conn := newMockConnWithWriter(t, func(b []byte) (int, error) {
+		once.Do(func() { close(writerStarted) })
+		<-blocker
+		return len(b), nil
+	})
 	pc := New(3, conn, Inbound, Options{})
 	defer func() {
 		close(blocker)
@@ -165,24 +175,22 @@ func TestNetCoreSendReturnsFalseWhenQueueFull(t *testing.T) {
 	}
 }
 
-// TestNetCoreCloseIdemponent verifies that Close() can be called multiple
+// TestNetCoreCloseIdempotent verifies that Close() can be called multiple
 // times without panicking.
 func TestNetCoreCloseIdempotent(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	pc := New(4, conn, Inbound, Options{})
 
 	pc.Close()
 	pc.Close() // must not panic
 
-	if !conn.IsClosed() {
-		t.Fatal("underlying connection should be closed")
-	}
+	conn.AssertCalled(t, "Close")
 }
 
 // TestNetCoreSendAfterCloseReturnsFalse verifies that Send() on a closed
 // NetCore returns false without panicking.
 func TestNetCoreSendAfterCloseReturnsFalse(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	pc := New(5, conn, Inbound, Options{})
 	pc.Close()
 
@@ -193,7 +201,7 @@ func TestNetCoreSendAfterCloseReturnsFalse(t *testing.T) {
 
 // TestNetCoreHasCapability verifies capability lookup.
 func TestNetCoreHasCapability(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	pc := New(6, conn, Inbound, Options{})
 	defer pc.Close()
 
@@ -212,7 +220,7 @@ func TestNetCoreHasCapability(t *testing.T) {
 
 // TestNetCoreIdentityLifecycle verifies the identity set/get flow.
 func TestNetCoreIdentityLifecycle(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	pc := New(7, conn, Inbound, Options{})
 	defer pc.Close()
 
@@ -229,7 +237,7 @@ func TestNetCoreIdentityLifecycle(t *testing.T) {
 // TestNetCoreConcurrentSendNoRace runs multiple goroutines calling Send()
 // concurrently to verify there are no data races.
 func TestNetCoreConcurrentSendNoRace(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	pc := New(8, conn, Inbound, Options{})
 	defer pc.Close()
 
@@ -276,7 +284,7 @@ func TestSendStatusStringCoversAllValues(t *testing.T) {
 }
 
 // saturateSendCh drives NetCore into a fully-saturated backpressure state:
-// one item is pulled by the writer (blocked in the caller-owned mockConn
+// one item is pulled by the writer (blocked in the caller-owned MockConn
 // gate), and sendChBuffer more items fill every buffered slot. The caller
 // passes writerStarted so the helper can wait until the writer has
 // definitely pulled the first frame before filling the buffer — otherwise
@@ -307,13 +315,11 @@ func TestNetCoreSendRawSyncFastFailsOnFullQueue(t *testing.T) {
 	writerStarted := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	conn := &mockConn{
-		writeFn: func(b []byte) (int, error) {
-			once.Do(func() { close(writerStarted) })
-			<-release
-			return len(b), nil
-		},
-	}
+	conn := newMockConnWithWriter(t, func(b []byte) (int, error) {
+		once.Do(func() { close(writerStarted) })
+		<-release
+		return len(b), nil
+	})
 	pc := New(41, conn, Inbound, Options{})
 	defer func() {
 		select {
@@ -354,14 +360,12 @@ func TestNetCoreSendRawSyncBlockingDoesNotStarveOnFullQueue(t *testing.T) {
 	release := make(chan struct{})
 	writes := make(chan struct{}, sendChBuffer+2)
 	var once sync.Once
-	conn := &mockConn{
-		writeFn: func(b []byte) (int, error) {
-			once.Do(func() { close(writerStarted) })
-			<-release
-			writes <- struct{}{}
-			return len(b), nil
-		},
-	}
+	conn := newMockConnWithWriter(t, func(b []byte) (int, error) {
+		once.Do(func() { close(writerStarted) })
+		<-release
+		writes <- struct{}{}
+		return len(b), nil
+	})
 	pc := New(42, conn, Outbound, Options{})
 	defer func() {
 		// Release the writer (if still waiting) before closing so Close()
@@ -421,7 +425,7 @@ func TestNetCoreSendRawSyncBlockingDoesNotStarveOnFullQueue(t *testing.T) {
 
 // TestNetCoreIsLocal verifies IsLocal/SetLocal behavior.
 func TestNetCoreIsLocal(t *testing.T) {
-	conn := &mockConn{}
+	conn, _ := newBufferedMockConn(t)
 	nc := New(1, conn, Inbound, Options{})
 	defer nc.Close()
 

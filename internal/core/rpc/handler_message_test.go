@@ -4,7 +4,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 func TestMessageFetchMessagesValidTopic(t *testing.T) {
@@ -17,18 +22,16 @@ func TestMessageFetchMessagesValidTopic(t *testing.T) {
 			CreatedAt: "2026-03-26T10:00:00Z",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_messages" && frame.Topic != "" {
-				return protocol.Frame{
-					Type:     "messages_response",
-					Topic:    frame.Topic,
-					Messages: messages,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_messages" && frame.Topic != "" {
+			return protocol.Frame{
+				Type:     "messages_response",
+				Topic:    frame.Topic,
+				Messages: messages,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/list", map[string]interface{}{
@@ -50,7 +53,7 @@ func TestMessageFetchMessagesValidTopic(t *testing.T) {
 }
 
 func TestMessageFetchMessagesMissingTopic(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/list", map[string]interface{}{})
@@ -60,7 +63,7 @@ func TestMessageFetchMessagesMissingTopic(t *testing.T) {
 }
 
 func TestMessageFetchMessagesEmptyTopic(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/list", map[string]interface{}{
@@ -72,20 +75,18 @@ func TestMessageFetchMessagesEmptyTopic(t *testing.T) {
 }
 
 func TestMessageFetchMessagesWithPagination(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_messages" {
-				return protocol.Frame{
-					Type:     "messages_response",
-					Topic:    frame.Topic,
-					Limit:    frame.Limit,
-					Count:    frame.Count,
-					Messages: []protocol.MessageFrame{},
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_messages" {
+			return protocol.Frame{
+				Type:     "messages_response",
+				Topic:    frame.Topic,
+				Limit:    frame.Limit,
+				Count:    frame.Count,
+				Messages: []protocol.MessageFrame{},
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/list", map[string]interface{}{
@@ -100,18 +101,16 @@ func TestMessageFetchMessagesWithPagination(t *testing.T) {
 
 func TestMessageFetchMessageIDsValidTopic(t *testing.T) {
 	ids := []string{"msg-1", "msg-2", "msg-3"}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_message_ids" && frame.Topic != "" {
-				return protocol.Frame{
-					Type:  "message_ids_response",
-					Topic: frame.Topic,
-					IDs:   ids,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_message_ids" && frame.Topic != "" {
+			return protocol.Frame{
+				Type:  "message_ids_response",
+				Topic: frame.Topic,
+				IDs:   ids,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/ids", map[string]interface{}{
@@ -132,7 +131,7 @@ func TestMessageFetchMessageIDsValidTopic(t *testing.T) {
 }
 
 func TestMessageFetchMessageIDsMissingTopic(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/ids", map[string]interface{}{})
@@ -149,19 +148,17 @@ func TestMessageFetchMessage(t *testing.T) {
 		Body:      "test message content",
 		CreatedAt: "2026-03-26T10:00:00Z",
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_message" && frame.Topic != "" && frame.ID != "" {
-				return protocol.Frame{
-					Type:  "message_response",
-					Topic: frame.Topic,
-					ID:    frame.ID,
-					Item:  msgData,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_message" && frame.Topic != "" && frame.ID != "" {
+			return protocol.Frame{
+				Type:  "message_response",
+				Topic: frame.Topic,
+				ID:    frame.ID,
+				Item:  msgData,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/get", map[string]interface{}{
@@ -177,7 +174,7 @@ func TestMessageFetchMessage(t *testing.T) {
 }
 
 func TestMessageFetchMessageMissingTopic(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/get", map[string]interface{}{
@@ -189,7 +186,7 @@ func TestMessageFetchMessageMissingTopic(t *testing.T) {
 }
 
 func TestMessageFetchMessageMissingID(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/get", map[string]interface{}{
@@ -208,19 +205,17 @@ func TestMessageFetchInboxValidRequest(t *testing.T) {
 			Recipient: "recipient-addr",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_inbox" {
-				return protocol.Frame{
-					Type:      "inbox_response",
-					Topic:     frame.Topic,
-					Recipient: frame.Recipient,
-					Messages:  messages,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_inbox" {
+			return protocol.Frame{
+				Type:      "inbox_response",
+				Topic:     frame.Topic,
+				Recipient: frame.Recipient,
+				Messages:  messages,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/inbox", map[string]interface{}{
@@ -234,7 +229,7 @@ func TestMessageFetchInboxValidRequest(t *testing.T) {
 }
 
 func TestMessageFetchInboxMissingTopic(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/inbox", map[string]interface{}{
@@ -246,18 +241,16 @@ func TestMessageFetchInboxMissingTopic(t *testing.T) {
 }
 
 func TestMessageFetchInboxDefaultRecipient(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_inbox" {
-				return protocol.Frame{
-					Type:      "inbox_response",
-					Topic:     frame.Topic,
-					Recipient: frame.Recipient,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_inbox" {
+			return protocol.Frame{
+				Type:      "inbox_response",
+				Topic:     frame.Topic,
+				Recipient: frame.Recipient,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/inbox", map[string]interface{}{
@@ -278,18 +271,16 @@ func TestMessageFetchPendingMessages(t *testing.T) {
 			QueuedAt:  "2026-03-26T10:00:00Z",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_pending_messages" {
-				return protocol.Frame{
-					Type:            "pending_messages_response",
-					Topic:           frame.Topic,
-					PendingMessages: pending,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_pending_messages" {
+			return protocol.Frame{
+				Type:            "pending_messages_response",
+				Topic:           frame.Topic,
+				PendingMessages: pending,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/pending", map[string]interface{}{
@@ -302,7 +293,7 @@ func TestMessageFetchPendingMessages(t *testing.T) {
 }
 
 func TestMessageFetchPendingMessagesMissingTopic(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/pending", map[string]interface{}{})
@@ -319,18 +310,16 @@ func TestMessageFetchDeliveryReceipts(t *testing.T) {
 			DeliveredAt: "2026-03-26T10:00:00Z",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_delivery_receipts" {
-				return protocol.Frame{
-					Type:      "receipts_response",
-					Recipient: frame.Recipient,
-					Receipts:  receipts,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_delivery_receipts" {
+			return protocol.Frame{
+				Type:      "receipts_response",
+				Recipient: frame.Recipient,
+				Receipts:  receipts,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/receipts", map[string]interface{}{
@@ -343,17 +332,15 @@ func TestMessageFetchDeliveryReceipts(t *testing.T) {
 }
 
 func TestMessageFetchDeliveryReceiptsDefaultRecipient(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_delivery_receipts" {
-				return protocol.Frame{
-					Type:      "receipts_response",
-					Recipient: frame.Recipient,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_delivery_receipts" {
+			return protocol.Frame{
+				Type:      "receipts_response",
+				Recipient: frame.Recipient,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/receipts", map[string]interface{}{})
@@ -364,17 +351,15 @@ func TestMessageFetchDeliveryReceiptsDefaultRecipient(t *testing.T) {
 }
 
 func TestMessageFetchMessagesNodeError(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_messages" {
-				return protocol.Frame{
-					Type:  "error",
-					Error: "topic not found",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_messages" {
+			return protocol.Frame{
+				Type:  "error",
+				Error: "topic not found",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/list", map[string]interface{}{
@@ -395,17 +380,15 @@ func TestMessageFetchDMHeaders(t *testing.T) {
 			CreatedAt: "2026-03-26T10:00:00Z",
 		},
 	}
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_dm_headers" {
-				return protocol.Frame{
-					Type:      "dm_headers_response",
-					DMHeaders: headers,
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_dm_headers" {
+			return protocol.Frame{
+				Type:      "dm_headers_response",
+				DMHeaders: headers,
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/dm_headers", map[string]interface{}{})
@@ -424,16 +407,14 @@ func TestMessageFetchDMHeaders(t *testing.T) {
 }
 
 func TestMessageFetchDMHeadersEmpty(t *testing.T) {
-	node := &mockNodeProvider{
-		handleFunc: func(frame protocol.Frame) protocol.Frame {
-			if frame.Type == "fetch_dm_headers" {
-				return protocol.Frame{
-					Type: "dm_headers_response",
-				}
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.Type == "fetch_dm_headers" {
+			return protocol.Frame{
+				Type: "dm_headers_response",
 			}
-			return protocol.Frame{Type: "ok"}
-		},
-	}
+		}
+		return protocol.Frame{Type: "ok"}
+	})
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/dm_headers", map[string]interface{}{})
@@ -443,7 +424,7 @@ func TestMessageFetchDMHeadersEmpty(t *testing.T) {
 }
 
 func TestMessageSendDMNilRouter(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
@@ -456,8 +437,8 @@ func TestMessageSendDMNilRouter(t *testing.T) {
 }
 
 func TestMessageSendDMMissingTo(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
@@ -469,8 +450,8 @@ func TestMessageSendDMMissingTo(t *testing.T) {
 }
 
 func TestMessageSendDMMissingBody(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
@@ -482,8 +463,19 @@ func TestMessageSendDMMissingBody(t *testing.T) {
 }
 
 func TestMessageSendDMSuccess(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+
+	var capturedTo domain.PeerIdentity
+	var capturedMsg domain.OutgoingDM
+	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
+	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			capturedTo = args.Get(0).(domain.PeerIdentity)
+			capturedMsg = args.Get(1).(domain.OutgoingDM)
+		})
+	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
@@ -495,17 +487,17 @@ func TestMessageSendDMSuccess(t *testing.T) {
 	expectField(t, result, "status", "pending")
 	expectField(t, result, "to", "peer-addr")
 
-	if dmRouter.lastTo != "peer-addr" {
-		t.Errorf("expected dmRouter.lastTo = %q, got %q", "peer-addr", dmRouter.lastTo)
+	if capturedTo != "peer-addr" {
+		t.Errorf("expected capturedTo = %q, got %q", "peer-addr", capturedTo)
 	}
-	if dmRouter.lastMsg.Body != "hello world" {
-		t.Errorf("expected dmRouter.lastMsg.Body = %q, got %q", "hello world", dmRouter.lastMsg.Body)
+	if string(capturedMsg.Body) != "hello world" {
+		t.Errorf("expected capturedMsg.Body = %q, got %q", "hello world", capturedMsg.Body)
 	}
 }
 
 func TestMessageSendDMRejectsNonStringReplyTo(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	// reply_to as number — must be rejected, not silently dropped.
@@ -534,8 +526,8 @@ func TestMessageSendDMRejectsNonStringReplyTo(t *testing.T) {
 }
 
 func TestMessageSendDMRejectsInvalidUUIDReplyTo(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	// reply_to as string but not UUID v4 — must be rejected synchronously.
@@ -551,14 +543,21 @@ func TestMessageSendDMRejectsInvalidUUIDReplyTo(t *testing.T) {
 	}
 
 	// Verify dmRouter was never called — the request should not be enqueued.
-	if dmRouter.lastTo != "" {
-		t.Errorf("expected dmRouter not called, but lastTo=%q", dmRouter.lastTo)
-	}
+	dmRouter.AssertNotCalled(t, "SendMessage")
 }
 
 func TestMessageSendDMAcceptsValidUUIDReplyTo(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+
+	var capturedMsg domain.OutgoingDM
+	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
+	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			capturedMsg = args.Get(1).(domain.OutgoingDM)
+		})
+	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
 	// Without chatlog, existence check is skipped — format-valid UUID is accepted.
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
@@ -570,17 +569,24 @@ func TestMessageSendDMAcceptsValidUUIDReplyTo(t *testing.T) {
 
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "status", "pending")
-	if dmRouter.lastMsg.ReplyTo != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
-		t.Errorf("expected reply_to forwarded, got %q", dmRouter.lastMsg.ReplyTo)
+	if string(capturedMsg.ReplyTo) != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
+		t.Errorf("expected reply_to forwarded, got %q", capturedMsg.ReplyTo)
 	}
 }
 
 func TestMessageSendDMRejectsDanglingReplyToWithChatlog(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
-	chatlog := &mockChatlogProvider{
-		knownEntries: map[string]bool{}, // empty — no messages exist
-	}
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
+
+	knownEntries := map[string]bool{} // empty — no messages exist
+	chatlog := rpcmocks.NewMockChatlogProvider(t)
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
+	chatlog.EXPECT().HasEntryInConversation(mock.Anything, mock.Anything).
+		RunAndReturn(func(peerAddress, messageID string) bool {
+			return knownEntries[peerAddress+":"+messageID]
+		})
 
 	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
 
@@ -595,19 +601,32 @@ func TestMessageSendDMRejectsDanglingReplyToWithChatlog(t *testing.T) {
 	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "does not exist") {
 		t.Errorf("expected existence validation error, got %q", errMsg)
 	}
-	if dmRouter.lastTo != "" {
-		t.Errorf("expected dmRouter not called, but lastTo=%q", dmRouter.lastTo)
-	}
+	dmRouter.AssertNotCalled(t, "SendMessage")
 }
 
 func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
-	chatlog := &mockChatlogProvider{
-		knownEntries: map[string]bool{
-			"peer-addr:a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5": true,
-		},
+	node := newDefaultNodeProvider(t)
+
+	var capturedMsg domain.OutgoingDM
+	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
+	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			capturedMsg = args.Get(1).(domain.OutgoingDM)
+		})
+	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	knownEntries := map[string]bool{
+		"peer-addr:a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5": true,
 	}
+	chatlog := rpcmocks.NewMockChatlogProvider(t)
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
+	chatlog.EXPECT().HasEntryInConversation(mock.Anything, mock.Anything).
+		RunAndReturn(func(peerAddress, messageID string) bool {
+			return knownEntries[peerAddress+":"+messageID]
+		})
 
 	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
 
@@ -619,14 +638,23 @@ func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
 
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "status", "pending")
-	if dmRouter.lastMsg.ReplyTo != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
-		t.Errorf("expected reply_to forwarded, got %q", dmRouter.lastMsg.ReplyTo)
+	if string(capturedMsg.ReplyTo) != "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5" {
+		t.Errorf("expected reply_to forwarded, got %q", capturedMsg.ReplyTo)
 	}
 }
 
 func TestMessageSendDMAcceptsEmptyReplyTo(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+
+	var capturedMsg domain.OutgoingDM
+	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
+	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			capturedMsg = args.Get(1).(domain.OutgoingDM)
+		})
+	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	// Omitted reply_to — should succeed normally.
@@ -637,13 +665,13 @@ func TestMessageSendDMAcceptsEmptyReplyTo(t *testing.T) {
 
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "status", "pending")
-	if dmRouter.lastMsg.ReplyTo != "" {
-		t.Errorf("expected empty reply_to, got %q", dmRouter.lastMsg.ReplyTo)
+	if string(capturedMsg.ReplyTo) != "" {
+		t.Errorf("expected empty reply_to, got %q", capturedMsg.ReplyTo)
 	}
 }
 
 func TestMessageCommandsHiddenWithoutDMRouter(t *testing.T) {
-	node := &mockNodeProvider{}
+	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, nil) // dmRouter=nil
 
 	code, result := postJSON(t, server, "/rpc/v1/system/help", map[string]interface{}{})
@@ -676,8 +704,8 @@ func TestMessageCommandsHiddenWithoutDMRouter(t *testing.T) {
 }
 
 func TestMessageCommandsVisibleWithDMRouter(t *testing.T) {
-	node := &mockNodeProvider{}
-	dmRouter := &mockDMRouterProvider{}
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/system/help", map[string]interface{}{})

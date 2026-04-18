@@ -1,0 +1,10 @@
+version: "2"
+
+run:
+  timeout: 7m
+
+exclusions:
+  # generated: strict is the default — files with "// Code generated ... DO NOT EDIT."
+  # (all mockery output) are automatically excluded.
+  paths:
+    - "mocks/"

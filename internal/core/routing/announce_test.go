@@ -1,61 +1,73 @@
-package routing
+package routing_test
 
 import (
 	"context"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/mock"
+
+	"github.com/piratecash/corsa/internal/core/routing"
+	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 )
 
-// mockPeerSender records calls to SendAnnounceRoutes.
-type mockPeerSender struct {
+type senderRecorder struct {
 	mu    sync.Mutex
-	calls []mockSendCall
+	calls []sendCall
 }
 
-type mockSendCall struct {
-	PeerAddress PeerAddress
-	Routes      []AnnounceEntry
+type sendCall struct {
+	PeerAddress routing.PeerAddress
+	Routes      []routing.AnnounceEntry
 }
 
-func (m *mockPeerSender) SendAnnounceRoutes(peerAddress PeerAddress, routes []AnnounceEntry) bool {
-	m.mu.Lock()
-	m.calls = append(m.calls, mockSendCall{PeerAddress: peerAddress, Routes: routes})
-	m.mu.Unlock()
-	return true
+func (r *senderRecorder) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
 }
 
-func (m *mockPeerSender) callCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.calls)
-}
-
-func (m *mockPeerSender) lastCall() mockSendCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(m.calls) == 0 {
-		return mockSendCall{}
+func (r *senderRecorder) lastCall() sendCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.calls) == 0 {
+		return sendCall{}
 	}
-	return m.calls[len(m.calls)-1]
+	return r.calls[len(r.calls)-1]
+}
+
+func newMockPeerSender(t *testing.T) (*routingmocks.MockPeerSender, *senderRecorder) {
+	t.Helper()
+	rec := &senderRecorder{}
+	m := routingmocks.NewMockPeerSender(t)
+	m.EXPECT().SendAnnounceRoutes(mock.Anything, mock.Anything).RunAndReturn(
+		func(addr routing.PeerAddress, routes []routing.AnnounceEntry) bool {
+			rec.mu.Lock()
+			rec.calls = append(rec.calls, sendCall{PeerAddress: addr, Routes: routes})
+			rec.mu.Unlock()
+			return true
+		},
+	).Maybe()
+	return m, rec
 }
 
 func TestAnnounceLoopPeriodicSend(t *testing.T) {
-	table := NewTable(WithLocalOrigin("node-A"))
-	sender := &mockPeerSender{}
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	sender, rec := newMockPeerSender(t)
 
 	if _, err := table.AddDirectPeer("peer-B"); err != nil {
 		t.Fatal(err)
 	}
 
-	peers := func() []AnnounceTarget {
-		return []AnnounceTarget{
+	peers := func() []routing.AnnounceTarget {
+		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C"},
 		}
 	}
 
-	loop := NewAnnounceLoop(table, sender, peers,
-		WithAnnounceInterval(50*time.Millisecond))
+	loop := routing.NewAnnounceLoop(table, sender, peers,
+		routing.WithAnnounceInterval(50*time.Millisecond))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -69,11 +81,11 @@ func TestAnnounceLoopPeriodicSend(t *testing.T) {
 	cancel()
 	<-done
 
-	if sender.callCount() == 0 {
+	if rec.callCount() == 0 {
 		t.Fatal("expected at least one periodic announcement, got 0")
 	}
 
-	call := sender.lastCall()
+	call := rec.lastCall()
 	if call.PeerAddress != "addr-C" {
 		t.Fatalf("expected peer address addr-C, got %s", call.PeerAddress)
 	}
@@ -83,22 +95,22 @@ func TestAnnounceLoopPeriodicSend(t *testing.T) {
 }
 
 func TestAnnounceLoopTriggeredUpdate(t *testing.T) {
-	table := NewTable(WithLocalOrigin("node-A"))
-	sender := &mockPeerSender{}
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	sender, rec := newMockPeerSender(t)
 
 	if _, err := table.AddDirectPeer("peer-B"); err != nil {
 		t.Fatal(err)
 	}
 
-	peers := func() []AnnounceTarget {
-		return []AnnounceTarget{
+	peers := func() []routing.AnnounceTarget {
+		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C"},
 		}
 	}
 
 	// Use a very long interval so only triggered updates fire.
-	loop := NewAnnounceLoop(table, sender, peers,
-		WithAnnounceInterval(10*time.Second))
+	loop := routing.NewAnnounceLoop(table, sender, peers,
+		routing.WithAnnounceInterval(10*time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -111,7 +123,7 @@ func TestAnnounceLoopTriggeredUpdate(t *testing.T) {
 	loop.TriggerUpdate()
 	time.Sleep(50 * time.Millisecond)
 
-	if sender.callCount() == 0 {
+	if rec.callCount() == 0 {
 		t.Fatal("expected triggered announcement, got 0")
 	}
 
@@ -120,8 +132,8 @@ func TestAnnounceLoopTriggeredUpdate(t *testing.T) {
 }
 
 func TestAnnounceLoopSplitHorizon(t *testing.T) {
-	table := NewTable(WithLocalOrigin("node-A"))
-	sender := &mockPeerSender{}
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	sender, rec := newMockPeerSender(t)
 
 	if _, err := table.AddDirectPeer("peer-B"); err != nil {
 		t.Fatal(err)
@@ -129,14 +141,14 @@ func TestAnnounceLoopSplitHorizon(t *testing.T) {
 
 	// Announce to peer-B: the direct route for peer-B was learned via
 	// peer-B (NextHop == peer-B), so it should be excluded by split horizon.
-	peers := func() []AnnounceTarget {
-		return []AnnounceTarget{
+	peers := func() []routing.AnnounceTarget {
+		return []routing.AnnounceTarget{
 			{Address: "addr-B", Identity: "peer-B"},
 		}
 	}
 
-	loop := NewAnnounceLoop(table, sender, peers,
-		WithAnnounceInterval(10*time.Second))
+	loop := routing.NewAnnounceLoop(table, sender, peers,
+		routing.WithAnnounceInterval(10*time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -154,26 +166,26 @@ func TestAnnounceLoopSplitHorizon(t *testing.T) {
 	// announcing to peer-B. The direct route has NextHop == "peer-B",
 	// which equals the announce target identity "peer-B", so no routes
 	// should be sent.
-	if sender.callCount() != 0 {
-		t.Fatalf("expected 0 calls due to split horizon, got %d", sender.callCount())
+	if rec.callCount() != 0 {
+		t.Fatalf("expected 0 calls due to split horizon, got %d", rec.callCount())
 	}
 }
 
 func TestAnnounceLoopNoPeersNoSend(t *testing.T) {
-	table := NewTable(WithLocalOrigin("node-A"))
-	sender := &mockPeerSender{}
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	sender, rec := newMockPeerSender(t)
 
 	if _, err := table.AddDirectPeer("peer-B"); err != nil {
 		t.Fatal(err)
 	}
 
 	// No peers to announce to.
-	peers := func() []AnnounceTarget {
+	peers := func() []routing.AnnounceTarget {
 		return nil
 	}
 
-	loop := NewAnnounceLoop(table, sender, peers,
-		WithAnnounceInterval(50*time.Millisecond))
+	loop := routing.NewAnnounceLoop(table, sender, peers,
+		routing.WithAnnounceInterval(50*time.Millisecond))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -186,27 +198,27 @@ func TestAnnounceLoopNoPeersNoSend(t *testing.T) {
 	cancel()
 	<-done
 
-	if sender.callCount() != 0 {
-		t.Fatalf("expected 0 sends with no peers, got %d", sender.callCount())
+	if rec.callCount() != 0 {
+		t.Fatalf("expected 0 sends with no peers, got %d", rec.callCount())
 	}
 }
 
 func TestAnnounceLoopTriggerCoalesces(t *testing.T) {
-	table := NewTable(WithLocalOrigin("node-A"))
-	sender := &mockPeerSender{}
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	sender, rec := newMockPeerSender(t)
 
 	if _, err := table.AddDirectPeer("peer-B"); err != nil {
 		t.Fatal(err)
 	}
 
-	peers := func() []AnnounceTarget {
-		return []AnnounceTarget{
+	peers := func() []routing.AnnounceTarget {
+		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C"},
 		}
 	}
 
-	loop := NewAnnounceLoop(table, sender, peers,
-		WithAnnounceInterval(10*time.Second))
+	loop := routing.NewAnnounceLoop(table, sender, peers,
+		routing.WithAnnounceInterval(10*time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -225,7 +237,7 @@ func TestAnnounceLoopTriggerCoalesces(t *testing.T) {
 
 	// Due to coalescing, we expect far fewer than 10 sends.
 	// At least 1 (the first trigger), at most a few.
-	count := sender.callCount()
+	count := rec.callCount()
 	if count == 0 {
 		t.Fatal("expected at least 1 triggered send")
 	}
@@ -235,12 +247,12 @@ func TestAnnounceLoopTriggerCoalesces(t *testing.T) {
 }
 
 func TestAnnounceLoopRunOnlyOnce(t *testing.T) {
-	table := NewTable(WithLocalOrigin("node-A"))
-	sender := &mockPeerSender{}
-	peers := func() []AnnounceTarget { return nil }
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	sender, _ := newMockPeerSender(t)
+	peers := func() []routing.AnnounceTarget { return nil }
 
-	loop := NewAnnounceLoop(table, sender, peers,
-		WithAnnounceInterval(10*time.Second))
+	loop := routing.NewAnnounceLoop(table, sender, peers,
+		routing.WithAnnounceInterval(10*time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
