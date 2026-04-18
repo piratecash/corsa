@@ -79,6 +79,29 @@ func TestEllipsize(t *testing.T) {
 	}
 }
 
+func TestScheduleTransferInvalidateCoalesces(t *testing.T) {
+	w := &Window{}
+
+	w.scheduleTransferInvalidate(10 * time.Millisecond)
+	w.scheduleTransferInvalidate(10 * time.Millisecond)
+
+	w.transferInvalidateMu.Lock()
+	pending := w.transferInvalidatePending
+	w.transferInvalidateMu.Unlock()
+	if !pending {
+		t.Fatalf("expected transfer invalidate to be pending")
+	}
+
+	time.Sleep(30 * time.Millisecond)
+
+	w.transferInvalidateMu.Lock()
+	pending = w.transferInvalidatePending
+	w.transferInvalidateMu.Unlock()
+	if pending {
+		t.Fatalf("expected transfer invalidate pending flag to clear after timer fires")
+	}
+}
+
 // TestNetworkStatusSummary verifies that the aggregate network status is based
 // on the number of usable peers (healthy + degraded) among currently live
 // peers. Stalled peers count as connected-but-not-usable, while reconnecting

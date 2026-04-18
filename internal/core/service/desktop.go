@@ -363,7 +363,12 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		return status
 	}
 
-	welcome, err := c.localRequestFrame(protocol.Frame{
+	// All RPC calls use the caller-supplied context so that context
+	// cancellation / deadline propagates. Previously localRequestFrame
+	// (without ctx) was used, meaning the 3-second timeout from
+	// pollHealth never reached the individual handlers — a single slow
+	// handler could block the entire chain indefinitely.
+	welcome, err := c.localRequestFrameCtx(ctx, protocol.Frame{
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "desktop",
@@ -384,68 +389,68 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Services = welcome.Services
 	status.Capabilities = welcome.Capabilities
 
-	peersReply, err := c.localRequestFrame(protocol.Frame{Type: "get_peers"})
+	peersReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "get_peers"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	idsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_identities"})
+	idsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_identities"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	contactsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	contactsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_trusted_contacts"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	peerHealthReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_peer_health"})
+	peerHealthReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_peer_health"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	aggregateStatusReply, aggregateStatusErr := c.localRequestFrame(protocol.Frame{Type: "fetch_aggregate_status"})
-	pendingReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
+	aggregateStatusReply, aggregateStatusErr := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_aggregate_status"})
+	pendingReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	messagesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
+	messagesReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_messages", Topic: "global"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	dmHeadersReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_dm_headers"})
+	dmHeadersReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_dm_headers"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	messageIDsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_message_ids", Topic: "global"})
+	messageIDsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_message_ids", Topic: "global"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	directMessageIDsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
+	directMessageIDsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	receiptsReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_delivery_receipts", Recipient: c.id.Address})
+	receiptsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_delivery_receipts", Recipient: c.id.Address})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
 		return status
 	}
-	noticesReply, err := c.localRequestFrame(protocol.Frame{Type: "fetch_notices"})
+	noticesReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_notices"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
@@ -464,12 +469,12 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 
 	// Check for missing contacts from DM headers (lightweight, no decryption needed).
 	if missing := missingDMHeaderContacts(c.id.Address, contacts, dmHeaders); len(missing) > 0 {
-		refreshedContactsReply, refreshErr := c.localRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+		refreshedContactsReply, refreshErr := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_contacts"})
 		if refreshErr == nil {
 			networkContacts := contactsFromFrame(refreshedContactsReply)
 			// Auto-import new contacts from DM headers.
 			if imported := c.importIncomingDMHeaderContacts(contacts, networkContacts, dmHeaders); imported > 0 {
-				trustedContactsReply, trustedErr := c.localRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+				trustedContactsReply, trustedErr := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_trusted_contacts"})
 				if trustedErr == nil {
 					contacts = contactsFromFrame(trustedContactsReply)
 				}

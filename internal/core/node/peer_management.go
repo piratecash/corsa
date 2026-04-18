@@ -2631,6 +2631,26 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 	s.refreshAggregateStatusLocked()
 }
 
+// peerHealthSnap holds the minimal per-peer data extracted from s.mu-protected
+// state in a single short critical section. All subsequent formatting and
+// enrichment runs lock-free, preventing the long RLock hold that caused
+// writer starvation (bootstrapLoop's refreshAggregateStatus needs s.mu.Lock
+// every 2 s, and Go's RWMutex is writer-preferring — a long RLock blocks
+// subsequent RLock callers once a writer is queued, freezing the entire
+// ProbeNode RPC chain and the UI).
+type peerHealthSnap struct {
+	health              peerHealth
+	peerID              domain.PeerIdentity
+	clientVersion       string
+	clientBuild          int
+	pendingCount         int
+	capabilities         []string
+	sessionVersion       int
+	sessionConnID        uint64
+	inboundConnIDs       []uint64
+	versionLockoutActive bool
+}
+
 func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	// Collect CM slot snapshots before taking s.mu to avoid nested locking
 	// (connManager.Slots() acquires cm.mu independently).
@@ -2671,74 +2691,141 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		}
 	}
 
+	// ---------------------------------------------------------------
+	// Short critical section: copy all s.mu-protected data into local
+	// snapshots so the lock is released before any formatting work.
+	// This prevents writer starvation on s.mu — bootstrapLoop calls
+	// refreshAggregateStatus (write lock) every 2 s, and Go's RWMutex
+	// is writer-preferring: once a writer is queued, new RLock callers
+	// block. Holding RLock for the full frame-building loop made
+	// subsequent ProbeNode RPCs (each needing RLock) wait behind the
+	// queued writer, freezing the UI for the entire 3-second timeout.
+	// ---------------------------------------------------------------
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	now := time.Now().UTC()
 
 	live := s.liveTrafficLocked()
 
-	seen := make(map[domain.PeerAddress]struct{}, len(s.health))
-	items := make([]protocol.PeerHealthFrame, 0, len(s.health)+len(live))
+	healthSnaps := make([]peerHealthSnap, 0, len(s.health))
 	for _, health := range s.health {
-		seen[health.Address] = struct{}{}
-		sent := health.BytesSent
-		recv := health.BytesReceived
-		if lv, ok := live[health.Address]; ok {
+		snap := peerHealthSnap{
+			health:               *health,
+			peerID:               s.peerIDs[health.Address],
+			clientVersion:        s.peerVersions[health.Address],
+			clientBuild:          s.peerBuilds[health.Address],
+			pendingCount:         len(s.pending[health.Address]),
+			capabilities:         s.peerCapabilitiesLocked(health.Address),
+			versionLockoutActive: s.isPeerVersionLockedOutLocked(health.Address),
+			inboundConnIDs:       s.inboundConnIDsLocked(health.Address),
+		}
+		snap.health.State = s.computePeerStateAtLocked(health, now)
+		for dialAddr, session := range s.sessions {
+			if s.resolveHealthAddress(dialAddr) == health.Address {
+				snap.sessionVersion = session.version
+				snap.sessionConnID = uint64(session.connID)
+				break
+			}
+		}
+		healthSnaps = append(healthSnaps, snap)
+	}
+
+	// Snapshot inbound-only peers (live traffic but no health entry).
+	type inboundLiveSnap struct {
+		address        domain.PeerAddress
+		peerID         domain.PeerIdentity
+		clientVersion  string
+		clientBuild    int
+		capabilities   []string
+		sessionVersion int
+		sent           int64
+		received       int64
+		inboundConnIDs []uint64
+	}
+	healthAddrs := make(map[domain.PeerAddress]struct{}, len(s.health))
+	for _, h := range s.health {
+		healthAddrs[h.Address] = struct{}{}
+	}
+	var inboundSnaps []inboundLiveSnap
+	for addr, lv := range live {
+		if _, ok := healthAddrs[addr]; ok {
+			continue
+		}
+		ils := inboundLiveSnap{
+			address:        addr,
+			peerID:         s.peerIDs[addr],
+			clientVersion:  s.peerVersions[addr],
+			clientBuild:    s.peerBuilds[addr],
+			capabilities:   s.peerCapabilitiesLocked(addr),
+			sent:           lv.sent,
+			received:       lv.received,
+			inboundConnIDs: s.inboundConnIDsLocked(addr),
+		}
+		if session, ok := s.sessions[addr]; ok {
+			ils.sessionVersion = session.version
+		}
+		inboundSnaps = append(inboundSnaps, ils)
+	}
+
+	s.mu.RUnlock()
+	// ---------------------------------------------------------------
+	// Lock released — all remaining work is pure computation on local
+	// copies, safe to run without holding any lock.
+	// ---------------------------------------------------------------
+
+	seen := make(map[domain.PeerAddress]struct{}, len(healthSnaps))
+	items := make([]protocol.PeerHealthFrame, 0, len(healthSnaps)+len(inboundSnaps))
+	for _, snap := range healthSnaps {
+		h := &snap.health
+		seen[h.Address] = struct{}{}
+		sent := h.BytesSent
+		recv := h.BytesReceived
+		if lv, ok := live[h.Address]; ok {
 			sent += lv.sent
 			recv += lv.received
 		}
 		phf := protocol.PeerHealthFrame{
-			Address:             string(health.Address),
-			PeerID:              string(s.peerIDs[health.Address]),
-			Network:             classifyAddress(health.Address).String(),
-			Direction:           string(health.Direction),
-			ClientVersion:       s.peerVersions[health.Address],
-			ClientBuild:         s.peerBuilds[health.Address],
-			State:               s.computePeerStateAtLocked(health, now),
-			Connected:           health.Connected,
-			PendingCount:        len(s.pending[health.Address]),
-			LastConnectedAt:     formatTime(health.LastConnectedAt),
-			LastDisconnectedAt:  formatTime(health.LastDisconnectedAt),
-			LastPingAt:          formatTime(health.LastPingAt),
-			LastPongAt:          formatTime(health.LastPongAt),
-			LastUsefulSendAt:    formatTime(health.LastUsefulSendAt),
-			LastUsefulReceiveAt: formatTime(health.LastUsefulReceiveAt),
-			ConsecutiveFailures: health.ConsecutiveFailures,
-			LastError:           health.LastError,
-			Score:               health.Score,
-			BannedUntil:         formatTime(health.BannedUntil),
+			Address:             string(h.Address),
+			PeerID:              string(snap.peerID),
+			Network:             classifyAddress(h.Address).String(),
+			Direction:           string(h.Direction),
+			ClientVersion:       snap.clientVersion,
+			ClientBuild:         snap.clientBuild,
+			State:               h.State,
+			Connected:           h.Connected,
+			PendingCount:        snap.pendingCount,
+			LastConnectedAt:     formatTime(h.LastConnectedAt),
+			LastDisconnectedAt:  formatTime(h.LastDisconnectedAt),
+			LastPingAt:          formatTime(h.LastPingAt),
+			LastPongAt:          formatTime(h.LastPongAt),
+			LastUsefulSendAt:    formatTime(h.LastUsefulSendAt),
+			LastUsefulReceiveAt: formatTime(h.LastUsefulReceiveAt),
+			ConsecutiveFailures: h.ConsecutiveFailures,
+			LastError:           h.LastError,
+			Score:               h.Score,
+			BannedUntil:         formatTime(h.BannedUntil),
 			BytesSent:           sent,
 			BytesReceived:       recv,
 			TotalTraffic:        sent + recv,
-			Capabilities:        s.peerCapabilitiesLocked(health.Address),
+			Capabilities:        snap.capabilities,
 
 			// Machine-readable disconnect diagnostics.
-			LastErrorCode:               health.LastErrorCode,
-			LastDisconnectCode:          health.LastDisconnectCode,
-			IncompatibleVersionAttempts: int(health.IncompatibleVersionAttempts),
-			LastIncompatibleVersionAt:   formatTime(health.LastIncompatibleVersionAt),
-			ObservedPeerVersion:         int(health.ObservedPeerVersion),
-			ObservedPeerMinimumVersion:  int(health.ObservedPeerMinimumVersion),
-			VersionLockoutActive:        s.isPeerVersionLockedOutLocked(health.Address),
-		}
-		// sessions is keyed by dial address which may differ from the
-		// health address when a fallback port was used. Iterate to find
-		// the matching session by resolved health key.
-		for dialAddr, session := range s.sessions {
-			if s.resolveHealthAddress(dialAddr) == health.Address {
-				phf.ProtocolVersion = session.version
-				// PeerHealthFrame.ConnID is the wire-level uint64; convert
-				// from the typed session identifier before serialising.
-				phf.ConnID = uint64(session.connID)
-				break
-			}
+			LastErrorCode:               h.LastErrorCode,
+			LastDisconnectCode:          h.LastDisconnectCode,
+			IncompatibleVersionAttempts: int(h.IncompatibleVersionAttempts),
+			LastIncompatibleVersionAt:   formatTime(h.LastIncompatibleVersionAt),
+			ObservedPeerVersion:         int(h.ObservedPeerVersion),
+			ObservedPeerMinimumVersion:  int(h.ObservedPeerMinimumVersion),
+			VersionLockoutActive:        snap.versionLockoutActive,
+
+			ProtocolVersion: snap.sessionVersion,
+			ConnID:          snap.sessionConnID,
 		}
 		// Enrich with CM slot lifecycle data if this peer has an outbound slot.
-		if snap, ok := slotByAddr[health.Address]; ok {
-			phf.SlotState = snap.State
-			phf.SlotRetryCount = snap.RetryCount
-			phf.SlotGeneration = snap.Generation
-			phf.SlotConnectedAddr = snap.ConnectedAddr
+		if sl, ok := slotByAddr[h.Address]; ok {
+			phf.SlotState = sl.State
+			phf.SlotRetryCount = sl.RetryCount
+			phf.SlotGeneration = sl.Generation
+			phf.SlotConnectedAddr = sl.ConnectedAddr
 		}
 		// When an outbound session exists, emit a single row with the
 		// outbound ConnID — even if inbound connections coexist (both
@@ -2751,9 +2838,8 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			enrichCaptureFields(&phf, captureByConn)
 			items = append(items, phf)
 		} else {
-			inboundConns := s.inboundConnIDsLocked(health.Address)
-			if len(inboundConns) > 0 {
-				for _, cid := range inboundConns {
+			if len(snap.inboundConnIDs) > 0 {
+				for _, cid := range snap.inboundConnIDs {
 					row := phf
 					row.ConnID = cid
 					row.Direction = string(peerDirectionInbound)
@@ -2767,32 +2853,26 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	}
 
 	// Include inbound-only peers that have live traffic but no health entry yet.
-	for addr, lv := range live {
-		if _, ok := seen[addr]; ok {
-			continue
-		}
+	for _, ils := range inboundSnaps {
 		inboundPHF := protocol.PeerHealthFrame{
-			Address:       string(addr),
-			PeerID:        string(s.peerIDs[addr]),
-			Network:       classifyAddress(addr).String(),
-			Direction:     string(peerDirectionInbound),
-			ClientVersion: s.peerVersions[addr],
-			ClientBuild:   s.peerBuilds[addr],
-			State:         peerStateHealthy,
-			Connected:     true,
-			BytesSent:     lv.sent,
-			BytesReceived: lv.received,
-			TotalTraffic:  lv.sent + lv.received,
-			Capabilities:  s.peerCapabilitiesLocked(addr),
-		}
-		if session, ok := s.sessions[addr]; ok {
-			inboundPHF.ProtocolVersion = session.version
+			Address:         string(ils.address),
+			PeerID:          string(ils.peerID),
+			Network:         classifyAddress(ils.address).String(),
+			Direction:       string(peerDirectionInbound),
+			ClientVersion:   ils.clientVersion,
+			ClientBuild:     ils.clientBuild,
+			State:           peerStateHealthy,
+			Connected:       true,
+			BytesSent:       ils.sent,
+			BytesReceived:   ils.received,
+			TotalTraffic:    ils.sent + ils.received,
+			Capabilities:    ils.capabilities,
+			ProtocolVersion: ils.sessionVersion,
 		}
 		// Emit one row per inbound conn_id (same pattern as health-based
 		// inbound peers) so capture enrichment can match by ConnID.
-		inboundConns := s.inboundConnIDsLocked(addr)
-		if len(inboundConns) > 0 {
-			for _, cid := range inboundConns {
+		if len(ils.inboundConnIDs) > 0 {
+			for _, cid := range ils.inboundConnIDs {
 				row := inboundPHF
 				row.ConnID = cid
 				enrichCaptureFields(&row, captureByConn)

@@ -134,10 +134,19 @@ func (s *Service) AggregateStatus() domain.AggregateStatusSnapshot {
 }
 
 // aggregateStatusFrame builds the protocol frame for the
-// fetch_aggregate_status local RPC command.
+// fetch_aggregate_status local RPC command. Both snapshots are read under
+// a single RLock acquisition to avoid re-acquiring the lock twice — with
+// Go's writer-preferring RWMutex, each separate RLock is a window where
+// a queued writer can interleave and stall the caller.
 func (s *Service) aggregateStatusFrame() protocol.Frame {
-	snap := s.AggregateStatus()
-	vpSnap := s.VersionPolicySnapshot()
+	s.mu.RLock()
+	snap := s.aggregateStatus
+	var vpSnap domain.VersionPolicySnapshot
+	if s.versionPolicy != nil {
+		vpSnap = s.versionPolicy.snapshot
+	}
+	s.mu.RUnlock()
+
 	return protocol.Frame{
 		Type: "aggregate_status",
 		AggregateStatus: &protocol.AggregateStatusFrame{

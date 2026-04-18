@@ -167,6 +167,9 @@ type Window struct {
 	consoleMu sync.Mutex
 
 	window *app.Window
+
+	transferInvalidateMu      sync.Mutex
+	transferInvalidatePending bool
 }
 
 // pendingAttachMsg is the payload delivered over the pendingAttach channel
@@ -1731,11 +1734,8 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 	// awaiting confirmation (waiting_ack needs redraw for ack arrival).
 	transferInProgress := (isMine && !senderCompleted && transferState != "") ||
 		receiverDownloadActive || transferState == "waiting_ack"
-	if transferInProgress && w.window != nil {
-		window := w.window
-		time.AfterFunc(500*time.Millisecond, func() {
-			window.Invalidate()
-		})
+	if transferInProgress {
+		w.scheduleTransferInvalidate(500 * time.Millisecond)
 	}
 
 	macro := op.Record(gtx.Ops)
@@ -1948,6 +1948,31 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 	paint.PaintOp{}.Add(gtx.Ops)
 	call.Add(gtx.Ops)
 	return dims
+}
+
+// scheduleTransferInvalidate coalesces redraw requests for in-progress file
+// transfers. layoutFileCard runs every frame; spawning a new timer on each
+// frame leads to an unbounded timer/goroutine backlog under active transfers,
+// which can starve the Gio event loop and present as a frozen window.
+func (w *Window) scheduleTransferInvalidate(delay time.Duration) {
+	w.transferInvalidateMu.Lock()
+	if w.transferInvalidatePending {
+		w.transferInvalidateMu.Unlock()
+		return
+	}
+	w.transferInvalidatePending = true
+	w.transferInvalidateMu.Unlock()
+
+	time.AfterFunc(delay, func() {
+		w.transferInvalidateMu.Lock()
+		w.transferInvalidatePending = false
+		window := w.window
+		w.transferInvalidateMu.Unlock()
+
+		if window != nil {
+			window.Invalidate()
+		}
+	})
 }
 
 // layoutFileProgressBar renders a progress bar for the sender side.
