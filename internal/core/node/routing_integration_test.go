@@ -1,8 +1,11 @@
 package node
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -3803,5 +3806,127 @@ func TestRoutingTargetsDeduplicatesFallbackPort(t *testing.T) {
 	}
 	if len(targets) != 1 {
 		t.Fatalf("expected exactly 1 target, got %d: %v", len(targets), targets)
+	}
+}
+
+// TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess is the
+// end-to-end regression guard for the raw/bootstrap outbound path.
+// sendNoticeToPeer falls back to a direct TCP dial + raw hello /
+// welcome / auth_session / auth_ok when neither an outbound session
+// nor an inbound connection is available. Before the fix, that path
+// completed the handshake but never called the advertise-convergence
+// success hook, so peers reached only via push_notice fan-out diverged
+// from peers reached via managed outbound sessions: they never got an
+// announceable persistedMeta row and none of the hostname /
+// observed-IP sweep invariants applied to them. This test drives the
+// handshake end-to-end against a loopback mock peer and asserts that
+// the trusted advertise triple and announce_state land on
+// persistedMeta just like they would for the managed path.
+func TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	peerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+
+	peerDone := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			peerDone <- fmt.Errorf("accept: %w", err)
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		reader := bufio.NewReader(c)
+
+		// hello.
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- fmt.Errorf("read hello: %w", err)
+			return
+		}
+		welcomeLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:      "welcome",
+			Challenge: "bootstrap-challenge",
+			Address:   peerID.Address,
+		})
+		if err != nil {
+			peerDone <- fmt.Errorf("marshal welcome: %w", err)
+			return
+		}
+		if _, err := io.WriteString(c, welcomeLine); err != nil {
+			peerDone <- fmt.Errorf("write welcome: %w", err)
+			return
+		}
+
+		// auth_session.
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- fmt.Errorf("read auth_session: %w", err)
+			return
+		}
+		authOKLine, err := protocol.MarshalFrameLine(protocol.Frame{Type: "auth_ok"})
+		if err != nil {
+			peerDone <- fmt.Errorf("marshal auth_ok: %w", err)
+			return
+		}
+		if _, err := io.WriteString(c, authOKLine); err != nil {
+			peerDone <- fmt.Errorf("write auth_ok: %w", err)
+			return
+		}
+
+		// push_notice. sendNoticeToPeer then does one more readFrameLine
+		// — send a trivial reply so our side returns without waiting out
+		// the deadline.
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- fmt.Errorf("read push_notice: %w", err)
+			return
+		}
+		replyLine, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "ok"})
+		_, _ = io.WriteString(c, replyLine)
+		peerDone <- nil
+	}()
+
+	peerAddr := domain.PeerAddress(ln.Addr().String())
+	svc.sendNoticeToPeer(peerAddr, time.Minute, "bootstrap-ciphertext")
+
+	select {
+	case err := <-peerDone:
+		if err != nil {
+			t.Fatalf("peer goroutine: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("bootstrap handshake did not complete within 5s")
+	}
+
+	svc.mu.RLock()
+	pm := svc.persistedMeta[peerAddr]
+	svc.mu.RUnlock()
+	if pm == nil {
+		t.Fatalf("persistedMeta row not created by bootstrap path")
+	}
+	if pm.AnnounceState != announceStateAnnounceable {
+		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
+	}
+	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceOutbound {
+		t.Fatalf("trusted_advertise_source: got %q want %q",
+			pm.TrustedAdvertiseSource, trustedAdvertiseSourceOutbound)
+	}
+	if pm.TrustedAdvertiseIP != "127.0.0.1" {
+		t.Fatalf("trusted_advertise_ip: got %q want %q (must be canonical IP from RemoteAddr)",
+			pm.TrustedAdvertiseIP, "127.0.0.1")
+	}
+	_, wantPort, ok := splitHostPort(string(peerAddr))
+	if !ok {
+		t.Fatalf("splitHostPort failed for listener addr %q", peerAddr)
+	}
+	if pm.TrustedAdvertisePort != wantPort {
+		t.Fatalf("trusted_advertise_port: got %q want %q", pm.TrustedAdvertisePort, wantPort)
 	}
 }

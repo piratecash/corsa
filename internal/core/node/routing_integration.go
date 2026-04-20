@@ -1393,6 +1393,14 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	if err != nil {
 		return
 	}
+	// Advertise convergence: the inbound side may respond with a
+	// connection_notice (observed-address-mismatch) instead of welcome,
+	// meaning it is about to close. Record the observed IP hint so the
+	// next outbound hello self-corrects, then abort this bootstrap write.
+	if welcome.Type == protocol.FrameTypeConnectionNotice {
+		s.handleConnectionNotice(welcome)
+		return
+	}
 	if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
@@ -1414,6 +1422,14 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		if err != nil || authReply.Type != "auth_ok" {
 			return
 		}
+		// Outbound convergence success hook: auth_ok on this raw/
+		// bootstrap path is the same evidence of a reachable dialable
+		// peer as on the managed-session path. Without this call, peers
+		// reached only through push_notice fan-out would never get an
+		// announceable persistedMeta row or a trusted advertise triple,
+		// so their state would diverge from the managed path and the
+		// hostname / observed-IP sweep invariants would not apply here.
+		s.recordOutboundAuthSuccessFromConn(address, conn)
 	}
 	if welcome.Type == "error" {
 		return

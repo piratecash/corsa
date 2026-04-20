@@ -26,6 +26,17 @@ type PeerAddress string
 // with remote transport addresses at compile time.
 type ListenAddress string
 
+// PeerIP is the canonical bare-IP form of a peer endpoint (IPv4 or
+// IPv6 textual representation after IPv4-mapped IPv6 has been collapsed
+// to the bare IPv4 form). Distinct from PeerAddress, which carries the
+// host:port tuple used for dialling. Used by the advertise-address
+// convergence layer for trusted-advertise triples, observed-IP history,
+// consensus computation, and self-advertise overrides. An empty value
+// is a legal "no value" sentinel — absence is encoded by the zero value
+// rather than a separate optional wrapper because the canonical form of
+// a missing IP is still an empty string on the wire.
+type PeerIP string
+
 // PeerSource describes how a peer address was discovered.
 type PeerSource string
 

@@ -509,3 +509,270 @@ func TestBuildPeerExchange_InitializingSlotExcluded(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: announce_state gate (advertise convergence)
+// ---------------------------------------------------------------------------
+
+// TestBuildPeerExchange_ExcludesDirectOnlyCandidate verifies the
+// persistedMeta announce_state gate on the peerProvider path: a peer
+// classified as direct_only via the advertise-convergence decision
+// must never be relayed to third parties via get_peers. The parallel
+// announceable entry must still appear — the filter is per-peer, not
+// a blanket suppression.
+func TestBuildPeerExchange_ExcludesDirectOnlyCandidate(t *testing.T) {
+	pp := NewPeerProvider(testProviderConfig())
+	directOnly := mustAddr("8.8.8.8:9000")
+	announceable := mustAddr("1.1.1.1:9000")
+	pp.Add(directOnly, domain.PeerSourcePeerExchange)
+	pp.Add(announceable, domain.PeerSourcePeerExchange)
+
+	svc := &Service{
+		connManager:  nil,
+		peerProvider: pp,
+		persistedMeta: map[domain.PeerAddress]*peerEntry{
+			directOnly:   {Address: directOnly, AnnounceState: announceStateDirectOnly},
+			announceable: {Address: announceable, AnnounceState: announceStateAnnounceable},
+		},
+	}
+
+	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	for _, a := range addrs {
+		if a == "8.8.8.8:9000" {
+			t.Fatalf("direct_only peer must be excluded, got %v", addrs)
+		}
+	}
+	hasAnnounceable := false
+	for _, a := range addrs {
+		if a == "1.1.1.1:9000" {
+			hasAnnounceable = true
+			break
+		}
+	}
+	if !hasAnnounceable {
+		t.Fatalf("announceable peer must be included, got %v", addrs)
+	}
+}
+
+// TestBuildPeerExchange_ExcludesUnsetAnnounceState asserts that a
+// persistedMeta row with announce_state="" (unset — no convergence
+// decision yet) is treated as non-announceable, because the RFC
+// requires an explicit announceable state before relaying. A stray
+// row that predates the rollout must not silently leak outward.
+func TestBuildPeerExchange_ExcludesUnsetAnnounceState(t *testing.T) {
+	pp := NewPeerProvider(testProviderConfig())
+	candidate := mustAddr("8.8.4.4:9000")
+	pp.Add(candidate, domain.PeerSourcePeerExchange)
+
+	svc := &Service{
+		connManager:  nil,
+		peerProvider: pp,
+		persistedMeta: map[domain.PeerAddress]*peerEntry{
+			candidate: {Address: candidate, AnnounceState: announceStateUnset},
+		},
+	}
+
+	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	for _, a := range addrs {
+		if a == "8.8.4.4:9000" {
+			t.Fatalf("unset announce_state must be excluded, got %v", addrs)
+		}
+	}
+}
+
+// TestBuildPeerExchange_IncludesUnknownBootstrapPeer covers the
+// bootstrap/manual fallback: a peer that has never been through the
+// convergence decision (no persistedMeta row at all) must still be
+// propagatable so the network can grow from an empty state. Without
+// this, a fresh node with only bootstrap candidates would never relay
+// anything and peer discovery would stall.
+func TestBuildPeerExchange_IncludesUnknownBootstrapPeer(t *testing.T) {
+	pp := NewPeerProvider(testProviderConfig())
+	bootstrap := mustAddr("9.9.9.9:9000")
+	pp.Add(bootstrap, domain.PeerSourceBootstrap)
+
+	svc := &Service{
+		connManager:  nil,
+		peerProvider: pp,
+		// Empty persistedMeta on purpose — no convergence decision yet.
+		persistedMeta: map[domain.PeerAddress]*peerEntry{},
+	}
+
+	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	found := false
+	for _, a := range addrs {
+		if a == "9.9.9.9:9000" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("bootstrap peer without persistedMeta row must propagate, got %v", addrs)
+	}
+}
+
+// TestBuildPeerExchange_ExcludesDirectOnlyActiveSlot covers the
+// connection-manager section of buildPeerExchangeResponse. An active
+// outbound slot whose persistedMeta marks it direct_only must not be
+// relayed — convergence classifications are authoritative even for
+// peers we successfully dialled (the dial proved reachability, not
+// announceability).
+func TestBuildPeerExchange_ExcludesDirectOnlyActiveSlot(t *testing.T) {
+	svc, cm, _, cancel := buildTestServiceWithCM(t, []string{"1.2.3.4:9000"}, 8)
+	defer cancel()
+
+	slotActive(t, cm, "1.2.3.4:9000")
+
+	// Inject the direct_only convergence decision AFTER the slot is
+	// active. The filter snapshot happens on each buildPeerExchangeResponse
+	// call, so the next call must see the downgrade immediately.
+	svc.mu.Lock()
+	if svc.persistedMeta == nil {
+		svc.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
+	}
+	svc.persistedMeta[domain.PeerAddress("1.2.3.4:9000")] = &peerEntry{
+		Address:       domain.PeerAddress("1.2.3.4:9000"),
+		AnnounceState: announceStateDirectOnly,
+	}
+	svc.mu.Unlock()
+
+	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	for _, a := range addrs {
+		if a == "1.2.3.4:9000" {
+			t.Fatalf("direct_only active slot must be excluded, got %v", addrs)
+		}
+	}
+}
+
+// TestBuildPeerExchange_ExcludesDirectOnlySlotByCanonicalKey reproduces
+// the fallback-port leak: a CM-managed slot whose canonical address is
+// persisted as direct_only but whose dial actually succeeded on a
+// fallback port must still be excluded from peer exchange. Without
+// the dual-key gate the filter only checks the connected fallback
+// address, finds no persistedMeta row for it and falls through to
+// "allow unknown", leaking the direct_only classification.
+func TestBuildPeerExchange_ExcludesDirectOnlySlotByCanonicalKey(t *testing.T) {
+	const canonical = "1.2.3.4:9000"
+	const fallback = "1.2.3.4:9001"
+
+	b := testCMConfig(canonical)
+	b.Cfg.MaxSlotsFn = func() int { return 1 }
+	b.Cfg.DialFn = func(_ context.Context, _ []domain.PeerAddress) (DialResult, error) {
+		session := fakePeerSession(domain.PeerAddress(fallback), "id-fallback")
+		return DialResult{
+			Session:          session,
+			ConnectedAddress: domain.PeerAddress(fallback),
+		}, nil
+	}
+	cm := b.Build()
+	svc := &Service{
+		connManager:  cm,
+		peerProvider: b.Cfg.Provider,
+		cfg:          config.Node{MaxOutgoingPeers: 1},
+	}
+
+	cancel := runCM(cm)
+	defer cancel()
+	cm.NotifyBootstrapReady()
+
+	slotActive(t, cm, canonical)
+
+	svc.mu.Lock()
+	if svc.persistedMeta == nil {
+		svc.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
+	}
+	// The convergence write landed on the canonical key — the
+	// fallback endpoint has no persisted row of its own.
+	svc.persistedMeta[domain.PeerAddress(canonical)] = &peerEntry{
+		Address:       domain.PeerAddress(canonical),
+		AnnounceState: announceStateDirectOnly,
+	}
+	svc.mu.Unlock()
+
+	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	for _, a := range addrs {
+		if a == canonical || a == fallback {
+			t.Fatalf("direct_only slot leaked via fallback endpoint, got %v", addrs)
+		}
+	}
+}
+
+// TestBuildPeerExchange_ExcludesDirectOnlySlotByFallbackKey is the
+// symmetric case: the persisted decision is keyed on the fallback
+// endpoint (e.g. because the connect writer persisted the actual
+// dialed variant). The canonical address is free of a row, but the
+// gate must still exclude the slot.
+func TestBuildPeerExchange_ExcludesDirectOnlySlotByFallbackKey(t *testing.T) {
+	const canonical = "1.2.3.4:9000"
+	const fallback = "1.2.3.4:9001"
+
+	b := testCMConfig(canonical)
+	b.Cfg.MaxSlotsFn = func() int { return 1 }
+	b.Cfg.DialFn = func(_ context.Context, _ []domain.PeerAddress) (DialResult, error) {
+		session := fakePeerSession(domain.PeerAddress(fallback), "id-fallback")
+		return DialResult{
+			Session:          session,
+			ConnectedAddress: domain.PeerAddress(fallback),
+		}, nil
+	}
+	cm := b.Build()
+	svc := &Service{
+		connManager:  cm,
+		peerProvider: b.Cfg.Provider,
+		cfg:          config.Node{MaxOutgoingPeers: 1},
+	}
+
+	cancel := runCM(cm)
+	defer cancel()
+	cm.NotifyBootstrapReady()
+
+	slotActive(t, cm, canonical)
+
+	svc.mu.Lock()
+	if svc.persistedMeta == nil {
+		svc.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
+	}
+	svc.persistedMeta[domain.PeerAddress(fallback)] = &peerEntry{
+		Address:       domain.PeerAddress(fallback),
+		AnnounceState: announceStateDirectOnly,
+	}
+	svc.mu.Unlock()
+
+	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	for _, a := range addrs {
+		if a == canonical || a == fallback {
+			t.Fatalf("direct_only slot leaked via fallback key, got %v", addrs)
+		}
+	}
+}
+
+// TestBuildPeerExchange_ExcludesDirectOnlyInbound exercises the
+// inbound section (s.health). An authenticated inbound peer whose
+// persistedMeta is direct_only must not leak through get_peers even
+// though the caller has a live connection to it.
+func TestBuildPeerExchange_ExcludesDirectOnlyInbound(t *testing.T) {
+	const inboundAddr domain.PeerAddress = "7.7.7.7:9000"
+
+	pp := NewPeerProvider(testProviderConfig())
+	svc := &Service{
+		connManager:  nil,
+		peerProvider: pp,
+		health: map[domain.PeerAddress]*peerHealth{
+			inboundAddr: {
+				Address:   inboundAddr,
+				Connected: true,
+				Direction: peerDirectionInbound,
+			},
+		},
+		persistedMeta: map[domain.PeerAddress]*peerEntry{
+			inboundAddr: {Address: inboundAddr, AnnounceState: announceStateDirectOnly},
+		},
+	}
+
+	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
+	for _, a := range addrs {
+		if a == string(inboundAddr) {
+			t.Fatalf("direct_only inbound peer must be excluded, got %v", addrs)
+		}
+	}
+}

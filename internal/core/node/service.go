@@ -217,6 +217,20 @@ type Service struct {
 	// unit tests that do not need capture.
 	captureManager *capture.Manager
 
+	// advertise-address convergence runtime state. Owned by Service
+	// under s.mu — no other struct writes here. See
+	// docs/protocol/handshake.md "Advertise convergence" for contract.
+	//
+	// trustedSelfAdvertiseIP is the IP that overrides s.cfg.AdvertiseAddress
+	// in outbound hello frames once a peer told us our observed IP was
+	// different from what we were advertising. Empty string = no override.
+	trustedSelfAdvertiseIP domain.PeerIP
+	// observedIPHistoryByPeer tracks the last observedIPHistoryMaxSize
+	// observed IP hints received for a single remote peer. Used by the
+	// outbound convergence loop to break ping-pong cycles. Runtime only,
+	// not persisted (see peerEntry.LastObservedIP for the persisted snapshot).
+	observedIPHistoryByPeer map[domain.PeerAddress][]domain.PeerIP
+
 	// networkOverride, when non-nil, replaces the default networkBridge
 	// returned by Service.Network(). It is the single seam that lets tests
 	// (see internal/core/netcore/netcoretest) drive protocol logic against
@@ -669,50 +683,51 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// (e.g. handleInboundPushMessage sender-key recovery) that derive
 		// a timeout from s.runCtx before Run() has been called — notably in
 		// unit tests that exercise handlers directly without Run().
-		runCtx:                context.Background(),
-		identity:              id,
-		cfg:                   cfg,
-		eventBus:              eventBus,
-		selfBoxSig:            selfContact.BoxSignature,
-		trust:                 trust,
-		peers:                 peers,
-		peersStatePath:        peersStatePath,
-		persistedMeta:         persistedByAddr,
-		known:                 known,
-		boxKeys:               boxKeys,
-		pubKeys:               pubKeys,
-		boxSigs:               boxSigs,
-		topics:                topics,
-		receipts:              receipts,
-		notices:               make(map[string]gazeta.Notice),
-		seen:                  seen,
-		seenReceipts:          seenReceipts,
-		subs:                  make(map[string]map[string]*subscriber),
-		sessions:              make(map[domain.PeerAddress]*peerSession),
-		health:                restoredHealth,
-		peerTypes:             make(map[domain.PeerAddress]domain.NodeType),
-		peerIDs:               make(map[domain.PeerAddress]domain.PeerIdentity),
-		peerVersions:          restoredVersions,
-		peerBuilds:            make(map[domain.PeerAddress]int),
-		pending:               pending,
-		pendingKeys:           pendingKeys,
-		orphaned:              orphaned,
-		relayRetry:            relayRetry,
-		outbound:              queueState.OutboundState,
-		upstream:              make(map[domain.PeerAddress]struct{}),
-		dialOrigin:            make(map[domain.PeerAddress]domain.PeerAddress),
-		observedAddrs:         make(map[domain.PeerIdentity]string),
-		reachableGroups:       computeReachableGroups(cfg),
-		inboundHealthRefs:     make(map[domain.PeerAddress]int),
-		conns:                 make(map[netcore.ConnID]*connEntry),
-		connIDByNetConn:       make(map[net.Conn]netcore.ConnID),
-		bans:                  make(map[string]banEntry),
-		events:                make(map[chan protocol.LocalChangeEvent]struct{}),
-		identitySessions:      make(map[domain.PeerIdentity]int),
-		identityRelaySessions: make(map[domain.PeerIdentity]int),
-		bannedIPSet:           make(map[string]domain.BannedIPEntry),
-		aggregateStatus:       domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
-		done:                  make(chan struct{}),
+		runCtx:                  context.Background(),
+		identity:                id,
+		cfg:                     cfg,
+		eventBus:                eventBus,
+		selfBoxSig:              selfContact.BoxSignature,
+		trust:                   trust,
+		peers:                   peers,
+		peersStatePath:          peersStatePath,
+		persistedMeta:           persistedByAddr,
+		known:                   known,
+		boxKeys:                 boxKeys,
+		pubKeys:                 pubKeys,
+		boxSigs:                 boxSigs,
+		topics:                  topics,
+		receipts:                receipts,
+		notices:                 make(map[string]gazeta.Notice),
+		seen:                    seen,
+		seenReceipts:            seenReceipts,
+		subs:                    make(map[string]map[string]*subscriber),
+		sessions:                make(map[domain.PeerAddress]*peerSession),
+		health:                  restoredHealth,
+		peerTypes:               make(map[domain.PeerAddress]domain.NodeType),
+		peerIDs:                 make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerVersions:            restoredVersions,
+		peerBuilds:              make(map[domain.PeerAddress]int),
+		pending:                 pending,
+		pendingKeys:             pendingKeys,
+		orphaned:                orphaned,
+		relayRetry:              relayRetry,
+		outbound:                queueState.OutboundState,
+		upstream:                make(map[domain.PeerAddress]struct{}),
+		dialOrigin:              make(map[domain.PeerAddress]domain.PeerAddress),
+		observedAddrs:           make(map[domain.PeerIdentity]string),
+		observedIPHistoryByPeer: make(map[domain.PeerAddress][]domain.PeerIP),
+		reachableGroups:         computeReachableGroups(cfg),
+		inboundHealthRefs:       make(map[domain.PeerAddress]int),
+		conns:                   make(map[netcore.ConnID]*connEntry),
+		connIDByNetConn:         make(map[net.Conn]netcore.ConnID),
+		bans:                    make(map[string]banEntry),
+		events:                  make(map[chan protocol.LocalChangeEvent]struct{}),
+		identitySessions:        make(map[domain.PeerIdentity]int),
+		identityRelaySessions:   make(map[domain.PeerIdentity]int),
+		bannedIPSet:             make(map[string]domain.BannedIPEntry),
+		aggregateStatus:         domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
+		done:                    make(chan struct{}),
 	}
 
 	// Initialize PeerProvider (Stage 3: connection management integration).
@@ -1404,6 +1419,44 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			}
 			return true
 		}
+		// Advertise convergence decision. Runs after version compatibility
+		// but before auth. Decides whether the hello's advertised listen
+		// address matches the observed TCP peer, and rejects with
+		// connection_notice when the peer is trying to advertise a
+		// world-reachable address that disagrees with the observed one.
+		// Accept branches are applied to persistedMeta after
+		// rememberConnPeerAddr so the domain record is consistent with
+		// NetCore's view.
+		advertiseResult := validateAdvertisedAddress(addr, frame)
+		if advertiseResult.ShouldReject {
+			accepted = false
+			log.Warn().
+				Str("addr", addr).
+				Str("advertised_listen", frame.Listen).
+				Str("observed_ip", string(advertiseResult.NormalizedObservedIP)).
+				Str("advertised_ip", string(advertiseResult.NormalizedAdvertisedIP)).
+				Str("decision", string(advertiseResult.Decision)).
+				Msg("inbound_hello_rejected_advertise_mismatch")
+			if advertiseResult.RejectNotice != nil {
+				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, *advertiseResult.RejectNotice)
+			}
+			// Forgivable penalty: bucket tracked in persistedMeta via
+			// apply helper below, transport-level score tracked here so
+			// a noisy peer eventually gets a TCP-level rate limit.
+			s.addBanScore(connID, banIncrementAdvertiseMismatch)
+			// Best-effort downgrade of an already-known peer. No new row
+			// is created for world_mismatch (update_existing_only write).
+			claimed := strings.TrimSpace(frame.Listen)
+			if claimed == "" {
+				claimed = strings.TrimSpace(frame.Address)
+			}
+			if claimed != "" {
+				if peerAddr := sanitizeInboundAddress(addr, claimed); peerAddr != "" {
+					s.applyAdvertiseValidationResult(domain.PeerAddress(peerAddr), advertiseResult)
+				}
+			}
+			return false
+		}
 		// Determine auth path by checking server-verifiable identity fields
 		// (Address, PubKey, BoxKey, BoxSig), NOT frame.Client which the
 		// attacker controls. This eliminates GAP-0.
@@ -1417,6 +1470,8 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			}
 			s.setConnAuthStateByID(connID, authState)
 			s.rememberConnPeerAddr(connID, frame, addr)
+			// Advertise convergence persistence (accept branches).
+			s.applyAdvertiseOnInboundAccept(addr, frame, advertiseResult)
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
@@ -1440,6 +1495,8 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// (hello, ping, pong, auth_session). All P2P wire commands
 		// are blocked until auth_session completes.
 		s.rememberConnPeerAddr(connID, frame, addr)
+		// Advertise convergence persistence (accept branches).
+		s.applyAdvertiseOnInboundAccept(addr, frame, advertiseResult)
 		log.Debug().
 			Str("client", frame.Client).
 			Str("addr", addr).
@@ -2757,9 +2814,12 @@ func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP s
 	if ip == nil {
 		return
 	}
-	// Ignore private, loopback, and link-local addresses — they are never
-	// useful as externally-visible observations.
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+	// Ignore private, loopback, link-local, CGNAT and ULA addresses —
+	// they are never useful as externally-visible observations. The same
+	// non-routable set is enforced here that advertise validation and
+	// announce filtering use, so "what counts as world-reachable" stays
+	// single-sourced through isNonRoutableIP.
+	if isNonRoutableIP(ip) {
 		return
 	}
 
@@ -4314,9 +4374,14 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 }
 
 func (s *Service) nodeHelloJSONLine() string {
+	// Advertise convergence: priority is runtime override (learned from
+	// observed-address-mismatch notices) → observed consensus IP →
+	// configured AdvertiseAddress. selfAdvertiseEndpoint returns "" when
+	// the node is non-listener, which collapses Listen to "" so peers
+	// see listener=0.
 	listen := ""
 	if s.cfg.EffectiveListenerEnabled() {
-		listen = s.cfg.AdvertiseAddress
+		listen = s.selfAdvertiseEndpoint()
 	}
 	line, err := protocol.MarshalFrameLine(protocol.Frame{
 		Type:          "hello",

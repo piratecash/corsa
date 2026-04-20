@@ -28,6 +28,26 @@ For `incompatible-protocol-version` errors, additional fields are included:
 }
 ```
 
+A separate transport-control frame `connection_notice` carries advisory
+close reasons that the responder wants the initiator to learn before the
+socket goes away. It mirrors the error frame shape but adds `status` and
+`details`:
+
+```json
+{
+  "type": "connection_notice",
+  "code": "observed-address-mismatch",
+  "status": "closing",
+  "error": "advertised address does not match observed remote address",
+  "details": { "observed_address": "203.0.113.50" }
+}
+```
+
+The initiator should treat `connection_notice` as informational: record
+the `details`, then expect the socket to close. Status codes surfaced
+through `connection_notice` are listed under "Connection Notice Codes"
+below.
+
 ## Error Code Reference
 
 | Code | When Returned | HTTP Analogy | Details |
@@ -123,6 +143,17 @@ These errors indicate internal server issues:
 
 - `encode-failed` - Response serialization failed
 - `read` - Network I/O error
+
+### Connection Notice Codes
+
+Delivered through the `connection_notice` frame type rather than
+`type="error"`. They are advisory — the responder is going to close the
+connection and wants the initiator to learn a machine-readable reason
+first.
+
+| Code | When Sent | Details |
+|------|-----------|---------|
+| `observed-address-mismatch` | Inbound `hello` advertised a world-reachable IP that does not match the observed TCP source | `details.observed_address` holds the IP the responder sees for the initiator. Initiator records it as the trusted self-advertise IP so the next outbound hello self-corrects |
 
 ## Error Handling Guide
 
@@ -266,6 +297,26 @@ graph TB
 }
 ```
 
+Отдельный transport-control фрейм `connection_notice` передаёт
+рекомендательные причины закрытия соединения, о которых ответчик хочет
+сообщить инициатору до разрыва сокета. По форме совпадает с error, но
+добавляет поля `status` и `details`:
+
+```json
+{
+  "type": "connection_notice",
+  "code": "observed-address-mismatch",
+  "status": "closing",
+  "error": "advertised address does not match observed remote address",
+  "details": { "observed_address": "203.0.113.50" }
+}
+```
+
+Инициатор должен рассматривать `connection_notice` как информационный:
+записать `details`, затем ожидать закрытия сокета. Коды статусов,
+передаваемые через `connection_notice`, перечислены ниже в секции
+«Коды connection_notice».
+
 ## Справочник кодов ошибок
 
 | Код | Когда возвращается | Аналогия HTTP | Детали |
@@ -361,6 +412,17 @@ graph TB
 
 - `encode-failed` - Сериализация ответа не удалась
 - `read` - Ошибка ввода-вывода сети
+
+### Коды connection_notice
+
+Передаются через фрейм `connection_notice`, а не через `type="error"`.
+Носят рекомендательный характер — ответчик собирается закрыть
+соединение и хочет, чтобы инициатор узнал машинно-читаемую причину
+заранее.
+
+| Код | Когда отправляется | Детали |
+|-----|---------------------|--------|
+| `observed-address-mismatch` | Входящий `hello` объявил world-reachable IP, который не совпадает с наблюдаемым TCP-источником | `details.observed_address` содержит IP, который ответчик видит у инициатора. Инициатор сохраняет его как trusted-self-advertise-IP, чтобы следующий исходящий hello сам скорректировался |
 
 ## Руководство по обработке ошибок
 

@@ -56,14 +56,20 @@ type Frame struct {
 	Signature              string                `json:"signature,omitempty"`
 	Code                   string                `json:"code,omitempty"`
 	Error                  string                `json:"error,omitempty"`
-	DMHeaders              []DMHeaderFrame       `json:"dm_headers,omitempty"`
-	ChatEntries            []ChatEntryFrame      `json:"chat_entries,omitempty"`
-	ChatPreviews           []ChatPreviewFrame    `json:"chat_previews,omitempty"`
-	Conversations          []ConversationFrame   `json:"conversations,omitempty"`
-	NetworkStats           *NetworkStatsFrame    `json:"network_stats,omitempty"`
-	AggregateStatus        *AggregateStatusFrame `json:"aggregate_status,omitempty"`
-	TrafficHistory         *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
-	Capabilities           []string              `json:"capabilities,omitempty"`
+	// Details carries machine-readable payload for connection_notice-style
+	// control frames. Shape is a function of Code. Kept as json.RawMessage
+	// so the wire layer stays agnostic to per-code schemas — decode it in
+	// the handler that understands the Code. omitempty prevents historical
+	// frames (hello, welcome, auth_*) from serialising "details": null.
+	Details         json.RawMessage       `json:"details,omitempty"`
+	DMHeaders       []DMHeaderFrame       `json:"dm_headers,omitempty"`
+	ChatEntries     []ChatEntryFrame      `json:"chat_entries,omitempty"`
+	ChatPreviews    []ChatPreviewFrame    `json:"chat_previews,omitempty"`
+	Conversations   []ConversationFrame   `json:"conversations,omitempty"`
+	NetworkStats    *NetworkStatsFrame    `json:"network_stats,omitempty"`
+	AggregateStatus *AggregateStatusFrame `json:"aggregate_status,omitempty"`
+	TrafficHistory  *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
+	Capabilities    []string              `json:"capabilities,omitempty"`
 
 	// Relay fields (Iteration 1 — hop-by-hop relay)
 	HopCount    int    `json:"hop_count,omitempty"`
@@ -163,13 +169,13 @@ type PeerHealthFrame struct {
 	// "rate-limited"). Empty when the disconnect was clean, non-protocol,
 	// or the error maps to the generic "protocol-error" sentinel. Cleared
 	// on successful reconnect.
-	LastErrorCode      string `json:"last_error_code,omitempty"`
-	LastDisconnectCode string `json:"last_disconnect_code,omitempty"`
-	IncompatibleVersionAttempts int   `json:"incompatible_version_attempts,omitempty"`
-	LastIncompatibleVersionAt  string `json:"last_incompatible_version_at,omitempty"`
-	ObservedPeerVersion        int    `json:"observed_peer_version,omitempty"`
-	ObservedPeerMinimumVersion int    `json:"observed_peer_minimum_version,omitempty"`
-	VersionLockoutActive       bool   `json:"version_lockout_active,omitempty"`
+	LastErrorCode               string `json:"last_error_code,omitempty"`
+	LastDisconnectCode          string `json:"last_disconnect_code,omitempty"`
+	IncompatibleVersionAttempts int    `json:"incompatible_version_attempts,omitempty"`
+	LastIncompatibleVersionAt   string `json:"last_incompatible_version_at,omitempty"`
+	ObservedPeerVersion         int    `json:"observed_peer_version,omitempty"`
+	ObservedPeerMinimumVersion  int    `json:"observed_peer_minimum_version,omitempty"`
+	VersionLockoutActive        bool   `json:"version_lockout_active,omitempty"`
 }
 
 // NetworkStatsFrame provides aggregated traffic statistics for the entire node.
@@ -195,10 +201,10 @@ type PeerTrafficFrame struct {
 // network health returned by the fetch_aggregate_status local RPC command.
 // Desktop consumes this frame instead of computing the status locally.
 type AggregateStatusFrame struct {
-	Status          string `json:"status"`           // offline | reconnecting | limited | warning | healthy
-	UsablePeers     int    `json:"usable_peers"`     // healthy + degraded — can route messages
-	ConnectedPeers  int    `json:"connected_peers"`  // usable + stalled
-	TotalPeers      int    `json:"total_peers"`      // connected + reconnecting
+	Status          string `json:"status"`          // offline | reconnecting | limited | warning | healthy
+	UsablePeers     int    `json:"usable_peers"`    // healthy + degraded — can route messages
+	ConnectedPeers  int    `json:"connected_peers"` // usable + stalled
+	TotalPeers      int    `json:"total_peers"`     // connected + reconnecting
 	PendingMessages int    `json:"pending_messages"`
 
 	// Version policy snapshot — embedded directly in AggregateStatusFrame
@@ -218,7 +224,7 @@ type AggregateStatusFrame struct {
 	MaxObservedPeerBuild         int    `json:"max_observed_peer_build,omitempty"`
 	// MaxObservedPeerVersion is the highest protocol version among incompatible
 	// peers (runtime reporters + persisted lockouts). See domain.VersionPolicySnapshot.
-	MaxObservedPeerVersion       int    `json:"max_observed_peer_version,omitempty"`
+	MaxObservedPeerVersion int `json:"max_observed_peer_version,omitempty"`
 }
 
 // TrafficHistoryFrame holds a rolling window of per-second traffic samples.
@@ -246,6 +252,64 @@ type PendingMessageFrame struct {
 	LastAttemptAt string `json:"last_attempt_at,omitempty"`
 	Retries       int    `json:"retries,omitempty"`
 	Error         string `json:"error,omitempty"`
+}
+
+// Connection-notice wire constants.
+//
+// type="connection_notice" is a universal transport/control frame that
+// carries a machine-readable Code plus Details describing why the
+// connection is about to be closed or why a handshake decision is being
+// forwarded to the caller. Unlike type="error", connection_notice is
+// not tied to a specific request/reply interaction and explicitly
+// includes Status so callers know the expected transport action.
+const (
+	// FrameTypeConnectionNotice is the canonical type string for the
+	// universal transport/control frame introduced by the advertise-address
+	// convergence contract. First consumer: ErrCodeObservedAddressMismatch.
+	FrameTypeConnectionNotice = "connection_notice"
+
+	// ConnectionStatusClosing is the only Status value currently shipped
+	// with connection_notice: the responder will close the TCP socket
+	// immediately after the frame is flushed.
+	ConnectionStatusClosing = "closing"
+)
+
+// ObservedAddressMismatchDetails is the schema for Frame.Details when
+// Code == ErrCodeObservedAddressMismatch. observed_address carries the
+// bare IP as seen by the responder, without port — matching the shape
+// already used by welcome.observed_address.
+type ObservedAddressMismatchDetails struct {
+	ObservedAddress string `json:"observed_address,omitempty"`
+}
+
+// MarshalObservedAddressMismatchDetails serialises the details payload
+// for ErrCodeObservedAddressMismatch into the opaque json.RawMessage
+// carried by Frame.Details. Returns nil RawMessage (plus nil error) when
+// ObservedAddress is empty so the field is omitted by omitempty.
+func MarshalObservedAddressMismatchDetails(observedIP string) (json.RawMessage, error) {
+	if observedIP == "" {
+		return nil, nil
+	}
+	payload, err := json.Marshal(ObservedAddressMismatchDetails{ObservedAddress: observedIP})
+	if err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+// ParseObservedAddressMismatchDetails decodes Frame.Details for a
+// connection_notice with Code == ErrCodeObservedAddressMismatch. Empty
+// details is not an error: legacy peers may send the notice without a
+// hint, and callers must treat that as "no actionable observed IP".
+func ParseObservedAddressMismatchDetails(raw json.RawMessage) (ObservedAddressMismatchDetails, error) {
+	if len(raw) == 0 {
+		return ObservedAddressMismatchDetails{}, nil
+	}
+	var details ObservedAddressMismatchDetails
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return ObservedAddressMismatchDetails{}, err
+	}
+	return details, nil
 }
 
 func IsJSONLine(line string) bool {

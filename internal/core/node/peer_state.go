@@ -40,6 +40,53 @@ type peerEntry struct {
 	// the local version changes. Cleared on startup when LocalVersionFingerprint
 	// differs from the running node (protocol version or client build increased).
 	VersionLockout domain.VersionLockoutSnapshot `json:"version_lockout,omitempty"`
+
+	// --- advertise-address convergence state ---
+	//
+	// AnnounceState is the persisted gate for peer announce. "direct_only"
+	// means a live direct connection is allowed but the peer MUST NOT be
+	// relayed as a candidate to other peers. "announceable" means the
+	// advertised endpoint was confirmed (either inbound_confirmed or
+	// outbound_confirmed — consensus_confirmed is reserved). Empty string
+	// ("unset") is legal and distinct from "direct_only": it means no
+	// convergence decision has been made yet.
+	AnnounceState announceState `json:"announce_state,omitempty"`
+
+	// TrustedAdvertiseIP is the canonical IP form (IPv4-mapped IPv6 already
+	// collapsed) recorded when the advertised endpoint was confirmed.
+	TrustedAdvertiseIP domain.PeerIP `json:"trusted_advertise_ip,omitempty"`
+
+	// TrustedAdvertiseSource marks how the advertise was confirmed:
+	// "inbound_confirmed", "outbound_confirmed", or the reserved
+	// "consensus_confirmed". "config" is intentionally excluded —
+	// config alone is not a trusted source for peer announce.
+	TrustedAdvertiseSource string `json:"trusted_advertise_source,omitempty"`
+
+	// TrustedAdvertisePort is the port paired with TrustedAdvertiseIP.
+	// For inbound_confirmed the value is always the default peer port
+	// (never an inbound TCP source port). For outbound_confirmed it is
+	// the port we actually dialled.
+	TrustedAdvertisePort string `json:"trusted_advertise_port,omitempty"`
+
+	// LastObservedIP / LastObservedAt capture the most recent observed IP
+	// hint carried by a mismatch notice or welcome.observed_address for
+	// this peer. These are a single-value snapshot — the runtime history
+	// of size observedIPHistoryMaxSize does not fold into this field.
+	LastObservedIP domain.PeerIP `json:"last_observed_ip,omitempty"`
+	LastObservedAt *time.Time    `json:"last_observed_at,omitempty"`
+
+	// AdvertiseMismatchCount counts distinct mismatch events and grows
+	// monotonically across sessions. Used by ranking/degradation logic.
+	AdvertiseMismatchCount int `json:"advertise_mismatch_count,omitempty"`
+
+	// ForgivableMisadvertisePoints accumulates penalty credit reserved
+	// for misadvertise ban points (banIncrementAdvertiseMismatch). Only
+	// this bucket can be repaid by a subsequent successful auth, and
+	// MisadvertisePointsRepaid tracks how much was already forgiven.
+	// Together they enforce the invariant "a repay cannot remove more
+	// than was charged for misadvertise".
+	ForgivableMisadvertisePoints int `json:"forgivable_misadvertise_points,omitempty"`
+	MisadvertisePointsRepaid     int `json:"misadvertise_points_repaid,omitempty"`
 }
 
 // bannedIPEntry is the on-disk representation of an IP-wide ban.
@@ -60,6 +107,12 @@ type peerStateFile struct {
 	Peers     []peerEntry          `json:"peers"`
 	BannedIPs []bannedIPStateEntry `json:"banned_ips,omitempty"`
 }
+
+// announceState is the closed enum for peerEntry.AnnounceState and for
+// advertiseValidationResult.PersistAnnounceState. Kept as a named string
+// so the JSON wire/disk form is unchanged, but any stray untyped string
+// assignment is a compile error.
+type announceState string
 
 const (
 	peerStateVersion             = 2              // v2: added banned_ips section with ban_origin/ban_reason
@@ -83,6 +136,33 @@ const (
 	peerEvictScoreThreshold = -20              // score at or below this → candidate for eviction
 	peerEvictStaleWindow    = 24 * time.Hour   // must also be unseen for this long
 	peerEvictInterval       = 10 * time.Minute // how often the eviction sweep runs
+
+	// Advertise-address convergence state (peerEntry.AnnounceState).
+	// "unset" is encoded as the empty string and must remain distinct
+	// from "direct_only" per the convergence contract.
+	announceStateUnset        announceState = ""             // no convergence decision yet
+	announceStateDirectOnly   announceState = "direct_only"  // direct connection allowed, no peer announce
+	announceStateAnnounceable announceState = "announceable" // confirmed advertise, may be announced to other peers
+
+	// Trusted advertise source markers (peerEntry.TrustedAdvertiseSource).
+	// consensusConfirmed is reserved for a future consensus-based flow
+	// and MUST NOT be written by the current rollout.
+	trustedAdvertiseSourceInbound   = "inbound_confirmed"
+	trustedAdvertiseSourceOutbound  = "outbound_confirmed"
+	trustedAdvertiseSourceConsensus = "consensus_confirmed"
+
+	// observedIPHistoryMaxSize bounds the runtime-only per-peer history of
+	// observed IP hints used by the outbound convergence loop to avoid
+	// ping-ponging between two misadvertising peers. Runtime only — it
+	// does NOT get serialised into LastObservedIP / LastObservedAt.
+	observedIPHistoryMaxSize = 5
+
+	// banIncrementAdvertiseMismatch is the soft penalty applied to an
+	// inbound peer that fails the observed/advertised IP match. Kept
+	// intentionally at 5% of banThreshold and half of the invalid-signature
+	// penalty — a repeatedly misadvertising peer should drift toward ban,
+	// but a single honest mistake must not ban immediately.
+	banIncrementAdvertiseMismatch = 50
 
 	// Orphaned health entries — inbound-only peers not present in s.peers.
 	// These accumulate from ephemeral inbound connections (e.g.

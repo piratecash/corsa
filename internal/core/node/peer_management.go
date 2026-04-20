@@ -711,6 +711,15 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_parse_failed")
 		return 0
 	}
+	// Advertise convergence: peer closed the dial with a connection_notice
+	// instead of welcoming us. Record the observed IP hint (when present
+	// and routable) and abort this sync pass — the corrected advertise
+	// will be emitted on the next hello.
+	if welcome.Type == protocol.FrameTypeConnectionNotice {
+		s.handleConnectionNotice(welcome)
+		log.Info().Str("peer", string(address)).Str("code", welcome.Code).Msg("sync_peer_connection_notice")
+		return 0
+	}
 	if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
@@ -750,6 +759,15 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			log.Warn().Str("peer", string(address)).Str("type", frame.Type).Str("code", frame.Code).Msg("sync_peer_auth_rejected")
 			return 0
 		}
+		// Outbound convergence success hook: syncPeer is a legacy fresh-
+		// dial path (sender-key recovery, forced refresh) that completes
+		// the same hello → welcome → auth_ok exchange as the managed-
+		// session and raw/bootstrap paths. Without this call, peers
+		// reached only through syncPeer would never get
+		// announce_state=announceable or a trusted advertise triple,
+		// so convergence state would depend on which outbound path
+		// happened to reach the peer.
+		s.recordOutboundAuthSuccessFromConn(address, conn)
 	}
 	s.learnIdentityFromWelcome(welcome)
 	s.mu.RLock()
@@ -1163,7 +1181,79 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 		return protocol.ErrAuthRequired
 	}
 	session.authOK = true
+	s.recordOutboundAuthSuccess(session)
 	return nil
+}
+
+// recordOutboundAuthSuccess is the managed-session entry point for the
+// outbound convergence post-handshake hook. It unwraps the session-
+// owned conn and delegates to recordOutboundAuthSuccessFromConn, so
+// the session-based and raw/bootstrap paths share a single projection
+// onto persistedMeta — no path can silently skip announce_state
+// promotion or the misadvertise repay.
+func (s *Service) recordOutboundAuthSuccess(session *peerSession) {
+	if session == nil {
+		return
+	}
+	s.recordOutboundAuthSuccessFromConn(session.address, session.conn)
+}
+
+// recordOutboundAuthSuccessFromConn is the shared post-auth_ok writer
+// used by every outbound path that completes the handshake:
+//   - the managed-session path via authenticatePeerSession
+//     (→ recordOutboundAuthSuccess → here),
+//   - the raw/bootstrap push_notice fallback in sendNoticeToPeer,
+//   - the legacy fresh-dial path in syncPeer (sender-key recovery,
+//     forced refresh).
+//
+// Consolidating all three through one writer prevents convergence
+// state from depending on which outbound path happened to reach the
+// peer first.
+//
+// It pulls the real TCP peer IP from the live connection's
+// RemoteAddr — NOT from peerAddress, which may carry a hostname for
+// DNS / manual bootstrap peers — and feeds the canonical (IP, port)
+// pair to recordOutboundConfirmed. A hostname reaching
+// TrustedAdvertiseIP would silently break the observed-IP downgrade
+// sweep that compares the field against canonical IPs from inbound
+// TCP endpoints.
+//
+// Side effects are gated on successfully deriving an IP:port pair.
+// If conn is nil, RemoteAddr is unavailable (unit tests), or the IP
+// is unparseable, nothing is written — auth itself is still
+// considered OK by the caller.
+func (s *Service) recordOutboundAuthSuccessFromConn(peerAddress domain.PeerAddress, conn net.Conn) {
+	if peerAddress == "" || conn == nil {
+		return
+	}
+	ra := conn.RemoteAddr()
+	if ra == nil {
+		return
+	}
+	// rawBanIP is the key addBanScore stores under — raw host from
+	// net.SplitHostPort(RemoteAddr()), not the canonicalised form. The
+	// refund must look the peer up under the exact same key, otherwise
+	// hostname-based peers get their peer-level bucket refunded while
+	// their IP-level ban score silently accumulates toward banThreshold.
+	rawBanIP := domain.PeerIP(remoteIP(ra))
+	dialedIP := canonicalIPFromHost(string(rawBanIP))
+	if dialedIP == "" {
+		return
+	}
+	_, dialedPort, ok := splitHostPort(ra.String())
+	if !ok || dialedPort == "" {
+		return
+	}
+	s.recordOutboundConfirmed(peerAddress, domain.PeerIP(dialedIP), dialedPort)
+	// Forgivable misadvertise bucket repays a fixed amount on every
+	// successful auth — keeps honest but flaky peers from drifting
+	// toward a ban after transient NAT-remap events. rawBanIP mirrors
+	// the refund onto s.bans; empty rawBanIP (never happens here
+	// because canonicalIPFromHost already rejected it above) would
+	// only move the peer-level bucket.
+	s.mu.Lock()
+	_ = s.repayMisadvertisePenaltyOnAuthLocked(peerAddress, rawBanIP)
+	s.mu.Unlock()
 }
 
 func scorePeerTargetLocked(health *peerHealth) int64 {
@@ -1789,6 +1879,15 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 			return protocol.Frame{}, err
 		case incoming := <-session.inboxCh:
 			s.markPeerRead(session.address, incoming)
+			if incoming.Type == protocol.FrameTypeConnectionNotice {
+				// Advertise convergence feedback from the inbound side.
+				// The peer is closing the connection immediately after
+				// sending this notice (Status="closing"), so we record
+				// the observed IP and surface the sentinel error so the
+				// caller tears down the session.
+				s.handleConnectionNotice(incoming)
+				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
+			}
 			if incoming.Type == "error" {
 				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
 			}
@@ -3732,11 +3831,23 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr domain.PeerA
 
 	switch {
 	case advertisedOK && observedOK:
-		observedIP := net.ParseIP(observedHost)
-		advertisedIP := net.ParseIP(advertisedHost)
+		// Normalise both hosts through canonicalIPFromHost so IPv4-mapped
+		// IPv6 (::ffff:1.2.3.4) compares equal to the bare IPv4 form and
+		// we never produce a false mismatch between observed and advertised.
+		// Host-form strings (names, DNS) pass through unchanged.
+		normObserved := observedHost
+		if canon := canonicalIPFromHost(observedHost); canon != "" {
+			normObserved = canon
+		}
+		normAdvertised := advertisedHost
+		if canon := canonicalIPFromHost(advertisedHost); canon != "" {
+			normAdvertised = canon
+		}
+		observedIP := net.ParseIP(normObserved)
+		advertisedIP := net.ParseIP(normAdvertised)
 
-		if advertisedIP != nil && !isForbiddenAdvertisedIP(advertisedIP) && advertisedHost == observedHost {
-			return domain.PeerAddress(net.JoinHostPort(advertisedHost, advertisedPort)), true
+		if advertisedIP != nil && !isForbiddenAdvertisedIP(advertisedIP) && normAdvertised == normObserved {
+			return domain.PeerAddress(net.JoinHostPort(normAdvertised, advertisedPort)), true
 		}
 		if observedIP != nil && !s.isForbiddenDialIP(observedIP) {
 			if advertisedIP != nil && isForbiddenAdvertisedIP(advertisedIP) {
@@ -3745,12 +3856,12 @@ func (s *Service) normalizePeerAddress(observedAddr, advertisedAddr domain.PeerA
 				// cluster), so its self-reported port is authoritative.
 				// Only fall back to DefaultPeerPort when the hosts differ,
 				// meaning the advertised IP was likely spoofed.
-				if advertisedHost == observedHost {
-					return domain.PeerAddress(net.JoinHostPort(observedHost, advertisedPort)), true
+				if normAdvertised == normObserved {
+					return domain.PeerAddress(net.JoinHostPort(normObserved, advertisedPort)), true
 				}
-				return domain.PeerAddress(net.JoinHostPort(observedHost, config.DefaultPeerPort)), true
+				return domain.PeerAddress(net.JoinHostPort(normObserved, config.DefaultPeerPort)), true
 			}
-			return domain.PeerAddress(net.JoinHostPort(observedHost, advertisedPort)), true
+			return domain.PeerAddress(net.JoinHostPort(normObserved, advertisedPort)), true
 		}
 		return "", false
 	case advertisedOK:
@@ -3803,28 +3914,88 @@ func splitHostPort(address string) (string, string, bool) {
 	return host, port, true
 }
 
-// isForbiddenAdvertisedIP returns true for IPs that must never be accepted
-// as self-reported advertised addresses from remote peers.  Covers the
-// full RFC 1918 private range (10/8, 172.16/12, 192.168/16) and loopback.
-// These addresses can still be used for manual `addpeer` connections —
-// the guard applies only to the auto-learning / announce path.
-func isForbiddenAdvertisedIP(ip net.IP) bool {
+// nonRoutableCIDRs enumerates the IPv4 / IPv6 ranges that are never
+// routable in the public Internet. advertise validation, announce
+// filtering, peer normalization and forbidden dial checks all share this
+// single list so partial subsets never diverge between code paths.
+//
+// The list is deliberately wider than classic RFC 1918 because carrier-
+// grade NAT (100.64/10) and link-local (169.254/16, fe80::/10) ranges
+// are just as non-routable from the public Internet and must be excluded
+// from world-reachable advertise/announce decisions. Loopback (127/8,
+// ::1/128) and IPv6 ULA (fc00::/7) complete the set.
+//
+// Canonical non-routable IPv4/IPv6 ranges shared by advertise /
+// announce / normalize / dial filters.
+var nonRoutableCIDRs = []string{
+	// IPv4.
+	"127.0.0.0/8",    // loopback
+	"10.0.0.0/8",     // RFC 1918
+	"172.16.0.0/12",  // RFC 1918
+	"192.168.0.0/16", // RFC 1918
+	"100.64.0.0/10",  // carrier-grade NAT (RFC 6598)
+	"169.254.0.0/16", // IPv4 link-local (RFC 3927)
+	// IPv6.
+	"::1/128",   // loopback
+	"fc00::/7",  // unique local addresses (RFC 4193)
+	"fe80::/10", // link-local
+}
+
+// canonicalIPFromHost returns the canonical textual form of an IP
+// address for compare/storage purposes. IPv4-mapped IPv6 such as
+// ::ffff:1.2.3.4 collapses to the bare IPv4 form so observed vs
+// advertised comparisons never give a false mismatch. Returns an empty
+// string when host is not a parseable IP — callers treat this as
+// "not an IP address" and fall through to their own branch.
+//
+// Unified IP normalization helper — IPv4-mapped IPv6 collapses.
+func canonicalIPFromHost(host string) string {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return ""
+	}
+	ip := net.ParseIP(trimmed)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
+}
+
+// isNonRoutableIP returns true if ip belongs to any of nonRoutableCIDRs
+// or to the loopback / link-local classes enforced by the stdlib. This
+// is the single shared predicate used by advertise validation, announce
+// filtering, peer normalization and dial-side forbidden checks.
+func isNonRoutableIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
 	if ip.IsLoopback() {
 		return true
 	}
-	if inCIDR(ip, "10.0.0.0/8") {
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	if inCIDR(ip, "172.16.0.0/12") {
-		return true
-	}
-	if inCIDR(ip, "192.168.0.0/16") {
-		return true
+	for _, cidr := range nonRoutableCIDRs {
+		if inCIDR(ip, cidr) {
+			return true
+		}
 	}
 	return false
+}
+
+// isForbiddenAdvertisedIP returns true for IPs that must never be accepted
+// as self-reported advertised addresses from remote peers. The list is
+// the shared nonRoutableCIDRs set so RFC 1918 private ranges, CGNAT
+// (100.64/10), IPv4 link-local (169.254/16), IPv6 loopback (::1), IPv6
+// ULA (fc00::/7) and IPv6 link-local (fe80::/10) are all rejected the
+// same way in advertise / announce / normalize / dial paths. These
+// addresses can still be used for manual `addpeer` connections — the
+// guard applies only to the auto-learning / announce path.
+func isForbiddenAdvertisedIP(ip net.IP) bool {
+	return isNonRoutableIP(ip)
 }
 
 func inCIDR(ip net.IP, cidr string) bool {
@@ -3839,6 +4010,10 @@ func (s *Service) isForbiddenDialIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
+	// Link-local and unspecified addresses are structurally undialable
+	// regardless of operator configuration; reject up front so the
+	// AllowPrivatePeers / allowLoopbackPeers branches below cannot
+	// accidentally re-enable them.
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return true
 	}
@@ -3848,10 +4023,9 @@ func (s *Service) isForbiddenDialIP(ip net.IP) bool {
 	if ip.IsLoopback() {
 		return !s.allowLoopbackPeers()
 	}
-	if isForbiddenAdvertisedIP(ip) {
-		return true
-	}
-	return false
+	// Everything else goes through the shared non-routable predicate so
+	// advertise / announce / dial filters stay synchronised on one list.
+	return isNonRoutableIP(ip)
 }
 
 // allowLoopbackPeers returns true only when the node is **explicitly**
@@ -4694,6 +4868,35 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]struct{}) []domain.PeerAddress {
 	seenIPs := make(map[string]struct{})
 
+	// Snapshot the announce-state gate once under s.mu. Any peer whose
+	// persistedMeta.AnnounceState is NOT announceable must be excluded
+	// from peer exchange — the advertise-convergence contract forbids
+	// relaying direct-only knowledge to third parties. Peers without any
+	// persistedMeta row fall back to "allow" so bootstrap/manual peers
+	// that have never been through a handshake still propagate.
+	s.mu.RLock()
+	announceable := make(map[domain.PeerAddress]struct{}, len(s.persistedMeta))
+	knownInPersistedMeta := make(map[domain.PeerAddress]struct{}, len(s.persistedMeta))
+	for addr, pm := range s.persistedMeta {
+		if pm == nil {
+			continue
+		}
+		knownInPersistedMeta[addr] = struct{}{}
+		if pm.AnnounceState == announceStateAnnounceable {
+			announceable[addr] = struct{}{}
+		}
+	}
+	s.mu.RUnlock()
+	isAnnounceable := func(addr domain.PeerAddress) bool {
+		if _, ok := knownInPersistedMeta[addr]; !ok {
+			// No convergence decision yet — fall through so bootstrap
+			// and manual peers remain propagatable.
+			return true
+		}
+		_, ok := announceable[addr]
+		return ok
+	}
+
 	// 1. Active connections first — verified by live TCP, highest priority.
 	var active []domain.PeerAddress
 	if s.connManager != nil {
@@ -4701,18 +4904,37 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 			if slot.State != "active" {
 				continue
 			}
-			addr := slot.Address
+			// The convergence decision for a CM-managed peer may be
+			// keyed either on the canonical slot.Address (when the
+			// first dial reached the configured endpoint) or on
+			// slot.ConnectedAddress (when a fallback variant won the
+			// race and got persisted by the connect writer). A slot
+			// must be excluded from peer exchange if *either* key
+			// has a persisted decision that is not announceable —
+			// without this, a direct_only peer reached via a fallback
+			// port slips through because persistedMeta is empty for
+			// the fallback key and the filter falls through to
+			// "allow unknown".
+			canonical := slot.Address
+			connected := canonical
 			if slot.ConnectedAddress != nil {
-				addr = *slot.ConnectedAddress
+				connected = *slot.ConnectedAddress
 			}
-			if shouldHidePeerExchangeAddress(addr) {
+			// The emitted address is the endpoint that is actually
+			// reachable right now (connected, which equals canonical
+			// when no fallback won). That's the dial target other
+			// peers will store.
+			if shouldHidePeerExchangeAddress(connected) {
 				continue
 			}
-			ip, _, ok := splitHostPort(string(addr))
+			if !isAnnounceable(canonical) || !isAnnounceable(connected) {
+				continue
+			}
+			ip, _, ok := splitHostPort(string(connected))
 			if ok {
 				if _, exists := seenIPs[ip]; !exists {
 					seenIPs[ip] = struct{}{}
-					active = append(active, addr)
+					active = append(active, connected)
 				}
 			}
 		}
@@ -4728,6 +4950,9 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 			continue
 		}
 		if shouldHidePeerExchangeAddress(addr) {
+			continue
+		}
+		if !isAnnounceable(addr) {
 			continue
 		}
 		ip, _, ok := splitHostPort(string(addr))
@@ -4746,6 +4971,9 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	if s.peerProvider != nil {
 		for _, candidate := range s.peerProvider.Candidates() {
 			if shouldHidePeerExchangeAddress(candidate.Address) {
+				continue
+			}
+			if !isAnnounceable(candidate.Address) {
 				continue
 			}
 			ip, _, ok := splitHostPort(string(candidate.Address))

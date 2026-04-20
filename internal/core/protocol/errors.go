@@ -32,6 +32,13 @@ const (
 	ErrCodeRateLimited                = "rate-limited"
 	ErrCodeHelloAfterAuth             = "hello-after-auth"
 	ErrCodeSenderIdentityNotVerified  = "sender-identity-not-verified"
+	// ErrCodeObservedAddressMismatch signals that the advertised listen
+	// address in a peer's hello frame does not match the observed remote
+	// TCP endpoint. Used only inside type="connection_notice" frames with
+	// machine-readable details.observed_address. The responder closes the
+	// connection immediately after sending the notice — welcome is not
+	// issued, auth_session is not expected.
+	ErrCodeObservedAddressMismatch = "observed-address-mismatch"
 )
 
 var (
@@ -64,6 +71,9 @@ var (
 	ErrRateLimited                = errors.New(ErrCodeRateLimited)
 	ErrHelloAfterAuth             = errors.New(ErrCodeHelloAfterAuth)
 	ErrSenderIdentityNotVerified  = errors.New(ErrCodeSenderIdentityNotVerified)
+	// ErrObservedAddressMismatch is the sentinel for ErrCodeObservedAddressMismatch.
+	// Callers detect a pre-welcome advertise-address rejection via errors.Is.
+	ErrObservedAddressMismatch = errors.New(ErrCodeObservedAddressMismatch)
 )
 
 func ErrorCode(err error) string {
@@ -126,6 +136,8 @@ func ErrorCode(err error) string {
 		return ErrCodeHelloAfterAuth
 	case errors.Is(err, ErrSenderIdentityNotVerified):
 		return ErrCodeSenderIdentityNotVerified
+	case errors.Is(err, ErrObservedAddressMismatch):
+		return ErrCodeObservedAddressMismatch
 	default:
 		return ErrCodeProtocol
 	}
@@ -189,6 +201,8 @@ func ErrorFromCode(code string) error {
 		return ErrHelloAfterAuth
 	case ErrCodeSenderIdentityNotVerified:
 		return ErrSenderIdentityNotVerified
+	case ErrCodeObservedAddressMismatch:
+		return ErrObservedAddressMismatch
 	default:
 		return ErrProtocol
 	}

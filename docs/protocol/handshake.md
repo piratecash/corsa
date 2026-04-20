@@ -265,6 +265,151 @@ When initiator sends `pubkey`, `boxkey`, and `boxsig`:
 - **Consensus building**: compare across 2+ peer observations
 - Informational only; does not affect connection logic
 
+### Advertise Convergence
+
+After a peer sends `hello`, the responder decides whether the advertised
+`listen` address matches the observed TCP source. The decision is derived
+once, does not depend on the order of hello fields, and produces one of
+six outcomes:
+
+- `non_listener` — peer explicitly declared `listener="0"`. Accepted as
+  direct-only: known to this session, never announced to other peers.
+- `legacy_direct` — no usable `listen` (absent, wildcard bind, or
+  structurally invalid host:port). Treated as direct-only for backward
+  compatibility.
+- `match` — observed IP equals the advertised IP (after canonical
+  IPv4-mapped-IPv6 normalisation). Accepted as announceable: trusted for
+  peer announces.
+- `local_exception` — observed is private/loopback/link-local/CGNAT but
+  the advertise is a world-reachable address. Accepted as direct-only
+  (common single-host / LAN test setups).
+- `world_mismatch` — observed is world-reachable and disagrees with the
+  advertised IP. The connection is rejected before `welcome` with a
+  `connection_notice` frame (see below) and the advertise bucket is
+  charged with `banIncrementAdvertiseMismatch` points.
+- `invalid` — observed is not a parseable IP (should not happen for real
+  TCP peers). Rejected as protocol error without a notice payload.
+
+On `world_mismatch` the responder emits a `connection_notice` frame:
+
+```json
+{
+  "type": "connection_notice",
+  "code": "observed-address-mismatch",
+  "status": "closing",
+  "error": "advertised address does not match observed remote address",
+  "details": { "observed_address": "203.0.113.50" }
+}
+```
+
+The initiator side treats this frame as advisory feedback: it records
+`observed_address` as a runtime `trusted_self_advertise_ip` override so
+the next outbound `hello` self-corrects, then closes the session. The
+override never downgrades the local node to a non-routable address — a
+peer reporting a private/loopback/link-local hint is ignored for
+override purposes.
+
+The outbound `listen` that a node publishes follows this priority:
+
+1. Runtime override (learned from `observed-address-mismatch`).
+2. Observed-address consensus (≥2 distinct peers agreeing on the same
+   world-reachable IP).
+3. Configured `AdvertiseAddress`.
+
+The port published in outbound `hello.listen` always comes from the real
+local listener — the convergence machinery never swaps the port to an
+unproven value. This also applies to the configured `AdvertiseAddress`
+fallback: only the host portion of `AdvertiseAddress` is reused, the
+port is always taken from the live listener. If the operator edits the
+config to a wrong or stale port, the node still advertises the real
+bound port and stays dialable.
+
+Sticky-state rule: a peer that was once recorded as `announceable` stays
+announceable until an explicit downgrade event (`world_mismatch` or
+`local_exception` arriving after the previous `match`). A follow-up
+`legacy_direct` or `non_listener` does not silently erase prior trust.
+
+Observed-IP downgrade sweep: on `world_mismatch` the responder also
+scans `persistedMeta` for any `announceable` entry whose
+`trusted_advertise_ip` equals the current observed IP, or whose
+persisted address host equals the observed IP. Each such entry is
+demoted to `direct_only` in the same transaction as the incoming
+peer's downgrade and the mismatch accounting —
+`advertise_mismatch_count++` and
+`forgivable_misadvertise_points += banIncrementAdvertiseMismatch` — is
+charged on the surviving swept row. Without this, a peer that keeps
+its real IP but rotates the claimed listen port would both preserve
+its stale `announceable` row and dodge the persisted ranking penalty
+that rollout 5 depends on. When the incoming `peer_address` coincides
+with a row already charged by the sweep, the main switch skips its
+own increment so a single `world_mismatch` event is billed exactly
+once.
+
+Peer exchange gate: only peers whose persisted `announce_state` is
+`announceable` are relayed in `get_peers` responses. Peers tagged
+`direct_only` or with an unset `announce_state` are never announced
+outward — they represent a live connection permission, not a
+third-party-reachable endpoint. Peers without any persisted row at all
+(bootstrap / manual adds that have not yet been through a handshake)
+fall through and are propagatable so the network can grow from an
+empty state. For CM-managed active slots the gate is applied to
+**both** the canonical slot address and the fallback-connected
+address: the convergence writer may key the decision on either
+(the canonical one if the first dial reached the configured
+endpoint, the fallback if an alternate port variant won the dial
+race), so checking only one key would let a `direct_only` peer leak
+through whenever the other key happened to be empty.
+
+Forgivable misadvertise repay: each `world_mismatch` charges two
+counters — the peer-level `forgivable_misadvertise_points` bucket on
+`persistedMeta` and the per-IP `s.bans[ip].Score` accumulated by
+`addBanScore`. A later successful `auth_ok` from the same peer repays
+up to `banIncrementAdvertiseMismatch` points in **both** places,
+preventing an honest but flaky peer from permanently climbing toward
+the transport-level ban threshold while its peer-level bucket decays
+normally. The mirror refund clamps at zero — the repay can never push
+`s.bans[ip].Score` below zero, and the cumulative repay can never
+exceed what was originally charged for misadvertise. The refund looks
+up `s.bans` under the verified TCP peer IP derived from the live
+`conn.RemoteAddr()` — the exact key `addBanScore` used when charging
+— NOT the host component of `peerAddress`. For DNS / manually-added
+bootstrap peers `peerAddress` still carries an unresolved hostname,
+so splitting it here would leave the IP-level ban score permanently
+un-refunded while the peer-level bucket decayed: the exact divergence
+the mirror refund was introduced to close.
+
+Outbound-confirmed trust IP invariant: `trusted_advertise_ip` on a
+peer row is always a canonical IPv4/IPv6 address — never a hostname.
+The outbound-success writer (`recordOutboundConfirmed`) refuses any
+call whose dialed-IP argument does not parse as a concrete IP literal,
+and its caller derives that argument from `session.conn.RemoteAddr()`
+(the live TCP endpoint after OS DNS resolution), not from
+`session.address`, which for DNS or manually-added bootstrap peers
+still carries the unresolved hostname. Storing a hostname here would
+permanently break the observed-IP downgrade sweep: the sweep compares
+`trusted_advertise_ip` byte-for-byte against canonical IPs extracted
+from inbound TCP `RemoteAddr`s, so a hostname value would never match
+and the stale `announceable` row would survive every subsequent
+`world_mismatch` targeting the same peer. When no canonical IP can be
+derived from the live connection, the write is skipped — the peer
+remains untracked on the advertise-convergence layer rather than
+learning bad trust from a partial observation.
+
+Raw/bootstrap path convergence parity: outbound connections that do
+not go through the managed-session state machine — the `push_notice`
+TCP fallback used for bootstrap delivery in `sendNoticeToPeer`, and
+the legacy fresh-dial path in `syncPeer` used for sender-key recovery
+and forced refresh — share the same post-`auth_ok` convergence writer
+as the managed path. All three call sites funnel through
+`recordOutboundAuthSuccessFromConn`, which derives the canonical
+dialed IP and port from `conn.RemoteAddr()` and then performs the
+same `recordOutboundConfirmed` + misadvertise-repay sequence. Without
+this shared hook, peers reached only through the bootstrap fan-out
+or the sender-key recovery fresh-dial would never receive
+`announce_state=announceable` or a trusted advertise triple, so their
+state would diverge from the managed path and the hostname /
+observed-IP sweep invariants above would silently not apply there.
+
 ### Node Role Semantics
 
 - **full node** (`node_type="full"`): relays mesh traffic, stores messages for gossip
@@ -639,6 +784,152 @@ sequenceDiagram
 - Используется для обнаружения NAT (например, локальный IP ≠ наблюдаемый IP)
 - **Построение консенсуса**: сравнивать через 2+ наблюдений пиров
 - Только информационное; не влияет на логику соединения
+
+### Согласование advertise-адреса
+
+После получения `hello` ответчик решает, совпадает ли заявленный `listen`
+с наблюдаемым TCP-источником. Решение выводится один раз и принимает одно
+из шести значений:
+
+- `non_listener` — пир явно объявил `listener="0"`. Принимается как
+  direct-only: используется в рамках сессии, не анонсируется другим пирам.
+- `legacy_direct` — нет пригодного `listen` (отсутствует, wildcard-bind,
+  невалидный host:port). Принимается как direct-only для обратной
+  совместимости.
+- `match` — наблюдаемый IP совпадает с advertised IP (после
+  канонизации IPv4-mapped-IPv6). Принимается как announceable: доверяется
+  для анонса пирам.
+- `local_exception` — наблюдаемый IP приватный/loopback/link-local/CGNAT,
+  а advertised — world-reachable. Принимается как direct-only (типичные
+  single-host / LAN сценарии).
+- `world_mismatch` — наблюдаемый IP world-reachable и не совпадает с
+  advertised. Соединение отклоняется до `welcome` через фрейм
+  `connection_notice` (см. ниже) и к корзине advertise-штрафов
+  добавляется `banIncrementAdvertiseMismatch` очков.
+- `invalid` — наблюдаемый IP не парсится (не встречается у реальных TCP
+  пиров). Отклоняется как протокольная ошибка без payload notice.
+
+При `world_mismatch` ответчик отправляет фрейм `connection_notice`:
+
+```json
+{
+  "type": "connection_notice",
+  "code": "observed-address-mismatch",
+  "status": "closing",
+  "error": "advertised address does not match observed remote address",
+  "details": { "observed_address": "203.0.113.50" }
+}
+```
+
+Инициатор трактует этот фрейм как рекомендательный сигнал: он сохраняет
+`observed_address` как runtime override `trusted_self_advertise_ip`,
+чтобы следующий исходящий `hello` сам скорректировал advertise, затем
+закрывает сессию. Override никогда не переводит локальную ноду на
+non-routable адрес — если пир прислал приватный/loopback/link-local
+подсказку, она игнорируется при обновлении override.
+
+Исходящий `listen` выбирается по приоритету:
+
+1. Runtime override (получен через `observed-address-mismatch`).
+2. Консенсус observed-address (≥2 разных пира сходятся на одном
+   world-reachable IP).
+3. Конфиг `AdvertiseAddress`.
+
+Порт в исходящем `hello.listen` всегда берётся от реального локального
+listener — механизм convergence никогда не подменяет порт на непроверенный.
+Это же правило распространяется на fallback-ветку с конфигурационным
+`AdvertiseAddress`: из `AdvertiseAddress` берётся только host, порт всегда
+приходит от живого listener. Если оператор отредактировал конфиг и
+указал неправильный или устаревший порт, нода всё равно анонсирует
+реальный bound-порт и остаётся dialable.
+
+Sticky-state правило: пир однажды записанный как `announceable` остаётся
+announceable до явного события downgrade (`world_mismatch` или
+`local_exception`, приходящие после `match`). Последующий `legacy_direct`
+или `non_listener` не стирает прошлое доверие молча.
+
+Сметание announceable по observed IP: на `world_mismatch` ответчик
+дополнительно сканирует `persistedMeta` и ищет любые announceable-записи,
+у которых `trusted_advertise_ip` равен текущему observed IP или host
+персистентного адреса совпадает с observed IP. Каждая такая запись
+демоутится до `direct_only` в той же транзакции, что и downgrade
+входящего пира, и на выжившую строку начисляется mismatch-учёт:
+`advertise_mismatch_count++` и
+`forgivable_misadvertise_points += banIncrementAdvertiseMismatch`.
+Без этого пир, сохраняющий свой реальный IP, но меняющий заявленный
+listen-порт между сессиями, и сохранял бы устаревшую announceable-строку,
+и уворачивался бы от rollout-5 ранжирующего штрафа. Если входящий
+`peer_address` совпадает со строкой, которую sweep уже списал,
+главный switch пропускает собственный инкремент — одно событие
+`world_mismatch` должно списываться ровно один раз.
+
+Фильтр peer exchange: в ответах `get_peers` релеятся только пиры, у
+которых персистентное `announce_state` равно `announceable`. Пиры с
+`direct_only` или с неустановленным `announce_state` никогда не
+анонсируются наружу — они представляют разрешение на прямое
+соединение, но не endpoint, достижимый третьей стороной. Пиры без
+персистентной записи вообще (bootstrap / ручное добавление, которые
+ещё не прошли handshake) проходят дальше и могут релеиться, чтобы
+сеть могла расти с пустого состояния. Для активных CM-слотов фильтр
+применяется к **обоим** ключам: канонический `slot.Address` и
+fallback `slot.ConnectedAddress`. Convergence-писатель может положить
+решение под любой из них (канонический, если первый dial попал в
+настроенный endpoint; fallback, если выиграл альтернативный порт),
+поэтому проверка только одного ключа даёт утечку direct_only-пира
+всякий раз, когда второй ключ оказывается пустым.
+
+Возврат forgivable misadvertise points: каждый `world_mismatch` заряжает
+два счётчика — per-peer `forgivable_misadvertise_points` в
+`persistedMeta` и per-IP `s.bans[ip].Score`, который накапливает
+`addBanScore`. Последующий успешный `auth_ok` от того же пира
+возвращает до `banIncrementAdvertiseMismatch` очков **в обоих** местах.
+Это не даёт честному, но нестабильному пиру вечно расти к
+transport-level ban-порогу, пока per-peer bucket корректно затухает.
+Зеркальный возврат клампится в ноль — repay никогда не уводит
+`s.bans[ip].Score` ниже нуля, а кумулятивный возврат никогда не
+превышает изначально списанное за misadvertise. Зеркальный возврат
+ищет запись в `s.bans` по верифицированному TCP IP-пира, полученному
+из живого `conn.RemoteAddr()` — то же самое значение, под которым
+`addBanScore` сохранял Score, — а НЕ по host-части `peerAddress`. Для
+DNS / вручную добавленных bootstrap-пиров `peerAddress` по-прежнему
+содержит неразрешённый hostname, поэтому расщепление его здесь
+оставит IP-level ban score навсегда без рефанда, в то время как
+per-peer bucket корректно затухает: ровно ту самую divergence,
+которую зеркальный возврат и должен был закрыть.
+
+Инвариант trusted IP для outbound-подтверждения: поле
+`trusted_advertise_ip` в записи пира всегда содержит канонический
+IPv4/IPv6 адрес — никогда hostname. Писатель успешного исходящего
+соединения (`recordOutboundConfirmed`) отказывает любому вызову, в
+котором аргумент dial-IP не парсится как конкретный IP-литерал, а его
+caller берёт этот аргумент из `session.conn.RemoteAddr()` (живой
+TCP-эндпоинт после резолва OS DNS), а не из `session.address`, где для
+DNS- или вручную добавленных bootstrap-пиров по-прежнему лежит
+неразрешённый hostname. Hostname, попавший в `trusted_advertise_ip`,
+навсегда сломает observed-IP downgrade sweep: sweep побайтово
+сравнивает `trusted_advertise_ip` с каноническими IP-ами из входящих
+TCP `RemoteAddr`, поэтому значение-hostname никогда не совпадёт и
+устаревшая строка `announceable` переживёт каждый следующий
+`world_mismatch` по тому же пиру. Если из живого соединения
+невозможно извлечь канонический IP — запись пропускается: пир
+остаётся нетронутым на слое advertise-convergence, а не учит плохое
+доверие по частичному наблюдению.
+
+Паритет convergence для raw/bootstrap-пути: исходящие соединения,
+которые не проходят через managed-session state machine — TCP
+fallback для `push_notice`, используемый для доставки bootstrap в
+`sendNoticeToPeer`, и legacy fresh-dial в `syncPeer`, используемый
+для sender-key recovery и forced refresh, — используют тот же
+пост-`auth_ok` convergence writer, что и managed-путь. Все три
+call site сходятся в `recordOutboundAuthSuccessFromConn`, который
+берёт канонический dial-IP и порт из `conn.RemoteAddr()` и затем
+выполняет ту же последовательность `recordOutboundConfirmed` +
+repay forgivable misadvertise. Без этого общего хука пиры,
+достижимые только через bootstrap fan-out или sender-key recovery
+fresh-dial, никогда не получили бы `announce_state=announceable`
+или trusted advertise triple, и их состояние разошлось бы с
+managed-путём — а инварианты hostname / observed-IP sweep выше
+молча не применялись бы к этой ветке.
 
 ### Семантика ролей ноды
 

@@ -515,3 +515,141 @@ func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
 			baseline, final, iterations, final-baseline)
 	}
 }
+
+// TestSyncPeer_RecordsOutboundSuccess is the regression guard for the
+// legacy syncPeer handshake path. syncPeer completes the same
+// hello → welcome → auth_session → auth_ok exchange as the managed
+// outbound session (authenticatePeerSession) and the raw/bootstrap
+// push_notice path in sendNoticeToPeer, so it must funnel success
+// through the same recordOutboundAuthSuccessFromConn helper. Before
+// the fix the legacy path returned straight from its inline
+// auth_session/auth_ok exchange without calling that helper: as a
+// result peers reached only through sender-key recovery / forced
+// refresh never got announce_state=announceable, never recorded the
+// trusted advertise triple, and never repaid forgivable misadvertise
+// points — so convergence state depended on which outbound path
+// happened to reach the peer first.
+func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	peerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+
+	peerDone := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			peerDone <- err
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		reader := bufio.NewReader(c)
+
+		// hello.
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- err
+			return
+		}
+		// welcome with challenge forces the auth_session branch — the
+		// branch where the convergence hook must fire.
+		welcomeLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:      "welcome",
+			Challenge: "sync-peer-challenge",
+			Address:   peerID.Address,
+		})
+		if err != nil {
+			peerDone <- err
+			return
+		}
+		if _, err := c.Write([]byte(welcomeLine)); err != nil {
+			peerDone <- err
+			return
+		}
+
+		// auth_session → auth_ok.
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- err
+			return
+		}
+		authOK, err := protocol.MarshalFrameLine(protocol.Frame{Type: "auth_ok"})
+		if err != nil {
+			peerDone <- err
+			return
+		}
+		if _, err := c.Write([]byte(authOK)); err != nil {
+			peerDone <- err
+			return
+		}
+
+		// fetch_contacts → empty contacts; syncPeer reads one contacts
+		// reply and returns. requestPeers=false so no get_peers between.
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- err
+			return
+		}
+		contactsLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:     "contacts",
+			Contacts: []protocol.ContactFrame{},
+		})
+		if err != nil {
+			peerDone <- err
+			return
+		}
+		if _, err := c.Write([]byte(contactsLine)); err != nil {
+			peerDone <- err
+			return
+		}
+		peerDone <- nil
+	}()
+
+	peerAddr := domain.PeerAddress(ln.Addr().String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// requestPeers=false mirrors the sender-key recovery call site —
+	// the production caller that exercises the auth_ok branch.
+	svc.syncPeer(ctx, peerAddr, false)
+
+	select {
+	case err := <-peerDone:
+		if err != nil {
+			t.Fatalf("peer goroutine: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("syncPeer handshake did not complete within 5s")
+	}
+
+	svc.mu.RLock()
+	pm := svc.persistedMeta[peerAddr]
+	svc.mu.RUnlock()
+	if pm == nil {
+		t.Fatalf("persistedMeta row not created by syncPeer path")
+	}
+	if pm.AnnounceState != announceStateAnnounceable {
+		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
+	}
+	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceOutbound {
+		t.Fatalf("trusted_advertise_source: got %q want %q",
+			pm.TrustedAdvertiseSource, trustedAdvertiseSourceOutbound)
+	}
+	if pm.TrustedAdvertiseIP != "127.0.0.1" {
+		t.Fatalf("trusted_advertise_ip: got %q want %q (must be canonical IP from RemoteAddr)",
+			pm.TrustedAdvertiseIP, "127.0.0.1")
+	}
+	_, wantPort, ok := splitHostPort(string(peerAddr))
+	if !ok {
+		t.Fatalf("splitHostPort failed for listener addr %q", peerAddr)
+	}
+	if pm.TrustedAdvertisePort != wantPort {
+		t.Fatalf("trusted_advertise_port: got %q want %q", pm.TrustedAdvertisePort, wantPort)
+	}
+}
