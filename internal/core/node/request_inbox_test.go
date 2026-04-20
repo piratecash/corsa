@@ -1022,22 +1022,12 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 	}
 
 	// Verify: now marked as seen after successful gossip.
-	// gossipTransitReceipt runs in a goroutine and calls markTransitReceiptSeen
-	// AFTER enqueuePeerFrame writes to sendCh, so we must poll briefly to let
-	// the goroutine finish the mark step.
-	deadline := time.After(2 * time.Second)
-	for {
-		svc.mu.RLock()
-		_, markedAfterSecond := svc.seenReceipts[key]
-		svc.mu.RUnlock()
-		if markedAfterSecond {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("receipt must be marked as seen after successful gossip delivery")
-		case <-time.After(5 * time.Millisecond):
-		}
+	// gossipTransitReceipt is synchronous, so the mark is immediate.
+	svc.mu.RLock()
+	_, markedAfterSecond := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if !markedAfterSecond {
+		t.Fatal("receipt must be marked as seen after successful gossip delivery")
 	}
 }
 
@@ -1069,9 +1059,23 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	// First call — no relay state, no gossip targets.
 	svc.dispatchPeerSessionFrame(senderAddr, senderSession, frame)
 
-	// Verify: not marked as seen.
-	svc.mu.RLock()
+	// dispatchPeerSessionFrame pre-marks the receipt as seen (to suppress
+	// rapid-fire duplicates) and then launches gossipTransitReceipt as a
+	// goroutine. When no routing targets exist the goroutine calls
+	// unmarkTransitReceiptSeen, but this happens asynchronously. Poll
+	// until the goroutine completes the unmark.
 	key := "foreign-recipient-sess-recovery:msg-recovery-sess-1:delivered"
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		svc.mu.RLock()
+		_, marked := svc.seenReceipts[key]
+		svc.mu.RUnlock()
+		if !marked {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	svc.mu.RLock()
 	_, markedAfterFirst := svc.seenReceipts[key]
 	svc.mu.RUnlock()
 	if markedAfterFirst {
@@ -1104,22 +1108,13 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	}
 
 	// Verify: marked as seen after success.
-	// gossipTransitReceipt runs in a goroutine and calls markTransitReceiptSeen
-	// AFTER enqueuePeerFrame writes to sendCh, so we must poll briefly to let
-	// the goroutine finish the mark step.
-	deadline2 := time.After(2 * time.Second)
-	for {
-		svc.mu.RLock()
-		_, markedAfterSecond := svc.seenReceipts[key]
-		svc.mu.RUnlock()
-		if markedAfterSecond {
-			break
-		}
-		select {
-		case <-deadline2:
-			t.Fatal("receipt must be marked as seen after successful gossip delivery (session)")
-		case <-time.After(5 * time.Millisecond):
-		}
+	// The pre-mark in dispatchPeerSessionFrame marks the receipt before
+	// the goroutine runs; gossipTransitReceipt only unmarks on failure.
+	svc.mu.RLock()
+	_, markedAfterSecond := svc.seenReceipts[key]
+	svc.mu.RUnlock()
+	if !markedAfterSecond {
+		t.Fatal("receipt must be marked as seen after successful gossip delivery (session)")
 	}
 }
 
@@ -1132,10 +1127,10 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 // gossipTransitReceipt is the shared helper invoked by both
 // handleInboundRelayDeliveryReceipt and dispatchPeerSessionFrame, so a
 // single direct-call test covers the retry/dedupe logic for both paths.
-// Dispatcher wiring (handler → go gossipTransitReceipt) is independently
+// Dispatcher wiring (handler → gossipTransitReceipt) is independently
 // pinned by TestRelayDeliveryReceiptGossipsFallbackForUnrelatedRecipient
 // (inbound) and TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown
-// (session), which synchronize on sendCh delivery via time.After.
+// (session).
 //
 // Direct invocation makes all assertions fully synchronous — no sleeps or
 // timing assumptions.
@@ -1177,8 +1172,9 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 		DeliveredAt: time.Now().UTC(),
 	}
 
-	// Direct call — synchronous, no goroutine wrapper. All sends fail,
-	// receipt must NOT be marked.
+	// Pre-mark before gossip (matches production caller contract).
+	// All sends fail → gossipTransitReceipt unmarks → receipt eligible for retry.
+	svc.markTransitReceiptSeen(receipt)
 	svc.gossipTransitReceipt(receipt)
 
 	svc.mu.RLock()
@@ -1196,7 +1192,8 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 	svc.pending[gossipTarget] = nil
 	svc.mu.Unlock()
 
-	// Retry — same receipt, capacity recovered. Must deliver and mark.
+	// Retry — pre-mark again, capacity recovered. Must deliver and stay marked.
+	svc.markTransitReceiptSeen(receipt)
 	svc.gossipTransitReceipt(receipt)
 
 	select {

@@ -49,6 +49,11 @@ type Node struct {
 	MaxClockDrift    time.Duration
 	MaxOutgoingPeers int
 	MaxIncomingPeers int
+
+	// AllowPrivatePeers disables the private/loopback IP filter for peer
+	// addresses. Production nodes never set this — it exists solely for
+	// unit tests that use RFC 1918 addresses as fake peers.
+	AllowPrivatePeers bool
 }
 
 type RPC struct {

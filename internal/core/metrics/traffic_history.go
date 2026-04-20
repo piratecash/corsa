@@ -19,6 +19,15 @@ type TrafficSample struct {
 // TrafficHistory maintains a fixed-size ring buffer of traffic samples.
 // When full, the oldest sample is evicted to make room for the newest.
 // All methods are safe for concurrent use.
+//
+// Delta computation expects a baseline: prevSent/prevRecv must reflect the
+// cumulative counters that were already in place before the first Record
+// call. Seed captures that baseline explicitly; callers that wire up a
+// Collector before any traffic flowed can skip Seed (prev stays at 0 and the
+// first Record produces delta == totalSent/totalReceived correctly). Callers
+// that start observing a running system must Seed(current totals) once
+// before the first Record, otherwise the first sample would spike with the
+// pre-observation cumulative bytes recorded as "one second of traffic".
 type TrafficHistory struct {
 	mu       sync.RWMutex
 	samples  []TrafficSample
@@ -35,22 +44,40 @@ func NewTrafficHistory() *TrafficHistory {
 	}
 }
 
-// Record adds a new sample. Deltas are computed automatically from the
-// difference between the current totals and the previous sample.
+// Seed sets the baseline for delta computation to the given cumulative
+// counters without appending a sample. Intended to be called exactly once,
+// before the first Record, when the producer is attached to an already-running
+// system whose counters are non-zero. Without Seed, the first Record would
+// treat prevSent == 0 and report the entire pre-observation cumulative as a
+// single-second spike (or, in the previous implementation, discard the first
+// delta altogether and hide real traffic that happened between producer
+// startup and the first tick).
+//
+// Calling Seed after Record is a no-op on the recorded samples but overwrites
+// the baseline — callers should treat Seed as a startup-time operation.
+func (th *TrafficHistory) Seed(totalSent, totalReceived int64) {
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	th.prevSent = totalSent
+	th.prevRecv = totalReceived
+}
+
+// Record adds a new sample. Deltas are computed as totalSent - prevSent /
+// totalReceived - prevRecv, clamped to zero on counter resets. The baseline
+// prevSent/prevRecv starts at zero (suitable when the producer observes the
+// system from startup) and is updated on every Record; see Seed for the case
+// where the producer attaches to a system with pre-existing cumulative bytes.
 func (th *TrafficHistory) Record(totalSent, totalReceived int64) {
 	th.mu.Lock()
 	defer th.mu.Unlock()
 
-	var deltaSent, deltaRecv int64
-	if th.full || th.head > 0 {
-		deltaSent = totalSent - th.prevSent
-		deltaRecv = totalReceived - th.prevRecv
-		if deltaSent < 0 {
-			deltaSent = 0
-		}
-		if deltaRecv < 0 {
-			deltaRecv = 0
-		}
+	deltaSent := totalSent - th.prevSent
+	deltaRecv := totalReceived - th.prevRecv
+	if deltaSent < 0 {
+		deltaSent = 0
+	}
+	if deltaRecv < 0 {
+		deltaRecv = 0
 	}
 
 	th.samples[th.head] = TrafficSample{

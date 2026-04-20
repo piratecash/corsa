@@ -105,7 +105,7 @@ func newScopedTestService(t *testing.T) (*Service, func()) {
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 	svc.disableRateLimiting = true
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -28,11 +28,12 @@ func testProviderConfig() PeerProviderConfig {
 				domain.NetGroupLocal: {},
 			}
 		},
-		BannedIPsFn:   func() map[string]domain.BannedIPEntry { return nil },
-		ListenAddr:    ":64646",
-		DefaultPort:   config.DefaultPeerPort,
-		IsSelfAddress: func(domain.PeerAddress) bool { return false },
-		NowFn:         func() time.Time { return time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC) },
+		BannedIPsFn:            func() map[string]domain.BannedIPEntry { return nil },
+		ListenAddr:             ":64646",
+		DefaultPort:            config.DefaultPeerPort,
+		IsSelfAddress:          func(domain.PeerAddress) bool { return false },
+		NowFn:                  func() time.Time { return time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC) },
+		AllowPrivateCandidates: true,
 	}
 }
 
@@ -195,7 +196,9 @@ func TestCandidates_ForbiddenIPFiltered(t *testing.T) {
 }
 
 func TestCandidates_PersistedPrivateIPv4Filtered(t *testing.T) {
-	pp := NewPeerProvider(testProviderConfig())
+	cfg := testProviderConfig()
+	cfg.AllowPrivateCandidates = false // this test verifies private IP filtering
+	pp := NewPeerProvider(cfg)
 
 	pp.Restore(domain.RestoreEntry{
 		Address: mustAddr("127.0.0.1:64646"),
@@ -1306,6 +1309,46 @@ func TestV3RoundTrip_PartialExpiry(t *testing.T) {
 	}
 	if banned[0].IP != "5.6.7.8" {
 		t.Errorf("expected active ban on 5.6.7.8, got %v", banned[0].IP)
+	}
+}
+
+// TestShouldSkipPrivateAutoDialPeer verifies that private/loopback addresses
+// from all non-manual sources are excluded from CM auto-dial candidates.
+func TestShouldSkipPrivateAutoDialPeer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		ip     string
+		source domain.PeerSource
+		want   bool
+	}{
+		{"loopback announce", "127.0.0.1", domain.PeerSourceAnnounce, true},
+		{"loopback bootstrap", "127.0.0.1", domain.PeerSourceBootstrap, true},
+		{"loopback persisted", "127.0.0.1", domain.PeerSourcePersisted, true},
+		{"loopback manual", "127.0.0.1", domain.PeerSourceManual, false},
+		{"10.x announce", "10.0.0.5", domain.PeerSourceAnnounce, true},
+		{"10.x manual", "10.0.0.5", domain.PeerSourceManual, false},
+		{"192.168.x announce", "192.168.1.1", domain.PeerSourceAnnounce, true},
+		{"172.24.x announce", "172.24.0.1", domain.PeerSourceAnnounce, true},
+		{"public announce", "198.51.100.1", domain.PeerSourceAnnounce, false},
+		{"public persisted", "198.51.100.1", domain.PeerSourcePersisted, false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			kp := &knownPeer{
+				Address: domain.PeerAddress(tc.ip + ":64646"),
+				IP:      tc.ip,
+				Source:  tc.source,
+			}
+			got := shouldSkipPersistedPrivatePeer(kp)
+			if got != tc.want {
+				t.Fatalf("shouldSkipPersistedPrivatePeer(%s, source=%s) = %v, want %v",
+					tc.ip, tc.source, got, tc.want)
+			}
+		})
 	}
 }
 

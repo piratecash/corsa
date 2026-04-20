@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -456,9 +457,16 @@ func TestSnapshotIsConsistent(t *testing.T) {
 	r.peers["peer-1"] = &RouterPeerState{Unread: 3}
 	r.peerOrder = []domain.PeerIdentity{"peer-1"}
 	r.activeMessages = []DirectMessage{{ID: "m1", Body: "hello"}}
-	r.nodeStatus = NodeStatus{Peers: []string{"a"}}
+	r.statusMonitor.(*testStatusProvider).Status = NodeStatus{Peers: []string{"a"}}
 	r.sendStatus = "ok"
 	r.mu.Unlock()
+
+	// notify() builds an immutable snapshot under Lock and stores it in
+	// snapCache. Without this call Snapshot() returns an empty struct because
+	// the lock-free path reads from snapCache, which is nil right after
+	// manual field assignment.
+	r.notify(UIEventSidebarUpdated)
+	<-r.uiEvents // drain the notification
 
 	snap := r.Snapshot()
 
@@ -1065,10 +1073,15 @@ func TestSnapshotCacheReady(t *testing.T) {
 	}
 
 	// Load cache for peer-1, set as active.
+	// CacheReady depends on ConversationCache state (independent of r.mu),
+	// so it is recomputed on every Snapshot() call even from cache.
 	r.cache.Load("peer-1", nil)
 	r.mu.Lock()
 	r.activePeer = "peer-1"
 	r.mu.Unlock()
+	// Simulate what production code (selectPeerCore) does after mutation.
+	r.notify(UIEventSidebarUpdated)
+	<-r.uiEvents
 
 	snap = r.Snapshot()
 	if !snap.CacheReady {
@@ -1079,6 +1092,8 @@ func TestSnapshotCacheReady(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = "peer-2"
 	r.mu.Unlock()
+	r.notify(UIEventSidebarUpdated)
+	<-r.uiEvents
 
 	snap = r.Snapshot()
 	if snap.CacheReady {
@@ -1665,14 +1680,10 @@ func TestStartupDoneClosedOnPanic(t *testing.T) {
 	}
 }
 
-// TestEventListenerBuffersDuringStartup verifies that the real
-// runEventListener drains the subscription channel immediately and replays
-// buffered events after startupDone closes, preventing the node from
-// dropping events.
-func TestEventListenerBuffersDuringStartup(t *testing.T) {
-	// Need a real chatlog with schema so updatePreviewFromStore succeeds
-	// (returns true) and the non-active decrypt-fail goroutine does not
-	// roll back seenMessageIDs.
+// TestEbusBuffersDuringStartup verifies that onEbusLocalChange buffers
+// events while startupComplete is false. After runStartup replays them,
+// seenMessageIDs are populated.
+func TestEbusBuffersDuringStartup(t *testing.T) {
 	db, cl := newTestChatLog(t)
 	defer func() { _ = db.Close() }()
 
@@ -1683,82 +1694,55 @@ func TestEventListenerBuffersDuringStartup(t *testing.T) {
 		seenMessageIDs: make(map[string]struct{}),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 64),
-		startupDone:    make(chan struct{}), // NOT pre-closed — simulates ongoing startup
+		startupDone:    make(chan struct{}),
+		// startupComplete defaults to false — events will be buffered.
 	}
 
-	events := make(chan protocol.LocalChangeEvent, 16)
-	done := make(chan struct{})
-
-	// Run the real production event listener — not a hand-written simulation.
-	go func() {
-		r.runEventListener(events, func() {})
-		close(done)
-	}()
-
-	// Send events BEFORE startup completes — these must be buffered.
-	events <- protocol.LocalChangeEvent{
-		Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "msg-1",
-		Sender: "peer1", Recipient: "me",
-	}
-	events <- protocol.LocalChangeEvent{
-		Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "msg-2",
-		Sender: "peer1", Recipient: "me",
-	}
-	events <- protocol.LocalChangeEvent{
-		Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "msg-3",
-		Sender: "peer1", Recipient: "me",
+	// Deliver 3 events via onEbusLocalChange BEFORE startup completes.
+	for i := 1; i <= 3; i++ {
+		r.onEbusLocalChange(protocol.LocalChangeEvent{
+			Type: protocol.LocalChangeNewMessage, Topic: "dm",
+			MessageID: fmt.Sprintf("msg-%d", i),
+			Sender:    "peer1", Recipient: "me",
+		})
 	}
 
-	// Poll until the listener drains all 3 events from the channel into
-	// its internal buffer (instead of a fixed sleep).
-	if !pollCondition(2*time.Second, func() bool { return len(events) == 0 }) {
-		t.Fatal("listener did not drain pre-startup events from channel")
-	}
-
-	// Verify nothing was processed yet — events should be buffered, not handled.
+	// Events must be buffered, not processed.
 	r.mu.RLock()
 	preStartupSeen := len(r.seenMessageIDs)
+	bufLen := len(r.startupEventBuf)
 	r.mu.RUnlock()
 	if preStartupSeen != 0 {
 		t.Fatalf("expected 0 seen messages before startup, got %d", preStartupSeen)
 	}
+	if bufLen != 3 {
+		t.Fatalf("expected 3 buffered events, got %d", bufLen)
+	}
 
-	// Complete startup — buffered events should now replay.
+	// Simulate runStartup Phase 1: replay buffered events under replayingStartup.
+	r.mu.Lock()
+	r.replayingStartup = true
+	buf := r.startupEventBuf
+	r.startupEventBuf = nil
+	r.mu.Unlock()
+	for _, ev := range buf {
+		r.safeHandleEvent(ev)
+	}
+
+	// Phase 2: switch to live mode.
+	r.mu.Lock()
+	r.replayingStartup = false
+	r.startupComplete = true
+	r.mu.Unlock()
 	close(r.startupDone)
 
-	// Wait until the 3 buffered events are processed (seenMessageIDs populated)
-	// before sending the live event. This replaces a fixed sleep.
-	if !pollCondition(2*time.Second, func() bool {
-		r.mu.RLock()
-		n := len(r.seenMessageIDs)
-		r.mu.RUnlock()
-		return n >= 3
-	}) {
-		t.Fatal("buffered events were not replayed within timeout")
-	}
+	// Send a live event — should be processed immediately.
+	r.onEbusLocalChange(protocol.LocalChangeEvent{
+		Type: protocol.LocalChangeNewMessage, Topic: "dm",
+		MessageID: "msg-4", Sender: "peer1", Recipient: "me",
+	})
 
-	// Send one more live event after startup.
-	events <- protocol.LocalChangeEvent{
-		Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "msg-4",
-		Sender: "peer1", Recipient: "me",
-	}
-
-	// Poll until the live event is consumed from the channel.
-	if !pollCondition(2*time.Second, func() bool { return len(events) == 0 }) {
-		t.Fatal("listener did not consume live event from channel")
-	}
-
-	close(events)
-
-	// Wait for the real listener goroutine to finish.
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("runEventListener did not exit after channel close")
-	}
-
-	// Poll until all 4 message IDs are in seenMessageIDs (async goroutines
-	// in the non-active decrypt-fail path may still be completing).
+	// Poll until all 4 message IDs are in seenMessageIDs.
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
 		n := len(r.seenMessageIDs)
@@ -2279,33 +2263,44 @@ func TestAutoSelectPeerSamePeerIsNoOp(t *testing.T) {
 
 // TestReplayStartupBufferDoesNotDoubleCountUnread verifies that events
 // replayed from the startup buffer do NOT increment Unread again (because
-// seedPreviews already loaded the correct count from SQL).
+// seedPreviews already loaded the correct count from SQL). Uses the ebus
+// onEbusLocalChange → runStartup replay path.
 func TestReplayStartupBufferDoesNotDoubleCountUnread(t *testing.T) {
 	r := newTestRouter()
 
-	// Simulate seedPreviews having set Unread = 3 for this peer.
+	// Reset startupComplete so events get buffered by onEbusLocalChange.
 	r.mu.Lock()
+	r.startupComplete = false
 	r.ensurePeerLocked("peer-1")
 	r.peers["peer-1"].Unread = 3
 	r.activePeer = "peer-2" // different from peer-1 → non-active path
 	r.mu.Unlock()
 
-	// Simulate buffered event for the same peer.
-	buf := []protocol.LocalChangeEvent{
-		{
-			Type:      protocol.LocalChangeNewMessage,
-			Topic:     "dm",
-			MessageID: "msg-replay-1",
-			Sender:    "peer-1",
-			Recipient: "me",
-		},
+	// Buffer an event via onEbusLocalChange.
+	r.onEbusLocalChange(protocol.LocalChangeEvent{
+		Type:      protocol.LocalChangeNewMessage,
+		Topic:     "dm",
+		MessageID: "msg-replay-1",
+		Sender:    "peer-1",
+		Recipient: "me",
+	})
+
+	// Simulate runStartup replay: Phase 1 under replayingStartup=true.
+	r.mu.Lock()
+	r.replayingStartup = true
+	buf := r.startupEventBuf
+	r.startupEventBuf = nil
+	r.mu.Unlock()
+
+	for _, ev := range buf {
+		r.safeHandleEvent(ev)
 	}
 
-	// replayAndListen sets replayingStartup = true during replay.
-	// We use a closed channel so `for event := range events` exits immediately.
-	closedCh := make(chan protocol.LocalChangeEvent)
-	close(closedCh)
-	r.replayAndListen(buf, 0, closedCh)
+	// Phase 2: switch to live mode.
+	r.mu.Lock()
+	r.replayingStartup = false
+	r.startupComplete = true
+	r.mu.Unlock()
 
 	r.mu.RLock()
 	unread := r.peers["peer-1"].Unread
@@ -2316,10 +2311,10 @@ func TestReplayStartupBufferDoesNotDoubleCountUnread(t *testing.T) {
 		t.Fatalf("expected Unread=3 (unchanged from seedPreviews), got %d", unread)
 	}
 	if replaying {
-		t.Fatal("replayingStartup should be false after replayAndListen returns")
+		t.Fatal("replayingStartup should be false after replay")
 	}
 
-	// Also verify no UIEventBeep was emitted during replay.
+	// Verify no UIEventBeep was emitted during replay.
 	for len(r.uiEvents) > 0 {
 		ev := <-r.uiEvents
 		if ev.Type == UIEventBeep {
@@ -2328,41 +2323,52 @@ func TestReplayStartupBufferDoesNotDoubleCountUnread(t *testing.T) {
 	}
 }
 
-// TestReplayDrainsLiveEventsDuringStartup verifies that replayAndListen
-// drains pending live events from the channel after processing buffered
-// events (preventing the node-side 16-slot channel from overflowing).
-//
-// Proof strategy: buffered events run under replayingStartup=true (no beep),
-// live events run under replayingStartup=false (beep emitted for incoming).
-// Counting UIEventBeep proves live events were processed by onNewMessage.
-// We cannot check seenMessageIDs because decrypt-fail fallback goroutines
-// evict IDs when updatePreviewFromStore also fails (expected without chatlog).
-func TestReplayDrainsLiveEventsDuringStartup(t *testing.T) {
+// TestEbusLiveEventsAfterReplayTriggerBeep verifies that events delivered
+// via onEbusLocalChange after startup replay completes are processed as
+// live (beep emitted), while buffered events replayed under
+// replayingStartup=true do not emit beeps.
+func TestEbusLiveEventsAfterReplayTriggerBeep(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
+	r.startupComplete = false
 	r.activePeer = "someone-else"
 	r.mu.Unlock()
 
-	// Prepare 3 buffered events from peer-1 (replaying=true → no beep).
-	buf := []protocol.LocalChangeEvent{
-		{Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "buf-1", Sender: "peer-1", Recipient: "me"},
-		{Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "buf-2", Sender: "peer-1", Recipient: "me"},
-		{Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "buf-3", Sender: "peer-1", Recipient: "me"},
+	// Buffer 3 events via onEbusLocalChange (startup not complete).
+	for i := 1; i <= 3; i++ {
+		r.onEbusLocalChange(protocol.LocalChangeEvent{
+			Type: protocol.LocalChangeNewMessage, Topic: "dm",
+			MessageID: fmt.Sprintf("buf-%d", i), Sender: "peer-1", Recipient: "me",
+		})
 	}
 
-	// Live channel with 2 incoming events from peer-2 (replaying=false → beep).
-	liveCh := make(chan protocol.LocalChangeEvent, 4)
-	liveCh <- protocol.LocalChangeEvent{Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "live-1", Sender: "peer-2", Recipient: "me"}
-	liveCh <- protocol.LocalChangeEvent{Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "live-2", Sender: "peer-2", Recipient: "me"}
-	close(liveCh) // close so `for event := range events` exits after drain
+	// Replay Phase 1 under replayingStartup=true → no beep.
+	r.mu.Lock()
+	r.replayingStartup = true
+	buf := r.startupEventBuf
+	r.startupEventBuf = nil
+	r.mu.Unlock()
+	for _, ev := range buf {
+		r.safeHandleEvent(ev)
+	}
 
-	r.replayAndListen(buf, 0, liveCh)
+	// Phase 2: switch to live mode.
+	r.mu.Lock()
+	r.replayingStartup = false
+	r.startupComplete = true
+	r.mu.Unlock()
 
-	// Count UIEventBeep emissions. Each live incoming message emits one beep
-	// synchronously in onNewMessage (before goroutine). Buffered events do not
-	// emit beeps (replaying=true). So exactly 2 beeps proves both live events
-	// were drained and processed.
+	// Send 2 live events — should emit beep.
+	for i := 1; i <= 2; i++ {
+		r.onEbusLocalChange(protocol.LocalChangeEvent{
+			Type: protocol.LocalChangeNewMessage, Topic: "dm",
+			MessageID: fmt.Sprintf("live-%d", i), Sender: "peer-2", Recipient: "me",
+		})
+	}
+
+	// Count UIEventBeep. Buffered events (3) emit 0 beeps (replaying).
+	// Live events (2) emit 2 beeps.
 	beepCount := 0
 	drainTimeout := time.After(500 * time.Millisecond)
 	for done := false; !done; {
@@ -2377,73 +2383,67 @@ func TestReplayDrainsLiveEventsDuringStartup(t *testing.T) {
 	}
 
 	if beepCount != 2 {
-		t.Fatalf("expected 2 UIEventBeep (one per live event), got %d — "+
-			"live events may not have been drained during replay", beepCount)
+		t.Fatalf("expected 2 UIEventBeep (one per live event), got %d", beepCount)
 	}
 }
 
-// TestLiveEventsDuringReplayTriggerBeep verifies that live events arriving
-// during startup replay are buffered (not processed) while replayingStartup
-// is true, then processed after the flag is reset. This ensures new messages
-// that arrive during replay correctly trigger UIEventBeep and Unread++.
-//
-// Before the fix, bufferPendingLiveEvents (then drainPendingLiveEvents)
-// processed live events immediately under replayingStartup=true, permanently
-// suppressing their Unread++ and UIEventBeep.  seenMessageIDs would still
-// be populated, so repairUnreadFromHeaders couldn't recover them either.
-//
-// We assert on UIEventBeep rather than Unread because Unread++ requires
-// DecryptIncomingMessage (real crypto), whereas UIEventBeep is emitted
-// directly in onNewMessage based on the replaying flag alone.
-func TestLiveEventsDuringReplayTriggerBeep(t *testing.T) {
+// TestEbusEventsDuringReplayBufferedThenLive verifies that events arriving
+// via onEbusLocalChange during Phase 1 replay are re-buffered (startup not
+// yet complete), then processed as live in Phase 2. The replay event must
+// NOT emit UIEventBeep, while the live event MUST.
+func TestEbusEventsDuringReplayBufferedThenLive(t *testing.T) {
 	r := newTestRouter()
 
-	// Set up a non-active peer so onNewMessage takes the sidebar path
-	// (which emits UIEventBeep for incoming messages when !replaying).
 	r.mu.Lock()
+	r.startupComplete = false
 	r.activePeer = "someone-else"
 	r.ensurePeerLocked("peer-1")
 	r.mu.Unlock()
 
-	// One buffered event (replay) — should NOT emit UIEventBeep.
-	buf := []protocol.LocalChangeEvent{
-		{
-			Type:      protocol.LocalChangeNewMessage,
-			Topic:     "dm",
-			MessageID: "replay-msg",
-			Sender:    "peer-1",
-			Recipient: "me",
-		},
+	// Buffer one event (pre-startup).
+	r.onEbusLocalChange(protocol.LocalChangeEvent{
+		Type: protocol.LocalChangeNewMessage, Topic: "dm",
+		MessageID: "replay-msg", Sender: "peer-1", Recipient: "me",
+	})
+
+	// Phase 1: replay under replayingStartup=true.
+	r.mu.Lock()
+	r.replayingStartup = true
+	buf := r.startupEventBuf
+	r.startupEventBuf = nil
+	r.mu.Unlock()
+
+	for _, ev := range buf {
+		r.safeHandleEvent(ev)
 	}
 
-	// Live event pre-buffered in channel — simulates a message arriving
-	// while replay is in progress.  With the buffer approach, this event
-	// is drained from the channel during replay (preventing node-side
-	// overflow) but processed AFTER replayingStartup is reset.
-	liveCh := make(chan protocol.LocalChangeEvent, 4)
-	liveCh <- protocol.LocalChangeEvent{
-		Type:      protocol.LocalChangeNewMessage,
-		Topic:     "dm",
-		MessageID: "live-msg",
-		Sender:    "peer-1",
-		Recipient: "me",
+	// Simulate an event arriving during Phase 1 (still !startupComplete).
+	r.onEbusLocalChange(protocol.LocalChangeEvent{
+		Type: protocol.LocalChangeNewMessage, Topic: "dm",
+		MessageID: "live-msg", Sender: "peer-1", Recipient: "me",
+	})
+
+	// Phase 2: switch to live mode and drain remaining.
+	r.mu.Lock()
+	r.replayingStartup = false
+	r.startupComplete = true
+	remaining := r.startupEventBuf
+	r.startupEventBuf = nil
+	r.mu.Unlock()
+
+	for _, ev := range remaining {
+		r.safeHandleEvent(ev)
 	}
-	close(liveCh)
 
-	r.replayAndListen(buf, 0, liveCh)
-
-	// After replayAndListen returns, replayingStartup must be false.
 	r.mu.RLock()
 	replaying := r.replayingStartup
 	r.mu.RUnlock()
-
 	if replaying {
-		t.Fatal("replayingStartup should be false after replayAndListen returns")
+		t.Fatal("replayingStartup should be false after replay")
 	}
 
-	// Count UIEventBeep in the channel.
-	// Replay event: sender != "me" but replayingStartup=true  → NO beep.
-	// Live event:   sender != "me" and replayingStartup=false → beep.
+	// Replay event: replayingStartup=true → NO beep.
+	// Live event: replayingStartup=false → beep.
 	beepCount := 0
 	for len(r.uiEvents) > 0 {
 		ev := <-r.uiEvents
@@ -2456,77 +2456,38 @@ func TestLiveEventsDuringReplayTriggerBeep(t *testing.T) {
 	}
 }
 
-// TestReplayLiveBufferCapped verifies that the pendingLive buffer inside
-// replayAndListen is capped and doesn't grow unboundedly.  When more live
-// events arrive during replay than maxReplayLiveBuf (256), excess events
-// are consumed from the channel (preventing node-side overflow) but dropped.
-// After replay, a UI reload notification is sent so repair-path picks up
-// the missed events.
-func TestReplayLiveBufferCapped(t *testing.T) {
-	// Need a real chatlog with schema so updatePreviewFromStore succeeds
-	// (returns true) and the non-active decrypt-fail goroutine does not
-	// roll back seenMessageIDs.
-	db, cl := newTestChatLog(t)
-	defer func() { _ = db.Close() }()
-
+// TestEbusStartupBufferCapped verifies that onEbusLocalChange caps the
+// startup buffer at 256 events. Excess events are dropped; the drop count
+// is tracked in startupDropped so runStartup can emit a UI reload.
+func TestEbusStartupBufferCapped(t *testing.T) {
 	r := newTestRouter()
-	r.client.chatLog = cl
-
-	// Use a larger event channel to absorb the storm of UIEventSidebarUpdated
-	// notifications from 257 goroutines (avoids notify retry goroutine spam).
-	r.uiEvents = make(chan UIEvent, 512)
 
 	r.mu.Lock()
+	r.startupComplete = false
 	r.activePeer = "someone-else"
 	r.mu.Unlock()
 
-	// One buffered event to trigger replay loop.
-	buf := []protocol.LocalChangeEvent{
-		{Type: protocol.LocalChangeNewMessage, Topic: "dm", MessageID: "buf-1", Sender: "peer-1", Recipient: "me"},
-	}
-
-	// Overfill the live channel: put 260 events (exceeds 256 cap).
-	liveCh := make(chan protocol.LocalChangeEvent, 300)
+	// Send 260 events — 256 should be buffered, 4 dropped.
 	for i := 0; i < 260; i++ {
-		liveCh <- protocol.LocalChangeEvent{
+		r.onEbusLocalChange(protocol.LocalChangeEvent{
 			Type:      protocol.LocalChangeNewMessage,
 			Topic:     "dm",
-			MessageID: fmt.Sprintf("live-%d", i),
-			Sender:    "peer-2",
+			MessageID: fmt.Sprintf("evt-%d", i),
+			Sender:    "peer-1",
 			Recipient: "me",
-		}
-	}
-	close(liveCh)
-
-	r.replayAndListen(buf, 0, liveCh)
-
-	// Poll until all 257 message IDs settle in seenMessageIDs. The IDs are
-	// registered synchronously in onNewMessage, but async goroutines (non-active
-	// decrypt-fail path) could evict them on failure. With a real chatlog,
-	// updatePreviewFromStore succeeds so no eviction happens.
-	if !pollCondition(5*time.Second, func() bool {
-		r.mu.RLock()
-		n := len(r.seenMessageIDs)
-		r.mu.RUnlock()
-		return n >= 257
-	}) {
-		r.mu.RLock()
-		total := len(r.seenMessageIDs)
-		r.mu.RUnlock()
-		t.Fatalf("expected 257 events in seenMessageIDs (1 buf + 256 capped live), got %d", total)
+		})
 	}
 
-	// UIEventSidebarUpdated must have been emitted (from the droppedLive
-	// overflow notification).  Drain all events and count sidebar updates.
-	sidebarCount := 0
-	for len(r.uiEvents) > 0 {
-		ev := <-r.uiEvents
-		if ev.Type == UIEventSidebarUpdated {
-			sidebarCount++
-		}
+	r.mu.RLock()
+	bufLen := len(r.startupEventBuf)
+	dropped := r.startupDropped
+	r.mu.RUnlock()
+
+	if bufLen != 256 {
+		t.Fatalf("expected 256 buffered events, got %d", bufLen)
 	}
-	if sidebarCount == 0 {
-		t.Fatal("expected UIEventSidebarUpdated notification for live buffer overflow")
+	if dropped != 4 {
+		t.Fatalf("expected 4 dropped events, got %d", dropped)
 	}
 }
 
@@ -4723,20 +4684,61 @@ func awaitEvent(t *testing.T, ch <-chan UIEvent, target UIEventType, timeout tim
 	}
 }
 
+// testStatusProvider is a minimal NodeStatusProvider for unit tests.
+// Tests can set the Status field directly; NodeStatus() returns a deep copy.
+type testStatusProvider struct {
+	mu     sync.RWMutex
+	Status NodeStatus
+}
+
+func (p *testStatusProvider) NodeStatus() NodeStatus {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return deepCopyNodeStatus(p.Status)
+}
+
+func (p *testStatusProvider) Contacts() map[string]Contact {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Status.Contacts == nil {
+		return nil
+	}
+	cp := make(map[string]Contact, len(p.Status.Contacts))
+	for k, v := range p.Status.Contacts {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (p *testStatusProvider) IsReachable(id domain.PeerIdentity) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Status.ReachableIDs[id]
+}
+
+func (p *testStatusProvider) Reset() {
+	p.mu.Lock()
+	p.Status = NodeStatus{}
+	p.mu.Unlock()
+}
+
 func newTestRouter() *DMRouter {
 	done := make(chan struct{})
 	close(done) // pre-closed so tests don't block on startupDone
 	client := &DesktopClient{id: &identity.Identity{Address: "me"}}
+	provider := &testStatusProvider{}
 	return &DMRouter{
-		client:         client,
-		fileBridge:     NewFileTransferBridge(client),
-		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
-		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
-		peerGen:        make(map[domain.PeerIdentity]uint64),
-		cache:          NewConversationCache(),
-		uiEvents:       make(chan UIEvent, 32),
-		startupDone:    done,
+		client:          client,
+		fileBridge:      NewFileTransferBridge(client),
+		statusMonitor:   provider,
+		peers:           make(map[domain.PeerIdentity]*RouterPeerState),
+		peerOrder:       make([]domain.PeerIdentity, 0),
+		seenMessageIDs:  make(map[string]struct{}),
+		peerGen:         make(map[domain.PeerIdentity]uint64),
+		cache:           NewConversationCache(),
+		uiEvents:        make(chan UIEvent, 32),
+		startupDone:     done,
+		startupComplete: true, // most tests assume post-startup behavior
 	}
 }
 
@@ -4920,3 +4922,195 @@ func TestSendFileAnnounceAsyncFailureCallsOnFailure(t *testing.T) {
 		t.Errorf("sendStatus should reflect failure, got %q", status)
 	}
 }
+
+// TestSnapshotCacheReturnsStaleWhenUnchanged verifies that consecutive
+// Snapshot() calls without intervening mutations return the same cached
+// snapshot. Snapshot() is completely lock-free — it never acquires r.mu.
+func TestSnapshotCacheReturnsStaleWhenUnchanged(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter()
+
+	r.mu.Lock()
+	r.activePeer = "peer-A"
+	r.ensurePeerLocked("peer-A")
+	r.peers["peer-A"].Unread = 3
+	r.mu.Unlock()
+	// notify() builds and caches the snapshot under Lock.
+	r.notify(UIEventSidebarUpdated)
+	<-r.uiEvents
+
+	snap1 := r.Snapshot()
+	if snap1.ActivePeer != "peer-A" {
+		t.Fatalf("snap1.ActivePeer = %q, want peer-A", snap1.ActivePeer)
+	}
+	if snap1.Peers["peer-A"].Unread != 3 {
+		t.Fatalf("snap1 Unread = %d, want 3", snap1.Peers["peer-A"].Unread)
+	}
+
+	// Second call without mutation — must return cached snapshot.
+	snap2 := r.Snapshot()
+	if snap2.ActivePeer != snap1.ActivePeer {
+		t.Fatalf("snap2.ActivePeer = %q, expected cached %q", snap2.ActivePeer, snap1.ActivePeer)
+	}
+	if snap2.Peers["peer-A"].Unread != 3 {
+		t.Fatalf("snap2 Unread = %d, want 3 (cached)", snap2.Peers["peer-A"].Unread)
+	}
+}
+
+// TestSnapshotCacheInvalidatedByNotify verifies that notify() builds a
+// fresh snapshot reflecting the latest state, so subsequent Snapshot()
+// calls return updated data.
+func TestSnapshotCacheInvalidatedByNotify(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter()
+
+	r.mu.Lock()
+	r.activePeer = "peer-A"
+	r.mu.Unlock()
+	r.notify(UIEventSidebarUpdated)
+	<-r.uiEvents
+
+	snap1 := r.Snapshot()
+	if snap1.ActivePeer != "peer-A" {
+		t.Fatalf("snap1.ActivePeer = %q, want peer-A", snap1.ActivePeer)
+	}
+
+	// Mutate under lock, then notify (as real code does).
+	r.mu.Lock()
+	r.activePeer = "peer-B"
+	r.mu.Unlock()
+	r.notify(UIEventSidebarUpdated)
+	<-r.uiEvents
+
+	snap2 := r.Snapshot()
+	if snap2.ActivePeer != "peer-B" {
+		t.Fatalf("snap2.ActivePeer = %q, want peer-B after notify", snap2.ActivePeer)
+	}
+}
+
+// TestRepairUnreadFromHeadersSplitLock verifies that the two-phase lock
+// strategy in repairUnreadFromHeaders correctly processes headers: new
+// messages are added to seenMessageIDs and unread counts are incremented,
+// while the write lock is held only briefly in each phase.
+func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter()
+
+	// Pre-seed one message as already seen.
+	r.mu.Lock()
+	r.seenMessageIDs["old-msg"] = struct{}{}
+	r.mu.Unlock()
+
+	status := NodeStatus{
+		DMHeaders: []DMHeader{
+			{ID: "old-msg", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
+			{ID: "new-msg-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
+			{ID: "new-msg-2", Sender: domain.PeerIdentity("peer-2"), Recipient: domain.PeerIdentity("me")},
+		},
+	}
+
+	r.repairUnreadFromHeaders(status)
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// old-msg was already seen, so only 2 new messages processed.
+	if _, ok := r.seenMessageIDs["new-msg-1"]; !ok {
+		t.Fatal("new-msg-1 should be in seenMessageIDs")
+	}
+	if _, ok := r.seenMessageIDs["new-msg-2"]; !ok {
+		t.Fatal("new-msg-2 should be in seenMessageIDs")
+	}
+	// peer-1 gets 1 new unread (new-msg-1), peer-2 gets 1 (new-msg-2).
+	if r.peers["peer-1"] == nil || r.peers["peer-1"].Unread != 1 {
+		t.Fatalf("peer-1 Unread = %v, want 1", r.peers["peer-1"])
+	}
+	if r.peers["peer-2"] == nil || r.peers["peer-2"].Unread != 1 {
+		t.Fatalf("peer-2 Unread = %v, want 1", r.peers["peer-2"])
+	}
+}
+
+// TestSnapshotCacheConcurrentSafety exercises Snapshot() from multiple
+// goroutines while mutations and notifications happen concurrently.
+// The test verifies that no data race occurs (run with -race).
+func TestSnapshotCacheConcurrentSafety(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter()
+
+	const goroutines = 8
+	const iterations = 200
+
+	done := make(chan struct{})
+
+	// Writer goroutine: mutates state and calls notify.
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			peer := domain.PeerIdentity(fmt.Sprintf("peer-%d", i%5))
+			r.mu.Lock()
+			r.ensurePeerLocked(peer)
+			r.peers[peer].Unread++
+			r.activePeer = peer
+			r.mu.Unlock()
+			r.notify(UIEventSidebarUpdated)
+			// Drain event to avoid channel backup.
+			select {
+			case <-r.uiEvents:
+			default:
+			}
+			runtime.Gosched()
+		}
+	}()
+
+	// Reader goroutines: call Snapshot() concurrently.
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					snap := r.Snapshot()
+					// Access snapshot fields to trigger race detector.
+					_ = snap.ActivePeer
+					_ = len(snap.Peers)
+					_ = snap.NodeStatus
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+
+	<-done
+}
+
+// TestSetSendStatusInvalidatesSnapshotCache verifies that the exported
+// SetSendStatus (called from window.go for copy/delete/file-prepare
+// status updates) bumps the snapshot generation so the UI sees the new
+// status on the next frame instead of serving a stale cached snapshot.
+func TestSetSendStatusInvalidatesSnapshotCache(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter()
+
+	// Prime the cache via notify.
+	r.notify(UIEventStatusUpdated)
+	<-r.uiEvents
+	snap1 := r.Snapshot()
+	if snap1.SendStatus != "" {
+		t.Fatalf("initial SendStatus = %q, want empty", snap1.SendStatus)
+	}
+
+	// Simulate window.go calling SetSendStatus.
+	r.SetSendStatus("identity copied")
+	// Drain the notification emitted by setSendStatusNotify.
+	<-r.uiEvents
+
+	snap2 := r.Snapshot()
+	if snap2.SendStatus != "identity copied" {
+		t.Fatalf("SendStatus after SetSendStatus = %q, want %q", snap2.SendStatus, "identity copied")
+	}
+}
+
+// ── Monitor-level tests moved to node_status_monitor_test.go ──
+// TestApplyPeerHealthDelta*, TestMergePeerHealth*, TestApplyPeerPendingDelta*
+// now test NodeStatusMonitor directly since it owns PeerHealth aggregation.

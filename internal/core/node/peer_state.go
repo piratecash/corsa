@@ -28,12 +28,12 @@ type peerEntry struct {
 	// peerHealthFrames() snapshot retains the exact evidence that created a
 	// lockout across restarts. Without persistence these fields reset to zero
 	// while the lockout itself survives, creating an information gap.
-	LastErrorCode              string                 `json:"last_error_code,omitempty"`
-	LastDisconnectCode         string                 `json:"last_disconnect_code,omitempty"`
+	LastErrorCode               string                 `json:"last_error_code,omitempty"`
+	LastDisconnectCode          string                 `json:"last_disconnect_code,omitempty"`
 	IncompatibleVersionAttempts domain.AttemptCount    `json:"incompatible_version_attempts,omitempty"`
-	LastIncompatibleVersionAt  *time.Time             `json:"last_incompatible_version_at,omitempty"`
-	ObservedPeerVersion        domain.ProtocolVersion `json:"observed_peer_version,omitempty"`
-	ObservedPeerMinimumVersion domain.ProtocolVersion `json:"observed_peer_minimum_version,omitempty"`
+	LastIncompatibleVersionAt   *time.Time             `json:"last_incompatible_version_at,omitempty"`
+	ObservedPeerVersion         domain.ProtocolVersion `json:"observed_peer_version,omitempty"`
+	ObservedPeerMinimumVersion  domain.ProtocolVersion `json:"observed_peer_minimum_version,omitempty"`
 
 	// Version lockout: persisted context from a confirmed incompatible-version
 	// rejection. When active, this peer is excluded from dial candidates until
@@ -62,20 +62,20 @@ type peerStateFile struct {
 }
 
 const (
-	peerStateVersion     = 2              // v2: added banned_ips section with ban_origin/ban_reason
-	peerScoreConnect     = 10             // awarded on successful TCP handshake
-	peerScoreDisconnect  = -2             // applied on clean disconnect
-	peerScoreFailure     = -5             // applied on dial/protocol failure
-	peerScoreOldProtocol           = -50            // applied when peer protocol version is too old; pushes to bottom of dial list
-	peerBanIncompatible            = 24 * time.Hour // ban duration for peers with incompatible protocol version
-	peerBanIncrementIncompatible   = 250            // overlay-level penalty per incompatible-version attempt
-	peerBanThresholdIncompatible   = 1000           // overlay penalty sum that triggers the timed ban
-	peerScoreMax         = 100
-	peerScoreMin         = -50
-	maxPersistedPeers    = 500
-	peerStateSaveMinutes = 5                // minimum interval between periodic saves
-	peerCooldownBase     = 30 * time.Second // base cooldown after first failure
-	peerCooldownMax      = 30 * time.Minute // cap on exponential backoff
+	peerStateVersion             = 2              // v2: added banned_ips section with ban_origin/ban_reason
+	peerScoreConnect             = 10             // awarded on successful TCP handshake
+	peerScoreDisconnect          = -2             // applied on clean disconnect
+	peerScoreFailure             = -5             // applied on dial/protocol failure
+	peerScoreOldProtocol         = -50            // applied when peer protocol version is too old; pushes to bottom of dial list
+	peerBanIncompatible          = 24 * time.Hour // ban duration for peers with incompatible protocol version
+	peerBanIncrementIncompatible = 250            // overlay-level penalty per incompatible-version attempt
+	peerBanThresholdIncompatible = 1000           // overlay penalty sum that triggers the timed ban
+	peerScoreMax                 = 100
+	peerScoreMin                 = -50
+	maxPersistedPeers            = 500
+	peerStateSaveMinutes         = 5                // minimum interval between periodic saves
+	peerCooldownBase             = 30 * time.Second // base cooldown after first failure
+	peerCooldownMax              = 30 * time.Minute // cap on exponential backoff
 
 	// Eviction thresholds.
 	// A peer is evictable when its score drops below the threshold AND it has
@@ -83,6 +83,13 @@ const (
 	peerEvictScoreThreshold = -20              // score at or below this → candidate for eviction
 	peerEvictStaleWindow    = 24 * time.Hour   // must also be unseen for this long
 	peerEvictInterval       = 10 * time.Minute // how often the eviction sweep runs
+
+	// Orphaned health entries — inbound-only peers not present in s.peers.
+	// These accumulate from ephemeral inbound connections (e.g.
+	// 127.0.0.1:<random_port>) that connected once, disconnected, and will
+	// never be dialled. A shorter window than peerEvictStaleWindow is used
+	// because there is no outbound dial target to preserve.
+	orphanedHealthEvictWindow = 10 * time.Minute
 )
 
 func peerCooldownDuration(consecutiveFailures int) time.Duration {

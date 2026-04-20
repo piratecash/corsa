@@ -2,6 +2,7 @@ package node
 
 import (
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -18,13 +19,21 @@ import (
 // All fields are value-typed; the capabilities slice is a defensive copy so
 // callers cannot scribble back into the live *netcore.NetCore. Walkers must
 // populate every field — partial snapshots are a contract violation.
+//
+// remoteIP and peerDir are resolved at snapshot time so consumers that need
+// typed network metadata (capture resolver, traffic bridge) never dereference
+// net.Conn or entry.core themselves. Keeping the resolution inside the
+// registry is the only way to enforce the §2.9 net-import whitelist: the
+// raw socket lives here, and only here.
 type connInfo struct {
 	id           domain.ConnID
 	remoteAddr   string
+	remoteIP     netip.Addr
 	address      domain.PeerAddress
 	identity     domain.PeerIdentity
 	capabilities []domain.Capability
 	dir          netcore.Direction
+	peerDir      domain.PeerDirection
 	lastActivity time.Time
 	tracked      bool
 }
@@ -60,13 +69,70 @@ func snapshotEntryLocked(id domain.ConnID, entry *connEntry) (connInfo, bool) {
 	return connInfo{
 		id:           id,
 		remoteAddr:   core.RemoteAddr(),
+		remoteIP:     coreRemoteIP(core),
 		address:      core.Address(),
 		identity:     core.Identity(),
 		capabilities: capsCopy,
 		dir:          core.Dir(),
+		peerDir:      coreToPeerDirection(core.Dir()),
 		lastActivity: core.LastActivity(),
 		tracked:      entry.tracked,
 	}, true
+}
+
+// resolveRemoteIPFromAddr normalises a net.Addr (TCP or otherwise) into a
+// netip.Addr. netcore-plan §4.4 mandates netip.Addr for the runtime model,
+// not string. IPv4-mapped addresses are unmapped so equality comparisons
+// against caller-supplied netip.Addr values behave as expected.
+//
+// The helper accepts net.Addr rather than net.Conn deliberately: net.Addr
+// carries the same information we need without adding another entry to the
+// §2.9 net.Conn-accepting carve-out. Callers that start from a net.Conn
+// pass conn.RemoteAddr() inline; the single nil-guard inside the helper
+// handles the case where a freshly-accepted connection has not published
+// its remote yet.
+func resolveRemoteIPFromAddr(addr net.Addr) netip.Addr {
+	if addr == nil {
+		return netip.Addr{}
+	}
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok && tcpAddr.IP != nil {
+		if mapped, ok := netip.AddrFromSlice(tcpAddr.IP); ok {
+			return mapped.Unmap()
+		}
+	}
+	addrPort, err := netip.ParseAddrPort(addr.String())
+	if err == nil {
+		return addrPort.Addr().Unmap()
+	}
+	return netip.Addr{}
+}
+
+// coreRemoteIP returns the remote peer IP for a connection core, or the
+// zero netip.Addr when the core (or its underlying raw socket) is missing.
+// This is the ConnID-path companion to resolveRemoteIPFromAddr: snapshot
+// builders hold a *netcore.NetCore from entry.core, so centralising the
+// nil-guarded .Conn().RemoteAddr() chain here keeps the §2.9 boundary
+// invariant that only conn_registry.go dereferences the raw net.Conn.
+func coreRemoteIP(core *netcore.NetCore) netip.Addr {
+	if core == nil {
+		return netip.Addr{}
+	}
+	conn := core.Conn()
+	if conn == nil {
+		return netip.Addr{}
+	}
+	return resolveRemoteIPFromAddr(conn.RemoteAddr())
+}
+
+// coreToPeerDirection maps netcore.Direction to domain.PeerDirection.
+// Centralised in conn_registry.go so external consumers never need to
+// import netcore just to translate a direction value read through the
+// snapshot boundary.
+func coreToPeerDirection(d netcore.Direction) domain.PeerDirection {
+	if d == netcore.Outbound {
+		return domain.PeerDirectionOutbound
+	}
+	return domain.PeerDirectionInbound
 }
 
 // conn_registry.go contains the narrow helper layer that encapsulates all
@@ -228,6 +294,57 @@ func (s *Service) connEntryByIDLocked(id domain.ConnID) *connEntry {
 	return s.conns[id]
 }
 
+// connInfoByIDLocked returns a value-typed connInfo snapshot for id, or
+// the zero value and false when the id is unknown or its core is missing.
+// This is the narrow ConnID-first read path used by consumers that must
+// not see *netcore.NetCore or net.Conn (e.g. the traffic capture bridge
+// resolving remote IP / peer direction for a single connection).
+// The caller must hold s.mu.
+func (s *Service) connInfoByIDLocked(id domain.ConnID) (connInfo, bool) {
+	return snapshotEntryLocked(id, s.conns[id])
+}
+
+// overlayIdentityByIDLocked returns the overlay address, identity, and
+// direction recorded on the live connection at id, or zero values when the
+// id is unknown (or the core has been torn down). Callers who need an
+// atomic triple read of these three fields use this helper to avoid
+// dereferencing entry.core themselves. The caller must hold s.mu.
+func (s *Service) overlayIdentityByIDLocked(id domain.ConnID) (domain.PeerAddress, domain.PeerIdentity, domain.PeerDirection) {
+	entry := s.conns[id]
+	if entry == nil || entry.core == nil {
+		return "", "", ""
+	}
+	return entry.core.Address(), entry.core.Identity(), coreToPeerDirection(entry.core.Dir())
+}
+
+// overlayIdentityByID is the lock-free adapter over overlayIdentityByIDLocked.
+// Public-enough for in-package callers that need the triple atomically without
+// holding s.mu themselves; behaves identically to the locked variant otherwise.
+func (s *Service) overlayIdentityByID(id domain.ConnID) (domain.PeerAddress, domain.PeerIdentity, domain.PeerDirection) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.overlayIdentityByIDLocked(id)
+}
+
+// attachCaptureSinkByID attaches a netcore.CaptureSink to the NetCore at id
+// and returns a snapshot of the fields the caller needs to build a
+// capture.ConnInfo (RemoteIP, PeerDir). Returns (zero, zero, false) when id
+// is unknown. The method takes s.mu.RLock internally — SetCaptureSink has
+// its own sync on *netcore.NetCore, so the registry lock only protects the
+// s.conns lookup, not the sink write. This is the single ConnID-first entry
+// point for capture-sink lifecycle; the traffic bridge never reaches for
+// entry.core.SetCaptureSink directly.
+func (s *Service) attachCaptureSinkByID(id domain.ConnID, sink netcore.CaptureSink) (netip.Addr, domain.PeerDirection, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry := s.conns[id]
+	if entry == nil || entry.core == nil {
+		return netip.Addr{}, "", false
+	}
+	entry.core.SetCaptureSink(sink)
+	return coreRemoteIP(entry.core), coreToPeerDirection(entry.core.Dir()), true
+}
+
 // forEachConnLocked iterates over every registered connection regardless
 // of direction, calling fn with a connInfo snapshot per entry. Iteration
 // stops if fn returns false. The caller must hold s.mu. Walkers no longer
@@ -331,6 +448,15 @@ func (s *Service) inboundConnCountLocked() int {
 		}
 	}
 	return count
+}
+
+// connCountLocked returns the total number of registered connections
+// (inbound + outbound) regardless of tracked state. Callers use this as a
+// capacity hint before iterating via forEachConnLocked; the abstraction
+// keeps direct len(s.conns) reads out of external files. The caller must
+// hold s.mu.
+func (s *Service) connCountLocked() int {
+	return len(s.conns)
 }
 
 // setTrackedByIDLocked marks the tracked flag on a connection entry keyed by

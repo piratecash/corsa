@@ -126,7 +126,22 @@ type AggregateStatusSnapshot struct {
 	TotalPeers int
 	// PendingMessages is the total number of unsent pending messages across all peers.
 	PendingMessages int
+	// ComputedAt is the wall-clock time when the node layer last recomputed
+	// this snapshot. Desktop uses it as the "last checked" indicator in the
+	// Info tab — it proves the node layer is alive and responsive.
+	ComputedAt time.Time
 }
+
+// RouteChangeReason describes why a routing table mutation occurred.
+type RouteChangeReason string
+
+const (
+	RouteChangeDirectPeerAdded    RouteChangeReason = "direct_peer_added"
+	RouteChangeDirectPeerRemoved  RouteChangeReason = "direct_peer_removed"
+	RouteChangeAnnouncement       RouteChangeReason = "announcement"
+	RouteChangeTransitInvalidated RouteChangeReason = "transit_invalidated"
+	RouteChangeTTLExpired         RouteChangeReason = "ttl_expired"
+)
 
 // InboundPeerRef describes a live inbound connection that has completed
 // (or is completing) the hello/auth handshake.

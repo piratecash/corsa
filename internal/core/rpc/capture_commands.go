@@ -44,6 +44,9 @@ func RegisterCaptureCommands(t *CommandTable, cp CaptureProvider) {
 	}
 
 	t.Register(startByConnIDInfo, func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		connIDsStr, _ := req.Args["conn_ids"].(string)
 		if strings.TrimSpace(connIDsStr) == "" {
 			return validationError(fmt.Errorf("conn_ids is required"))
@@ -62,6 +65,9 @@ func RegisterCaptureCommands(t *CommandTable, cp CaptureProvider) {
 	})
 
 	t.Register(startByIPInfo, func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		ipsStr, _ := req.Args["ips"].(string)
 		if strings.TrimSpace(ipsStr) == "" {
 			return validationError(fmt.Errorf("ips is required"))
@@ -80,6 +86,9 @@ func RegisterCaptureCommands(t *CommandTable, cp CaptureProvider) {
 	})
 
 	t.Register(startAllInfo, func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		format, _ := req.Args["format"].(string)
 
 		data, err := cp.StartCaptureAll(format)
@@ -90,6 +99,9 @@ func RegisterCaptureCommands(t *CommandTable, cp CaptureProvider) {
 	})
 
 	t.Register(stopInfo, func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		connIDsStr, _ := req.Args["conn_ids"].(string)
 		ipsStr, _ := req.Args["ips"].(string)
 		scope, _ := req.Args["scope"].(string)

@@ -33,7 +33,7 @@ func fromInternalMessage(msg *service.DirectMessage) DirectMessage {
 		CommandData:   msg.CommandData,
 		Timestamp:     msg.Timestamp,
 		ReceiptStatus: msg.ReceiptStatus,
-		DeliveredAt:   msg.DeliveredAt,
+		DeliveredAt:   msg.DeliveredAt.Ptr(),
 	}
 }
 

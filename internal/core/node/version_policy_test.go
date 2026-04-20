@@ -2372,6 +2372,7 @@ func TestAddPeerFrame_ClearsLockoutAcrossIdentity(t *testing.T) {
 	addr3 := domain.PeerAddress("10.0.0.2:1234") // different identity
 
 	svc := &Service{
+		cfg: config.Node{AllowPrivatePeers: true},
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr1: {Address: addr1},
 			addr2: {Address: addr2},
@@ -2592,6 +2593,7 @@ func TestAddPeerFrame_ClearsSiblingBansAndCooldowns(t *testing.T) {
 	addr4 := domain.PeerAddress("10.0.0.3:1234") // different identity
 
 	svc := &Service{
+		cfg: config.Node{AllowPrivatePeers: true},
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr1: {Address: addr1},
 			addr2: {Address: addr2},
@@ -2797,6 +2799,7 @@ func TestAddPeerFrame_RepairsStaleScorePenalties(t *testing.T) {
 	addr3 := domain.PeerAddress("10.0.0.2:1234") // different identity
 
 	svc := &Service{
+		cfg: config.Node{AllowPrivatePeers: true},
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr1: {Address: addr1},
 			addr2: {Address: addr2},

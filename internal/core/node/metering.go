@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -130,38 +131,62 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 // networkStatsFrame builds a network_stats frame with cumulative and live
 // traffic counters for all known peers.
 func (s *Service) networkStatsFrame() protocol.Frame {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// ---------------------------------------------------------------
+	// Short critical section: snapshot health, live traffic and peer
+	// list under lock, then release before sorting and frame building.
+	// Prevents writer starvation on s.mu (see peerHealthFrames comment).
+	// ---------------------------------------------------------------
+	type healthSnap struct {
+		Address   domain.PeerAddress
+		Sent      int64
+		Received  int64
+		Connected bool
+	}
 
+	s.mu.RLock()
 	live := s.liveTrafficLocked()
 
+	healthSnaps := make([]healthSnap, 0, len(s.health))
+	for _, health := range s.health {
+		healthSnaps = append(healthSnaps, healthSnap{
+			Address:   health.Address,
+			Sent:      health.BytesSent,
+			Received:  health.BytesReceived,
+			Connected: health.Connected,
+		})
+	}
+
+	peerAddrs := make([]domain.PeerAddress, len(s.peers))
+	for i, p := range s.peers {
+		peerAddrs[i] = p.Address
+	}
+	s.mu.RUnlock()
+
+	// Build traffic frames from snapshots — no lock held.
 	var totalSent, totalReceived int64
 	var connectedCount int
-	peerTraffic := make([]protocol.PeerTrafficFrame, 0, len(s.health)+len(live))
+	peerTraffic := make([]protocol.PeerTrafficFrame, 0, len(healthSnaps)+len(live))
+	seen := make(map[domain.PeerAddress]struct{}, len(healthSnaps))
 
-	// Track which addresses we've already counted from s.health so we can
-	// pick up inbound-only peers that have live traffic but no health entry yet.
-	seen := make(map[domain.PeerAddress]struct{}, len(s.health))
-
-	for _, health := range s.health {
-		seen[health.Address] = struct{}{}
-		sent := health.BytesSent
-		recv := health.BytesReceived
-		if lv, ok := live[health.Address]; ok {
+	for _, h := range healthSnaps {
+		seen[h.Address] = struct{}{}
+		sent := h.Sent
+		recv := h.Received
+		if lv, ok := live[h.Address]; ok {
 			sent += lv.sent
 			recv += lv.received
 		}
 		totalSent += sent
 		totalReceived += recv
-		if health.Connected {
+		if h.Connected {
 			connectedCount++
 		}
 		peerTraffic = append(peerTraffic, protocol.PeerTrafficFrame{
-			Address:       string(health.Address),
+			Address:       string(h.Address),
 			BytesSent:     sent,
 			BytesReceived: recv,
 			TotalTraffic:  sent + recv,
-			Connected:     health.Connected,
+			Connected:     h.Connected,
 		})
 	}
 
@@ -192,14 +217,13 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 	// known_peers is the union of the configured peer list and any peers
 	// we've seen via health/live traffic (includes non-listener clients
 	// that don't appear in s.peers but are actively connected).
-	knownSet := make(map[string]struct{}, len(s.peers)+len(seen))
-	for _, p := range s.peers {
-		knownSet[string(p.Address)] = struct{}{}
+	knownSet := make(map[string]struct{}, len(peerAddrs)+len(seen))
+	for _, addr := range peerAddrs {
+		knownSet[string(addr)] = struct{}{}
 	}
 	for addr := range seen {
 		knownSet[string(addr)] = struct{}{}
 	}
-	// live-only peers were appended after the seen loop; add them too.
 	for addr := range live {
 		knownSet[string(addr)] = struct{}{}
 	}
@@ -216,5 +240,64 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 	return protocol.Frame{
 		Type:         "network_stats",
 		NetworkStats: stats,
+	}
+}
+
+// emitTrafficDeltas publishes a single PeerTrafficBatch event containing
+// snapshots for all peers whose cumulative byte count (persisted + live)
+// changed since the last emission. Called from bootstrapLoop on every tick
+// (~2s). Uses a short RLock to snapshot health + live counters, then
+// compares and publishes outside the lock.
+func (s *Service) emitTrafficDeltas() {
+	s.mu.RLock()
+	live := s.liveTrafficLocked()
+
+	type snap struct {
+		address domain.PeerAddress
+		sent    int64
+		recv    int64
+	}
+	snaps := make([]snap, 0, len(s.health))
+	for _, h := range s.health {
+		sent := h.BytesSent
+		recv := h.BytesReceived
+		if lv, ok := live[h.Address]; ok {
+			sent += lv.sent
+			recv += lv.received
+		}
+		snaps = append(snaps, snap{h.Address, sent, recv})
+	}
+
+	// Include live-only peers not yet in health (inbound before handshake).
+	for addr, lv := range live {
+		if _, ok := s.health[addr]; ok {
+			continue
+		}
+		snaps = append(snaps, snap{addr, lv.sent, lv.received})
+	}
+	s.mu.RUnlock()
+
+	// Compare with last emission and publish only changed peers.
+	s.trafficMu.Lock()
+	if s.lastTrafficSnap == nil {
+		s.lastTrafficSnap = make(map[domain.PeerAddress][2]int64, len(snaps))
+	}
+	var changed []ebus.PeerTrafficSnapshot
+	for _, sn := range snaps {
+		prev := s.lastTrafficSnap[sn.address]
+		if prev[0] == sn.sent && prev[1] == sn.recv {
+			continue
+		}
+		s.lastTrafficSnap[sn.address] = [2]int64{sn.sent, sn.recv}
+		changed = append(changed, ebus.PeerTrafficSnapshot{
+			Address:       sn.address,
+			BytesSent:     sn.sent,
+			BytesReceived: sn.recv,
+		})
+	}
+	s.trafficMu.Unlock()
+
+	if len(changed) > 0 {
+		s.eventBus.Publish(ebus.TopicPeerTrafficUpdated, ebus.PeerTrafficBatch{Peers: changed})
 	}
 }

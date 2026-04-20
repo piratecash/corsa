@@ -24,6 +24,12 @@ func main() {
 	cfg.Node.QueueStatePath = filepath.Join(".corsa-bot", "queue-64648.json")
 	cfg.Node.PeersStatePath = filepath.Join(".corsa-bot", "peers-64648.json")
 
+	// SDK does not auto-generate identity — ensure the file exists for this example.
+	// Production bots should supply NodeConfig.PrivateKey instead.
+	if err := sdk.EnsureIdentityFile(cfg.Node.IdentityPath); err != nil {
+		log.Fatalf("ensure identity: %v", err)
+	}
+
 	runtime, err := sdk.New(cfg)
 	if err != nil {
 		log.Fatal(err)

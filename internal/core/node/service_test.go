@@ -325,8 +325,9 @@ func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
 			"10.0.0.8:64646",
 			"10.0.0.9:64646",
 		},
-		Type: domain.NodeTypeClient,
-	}, id)
+		Type:              domain.NodeTypeClient,
+		AllowPrivatePeers: true,
+	}, id, nil)
 
 	got := candidateAddresses(svc.peerDialCandidates())
 	if len(got) != config.DefaultOutgoingPeers {
@@ -351,12 +352,13 @@ func TestPeerDialCandidatesUsesDefaultFullOutgoingLimit(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
-		BootstrapPeers:   bootstrap,
-		Type:             domain.NodeTypeFull,
-	}, id)
+		ListenAddress:     "127.0.0.1:64646",
+		AdvertiseAddress:  "127.0.0.1:64646",
+		PeersStatePath:    filepath.Join(t.TempDir(), "peers.json"),
+		BootstrapPeers:    bootstrap,
+		Type:              domain.NodeTypeFull,
+		AllowPrivatePeers: true,
+	}, id, nil)
 
 	got := candidateAddresses(svc.peerDialCandidates())
 	if len(got) != config.DefaultOutgoingPeers {
@@ -376,7 +378,7 @@ func TestNormalizePeerAddressPrefersObservedHostAndDefaultPortForPrivateAdvertis
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	got, ok := svc.normalizePeerAddress(domain.PeerAddress("198.51.100.2:50702"), domain.PeerAddress("127.0.0.1:64647"))
 	if !ok {
@@ -399,7 +401,7 @@ func TestNormalizePeerAddressPrefersObservedHostWhenAdvertisedHostDiffers(t *tes
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	got, ok := svc.normalizePeerAddress(domain.PeerAddress("198.51.100.2:50702"), domain.PeerAddress("198.51.100.3:64647"))
 	if !ok {
@@ -410,6 +412,10 @@ func TestNormalizePeerAddressPrefersObservedHostWhenAdvertisedHostDiffers(t *tes
 	}
 }
 
+// TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback
+// verifies that ALL RFC 1918 / loopback addresses are rejected as CM
+// auto-dial candidates, regardless of source. Only public IPs produce
+// dial candidates with the default-port fallback.
 func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t *testing.T) {
 	t.Parallel()
 
@@ -423,16 +429,18 @@ func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t
 		AdvertiseAddress: "198.51.100.1:64646",
 		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers: []string{
-			"10.0.0.1:64647",
-			"127.0.0.1:64647",
-			"192.168.1.20:64646",
-			"172.16.3.10:64646",
+			"10.0.0.1:64647",     // RFC1918 10/8 — forbidden
+			"127.0.0.1:64647",    // loopback — forbidden
+			"192.168.1.20:64646", // RFC1918 192.168/16 — forbidden
+			"172.16.3.10:64646",  // RFC1918 172.16/12 — forbidden
+			"172.24.0.1:64646",   // RFC1918 172.16/12 (was /21 bug) — forbidden
+			"203.0.113.50:64647", // public IP — allowed
 		},
 		Type: domain.NodeTypeClient,
-	}, id)
+	}, id, nil)
 
 	got := candidateAddresses(svc.peerDialCandidates())
-	want := []string{"10.0.0.1:64647", "10.0.0.1:64646"}
+	want := []string{"203.0.113.50:64647", "203.0.113.50:64646"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected candidate count: got %v want %v", got, want)
 	}
@@ -460,7 +468,7 @@ func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
 			"198.51.100.2:64647",
 		},
 		Type: domain.NodeTypeClient,
-	}, id)
+	}, id, nil)
 
 	got := candidateAddresses(svc.peerDialCandidates())
 	want := []string{"198.51.100.2:64647", "198.51.100.2:64646"}
@@ -471,6 +479,126 @@ func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("unexpected candidates: got %v want %v", got, want)
 		}
+	}
+}
+
+// TestAllowLoopbackPeersOnlyExplicitLoopback verifies that wildcard binds
+// (":port") do NOT enable loopback peer mode — only explicit "127.x.y.z:port".
+func TestAllowLoopbackPeersOnlyExplicitLoopback(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		listen string
+		advert string
+		want   bool
+	}{
+		{"wildcard bind", ":64646", "", false},
+		{"0.0.0.0 bind", "0.0.0.0:64646", "", false},
+		{"explicit loopback bind", "127.0.0.1:64646", "", true},
+		{"loopback advertise", ":64646", "127.0.0.1:64646", true},
+		{"public advertise", ":64646", "198.51.100.1:64646", false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			svc := NewService(config.Node{
+				ListenAddress:    tc.listen,
+				AdvertiseAddress: tc.advert,
+				Type:             domain.NodeTypeFull,
+			}, id, nil)
+			got := svc.allowLoopbackPeers()
+			if got != tc.want {
+				t.Fatalf("allowLoopbackPeers() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsForbiddenAdvertisedIPCoversFullRFC1918 verifies all three RFC 1918
+// blocks and loopback are rejected as advertised IPs.
+func TestIsForbiddenAdvertisedIPCoversFullRFC1918(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		ip   string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"127.42.0.1", true}, // 127.0.0.0/8
+		{"10.0.0.1", true},   // 10.0.0.0/8
+		{"10.255.255.255", true},
+		{"172.16.0.1", true}, // 172.16.0.0/12
+		{"172.24.0.1", true}, // was missed by old /21
+		{"172.31.255.255", true},
+		{"192.168.0.1", true}, // 192.168.0.0/16
+		{"192.168.255.255", true},
+		{"172.32.0.1", false}, // outside /12
+		{"11.0.0.1", false},
+		{"8.8.8.8", false},
+		{"198.51.100.1", false},
+	}
+
+	for _, tc := range tests {
+		ip := net.ParseIP(tc.ip)
+		got := isForbiddenAdvertisedIP(ip)
+		if got != tc.want {
+			t.Errorf("isForbiddenAdvertisedIP(%s) = %v, want %v", tc.ip, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizePeerAddressRejectsLoopbackForWildcardBind verifies that a
+// production node with wildcard bind (":port") rejects loopback advertised
+// addresses, preventing the connect→EOF→re-dial storm.
+func TestNormalizePeerAddressRejectsLoopbackForWildcardBind(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "198.51.100.1:64646",
+		Type:             domain.NodeTypeFull,
+	}, id, nil)
+
+	// Inbound from 127.0.0.1 with self-reported listen=127.0.0.1:57461.
+	_, ok := svc.normalizePeerAddress("127.0.0.1:57491", "127.0.0.1:57461")
+	if ok {
+		t.Fatal("expected normalizePeerAddress to reject loopback for wildcard bind")
+	}
+}
+
+// TestNormalizePeerAddressAcceptsLoopbackForExplicitLoopbackBind verifies
+// that a dev-mode node with explicit loopback bind still accepts local peers.
+func TestNormalizePeerAddressAcceptsLoopbackForExplicitLoopbackBind(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress: "127.0.0.1:64646",
+		Type:          domain.NodeTypeFull,
+	}, id, nil)
+
+	got, ok := svc.normalizePeerAddress("127.0.0.1:57491", "127.0.0.1:57461")
+	if !ok {
+		t.Fatal("expected normalizePeerAddress to accept loopback for explicit loopback bind")
+	}
+	if got != "127.0.0.1:57461" {
+		t.Fatalf("unexpected normalized address: %s", got)
 	}
 }
 
@@ -1886,13 +2014,18 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	if cfg.QueueStatePath == "" {
 		cfg.QueueStatePath = filepath.Join(tmpDir, "queue.json")
 	}
+	// Allow private/loopback IPs as peer addresses in tests.
+	// Tests that explicitly verify forbidden-IP filtering should
+	// override this on the returned service after construction.
+	cfg.AllowPrivatePeers = true
 	ctx, cancel := context.WithCancel(context.Background())
 	id, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("generate test identity: %v", err)
 	}
-	svc := NewService(cfg, id)
+	svc := NewService(cfg, id, nil)
 	svc.disableRateLimiting = true
+	svc.markPeerStateIntervalTest = -1
 	return startTestService(t, ctx, cancel, svc)
 }
 
@@ -1908,10 +2041,12 @@ func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Ident
 	if cfg.QueueStatePath == "" {
 		cfg.QueueStatePath = filepath.Join(tmpDir, "queue.json")
 	}
+	cfg.AllowPrivatePeers = true
 
 	ctx, cancel := context.WithCancel(context.Background())
-	svc := NewService(cfg, id)
+	svc := NewService(cfg, id, nil)
 	svc.disableRateLimiting = true
+	svc.markPeerStateIntervalTest = -1
 	return startTestService(t, ctx, cancel, svc)
 }
 
@@ -2325,7 +2460,7 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	createdAt := time.Now().UTC().Truncate(time.Second)
 	svc.mu.Lock()
@@ -2369,7 +2504,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	frame := protocol.Frame{
 		Type:      "send_message",
@@ -2443,7 +2578,7 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
 		Type:             domain.NodeTypeFull,
-	}, recipientID)
+	}, recipientID, nil)
 
 	senderID, err := identity.Generate()
 	if err != nil {
@@ -2506,7 +2641,7 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 	}
 
-	svc := NewService(cfg, id)
+	svc := NewService(cfg, id, nil)
 	frame := protocol.Frame{
 		Type:      "send_message",
 		Topic:     "dm",
@@ -2538,7 +2673,7 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 		t.Fatalf("expected first relay attempt, got %d", attempts)
 	}
 
-	reloaded := NewService(cfg, id)
+	reloaded := NewService(cfg, id, nil)
 	reloaded.mu.RLock()
 	defer reloaded.mu.RUnlock()
 
@@ -2578,7 +2713,7 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-	}, id)
+	}, id, nil)
 
 	queuedAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
 	lastAttemptAt := queuedAt.Add(30 * time.Second)
@@ -2666,7 +2801,7 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-	}, id)
+	}, id, nil)
 
 	address := domain.PeerAddress("127.0.0.1:65001")
 	svc.mu.Lock()
@@ -2716,7 +2851,7 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 		AdvertiseAddress: "127.0.0.1:64646",
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-	}, id)
+	}, id, nil)
 
 	receipt := protocol.DeliveryReceipt{
 		MessageID:   protocol.MessageID("receipt-msg-1"),
@@ -2763,7 +2898,7 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	receipt := protocol.DeliveryReceipt{
 		MessageID:   protocol.MessageID("receipt-msg-2"),
@@ -2956,7 +3091,7 @@ func TestNormalizePeerAddressAcceptsValidV3Onion(t *testing.T) {
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	// 56 base32 chars = valid Tor v3.
 	onion := "2gzyxa5ihm7nsber23gk5eqx3mp4wrymfbhqgk2ycdjp3yzcrllbiqad.onion"
@@ -2982,7 +3117,7 @@ func TestNormalizePeerAddressRejectsShortOnion(t *testing.T) {
 		ListenAddress:    ":64646",
 		AdvertiseAddress: "198.51.100.1:64646",
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	// "junk.onion" is not a valid 16/56 base32 host.
 	_, ok := svc.normalizePeerAddress(domain.PeerAddress(""), domain.PeerAddress("junk.onion:64646"))
@@ -3208,12 +3343,13 @@ func TestPeerDialCandidatesIncludesPersistedPeers(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		BootstrapPeers:   []string{},
-		PeersStatePath:   peersPath,
-		Type:             domain.NodeTypeFull,
-	}, id)
+		ListenAddress:     ":64646",
+		AdvertiseAddress:  "198.51.100.1:64646",
+		BootstrapPeers:    []string{},
+		PeersStatePath:    peersPath,
+		Type:              domain.NodeTypeFull,
+		AllowPrivatePeers: true,
+	}, id, nil)
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
 
@@ -3298,12 +3434,13 @@ func TestOnionPeersSkippedWithoutProxy(t *testing.T) {
 
 	// No ProxyAddress configured.
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		BootstrapPeers:   []string{},
-		PeersStatePath:   peersPath,
-		Type:             domain.NodeTypeFull,
-	}, id)
+		ListenAddress:     ":64646",
+		AdvertiseAddress:  "198.51.100.1:64646",
+		BootstrapPeers:    []string{},
+		PeersStatePath:    peersPath,
+		Type:              domain.NodeTypeFull,
+		AllowPrivatePeers: true,
+	}, id, nil)
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
 	for _, c := range candidates {
@@ -3356,7 +3493,7 @@ func TestOnionPeersIncludedWithProxy(t *testing.T) {
 		PeersStatePath:   peersPath,
 		ProxyAddress:     "127.0.0.1:9050",
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
 	found := false
@@ -3956,6 +4093,225 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 	}
 }
 
+// TestSanitizeInboundAddress verifies that the health-tracking address for
+// inbound connections uses the verified TCP IP, not the self-reported one.
+func TestSanitizeInboundAddress(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		tcpAddr  string
+		claimed  string
+		expected string
+	}{
+		{
+			name:     "matching IPs — use claimed port",
+			tcpAddr:  "1.2.3.4:55000",
+			claimed:  "1.2.3.4:64646",
+			expected: "1.2.3.4:64646",
+		},
+		{
+			name:     "mismatched IPs — use TCP IP with claimed port",
+			tcpAddr:  "1.2.3.4:55000",
+			claimed:  "5.6.7.8:64646",
+			expected: "1.2.3.4:64646",
+		},
+		{
+			name:     "localhost TCP with localhost claimed",
+			tcpAddr:  "127.0.0.1:55000",
+			claimed:  "127.0.0.1:63594",
+			expected: "127.0.0.1:63594",
+		},
+		{
+			name:     "empty tcpAddr — fallback to claimed",
+			tcpAddr:  "",
+			claimed:  "5.6.7.8:64646",
+			expected: "5.6.7.8:64646",
+		},
+		{
+			name:     "empty claimed — return empty",
+			tcpAddr:  "1.2.3.4:55000",
+			claimed:  "",
+			expected: "",
+		},
+		{
+			name:     "claimed not host:port — use TCP IP with default port",
+			tcpAddr:  "1.2.3.4:55000",
+			claimed:  "not-an-address",
+			expected: "1.2.3.4:" + config.DefaultPeerPort,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeInboundAddress(tt.tcpAddr, tt.claimed)
+			if got != tt.expected {
+				t.Fatalf("sanitizeInboundAddress(%q, %q) = %q, want %q", tt.tcpAddr, tt.claimed, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestEvictOrphanedHealthEntries verifies that inbound-only health entries
+// (not present in s.peers) are cleaned up after the staleness window.
+func TestEvictOrphanedHealthEntries(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             domain.NodeTypeFull,
+	})
+	defer stop()
+
+	// Add one real peer (in s.peers with a health entry) so we can verify it survives.
+	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-real")
+
+	staleTime := time.Now().Add(-20 * time.Minute) // well past orphanedHealthEvictWindow
+
+	svc.mu.Lock()
+
+	// Create a health entry for the real peer — addPeerAddress only adds
+	// to s.peers, not to s.health. In production, health entries are
+	// created on connection via ensurePeerHealthLocked.
+	realAddr := domain.PeerAddress("10.0.0.1:64646")
+	svc.health[realAddr] = &peerHealth{
+		Address:            realAddr,
+		State:              peerStateReconnecting,
+		Connected:          false,
+		LastConnectedAt:    staleTime.Add(-time.Minute),
+		LastDisconnectedAt: staleTime,
+	}
+
+	// Orphaned inbound-only peer: not in s.peers, disconnected long ago.
+	orphanAddr := domain.PeerAddress("127.0.0.1:55555")
+	svc.health[orphanAddr] = &peerHealth{
+		Address:            orphanAddr,
+		State:              peerStateReconnecting,
+		Connected:          false,
+		LastConnectedAt:    staleTime.Add(-time.Minute),
+		LastDisconnectedAt: staleTime,
+	}
+	svc.peerIDs[orphanAddr] = "orphan-identity"
+	svc.peerTypes[orphanAddr] = "full"
+
+	// Recent orphan: not in s.peers, but disconnected only 1 minute ago — should survive.
+	recentAddr := domain.PeerAddress("127.0.0.1:55556")
+	svc.health[recentAddr] = &peerHealth{
+		Address:            recentAddr,
+		State:              peerStateReconnecting,
+		Connected:          false,
+		LastConnectedAt:    time.Now().Add(-2 * time.Minute),
+		LastDisconnectedAt: time.Now().Add(-1 * time.Minute),
+	}
+
+	// Connected orphan: not in s.peers, but still connected — should survive.
+	connectedAddr := domain.PeerAddress("127.0.0.1:55557")
+	svc.health[connectedAddr] = &peerHealth{
+		Address:            connectedAddr,
+		State:              peerStateHealthy,
+		Connected:          true,
+		LastConnectedAt:    time.Now().Add(-time.Minute),
+		LastDisconnectedAt: staleTime,
+	}
+
+	// Orphan with active inbound refs: should survive.
+	refAddr := domain.PeerAddress("127.0.0.1:55558")
+	svc.health[refAddr] = &peerHealth{
+		Address:            refAddr,
+		State:              peerStateReconnecting,
+		Connected:          false,
+		LastConnectedAt:    staleTime.Add(-time.Minute),
+		LastDisconnectedAt: staleTime,
+	}
+	svc.inboundHealthRefs[refAddr] = 1
+
+	svc.mu.Unlock()
+
+	svc.evictOrphanedHealthEntries()
+
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+
+	// Stale orphan must be evicted.
+	if svc.health[orphanAddr] != nil {
+		t.Fatal("expected stale orphaned health entry to be evicted")
+	}
+	if _, ok := svc.peerIDs[orphanAddr]; ok {
+		t.Fatal("expected peerIDs for orphan to be cleaned up")
+	}
+	if _, ok := svc.peerTypes[orphanAddr]; ok {
+		t.Fatal("expected peerTypes for orphan to be cleaned up")
+	}
+
+	// Recent orphan must survive.
+	if svc.health[recentAddr] == nil {
+		t.Fatal("expected recently disconnected orphan to survive")
+	}
+
+	// Connected orphan must survive.
+	if svc.health[connectedAddr] == nil {
+		t.Fatal("expected connected orphan to survive")
+	}
+
+	// Orphan with active inbound refs must survive.
+	if svc.health[refAddr] == nil {
+		t.Fatal("expected orphan with active inbound refs to survive")
+	}
+
+	// Real peer (in s.peers) must survive.
+	if svc.health[domain.PeerAddress("10.0.0.1:64646")] == nil {
+		t.Fatal("expected real peer health to survive")
+	}
+}
+
+// TestEvictOrphanedHealthEntriesRefreshesAggregate verifies that after
+// evicting orphaned health entries, the aggregate status is recomputed
+// so TotalPeers reflects the reduced health map size.
+func TestEvictOrphanedHealthEntriesRefreshesAggregate(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:    address,
+		AdvertiseAddress: normalizeAddress(address),
+		BootstrapPeers:   []string{},
+		Type:             domain.NodeTypeFull,
+	})
+	defer stop()
+
+	staleTime := time.Now().Add(-20 * time.Minute)
+
+	svc.mu.Lock()
+	// Create several orphaned entries to inflate TotalPeers.
+	for i := 0; i < 5; i++ {
+		addr := domain.PeerAddress(fmt.Sprintf("127.0.0.1:%d", 40000+i))
+		svc.health[addr] = &peerHealth{
+			Address:            addr,
+			State:              peerStateReconnecting,
+			Connected:          false,
+			LastConnectedAt:    staleTime.Add(-time.Minute),
+			LastDisconnectedAt: staleTime,
+		}
+	}
+	svc.refreshAggregateStatusLocked()
+	totalBefore := svc.aggregateStatus.TotalPeers
+	svc.mu.Unlock()
+
+	if totalBefore < 5 {
+		t.Fatalf("expected at least 5 total peers before eviction, got %d", totalBefore)
+	}
+
+	svc.evictOrphanedHealthEntries()
+
+	snap := svc.AggregateStatus()
+	if snap.TotalPeers >= totalBefore {
+		t.Fatalf("expected TotalPeers to decrease after eviction: before=%d, after=%d", totalBefore, snap.TotalPeers)
+	}
+}
+
 // TestFallbackAddressHealthTracking verifies that when a fallback port variant
 // is dialled, health updates are recorded under the primary peer address.
 func TestFallbackAddressHealthTracking(t *testing.T) {
@@ -4153,7 +4509,7 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "127.0.0.1:64646",
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-	}, id)
+	}, id, nil)
 
 	primaryAddr := domain.PeerAddress("10.0.0.1:64647")
 	fallbackAddr := domain.PeerAddress("10.0.0.1:64646")
@@ -4321,7 +4677,7 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 		AdvertiseAddress: "127.0.0.1:64646",
 		BootstrapPeers:   []string{primaryAddr},
 		QueueStatePath:   queuePath,
-	}, id)
+	}, id, nil)
 
 	svc.mu.RLock()
 	primaryPending := len(svc.pending[domain.PeerAddress(primaryAddr)])
@@ -4412,7 +4768,7 @@ func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
 		AdvertiseAddress: "127.0.0.1:64646",
 		BootstrapPeers:   []string{primaryA, primaryB},
 		QueueStatePath:   queuePath,
-	}, id)
+	}, id, nil)
 
 	svc.mu.RLock()
 	fallbackPending := len(svc.pending[domain.PeerAddress(fallbackAddr)])
@@ -4486,11 +4842,12 @@ func TestQueueStateMigrationOrphansUnknownHost(t *testing.T) {
 
 	// Bootstrap peer on a DIFFERENT host — 10.99.99.1 has zero candidates.
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		BootstrapPeers:   []string{"10.0.0.1:64647"},
-		QueueStatePath:   queuePath,
-	}, id)
+		ListenAddress:     "127.0.0.1:64646",
+		AdvertiseAddress:  "127.0.0.1:64646",
+		BootstrapPeers:    []string{"10.0.0.1:64647"},
+		QueueStatePath:    queuePath,
+		AllowPrivatePeers: true,
+	}, id, nil)
 
 	svc.mu.RLock()
 	pendingCount := len(svc.pending[domain.PeerAddress(unknownAddr)])
@@ -4553,11 +4910,12 @@ func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
 
 	// No bootstrap peer matching this host — but migration is skipped.
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		BootstrapPeers:   []string{"10.0.0.1:64647"},
-		QueueStatePath:   queuePath,
-	}, id)
+		ListenAddress:     "127.0.0.1:64646",
+		AdvertiseAddress:  "127.0.0.1:64646",
+		BootstrapPeers:    []string{"10.0.0.1:64647"},
+		QueueStatePath:    queuePath,
+		AllowPrivatePeers: true,
+	}, id, nil)
 
 	svc.mu.RLock()
 	pendingCount := len(svc.pending[domain.PeerAddress(runtimeAddr)])
@@ -4581,7 +4939,7 @@ func TestRecordObservedAddressIgnoresEmpty(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "")
 	svc.recordObservedAddress("", "203.0.113.50")
@@ -4599,7 +4957,7 @@ func TestRecordObservedAddressIgnoresPrivate(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "10.0.0.1")
 	svc.recordObservedAddress("peer-fingerprint-b", "192.168.1.5")
@@ -4618,7 +4976,7 @@ func TestRecordObservedAddressStoresPublicIP(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
 	svc.mu.RLock()
@@ -4635,7 +4993,7 @@ func TestRecordObservedAddressConsensusRequiresTwoPeers(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	// Single observation — no consensus yet.
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
@@ -4662,7 +5020,7 @@ func TestRecordObservedAddressSameNodeOneVote(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	// Same peer identity reached via two different addresses — still one vote.
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
@@ -4681,7 +5039,7 @@ func TestRecordObservedAddressNoConsensusWhenPeersDisagree(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
 	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.99")
@@ -4702,7 +5060,7 @@ func TestRecordObservedAddressSkipsWhenAdvertiseIsPublic(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "0.0.0.0:64646",
 		AdvertiseAddress: "203.0.113.50:64646",
-	}, id)
+	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
 	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.50")
@@ -4724,7 +5082,7 @@ func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	// Simulate what openPeerSession does: record observation keyed by identity,
 	// and register the peerID mapping so markPeerDisconnected can find it.
@@ -4758,7 +5116,7 @@ func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:    "127.0.0.1:64646",
 		AdvertiseAddress: "192.168.1.10:64646",
-	}, id)
+	}, id, nil)
 
 	// Record observation under peer identity.
 	svc.recordObservedAddress(domain.PeerIdentity(peerID.Address), "203.0.113.50")
@@ -4965,6 +5323,9 @@ func TestAddPeerFrameForbiddenIPError(t *testing.T) {
 		Type:             domain.NodeTypeFull,
 	})
 	defer stop()
+
+	// Restore strict filtering — this test verifies forbidden IPs are rejected.
+	svc.cfg.AllowPrivatePeers = false
 
 	// 192.168.x.x is in isForbiddenAdvertisedIP → shouldSkipDialAddress
 	reply := svc.addPeerFrame(protocol.Frame{
@@ -5642,7 +6003,7 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             domain.NodeTypeFull,
-	}, senderID)
+	}, senderID, nil)
 
 	storeMock, rec := newRecordingMockMessageStore(t)
 	svc.RegisterMessageStore(storeMock)
@@ -6885,7 +7246,7 @@ func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
 		ListenAddress:    "127.0.0.1:0",
 		AdvertiseAddress: "127.0.0.1:0",
 		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
-	}, id)
+	}, id, nil)
 
 	server, client := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -6949,7 +7310,7 @@ func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
 		ListenAddress:    "127.0.0.1:0",
 		AdvertiseAddress: "127.0.0.1:0",
 		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
-	}, id)
+	}, id, nil)
 
 	server, client := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -8041,7 +8402,7 @@ func TestMixedVersionLegacyPeerExchange(t *testing.T) {
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             domain.NodeTypeFull,
-	}, nodeID)
+	}, nodeID, nil)
 	svc.disableRateLimiting = true
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -8133,7 +8494,7 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
 		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
 		Type:             domain.NodeTypeFull,
-	}, id)
+	}, id, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	svc, stop := startTestService(t, ctx, cancel, svc)

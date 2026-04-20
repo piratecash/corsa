@@ -10,6 +10,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -18,6 +19,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -62,14 +64,16 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.flushPeerState()
 			return
 		case <-ticker.C:
-			s.cleanupExpiredMessages()
+			s.cleanupExpiredMessagesForce()
 			s.cleanupExpiredNotices()
 			s.evictStalePeers()
+			s.evictOrphanedHealthEntries()
 			s.evictStaleInboundConns()
 			s.retryRelayDeliveries()
 			s.relayLimiter.cleanup(5 * time.Minute)
 			s.maybeSavePeerState()
 			s.refreshAggregateStatus()
+			s.emitTrafficDeltas()
 		}
 	}
 }
@@ -146,34 +150,25 @@ func (s *Service) evictStalePeers() {
 
 	now := time.Now()
 
-	var evicted []domain.PeerAddress
-
-	s.mu.Lock()
-	s.lastPeerEvict = now
-
-	kept := make([]transport.Peer, 0, len(s.peers))
+	// ---------------------------------------------------------------
+	// Phase 1 (RLock): identify eviction candidates without holding
+	// the write lock. This keeps the write-lock window short, reducing
+	// contention with ProbeNode RPCs that need RLock.
+	// ---------------------------------------------------------------
+	s.mu.RLock()
+	candidates := make(map[domain.PeerAddress]struct{})
 	for _, peer := range s.peers {
 		health := s.health[peer.Address]
 		if health == nil {
-			// No health info yet — keep; might be a freshly discovered peer.
-			kept = append(kept, peer)
 			continue
 		}
-		// Never evict bootstrap peers.
 		if peer.Source == domain.PeerSourceBootstrap {
-			kept = append(kept, peer)
 			continue
 		}
-		// Never evict currently connected peers.
 		if health.Connected {
-			kept = append(kept, peer)
 			continue
 		}
-		// Never evict peers with an active version lockout — eviction
-		// would delete the VersionLockout from persistedMeta, making
-		// the peer dialable again before the next flush to disk.
 		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.VersionLockout.IsActive() {
-			kept = append(kept, peer)
 			continue
 		}
 		// Evict if score is terrible AND last successful connection (or
@@ -183,15 +178,65 @@ func (s *Service) evictStalePeers() {
 		// peers.  Only LastConnectedAt (actual success) matters for eviction.
 		if health.Score <= peerEvictScoreThreshold {
 			lastSuccess := health.LastConnectedAt
-			// If peer was never successfully connected, fall back to AddedAt
-			// (the time it was first discovered via peer exchange or config).
 			if lastSuccess.IsZero() {
 				if pm := s.persistedMeta[peer.Address]; pm != nil && pm.AddedAt != nil {
 					lastSuccess = *pm.AddedAt
 				}
 			}
 			if !lastSuccess.IsZero() && now.Sub(lastSuccess) > peerEvictStaleWindow {
-				// Evict: clean up associated state.
+				candidates[peer.Address] = struct{}{}
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		// Still update the timestamp under a short lock so the interval
+		// check does not re-run the scan on every tick.
+		s.mu.Lock()
+		s.lastPeerEvict = now
+		s.mu.Unlock()
+		return
+	}
+
+	// ---------------------------------------------------------------
+	// Phase 2 (Lock): apply evictions. Re-check each candidate under
+	// write lock — state may have changed between phases (peer
+	// reconnected, score improved, etc.).
+	// ---------------------------------------------------------------
+	var evicted []domain.PeerAddress
+
+	s.mu.Lock()
+	s.lastPeerEvict = now
+
+	kept := make([]transport.Peer, 0, len(s.peers))
+	for _, peer := range s.peers {
+		if _, candidate := candidates[peer.Address]; !candidate {
+			kept = append(kept, peer)
+			continue
+		}
+		// Re-validate under write lock: conditions may have changed.
+		health := s.health[peer.Address]
+		if health == nil || health.Connected {
+			kept = append(kept, peer)
+			continue
+		}
+		if peer.Source == domain.PeerSourceBootstrap {
+			kept = append(kept, peer)
+			continue
+		}
+		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.VersionLockout.IsActive() {
+			kept = append(kept, peer)
+			continue
+		}
+		if health.Score <= peerEvictScoreThreshold {
+			lastSuccess := health.LastConnectedAt
+			if lastSuccess.IsZero() {
+				if pm := s.persistedMeta[peer.Address]; pm != nil && pm.AddedAt != nil {
+					lastSuccess = *pm.AddedAt
+				}
+			}
+			if !lastSuccess.IsZero() && now.Sub(lastSuccess) > peerEvictStaleWindow {
 				delete(s.health, peer.Address)
 				delete(s.peerTypes, peer.Address)
 				delete(s.peerIDs, peer.Address)
@@ -213,6 +258,102 @@ func (s *Service) evictStalePeers() {
 		for _, addr := range evicted {
 			s.peerProvider.Remove(addr)
 		}
+	}
+}
+
+// evictOrphanedHealthEntries removes health map entries for inbound-only
+// peers that are no longer connected and have no outbound peer-list entry.
+//
+// These "orphaned" entries accumulate from ephemeral inbound connections
+// (e.g. 127.0.0.1:<random_port>) that connected once, disconnected, and
+// will never be dialled because they have no persistent address in s.peers.
+// Without cleanup the reconnecting count in computeAggregateStatusLocked
+// grows unboundedly, inflating TotalPeers and degrading the aggregate
+// status signal.
+//
+// The sweep runs on the same tick as evictStalePeers (bootstrapLoop, every
+// 2 s) but the inner scan is throttled to peerEvictInterval.
+func (s *Service) evictOrphanedHealthEntries() {
+	now := time.Now().UTC()
+
+	// ---------------------------------------------------------------
+	// Phase 1 (RLock): build the set of addresses owned by s.peers,
+	// then identify orphaned health entries outside that set.
+	// ---------------------------------------------------------------
+	s.mu.RLock()
+	peerAddrs := make(map[domain.PeerAddress]struct{}, len(s.peers))
+	for _, p := range s.peers {
+		peerAddrs[p.Address] = struct{}{}
+	}
+
+	var candidates []domain.PeerAddress
+	for addr, health := range s.health {
+		if _, inPeers := peerAddrs[addr]; inPeers {
+			continue // has an outbound peer entry — handled by evictStalePeers
+		}
+		if health.Connected {
+			continue // still alive
+		}
+		if s.inboundHealthRefs[addr] > 0 {
+			continue // active inbound TCP session(s) exist
+		}
+		// Require a staleness window so that a brief disconnect + immediate
+		// reconnect does not lose the health row mid-cycle.
+		if health.LastDisconnectedAt.IsZero() || now.Sub(health.LastDisconnectedAt) < orphanedHealthEvictWindow {
+			continue
+		}
+		candidates = append(candidates, addr)
+	}
+	s.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	// ---------------------------------------------------------------
+	// Phase 2 (Lock): apply evictions. Re-check each candidate under
+	// write lock — state may have changed between phases (a peer-exchange
+	// frame may have added the address to s.peers).
+	// ---------------------------------------------------------------
+	s.mu.Lock()
+
+	// Rebuild peerAddrs under write lock — s.peers may have grown.
+	peerAddrs = make(map[domain.PeerAddress]struct{}, len(s.peers))
+	for _, p := range s.peers {
+		peerAddrs[p.Address] = struct{}{}
+	}
+
+	var evicted int
+	for _, addr := range candidates {
+		health := s.health[addr]
+		if health == nil || health.Connected {
+			continue
+		}
+		if _, inPeers := peerAddrs[addr]; inPeers {
+			continue
+		}
+		if s.inboundHealthRefs[addr] > 0 {
+			continue
+		}
+		if health.LastDisconnectedAt.IsZero() || now.Sub(health.LastDisconnectedAt) < orphanedHealthEvictWindow {
+			continue
+		}
+		delete(s.health, addr)
+		delete(s.peerTypes, addr)
+		delete(s.peerIDs, addr)
+		delete(s.peerVersions, addr)
+		delete(s.peerBuilds, addr)
+		delete(s.persistedMeta, addr)
+		delete(s.pending, addr)
+		evicted++
+	}
+	if evicted > 0 {
+		s.refreshAggregateStatusLocked()
+	}
+	s.mu.Unlock()
+
+	if evicted > 0 {
+		log.Info().Int("evicted", evicted).Int("candidates", len(candidates)).Msg("evicted_orphaned_health_entries")
 	}
 }
 
@@ -1984,10 +2125,30 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			return
 		}
 		// Gossip fallback: no reverse relay path or send failed.
-		// gossipTransitReceipt marks as seen only after at least one target
-		// accepts; if no targets exist or all sends fail, receipt stays
-		// eligible for retry.
-		go s.gossipTransitReceipt(receipt)
+		// Pre-mark so rapid-fire duplicate receipts from the same peer are
+		// suppressed. gossipTransitReceipt unmarks on complete failure to
+		// preserve retry eligibility.
+		if s.markTransitReceiptSeen(receipt) {
+			log.Debug().
+				Str("peer", string(address)).
+				Str("message_id", string(receipt.MessageID)).
+				Str("recipient", receipt.Recipient).
+				Msg("relay_delivery_receipt dropped: duplicate transit receipt pre-gossip (session)")
+			return
+		}
+		// Must run in a goroutine: gossipTransitReceipt calls
+		// sendReceiptToPeer → queuePeerFrame → persistQueueState which
+		// does synchronous disk I/O. Running it inline blocks the peer
+		// session read loop, stalling heartbeat pong replies and causing
+		// the remote side to disconnect on pong-stall timeout.
+		// Track via backgroundWg so WaitBackground() blocks until disk
+		// I/O completes — prevents TempDir cleanup races in tests and
+		// data loss on shutdown.
+		s.backgroundWg.Add(1)
+		go func() {
+			defer s.backgroundWg.Done()
+			s.gossipTransitReceipt(receipt)
+		}()
 		log.Debug().
 			Str("peer", string(address)).
 			Str("message_id", string(receipt.MessageID)).
@@ -2228,10 +2389,10 @@ func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool 
 
 func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
+	peerID := s.peerIDs[address]
 	now := time.Now().UTC()
 	health.Connected = true
 	health.Direction = direction
@@ -2255,7 +2416,6 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	}
 
 	// Remove from the incompatible-reporter dedup set if present.
-	peerID := s.peerIDs[address]
 	if peerID != "" && s.versionPolicy != nil {
 		delete(s.versionPolicy.incompatibleReporters, peerID)
 	}
@@ -2301,11 +2461,17 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 
 	// Recompute version policy to reflect the cleared evidence.
 	s.recomputeVersionPolicyLocked(now)
+
+	s.mu.Unlock()
+
+	// Emit peer-connected event after releasing lock.
+	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
+	// emitted by updatePeerStateLocked (called above).
+	s.eventBus.Publish(ebus.TopicPeerConnected, address, peerID)
 }
 
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -2334,7 +2500,8 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 		health.LastDisconnectCode = ""
 		health.Score = clampScore(health.Score + peerScoreDisconnect)
 	}
-	if peerID := s.peerIDs[address]; peerID != "" {
+	peerID := s.peerIDs[address]
+	if peerID != "" {
 		delete(s.observedAddrs, peerID)
 	}
 
@@ -2347,6 +2514,13 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	// Recompute version policy so that the build signal immediately
 	// reflects the loss of this peer's vote.
 	s.recomputeVersionPolicyLocked(time.Now().UTC())
+
+	s.mu.Unlock()
+
+	// Emit peer-disconnected event after releasing lock.
+	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
+	// emitted by updatePeerStateLocked (called above).
+	s.eventBus.Publish(ebus.TopicPeerDisconnected, address, peerID)
 }
 
 // penalizeOldProtocolPeer applies a score penalty and accumulates ban score
@@ -2358,7 +2532,6 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 // when available (from the wire error frame or welcome); pass 0 when unknown.
 func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersion, peerMinimum domain.ProtocolVersion) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 
@@ -2452,6 +2625,49 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 		// stale until the next unrelated event.
 		s.recomputeVersionPolicyLocked(now)
 	}
+
+	s.emitPeerHealthDeltaLocked(health)
+	s.mu.Unlock()
+}
+
+// markPeerStateInterval is the minimum interval between full state
+// recomputes (computePeerStateAtLocked + possible ebus emit +
+// aggregate refresh) for the same peer in markPeerWrite / markPeerRead.
+//
+// The throttle is enforced via peerActivityNanos (sync.Map of
+// *atomic.Int64) which lives entirely outside s.mu. On the fast path
+// (< 1s since last recompute) the functions return immediately with
+// zero locking. Only when the interval elapses does the slow path
+// acquire s.mu.Lock(), flush timestamps into health, and run the
+// state machine. This eliminates the continuous writer pressure that
+// previously starved s.mu.RLock() callers (loadConversation,
+// fetch_network_stats).
+const markPeerStateInterval = time.Second
+
+// peerActivityNeedsRecompute checks the per-peer atomic timestamp in
+// peerActivityNanos and returns true only when the recompute interval
+// has elapsed since the last recompute. Uses CAS to guarantee exactly
+// one goroutine wins the race for a given peer in the same interval.
+// No locks are acquired — the check is fully lock-free.
+//
+// The interval defaults to markPeerStateInterval (1 s). Tests can set
+// markPeerStateIntervalTest to -1 to disable throttling entirely.
+func (s *Service) peerActivityNeedsRecompute(address domain.PeerAddress, nowNano int64) bool {
+	interval := int64(markPeerStateInterval)
+	if s.markPeerStateIntervalTest < 0 {
+		return true // test mode: always recompute
+	}
+	if s.markPeerStateIntervalTest > 0 {
+		interval = int64(s.markPeerStateIntervalTest)
+	}
+
+	v, _ := s.peerActivityNanos.LoadOrStore(address, &atomic.Int64{})
+	last := v.(*atomic.Int64)
+	prev := last.Load()
+	if nowNano-prev < interval {
+		return false
+	}
+	return last.CompareAndSwap(prev, nowNano)
 }
 
 func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame) {
@@ -2463,12 +2679,20 @@ func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame
 		Bool("accepted", true).
 		Msg("protocol_trace")
 
+	now := time.Now().UTC()
+	// Ping/pong frames bypass the throttle — they are low-frequency
+	// (~30 s) and critical for health: suppressing LastPingAt updates
+	// makes computePeerStateAtLocked see a stale timestamp, degrading
+	// the peer and eventually killing the connection.
+	if frame.Type != "ping" && !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	now := time.Now().UTC()
 	if frame.Type == "ping" {
 		health.LastPingAt = now
 	} else if frame.Type != "" {
@@ -2490,29 +2714,39 @@ func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame)
 	}
 	ev.Msg("protocol_trace")
 
+	now := time.Now().UTC()
+	// Pong frames bypass the throttle — they are low-frequency (~30 s)
+	// and critical for health: suppressing LastPongAt updates makes
+	// computePeerStateAtLocked see a stale timestamp, degrading the
+	// peer and eventually killing the connection.
+	if frame.Type != "pong" && !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	now := time.Now().UTC()
 	if frame.Type == "pong" {
 		health.LastPongAt = now
-		s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
-		return
-	}
-	if frame.Type != "" {
+	} else if frame.Type != "" {
 		health.LastUsefulReceiveAt = now
 	}
 	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 }
 
 func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
+	now := time.Now().UTC()
+	if !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	now := time.Now().UTC()
 	health.LastUsefulReceiveAt = now
 	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 }
@@ -2617,6 +2851,11 @@ func resetPeerHealthForRecoveryLocked(h *peerHealth) {
 
 func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 	if health.State == next {
+		// State unchanged — still emit the delta so that timestamp updates
+		// (LastPongAt, LastUsefulReceiveAt) reach ebus subscribers.
+		// Callers are already throttled by peerActivityNeedsRecompute
+		// (~1 event/sec/peer), so this does not create writer pressure.
+		s.emitPeerHealthDeltaLocked(health)
 		return
 	}
 	if health.State != "" {
@@ -2629,6 +2868,73 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 	// to limited). Recompute and store the materialized snapshot so that
 	// policy helpers and the Desktop UI always see a consistent value.
 	s.refreshAggregateStatusLocked()
+
+	s.emitPeerHealthDeltaLocked(health)
+	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, s.aggregateStatus)
+}
+
+// emitPeerHealthDeltaLocked publishes a full PeerHealthDelta for the given
+// peer. Single point of construction for all health-delta events — called
+// from updatePeerStateLocked (state transitions and timestamp updates) and
+// penalizeOldProtocolPeer (incompatible version handling).
+//
+// Callers are rate-limited by peerActivityNeedsRecompute (~1 call/sec/peer)
+// and pong bypass (~30 s interval), so emission frequency is bounded and
+// does not create writer pressure on s.mu.
+// Caller must hold s.mu.
+func (s *Service) emitPeerHealthDeltaLocked(health *peerHealth) {
+	delta := ebus.PeerHealthDelta{
+		Address:             health.Address,
+		PeerID:              s.peerIDs[health.Address],
+		Direction:           health.Direction,
+		ClientVersion:       s.peerVersions[health.Address],
+		ClientBuild:         s.peerBuilds[health.Address],
+		State:               health.State,
+		Connected:           health.Connected,
+		Score:               health.Score,
+		PendingCount:        len(s.pending[health.Address]),
+		ConsecutiveFailures: health.ConsecutiveFailures,
+		LastConnectedAt:     ebus.TimePtr(health.LastConnectedAt),
+		LastDisconnectedAt:  ebus.TimePtr(health.LastDisconnectedAt),
+		LastPingAt:          ebus.TimePtr(health.LastPingAt),
+		LastPongAt:          ebus.TimePtr(health.LastPongAt),
+		LastUsefulSendAt:    ebus.TimePtr(health.LastUsefulSendAt),
+		LastUsefulReceiveAt: ebus.TimePtr(health.LastUsefulReceiveAt),
+		LastError:           health.LastError,
+
+		// Diagnostic fields — mirror peerHealthFrames() so operator-facing
+		// UI stays current after the switch to one-shot FetchAndSeed().
+		// Without these, ban clears, handshake rejections, and recovery
+		// events reach the UI only on the startup probe and never again.
+		BannedUntil:                 ebus.TimePtr(health.BannedUntil),
+		LastErrorCode:               health.LastErrorCode,
+		LastDisconnectCode:          health.LastDisconnectCode,
+		IncompatibleVersionAttempts: health.IncompatibleVersionAttempts,
+		LastIncompatibleVersionAt:   ebus.TimePtr(health.LastIncompatibleVersionAt),
+		ObservedPeerVersion:         health.ObservedPeerVersion,
+		ObservedPeerMinimumVersion:  health.ObservedPeerMinimumVersion,
+		VersionLockoutActive:        s.isPeerVersionLockedOutLocked(health.Address),
+	}
+	if session := s.resolveSessionLocked(health.Address); session != nil {
+		delta.ConnID = uint64(session.connID)
+		delta.ProtocolVersion = session.version
+	}
+	// Snapshot active inbound connections so the monitor can reconcile
+	// per-ConnID rows — creating rows for new inbound connections and
+	// pruning rows for connections that no longer exist.
+	delta.InboundConnIDs = s.inboundConnIDsLocked(health.Address)
+	s.eventBus.Publish(ebus.TopicPeerHealthChanged, delta)
+}
+
+// emitPeerPendingChanged publishes a lightweight TopicPeerPendingChanged event.
+// Called after queue mutations (enqueue, flush, expiry) so subscribers can
+// update the per-peer pending badge without waiting for the next state
+// transition. Must be called WITHOUT s.mu held (Publish is non-blocking).
+func (s *Service) emitPeerPendingChanged(address domain.PeerAddress, count int) {
+	s.eventBus.Publish(ebus.TopicPeerPendingChanged, ebus.PeerPendingDelta{
+		Address: address,
+		Count:   count,
+	})
 }
 
 // peerHealthSnap holds the minimal per-peer data extracted from s.mu-protected
@@ -2639,14 +2945,14 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 // subsequent RLock callers once a writer is queued, freezing the entire
 // ProbeNode RPC chain and the UI).
 type peerHealthSnap struct {
-	health              peerHealth
-	peerID              domain.PeerIdentity
-	clientVersion       string
+	health               peerHealth
+	peerID               domain.PeerIdentity
+	clientVersion        string
 	clientBuild          int
 	pendingCount         int
 	capabilities         []string
 	sessionVersion       int
-	sessionConnID        uint64
+	sessionConnID        domain.ConnID
 	inboundConnIDs       []uint64
 	versionLockoutActive bool
 }
@@ -2722,7 +3028,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		for dialAddr, session := range s.sessions {
 			if s.resolveHealthAddress(dialAddr) == health.Address {
 				snap.sessionVersion = session.version
-				snap.sessionConnID = uint64(session.connID)
+				snap.sessionConnID = session.connID
 				break
 			}
 		}
@@ -2818,7 +3124,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			VersionLockoutActive:        snap.versionLockoutActive,
 
 			ProtocolVersion: snap.sessionVersion,
-			ConnID:          snap.sessionConnID,
+			ConnID:          uint64(snap.sessionConnID),
 		}
 		// Enrich with CM slot lifecycle data if this peer has an outbound slot.
 		if sl, ok := slotByAddr[h.Address]; ok {
@@ -2986,34 +3292,6 @@ func formatTime(ts time.Time) string {
 	return ts.UTC().Format(time.RFC3339)
 }
 
-func pendingStatusFromFrame(item pendingFrame) string {
-	if item.Retries > 0 {
-		return "retrying"
-	}
-	return "queued"
-}
-
-func outboundLastAttemptLocked(items map[string]outboundDelivery, id string) time.Time {
-	if item, ok := items[id]; ok {
-		return item.LastAttemptAt
-	}
-	return time.Time{}
-}
-
-func outboundRetriesLocked(items map[string]outboundDelivery, id string, fallback int) int {
-	if item, ok := items[id]; ok && item.Retries > fallback {
-		return item.Retries
-	}
-	return fallback
-}
-
-func outboundErrorLocked(items map[string]outboundDelivery, id string) string {
-	if item, ok := items[id]; ok {
-		return item.Error
-	}
-	return ""
-}
-
 func (s *Service) enqueuePeerFrame(address domain.PeerAddress, frame protocol.Frame) bool {
 	session, ok := s.activePeerSession(address)
 	if !ok {
@@ -3076,9 +3354,14 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	})
 	s.pendingKeys[key] = struct{}{}
 	s.noteOutboundQueuedLocked(frame, "")
+	pendingCount := len(s.pending[primary])
+	s.refreshAggregatePendingLocked()
+	aggSnap := s.aggregateStatus
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
+	s.emitPeerPendingChanged(primary, pendingCount)
+	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 	return true
 }
 
@@ -3156,8 +3439,14 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 		}
 	}
 	if len(remaining) == 0 {
-		snapshot := s.queueStateSnapshot()
+		s.mu.Lock()
+		s.refreshAggregatePendingLocked()
+		aggSnap := s.aggregateStatus
+		snapshot := s.queueStateSnapshotLocked()
+		s.mu.Unlock()
 		s.persistQueueState(snapshot)
+		s.emitPeerPendingChanged(primary, 0)
+		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 		return
 	}
 
@@ -3166,9 +3455,14 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	for _, item := range remaining {
 		s.pendingKeys[pendingFrameKey(primary, item.Frame)] = struct{}{}
 	}
+	pendingCount := len(s.pending[primary])
+	s.refreshAggregatePendingLocked()
+	aggSnap := s.aggregateStatus
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
+	s.emitPeerPendingChanged(primary, pendingCount)
+	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 }
 
 // flushPendingFireAndForget drains fire-and-forget frames (push_message,
@@ -3217,14 +3511,19 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 		s.mu.Unlock()
 		return
 	}
+	pendingCount := len(remaining)
 	if len(remaining) > 0 {
 		s.pending[address] = remaining
 	} else {
 		delete(s.pending, address)
 	}
+	s.refreshAggregatePendingLocked()
+	aggSnap := s.aggregateStatus
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
+	s.emitPeerPendingChanged(address, pendingCount)
+	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 
 	remoteAddr := s.Network().RemoteAddr(id)
 	for _, item := range toSend {
@@ -3504,6 +3803,11 @@ func splitHostPort(address string) (string, string, bool) {
 	return host, port, true
 }
 
+// isForbiddenAdvertisedIP returns true for IPs that must never be accepted
+// as self-reported advertised addresses from remote peers.  Covers the
+// full RFC 1918 private range (10/8, 172.16/12, 192.168/16) and loopback.
+// These addresses can still be used for manual `addpeer` connections —
+// the guard applies only to the auto-learning / announce path.
 func isForbiddenAdvertisedIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -3511,10 +3815,13 @@ func isForbiddenAdvertisedIP(ip net.IP) bool {
 	if ip.IsLoopback() {
 		return true
 	}
-	if inCIDR(ip, "192.168.0.0/16") {
+	if inCIDR(ip, "10.0.0.0/8") {
 		return true
 	}
-	if inCIDR(ip, "172.16.0.0/21") {
+	if inCIDR(ip, "172.16.0.0/12") {
+		return true
+	}
+	if inCIDR(ip, "192.168.0.0/16") {
 		return true
 	}
 	return false
@@ -3532,17 +3839,35 @@ func (s *Service) isForbiddenDialIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if s.cfg.AllowPrivatePeers {
+		return false
+	}
 	if ip.IsLoopback() {
 		return !s.allowLoopbackPeers()
 	}
-	if isForbiddenAdvertisedIP(ip) || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+	if isForbiddenAdvertisedIP(ip) {
 		return true
 	}
 	return false
 }
 
+// allowLoopbackPeers returns true only when the node is **explicitly**
+// configured to listen or advertise on a loopback interface (e.g.
+// "127.0.0.1:64646"). Wildcard binds like ":64646" are NOT loopback —
+// externalListenAddress() synthesises "127.0.0.1:<port>" for those as a
+// test-dialing convenience, but that does not mean the node intends to
+// operate in a local-dev cluster.
+//
+// Without this distinction, every production node that binds ":port" has
+// allowLoopbackPeers=true, which disables self-detection for 127.0.0.1.
+// Inbound connections from localhost then learn ephemeral loopback
+// addresses as dial candidates, and the ConnectionManager enters a
+// connect→EOF→re-dial storm that pollutes health/peer-list/routing.
 func (s *Service) allowLoopbackPeers() bool {
-	for _, address := range []string{s.cfg.AdvertiseAddress, s.externalListenAddress(), s.cfg.ListenAddress} {
+	for _, address := range []string{s.cfg.AdvertiseAddress, s.cfg.ListenAddress} {
 		host, _, ok := splitHostPort(address)
 		if !ok {
 			continue
@@ -4108,15 +4433,15 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 // Implements rpc.ConnectionDiagnosticProvider.
 func (s *Service) ActivePeersJSON() (json.RawMessage, error) {
 	type recordingEntry struct {
-		ConnID    uint64 `json:"conn_id"`
-		RemoteIP  string `json:"remote_ip"`
-		PeerDir   string `json:"peer_direction"`
-		Format    string `json:"format"`
-		Scope     string `json:"scope"`
-		FilePath  string `json:"file_path"`
-		StartedAt string `json:"started_at"`
-		Error     string `json:"error,omitempty"`
-		Dropped   int64  `json:"dropped_events,omitempty"`
+		ConnID    domain.ConnID `json:"conn_id"`
+		RemoteIP  string        `json:"remote_ip"`
+		PeerDir   string        `json:"peer_direction"`
+		Format    string        `json:"format"`
+		Scope     string        `json:"scope"`
+		FilePath  string        `json:"file_path"`
+		StartedAt string        `json:"started_at"`
+		Error     string        `json:"error,omitempty"`
+		Dropped   int64         `json:"dropped_events,omitempty"`
 	}
 	type response struct {
 		Slots      []SlotInfo       `json:"slots"`
@@ -4134,7 +4459,7 @@ func (s *Service) ActivePeersJSON() (json.RawMessage, error) {
 	if cm := s.captureManager; cm != nil {
 		for _, snap := range cm.AllSessionSnapshots() {
 			recordings = append(recordings, recordingEntry{
-				ConnID:    uint64(snap.ConnID),
+				ConnID:    snap.ConnID,
 				RemoteIP:  snap.RemoteIP.String(),
 				PeerDir:   snap.PeerDirection.String(),
 				Format:    snap.Format.String(),
@@ -4259,14 +4584,14 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 
 	// Wire DTO projected at serialization boundary.
 	type activeConnectionJSON struct {
-		PeerAddress   string `json:"peer_address"`
-		RemoteAddress string `json:"remote_address"`
-		Identity      string `json:"identity"`
-		Direction     string `json:"direction"`
-		Network       string `json:"network"`
-		State         string `json:"state"`
-		ConnID        uint64 `json:"conn_id"`
-		SlotState     string `json:"slot_state,omitempty"`
+		PeerAddress   string        `json:"peer_address"`
+		RemoteAddress string        `json:"remote_address"`
+		Identity      string        `json:"identity"`
+		Direction     string        `json:"direction"`
+		Network       string        `json:"network"`
+		State         string        `json:"state"`
+		ConnID        domain.ConnID `json:"conn_id"`
+		SlotState     string        `json:"slot_state,omitempty"`
 	}
 
 	type activeConnectionsResponse struct {
@@ -4353,7 +4678,7 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 			Direction:     c.Direction.String(),
 			Network:       c.Network.String(),
 			State:         c.State,
-			ConnID:        uint64(c.ConnID),
+			ConnID:        c.ConnID,
 			SlotState:     c.SlotState,
 		}
 	}

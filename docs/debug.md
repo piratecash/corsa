@@ -123,6 +123,8 @@ Sessions created by standing rules (`by_ip`, `all`) start in `pending` state —
 
 When a capture is active, the Desktop Console shows a red recording dot on the peer card header and a recording info row with the scope, file path, start time, and dropped event count. A global "Stop all recording" banner appears at the top of the peers tab when any capture is running, dispatching `stopPeerTrafficRecording scope=all`.
 
+Capture state is surfaced to the UI through `NodeStatus.CaptureSessions`, a map keyed by `domain.ConnID`. Active entries drive the dot / info row / banner; stopped entries linger for a TTL (60 seconds by default) so terminal diagnostics such as the writer error or the `DroppedEvents` count remain visible after the session ends. The map is completely independent of `PeerHealth`: capture-start never creates a peer row, and capture-stop never modifies one. See [ui.md](ui.md#console-window--traffic-recording-indicators) for the full UI wiring.
+
 ---
 
 ## Русский
@@ -247,3 +249,5 @@ stateDiagram-v2
 #### Desktop Console UI
 
 Когда запись активна, Desktop Console показывает красную точку записи на заголовке peer-карточки и строку с информацией о записи: scope, путь к файлу, время старта и количество потерянных событий. Глобальный баннер "Stop all recording" появляется вверху вкладки peers при любой активной записи и отправляет `stopPeerTrafficRecording scope=all`.
+
+Состояние записи отдаётся в UI через `NodeStatus.CaptureSessions` — карту по ключу `domain.ConnID`. Активные записи управляют точкой / строкой информации / баннером; остановленные записи живут TTL (по умолчанию 60 секунд), чтобы терминальная диагностика — ошибка writer'а, счётчик `DroppedEvents` — оставалась видимой после завершения сессии. Карта полностью независима от `PeerHealth`: capture-start никогда не создаёт peer-строку, а capture-stop никогда её не модифицирует. Полная схема UI-wiring — см. [ui.md](ui.md#окно-консоли--индикаторы-записи-трафика).

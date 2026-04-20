@@ -49,6 +49,9 @@ func RegisterRoutingCommands(t *CommandTable, rp RoutingProvider) {
 // next-hop, origin, and TTL remaining.
 func routeTableHandler(rp RoutingProvider) CommandHandler {
 	return func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		snap := rp.RoutingSnapshot()
 		snapTime := snap.TakenAt
 
@@ -130,6 +133,9 @@ func routeTableHandler(rp RoutingProvider) CommandHandler {
 // entry counts, reachable destinations, and flap detection state.
 func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 	return func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		snap := rp.RoutingSnapshot()
 		snapTime := snap.TakenAt
 
@@ -196,6 +202,9 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 // Uses the atomic snapshot for TTL computation, consistent with routeTableHandler.
 func routeLookupHandler(rp RoutingProvider) CommandHandler {
 	return func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		identityArg, _ := req.Args["identity"].(string)
 		identityArg = strings.TrimSpace(identityArg)
 		if identityArg == "" {

@@ -2,7 +2,6 @@ package service
 
 import (
 	"sync"
-	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 )
@@ -78,7 +77,7 @@ func (c *ConversationCache) AppendMessage(msg DirectMessage) bool {
 
 // UpdateStatus enforces forward-only transitions (sent→delivered→seen) to maintain
 // monotonic delivery status progression. Returns true if updated, false otherwise.
-func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt *time.Time) bool {
+func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt domain.OptionalTime) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -98,12 +97,12 @@ func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt *
 
 	if newRank == oldRank {
 		// Same status — allow updating DeliveredAt if the incoming value is
-		// a real (non-nil, non-zero) timestamp.  This covers the common case
+		// a real (valid, non-zero) timestamp. This covers the common case
 		// where decryptDirectMessages() synthesized DeliveredAt from the
-		// message Timestamp on restart and a real receipt arrives later with
-		// the same rank — the synthetic value (which is non-nil, non-zero)
-		// gets replaced by the actual receipt time.
-		if deliveredAt == nil || deliveredAt.IsZero() {
+		// message Timestamp on restart and a real receipt arrives later
+		// with the same rank — the synthetic value gets replaced by the
+		// actual receipt time.
+		if !deliveredAt.Valid() || deliveredAt.Time().IsZero() {
 			return false
 		}
 		msg.DeliveredAt = deliveredAt
@@ -111,7 +110,7 @@ func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt *
 	}
 
 	msg.ReceiptStatus = status
-	if deliveredAt != nil {
+	if deliveredAt.Valid() {
 		msg.DeliveredAt = deliveredAt
 	}
 	return true

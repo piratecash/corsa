@@ -161,10 +161,11 @@ func TestNewServiceMergesPersistedPeersWithBootstrap(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	svc := NewService(cfg, id)
-	go func() { _ = svc.Run(ctx) }()
+	svc := NewService(cfg, id, nil)
+	runDone := make(chan struct{})
+	go func() { _ = svc.Run(ctx); close(runDone) }()
+	defer func() { cancel(); <-runDone }()
 
 	svc.mu.RLock()
 	defer svc.mu.RUnlock()
@@ -241,7 +242,7 @@ func TestNewServiceWithEmptyPeersFile(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	svc := NewService(cfg, id)
+	svc := NewService(cfg, id, nil)
 	done := make(chan struct{})
 	go func() {
 		_ = svc.Run(ctx)
@@ -362,10 +363,11 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	svc := NewService(cfg, id)
-	go func() { _ = svc.Run(ctx) }()
+	svc := NewService(cfg, id, nil)
+	runDone := make(chan struct{})
+	go func() { _ = svc.Run(ctx); close(runDone) }()
+	defer func() { cancel(); <-runDone }()
 
 	// Flush immediately — the peer hasn't reconnected, so health should
 	// come entirely from persisted state.
@@ -661,8 +663,8 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	// Simulate hello on both connections (populates NetCore state).
 	authID, _ := svc.connIDFor(authConn)
 	spoofID, _ := svc.connIDFor(spoofConn)
-	svc.rememberConnPeerAddr(authID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)})
-	svc.rememberConnPeerAddr(spoofID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)})
+	svc.rememberConnPeerAddr(authID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)}, "10.0.0.1:55001")
+	svc.rememberConnPeerAddr(spoofID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)}, "10.0.0.1:55002")
 
 	// Only the first connection completes auth and is promoted.
 	svc.trackInboundConnect(authID, peerAddr, "test-identity")

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -37,6 +38,7 @@ func attachTestNetCore(_ *Service, session *peerSession) {
 // syncContactsViaSession).
 func newSyncTestService() *Service {
 	return &Service{
+		cfg:           config.Node{AllowPrivatePeers: true},
 		health:        make(map[domain.PeerAddress]*peerHealth),
 		pending:       make(map[domain.PeerAddress][]pendingFrame),
 		peers:         []transport.Peer{},

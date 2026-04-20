@@ -20,6 +20,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	"github.com/piratecash/corsa/internal/core/service"
 
@@ -43,6 +44,7 @@ import (
 type Window struct {
 	router   *service.DMRouter
 	client   *service.DesktopClient
+	eventBus *ebus.Bus
 	cmdTable *rpc.CommandTable
 	runtime  *NodeRuntime
 	prefs    *Preferences
@@ -101,8 +103,12 @@ type Window struct {
 	replyCancelButton widget.Clickable
 
 	// msgCacheByID stores message metadata for O(1) lookup when rendering
-	// reply quotes (body, sender, timestamp). Rebuilt once per frame.
+	// reply quotes (body, sender, timestamp). Rebuilt when the snapshot
+	// generation changes — this catches every mutation including body
+	// edits, ReplyTo updates, and same-shape conversation reloads that
+	// the old count+first/last heuristic missed.
 	msgCacheByID map[string]cachedMsg
+	msgCacheGen  uint64 // snapshot Generation when cache was built
 
 	// replyQuoteTags maps message IDs to stable pointer event tags for
 	// click-to-scroll behavior on reply quotes.
@@ -239,7 +245,7 @@ func newAppTheme() *material.Theme {
 	return theme
 }
 
-func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable *rpc.CommandTable, runtime *NodeRuntime, prefs *Preferences) *Window {
+func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus *ebus.Bus, cmdTable *rpc.CommandTable, runtime *NodeRuntime, prefs *Preferences) *Window {
 	theme := newAppTheme()
 
 	language := normalizeLanguage(client.Language())
@@ -250,6 +256,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, cmdTable
 	w := &Window{
 		router:              router,
 		client:              client,
+		eventBus:            eventBus,
 		cmdTable:            cmdTable,
 		runtime:             runtime,
 		prefs:               prefs,
@@ -293,16 +300,41 @@ func (w *Window) Run() error {
 	return nil
 }
 
+// uiHeartbeatInterval is the periodic fallback that guarantees the UI
+// redraws even when all UIEvents are dropped during a burst. Without
+// this, a sustained ebus write flood can exhaust the notify() retry
+// budget, leaving the Gio event loop with no pending Invalidate() calls
+// — resulting in a permanent freeze. 2 seconds is imperceptible for
+// status updates while keeping CPU cost negligible.
+const uiHeartbeatInterval = 2 * time.Second
+
 func (w *Window) startPolling(window *app.Window) {
 	w.router.Start()
 
 	go func() {
-		for ev := range w.router.Subscribe() {
-			if ev.Type == service.UIEventBeep {
-				go systemBeep()
-			}
-			if w.window != nil {
-				w.window.Invalidate()
+		heartbeat := time.NewTicker(uiHeartbeatInterval)
+		defer heartbeat.Stop()
+		events := w.router.Subscribe()
+
+		for {
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				if ev.Type == service.UIEventBeep {
+					go systemBeep()
+				}
+				if w.window != nil {
+					w.window.Invalidate()
+				}
+			case <-heartbeat.C:
+				// Periodic recovery: ensure the UI redraws at least
+				// every uiHeartbeatInterval even if all event-driven
+				// Invalidate() calls were lost to channel overflow.
+				if w.window != nil {
+					w.window.Invalidate()
+				}
 			}
 		}
 	}()
@@ -2569,22 +2601,22 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				}),
 			)
 
-			if isMine && (message.DeliveredAt != nil || message.ReceiptStatus == "queued" || message.ReceiptStatus == "retrying" || message.ReceiptStatus == "failed" || message.ReceiptStatus == "expired" || message.ReceiptStatus == "sent" || message.ReceiptStatus == "delivered" || message.ReceiptStatus == "seen") {
+			if isMine && (message.DeliveredAt.Valid() || message.ReceiptStatus == "queued" || message.ReceiptStatus == "retrying" || message.ReceiptStatus == "failed" || message.ReceiptStatus == "expired" || message.ReceiptStatus == "sent" || message.ReceiptStatus == "delivered" || message.ReceiptStatus == "seen") {
 				children = append(children,
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						statusText := ""
 						switch {
-						case message.ReceiptStatus == "seen" && message.DeliveredAt != nil:
-							statusText = "✓✓ " + message.DeliveredAt.Local().Format("02.01.2006 15:04")
+						case message.ReceiptStatus == "seen" && message.DeliveredAt.Valid():
+							statusText = "✓✓ " + message.DeliveredAt.Time().Local().Format("02.01.2006 15:04")
 						case message.ReceiptStatus == "seen":
 							statusText = "✓✓"
-						case message.ReceiptStatus == "delivered" && message.DeliveredAt != nil:
-							statusText = "✓ " + message.DeliveredAt.Local().Format("02.01.2006 15:04")
+						case message.ReceiptStatus == "delivered" && message.DeliveredAt.Valid():
+							statusText = "✓ " + message.DeliveredAt.Time().Local().Format("02.01.2006 15:04")
 						case message.ReceiptStatus == "delivered":
 							statusText = "✓"
-						case message.DeliveredAt != nil:
-							statusText = "✓ " + message.DeliveredAt.Local().Format("02.01.2006 15:04")
+						case message.DeliveredAt.Valid():
+							statusText = "✓ " + message.DeliveredAt.Time().Local().Format("02.01.2006 15:04")
 						case message.ReceiptStatus == "queued":
 							statusText = w.t("chat.status.queued")
 						case message.ReceiptStatus == "retrying":
@@ -3569,12 +3601,28 @@ func (w *Window) applyDeferredScroll() {
 // Called once per frame from layout(), before any rendering that needs
 // reply quote lookups. Stores body, sender, timestamp and index for
 // scroll-to-original support.
+//
+// The rebuild is skipped when the snapshot generation has not changed.
+// Generation is bumped on every DMRouter state mutation, so any change
+// to message bodies, ReplyTo fields, receipt statuses, or conversation
+// switches is detected — including same-shape reloads that the old
+// count+first/last heuristic missed. O(1) per no-change frame.
 func (w *Window) rebuildMsgCache() {
+	gen := w.snap.Generation
 	msgs := w.snap.ActiveMessages
+
 	if len(msgs) == 0 {
-		w.msgCacheByID = nil
+		if w.msgCacheByID != nil {
+			w.msgCacheByID = nil
+			w.msgCacheGen = 0
+		}
 		return
 	}
+
+	if w.msgCacheByID != nil && w.msgCacheGen == gen {
+		return
+	}
+
 	m := make(map[string]cachedMsg, len(msgs))
 	for i := range msgs {
 		m[msgs[i].ID] = cachedMsg{
@@ -3585,6 +3633,7 @@ func (w *Window) rebuildMsgCache() {
 		}
 	}
 	w.msgCacheByID = m
+	w.msgCacheGen = gen
 }
 
 // findMessageBody looks up a message body by ID using the per-frame cache.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/metrics"
 	corsanode "github.com/piratecash/corsa/internal/core/node"
@@ -41,19 +42,77 @@ type Runtime struct {
 	closeOnce sync.Once
 }
 
+// EnsureIdentityFile creates an identity file at path if one does not exist
+// yet. This is a convenience for examples and development — production bots
+// should manage identity keys externally and supply them via NodeConfig.PrivateKey.
+func EnsureIdentityFile(path string) error {
+	if _, err := identity.Load(path); err == nil {
+		return nil
+	}
+	id, err := identity.Generate()
+	if err != nil {
+		return fmt.Errorf("generate identity: %w", err)
+	}
+	if err := identity.Save(path, id); err != nil {
+		return fmt.Errorf("save identity: %w", err)
+	}
+	return nil
+}
+
+// resolveIdentity determines the node identity using the SDK resolution
+// order: PrivateKey string first, then existing file at IdentityPath.
+// Auto-generation is intentionally not supported — each SDK consumer must
+// supply its own identity explicitly.
+func resolveIdentity(cfg Config) (*identity.Identity, error) {
+	if cfg.Node.PrivateKey != "" {
+		id, err := identity.FromPrivateKeyBase64(cfg.Node.PrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("identity from private key: %w", err)
+		}
+		return id, nil
+	}
+
+	normalized := normalizeConfig(cfg)
+	if normalized.Node.IdentityPath != "" {
+		id, err := identity.Load(normalized.Node.IdentityPath)
+		if err != nil {
+			return nil, fmt.Errorf("load identity from %s: %w (hint: set NodeConfig.PrivateKey to provide identity inline)", normalized.Node.IdentityPath, err)
+		}
+		return id, nil
+	}
+
+	return nil, errors.New("identity required: set NodeConfig.PrivateKey or provide existing identity file at NodeConfig.IdentityPath")
+}
+
 // New creates a new SDK runtime from explicit Go configuration.
 func New(cfg Config) (*Runtime, error) {
 	internalCfg := cfg.internal()
 
-	id, err := identity.LoadOrCreate(internalCfg.Node.IdentityPath)
+	id, err := resolveIdentity(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("load identity: %w", err)
+		return nil, fmt.Errorf("resolve identity: %w", err)
 	}
 
-	nodeService := corsanode.NewService(internalCfg.Node, id)
+	eventBus := ebus.New()
+
+	nodeService := corsanode.NewService(internalCfg.Node, id, eventBus)
 	client := service.NewDesktopClient(internalCfg.App, internalCfg.Node, id, nodeService)
 	fileBridge := service.NewFileTransferBridge(client)
-	router := service.NewDMRouter(client, fileBridge)
+
+	var statusMonitor *service.NodeStatusMonitor
+	var router *service.DMRouter
+	statusMonitor = service.NewNodeStatusMonitor(service.NodeStatusMonitorOpts{
+		EventBus: eventBus,
+		Client:   client,
+		OnChanged: func() {
+			if router != nil {
+				router.NotifyStatusChanged()
+			}
+		},
+	})
+	statusMonitor.Start()
+
+	router = service.NewDMRouter(client, fileBridge, eventBus, statusMonitor)
 	metricsCollector := metrics.NewCollector(nodeService)
 
 	cmdTable := rpc.NewCommandTable()
@@ -114,6 +173,11 @@ func (r *Runtime) Commands() []CommandInfo {
 // Start launches the node runtime in background mode.
 func (r *Runtime) Start(ctx context.Context) error {
 	r.startOnce.Do(func() {
+		// Capture the current totals as delta baseline before the first
+		// Record. Without Seed the first sample either hides bootstrap
+		// traffic (old skip-on-first behavior) or reports the entire
+		// pre-Seed cumulative as a single-second spike.
+		r.metrics.Seed()
 		go r.metrics.Run(ctx)
 		r.router.Start()
 		r.nodeService.PrimeBootstrapPeers()

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -23,6 +24,7 @@ func newSyncPeerTestService(aggregateStatus domain.NetworkStatus) *Service {
 	}
 	return &Service{
 		identity:      id,
+		cfg:           config.Node{AllowPrivatePeers: true},
 		runCtx:        context.Background(),
 		health:        make(map[domain.PeerAddress]*peerHealth),
 		pending:       make(map[domain.PeerAddress][]pendingFrame),

@@ -6,6 +6,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/metrics"
 	"github.com/piratecash/corsa/internal/core/node"
@@ -25,7 +26,7 @@ func New() *App {
 	}
 	return &App{
 		cfg:     cfg,
-		service: node.NewService(cfg.Node, id),
+		service: node.NewService(cfg.Node, id, ebus.New()),
 	}
 }
 
@@ -37,7 +38,11 @@ func (a *App) Run(ctx context.Context) error {
 		Msg("starting node")
 
 	// Metrics collector — samples node traffic every second, keeps 1 hour history.
+	// Seed the baseline from current totals before Run so the first Record
+	// produces a real delta instead of losing bootstrap traffic (see
+	// metrics.Collector.Seed docstring for full rationale).
 	metricsCollector := metrics.NewCollector(a.service)
+	metricsCollector.Seed()
 	go metricsCollector.Run(ctx)
 
 	// Build command table — node-only mode: no chatlog, no dm_router.

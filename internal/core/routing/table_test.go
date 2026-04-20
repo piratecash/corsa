@@ -2109,17 +2109,17 @@ func TestTickTTLReturnsExposedIdentities(t *testing.T) {
 	})
 
 	// Before expiry: nothing exposed.
-	exposed := tbl.TickTTL()
-	if len(exposed) != 0 {
-		t.Fatalf("expected no exposed identities before expiry, got %v", exposed)
+	result := tbl.TickTTL()
+	if len(result.Exposed) != 0 {
+		t.Fatalf("expected no exposed identities before expiry, got %v", result.Exposed)
 	}
 
 	// Advance past primary's TTL.
 	current = now.Add(11 * time.Second)
-	exposed = tbl.TickTTL()
+	result = tbl.TickTTL()
 
-	if len(exposed) != 1 || exposed[0] != "alice" {
-		t.Fatalf("expected [alice] exposed, got %v", exposed)
+	if len(result.Exposed) != 1 || result.Exposed[0] != "alice" {
+		t.Fatalf("expected [alice] exposed, got %v", result.Exposed)
 	}
 	// Backup route still alive.
 	if tbl.Size() != 1 {
@@ -2152,10 +2152,10 @@ func TestTickTTLNoExposedWhenAllSurvivorsWithdrawn(t *testing.T) {
 	})
 
 	current = now.Add(11 * time.Second)
-	exposed := tbl.TickTTL()
+	result := tbl.TickTTL()
 
-	if len(exposed) != 0 {
-		t.Fatalf("withdrawn-only survivors should not be exposed, got %v", exposed)
+	if len(result.Exposed) != 0 {
+		t.Fatalf("withdrawn-only survivors should not be exposed, got %v", result.Exposed)
 	}
 }
 
@@ -2170,9 +2170,9 @@ func TestTickTTLNoExposedWhenNothingRemoved(t *testing.T) {
 		ExpiresAt: now.Add(time.Hour),
 	})
 
-	exposed := tbl.TickTTL()
-	if len(exposed) != 0 {
-		t.Fatalf("no expiry means no exposed, got %v", exposed)
+	result := tbl.TickTTL()
+	if len(result.Exposed) != 0 {
+		t.Fatalf("no expiry means no exposed, got %v", result.Exposed)
 	}
 }
 
@@ -2190,10 +2190,10 @@ func TestTickTTLNoExposedWhenAllRoutesExpire(t *testing.T) {
 	})
 
 	current = now.Add(11 * time.Second)
-	exposed := tbl.TickTTL()
+	result := tbl.TickTTL()
 
-	if len(exposed) != 0 {
-		t.Fatalf("all-expired identity should not be exposed, got %v", exposed)
+	if len(result.Exposed) != 0 {
+		t.Fatalf("all-expired identity should not be exposed, got %v", result.Exposed)
 	}
 	if tbl.Size() != 0 {
 		t.Fatalf("expected empty table, got %d", tbl.Size())

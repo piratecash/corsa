@@ -3,7 +3,6 @@ package node
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -11,12 +10,17 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/capture"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/ebus"
 )
 
 // ---------------------------------------------------------------------------
 // capture.ConnResolver adapter — thin bridge between node.Service and
 // capture.Manager that resolves connection metadata from the live registry.
+//
+// All registry access goes through ConnID-first helpers (connInfoByIDLocked,
+// forEachConnLocked) so this file never touches s.conns, entry.core or
+// net.Conn directly. The §2.9 boundary requires the bridge to depend only on
+// the value-typed connInfo snapshot the registry hands out.
 // ---------------------------------------------------------------------------
 
 type serviceCaptureResolver struct {
@@ -27,15 +31,14 @@ func (r *serviceCaptureResolver) ConnInfoByID(id domain.ConnID) (capture.ConnInf
 	r.svc.mu.RLock()
 	defer r.svc.mu.RUnlock()
 
-	entry, ok := r.svc.conns[netcore.ConnID(id)]
-	if !ok || entry.core == nil {
+	info, ok := r.svc.connInfoByIDLocked(id)
+	if !ok {
 		return capture.ConnInfo{}, false
 	}
-
 	return capture.ConnInfo{
-		ConnID:   id,
-		RemoteIP: resolveRemoteIP(entry.core.Conn()),
-		PeerDir:  coreToPeerDirection(entry.core.Dir()),
+		ConnID:   info.id,
+		RemoteIP: info.remoteIP,
+		PeerDir:  info.peerDir,
 	}, true
 }
 
@@ -44,19 +47,16 @@ func (r *serviceCaptureResolver) ConnInfoByIP(ip netip.Addr) []capture.ConnInfo 
 	defer r.svc.mu.RUnlock()
 
 	var result []capture.ConnInfo
-	for id, entry := range r.svc.conns {
-		if entry.core == nil {
-			continue
-		}
-		entryIP := resolveRemoteIP(entry.core.Conn())
-		if entryIP == ip {
+	r.svc.forEachConnLocked(func(info connInfo) bool {
+		if info.remoteIP == ip {
 			result = append(result, capture.ConnInfo{
-				ConnID:   domain.ConnID(id),
-				RemoteIP: ip,
-				PeerDir:  coreToPeerDirection(entry.core.Dir()),
+				ConnID:   info.id,
+				RemoteIP: info.remoteIP,
+				PeerDir:  info.peerDir,
 			})
 		}
-	}
+		return true
+	})
 	return result
 }
 
@@ -64,55 +64,16 @@ func (r *serviceCaptureResolver) AllConnInfo() []capture.ConnInfo {
 	r.svc.mu.RLock()
 	defer r.svc.mu.RUnlock()
 
-	result := make([]capture.ConnInfo, 0, len(r.svc.conns))
-	for id, entry := range r.svc.conns {
-		if entry.core == nil {
-			continue
-		}
+	result := make([]capture.ConnInfo, 0, r.svc.connCountLocked())
+	r.svc.forEachConnLocked(func(info connInfo) bool {
 		result = append(result, capture.ConnInfo{
-			ConnID:   domain.ConnID(id),
-			RemoteIP: resolveRemoteIP(entry.core.Conn()),
-			PeerDir:  coreToPeerDirection(entry.core.Dir()),
+			ConnID:   info.id,
+			RemoteIP: info.remoteIP,
+			PeerDir:  info.peerDir,
 		})
-	}
+		return true
+	})
 	return result
-}
-
-// ---------------------------------------------------------------------------
-// IP resolution helpers
-// ---------------------------------------------------------------------------
-
-// resolveRemoteIP extracts a typed netip.Addr from a net.Conn's remote
-// address. Plan §4.4 mandates netip.Addr for runtime model, not string.
-func resolveRemoteIP(conn net.Conn) netip.Addr {
-	if conn == nil {
-		return netip.Addr{}
-	}
-	return resolveRemoteIPFromAddr(conn.RemoteAddr())
-}
-
-func resolveRemoteIPFromAddr(addr net.Addr) netip.Addr {
-	if addr == nil {
-		return netip.Addr{}
-	}
-	if tcpAddr, ok := addr.(*net.TCPAddr); ok && tcpAddr.IP != nil {
-		if mapped, ok := netip.AddrFromSlice(tcpAddr.IP); ok {
-			return mapped.Unmap()
-		}
-	}
-	addrPort, err := netip.ParseAddrPort(addr.String())
-	if err == nil {
-		return addrPort.Addr().Unmap()
-	}
-	return netip.Addr{}
-}
-
-// coreToPeerDirection maps netcore.Direction to domain.PeerDirection.
-func coreToPeerDirection(d netcore.Direction) domain.PeerDirection {
-	if d == netcore.Outbound {
-		return domain.PeerDirectionOutbound
-	}
-	return domain.PeerDirectionInbound
 }
 
 // ---------------------------------------------------------------------------
@@ -137,29 +98,31 @@ func (s *Service) CaptureManager() *capture.Manager {
 
 // notifyCaptureNewConn tells the capture manager about a new connection
 // (for rule matching) and attaches the outbound capture sink to the NetCore.
-// Called outside s.mu from handleConn / attachOutboundNetCore.
-func (s *Service) notifyCaptureNewConn(connID domain.ConnID, conn net.Conn) {
+// Called from handleConn / attachOutboundNetCore after the connection has
+// been registered, so the registry lookup always succeeds in production —
+// the bridge no longer needs the raw net.Conn to read the remote IP.
+func (s *Service) notifyCaptureNewConn(connID domain.ConnID) {
 	if s.captureManager == nil {
 		return
 	}
 
-	info := capture.ConnInfo{
-		ConnID:   connID,
-		RemoteIP: resolveRemoteIP(conn),
+	sink := &captureSinkAdapter{
+		connID:  connID,
+		manager: s.captureManager,
 	}
-	// Determine direction from the registry.
-	s.mu.RLock()
-	if entry, ok := s.conns[netcore.ConnID(connID)]; ok && entry.core != nil {
-		info.PeerDir = coreToPeerDirection(entry.core.Dir())
-		// Attach capture sink to the NetCore so writerLoop emits events.
-		entry.core.SetCaptureSink(&captureSinkAdapter{
-			connID:  connID,
-			manager: s.captureManager,
-		})
+	remoteIP, peerDir, ok := s.attachCaptureSinkByID(connID, sink)
+	if !ok {
+		// The connection raced away between the lifecycle hook and the
+		// registry lookup. Without registry metadata the manager cannot
+		// match standing rules anyway, so skip the OnNewConnection call.
+		return
 	}
-	s.mu.RUnlock()
 
-	s.captureManager.OnNewConnection(info)
+	s.captureManager.OnNewConnection(capture.ConnInfo{
+		ConnID:   connID,
+		RemoteIP: remoteIP,
+		PeerDir:  peerDir,
+	})
 }
 
 // notifyCaptureConnClosed tells the capture manager that a connection is
@@ -254,6 +217,7 @@ func (s *Service) StartCaptureByConnIDs(connIDs []uint64, format string) (json.R
 		ids[i] = domain.ConnID(v)
 	}
 	result := s.captureManager.StartByConnIDs(ids, f)
+	s.publishCaptureStarted(result)
 	return marshalStartResult(result)
 }
 
@@ -274,6 +238,7 @@ func (s *Service) StartCaptureByIPs(ips []string, format string) (json.RawMessag
 		addrs = append(addrs, addr)
 	}
 	result := s.captureManager.StartByIPs(addrs, f)
+	s.publishCaptureStarted(result)
 	return marshalStartResult(result)
 }
 
@@ -286,6 +251,7 @@ func (s *Service) StartCaptureAll(format string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("invalid format: %q", format)
 	}
 	result := s.captureManager.StartAll(f)
+	s.publishCaptureStarted(result)
 	return marshalStartResult(result)
 }
 
@@ -298,6 +264,7 @@ func (s *Service) StopCaptureByConnIDs(connIDs []uint64) (json.RawMessage, error
 		ids[i] = domain.ConnID(v)
 	}
 	result := s.captureManager.StopByConnIDs(ids)
+	s.publishCaptureStopped(result)
 	return marshalStopResult(result)
 }
 
@@ -314,6 +281,7 @@ func (s *Service) StopCaptureByIPs(ips []string) (json.RawMessage, error) {
 		addrs = append(addrs, addr)
 	}
 	result := s.captureManager.StopByIPs(addrs)
+	s.publishCaptureStopped(result)
 	return marshalStopResult(result)
 }
 
@@ -322,7 +290,89 @@ func (s *Service) StopCaptureAll() (json.RawMessage, error) {
 		return nil, fmt.Errorf("capture manager not available")
 	}
 	result := s.captureManager.StopAll()
+	s.publishCaptureStopped(result)
 	return marshalStopResult(result)
+}
+
+// ---------------------------------------------------------------------------
+// ebus publishing — keeps NodeStatusMonitor's Recording* fields live without
+// re-polling fetchPeerHealth. Handlers on the subscriber side update peer
+// rows identified by ConnID (globally unique) so no address lookup is needed.
+// ---------------------------------------------------------------------------
+
+// publishCaptureStarted emits TopicCaptureSessionStarted for every session
+// that became (or remained) active as a result of a Start*/StartAll call.
+// Both Started and AlreadyActive entries are emitted: re-emitting a Started
+// for an existing session is idempotent on the subscriber side (setting
+// Recording=true twice is a no-op) and self-heals a monitor that lost the
+// original event because of a full inbox.
+//
+// StartedAt and Scope are read from SessionSnapshotByID because
+// capture.StartEntry does not carry them; the snapshot is thread-safe and
+// returns the same startedAt the session stamped at construction time.
+func (s *Service) publishCaptureStarted(result capture.StartResult) {
+	if s.eventBus == nil || s.captureManager == nil {
+		return
+	}
+	for _, e := range result.Started {
+		s.publishOneCaptureStarted(e)
+	}
+	for _, e := range result.AlreadyActive {
+		s.publishOneCaptureStarted(e)
+	}
+}
+
+func (s *Service) publishOneCaptureStarted(entry capture.StartEntry) {
+	snap, ok := s.captureManager.SessionSnapshotByID(entry.ConnID)
+	if !ok {
+		// Session raced away between the Start call and the snapshot lookup
+		// (writer failure, OnConnectionClosed). The paired Stopped publish
+		// will follow from whichever path evicted the session.
+		return
+	}
+
+	// Resolve overlay identity (Address, PeerID, Direction) from the
+	// connection registry so NodeStatusMonitor can materialize a missing
+	// PeerHealth row when this event races ahead of TopicPeerHealthChanged.
+	// Empty values are acceptable — the subscriber treats empty Address as
+	// "cannot recover, wait for a future delta" rather than inventing a
+	// phantom row.
+	address, peerID, direction := s.resolveOverlayIdentityByConnID(entry.ConnID)
+
+	s.eventBus.Publish(ebus.TopicCaptureSessionStarted, ebus.CaptureSessionStarted{
+		ConnID:    entry.ConnID,
+		Address:   address,
+		PeerID:    peerID,
+		Direction: direction,
+		FilePath:  entry.FilePath,
+		StartedAt: ebus.TimePtr(snap.StartedAt),
+		Scope:     snap.Scope,
+		Format:    entry.Format,
+	})
+}
+
+// resolveOverlayIdentityByConnID returns the overlay address, identity, and
+// direction recorded on the live connection, or zero values when the
+// connection is not registered (or has no core attached). Thin adapter over
+// the registry helper that keeps s.conns / entry.core out of this file.
+func (s *Service) resolveOverlayIdentityByConnID(id domain.ConnID) (domain.PeerAddress, domain.PeerIdentity, domain.PeerDirection) {
+	return s.overlayIdentityByID(id)
+}
+
+// publishCaptureStopped emits TopicCaptureSessionStopped for every session
+// that was torn down by a Stop*/StopAll call. Error and DroppedEvents are
+// left zero — capture.StopResult does not surface terminal diagnostics today.
+// If they become observable we fill them here, not on the subscriber side,
+// so the monitor remains a pure applicator of remote state.
+func (s *Service) publishCaptureStopped(result capture.StopResult) {
+	if s.eventBus == nil {
+		return
+	}
+	for _, e := range result.Stopped {
+		s.eventBus.Publish(ebus.TopicCaptureSessionStopped, ebus.CaptureSessionStopped{
+			ConnID: e.ConnID,
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -330,11 +380,11 @@ func (s *Service) StopCaptureAll() (json.RawMessage, error) {
 // ---------------------------------------------------------------------------
 
 type startEntryDTO struct {
-	ConnID   uint64 `json:"conn_id"`
-	RemoteIP string `json:"remote_ip"`
-	PeerDir  string `json:"peer_direction"`
-	Format   string `json:"format"`
-	FilePath string `json:"file_path"`
+	ConnID   domain.ConnID `json:"conn_id"`
+	RemoteIP string        `json:"remote_ip"`
+	PeerDir  string        `json:"peer_direction"`
+	Format   string        `json:"format"`
+	FilePath string        `json:"file_path"`
 }
 
 type ruleEntryDTO struct {
@@ -386,7 +436,7 @@ func toStartEntryDTOs(entries []capture.StartEntry) []startEntryDTO {
 	out := make([]startEntryDTO, len(entries))
 	for i, e := range entries {
 		out[i] = startEntryDTO{
-			ConnID:   uint64(e.ConnID),
+			ConnID:   e.ConnID,
 			RemoteIP: e.RemoteIP.String(),
 			PeerDir:  e.PeerDir.String(),
 			Format:   e.Format.String(),

@@ -98,6 +98,7 @@ func (s *Service) refreshAggregateStatusLocked() {
 	s.maybeRecomputeVersionPolicyPeriodic(now)
 
 	next := s.computeAggregateStatusLocked(now)
+	next.ComputedAt = now
 
 	prev := s.aggregateStatus
 	s.aggregateStatus = next
@@ -112,6 +113,29 @@ func (s *Service) refreshAggregateStatusLocked() {
 			Int("pending", next.PendingMessages).
 			Msg("aggregate_status_change")
 	}
+}
+
+// refreshAggregatePendingLocked recounts only the PendingMessages field of
+// the cached aggregate snapshot without recomputing peer states or version
+// policy. Called from queue mutation paths (enqueue, flush, drop) where
+// only the pending total changes; peer health and connectivity remain the
+// same. Must be called with s.mu held (write lock).
+func (s *Service) refreshAggregatePendingLocked() {
+	var pending int
+	healthAddrs := make(map[domain.PeerAddress]struct{}, len(s.health))
+	for _, health := range s.health {
+		healthAddrs[health.Address] = struct{}{}
+		pending += len(s.pending[health.Address])
+	}
+	for addr, frames := range s.pending {
+		if _, ok := healthAddrs[addr]; !ok {
+			pending += len(frames)
+		}
+	}
+	for _, frames := range s.orphaned {
+		pending += len(frames)
+	}
+	s.aggregateStatus.PendingMessages = pending
 }
 
 // refreshAggregateStatus acquires the write lock and recomputes the

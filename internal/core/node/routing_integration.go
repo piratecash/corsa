@@ -15,6 +15,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -48,8 +49,18 @@ func (s *Service) routingTableTTLLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			exposed := s.routingTable.TickTTL()
-			s.triggerDrainForExposed(exposed)
+			result := s.routingTable.TickTTL()
+			s.triggerDrainForExposed(result.Exposed)
+			// Notify subscribers (NodeStatusMonitor reachability) when
+			// routes were actually removed. Without this event, TTL expiry
+			// of a primary route silently changes reachability without the
+			// monitor ever learning about it.
+			if result.Removed > 0 {
+				s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+					Reason:    domain.RouteChangeTTLExpired,
+					Withdrawn: result.Removed,
+				})
+			}
 		}
 	}
 }
@@ -538,6 +549,14 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		Int("rejected", rejected).
 		Msg("announce_routes_processed")
 
+	if accepted > 0 {
+		s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+			Reason:   domain.RouteChangeAnnouncement,
+			PeerID:   senderIdentity,
+			Accepted: accepted,
+		})
+	}
+
 	// Event-driven pending queue drain: new or reconfirmed transit routes
 	// mean that own outbound frames waiting for these recipients can be
 	// delivered via the learned next-hop. Both accepted (new/improved) and
@@ -618,6 +637,12 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 		Bool("penalized", result.Penalized).
 		Msg("routing_direct_peer_added")
 
+	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+		Reason:   domain.RouteChangeDirectPeerAdded,
+		PeerID:   peerIdentity,
+		Accepted: 1,
+	})
+
 	// Register or reset per-peer announce state for this routing-capable peer.
 	s.announceLoop.StateRegistry().MarkReconnected(peerIdentity)
 
@@ -689,6 +714,13 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 					Str("peer", string(peerIdentity)).
 					Int("transit_invalidated", invalidated).
 					Msg("routing_transit_routes_invalidated_on_disconnect")
+
+				s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+					Reason:    domain.RouteChangeTransitInvalidated,
+					PeerID:    peerIdentity,
+					Withdrawn: invalidated,
+				})
+
 				// Trigger an immediate announce cycle so neighbors learn the
 				// invalidated routes are withdrawn. Without this, stale routes
 				// persist until the next periodic cycle (up to 30s).
@@ -730,6 +762,12 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 		Int("withdrawals", len(result.Withdrawals)).
 		Int("transit_invalidated", result.TransitInvalidated).
 		Msg("routing_direct_peer_removed")
+
+	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+		Reason:    domain.RouteChangeDirectPeerRemoved,
+		PeerID:    peerIdentity,
+		Withdrawn: len(result.Withdrawals),
+	})
 
 	s.announceLoop.TriggerUpdate()
 	s.triggerDrainForExposed(result.ExposedBackups)
@@ -1725,10 +1763,30 @@ returnFrames:
 			s.clearOutboundQueuedLocked(d.frame.ID)
 		}
 	}
+	// Collect final pending counts for all addresses that were touched during
+	// the extract/re-insert cycle so the UI pending badge updates immediately.
+	var pendingDeltas []ebus.PeerPendingDelta
+	for addr := range extractMeta {
+		pendingDeltas = append(pendingDeltas, ebus.PeerPendingDelta{
+			Address: addr,
+			Count:   len(s.pending[addr]),
+		})
+	}
+	if len(pendingDeltas) > 0 {
+		s.refreshAggregatePendingLocked()
+	}
+	aggSnap := s.aggregateStatus
+
 	snapshot := s.queueStateSnapshotLocked()
 	drainDone := s.drainDone
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
+	for _, d := range pendingDeltas {
+		s.emitPeerPendingChanged(d.Address, d.Count)
+	}
+	if len(pendingDeltas) > 0 {
+		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
+	}
 	if drainDone != nil {
 		drainDone()
 	}

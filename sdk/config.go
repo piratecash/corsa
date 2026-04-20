@@ -29,10 +29,19 @@ type AppConfig struct {
 
 // NodeConfig contains node runtime settings configured directly in Go code.
 // ListenerEnabled is optional: nil means "use role-based default".
+//
+// Identity resolution order:
+//  1. PrivateKey — base64-encoded Ed25519 private key (preferred for SDK)
+//  2. IdentityPath — path to an existing identity JSON file
+//
+// The SDK never auto-generates a new identity. If neither PrivateKey
+// nor a valid IdentityPath with an existing file is provided,
+// sdk.New returns an error.
 type NodeConfig struct {
 	ListenAddress    string
 	AdvertiseAddress string
 	BootstrapPeers   []string
+	PrivateKey       string
 	IdentityPath     string
 	TrustStorePath   string
 	QueueStatePath   string

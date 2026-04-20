@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,6 +116,122 @@ func TestValidateAddressRejectsInvalid(t *testing.T) {
 				t.Errorf("IsValidAddress should return false for %q", tc.addr)
 			}
 		})
+	}
+}
+
+func TestLoadReturnErrorWhenFileMissing(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "nonexistent.json")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error when identity file does not exist")
+	}
+}
+
+func TestLoadReadsExistingFile(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "identity.json")
+
+	original, err := LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if loaded.Address != original.Address {
+		t.Fatalf("Load address = %q, want %q", loaded.Address, original.Address)
+	}
+}
+
+func TestFromPrivateKeyBase64ProducesSameAddress(t *testing.T) {
+	t.Parallel()
+
+	original, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	privKeyB64 := base64.StdEncoding.EncodeToString(original.PrivateKey)
+	restored, err := FromPrivateKeyBase64(privKeyB64)
+	if err != nil {
+		t.Fatalf("FromPrivateKeyBase64: %v", err)
+	}
+
+	if restored.Address != original.Address {
+		t.Fatalf("address mismatch: got %q, want %q", restored.Address, original.Address)
+	}
+}
+
+func TestFromPrivateKeyBase64DeterministicBoxKey(t *testing.T) {
+	t.Parallel()
+
+	id, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	privKeyB64 := base64.StdEncoding.EncodeToString(id.PrivateKey)
+
+	first, err := FromPrivateKeyBase64(privKeyB64)
+	if err != nil {
+		t.Fatalf("first FromPrivateKeyBase64: %v", err)
+	}
+	second, err := FromPrivateKeyBase64(privKeyB64)
+	if err != nil {
+		t.Fatalf("second FromPrivateKeyBase64: %v", err)
+	}
+
+	if BoxPublicKeyBase64(first.BoxPublicKey) != BoxPublicKeyBase64(second.BoxPublicKey) {
+		t.Fatal("box public key is not deterministic across calls")
+	}
+}
+
+func TestFromPrivateKeyBase64RejectsInvalidInput(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"not_base64", "this-is-not-base64!!!"},
+		{"wrong_size", base64.StdEncoding.EncodeToString([]byte("tooshort"))},
+		{"empty", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := FromPrivateKeyBase64(tc.key)
+			if err == nil {
+				t.Fatal("expected error for invalid private key input")
+			}
+		})
+	}
+}
+
+func TestSaveAndLoad(t *testing.T) {
+	t.Parallel()
+
+	id, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "identity.json")
+	if err := Save(path, id); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Address != id.Address {
+		t.Fatalf("address mismatch after Save/Load: got %q, want %q", loaded.Address, id.Address)
 	}
 }
 

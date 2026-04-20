@@ -500,3 +500,82 @@ func TestResetReplyOnPeerChangeSamePeer(t *testing.T) {
 		t.Error("replyToMsg should remain unchanged when peer is the same")
 	}
 }
+
+// TestRebuildMsgCacheSkipsWhenUnchanged verifies that rebuildMsgCache
+// does not reallocate the map when the snapshot generation has not changed.
+func TestRebuildMsgCacheSkipsWhenUnchanged(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	w := &Window{}
+	w.snap.Generation = 1
+	w.snap.ActiveMessages = []service.DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: "alice", Timestamp: now},
+		{ID: "msg-2", Body: "world", Sender: "bob", Timestamp: now.Add(time.Second)},
+	}
+
+	// First call — builds cache.
+	w.rebuildMsgCache()
+	if w.msgCacheByID == nil {
+		t.Fatal("msgCacheByID should be populated after first call")
+	}
+	if len(w.msgCacheByID) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(w.msgCacheByID))
+	}
+	if w.msgCacheGen != 1 {
+		t.Fatalf("msgCacheGen = %d, want 1", w.msgCacheGen)
+	}
+
+	// Second call with same generation — should skip rebuild.
+	w.rebuildMsgCache()
+	if w.msgCacheGen != 1 {
+		t.Fatalf("msgCacheGen = %d after no-op call, want 1", w.msgCacheGen)
+	}
+
+	// Bump generation and append a message — cache must rebuild.
+	w.snap.Generation = 2
+	w.snap.ActiveMessages = append(w.snap.ActiveMessages, service.DirectMessage{
+		ID: "msg-3", Body: "new", Sender: "carol", Timestamp: now.Add(2 * time.Second),
+	})
+	w.rebuildMsgCache()
+	if len(w.msgCacheByID) != 3 {
+		t.Fatalf("expected 3 entries after append, got %d", len(w.msgCacheByID))
+	}
+	if w.msgCacheGen != 2 {
+		t.Fatalf("msgCacheGen = %d after rebuild, want 2", w.msgCacheGen)
+	}
+}
+
+// TestRebuildMsgCacheDetectsGenerationChange verifies that the cache
+// is rebuilt when the snapshot generation changes, even if message
+// count and IDs remain the same (e.g. receipt status update, body
+// edit, or same-shape conversation reload).
+func TestRebuildMsgCacheDetectsGenerationChange(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	w := &Window{}
+	w.snap.Generation = 10
+	w.snap.ActiveMessages = []service.DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: "alice", Timestamp: now, ReceiptStatus: ""},
+	}
+
+	w.rebuildMsgCache()
+	if w.msgCacheGen != 10 {
+		t.Fatalf("msgCacheGen = %d, want 10", w.msgCacheGen)
+	}
+
+	// Simulate receipt arrival: same IDs, new generation.
+	w.snap.Generation = 11
+	w.snap.ActiveMessages[0].ReceiptStatus = "delivered"
+	w.rebuildMsgCache()
+	if w.msgCacheGen != 11 {
+		t.Fatalf("msgCacheGen = %d after update, want 11", w.msgCacheGen)
+	}
+
+	// Same generation — should skip.
+	w.rebuildMsgCache()
+	if w.msgCacheGen != 11 {
+		t.Fatalf("msgCacheGen = %d after no-op, want 11", w.msgCacheGen)
+	}
+}

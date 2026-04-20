@@ -597,12 +597,25 @@ func (t *Table) nextSeqLocked(identity PeerIdentity) uint64 {
 // lower-SeqNo announcements. RemoveDirectPeer and InvalidateTransitRoutes
 // set a short ExpiresAt on withdrawn entries so they are cleaned up
 // promptly without breaking tombstone semantics.
-func (t *Table) TickTTL() []PeerIdentity {
+// TickTTLResult holds the outcome of a TTL sweep.
+type TickTTLResult struct {
+	// Exposed lists identities whose primary route expired but at least one
+	// non-withdrawn backup route survives — callers can drain pending frames
+	// to the surviving route immediately.
+	Exposed []PeerIdentity
+
+	// Removed is the total number of individual route entries that expired
+	// across all identities. Zero means the routing table was not modified.
+	Removed int
+}
+
+func (t *Table) TickTTL() TickTTLResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := t.clock()
 	var exposed []PeerIdentity
+	totalRemoved := 0
 	for identity, routes := range t.routes {
 		origLen := len(routes)
 		n := 0
@@ -613,6 +626,7 @@ func (t *Table) TickTTL() []PeerIdentity {
 			}
 		}
 		removed := origLen - n
+		totalRemoved += removed
 		if n == 0 {
 			delete(t.routes, identity)
 		} else {
@@ -651,7 +665,7 @@ func (t *Table) TickTTL() []PeerIdentity {
 			}
 		}
 	}
-	return exposed
+	return TickTTLResult{Exposed: exposed, Removed: totalRemoved}
 }
 
 // RefreshDirectPeers is a no-op retained for API compatibility.

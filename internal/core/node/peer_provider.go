@@ -98,6 +98,11 @@ type PeerProviderConfig struct {
 
 	// NowFn returns the current time. Injected for testability.
 	NowFn func() time.Time
+
+	// AllowPrivateCandidates disables the private/loopback IP filter in
+	// Candidates(). Production nodes never set this — it exists solely
+	// for unit tests that use RFC 1918 addresses as fake peers.
+	AllowPrivateCandidates bool
 }
 
 // PeerProvider manages the set of known peers and produces filtered
@@ -306,10 +311,12 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 			continue
 		}
 
-		// 6a.1: never resurrect loopback / RFC1918 IPv4 peers from persisted
-		// state. They may be valid in local dev, but stale private addresses
-		// from peers.json are not useful dial candidates after restart.
-		if shouldSkipPersistedPrivatePeer(kp) {
+		// 6a.1: never auto-dial loopback / RFC1918 IPv4 peers. Private
+		// addresses are only reachable through the manual addpeer command
+		// for dev/test within a home network. Without this guard, inbound
+		// connections from localhost teach the node ephemeral 127.0.0.1:*
+		// addresses, and CM enters a connect→EOF→re-dial storm.
+		if !cfg.AllowPrivateCandidates && shouldSkipPersistedPrivatePeer(kp) {
 			continue
 		}
 
@@ -756,8 +763,12 @@ func (pp *PeerProvider) buildDialAddresses(kp *knownPeer) []domain.PeerAddress {
 	return pp.BuildDialAddresses(kp.Address)
 }
 
+// shouldSkipPrivateAutoDialPeer returns true for loopback / RFC1918 peers
+// that were NOT added via explicit manual `addpeer`. Auto-discovered and
+// persisted private addresses are never valid CM dial candidates —
+// private addresses are only dialable through the manual addpeer path.
 func shouldSkipPersistedPrivatePeer(kp *knownPeer) bool {
-	if kp == nil || kp.Source != domain.PeerSourcePersisted {
+	if kp == nil || kp.Source == domain.PeerSourceManual {
 		return false
 	}
 	return isLoopbackOrPrivateIPv4(net.ParseIP(kp.IP))

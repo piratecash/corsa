@@ -19,7 +19,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -72,16 +71,16 @@ type PeerHealth struct {
 	State               string
 	Connected           bool
 	PendingCount        int
-	LastConnectedAt     *time.Time
-	LastDisconnectedAt  *time.Time
-	LastPingAt          *time.Time
-	LastPongAt          *time.Time
-	LastUsefulSendAt    *time.Time
-	LastUsefulReceiveAt *time.Time
+	LastConnectedAt     domain.OptionalTime
+	LastDisconnectedAt  domain.OptionalTime
+	LastPingAt          domain.OptionalTime
+	LastPongAt          domain.OptionalTime
+	LastUsefulSendAt    domain.OptionalTime
+	LastUsefulReceiveAt domain.OptionalTime
 	ConsecutiveFailures int
 	LastError           string
 	Score               int
-	BannedUntil         *time.Time
+	BannedUntil         domain.OptionalTime
 	BytesSent           int64
 	BytesReceived       int64
 	TotalTraffic        int64
@@ -90,22 +89,46 @@ type PeerHealth struct {
 	SlotGeneration      uint64
 	SlotConnectedAddr   string // actual TCP address for the active connection
 
-	// Capture state — per-connection recording diagnostics (plan §8.1).
-	Recording              bool
-	RecordingFile          string
-	RecordingStartedAt     *time.Time
-	RecordingScope         string
-	RecordingError         string
-	RecordingDroppedEvents int64
-
 	// Machine-readable disconnect diagnostics (version upgrade detection §5.1).
 	LastErrorCode               string
 	LastDisconnectCode          string
 	IncompatibleVersionAttempts int
-	LastIncompatibleVersionAt   *time.Time
+	LastIncompatibleVersionAt   domain.OptionalTime
 	ObservedPeerVersion         int
 	ObservedPeerMinimumVersion  int
 	VersionLockoutActive        bool
+}
+
+// CaptureSession is the UI-visible record of a single traffic-capture session
+// keyed by the ConnID of the recorded connection. It lives in its own map on
+// NodeStatus so capture bookkeeping is independent of PeerHealth row pruning:
+//
+//   - Capture-start does not need to invent a placeholder PeerHealth row
+//     before the first health delta arrives; the recording indicator reads
+//     from CaptureSessions, which is keyed by ConnID alone.
+//
+//   - Capture-stop does not need to decide whether to remove a row or strip
+//     fields — it just updates the CaptureSession entry. PeerHealth rows are
+//     owned exclusively by network-layer evidence (health/slot/pending/traffic
+//     deltas) and are unaffected by capture lifecycle.
+//
+// Stopped sessions linger for NodeStatusMonitor.captureRetention so the UI
+// can surface terminal diagnostics (Error, DroppedEvents) after the writer
+// goes away. Active=false combined with a Valid() StoppedAt distinguishes a
+// terminal session from a still-running one.
+type CaptureSession struct {
+	ConnID        domain.ConnID
+	Address       domain.PeerAddress
+	PeerID        domain.PeerIdentity
+	Direction     domain.PeerDirection
+	FilePath      string
+	StartedAt     domain.OptionalTime
+	Scope         domain.CaptureScope
+	Format        domain.CaptureFormat
+	Active        bool                // true while the session is recording
+	StoppedAt     domain.OptionalTime // Valid() once the session has stopped (drives TTL cleanup)
+	Error         string              // terminal error reason (empty on clean stop)
+	DroppedEvents int64               // drop counter accumulated during the session
 }
 
 type DirectMessage struct {
@@ -118,7 +141,7 @@ type DirectMessage struct {
 	CommandData   string            // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
 	Timestamp     time.Time
 	ReceiptStatus string
-	DeliveredAt   *time.Time
+	DeliveredAt   domain.OptionalTime
 }
 
 type DMHeader struct {
@@ -140,8 +163,8 @@ type PendingMessage struct {
 	ID            string
 	Recipient     string
 	Status        string
-	QueuedAt      *time.Time
-	LastAttemptAt *time.Time
+	QueuedAt      domain.OptionalTime
+	LastAttemptAt domain.OptionalTime
 	Retries       int
 	Error         string
 }
@@ -161,8 +184,9 @@ type NodeStatus struct {
 	Contacts         map[string]Contact
 	Peers            []string
 	PeerHealth       []PeerHealth
-	AggregateStatus  *AggregateStatus                       // node-computed aggregate network health; nil when node does not support the command yet
-	ReachableIDs     map[domain.PeerIdentity]bool           // identity reachable via routing table (at least one live route exists)
+	CaptureSessions  map[domain.ConnID]CaptureSession // active + recently-stopped capture sessions keyed by ConnID
+	AggregateStatus  *AggregateStatus                 // node-computed aggregate network health; nil when node does not support the command yet
+	ReachableIDs     map[domain.PeerIdentity]bool     // identity reachable via routing table (at least one live route exists)
 	Stored           string
 	Messages         []string
 	MessageIDs       []string
@@ -389,12 +413,16 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 	status.Services = welcome.Services
 	status.Capabilities = welcome.Capabilities
 
-	peersReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "get_peers"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
+	// ---------------------------------------------------------------
+	// Fetch only the data that the UI and DMRouter actually consume.
+	// Previously ProbeNode issued 13+ sequential RPCs including
+	// get_peers, fetch_messages, fetch_message_ids (×2),
+	// fetch_pending_messages, and fetch_notices — none of which are
+	// read by any consumer of NodeStatus. Removing them cuts the
+	// synchronous chain roughly in half, directly reducing the window
+	// during which a slow handler can monopolize the embedded node
+	// and make the desktop look hung.
+	// ---------------------------------------------------------------
 	idsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_identities"})
 	if err != nil {
 		status.Error = err.Error()
@@ -414,31 +442,7 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		return status
 	}
 	aggregateStatusReply, aggregateStatusErr := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_aggregate_status"})
-	pendingReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_pending_messages", Topic: "dm"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-	messagesReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_messages", Topic: "global"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
 	dmHeadersReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_dm_headers"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-	messageIDsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_message_ids", Topic: "global"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
-	directMessageIDsReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_message_ids", Topic: "dm"})
 	if err != nil {
 		status.Error = err.Error()
 		status.CheckedAt = time.Now()
@@ -450,22 +454,11 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		status.CheckedAt = time.Now()
 		return status
 	}
-	noticesReply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_notices"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
 
-	peers := peersReply.Peers
 	ids := idsReply.Identities
 	contacts := contactsFromFrame(contactsReply)
-	messages := messageRecordsFromFrames(messagesReply.Messages)
 	dmHeaders := dmHeadersFromFrame(dmHeadersReply)
-	messageIDs := messageIDsReply.IDs
-	directMessageIDs := directMessageIDsReply.IDs
 	deliveryReceipts := receiptRecordsFromFrames(receiptsReply.Receipts)
-	notices := decryptNoticeFrames(c.id, noticesReply.Notices)
 
 	// Check for missing contacts from DM headers (lightweight, no decryption needed).
 	if missing := missingDMHeaderContacts(c.id.Address, contacts, dmHeaders); len(missing) > 0 {
@@ -482,27 +475,19 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 		}
 	}
 
-	pendingMessages := pendingMessagesFromFrame(pendingReply)
-
 	status.Connected = true
 	status.KnownIDs = ids
 	status.Contacts = contacts
-	status.Peers = peers
 	status.PeerHealth = peerHealthFromFrame(peerHealthReply)
+	status.CaptureSessions = captureSessionsFromFrame(peerHealthReply)
 	resolvedStatus, resolveWarn := resolveAggregateStatus(aggregateStatusReply, aggregateStatusErr)
 	if resolveWarn != "" {
 		log.Warn().Msg(resolveWarn)
 	}
 	status.AggregateStatus = resolvedStatus
 	status.ReachableIDs = c.buildReachableIDs()
-	status.Messages = stringifyMessages(messages)
-	status.MessageIDs = messageIDs
-	status.DirectMessages = nil // no longer loaded in ProbeNode; use FetchConversation on demand
-	status.DirectMessageIDs = directMessageIDs
 	status.DMHeaders = dmHeaders
-	status.PendingMessages = pendingMessages
 	status.DeliveryReceipts = deliveryReceipts
-	status.Gazeta = notices
 	status.CheckedAt = time.Now()
 	return status
 }
@@ -514,6 +499,12 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 //
 // Embedded mode: direct localNode.RoutingSnapshot() call.
 // Remote TCP mode: falls back to fetch_reachable_ids RPC frame.
+// BuildReachableIDs returns identities that have at least one live route
+// in the routing table. Exported for DMRouter ebus handlers.
+func (c *DesktopClient) BuildReachableIDs() map[domain.PeerIdentity]bool {
+	return c.buildReachableIDs()
+}
+
 func (c *DesktopClient) buildReachableIDs() map[domain.PeerIdentity]bool {
 	if c.localNode != nil {
 		return reachableFromSnapshot(c.localNode.RoutingSnapshot())
@@ -543,6 +534,37 @@ func reachableFromSnapshot(snap routing.Snapshot) map[domain.PeerIdentity]bool {
 	return reachable
 }
 
+// FetchContacts queries the node for the current trusted contacts map.
+// Used by ProbeNode during startup. Real-time updates use TopicContactAdded/Removed.
+func (c *DesktopClient) FetchContacts(ctx context.Context) (map[string]Contact, error) {
+	reply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_trusted_contacts"})
+	if err != nil {
+		return nil, err
+	}
+	return contactsFromFrame(reply), nil
+}
+
+// FetchKnownIDs queries the node for the current identity list.
+// Used by ProbeNode during startup. Real-time updates use TopicIdentityAdded.
+func (c *DesktopClient) FetchKnownIDs(ctx context.Context) ([]string, error) {
+	reply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_identities"})
+	if err != nil {
+		return nil, err
+	}
+	return reply.Identities, nil
+}
+
+// FetchPeerHealth queries the node for the current peer health snapshot.
+// Used by ProbeNode during startup. Real-time updates use
+// TopicPeerHealthChanged with per-peer deltas.
+func (c *DesktopClient) FetchPeerHealth(ctx context.Context) ([]PeerHealth, error) {
+	reply, err := c.localRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_peer_health"})
+	if err != nil {
+		return nil, err
+	}
+	return peerHealthFromFrame(reply), nil
+}
+
 func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 	items := make([]PeerHealth, 0, len(frame.PeerHealth))
 	for _, item := range frame.PeerHealth {
@@ -570,16 +592,10 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 			BytesSent:           item.BytesSent,
 			BytesReceived:       item.BytesReceived,
 			TotalTraffic:        item.TotalTraffic,
-			SlotState:              item.SlotState,
-			SlotRetryCount:         item.SlotRetryCount,
-			SlotGeneration:         item.SlotGeneration,
-			SlotConnectedAddr:      item.SlotConnectedAddr,
-			Recording:              item.Recording,
-			RecordingFile:          item.RecordingFile,
-			RecordingStartedAt:     parseOptionalTime(item.RecordingStartedAt),
-			RecordingScope:         item.RecordingScope,
-			RecordingError:         item.RecordingError,
-			RecordingDroppedEvents: item.RecordingDroppedEvents,
+			SlotState:           item.SlotState,
+			SlotRetryCount:      item.SlotRetryCount,
+			SlotGeneration:      item.SlotGeneration,
+			SlotConnectedAddr:   item.SlotConnectedAddr,
 
 			LastErrorCode:               item.LastErrorCode,
 			LastDisconnectCode:          item.LastDisconnectCode,
@@ -591,6 +607,56 @@ func peerHealthFromFrame(frame protocol.Frame) []PeerHealth {
 		})
 	}
 	return items
+}
+
+// captureSessionsFromFrame extracts active capture sessions from the
+// fetch_peer_health RPC response. The node still carries Recording* per
+// connection in PeerHealthFrame for wire-compatibility, so the probe-time
+// merge uses the same single RPC: only rows whose Recording flag is true
+// produce a CaptureSession entry. Stopped sessions are not part of the
+// probe snapshot — the probe only reports in-flight state.
+func captureSessionsFromFrame(frame protocol.Frame) map[domain.ConnID]CaptureSession {
+	sessions := make(map[domain.ConnID]CaptureSession)
+	for _, item := range frame.PeerHealth {
+		if !item.Recording {
+			continue
+		}
+		connID := domain.ConnID(item.ConnID)
+		scope, _ := parseCaptureScope(item.RecordingScope)
+		sessions[connID] = CaptureSession{
+			ConnID:    connID,
+			Address:   domain.PeerAddress(item.Address),
+			PeerID:    domain.PeerIdentity(item.PeerID),
+			Direction: domain.PeerDirection(item.Direction),
+			FilePath:  item.RecordingFile,
+			StartedAt: parseOptionalTime(item.RecordingStartedAt),
+			Scope:     scope,
+			// Format is not carried on the wire — the probe snapshot only
+			// surfaces recordings that started before the monitor subscribed,
+			// and CaptureFormatCompact is the default for all new sessions.
+			// When the capture ticker fires again it will publish the real
+			// format via TopicCaptureSessionStarted, which overwrites this.
+			Format:        domain.CaptureFormatCompact,
+			Active:        true,
+			Error:         item.RecordingError,
+			DroppedEvents: item.RecordingDroppedEvents,
+		}
+	}
+	if len(sessions) == 0 {
+		return nil
+	}
+	return sessions
+}
+
+// parseCaptureScope maps a wire scope string to its domain counterpart.
+// Unknown values fall back to CaptureScopeConnID so the UI still labels
+// the session rather than rendering an empty string.
+func parseCaptureScope(s string) (domain.CaptureScope, bool) {
+	scope := domain.CaptureScope(s)
+	if scope.IsValid() {
+		return scope, true
+	}
+	return domain.CaptureScopeConnID, false
 }
 
 // aggregateStatusFromFrame converts the protocol frame returned by
@@ -646,16 +712,20 @@ func resolveAggregateStatus(reply protocol.Frame, err error) (*AggregateStatus, 
 	return result, ""
 }
 
-func parseOptionalTime(value string) *time.Time {
+// parseOptionalTime parses an RFC3339 timestamp from the wire, returning
+// an invalid OptionalTime when the value is empty or unparseable. Used at
+// the wire→service boundary where the protocol carries timestamps as
+// strings.
+func parseOptionalTime(value string) domain.OptionalTime {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return nil
+		return domain.OptionalTime{}
 	}
 	ts, err := time.Parse(time.RFC3339, value)
 	if err != nil {
-		return nil
+		return domain.OptionalTime{}
 	}
-	return &ts
+	return domain.TimeOf(ts)
 }
 
 func incomingContactsToTrust(self string, trustedContacts, decryptContacts map[string]Contact, messages []DirectMessage) []protocol.ContactFrame {
@@ -1388,18 +1458,6 @@ func receiptRecordsFromFrames(receipts []protocol.ReceiptFrame) []DeliveryReceip
 	return out
 }
 
-func decryptNoticeFrames(id *identity.Identity, notices []protocol.NoticeFrame) []string {
-	out := make([]string, 0, len(notices))
-	for _, item := range notices {
-		notice, err := gazeta.DecryptForIdentity(id, item.Ciphertext)
-		if err != nil {
-			continue
-		}
-		out = append(out, notice.From+">"+notice.Body)
-	}
-	return out
-}
-
 // receiptStatusRank returns the monotonic rank of a delivery status.
 // Higher rank = further along the lifecycle. Unknown/empty = 0.
 func receiptStatusRank(status string) int {
@@ -1454,15 +1512,14 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			continue
 		}
 
-		var deliveredAt *time.Time
+		var deliveredAt domain.OptionalTime
 
 		// Start from the persisted status in SQLite (survives restart).
 		receiptStatus := item.PersistedStatus
 
 		// Layer in-memory receipt on top — but only if it advances the status.
 		if receipt, ok := receiptsByMessageID[item.ID]; ok {
-			deliveredCopy := receipt.DeliveredAt
-			deliveredAt = &deliveredCopy
+			deliveredAt = domain.TimeOf(receipt.DeliveredAt)
 			if receiptStatusRank(receipt.Status) > receiptStatusRank(receiptStatus) {
 				receiptStatus = receipt.Status
 			}
@@ -1470,12 +1527,11 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 
 		// Synthesize DeliveredAt for persisted statuses that survive restart.
 		// After a restart the in-memory receipt map is empty, so deliveredAt
-		// would be nil even though SQLite has a valid "delivered" or "seen"
-		// status. Use the message timestamp as a reasonable approximation so
-		// the UI can render status badges (checkmarks) after restart.
-		if deliveredAt == nil && (receiptStatus == "delivered" || receiptStatus == "seen") {
-			t := item.Timestamp
-			deliveredAt = &t
+		// would be invalid even though SQLite has a valid "delivered" or
+		// "seen" status. Use the message timestamp as a reasonable
+		// approximation so the UI can render status badges (checkmarks).
+		if !deliveredAt.Valid() && (receiptStatus == "delivered" || receiptStatus == "seen") {
+			deliveredAt = domain.TimeOf(item.Timestamp)
 		}
 
 		// For outgoing messages with no persisted or receipt status, check pending state.
@@ -1629,14 +1685,6 @@ func pendingMessagesFromFrame(frame protocol.Frame) []PendingMessage {
 			Retries:       item.Retries,
 			Error:         item.Error,
 		})
-	}
-	return out
-}
-
-func stringifyMessages(messages []MessageRecord) []string {
-	out := make([]string, 0, len(messages))
-	for _, message := range messages {
-		out = append(out, message.Sender+">"+message.Recipient+">"+message.Body)
 	}
 	return out
 }

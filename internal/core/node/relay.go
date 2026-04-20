@@ -1136,7 +1136,11 @@ func (s *Service) retryRelayDeliveries() {
 	for _, receipt := range s.retryableRelayReceipts(now) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
 		if !s.handleRelayReceipt(receipt) {
-			go s.gossipReceipt(receipt)
+			s.backgroundWg.Add(1)
+			go func() {
+				defer s.backgroundWg.Done()
+				s.gossipReceipt(receipt)
+			}()
 		}
 	}
 }
@@ -1381,12 +1385,6 @@ func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID p
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
 	return removed
-}
-
-func (s *Service) queueStateSnapshot() queueStateFile {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.queueStateSnapshotLocked()
 }
 
 func (s *Service) queueStateSnapshotLocked() queueStateFile {

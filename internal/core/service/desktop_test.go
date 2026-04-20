@@ -13,6 +13,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -529,7 +530,7 @@ func TestPendingMessagesFromFrame(t *testing.T) {
 	if got[0].Status != "retrying" || got[0].Retries != 2 || got[0].Error != "retry queued delivery" {
 		t.Fatalf("unexpected pending item: %#v", got[0])
 	}
-	if got[0].QueuedAt == nil || got[0].LastAttemptAt == nil {
+	if !got[0].QueuedAt.Valid() || !got[0].LastAttemptAt.Valid() {
 		t.Fatalf("expected parsed timestamps: %#v", got[0])
 	}
 }
@@ -600,12 +601,12 @@ func TestPeerHealthFromFrame(t *testing.T) {
 		State:               "healthy",
 		Connected:           true,
 		PendingCount:        2,
-		LastConnectedAt:     timePtr(t, "2026-03-20T09:10:11Z"),
-		LastDisconnectedAt:  timePtr(t, "2026-03-20T09:09:11Z"),
-		LastPingAt:          timePtr(t, "2026-03-20T09:11:00Z"),
-		LastPongAt:          timePtr(t, "2026-03-20T09:11:00Z"),
-		LastUsefulSendAt:    timePtr(t, "2026-03-20T09:10:58Z"),
-		LastUsefulReceiveAt: timePtr(t, "2026-03-20T09:10:59Z"),
+		LastConnectedAt:     optionalTime(t, "2026-03-20T09:10:11Z"),
+		LastDisconnectedAt:  optionalTime(t, "2026-03-20T09:09:11Z"),
+		LastPingAt:          optionalTime(t, "2026-03-20T09:11:00Z"),
+		LastPongAt:          optionalTime(t, "2026-03-20T09:11:00Z"),
+		LastUsefulSendAt:    optionalTime(t, "2026-03-20T09:10:58Z"),
+		LastUsefulReceiveAt: optionalTime(t, "2026-03-20T09:10:59Z"),
 		ConsecutiveFailures: 1,
 		LastError:           "timeout",
 		Score:               15,
@@ -723,16 +724,16 @@ func TestResolveAggregateStatus(t *testing.T) {
 func TestParseOptionalTime(t *testing.T) {
 	t.Parallel()
 
-	if got := parseOptionalTime(""); got != nil {
-		t.Fatalf("expected nil for empty time, got %#v", got)
+	if got := parseOptionalTime(""); got.Valid() {
+		t.Fatalf("expected invalid for empty time, got %#v", got)
 	}
-	if got := parseOptionalTime("broken"); got != nil {
-		t.Fatalf("expected nil for invalid time, got %#v", got)
+	if got := parseOptionalTime("broken"); got.Valid() {
+		t.Fatalf("expected invalid for bad time, got %#v", got)
 	}
 
 	got := parseOptionalTime("2026-03-20T09:10:11Z")
-	want := timePtr(t, "2026-03-20T09:10:11Z")
-	if !reflect.DeepEqual(got, want) {
+	want := optionalTime(t, "2026-03-20T09:10:11Z")
+	if !got.Equal(want) {
 		t.Fatalf("unexpected parsed time: got %#v want %#v", got, want)
 	}
 }
@@ -748,10 +749,9 @@ func mustTime(t *testing.T, value string) time.Time {
 	return timestamp.UTC()
 }
 
-func timePtr(t *testing.T, value string) *time.Time {
+func optionalTime(t *testing.T, value string) domain.OptionalTime {
 	t.Helper()
-	ts := mustTime(t, value)
-	return &ts
+	return domain.TimeOf(mustTime(t, value))
 }
 
 // TestNodeStatusHasNoDMBodyFields verifies that NodeStatus does not carry full
@@ -846,14 +846,14 @@ func TestDeliveredAtSynthesizedAfterRestart(t *testing.T) {
 			if msg.ReceiptStatus != tc.wantStatus {
 				t.Errorf("ReceiptStatus = %q, want %q", msg.ReceiptStatus, tc.wantStatus)
 			}
-			if tc.wantDeliveredAt && msg.DeliveredAt == nil {
-				t.Error("DeliveredAt should not be nil for persisted delivered/seen status")
+			if tc.wantDeliveredAt && !msg.DeliveredAt.Valid() {
+				t.Error("DeliveredAt should be valid for persisted delivered/seen status")
 			}
-			if !tc.wantDeliveredAt && msg.DeliveredAt != nil {
-				t.Errorf("DeliveredAt should be nil, got %v", msg.DeliveredAt)
+			if !tc.wantDeliveredAt && msg.DeliveredAt.Valid() {
+				t.Errorf("DeliveredAt should be invalid, got %v", msg.DeliveredAt)
 			}
-			if tc.wantDeliveredAt && msg.DeliveredAt != nil {
-				if !msg.DeliveredAt.Equal(msgTime) {
+			if tc.wantDeliveredAt && msg.DeliveredAt.Valid() {
+				if !msg.DeliveredAt.Time().Equal(msgTime) {
 					t.Errorf("DeliveredAt = %v, want %v (message timestamp)", msg.DeliveredAt, msgTime)
 				}
 			}
@@ -927,7 +927,7 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 		PeersStatePath: filepath.Join(dir, "peers.json"),
 	}
 
-	svc := node.NewService(cfg, id)
+	svc := node.NewService(cfg, id, ebus.New())
 	store := chatlog.NewStore(dir, domain.PeerIdentity(id.Address), domain.ListenAddress(":0"))
 
 	// WaitBackground must run before TempDir cleanup to avoid

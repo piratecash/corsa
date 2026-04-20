@@ -32,8 +32,38 @@ func NewCollector(source TrafficSource) *Collector {
 	}
 }
 
+// Seed captures the current cumulative byte counters from the source as the
+// delta baseline, without recording a sample. Intended to be called once,
+// synchronously, before Run, so that the very first ticker-driven Record
+// produces the genuine per-second delta instead of either (a) reporting the
+// entire pre-attach cumulative as a single-second spike or (b) silently
+// dropping the first delta to mask that spike.
+//
+// The latter mode (drop-on-first) is what the previous implementation did,
+// and it was the root cause of the desktop traffic chart appearing empty for
+// many seconds after launch on an idle node: the only sample that would
+// reliably contain non-zero traffic — the first one — was always zeroed,
+// and subsequent idle ticks recorded zero deltas, leaving the chart blank
+// until the next observable network exchange.
+//
+// If the source returns nil NetworkStats (collector not yet wired or
+// source error), Seed leaves the baseline at zero, which is correct for the
+// "started together" case.
+func (c *Collector) Seed() {
+	reply := c.source.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+	if reply.NetworkStats == nil {
+		return
+	}
+	c.traffic.Seed(reply.NetworkStats.TotalBytesSent, reply.NetworkStats.TotalBytesReceived)
+}
+
 // Run starts the collection loop. It takes a snapshot every second
 // until the context is cancelled. Call this in a goroutine.
+//
+// Run does not call Seed automatically: callers attaching to an
+// already-running system must Seed once before Run so the baseline reflects
+// the real pre-attach totals. Callers starting the source from scratch can
+// skip Seed (the zero baseline matches reality).
 func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

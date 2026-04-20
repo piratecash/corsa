@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -14,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	"github.com/piratecash/corsa/internal/core/service"
 
@@ -84,46 +87,48 @@ type consoleDonateEntry struct {
 }
 
 type ConsoleWindow struct {
-	parent            *Window
-	theme             *material.Theme
-	ops               op.Ops
-	onClose           func()
-	window            *app.Window
-	closed            chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
-	peerList          widget.List
-	peerSectionList   widget.List
-	peerSelectables   map[string]*peerCardSelectables // keyed by peer address; lazily created
-	historyList       widget.List
-	suggestList       widget.List
-	donateList        widget.List
-	consoleEditor     widget.Editor
-	runButton         widget.Clickable
-	consoleTabButton  widget.Clickable
-	peersTabButton    widget.Clickable
-	trafficTabButton  widget.Clickable
-	infoTabButton     widget.Clickable
-	donateTabButton   widget.Clickable
-	activeTab         int32     // consoleTab value; accessed atomically (UI writes, ticker reads)
-	trafficSamplesIn  []float32 // per-second received bytes/s (newest last)
-	trafficSamplesOut []float32 // per-second sent bytes/s (newest last)
-	trafficTotalSent  int64     // cumulative sent (for totals display)
-	trafficTotalRecv  int64     // cumulative received (for totals display)
-	trafficLoaded     bool      // true after initial history load
-	trafficTicker     *time.Ticker
-	mu                sync.RWMutex
-	consoleEntries    []consoleEntry
-	consoleBusy       bool
-	suggestButtons    map[string]*widget.Clickable
-	lastSuggestQuery  string
-	hideSuggestions   bool
-	selectedSuggest   int
-	suggestBaseQuery  string
-	suggestSnapshot   []consoleSuggestion
-	cachedCommands    []consoleSuggestion // loaded from CommandTable at init
-	donateEntries     []consoleDonateEntry
-	donateLink           widget.Selectable
-	donateLinkButton     widget.Clickable
-	stopRecordingButton  widget.Clickable
+	parent              *Window
+	theme               *material.Theme
+	ops                 op.Ops
+	onClose             func()
+	window              *app.Window
+	closed              chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
+	peerList            widget.List
+	peerSectionList     widget.List
+	peerSelectables     map[string]*peerCardSelectables // keyed by peer address; lazily created
+	historyList         widget.List
+	suggestList         widget.List
+	donateList          widget.List
+	consoleEditor       widget.Editor
+	runButton           widget.Clickable
+	consoleTabButton    widget.Clickable
+	peersTabButton      widget.Clickable
+	trafficTabButton    widget.Clickable
+	infoTabButton       widget.Clickable
+	donateTabButton     widget.Clickable
+	activeTab           int32     // consoleTab value; accessed atomically (UI writes, ticker reads)
+	trafficSamplesIn    []float32 // per-second received bytes/s (newest last)
+	trafficSamplesOut   []float32 // per-second sent bytes/s (newest last)
+	trafficTotalSent    int64     // cumulative sent (for totals display)
+	trafficTotalRecv    int64     // cumulative received (for totals display)
+	trafficLoaded       bool      // true after initial history load
+	trafficTicker       *time.Ticker
+	mu                  sync.RWMutex
+	consoleEntries      []consoleEntry
+	consoleBusy         bool
+	suggestButtons      map[string]*widget.Clickable
+	lastSuggestQuery    string
+	hideSuggestions     bool
+	selectedSuggest     int
+	suggestBaseQuery    string
+	suggestSnapshot     []consoleSuggestion
+	cachedCommands      []consoleSuggestion // loaded from CommandTable at init
+	donateEntries       []consoleDonateEntry
+	donateLink          widget.Selectable
+	donateLinkButton    widget.Clickable
+	stopRecordingButton widget.Clickable
+	ebusSubscriptions   []ebus.SubscriptionID // cleaned up on close to prevent handler leak
+	uptimeInvalidating  int32                 // atomic flag; coalesces uptime redraw requests
 }
 
 func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
@@ -183,23 +188,12 @@ func (c *ConsoleWindow) Open() {
 			app.Size(defaultConsoleWindowWidth, defaultConsoleWindowHeight),
 		)
 
-		// Periodic refresh goroutine.  Uses c.closed as a hard stop so it
-		// never calls Invalidate after DestroyEvent begins processing.
-		// The actual Invalidate goes through invalidateWindow() which holds
-		// RLock during the call, preventing DestroyEvent from nilling out
-		// the window handle until Invalidate returns.
-		ticker := time.NewTicker(2 * time.Second)
-		go func() {
-			defer ticker.Stop()
-			for {
-				select {
-				case <-c.closed:
-					return
-				case <-ticker.C:
-					c.invalidateWindow()
-				}
-			}
-		}()
+		// Subscribe to ebus events that affect console display (peers, info,
+		// aggregate status). Each event invalidates the window so the console
+		// re-reads the latest Snapshot on the next frame. Replaces the old
+		// 2-second polling ticker — now the console updates only when state
+		// actually changes.
+		c.subscribeConsoleEvents()
 
 		for {
 			switch e := window.Event().(type) {
@@ -207,6 +201,10 @@ func (c *ConsoleWindow) Open() {
 				// Signal all cross-goroutine callers (ticker, command goroutine)
 				// to stop touching the window BEFORE the native handle is freed.
 				close(c.closed)
+
+				// Remove ebus handlers so dead console doesn't accumulate
+				// subscriber entries on every open/close cycle.
+				c.unsubscribeConsoleEvents()
 
 				c.mu.Lock()
 				c.window = nil
@@ -385,7 +383,10 @@ func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
 }
 
 func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
-	connectedPeers := countConnectedPeers(status.PeerHealth)
+	// Both counters consume the full NodeStatus: orphan CaptureSessions count
+	// as connected/known peers during the capture-start race, matching the
+	// peers-tab liveness contract enshrined by activeRowsForTab.
+	connectedPeers := countConnectedPeers(status)
 	rows := []string{
 		c.parent.t("node.client_version", c.parent.client.Version()),
 		c.parent.t("node.peer_version", fallback(status.ClientVersion, strings.ReplaceAll(c.parent.client.Version(), " ", "-"))),
@@ -395,7 +396,7 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 		c.parent.t("node.services", fallback(joinOrNone(status.Services), "identity,contacts,messages,gazeta,relay")),
 		c.parent.t("node.capabilities", fallback(joinOrNone(status.Capabilities), "none")),
 		c.parent.t("node.connected", status.Connected),
-		c.parent.t("node.known_peers", len(status.Peers)),
+		c.parent.t("node.known_peers", countUniquePeers(status)),
 		c.parent.t("node.connected_peers", connectedPeers),
 		c.parent.localNodeErrorRow(),
 	}
@@ -433,9 +434,24 @@ func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
 }
 
 func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	activePeers := activePeerHealth(status.PeerHealth)
+	// activeRowsForTab merges orphan CaptureSessions into the active-peer
+	// set so the empty-state gate, summary, and section renderer all agree
+	// on what "active" means during the capture-start race. The counter,
+	// however, MUST report distinct peers (deduped by identity / address)
+	// — not connection rows — to match the info-tab semantics. A peer with
+	// multiple inbound conn_id rows, or one row plus an orphan capture for
+	// the same identity, would inflate len(activePeers) relative to the
+	// label's meaning.
+	activePeers := activeRowsForTab(status)
 	rows := []string{
-		c.parent.t("node.connected_peers", len(activePeers)),
+		c.parent.t("node.connected_peers", countConnectedPeers(status)),
+	}
+
+	// Schedule a redraw every second so the uptime counter stays fresh.
+	// Uptime is computed from LastConnectedAt at render time — without
+	// periodic invalidation it would freeze between ebus events.
+	if len(activePeers) > 0 {
+		c.scheduleUptimeInvalidate()
 	}
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -462,7 +478,7 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeSt
 						label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 						return label.Layout(gtx)
 					}
-					return c.layoutActivePeersContent(gtx, activePeers)
+					return c.layoutActivePeersContent(gtx, activePeers, status.CaptureSessions)
 				}),
 			)
 		})
@@ -684,7 +700,29 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 	c.suggestSnapshot = nil
 
 	go func(command string) {
-		output, err := c.executeCommand(command)
+		type cmdResult struct {
+			output string
+			err    error
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		ch := make(chan cmdResult, 1)
+		go func() {
+			out, err := c.executeCommand(ctx, command)
+			ch <- cmdResult{out, err}
+		}()
+
+		var output string
+		var err error
+		timedOut := false
+		select {
+		case r := <-ch:
+			output, err = r.output, r.err
+		case <-time.After(10 * time.Second):
+			err = fmt.Errorf("command timed out after 10s (still running in background)")
+			timedOut = true
+		}
 
 		entry := newConsoleEntry(consoleEntry{
 			Command:   command,
@@ -700,11 +738,78 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 
 		c.mu.Lock()
 		c.consoleEntries = append([]consoleEntry{entry}, c.consoleEntries...)
-		c.consoleBusy = false
+		if !timedOut {
+			// Command completed normally — release the busy guard.
+			c.consoleBusy = false
+		}
 		c.mu.Unlock()
-
 		c.invalidateWindow()
+
+		if timedOut {
+			// Wait for the background command to finish before releasing
+			// the busy guard. This prevents the user from submitting the
+			// same command again while the previous one is still mutating
+			// node state. A hard deadline prevents a stuck command from
+			// wedging the console permanently.
+			select {
+			case r := <-ch:
+				lateEntry := newConsoleEntry(consoleEntry{
+					Command:   command + " (late result)",
+					CreatedAt: time.Now(),
+				})
+				if r.err != nil {
+					lateEntry.Output = r.err.Error()
+					lateEntry.Failed = true
+				} else {
+					lateEntry.Output = r.output
+				}
+				lateEntry.OutputText.SetText(lateEntry.Output)
+
+				c.mu.Lock()
+				c.consoleEntries = append([]consoleEntry{lateEntry}, c.consoleEntries...)
+				c.consoleBusy = false
+				c.mu.Unlock()
+				c.invalidateWindow()
+
+			case <-time.After(2 * time.Minute):
+				// Command is truly stuck — cancel its context so any
+				// context-aware handler stops early, then unblock the
+				// console. Without cancellation the orphaned goroutine
+				// could complete and mutate node state while the user
+				// has already retried the same command.
+				cancel()
+
+				abandonEntry := newConsoleEntry(consoleEntry{
+					Command:   command + " (abandoned)",
+					CreatedAt: time.Now(),
+				})
+				abandonEntry.Output = "command did not complete within 2m30s — console unlocked (command may still finish in background)"
+				abandonEntry.Failed = true
+				abandonEntry.OutputText.SetText(abandonEntry.Output)
+
+				c.mu.Lock()
+				c.consoleEntries = append([]consoleEntry{abandonEntry}, c.consoleEntries...)
+				c.consoleBusy = false
+				c.mu.Unlock()
+				c.invalidateWindow()
+			}
+		}
 	}(command)
+}
+
+// scheduleUptimeInvalidate coalesces per-second redraw requests for the Peers
+// tab uptime counter. Only one timer goroutine is in flight at a time — the
+// atomic flag prevents unbounded goroutine spawning when layoutPeersTab runs
+// at 60 fps while peers are connected.
+func (c *ConsoleWindow) scheduleUptimeInvalidate() {
+	if !atomic.CompareAndSwapInt32(&c.uptimeInvalidating, 0, 1) {
+		return
+	}
+	go func() {
+		time.Sleep(time.Second)
+		atomic.StoreInt32(&c.uptimeInvalidating, 0)
+		c.invalidateWindow()
+	}()
 }
 
 // invalidateWindow safely invalidates the console window from any goroutine.
@@ -725,6 +830,62 @@ func (c *ConsoleWindow) invalidateWindow() {
 		w.Invalidate()
 	}
 	c.mu.RUnlock()
+}
+
+// subscribeConsoleEvents registers ebus handlers that invalidate the console
+// window when node state changes. Subscription IDs are stored in
+// c.ebusSubscriptions so they can be removed on close via unsubscribeConsoleEvents.
+func (c *ConsoleWindow) subscribeConsoleEvents() {
+	bus := c.parent.eventBus
+	if bus == nil {
+		return
+	}
+
+	invalidate := func() {
+		select {
+		case <-c.closed:
+			return
+		default:
+		}
+		c.invalidateWindow()
+	}
+
+	// Peer list and health data changed — affects Peers tab.
+	ids := []ebus.SubscriptionID{
+		bus.Subscribe(ebus.TopicPeerConnected, func(domain.PeerAddress, domain.PeerIdentity) { invalidate() }),
+		bus.Subscribe(ebus.TopicPeerDisconnected, func(domain.PeerAddress, domain.PeerIdentity) { invalidate() }),
+		bus.Subscribe(ebus.TopicPeerHealthChanged, func(ebus.PeerHealthDelta) { invalidate() }),
+		bus.Subscribe(ebus.TopicSlotStateChanged, func(domain.PeerAddress, string) { invalidate() }),
+
+		// Per-peer pending count changed — affects pending badge on peer cards.
+		bus.Subscribe(ebus.TopicPeerPendingChanged, func(ebus.PeerPendingDelta) { invalidate() }),
+
+		// Peer traffic updated — affects Traffic tab and peer cards byte counters.
+		bus.Subscribe(ebus.TopicPeerTrafficUpdated, func(ebus.PeerTrafficBatch) { invalidate() }),
+
+		// Aggregate network status — affects Info tab header and Peers tab summary.
+		bus.Subscribe(ebus.TopicAggregateStatusChanged, func(domain.AggregateStatusSnapshot) { invalidate() }),
+
+		// Version policy changed — affects update banner in Info tab.
+		bus.Subscribe(ebus.TopicVersionPolicyChanged, func(domain.VersionPolicySnapshot) { invalidate() }),
+
+		// Identity/contacts changes — affects Info tab.
+		bus.Subscribe(ebus.TopicContactAdded, func(ebus.ContactAddedEvent) { invalidate() }),
+		bus.Subscribe(ebus.TopicContactRemoved, func(string) { invalidate() }),
+		bus.Subscribe(ebus.TopicIdentityAdded, func(string) { invalidate() }),
+	}
+	c.ebusSubscriptions = ids
+}
+
+// unsubscribeConsoleEvents removes all ebus handlers registered by
+// subscribeConsoleEvents. Called on window close to prevent handler leak.
+func (c *ConsoleWindow) unsubscribeConsoleEvents() {
+	bus := c.parent.eventBus
+	if bus == nil {
+		return
+	}
+	bus.UnsubscribeAll(c.ebusSubscriptions)
+	c.ebusSubscriptions = nil
 }
 
 func (c *ConsoleWindow) isConsoleBusy() bool {
@@ -1204,6 +1365,7 @@ var peerSlotGroups = []struct {
 	label string
 }{
 	{"active", "Active"},
+	{"initializing", "Initializing"},
 	{"dialing", "Dialing"},
 	{"reconnecting", "Reconnecting"},
 	{"queued", "Queued"},
@@ -1221,26 +1383,183 @@ func effectiveSlotState(p service.PeerHealth) string {
 	return ""
 }
 
+// synthesizePeerHealthFromCapture builds a minimal PeerHealth view for a
+// CaptureSession that has no matching health-delta row yet. The resulting
+// row carries identity (address, peer id, conn id, direction) so the card
+// renderer can show the recording dot and address; all other health/traffic
+// fields stay zero, matching the "no signal yet" state of an idle conn that
+// just started recording. SlotState is set to "active" for outbound captures
+// (the slot already produced a live conn) and left empty for inbound, so the
+// row lands in the correct group via effectiveSlotState.
+func synthesizePeerHealthFromCapture(s service.CaptureSession) service.PeerHealth {
+	slotState := ""
+	if s.Direction == domain.PeerDirectionOutbound {
+		slotState = "active"
+	}
+	return service.PeerHealth{
+		Address:   string(s.Address),
+		PeerID:    string(s.PeerID),
+		ConnID:    uint64(s.ConnID),
+		Direction: string(s.Direction),
+		SlotState: slotState,
+		Connected: true,
+	}
+}
+
+// mergeCapturesIntoPeers reconciles peers with active CaptureSessions so
+// the UI renders exactly one card per peer while still surfacing captures
+// whose health delta has not landed. This is the UI-side fallback that
+// handles the capture-only state the CaptureSessions/PeerHealth split was
+// specifically designed to allow.
+//
+// Reconciliation rules, applied per active capture:
+//  1. Captures without any resolvable identity (both Address and PeerID
+//     empty) are skipped entirely — see captureHasIdentity. The session
+//     remains on NodeStatus.CaptureSessions so the writer stays visible
+//     to "Stop all recordings", but it cannot back a peer card.
+//  2. If peers already contains a row with the capture's ConnID, it is
+//     authoritative — no action.
+//  3. If peers contains a ConnID=0 same-Address placeholder (seeded by
+//     applySlotStateDelta/applyPeerPendingDelta before the first health
+//     delta), the placeholder is promoted in place: ConnID, Direction,
+//     and Connected come from the capture; SlotState, PendingCount, and
+//     any already-observed PeerID stay (they carry earlier evidence the
+//     capture cannot override). Without this step a slot-only placeholder
+//     plus a capture for the same peer would briefly render as two
+//     separate cards — the split-state bug resurfacing at the UI layer.
+//  4. Otherwise the capture is surfaced through a freshly synthesized
+//     PeerHealth row appended after the existing entries.
+//
+// The function does not mutate the caller's slice. When a promotion is
+// required the slice is cloned first (copy-on-write) so any caller still
+// reading the original (e.g., diagnostic snapshots) sees the placeholder
+// unchanged. Allocation is skipped entirely when there are no captures
+// at all — the common quiet-node path returns the input slice as-is.
+func mergeCapturesIntoPeers(
+	peers []service.PeerHealth,
+	captures map[domain.ConnID]service.CaptureSession,
+) []service.PeerHealth {
+	if len(captures) == 0 {
+		return peers
+	}
+	seen := make(map[domain.ConnID]struct{}, len(peers))
+	// placeholderByAddr indexes ConnID=0 rows with a non-empty Address so
+	// an incoming capture for the same peer can reuse the existing card
+	// instead of appending a duplicate. First-index-wins is deliberate:
+	// applySlotStateDelta never creates duplicates, so collisions here
+	// would already be a bug we should not paper over.
+	placeholderByAddr := make(map[string]int, len(peers))
+	for i, p := range peers {
+		if p.ConnID != 0 {
+			seen[domain.ConnID(p.ConnID)] = struct{}{}
+			continue
+		}
+		if p.Address != "" {
+			if _, exists := placeholderByAddr[p.Address]; !exists {
+				placeholderByAddr[p.Address] = i
+			}
+		}
+	}
+
+	output := peers
+	cloned := false
+	cloneForMutation := func() {
+		if cloned {
+			return
+		}
+		out := make([]service.PeerHealth, len(peers))
+		copy(out, peers)
+		output = out
+		cloned = true
+	}
+
+	var orphans []service.PeerHealth
+	for id, s := range captures {
+		if !s.Active {
+			continue
+		}
+		if !captureHasIdentity(s) {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		if idx, ok := placeholderByAddr[string(s.Address)]; ok {
+			cloneForMutation()
+			promotePlaceholderFromCapture(&output[idx], s)
+			seen[id] = struct{}{}
+			delete(placeholderByAddr, string(s.Address))
+			continue
+		}
+		orphans = append(orphans, synthesizePeerHealthFromCapture(s))
+	}
+	if len(orphans) == 0 {
+		return output
+	}
+	merged := make([]service.PeerHealth, 0, len(output)+len(orphans))
+	merged = append(merged, output...)
+	merged = append(merged, orphans...)
+	return merged
+}
+
+// promotePlaceholderFromCapture grafts a capture's live-conn evidence
+// onto an address-level ConnID=0 placeholder without discarding earlier
+// observations carried by that placeholder.
+//
+// ConnID, Direction, and Connected are authoritative from the capture:
+// a recording implies a real open connection whose identifying ConnID is
+// the one carried by the capture event.
+//
+// SlotState and PendingCount are preserved unconditionally — they reflect
+// ConnectionManager lifecycle state the capture does not observe and
+// cannot authoritatively update. Overwriting them would silently regress
+// the peer card's slot-lifecycle display.
+//
+// PeerID is preserved when already non-empty: an enrichment path (probe
+// snapshot, out-of-band identity delta) may have observed it before the
+// capture event, and the capture's PeerID is at best the same value.
+func promotePlaceholderFromCapture(p *service.PeerHealth, s service.CaptureSession) {
+	p.ConnID = uint64(s.ConnID)
+	if p.PeerID == "" {
+		p.PeerID = string(s.PeerID)
+	}
+	if p.Direction == "" {
+		p.Direction = string(s.Direction)
+	}
+	p.Connected = true
+}
+
 // layoutActivePeersContent groups peers by CM slot state and renders each
 // group as a titled section. Groups appear in a fixed priority order:
 // Active → Dialing → Reconnecting → Queued → Retry Wait → Inbound.
-func (c *ConsoleWindow) layoutActivePeersContent(gtx layout.Context, peers []service.PeerHealth) layout.Dimensions {
+//
+// peers is expected to be the post-merge set produced by activeRowsForTab,
+// i.e. real PeerHealth rows plus synthetic rows for orphan CaptureSessions.
+// This function does not merge again — the merge is owned by the caller so
+// all tab-level consumers share one view of the active set.
+//
+// captures is the current CaptureSessions map from NodeStatus — the UI keys
+// recording visuals (red dot, info line, stop-all banner) off this map rather
+// than fields on PeerHealth so that capture bookkeeping is independent of
+// peer-health row lifecycle.
+func (c *ConsoleWindow) layoutActivePeersContent(
+	gtx layout.Context,
+	peers []service.PeerHealth,
+	captures map[domain.ConnID]service.CaptureSession,
+) layout.Dimensions {
 	// Handle stop-recording button click.
 	if c.stopRecordingButton.Clicked(gtx) {
 		go func() {
-			_, _ = c.executeCommand("stopPeerTrafficRecording scope=all")
+			_, _ = c.executeCommand(context.Background(), "stopPeerTrafficRecording scope=all")
 		}()
 	}
 
 	grouped := make(map[string][]service.PeerHealth, len(peerSlotGroups))
-	hasRecording := false
 	for _, p := range peers {
 		key := effectiveSlotState(p)
 		grouped[key] = append(grouped[key], p)
-		if p.Recording {
-			hasRecording = true
-		}
 	}
+	hasRecording := hasActiveCapture(captures)
 
 	type section struct {
 		top    unit.Dp
@@ -1272,7 +1591,7 @@ func (c *ConsoleWindow) layoutActivePeersContent(gtx layout.Context, peers []ser
 		sections = append(sections, section{
 			top: top,
 			render: func(gtx layout.Context) layout.Dimensions {
-				return c.layoutPeerSection(gtx, label, groupItems)
+				return c.layoutPeerSection(gtx, label, groupItems, captures)
 			},
 		})
 	}
@@ -1292,6 +1611,7 @@ func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
 	degraded := 0
 	stalled := 0
 	dialing := 0
+	initializing := 0
 	queued := 0
 	retryWait := 0
 	var totalIn, totalOut int64
@@ -1307,6 +1627,8 @@ func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
 		switch item.SlotState {
 		case "dialing":
 			dialing++
+		case "initializing":
+			initializing++
 		case "queued":
 			queued++
 		case "retry_wait":
@@ -1318,8 +1640,8 @@ func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
 	summary := parent.t("node.active_peer.summary", healthy, degraded, stalled)
 	if summary == "node.active_peer.summary" {
 		base := fmt.Sprintf("Healthy: %d, Degraded: %d, Stalled: %d", healthy, degraded, stalled)
-		if dialing > 0 || queued > 0 || retryWait > 0 {
-			base += fmt.Sprintf(" | Dialing: %d, Queued: %d, RetryWait: %d", dialing, queued, retryWait)
+		if dialing > 0 || initializing > 0 || queued > 0 || retryWait > 0 {
+			base += fmt.Sprintf(" | Dialing: %d, Init: %d, Queued: %d, RetryWait: %d", dialing, initializing, queued, retryWait)
 		}
 		base += fmt.Sprintf(" | In: %s, Out: %s", formatBytes(totalIn), formatBytes(totalOut))
 		return base
@@ -1328,7 +1650,7 @@ func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
 }
 
 // executeCommand parses console input and dispatches it through CommandTable.
-func (c *ConsoleWindow) executeCommand(input string) (string, error) {
+func (c *ConsoleWindow) executeCommand(ctx context.Context, input string) (string, error) {
 	if c.parent.cmdTable == nil {
 		return "", fmt.Errorf("command table not initialized")
 	}
@@ -1349,6 +1671,7 @@ func (c *ConsoleWindow) executeCommand(input string) (string, error) {
 		return consoleHelpText(c.parent.cmdTable, addr), nil
 	}
 
+	req.Ctx = ctx
 	resp := c.parent.cmdTable.Execute(req)
 
 	if resp.Error != nil {
@@ -1465,14 +1788,96 @@ func consoleHelpText(table *rpc.CommandTable, selfAddress string) string {
 	return strings.Join(lines, "\n")
 }
 
-func countConnectedPeers(peers []service.PeerHealth) int {
-	count := 0
-	for _, item := range peers {
-		if item.Connected {
-			count++
-		}
+// peerIdentityKey returns the dedup key for "distinct peer" counters.
+// Prefer PeerID (stable across reconnects); fall back to Address when the
+// identity is not yet known (pre-handshake rows, slot-only placeholders,
+// capture-start races before the handshake handler fills the identity).
+func peerIdentityKey(peerID, address string) string {
+	if peerID != "" {
+		return peerID
 	}
-	return count
+	return address
+}
+
+// captureHasIdentity reports whether a CaptureSession carries any
+// renderable peer identity. CaptureSessionStarted explicitly permits an
+// empty Address when the publisher could not resolve the connection —
+// the writer is still active on the node, so the session is recorded,
+// but the desktop fallback has nothing to render as a peer. Without this
+// gate such sessions would produce blank PeerHealth cards through
+// mergeCapturesIntoPeers and all collapse into a single empty-string
+// key in the distinct-peer counters (peerIdentityKey("", "") == ""),
+// inflating known_peers / connected_peers by exactly one phantom entry
+// regardless of how many unlabeled captures are active.
+func captureHasIdentity(s service.CaptureSession) bool {
+	return s.PeerID != "" || s.Address != ""
+}
+
+// countUniquePeers returns the number of distinct peers the node has any
+// evidence of: observed PeerHealth rows plus identities from active
+// CaptureSessions. Pending-only placeholder rows (created by
+// applyPeerPendingDelta before any real health delta arrives) are excluded
+// so queued-but-never-seen addresses do not inflate the known_peers metric.
+// Active captures contribute their identity even when no PeerHealth row
+// exists yet — capture-start is positive evidence of a real peer. Captures
+// without any identity (see captureHasIdentity) are ignored so unresolved
+// sessions do not collapse into one phantom entry under the empty key.
+func countUniquePeers(status service.NodeStatus) int {
+	seen := make(map[string]struct{}, len(status.PeerHealth)+len(status.CaptureSessions))
+	for _, item := range status.PeerHealth {
+		if !isPeerObserved(item) {
+			continue
+		}
+		seen[peerIdentityKey(item.PeerID, item.Address)] = struct{}{}
+	}
+	for _, s := range status.CaptureSessions {
+		if !s.Active {
+			continue
+		}
+		if !captureHasIdentity(s) {
+			continue
+		}
+		seen[peerIdentityKey(string(s.PeerID), string(s.Address))] = struct{}{}
+	}
+	return len(seen)
+}
+
+// isPeerObserved returns true when the PeerHealth entry carries evidence
+// of a real connection, CM slot management, or health snapshot — not just
+// a pending-queue placeholder created by applyPeerPendingDelta.
+// SlotState covers peers the CM is actively managing (queued, dialing,
+// retry_wait, etc.) that may not yet have a health delta.
+func isPeerObserved(p service.PeerHealth) bool {
+	return p.PeerID != "" || p.Connected || p.State != "" || p.Direction != "" || p.SlotState != ""
+}
+
+// countConnectedPeers returns the number of distinct peers with at least
+// one open connection. An open connection is evidenced by a PeerHealth row
+// whose Connected=true or by an active CaptureSession (recording implies
+// the transport is live even before the first health delta lands). The
+// two sources are deduplicated by peerIdentityKey so a connection that
+// has both a health row and an active capture counts once. Captures
+// without any identity (see captureHasIdentity) are ignored so the
+// counter does not gain a phantom entry when the publisher could not
+// resolve the recording connection.
+func countConnectedPeers(status service.NodeStatus) int {
+	seen := make(map[string]struct{}, len(status.PeerHealth)+len(status.CaptureSessions))
+	for _, item := range status.PeerHealth {
+		if !item.Connected {
+			continue
+		}
+		seen[peerIdentityKey(item.PeerID, item.Address)] = struct{}{}
+	}
+	for _, s := range status.CaptureSessions {
+		if !s.Active {
+			continue
+		}
+		if !captureHasIdentity(s) {
+			continue
+		}
+		seen[peerIdentityKey(string(s.PeerID), string(s.Address))] = struct{}{}
+	}
+	return len(seen)
 }
 
 // activePeerHealth returns peers that the ConnectionManager is actively
@@ -1491,7 +1896,44 @@ func activePeerHealth(peers []service.PeerHealth) []service.PeerHealth {
 	return active
 }
 
-func (c *ConsoleWindow) layoutPeerSection(gtx layout.Context, title string, peers []service.PeerHealth) layout.Dimensions {
+// activeRowsForTab is the single source of truth for "what rows should the
+// peers tab render". It pairs the slot-state filter (active PeerHealth rows)
+// with orphan-capture surfacing (CaptureSessions whose ConnID has no health
+// delta yet) so every downstream consumer — empty-state gate, connected-peers
+// count, summary line, per-group sections, uptime redraw scheduler — observes
+// the same set. Splitting the filter from the merge and gating on the raw
+// filter result, as an earlier version did, allowed capture-only sessions
+// to vanish from the UI when no real health deltas had arrived.
+//
+// --- Architectural contract for PeerHealth / CaptureSessions consumers ---
+//
+// The desktop UI must treat PeerHealth and CaptureSessions as two projections
+// of the same underlying reality, not as interchangeable lists:
+//
+//  1. "Liveness" questions — is this conn open, how many peers are connected,
+//     what rows do we render, what identities have we observed — MUST go
+//     through activeRowsForTab / countConnectedPeers / countUniquePeers. All
+//     three fold in active CaptureSessions so orphan captures are surfaced.
+//
+//  2. "Health evidence" questions — how many peers are healthy/degraded/
+//     stalled/reconnecting, what direction breakdown — MUST read
+//     status.PeerHealth directly. An orphan capture carries no health
+//     evidence; counting it as healthy would fabricate a signal.
+//
+// New readers of status.PeerHealth or status.CaptureSessions in the desktop
+// package must pick a side. The rule of thumb: if the answer changes when a
+// connection exists without a health delta, it belongs to category 1 and
+// must consult CaptureSessions. Otherwise it is category 2 and should not.
+func activeRowsForTab(status service.NodeStatus) []service.PeerHealth {
+	return mergeCapturesIntoPeers(activePeerHealth(status.PeerHealth), status.CaptureSessions)
+}
+
+func (c *ConsoleWindow) layoutPeerSection(
+	gtx layout.Context,
+	title string,
+	peers []service.PeerHealth,
+	captures map[domain.ConnID]service.CaptureSession,
+) layout.Dimensions {
 	if len(peers) == 0 {
 		return layout.Dimensions{}
 	}
@@ -1511,15 +1953,25 @@ func (c *ConsoleWindow) layoutPeerSection(gtx layout.Context, title string, peer
 			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
 		}
 		peer := peer
+		// Look up the capture session for this row by ConnID. ConnID==0
+		// rows (address-level placeholders) cannot host a capture, so the
+		// lookup is intentionally skipped.
+		var capture *service.CaptureSession
+		if peer.ConnID != 0 {
+			if s, ok := captures[domain.ConnID(peer.ConnID)]; ok && s.Active {
+				cp := s
+				capture = &cp
+			}
+		}
 		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutPeerHealthCard(gtx, peer)
+			return c.layoutPeerHealthCard(gtx, peer, capture)
 		}))
 	}
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
-func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.PeerHealth) layout.Dimensions {
+func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.PeerHealth, capture *service.CaptureSession) layout.Dimensions {
 	sel := c.peerSelectablesFor(item.Address)
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
@@ -1542,7 +1994,7 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 							return c.layoutSelectableText(gtx, &sel.Address, item.Address, color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							if !item.Recording {
+							if capture == nil {
 								return layout.Dimensions{}
 							}
 							return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -1585,10 +2037,10 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 					})
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					if !item.Recording {
+					if capture == nil {
 						return layout.Dimensions{}
 					}
-					info := c.recordingInfoText(item)
+					info := recordingInfoText(*capture)
 					return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						return c.layoutSelectableText(gtx, &sel.RecordingInfo, info, color.NRGBA{R: 255, G: 100, B: 100, A: 255})
 					})
@@ -1619,12 +2071,12 @@ func (c *ConsoleWindow) layoutStateBadge(gtx layout.Context, state string) layou
 
 func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 	lastRecv := "-"
-	if item.LastUsefulReceiveAt != nil {
-		lastRecv = item.LastUsefulReceiveAt.Format("15:04:05")
+	if item.LastUsefulReceiveAt.Valid() {
+		lastRecv = item.LastUsefulReceiveAt.Time().Format("15:04:05")
 	}
 	lastPong := "-"
-	if item.LastPongAt != nil {
-		lastPong = item.LastPongAt.Format("15:04:05")
+	if item.LastPongAt.Valid() {
+		lastPong = item.LastPongAt.Time().Format("15:04:05")
 	}
 	connected := c.parent.t("node.link.down")
 	if item.Connected {
@@ -1635,8 +2087,8 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 		dirLabel = " " + item.Direction
 	}
 	uptime := "-"
-	if item.Connected && item.LastConnectedAt != nil {
-		uptime = formatUptime(time.Since(*item.LastConnectedAt))
+	if item.Connected && item.LastConnectedAt.Valid() {
+		uptime = formatUptime(time.Since(item.LastConnectedAt.Time()))
 	}
 
 	// Build slot suffix for CM-managed outbound peers.
@@ -1694,23 +2146,38 @@ func (c *ConsoleWindow) layoutRecordingDot(gtx layout.Context) layout.Dimensions
 	return layout.Dimensions{Size: image.Pt(size, size)}
 }
 
-// recordingInfoText builds a human-readable summary of the active capture for a peer card.
-func (c *ConsoleWindow) recordingInfoText(item service.PeerHealth) string {
+// recordingInfoText builds a human-readable summary of the capture for a
+// peer card. The session is passed by value because the UI snapshot already
+// owns its own copy and the function is read-only.
+func recordingInfoText(session service.CaptureSession) string {
 	startedAt := ""
-	if item.RecordingStartedAt != nil {
-		startedAt = item.RecordingStartedAt.Format("15:04:05")
+	if session.StartedAt.Valid() {
+		startedAt = session.StartedAt.Time().Format("15:04:05")
 	}
-	text := fmt.Sprintf("REC %s | %s", item.RecordingScope, item.RecordingFile)
+	text := fmt.Sprintf("REC %s | %s", string(session.Scope), session.FilePath)
 	if startedAt != "" {
 		text += " | since " + startedAt
 	}
-	if item.RecordingDroppedEvents > 0 {
-		text += fmt.Sprintf(" | dropped %d", item.RecordingDroppedEvents)
+	if session.DroppedEvents > 0 {
+		text += fmt.Sprintf(" | dropped %d", session.DroppedEvents)
 	}
-	if item.RecordingError != "" {
-		text += " | err: " + item.RecordingError
+	if session.Error != "" {
+		text += " | err: " + session.Error
 	}
 	return text
+}
+
+// hasActiveCapture reports whether the capture-sessions map contains any
+// session that is still recording. Stopped entries (kept around for the
+// retention TTL so the user can see terminal diagnostics) do not trigger
+// the "stop all" banner.
+func hasActiveCapture(captures map[domain.ConnID]service.CaptureSession) bool {
+	for _, s := range captures {
+		if s.Active {
+			return true
+		}
+	}
+	return false
 }
 
 // formatBytes formats a byte count into a human-readable string (B, KB, MB, GB, TB).
@@ -1771,18 +2238,21 @@ var (
 // loadTrafficHistory fetches the full history from the metrics collector
 // and populates the local sample slices. Called when the tab opens and on
 // every ticker restart so reopening shows accurate data.
-// On any failure (RPC error, unmarshal error, nil collector) the cached
-// graph state is cleared to prevent rendering stale data from a previous
-// session or a pre-restart collector.
-func (c *ConsoleWindow) loadTrafficHistory() {
+// The provided context allows the caller to bound the RPC duration — a
+// hung fetchTrafficHistory is cancelled when the context expires.
+// Returns true when the RPC succeeded (even if the collector returned an
+// empty history), false on any failure (RPC error, unmarshal error, nil
+// collector, context cancellation). On failure the cached graph state is
+// cleared to prevent rendering stale data from a previous session.
+func (c *ConsoleWindow) loadTrafficHistory(ctx context.Context) bool {
 	if c.parent.cmdTable == nil {
 		c.resetTrafficState()
-		return
+		return false
 	}
-	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetchTrafficHistory"})
+	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetchTrafficHistory", Ctx: ctx})
 	if resp.Error != nil {
 		c.resetTrafficState()
-		return
+		return false
 	}
 	var frame struct {
 		TrafficHistory *struct {
@@ -1796,7 +2266,7 @@ func (c *ConsoleWindow) loadTrafficHistory() {
 	}
 	if err := json.Unmarshal(resp.Data, &frame); err != nil || frame.TrafficHistory == nil {
 		c.resetTrafficState()
-		return
+		return false
 	}
 
 	samples := frame.TrafficHistory.Samples
@@ -1822,6 +2292,7 @@ func (c *ConsoleWindow) loadTrafficHistory() {
 		c.trafficLoaded = false
 	}
 	c.mu.Unlock()
+	return true
 }
 
 // resetTrafficState clears all cached traffic graph data so the UI does not
@@ -1840,26 +2311,79 @@ func (c *ConsoleWindow) resetTrafficState() {
 // and invalidates the window. Reloads the full history from the collector
 // on every call so that reopening the tab shows accurate per-second data
 // instead of compressing the missed interval into a single spike.
-// Called from the UI goroutine (handleActions); the ticker goroutine
-// accesses trafficTicker under c.mu to avoid races.
+// Called from the UI goroutine (handleActions); all RPC work runs in the
+// background goroutine to avoid blocking the Gio event loop.
+//
+// The ticker is created only after the initial history load finishes so
+// that sampleTraffic() ticks cannot race with and be overwritten by a
+// slow loadTrafficHistory() response. A stopped sentinel ticker is
+// stored during the load phase to prevent concurrent clicks from
+// spawning a second goroutine. The history load has a 30-second timeout;
+// on timeout or failure the sentinel is cleared so the user can retry.
 func (c *ConsoleWindow) startTrafficTicker() {
 	c.mu.Lock()
 	if c.trafficTicker != nil {
 		c.mu.Unlock()
 		return
 	}
-	c.mu.Unlock()
-
-	// Always reload full history from the collector — the collector kept
-	// sampling while the tab was inactive, so we get accurate per-second data.
-	c.loadTrafficHistory()
-
-	c.mu.Lock()
-	ticker := time.NewTicker(1 * time.Second)
-	c.trafficTicker = ticker
+	// Sentinel: a stopped ticker is non-nil, so a second click while
+	// the history RPC is in flight hits the guard above and returns.
+	sentinel := time.NewTicker(24 * time.Hour)
+	sentinel.Stop()
+	c.trafficTicker = sentinel
 	c.mu.Unlock()
 
 	go func() {
+		// Reload full history from the collector in the background — the
+		// collector kept sampling while the tab was inactive, so we get
+		// accurate per-second data. Running this off the UI goroutine
+		// prevents blocking the Gio event loop on slow RPC calls.
+		//
+		// A 30-second timeout prevents a hung fetchTrafficHistory RPC
+		// from keeping the sentinel alive forever, which would block all
+		// future retry attempts when the user clicks the Traffic tab.
+		loadCtx, loadCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		loadOK := c.loadTrafficHistory(loadCtx)
+		loadCancel()
+		c.invalidateWindow()
+
+		// If the user navigated away while history was loading, clean up
+		// the sentinel and exit without starting the real ticker.
+		if c.currentTab() != consoleTabTraffic {
+			c.mu.Lock()
+			c.trafficTicker = nil
+			c.mu.Unlock()
+			return
+		}
+
+		// If the RPC failed or timed out, clear the sentinel so the
+		// user can retry by clicking the Traffic tab again.
+		// Note: loadOK is true even when the collector returned an empty
+		// history (trafficLoaded stays false in that case) — empty history
+		// is a valid response after a collector restart, not a failure.
+		if !loadOK {
+			c.mu.Lock()
+			c.trafficTicker = nil
+			c.mu.Unlock()
+			return
+		}
+
+		// Seed baseline synchronously when history is empty so the first
+		// ticker-driven sample produces a real delta instead of being
+		// consumed just to record the baseline. See docstring on
+		// seedTrafficBaselineIfNeeded for full rationale.
+		c.seedTrafficBaselineIfNeeded()
+
+		// History is loaded — now start the real 1-second ticker.
+		// No sampleTraffic() call could have run before this point other
+		// than the optional baseline seed above, which is idempotent: it
+		// records current counters and flips trafficLoaded to true so the
+		// next tick computes a real delta.
+		ticker := time.NewTicker(1 * time.Second)
+		c.mu.Lock()
+		c.trafficTicker = ticker
+		c.mu.Unlock()
+
 		for {
 			select {
 			case <-c.closed:
@@ -1926,6 +2450,33 @@ func (c *ConsoleWindow) sampleTraffic() {
 	c.trafficTotalRecv = recv
 	c.trafficLoaded = true
 	c.mu.Unlock()
+}
+
+// seedTrafficBaselineIfNeeded captures the current cumulative counters as the
+// delta baseline when no history was returned by the collector.
+//
+// loadTrafficHistory leaves trafficLoaded==false when the collector reports an
+// empty samples slice (e.g. right after a restart) so that the first
+// sampleTraffic call does not compute a bogus delta against stale zero totals.
+// Without this helper the first 1s ticker tick is consumed just to seed that
+// baseline (sampleTraffic guards delta computation behind trafficLoaded), so
+// the user sees totals populate instantly from fetchNetworkStats but graph
+// bars remain empty for one extra tick. Seeding here shifts the baseline-only
+// sample off the visible timeline, letting the first ticker-driven tick at
+// t+1s produce a real delta.
+//
+// Called from the history-load goroutine in startTrafficTicker before the
+// real 1s ticker is created; safe to call when trafficLoaded is already true
+// (no-op in that case).
+func (c *ConsoleWindow) seedTrafficBaselineIfNeeded() {
+	c.mu.RLock()
+	needBaseline := !c.trafficLoaded
+	c.mu.RUnlock()
+	if !needBaseline {
+		return
+	}
+	c.sampleTraffic()
+	c.invalidateWindow()
 }
 
 func (c *ConsoleWindow) layoutTrafficTab(gtx layout.Context) layout.Dimensions {

@@ -186,7 +186,7 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 		Capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
 	}
 	id, _ := svc.connIDFor(serverConn)
-	svc.rememberConnPeerAddr(id, hello)
+	svc.rememberConnPeerAddr(id, hello, "10.0.0.1:55555")
 
 	caps := pc.Capabilities()
 	if caps == nil {

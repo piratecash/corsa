@@ -3,6 +3,7 @@ package identity
 import (
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -48,6 +49,70 @@ type Identity struct {
 type storedIdentity struct {
 	PrivateKey    string `json:"private_key"`
 	BoxPrivateKey string `json:"box_private_key,omitempty"`
+}
+
+// Load reads an existing identity file at path. Unlike LoadOrCreate, it
+// never generates a new key pair — returns an error when the file is missing.
+func Load(path string) (*Identity, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read identity %s: %w", path, err)
+	}
+	id, err := decodeIdentity(data)
+	if err != nil {
+		return nil, err
+	}
+	// Re-save to upgrade the format (e.g. add box key if missing).
+	if err := save(path, id); err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
+// FromPrivateKeyBase64 restores an Identity from a base64-encoded Ed25519
+// private key string. The X25519 box key pair is derived deterministically
+// from the Ed25519 seed using HMAC-SHA256 with domain separation — the same
+// input always produces the same Identity. This is the primary way for SDK
+// consumers to supply identity without relying on file-based storage.
+func FromPrivateKeyBase64(privKeyBase64 string) (*Identity, error) {
+	privBytes, err := base64.StdEncoding.DecodeString(privKeyBase64)
+	if err != nil {
+		return nil, fmt.Errorf("decode private key base64: %w", err)
+	}
+	if len(privBytes) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid private key size: got %d, want %d", len(privBytes), ed25519.PrivateKeySize)
+	}
+	privateKey := ed25519.PrivateKey(privBytes)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+
+	boxPrivate, boxPublic, err := deriveBoxKeyPair(privateKey.Seed())
+	if err != nil {
+		return nil, err
+	}
+
+	return &Identity{
+		PrivateKey:    privateKey,
+		PublicKey:     publicKey,
+		BoxPrivateKey: boxPrivate,
+		BoxPublicKey:  boxPublic,
+		Address:       Fingerprint(publicKey),
+	}, nil
+}
+
+// deriveBoxKeyPair deterministically derives an X25519 key pair from an
+// Ed25519 seed. Uses HMAC-SHA256 with domain-separated key to produce
+// 32 bytes suitable for X25519 private key material.
+func deriveBoxKeyPair(seed []byte) (*ecdh.PrivateKey, []byte, error) {
+	mac := hmac.New(sha256.New, []byte("corsa-box-key-derivation-v1"))
+	mac.Write(seed)
+	derived := mac.Sum(nil) // 32 bytes
+
+	curve := ecdh.X25519()
+	boxPrivate, err := curve.NewPrivateKey(derived)
+	if err != nil {
+		return nil, nil, fmt.Errorf("derive box private key: %w", err)
+	}
+	return boxPrivate, boxPrivate.PublicKey().Bytes(), nil
 }
 
 func LoadOrCreate(path string) (*Identity, error) {
@@ -170,6 +235,12 @@ func VerifyPayload(address, publicKeyBase64 string, payload []byte, signatureBas
 
 func boxKeyBindingPayload(address, boxKeyBase64 string) []byte {
 	return []byte("corsa-boxkey-v1|" + address + "|" + boxKeyBase64)
+}
+
+// Save persists the identity to the given file path. The parent directory
+// is created automatically if it does not exist.
+func Save(path string, id *Identity) error {
+	return save(path, id)
 }
 
 func save(path string, id *Identity) error {

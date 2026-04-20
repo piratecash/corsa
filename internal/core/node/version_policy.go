@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 )
 
 // ---------------------------------------------------------------------------
@@ -229,12 +230,17 @@ func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 	}
 
 	s.versionPolicy.snapshot = domain.VersionPolicySnapshot{
-		UpdateAvailable:             updateAvailable,
-		UpdateReason:                reason,
+		UpdateAvailable:              updateAvailable,
+		UpdateReason:                 reason,
 		IncompatibleVersionReporters: reporterCount,
-		MaxObservedPeerBuild:        maxBuild,
-		MaxObservedPeerVersion:      maxPeerVersion,
+		MaxObservedPeerBuild:         maxBuild,
+		MaxObservedPeerVersion:       maxPeerVersion,
 	}
+
+	// Notify subscribers so the UI picks up version-policy changes without
+	// polling. Safe to call under s.mu — ebus uses its own mutex and async
+	// handlers run in separate goroutines.
+	s.eventBus.Publish(ebus.TopicVersionPolicyChanged, s.versionPolicy.snapshot)
 }
 
 // maybeRecomputeVersionPolicyPeriodic is the throttled repair path for

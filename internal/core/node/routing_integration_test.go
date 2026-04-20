@@ -3318,13 +3318,13 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	//   1. Call TickTTL() — expires primary, returns exposed identity
 	//   2. Build identities map
 	//   3. Trigger drain
-	exposed := svc.routingTable.TickTTL()
-	if len(exposed) != 1 || string(exposed[0]) != idTargetX {
-		t.Fatalf("expected TickTTL to expose [%s], got %v", idTargetX, exposed)
+	result := svc.routingTable.TickTTL()
+	if len(result.Exposed) != 1 || string(result.Exposed[0]) != idTargetX {
+		t.Fatalf("expected TickTTL to expose [%s], got %v", idTargetX, result.Exposed)
 	}
 
-	identities := make(map[domain.PeerIdentity]struct{}, len(exposed))
-	for _, id := range exposed {
+	identities := make(map[domain.PeerIdentity]struct{}, len(result.Exposed))
+	for _, id := range result.Exposed {
 		identities[domain.PeerIdentity(id)] = struct{}{}
 	}
 
@@ -3408,9 +3408,9 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 	// Advance past TTL.
 	current = now.Add(11 * time.Second)
 
-	exposed := svc.routingTable.TickTTL()
-	if len(exposed) != 0 {
-		t.Fatalf("no backup routes survive — expected no exposed identities, got %v", exposed)
+	result := svc.routingTable.TickTTL()
+	if len(result.Exposed) != 0 {
+		t.Fatalf("no backup routes survive — expected no exposed identities, got %v", result.Exposed)
 	}
 
 	// Pending should be untouched (no drain triggered).

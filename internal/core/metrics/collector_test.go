@@ -72,15 +72,79 @@ func TestCollectorCollectsSamples(t *testing.T) {
 	}
 
 	samples := frame.TrafficHistory.Samples
-	// First sample should have delta=0 (no previous).
-	if samples[0].BytesSentPS != 0 {
-		t.Errorf("expected first delta=0, got %d", samples[0].BytesSentPS)
+	// Without Seed, the first sample reports delta == totals because the
+	// baseline is zero and the collector is observing from first byte. This
+	// is intentional — the previous skip-on-first behavior silently dropped
+	// real bootstrap traffic. Callers attaching to an already-running system
+	// must Seed before CollectTrafficSample to suppress this initial spike.
+	if samples[0].BytesSentPS != 100 {
+		t.Errorf("expected first delta=100 (totals without Seed), got %d", samples[0].BytesSentPS)
+	}
+	if samples[0].BytesRecvPS != 200 {
+		t.Errorf("expected first BytesRecvPS=200, got %d", samples[0].BytesRecvPS)
 	}
 
 	// Last sample should reflect the updated source values.
 	lastSample := samples[len(samples)-1]
 	if lastSample.TotalSent != 500 {
 		t.Errorf("expected last TotalSent=500, got %d", lastSample.TotalSent)
+	}
+}
+
+func TestCollectorSeedSuppressesFirstSpike(t *testing.T) {
+	// Collector attaches to a running source whose counters are already
+	// non-zero. Seed captures the current totals as baseline; subsequent
+	// Record produces a real delta rather than dumping the pre-attach
+	// cumulative as a single-second spike.
+	sent := int64(50_000)
+	recv := int64(30_000)
+	source := newMutableMockTrafficSource(t, &sent, &recv)
+	collector := metrics.NewCollector(source)
+
+	collector.Seed()
+
+	// No traffic flowed between Seed and the first Record.
+	collector.CollectTrafficSample()
+
+	// New traffic flows between first and second Record.
+	sent = 50_400
+	recv = 30_150
+	collector.CollectTrafficSample()
+
+	frame := collector.TrafficSnapshot()
+	samples := frame.TrafficHistory.Samples
+	if len(samples) != 2 {
+		t.Fatalf("expected 2 samples, got %d", len(samples))
+	}
+
+	// First sample after Seed: no new traffic → delta 0/0.
+	if samples[0].BytesSentPS != 0 || samples[0].BytesRecvPS != 0 {
+		t.Errorf("expected first delta=0/0 after Seed, got sent=%d recv=%d",
+			samples[0].BytesSentPS, samples[0].BytesRecvPS)
+	}
+
+	// Second sample reflects the 400/150 that flowed between ticks.
+	if samples[1].BytesSentPS != 400 {
+		t.Errorf("expected second BytesSentPS=400, got %d", samples[1].BytesSentPS)
+	}
+	if samples[1].BytesRecvPS != 150 {
+		t.Errorf("expected second BytesRecvPS=150, got %d", samples[1].BytesRecvPS)
+	}
+}
+
+func TestCollectorSeedWithNilStatsLeavesBaselineAtZero(t *testing.T) {
+	// Seed tolerates a source that returns nil NetworkStats (e.g. collector
+	// wired up before the source is ready) — baseline stays at zero. The
+	// first Record then reports delta==totals, which is safe because zero
+	// baseline matches the "no pre-existing traffic" assumption.
+	source := newNilStatsSource(t)
+	collector := metrics.NewCollector(source)
+
+	collector.Seed() // must not panic and must not alter the empty buffer
+
+	frame := collector.TrafficSnapshot()
+	if frame.TrafficHistory.Count != 0 {
+		t.Errorf("Seed must not append a sample, got %d", frame.TrafficHistory.Count)
 	}
 }
 

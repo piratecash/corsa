@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -22,7 +23,7 @@ const (
 	UIEventMessagesUpdated UIEventType = iota + 1
 	// UIEventSidebarUpdated — peers/peerOrder/unread/preview changed.
 	UIEventSidebarUpdated
-	// UIEventStatusUpdated — nodeStatus changed (health poll).
+	// UIEventStatusUpdated — node status changed (monitor update or health poll).
 	UIEventStatusUpdated
 	// UIEventBeep — play notification sound for every incoming DM (sender ≠ us),
 	// regardless of which chat is active. Emitted from all three code paths in
@@ -53,11 +54,19 @@ type RouterSnapshot struct {
 	NodeStatus     NodeStatus
 	SendStatus     string
 	MyAddress      domain.PeerIdentity
+
+	// Generation is a monotonically increasing counter bumped on every
+	// state mutation inside DMRouter. UI-side caches can compare this
+	// single value instead of sampling individual fields — a generation
+	// change guarantees that at least one piece of state differs.
+	Generation uint64
 }
 
 type DMRouter struct {
-	client     *DesktopClient
-	fileBridge *FileTransferBridge
+	client        *DesktopClient
+	fileBridge    *FileTransferBridge
+	eventBus      *ebus.Bus
+	statusMonitor NodeStatusProvider
 
 	mu               sync.RWMutex
 	activePeer       domain.PeerIdentity
@@ -66,7 +75,6 @@ type DMRouter struct {
 	peerOrder        []domain.PeerIdentity
 	activeMessages   []DirectMessage
 	cache            *ConversationCache
-	nodeStatus       NodeStatus
 	sendStatus       string
 	seenMessageIDs   map[string]struct{}
 	peerGen          map[domain.PeerIdentity]uint64 // bumped by RemovePeer; goroutines compare to detect stale sends
@@ -74,15 +82,38 @@ type DMRouter struct {
 	previewsSeeded   bool // true after seedPreviews() successfully set unread counts from SQL
 	replayingStartup bool // true during buffered-event replay; suppresses Unread++ in updateSidebarFromEvent
 
+	// startupComplete gates ebus message/receipt handlers. While false,
+	// events are buffered in startupEventBuf. Set to true after runStartup
+	// finishes replaying buffered events — all subsequent ebus events are
+	// processed as live.
+	startupComplete bool
+	startupEventBuf []protocol.LocalChangeEvent
+	startupDropped  int
+
+	// snapGen is a monotonic counter bumped inside notify() under r.mu.Lock.
+	// Each generation corresponds to a fresh snapshot stored in snapCache.
+	// The UI goroutine (via Snapshot()) reads snapCache lock-free — it never
+	// acquires r.mu, so writers cannot starve the UI.
+	snapGen   atomic.Uint64
+	snapCache atomic.Pointer[routerSnapshotCache]
+
 	uiEvents        chan UIEvent
 	uiOverflowCount atomic.Int64  // number of active retry goroutines in notify()
-	startupDone     chan struct{} // closed after initializeFromDB completes; gates event listener
+	startupDone     chan struct{} // closed after runStartup completes; used by external waiters
 
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
 	pendingScrollToEnd   bool
 	pendingClearEditor   bool
 	pendingClearReply    bool
 	pendingRecipientText domain.PeerIdentity
+}
+
+// routerSnapshotCache holds a pre-built snapshot and the generation at which
+// it was captured. Only the UI goroutine reads and writes the atomic pointer,
+// so no additional synchronization is needed between snapshot consumers.
+type routerSnapshotCache struct {
+	gen  uint64
+	snap RouterSnapshot
 }
 
 // PendingActions holds deferred widget mutations that must be applied
@@ -94,10 +125,12 @@ type PendingActions struct {
 	RecipientText domain.PeerIdentity
 }
 
-func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge) *DMRouter {
-	return &DMRouter{
+func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus *ebus.Bus, statusMonitor NodeStatusProvider) *DMRouter {
+	r := &DMRouter{
 		client:         client,
 		fileBridge:     fileBridge,
+		eventBus:       eventBus,
+		statusMonitor:  statusMonitor,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
@@ -106,34 +139,36 @@ func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge) *DMRoute
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    make(chan struct{}),
 	}
+	// Seed snapCache so Snapshot() returns a valid (though minimal) state
+	// immediately. Without this, the first frames after Start() render an
+	// all-zero RouterSnapshot until runStartup completes asynchronously.
+	r.snapCache.Store(&routerSnapshotCache{
+		gen:  0,
+		snap: r.buildSnapshotLocked(0),
+	})
+	return r
 }
 
 func (r *DMRouter) Subscribe() <-chan UIEvent {
 	return r.uiEvents
 }
 
-// Snapshot is safe to call from the UI goroutine at any time.
+// Snapshot returns the latest immutable state snapshot. Completely
+// lock-free — the snapshot is built by writers (under their Lock hold)
+// and stored via atomic.Pointer, so the UI goroutine never competes
+// for r.mu. This eliminates the RWMutex writer-preference starvation
+// that caused permanent UI freezes during ebus event bursts.
+//
+// CacheReady is recomputed on every call because ConversationCache
+// state is guarded by its own mutex, independent of DMRouter mutations.
 func (r *DMRouter) Snapshot() RouterSnapshot {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	peersCopy := make(map[domain.PeerIdentity]*RouterPeerState, len(r.peers))
-	for k, v := range r.peers {
-		clone := *v
-		peersCopy[k] = &clone
+	cached := r.snapCache.Load()
+	if cached == nil {
+		return RouterSnapshot{}
 	}
-
-	return RouterSnapshot{
-		ActivePeer:     r.activePeer,
-		PeerClicked:    r.peerClicked,
-		Peers:          peersCopy,
-		PeerOrder:      append([]domain.PeerIdentity(nil), r.peerOrder...),
-		ActiveMessages: append([]DirectMessage(nil), r.activeMessages...),
-		CacheReady:     r.activePeer != "" && r.cache.MatchesPeer(r.activePeer),
-		NodeStatus:     r.nodeStatus,
-		SendStatus:     r.sendStatus,
-		MyAddress:      r.client.Address(),
-	}
+	snap := cached.snap
+	snap.CacheReady = snap.ActivePeer != "" && r.cache.MatchesPeer(snap.ActivePeer)
+	return snap
 }
 
 func (r *DMRouter) ConsumePendingActions() PendingActions {
@@ -259,7 +294,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 	gen := r.peerGen[to]
 	r.mu.RUnlock()
 
-	r.setSendStatus("sending…")
+	r.setSendStatusNotify("sending…")
 
 	go func() {
 		defer recoverLog("SendMessage")
@@ -283,6 +318,10 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 			r.sendStatus = "send failed: " + err.Error()
 			r.mu.Unlock()
 			r.notify(UIEventStatusUpdated)
+			r.eventBus.Publish(ebus.TopicMessageSendFailed, ebus.MessageSendFailedResult{
+				To:  to,
+				Err: err,
+			})
 			return
 		}
 
@@ -310,6 +349,11 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 
 		r.notify(UIEventMessagesUpdated)
 		r.notify(UIEventSidebarUpdated)
+		r.eventBus.Publish(ebus.TopicMessageSent, ebus.MessageSentResult{
+			To:      to,
+			Body:    msg.Body,
+			ReplyTo: msg.ReplyTo,
+		})
 	}()
 }
 
@@ -328,7 +372,7 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 	gen := r.peerGen[to]
 	r.mu.RUnlock()
 
-	r.setSendStatus("sending…")
+	r.setSendStatusNotify("sending…")
 
 	go func() {
 		defer recoverLog("SendFileAnnounce")
@@ -342,6 +386,10 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 				onAsyncFailure()
 			}
 			r.setSendStatusNotify("file announce failed: " + err.Error())
+			r.eventBus.Publish(ebus.TopicFileSendFailed, ebus.FileSendFailedResult{
+				To:  to,
+				Err: err,
+			})
 			return
 		}
 
@@ -357,6 +405,11 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 				onAsyncFailure()
 			}
 			r.setSendStatusNotify("file announce cancelled: peer removed")
+			r.eventBus.Publish(ebus.TopicFileSendFailed, ebus.FileSendFailedResult{
+				To:     to,
+				FileID: result.FileID,
+				Err:    fmt.Errorf("peer removed during in-flight file announce"),
+			})
 			log.Info().
 				Str("peer", string(to)).
 				Str("file_id", string(result.FileID)).
@@ -385,6 +438,10 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 
 		r.notify(UIEventMessagesUpdated)
 		r.notify(UIEventSidebarUpdated)
+		r.eventBus.Publish(ebus.TopicFileSent, ebus.FileSentResult{
+			To:     to,
+			FileID: result.FileID,
+		})
 	}()
 
 	return nil
@@ -429,7 +486,14 @@ func (r *DMRouter) MyAddress() domain.PeerIdentity {
 }
 
 func (r *DMRouter) SetSendStatus(s string) {
-	r.setSendStatus(s)
+	r.setSendStatusNotify(s)
+}
+
+// NotifyStatusChanged is called by NodeStatusMonitor when network state
+// changes. It rebuilds the snapshot and emits UIEventStatusUpdated so
+// the UI picks up the new NodeStatus.
+func (r *DMRouter) NotifyStatusChanged() {
+	r.notify(UIEventStatusUpdated)
 }
 
 // RemovePeer deletes an identity from the sidebar, the node's trust store,
@@ -503,151 +567,87 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	return wasActive, nil
 }
 
-// Start launches three background goroutines:
-// 1. Startup (initializeFromDB)
-// 2. Event listener (handleEvent)
-// 3. Health ticker (pollHealth)
+// Start launches background goroutines and subscribes to DM-specific
+// ebus events (messages, receipts). Network-layer events (peer health,
+// aggregate status, contacts, identities) are handled by the
+// NodeStatusMonitor — DMRouter does not subscribe to them.
 func (r *DMRouter) Start() {
-	// 1. Startup: load previews, auto-select first peer, run initial pollHealth.
+	// 1. Subscribe to DM-specific ebus events.
+	r.subscribeEvents()
+
+	// 2. Startup: load previews, auto-select first peer, seed the monitor.
 	go r.runStartup()
-
-	// 2. Event listener — drains the subscription channel immediately to
-	//    prevent the node's emitLocalChange() from dropping events.
-	events, cancel := r.client.SubscribeLocalChanges()
-	go r.runEventListener(events, cancel)
-
-	// 3. Periodic health ticker (supplements the eager call in initializeFromDB).
-	//    Waits for startupDone before the first tick so that pollHealth
-	//    (which calls repairUnreadFromHeaders) doesn't race with the
-	//    buffered-event replay and double-count unread messages.
-	go func() {
-		<-r.startupDone
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			r.safePollHealth()
-		}
-	}()
 }
 
-// runStartup closes startupDone in defer so it fires even on panic —
-// without this the event listener would stay blocked forever.
+// runStartup loads initial data from the database and then replays any
+// message/receipt events that arrived via ebus during initialization.
+// Buffered events are replayed under replayingStartup=true to suppress
+// Unread++ (seedPreviews already loaded correct counts from SQL). Events
+// that arrive during replay are drained as live (replayingStartup=false).
 func (r *DMRouter) runStartup() {
 	defer close(r.startupDone)
 	defer recoverLog("initializeFromDB")
 	r.initializeFromDB()
+
+	// Phase 1: replay events buffered during initializeFromDB under
+	// replayingStartup=true (these are pre-snapshot, suppress Unread++).
+	r.mu.Lock()
+	r.replayingStartup = true
+	buf := r.startupEventBuf
+	r.startupEventBuf = nil
+	dropped := r.startupDropped
+	r.startupDropped = 0
+	r.mu.Unlock()
+
+	for _, ev := range buf {
+		r.safeHandleEvent(ev)
+	}
+
+	if dropped > 0 {
+		log.Warn().Int("dropped", dropped).Msg("startup ebus buffer overflow: some events dropped, UI will reload from chatlog")
+	}
+
+	// Phase 2: switch to live mode. Any events that arrived during Phase 1
+	// replay are drained as live (Unread++ and UIEventBeep enabled).
+	r.mu.Lock()
+	r.replayingStartup = false
+	r.startupComplete = true
+	remaining := r.startupEventBuf
+	r.startupEventBuf = nil
+	droppedLive := r.startupDropped
+	r.startupDropped = 0
+	r.mu.Unlock()
+
+	for _, ev := range remaining {
+		r.safeHandleEvent(ev)
+	}
+
+	if droppedLive > 0 {
+		log.Warn().Int("dropped", droppedLive).Msg("startup ebus live buffer overflow: some events dropped, UI will reload from chatlog")
+	}
+
 	r.notify(UIEventMessagesUpdated)
 	r.notify(UIEventSidebarUpdated)
 }
 
-// runEventListener buffers events before startup completes to prevent the node's
-// 16-slot buffer from overflowing. Events are buffered in a slice and replayed
-// once startupDone closes, preventing resetIdentityState() from wiping
-// already-applied event-driven updates.
-func (r *DMRouter) runEventListener(events <-chan protocol.LocalChangeEvent, cancel func()) {
-	defer cancel()
-
-	// Cap buffer at maxStartupBuf to prevent unbounded memory growth
-	// (each LocalChangeEvent may carry full encrypted Body).
-	// Excess events are dropped; UI reload picks up missed messages from chatlog.
-	const maxStartupBuf = 256
-	var buf []protocol.LocalChangeEvent
-	dropped := 0
-
-	for {
-		select {
-		case <-r.startupDone:
-			// Replay buffered events, then switch to live processing.
-			r.replayAndListen(buf, dropped, events)
-			return
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
-			if len(buf) < maxStartupBuf {
-				buf = append(buf, event)
-			} else {
-				dropped++
-			}
-		}
-	}
-}
-
-// replayAndListen replays buffered startup events and processes live events.
-// Extracted from runEventListener so buffered slice goes out of scope for GC.
-func (r *DMRouter) replayAndListen(buf []protocol.LocalChangeEvent, dropped int, events <-chan protocol.LocalChangeEvent) {
-	// During replay, suppress Unread++ in updateSidebarFromEvent because
-	// seedPreviews() already loaded the correct unread counts from SQL.
-	// Without this, every buffered incoming-message event would double-count.
+// onEbusLocalChange handles TopicMessageNew and TopicReceiptUpdated events
+// from ebus. Before startup completes, events are buffered (up to 256) and
+// replayed by runStartup. After startup, events are processed immediately.
+func (r *DMRouter) onEbusLocalChange(event protocol.LocalChangeEvent) {
 	r.mu.Lock()
-	r.replayingStartup = true
+	if !r.startupComplete {
+		const maxStartupBuf = 256
+		if len(r.startupEventBuf) < maxStartupBuf {
+			r.startupEventBuf = append(r.startupEventBuf, event)
+		} else {
+			r.startupDropped++
+		}
+		r.mu.Unlock()
+		return
+	}
 	r.mu.Unlock()
 
-	// Buffer live events that arrive during replay to prevent node-side
-	// 16-slot buffer from overflowing. These events arrived AFTER seedPreviews()
-	// SQL snapshot and must be processed with replayingStartup=false to trigger
-	// Unread++ and UIEventBeep. Cap buffer to prevent unbounded memory growth.
-	const maxReplayLiveBuf = 256
-	var pendingLive []protocol.LocalChangeEvent
-	droppedLive := 0
-
-	for _, ev := range buf {
-		r.safeHandleEvent(ev)
-		// Drain pending live events into the buffer so the node-side
-		// subscription channel (capacity 16) doesn't overflow while
-		// we're busy replaying.
-		pendingLive, droppedLive = r.bufferPendingLiveEvents(events, pendingLive, maxReplayLiveBuf, droppedLive)
-	}
-	if dropped > 0 {
-		log.Warn().Int("dropped", dropped).Msg("startup buffer overflow: some events were dropped, UI will reload from chatlog")
-		r.notify(UIEventMessagesUpdated)
-		r.notify(UIEventSidebarUpdated)
-	}
-	if droppedLive > 0 {
-		log.Warn().Int("dropped", droppedLive).Msg("replay live buffer overflow: some live events were dropped, UI will reload from chatlog")
-		r.notify(UIEventMessagesUpdated)
-		r.notify(UIEventSidebarUpdated)
-	}
-
-	// Reset replayingStartup BEFORE processing any live events.
-	// Buffered startup events (buf) were already handled above under
-	// replayingStartup=true — they are pre-snapshot and correctly
-	// suppressed.  Everything below is post-snapshot and must be
-	// treated as live.
-	r.mu.Lock()
-	r.replayingStartup = false
-	r.mu.Unlock()
-
-	// Process live events that were drained during replay — now with
-	// replayingStartup=false so they correctly trigger Unread++ and
-	// UIEventBeep.
-	for _, ev := range pendingLive {
-		r.safeHandleEvent(ev)
-	}
-
-	for event := range events {
-		r.safeHandleEvent(event)
-	}
-}
-
-// bufferPendingLiveEvents buffers queued events without processing them,
-// preventing live events from being incorrectly suppressed under replayingStartup.
-func (r *DMRouter) bufferPendingLiveEvents(events <-chan protocol.LocalChangeEvent, buf []protocol.LocalChangeEvent, maxBuf int, dropped int) ([]protocol.LocalChangeEvent, int) {
-	for {
-		select {
-		case ev, ok := <-events:
-			if !ok {
-				return buf, dropped
-			}
-			if len(buf) < maxBuf {
-				buf = append(buf, ev)
-			} else {
-				dropped++
-			}
-		default:
-			return buf, dropped
-		}
-	}
+	r.safeHandleEvent(event)
 }
 
 func (r *DMRouter) safeHandleEvent(event protocol.LocalChangeEvent) {
@@ -655,9 +655,24 @@ func (r *DMRouter) safeHandleEvent(event protocol.LocalChangeEvent) {
 	r.handleEvent(event)
 }
 
-func (r *DMRouter) safePollHealth() {
-	defer recoverLog("pollHealth")
-	r.pollHealth()
+// subscribeEvents wires up DM-specific ebus handlers. Network-layer
+// events (peer health, aggregate status, contacts, identities) are
+// handled by NodeStatusMonitor — DMRouter only subscribes to message
+// and receipt topics.
+func (r *DMRouter) subscribeEvents() {
+	if r.eventBus == nil {
+		return
+	}
+
+	// New direct message stored in chatlog.
+	r.eventBus.Subscribe(ebus.TopicMessageNew, func(event protocol.LocalChangeEvent) {
+		r.onEbusLocalChange(event)
+	})
+
+	// Delivery receipt status changed.
+	r.eventBus.Subscribe(ebus.TopicReceiptUpdated, func(event protocol.LocalChangeEvent) {
+		r.onEbusLocalChange(event)
+	})
 }
 
 func (r *DMRouter) handleEvent(event protocol.LocalChangeEvent) {
@@ -883,13 +898,9 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 		return
 	}
 
-	deliveredAt := event.DeliveredAt
-	var deliveredPtr *time.Time
-	if !deliveredAt.IsZero() {
-		deliveredPtr = &deliveredAt
-	}
+	deliveredAt := domain.TimeFromNonZero(event.DeliveredAt)
 
-	if r.cache.UpdateStatus(event.MessageID, event.Status, deliveredPtr) {
+	if r.cache.UpdateStatus(event.MessageID, event.Status, deliveredAt) {
 		r.mu.Lock()
 		r.activeMessages = r.cache.Messages()
 		r.mu.Unlock()
@@ -991,26 +1002,45 @@ func (r *DMRouter) resetIdentityState() {
 	r.pendingRecipientText = ""
 	r.mu.Unlock()
 
+	// Clear the monitor so the next FetchAndSeed seeds fresh data from
+	// ProbeNode instead of preserving stale state from a previous session.
+	if r.statusMonitor != nil {
+		r.statusMonitor.Reset()
+	}
+
 	r.cache.Load("", nil)
 }
 
+// pollHealth seeds the NodeStatusMonitor from a ProbeNode RPC and
+// performs DM-specific repairs (unread badges, delivery receipts).
+// Called once during startup (initializeFromDB).
+//
+// Network-layer fields (PeerHealth, AggregateStatus, Contacts, etc.)
+// are delegated to NodeStatusMonitor.FetchAndSeed which handles
+// ebus-aware merging. DMRouter only processes DM-specific data
+// (DMHeaders, DeliveryReceipts) from the probe result.
 func (r *DMRouter) pollHealth() {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	status := r.client.ProbeNode(ctx)
-	cancel()
+	ctx := context.Background()
+
+	var status NodeStatus
+	if m, ok := r.statusMonitor.(*NodeStatusMonitor); ok {
+		status = m.FetchAndSeed(ctx)
+	} else {
+		// Test doubles / mock providers — fall back to direct probe.
+		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		status = r.client.ProbeNode(probeCtx)
+		cancel()
+	}
 
 	r.repairUnreadFromHeaders(status)
 
 	r.mu.RLock()
 	activePeer := r.activePeer
 	r.mu.RUnlock()
+
 	if activePeer != "" {
 		r.applyReceiptRepair(activePeer, status.DeliveryReceipts)
 	}
-
-	r.mu.Lock()
-	r.nodeStatus = status
-	r.mu.Unlock()
 
 	r.notify(UIEventStatusUpdated)
 }
@@ -1112,11 +1142,7 @@ func (r *DMRouter) applyReceiptRepair(activePeer domain.PeerIdentity, receipts [
 			continue
 		}
 
-		var deliveredPtr *time.Time
-		if !rc.DeliveredAt.IsZero() {
-			deliveredPtr = &rc.DeliveredAt
-		}
-		if r.cache.UpdateStatus(rc.MessageID, rc.Status, deliveredPtr) {
+		if r.cache.UpdateStatus(rc.MessageID, rc.Status, domain.TimeFromNonZero(rc.DeliveredAt)) {
 			updated = true
 		}
 	}
@@ -1159,8 +1185,8 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 		}
 		r.ensurePeerLocked(p.PeerAddress)
 		existing := r.peers[p.PeerAddress]
-		// Skip if the event-path already delivered fresher data for this peer
-		// (race: SubscribeLocalChanges runs in parallel with initializeFromDB).
+		// Skip if the ebus event-path already delivered fresher data for this
+		// peer (ebus handlers run in parallel with initializeFromDB).
 		if !existing.Preview.Timestamp.IsZero() && !existing.Preview.Timestamp.Before(p.Timestamp) {
 			fresherPeers[p.PeerAddress] = struct{}{}
 			continue
@@ -1364,8 +1390,15 @@ func (r *DMRouter) refreshPreviewForPeer(peer domain.PeerIdentity, messageIDs []
 func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	me := r.client.Address()
 
+	// ---------------------------------------------------------------
+	// Phase 1 (short lock): read mutable flags, snapshot seenMessageIDs.
+	// The write lock is released before the O(N) header scan so that
+	// Snapshot() callers (UI goroutine, 60 FPS) are not blocked for the
+	// duration of the full iteration. Previously the entire loop ran
+	// under r.mu.Lock, causing writer starvation and UI freezes.
+	// ---------------------------------------------------------------
 	r.mu.Lock()
-	selected := r.activePeer // already domain.PeerIdentity
+	selected := r.activePeer
 
 	firstSync := !r.initialSynced
 	if firstSync {
@@ -1378,57 +1411,107 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	// normally — there is nothing to double-count.
 	skipUnreadCount := firstSync && r.previewsSeeded
 
-	hasNew := false
-	needReload := false
-	// Track which message IDs belong to each peer for rollback on
-	// refreshPreviewForPeer failure.
-	peerMessageIDs := make(map[domain.PeerIdentity][]string)
-	var reloadMessageIDs []string // IDs that triggered needReload for rollback on failure
+	// Copy seenMessageIDs keys for the lock-free classification pass.
+	// The copy is O(len(seenMessageIDs)) but is bounded by the total
+	// number of ever-seen messages and runs once per 5-second poll —
+	// far cheaper than holding the write lock during the header scan.
+	seenCopy := make(map[string]struct{}, len(r.seenMessageIDs))
+	for id := range r.seenMessageIDs {
+		seenCopy[id] = struct{}{}
+	}
+	r.mu.Unlock()
+
+	// ---------------------------------------------------------------
+	// Phase 2 (lock-free): classify each header into new/seen using
+	// the snapshot. cache.HasMessage has its own internal lock.
+	// ---------------------------------------------------------------
+	type headerAction struct {
+		peer            domain.PeerIdentity
+		id              string
+		isIncoming      bool
+		incrementUnread bool
+		triggerReload   bool
+		refreshSidebar  bool
+		triggerBeep     bool
+	}
+	var actions []headerAction
 
 	for _, header := range status.DMHeaders {
-		if _, ok := r.seenMessageIDs[header.ID]; ok {
+		if _, ok := seenCopy[header.ID]; ok {
 			continue
 		}
 
 		var peer domain.PeerIdentity
+		isIncoming := false
+		triggerBeep := false
 		if header.Sender == me {
 			peer = normalizePeer(header.Recipient)
 		} else if header.Recipient == me {
 			peer = normalizePeer(header.Sender)
-			r.ensurePeerLocked(peer)
-			// Only beep for non-active peers. Active peer messages are
-			// already visible on screen — beeping for them is wrong,
-			// especially on retry after a transient preview failure.
+			isIncoming = true
 			if !firstSync && peer != selected {
-				hasNew = true
+				triggerBeep = true
 			}
 		} else {
 			continue
 		}
 
-		r.seenMessageIDs[header.ID] = struct{}{}
+		incrementUnread := isIncoming && peer != selected && !skipUnreadCount
+		triggerReload := peer == selected && selected != "" && !r.cache.HasMessage(header.ID)
+		refreshSidebar := peer != "" && peer != selected
 
-		if peer != selected && header.Sender != me && header.Recipient == me {
-			r.ensurePeerLocked(peer)
-			if !skipUnreadCount {
-				r.peers[peer].Unread++
-				r.promotePeerLocked(peer)
-			}
+		actions = append(actions, headerAction{
+			peer:            peer,
+			id:              header.ID,
+			isIncoming:      isIncoming,
+			incrementUnread: incrementUnread,
+			triggerReload:   triggerReload,
+			refreshSidebar:  refreshSidebar,
+			triggerBeep:     triggerBeep,
+		})
+	}
+
+	// ---------------------------------------------------------------
+	// Phase 3 (short lock): apply classified mutations.
+	// ---------------------------------------------------------------
+	hasNew := false
+	needReload := false
+	peerMessageIDs := make(map[domain.PeerIdentity][]string)
+	var reloadMessageIDs []string
+
+	r.mu.Lock()
+	for _, a := range actions {
+		// Re-check under lock: another goroutine may have inserted the
+		// same ID between Phase 1 snapshot and now.
+		if _, ok := r.seenMessageIDs[a.id]; ok {
+			continue
+		}
+		r.seenMessageIDs[a.id] = struct{}{}
+
+		if a.isIncoming {
+			r.ensurePeerLocked(a.peer)
 		}
 
-		if peer == selected && selected != "" && !r.cache.HasMessage(header.ID) {
+		if a.triggerBeep {
+			hasNew = true
+		}
+		if a.incrementUnread {
+			r.ensurePeerLocked(a.peer)
+			r.peers[a.peer].Unread++
+			r.promotePeerLocked(a.peer)
+		}
+		if a.triggerReload {
 			needReload = true
-			reloadMessageIDs = append(reloadMessageIDs, header.ID)
+			reloadMessageIDs = append(reloadMessageIDs, a.id)
 		}
-
 		// Skip the active peer from sidebar-only preview refresh — its
 		// messages are handled by the loadConversation path below, which
 		// has its own rollback via reloadMessageIDs. Running both in
 		// parallel would cause refreshPreviewForPeer to evict IDs that
 		// loadConversation already recovered, triggering duplicate
 		// rediscovery and spurious UIEventBeep on the next health poll.
-		if peer != "" && peer != selected {
-			peerMessageIDs[peer] = append(peerMessageIDs[peer], header.ID)
+		if a.refreshSidebar {
+			peerMessageIDs[a.peer] = append(peerMessageIDs[a.peer], a.id)
 		}
 	}
 	r.mu.Unlock()
@@ -1533,11 +1616,128 @@ func (r *DMRouter) setSendStatusNotify(s string) {
 	r.notify(UIEventStatusUpdated)
 }
 
-// notify sends a UIEvent without blocking. If the channel is full, a
-// per-event background retry with exponential backoff (50ms → 100ms → 200ms)
-// ensures the event is eventually delivered. Atomic counter caps concurrent
-// retry goroutines at 8 to prevent accumulation during sustained bursts.
+// buildSnapshotLocked constructs an immutable RouterSnapshot from the
+// current mutable state. Must be called under r.mu (read or write lock).
+//
+// The snapshot is a deep copy — all maps, slices, and pointers in
+// NodeStatus are cloned so the UI goroutine can read the snapshot
+// without any lock, even while ebus handlers mutate the live state.
+func (r *DMRouter) buildSnapshotLocked(gen uint64) RouterSnapshot {
+	peersCopy := make(map[domain.PeerIdentity]*RouterPeerState, len(r.peers))
+	for k, v := range r.peers {
+		clone := *v
+		peersCopy[k] = &clone
+	}
+
+	// NodeStatus is owned by the monitor; reading it here avoids
+	// duplicating the data inside DMRouter. The monitor returns a
+	// deep copy, so the snapshot is fully immutable.
+	var ns NodeStatus
+	if r.statusMonitor != nil {
+		ns = r.statusMonitor.NodeStatus()
+	}
+
+	return RouterSnapshot{
+		Generation:     gen,
+		ActivePeer:     r.activePeer,
+		PeerClicked:    r.peerClicked,
+		Peers:          peersCopy,
+		PeerOrder:      append([]domain.PeerIdentity(nil), r.peerOrder...),
+		ActiveMessages: append([]DirectMessage(nil), r.activeMessages...),
+		CacheReady:     r.activePeer != "" && r.cache.MatchesPeer(r.activePeer),
+		NodeStatus:     ns,
+		SendStatus:     r.sendStatus,
+		MyAddress:      r.client.Address(),
+	}
+}
+
+// deepCopyNodeStatus creates an independent copy of NodeStatus with all
+// reference types (maps, slices, the AggregateStatus pointer) cloned.
+// Without this, the lock-free Snapshot() path would expose live maps to
+// the UI while ebus handlers mutate them under r.mu — a concurrent map
+// read/write panic.
+//
+// Timestamp optionality is expressed via domain.OptionalTime (a value
+// type) in every snapshot-visible struct (PeerHealth, CaptureSession,
+// DirectMessage, PendingMessage). Copying those structs by value is a
+// true deep copy of the timestamp state — there are no shared *time.Time
+// pointers that could alias monitor-owned memory. New optional-time
+// fields added to these structs need no plumbing change here.
+func deepCopyNodeStatus(src NodeStatus) NodeStatus {
+	dst := src // shallow copy of all scalar fields
+
+	// Maps — must be cloned to avoid aliasing live state. Values are
+	// value-types (or value-type snapshots like CaptureSession), so the
+	// per-entry assignment is a deep copy.
+	if src.Contacts != nil {
+		dst.Contacts = make(map[string]Contact, len(src.Contacts))
+		for k, v := range src.Contacts {
+			dst.Contacts[k] = v
+		}
+	}
+	if src.ReachableIDs != nil {
+		dst.ReachableIDs = make(map[domain.PeerIdentity]bool, len(src.ReachableIDs))
+		for k, v := range src.ReachableIDs {
+			dst.ReachableIDs[k] = v
+		}
+	}
+	if src.CaptureSessions != nil {
+		dst.CaptureSessions = make(map[domain.ConnID]CaptureSession, len(src.CaptureSessions))
+		for k, v := range src.CaptureSessions {
+			dst.CaptureSessions[k] = v
+		}
+	}
+
+	// Pointer — clone the pointed-to struct. AggregateStatus is the only
+	// pointer field that remains intentionally heap-bound (nil = "node
+	// does not support this command yet").
+	if src.AggregateStatus != nil {
+		clone := *src.AggregateStatus
+		dst.AggregateStatus = &clone
+	}
+
+	// Slices — append(nil, src...) creates an independent backing array.
+	// All element types are value types (domain.OptionalTime et al.), so
+	// the element copy is complete.
+	dst.Services = append([]string(nil), src.Services...)
+	dst.Capabilities = append([]string(nil), src.Capabilities...)
+	dst.KnownIDs = append([]string(nil), src.KnownIDs...)
+	dst.Peers = append([]string(nil), src.Peers...)
+	dst.Messages = append([]string(nil), src.Messages...)
+	dst.MessageIDs = append([]string(nil), src.MessageIDs...)
+	dst.DirectMessageIDs = append([]string(nil), src.DirectMessageIDs...)
+	dst.Gazeta = append([]string(nil), src.Gazeta...)
+	dst.PeerHealth = append([]PeerHealth(nil), src.PeerHealth...)
+	dst.DirectMessages = append([]DirectMessage(nil), src.DirectMessages...)
+	dst.DMHeaders = append([]DMHeader(nil), src.DMHeaders...)
+	dst.PendingMessages = append([]PendingMessage(nil), src.PendingMessages...)
+	dst.DeliveryReceipts = append([]DeliveryReceipt(nil), src.DeliveryReceipts...)
+
+	return dst
+}
+
+// notify builds a fresh snapshot under Lock, stores it atomically, and
+// sends a UIEvent. The Lock acquisition is safe because every call site
+// invokes notify() AFTER releasing r.mu — there is no nested-lock risk.
+//
+// This design makes Snapshot() completely lock-free: the UI goroutine
+// never competes with writers for r.mu, eliminating the RWMutex
+// writer-preference starvation that caused permanent UI freezes during
+// ebus event bursts.
+//
+// If the channel is full, a per-event background retry with exponential
+// backoff (50ms → 100ms → 200ms) ensures the event is eventually
+// delivered. Atomic counter caps concurrent retry goroutines at 8.
 func (r *DMRouter) notify(eventType UIEventType) {
+	// Build and cache the snapshot under Lock. The snapshot is an
+	// immutable deep copy — once stored via atomic.Pointer, the UI
+	// goroutine reads it without any lock.
+	r.mu.Lock()
+	gen := r.snapGen.Add(1)
+	snap := r.buildSnapshotLocked(gen)
+	r.snapCache.Store(&routerSnapshotCache{gen: gen, snap: snap})
+	r.mu.Unlock()
+
 	ev := UIEvent{Type: eventType}
 	select {
 	case r.uiEvents <- ev:

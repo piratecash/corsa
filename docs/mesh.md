@@ -107,7 +107,12 @@ every 2 seconds and:
 3. **Stale peer eviction** — every 10 minutes, peers with score ≤ −20 and no
    successful connection in the last 24 hours are pruned. Bootstrap peers and
    currently connected peers are never evicted.
-4. **Peer state persistence** — every 5 minutes, the address pool is saved to
+4. **Orphaned health eviction** — inbound-only peers (not present in the
+   outbound peer list) that have been disconnected for more than 10 minutes
+   with no active inbound connections are removed from the health map.
+   Without this sweep, ephemeral inbound connections (e.g. `127.0.0.1:<random_port>`)
+   accumulate in reconnecting state and inflate `TotalPeers` unboundedly.
+5. **Peer state persistence** — every 5 minutes, the address pool is saved to
    `peers-{port}.json`. On restart, persisted peers are merged with bootstrap
    peers so the node quickly reconnects to previously healthy peers.
 
@@ -151,6 +156,44 @@ peer's reputation to prevent cooldown bypass.
 2. Sends `welcome` with a fresh challenge.
 3. Waits for `auth_session` and verifies.
 4. Commands are routed through `dispatchPeerSessionFrame()`.
+
+**Inbound address sanitisation:**
+
+The health-tracking address for inbound connections is **sanitised**: the IP
+is taken from the real TCP `RemoteAddr` (verified by the kernel, cannot be
+spoofed) and the port from the self-reported `Listen` field. This follows the
+principle "trust no one" — a malicious peer cannot inject a health entry under
+an arbitrary address. The self-reported address is only used for peer
+gossip/relay (address exchange with other nodes). If the declared IP differs
+from the TCP IP, a warning is logged and the TCP IP is used.
+
+**Private/loopback address isolation:**
+
+Loopback (127.0.0.0/8) and RFC 1918 private addresses (10.0.0.0/8,
+172.16.0.0/12, 192.168.0.0/16) are **never auto-dialed** by the
+ConnectionManager. They can only be reached through the explicit `addpeer`
+command for manual connections within a home/dev network.
+
+`allowLoopbackPeers()` enables loopback peer mode **only** when the node is
+explicitly configured to listen on a loopback interface (e.g.
+`127.0.0.1:64646`). Wildcard binds (`:port`) do **not** enable loopback
+mode — `externalListenAddress()` synthesises `127.0.0.1:<port>` for test
+convenience, but that is not an explicit loopback configuration.
+
+Without this isolation, inbound connections from localhost teach the node
+ephemeral `127.0.0.1:<random_port>` addresses, and the ConnectionManager
+enters a connect→EOF→re-dial storm that pollutes the health map, peer list,
+and routing table.
+
+**Startup identity diagnostics:**
+
+On every `Service.Run()` call the node logs its OS PID, identity address,
+listen address, advertise address, and node type at `INFO` level with
+message `node_service_starting`. When an inbound hello arrives from a
+localhost IP (`127.0.0.0/8`) and carries an identity different from the
+local node, a `WARN` with message `localhost_peer_foreign_identity` is
+emitted — this helps identify separate local processes that accidentally
+connect to each other on ephemeral ports.
 
 ### Connection handshake (detail)
 
@@ -779,7 +822,13 @@ sequenceDiagram
 3. **Вычищение устаревших peer'ов** — каждые 10 минут удаляются peer'ы со
    скором ≤ −20 и без успешных подключений за последние 24 часа. Bootstrap-
    и текущие peer'ы никогда не удаляются.
-4. **Персистентность** — каждые 5 минут пул адресов сохраняется в
+4. **Вычищение осиротевших health-записей** — inbound-only peer'ы (не
+   присутствующие в outbound-списке) удаляются из health-карты, если они
+   отключены более 10 минут и не имеют активных inbound-соединений. Без
+   этой очистки эфемерные inbound-подключения (напр. `127.0.0.1:<random_port>`)
+   накапливаются в состоянии reconnecting и безгранично увеличивают
+   `TotalPeers`.
+5. **Персистентность** — каждые 5 минут пул адресов сохраняется в
    `peers-{port}.json`. При перезапуске сохранённые peer'ы мержатся с
    bootstrap для быстрого переподключения.
 
@@ -821,6 +870,43 @@ sequenceDiagram
 2. Отправляет `welcome` со свежим challenge.
 3. Ожидает `auth_session` и верифицирует.
 4. Команды маршрутизируются через `dispatchPeerSessionFrame()`.
+
+**Санитизация inbound-адреса:**
+
+Адрес для health-трекинга inbound-соединений **санитизируется**: IP берётся
+из реального TCP `RemoteAddr` (верифицирован ядром ОС, не может быть
+подделан), а порт — из заявленного поля `Listen`. Это следует принципу
+«не доверяй никому» — вредоносный пир не может создать health-запись под
+произвольным адресом. Заявленный адрес используется только для gossip/relay
+(обмен адресами с другими нодами). Если заявленный IP отличается от TCP IP,
+пишется warning и используется TCP IP.
+
+**Изоляция приватных/loopback адресов:**
+
+Loopback (127.0.0.0/8) и приватные RFC 1918 адреса (10.0.0.0/8,
+172.16.0.0/12, 192.168.0.0/16) **никогда не дозваниваются** автоматически
+через ConnectionManager. Они доступны только через явную команду `addpeer`
+для ручных подключений внутри домашней/тестовой сети.
+
+`allowLoopbackPeers()` включает loopback-режим **только** при явной
+конфигурации на loopback-интерфейс (например `127.0.0.1:64646`).
+Wildcard-bind (`:port`) **не** включает loopback-режим — `externalListenAddress()`
+синтезирует `127.0.0.1:<port>` для удобства тестирования, но это не
+явная loopback-конфигурация.
+
+Без этой изоляции входящие соединения с localhost обучают ноду эфемерным
+адресам `127.0.0.1:<случайный_порт>`, и ConnectionManager входит в цикл
+connect→EOF→re-dial, загрязняя health map, peer list и таблицу маршрутизации.
+
+**Диагностика identity при старте:**
+
+При каждом вызове `Service.Run()` нода логирует свой PID (ОС), identity address,
+listen address, advertise address и тип ноды на уровне `INFO` с сообщением
+`node_service_starting`. Когда входящий hello приходит с localhost IP
+(`127.0.0.0/8`) и содержит identity, отличный от локальной ноды, выводится
+`WARN` с сообщением `localhost_peer_foreign_identity` — это помогает выявить
+отдельные локальные процессы, случайно подключающиеся друг к другу через
+эфемерные порты.
 
 ### Хендшейк соединения (подробнее)
 

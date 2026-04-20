@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"runtime"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/capture"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/connauth"
@@ -66,6 +68,7 @@ type Service struct {
 	identity     *identity.Identity
 	selfBoxSig   string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
 	cfg          config.Node
+	eventBus     *ebus.Bus
 	trust        *trustStore
 	mu           sync.RWMutex
 	peers        []transport.Peer // dial candidates (typed: Address + Source)
@@ -123,34 +126,43 @@ type Service struct {
 	// the invariant is pinned by TestConnRegistry_InvalidationIsAtomic and
 	// TestConnRegistry_RegisterSyncsSecondaryIndex in
 	// conn_registry_lifecycle_test.go.
-	connIDByNetConn       map[net.Conn]netcore.ConnID
-	connIDCounter         uint64 // monotonic counter for connection IDs (protected by mu)
-	bans                  map[string]banEntry
-	events                map[chan protocol.LocalChangeEvent]struct{}
-	listener              net.Listener
-	lastSync              time.Time
-	peersStatePath        string
-	lastPeerSave          time.Time
-	lastPeerEvict         time.Time
-	dialOrigin            map[domain.PeerAddress]domain.PeerAddress // dial address → primary peer address (for fallback port tracking)
-	persistedMeta         map[domain.PeerAddress]*peerEntry         // stable metadata from peers.json, keyed by address
-	observedAddrs         map[domain.PeerIdentity]string            // peer identity (fingerprint) → observed IP they reported for us
-	reachableGroups       map[domain.NetGroup]struct{}              // network groups this node can reach (computed at startup)
-	messageStore          MessageStore                              // optional: persistence handler registered by desktop layer
-	router                Router                                    // routing strategy for outbound message delivery
-	relayStates           *relayStateStore                          // hop-by-hop relay forwarding state (Iteration 1)
-	relayLimiter          *relayRateLimiter                         // per-peer token bucket for relay fan-out
-	connLimiter           *connRateLimiter                          // per-IP connection rate limiter at accept level
-	cmdLimiter            *commandRateLimiter                       // per-connection command rate limiter for non-relay frames
-	inboundByIP           map[string]int                            // IP → active inbound connection count (per-IP cap)
-	routingTable          *routing.Table                            // distance-vector routing table (Phase 1.2)
-	announceLoop          *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
-	identitySessions      map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
-	identityRelaySessions map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
-	disableRateLimiting   bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
-	drainDone             func()                                    // test hook: called after drainPendingForIdentities completes; nil in production
-	done                  chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
-	primeBootstrapOnRun   bool                                      // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
+	connIDByNetConn           map[net.Conn]netcore.ConnID
+	connIDCounter             uint64 // monotonic counter for connection IDs (protected by mu)
+	bans                      map[string]banEntry
+	events                    map[chan protocol.LocalChangeEvent]struct{}
+	listener                  net.Listener
+	lastSync                  time.Time
+	peersStatePath            string
+	lastPeerSave              time.Time
+	lastPeerEvict             time.Time
+	dialOrigin                map[domain.PeerAddress]domain.PeerAddress // dial address → primary peer address (for fallback port tracking)
+	persistedMeta             map[domain.PeerAddress]*peerEntry         // stable metadata from peers.json, keyed by address
+	observedAddrs             map[domain.PeerIdentity]string            // peer identity (fingerprint) → observed IP they reported for us
+	reachableGroups           map[domain.NetGroup]struct{}              // network groups this node can reach (computed at startup)
+	messageStore              MessageStore                              // optional: persistence handler registered by desktop layer
+	router                    Router                                    // routing strategy for outbound message delivery
+	relayStates               *relayStateStore                          // hop-by-hop relay forwarding state (Iteration 1)
+	relayLimiter              *relayRateLimiter                         // per-peer token bucket for relay fan-out
+	connLimiter               *connRateLimiter                          // per-IP connection rate limiter at accept level
+	cmdLimiter                *commandRateLimiter                       // per-connection command rate limiter for non-relay frames
+	inboundByIP               map[string]int                            // IP → active inbound connection count (per-IP cap)
+	routingTable              *routing.Table                            // distance-vector routing table (Phase 1.2)
+	announceLoop              *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
+	identitySessions          map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
+	identityRelaySessions     map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
+	disableRateLimiting       bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
+	markPeerStateIntervalTest time.Duration                             // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
+	drainDone                 func()                                    // test hook: called after drainPendingForIdentities completes; nil in production
+	done                      chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
+	primeBootstrapOnRun       bool                                      // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
+
+	// lastExpiredCleanup is the timestamp of the last successful
+	// cleanupExpiredMessages run. Used to throttle inline callers
+	// (storeIncomingMessage, fetch*) so they skip the expensive full-scan
+	// when it ran recently. The bootstrapLoop tick (2s) guarantees a
+	// bounded upper bound on stale expired messages.
+	// Protected by s.mu (read and written inside cleanupExpiredMessages).
+	lastExpiredCleanup time.Time
 
 	// aggregateStatus is the materialized aggregate network health of the
 	// node. It is recomputed on every per-peer state transition via
@@ -173,6 +185,26 @@ type Service struct {
 	peerProvider *PeerProvider                   // single source of dial candidates — replaces peers[] + peerDialCandidates()
 	connManager  *ConnectionManager              // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
 	bannedIPSet  map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
+
+	// peerActivityNanos is an atomic per-peer tracker that lives outside
+	// s.mu so markPeerWrite/markPeerRead can skip s.mu.Lock() entirely
+	// on the fast path. Each entry stores the UnixNano timestamp of the
+	// last full state recompute for that peer. When less than
+	// markPeerStateInterval has elapsed, the hot path returns
+	// immediately with zero locking — eliminating the continuous writer
+	// pressure that starved s.mu.RLock() callers (loadConversation RPCs,
+	// fetch_network_stats).
+	//
+	// Key: domain.PeerAddress (raw, before resolveHealthAddress).
+	// Value: *atomic.Int64 (UnixNano of last recompute).
+	peerActivityNanos sync.Map
+
+	// trafficMu protects lastTrafficSnap. Separate from s.mu because
+	// emitTrafficDeltas already releases s.mu (RLock) before comparing
+	// with the previous snapshot. Using s.mu would require nesting or
+	// a second Lock acquisition.
+	trafficMu       sync.Mutex
+	lastTrafficSnap map[domain.PeerAddress][2]int64 // [sent, received] from last emission
 
 	// File transfer subsystem (Iteration 21).
 	fileStore    *filetransfer.FileStore // content-addressed file storage in transmit dir
@@ -391,7 +423,7 @@ const (
 	banThreshold                    = 1000
 	banIncrementInvalidSig          = 100
 	banIncrementIncompatibleVersion = 250 // accumulating: 4 attempts to reach banThreshold (1000)
-	banIncrementRateLimit           = 200  // command rate limit violation signals intentional abuse
+	banIncrementRateLimit           = 200 // command rate limit violation signals intentional abuse
 	banDuration                     = 24 * time.Hour
 	// nodeName and networkName are the protocol-level identifiers included
 	// in handshake, ping/pong and other frames. Defined once here so that
@@ -412,7 +444,7 @@ type incomingMessage struct {
 	Body       string
 }
 
-func NewService(cfg config.Node, id *identity.Identity) *Service {
+func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
 	// Load persisted peer state and merge with bootstrap peers.
 	// Bootstrap peers always appear first; persisted peers are appended
 	// in score-descending order, skipping duplicates.
@@ -640,6 +672,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 		runCtx:                context.Background(),
 		identity:              id,
 		cfg:                   cfg,
+		eventBus:              eventBus,
 		selfBoxSig:            selfContact.BoxSignature,
 		trust:                 trust,
 		peers:                 peers,
@@ -736,8 +769,9 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 			defer svc.mu.RUnlock()
 			return svc.isPeerVersionLockedOutLocked(addr)
 		},
-		ListenAddr:  domain.ListenAddress(cfg.ListenAddress),
-		DefaultPort: config.DefaultPeerPort,
+		ListenAddr:             domain.ListenAddress(cfg.ListenAddress),
+		DefaultPort:            config.DefaultPeerPort,
+		AllowPrivateCandidates: cfg.AllowPrivatePeers,
 	})
 
 	// Load persisted peers into PeerProvider.
@@ -787,6 +821,7 @@ func NewService(cfg config.Node, id *identity.Identity) *Service {
 	svc.connManager = NewConnectionManager(ConnectionManagerConfig{
 		MaxSlotsFn: func() int { return svc.cfg.EffectiveMaxOutgoingPeers() },
 		Provider:   svc.peerProvider,
+		EventBus:   svc.eventBus,
 		DialFn: func(ctx context.Context, addresses []domain.PeerAddress) (DialResult, error) {
 			return svc.dialForCM(ctx, addresses)
 		},
@@ -847,7 +882,7 @@ func NewServiceWithNetwork(cfg config.Node, id *identity.Identity, network netco
 	if network == nil {
 		panic("node.NewServiceWithNetwork: network is nil (use NewService for the default bridge)")
 	}
-	svc := NewService(cfg, id)
+	svc := NewService(cfg, id, nil)
 	svc.networkOverride = network
 	return svc
 }
@@ -863,6 +898,14 @@ func (s *Service) Run(ctx context.Context) error {
 	// Store context so CM callbacks can start goroutines bound to the
 	// Service lifecycle (see onCMSessionEstablished).
 	s.runCtx = ctx
+
+	log.Info().
+		Int("pid", os.Getpid()).
+		Str("identity", s.identity.Address).
+		Str("listen", s.cfg.ListenAddress).
+		Str("advertise", s.cfg.AdvertiseAddress).
+		Str("node_type", string(s.cfg.Type)).
+		Msg("node_service_starting")
 
 	// Signal drain goroutines to stop when Run exits. Drain goroutines
 	// launched by onPeerSessionEstablished and handleAnnounceRoutes check
@@ -1086,8 +1129,10 @@ func (s *Service) handleConn(conn net.Conn) {
 
 	// Capture lifecycle hook: notify manager about the new inbound
 	// connection so standing rules (by_ip, all) can auto-start capture.
-	// Also attach the capture sink to the NetCore for outbound tap.
-	s.notifyCaptureNewConn(connID, metered)
+	// Also attach the capture sink to the NetCore for outbound tap. The
+	// bridge reads RemoteIP / PeerDir back through the registry, so the
+	// raw net.Conn no longer crosses the §2.9 boundary.
+	s.notifyCaptureNewConn(connID)
 
 	defer func() {
 		// Capture lifecycle hook: stop capture for this connection.
@@ -1340,17 +1385,16 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			// The remote peer's version comes from the hello frame it just sent.
 			peerVer := domain.ProtocolVersion(frame.Version)
 			peerMin := domain.ProtocolVersion(frame.MinimumProtocolVersion)
-			if peerAddr := strings.TrimSpace(frame.Listen); peerAddr != "" {
+			// Sanitise the peer address before using it as a health
+			// map key — use verified TCP IP, not the self-reported claim.
+			claimedAddr := strings.TrimSpace(frame.Listen)
+			if claimedAddr == "" {
+				claimedAddr = strings.TrimSpace(frame.Address)
+			}
+			if peerAddr := sanitizeInboundAddress(addr, claimedAddr); peerAddr != "" {
 				// Pre-populate client version so the lockout has complete
 				// diagnostics. On the inbound rejection path the hello
 				// frame is the only source of this metadata.
-				if frame.ClientVersion != "" {
-					s.mu.Lock()
-					s.peerVersions[domain.PeerAddress(peerAddr)] = frame.ClientVersion
-					s.mu.Unlock()
-				}
-				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr), peerVer, peerMin)
-			} else if peerAddr = strings.TrimSpace(frame.Address); peerAddr != "" {
 				if frame.ClientVersion != "" {
 					s.mu.Lock()
 					s.peerVersions[domain.PeerAddress(peerAddr)] = frame.ClientVersion
@@ -1372,9 +1416,21 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 				return false
 			}
 			s.setConnAuthStateByID(connID, authState)
-			s.rememberConnPeerAddr(connID, frame)
+			s.rememberConnPeerAddr(connID, frame, addr)
 			if frame.Client == "node" || frame.Client == "desktop" {
 				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
+			}
+			// Diagnostic: warn when a localhost peer has a different identity
+			// than ours — indicates a separate local process (Task #69).
+			if remoteIP := net.ParseIP(remoteIPFromString(addr)); remoteIP != nil && remoteIP.IsLoopback() && frame.Address != "" && frame.Address != s.identity.Address {
+				log.Warn().
+					Int("pid", os.Getpid()).
+					Str("local_identity", s.identity.Address).
+					Str("remote_identity", frame.Address).
+					Str("remote_addr", addr).
+					Str("remote_listen", frame.Listen).
+					Str("remote_client", frame.Client).
+					Msg("localhost_peer_foreign_identity")
 			}
 			_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame(authState.Challenge, remoteIPFromString(addr)))
 			return true
@@ -1383,7 +1439,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// unauthenticated with access limited to handshake commands
 		// (hello, ping, pong, auth_session). All P2P wire commands
 		// are blocked until auth_session completes.
-		s.rememberConnPeerAddr(connID, frame)
+		s.rememberConnPeerAddr(connID, frame, addr)
 		log.Debug().
 			Str("client", frame.Client).
 			Str("addr", addr).
@@ -2389,21 +2445,62 @@ func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
 	s.setConnAuthStateByID(id, state)
 }
 
-// rememberConnPeerAddr populates the NetCore with identity, address,
-// capabilities, and networks from the hello frame. All subsequent lookups
-// use NetCore as the single source of truth for inbound connection state.
+// sanitizeInboundAddress and rememberConnPeerAddr are defined below.
+// sanitizeInboundAddress builds a health-tracking address for an inbound
+// connection by combining the verified TCP source IP with the self-reported
+// listen port. The TCP IP is ground truth (verified by the kernel, cannot
+// be spoofed without owning the route). The declared port is needed so
+// that multiple inbound connections from the same peer (different ephemeral
+// source ports) consolidate under a single health key.
 //
-// The identity field stores the Ed25519 fingerprint (hello.Address) for
-// routing purposes. The address field stores the listen address for health
-// tracking. These are kept separate because a NATed peer's listen address
-// (e.g. 127.0.0.1:64646) is not a valid identity fingerprint.
+// If the declared IP differs from the TCP IP, a warning is logged and the
+// TCP IP is used — the peer is either behind NAT or lying.
 //
-// ConnID-first: callers resolve id at the entry boundary.
-func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame) {
-	addr := strings.TrimSpace(hello.Listen)
-	if addr == "" {
-		addr = strings.TrimSpace(hello.Address)
+// Falls back to the claimed address unchanged when tcpAddr is empty
+// (outbound sessions do not need sanitisation) or unparseable.
+func sanitizeInboundAddress(tcpAddr, claimed string) string {
+	if tcpAddr == "" || claimed == "" {
+		return claimed
 	}
+	tcpIP, _, err := net.SplitHostPort(tcpAddr)
+	if err != nil || tcpIP == "" {
+		return claimed
+	}
+	claimedIP, claimedPort, err := net.SplitHostPort(claimed)
+	if err != nil || claimedPort == "" {
+		// Claimed address is not host:port — fall back to TCP address
+		// with default port so health tracking still works.
+		return net.JoinHostPort(tcpIP, config.DefaultPeerPort)
+	}
+	if tcpIP != claimedIP {
+		log.Warn().
+			Str("tcp_ip", tcpIP).
+			Str("claimed_ip", claimedIP).
+			Str("claimed_port", claimedPort).
+			Msg("inbound_address_mismatch: using verified TCP IP")
+	}
+	return net.JoinHostPort(tcpIP, claimedPort)
+}
+
+// rememberConnPeerAddr stores the remote peer's overlay address on the
+// NetCore for later health tracking and relay lookups.
+//
+// For inbound connections the address is sanitised: the IP is taken from
+// the real TCP RemoteAddr (verified by the TCP stack, cannot be spoofed)
+// and the port from the self-reported Listen field. This prevents a
+// malicious peer from injecting a health entry under an arbitrary address
+// while still consolidating multiple connections from the same peer under
+// a single health key.
+//
+// tcpAddr is the real TCP RemoteAddr string (host:port) from the
+// connection. For outbound sessions the caller may pass "" to skip
+// sanitisation.
+func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, tcpAddr string) {
+	claimed := strings.TrimSpace(hello.Listen)
+	if claimed == "" {
+		claimed = strings.TrimSpace(hello.Address)
+	}
+	addr := sanitizeInboundAddress(tcpAddr, claimed)
 	pc := s.netCoreForID(id)
 	if pc == nil {
 		return
@@ -2417,9 +2514,9 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame) {
 	})
 }
 
-// inboundPeerAddress returns the overlay address declared by the
-// remote peer during the hello handshake, or "" if no address is
-// known yet. The returned address is suitable for health tracking.
+// inboundPeerAddress returns the sanitised overlay address for health
+// tracking: verified TCP IP combined with the declared listen port.
+// Returns "" if the address is not yet known (pre-hello).
 // ConnID-first: callers that start from a net.Conn cross the boundary
 // once via connIDFor at the entry point and pass the resolved id here.
 func (s *Service) inboundPeerAddress(id domain.ConnID) domain.PeerAddress {
@@ -2798,18 +2895,35 @@ func (s *Service) identitiesFrame() protocol.Frame {
 func (s *Service) contactsFrame() protocol.Frame {
 	s.refreshKnowledgeFromPeers()
 
+	// Short critical section: snapshot map data under lock, format outside.
+	// Prevents writer starvation on s.mu (see peerHealthFrames comment).
+	type contactSnap struct {
+		Address string
+		PubKey  string
+		BoxKey  string
+		BoxSig  string
+	}
 	s.mu.RLock()
-	contacts := make([]protocol.ContactFrame, 0, len(s.boxKeys))
+	snaps := make([]contactSnap, 0, len(s.boxKeys))
 	for address, boxKey := range s.boxKeys {
-		pubKey := s.pubKeys[address]
-		contacts = append(contacts, protocol.ContactFrame{
+		snaps = append(snaps, contactSnap{
 			Address: address,
-			PubKey:  pubKey,
+			PubKey:  s.pubKeys[address],
 			BoxKey:  boxKey,
 			BoxSig:  s.boxSigs[address],
 		})
 	}
 	s.mu.RUnlock()
+
+	contacts := make([]protocol.ContactFrame, len(snaps))
+	for i, snap := range snaps {
+		contacts[i] = protocol.ContactFrame{
+			Address: snap.Address,
+			PubKey:  snap.PubKey,
+			BoxKey:  snap.BoxKey,
+			BoxSig:  snap.BoxSig,
+		}
+	}
 
 	return protocol.Frame{
 		Type:     "contacts",
@@ -2821,14 +2935,30 @@ func (s *Service) contactsFrame() protocol.Frame {
 func (s *Service) trustedContactsFrame() protocol.Frame {
 	trusted := s.trust.trustedContacts()
 
+	// Short critical section: read s.pubKeys/s.boxKeys under lock, merge
+	// with trust-store data outside. Prevents writer starvation on s.mu
+	// (see peerHealthFrames comment).
+	type keySnap struct {
+		PubKey string
+		BoxKey string
+	}
 	s.mu.RLock()
+	keys := make(map[string]keySnap, len(trusted))
+	for address := range trusted {
+		keys[address] = keySnap{
+			PubKey: s.pubKeys[address],
+			BoxKey: s.boxKeys[address],
+		}
+	}
+	s.mu.RUnlock()
+
 	contacts := make([]protocol.ContactFrame, 0, len(trusted))
 	for address, contact := range trusted {
-		pubKey := s.pubKeys[address]
+		pubKey := keys[address].PubKey
 		if pubKey == "" {
 			pubKey = contact.PubKey
 		}
-		boxKey := s.boxKeys[address]
+		boxKey := keys[address].BoxKey
 		if boxKey == "" {
 			boxKey = contact.BoxKey
 		}
@@ -2839,7 +2969,6 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 			BoxSig:  contact.BoxSignature,
 		})
 	}
-	s.mu.RUnlock()
 
 	return protocol.Frame{
 		Type:     "contacts",
@@ -2867,6 +2996,7 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 	// If the contact was not in the trust store, that is not an error —
 	// it may have originated from network discovery rather than the
 	// trusted contacts list.
+	s.eventBus.Publish(ebus.TopicContactRemoved, string(identity))
 	return protocol.Frame{Type: "ok", Address: string(identity)}
 }
 
@@ -2878,7 +3008,9 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 	s.mu.Lock()
 
 	var dropped int
+	var affected []ebus.PeerPendingDelta
 	for addr, frames := range s.pending {
+		origLen := len(frames)
 		kept := frames[:0]
 		for _, pf := range frames {
 			if pf.Frame.Type == "send_message" && pf.Frame.Recipient == recipient {
@@ -2889,10 +3021,15 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 			}
 			kept = append(kept, pf)
 		}
+		if len(kept) == origLen {
+			continue // nothing changed for this peer
+		}
 		if len(kept) == 0 {
 			delete(s.pending, addr)
+			affected = append(affected, ebus.PeerPendingDelta{Address: addr, Count: 0})
 		} else {
 			s.pending[addr] = kept
+			affected = append(affected, ebus.PeerPendingDelta{Address: addr, Count: len(kept)})
 		}
 	}
 
@@ -2906,6 +3043,8 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 		}
 	}
 
+	s.refreshAggregatePendingLocked()
+	aggSnap := s.aggregateStatus
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 
@@ -2913,58 +3052,130 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 		log.Info().Str("recipient", recipient).Int("pending_dropped", dropped).Int("outbound_dropped", outboundDropped).Msg("dropped_pending_for_deleted_contact")
 		s.persistQueueState(snapshot)
 	}
+
+	for _, d := range affected {
+		s.emitPeerPendingChanged(d.Address, d.Count)
+	}
+	if len(affected) > 0 {
+		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
+	}
 }
 
 func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
 	if strings.TrimSpace(topic) == "" {
 		topic = "dm"
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
-	ids := make([]string, 0)
-	seen := make(map[string]struct{})
-	items := make([]protocol.PendingMessageFrame, 0)
+	// ---------------------------------------------------------------
+	// Short critical section: snapshot s.pending and s.outbound under
+	// lock, then release before dedup, formatting and sorting.
+	// Previously the entire function ran under defer RUnlock — holding
+	// the read lock during sort.Slice starved writers (bootstrapLoop's
+	// refreshAggregateStatus) and cascaded into UI freezes.
+	// ---------------------------------------------------------------
+	type pendingSnap struct {
+		ID        string
+		Recipient string
+		Retries   int
+		QueuedAt  time.Time
+	}
+	type outboundSnap struct {
+		ID            string
+		Recipient     string
+		Status        string
+		QueuedAt      time.Time
+		LastAttemptAt time.Time
+		Retries       int
+		Error         string
+	}
+
+	s.mu.RLock()
+	var pendingItems []pendingSnap
 	for _, frames := range s.pending {
 		for _, item := range frames {
-			frame := item.Frame
-			if frame.Topic != topic || frame.Type != "send_message" || frame.ID == "" {
+			f := item.Frame
+			if f.Topic != topic || f.Type != "send_message" || f.ID == "" {
 				continue
 			}
-			if _, ok := seen[frame.ID]; ok {
-				continue
-			}
-			seen[frame.ID] = struct{}{}
-			ids = append(ids, frame.ID)
-			status := pendingStatusFromFrame(item)
-			items = append(items, protocol.PendingMessageFrame{
-				ID:            frame.ID,
-				Recipient:     frame.Recipient,
-				Status:        status,
-				QueuedAt:      formatTime(item.QueuedAt),
-				LastAttemptAt: formatTime(outboundLastAttemptLocked(s.outbound, frame.ID)),
-				Retries:       outboundRetriesLocked(s.outbound, frame.ID, item.Retries),
-				Error:         outboundErrorLocked(s.outbound, frame.ID),
+			pendingItems = append(pendingItems, pendingSnap{
+				ID:        f.ID,
+				Recipient: f.Recipient,
+				Retries:   item.Retries,
+				QueuedAt:  item.QueuedAt,
 			})
 		}
 	}
-	for id, item := range s.outbound {
-		if item.Status == "" || item.Status == "sent" {
+	var outboundItems []outboundSnap
+	for id, ob := range s.outbound {
+		if ob.Status == "" || ob.Status == "sent" {
 			continue
 		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-		items = append(items, protocol.PendingMessageFrame{
+		outboundItems = append(outboundItems, outboundSnap{
 			ID:            id,
-			Recipient:     item.Recipient,
-			Status:        item.Status,
-			QueuedAt:      formatTime(item.QueuedAt),
-			LastAttemptAt: formatTime(item.LastAttemptAt),
-			Retries:       item.Retries,
-			Error:         item.Error,
+			Recipient:     ob.Recipient,
+			Status:        ob.Status,
+			QueuedAt:      ob.QueuedAt,
+			LastAttemptAt: ob.LastAttemptAt,
+			Retries:       ob.Retries,
+			Error:         ob.Error,
+		})
+	}
+	// Snapshot outbound map for enrichment lookups (last attempt, retries, error).
+	outboundByID := make(map[string]outboundSnap, len(outboundItems))
+	for _, ob := range outboundItems {
+		outboundByID[ob.ID] = ob
+	}
+	s.mu.RUnlock()
+
+	// Build frames from snapshots — no lock held.
+	ids := make([]string, 0)
+	seen := make(map[string]struct{})
+	items := make([]protocol.PendingMessageFrame, 0)
+	for _, p := range pendingItems {
+		if _, ok := seen[p.ID]; ok {
+			continue
+		}
+		seen[p.ID] = struct{}{}
+		ids = append(ids, p.ID)
+
+		status := "queued"
+		if p.Retries > 0 {
+			status = "retrying"
+		}
+		lastAttempt := time.Time{}
+		retries := p.Retries
+		errStr := ""
+		if ob, ok := outboundByID[p.ID]; ok {
+			lastAttempt = ob.LastAttemptAt
+			if ob.Retries > retries {
+				retries = ob.Retries
+			}
+			errStr = ob.Error
+		}
+		items = append(items, protocol.PendingMessageFrame{
+			ID:            p.ID,
+			Recipient:     p.Recipient,
+			Status:        status,
+			QueuedAt:      formatTime(p.QueuedAt),
+			LastAttemptAt: formatTime(lastAttempt),
+			Retries:       retries,
+			Error:         errStr,
+		})
+	}
+	for _, ob := range outboundItems {
+		if _, ok := seen[ob.ID]; ok {
+			continue
+		}
+		seen[ob.ID] = struct{}{}
+		ids = append(ids, ob.ID)
+		items = append(items, protocol.PendingMessageFrame{
+			ID:            ob.ID,
+			Recipient:     ob.Recipient,
+			Status:        ob.Status,
+			QueuedAt:      formatTime(ob.QueuedAt),
+			LastAttemptAt: formatTime(ob.LastAttemptAt),
+			Retries:       ob.Retries,
+			Error:         ob.Error,
 		})
 	}
 	sort.Strings(ids)
@@ -3340,7 +3551,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// Transit relay traffic must not wake up the UI.
 	// Emit event only for genuinely new messages (StoreInserted).
 	if isLocal && storeResult == StoreInserted {
-		s.emitLocalChange(protocol.LocalChangeEvent{
+		event := protocol.LocalChangeEvent{
 			Type:       protocol.LocalChangeNewMessage,
 			Topic:      msg.Topic,
 			MessageID:  string(msg.ID),
@@ -3350,7 +3561,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			Flag:       string(msg.Flag),
 			CreatedAt:  msg.CreatedAt.Format(time.RFC3339Nano),
 			TTLSeconds: msg.TTLSeconds,
-		})
+		}
+		s.emitLocalChange(event)
+		s.eventBus.Publish(ebus.TopicMessageNew, event)
 	}
 
 	_, callerFile, callerLine, _ := runtime.Caller(1)
@@ -3463,14 +3676,27 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	s.seenReceipts[key] = struct{}{}
 	s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
 	delete(s.outbound, string(receipt.MessageID))
-	s.clearPendingMessageLocked(receipt.MessageID)
-	s.clearPendingReceiptLocked(receipt.MessageID, receipt.Recipient, receipt.Status)
+	msgAffected := s.clearPendingMessageLocked(receipt.MessageID)
+	rcptAffected := s.clearPendingReceiptLocked(receipt.MessageID, receipt.Recipient, receipt.Status)
 	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
 	delete(s.relayRetry, relayReceiptKey(receipt))
 	count := len(s.receipts[receipt.Recipient])
+	pendingDeltas := mergePendingDeltas(msgAffected, rcptAffected)
+	if len(pendingDeltas) > 0 {
+		s.refreshAggregatePendingLocked()
+	}
+	aggSnap := s.aggregateStatus
 	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 	s.persistQueueState(snapshot)
+
+	// Emit pending count deltas for all peers whose queues were modified.
+	for _, d := range pendingDeltas {
+		s.emitPeerPendingChanged(d.Address, d.Count)
+	}
+	if len(pendingDeltas) > 0 {
+		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
+	}
 
 	// Update delivery status via the registered MessageStore BEFORE emitting
 	// local change so the desktop UI can safely read the new status from
@@ -3481,7 +3707,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	}
 
 	if receiptStoreOK {
-		s.emitLocalChange(protocol.LocalChangeEvent{
+		event := protocol.LocalChangeEvent{
 			Type:        protocol.LocalChangeReceiptUpdate,
 			Topic:       "dm",
 			MessageID:   string(receipt.MessageID),
@@ -3489,7 +3715,9 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 			Recipient:   receipt.Recipient,
 			Status:      receipt.Status,
 			DeliveredAt: receipt.DeliveredAt,
-		})
+		}
+		s.emitLocalChange(event)
+		s.eventBus.Publish(ebus.TopicReceiptUpdated, event)
 	}
 
 	log.Info().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Time("delivered_at", receipt.DeliveredAt).Msg("stored delivery receipt")
@@ -3503,9 +3731,17 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	// relay chain could not forward (no state, or hop unavailable).
 	relayForwarded := s.handleRelayReceipt(receipt)
 	if !relayForwarded {
-		go s.gossipReceipt(receipt)
+		s.backgroundWg.Add(1)
+		go func() {
+			defer s.backgroundWg.Done()
+			s.gossipReceipt(receipt)
+		}()
 	}
-	go s.pushReceiptToSubscribers(receipt)
+	s.backgroundWg.Add(1)
+	go func() {
+		defer s.backgroundWg.Done()
+		s.pushReceiptToSubscribers(receipt)
+	}()
 
 	return true, count
 }
@@ -3531,10 +3767,11 @@ func (s *Service) isTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
 // ensures that a receipt seen via local delivery is also suppressed on the
 // transit path and vice versa.
 //
-// Callers must only invoke this method AFTER confirming that the receipt can
-// actually be delivered (relay chain forwarded successfully, or gossip has
-// usable routing targets). Marking before delivery confirmation would
-// permanently suppress retries for transiently unroutable receipts.
+// For the gossip fallback path, callers pre-mark BEFORE launching the gossip
+// goroutine to eliminate the race window where duplicates slip through.
+// gossipTransitReceipt calls unmarkTransitReceiptSeen on complete failure
+// to restore retry eligibility. For the relay chain path, callers mark
+// AFTER confirmed forwarding (no rollback needed — relay is synchronous).
 func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
 	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
 
@@ -3548,27 +3785,39 @@ func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool 
 	return false
 }
 
+// unmarkTransitReceiptSeen removes a previously marked transit receipt from
+// seenReceipts. Called by gossipTransitReceipt when gossip fails completely
+// (no routing targets or all sends rejected) to restore retry eligibility.
+// The pre-mark + unmark-on-failure pattern eliminates the race window where
+// a duplicate receipt could slip through between the synchronous mark (in
+// the caller) and the deferred mark (inside the goroutine).
+func (s *Service) unmarkTransitReceiptSeen(receipt protocol.DeliveryReceipt) {
+	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+
+	s.mu.Lock()
+	delete(s.seenReceipts, key)
+	s.mu.Unlock()
+}
+
 // gossipTransitReceipt is the transit-receipt variant of gossipReceipt.
-// It resolves routing targets first; if none exist the receipt is NOT marked
-// as seen — allowing a future arrival of the same receipt to retry after
-// routes recover. When targets exist, sends are attempted synchronously
-// (sendReceiptToPeer is an in-memory channel/queue write, not a network I/O
-// call) and the receipt is marked as seen only after at least one target
-// actually accepted it. If every send fails (all channels full, all sessions
-// stalled), the receipt remains unmarked and eligible for retry on a future
-// arrival.
+// It resolves routing targets first; if none exist the receipt is unmarked
+// (via unmarkTransitReceiptSeen) — allowing a future arrival of the same
+// receipt to retry after routes recover. When targets exist, sends are
+// attempted synchronously (sendReceiptToPeer is an in-memory channel/queue
+// write, not a network I/O call). If every send fails (all channels full,
+// all sessions stalled), the receipt is unmarked and eligible for retry.
 //
-// Concurrency note: two simultaneous arrivals of the same receipt can both
-// enter this function and both send before either marks. This produces a
-// one-time wire duplicate to each target — acceptable because the receiving
-// node's isTransitReceiptSeen check will suppress re-processing. The
-// alternative (pre-mark + rollback on failure) would add complexity without
-// meaningful benefit, since duplicate sends are harmless and self-limiting.
+// The caller must pre-mark the receipt via markTransitReceiptSeen before
+// calling gossipTransitReceipt. Pre-marking eliminates the race window
+// where a duplicate receipt could slip through before the mark. On
+// complete failure (no targets or all sends rejected) the mark is rolled
+// back so retry eligibility is preserved.
 func (s *Service) gossipTransitReceipt(receipt protocol.DeliveryReceipt) {
 	defer crashlog.DeferRecover()
 
 	targets := s.routingTargetsForRecipient(receipt.Recipient)
 	if len(targets) == 0 {
+		s.unmarkTransitReceiptSeen(receipt)
 		log.Debug().
 			Str("message_id", string(receipt.MessageID)).
 			Str("recipient", receipt.Recipient).
@@ -3587,6 +3836,7 @@ func (s *Service) gossipTransitReceipt(receipt protocol.DeliveryReceipt) {
 	}
 
 	if !delivered {
+		s.unmarkTransitReceiptSeen(receipt)
 		log.Debug().
 			Str("message_id", string(receipt.MessageID)).
 			Str("recipient", receipt.Recipient).
@@ -3594,18 +3844,45 @@ func (s *Service) gossipTransitReceipt(receipt protocol.DeliveryReceipt) {
 			Msg("transit receipt gossip: all sends failed, receipt eligible for retry")
 		return
 	}
-
-	// At least one target accepted the receipt — mark as seen to suppress
-	// future duplicates. The mark is placed AFTER confirmed delivery so
-	// that transient send failures do not permanently suppress the receipt.
-	s.markTransitReceiptSeen(receipt)
+	// At least one target accepted — receipt stays marked as seen.
 }
 
-func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) {
-	if strings.TrimSpace(string(messageID)) == "" {
-		return
+// mergePendingDeltas deduplicates two slices of PeerPendingDelta by address.
+// When the same address appears in both, the entry from b wins (it reflects
+// the later mutation under the same lock hold).
+func mergePendingDeltas(a, b []ebus.PeerPendingDelta) []ebus.PeerPendingDelta {
+	if len(a) == 0 {
+		return b
 	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[domain.PeerAddress]int, len(a)+len(b))
+	result := make([]ebus.PeerPendingDelta, 0, len(a)+len(b))
+	for _, d := range a {
+		seen[d.Address] = len(result)
+		result = append(result, d)
+	}
+	for _, d := range b {
+		if idx, ok := seen[d.Address]; ok {
+			result[idx] = d // b wins — later mutation
+		} else {
+			result = append(result, d)
+		}
+	}
+	return result
+}
+
+// clearPendingMessageLocked removes a specific send_message from the pending
+// queue (matched by messageID). Returns affected (address, newCount) pairs
+// so the caller can emit TopicPeerPendingChanged after releasing s.mu.
+func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) []ebus.PeerPendingDelta {
+	if strings.TrimSpace(string(messageID)) == "" {
+		return nil
+	}
+	var affected []ebus.PeerPendingDelta
 	for address, items := range s.pending {
+		origLen := len(items)
 		remaining := items[:0]
 		for _, item := range items {
 			if item.Frame.Type == "send_message" && item.Frame.ID == string(messageID) {
@@ -3614,19 +3891,31 @@ func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) {
 			}
 			remaining = append(remaining, item)
 		}
+		if len(remaining) == origLen {
+			continue // nothing changed for this peer
+		}
 		if len(remaining) == 0 {
 			delete(s.pending, address)
+			affected = append(affected, ebus.PeerPendingDelta{Address: address, Count: 0})
 			continue
 		}
 		s.pending[address] = append([]pendingFrame(nil), remaining...)
+		affected = append(affected, ebus.PeerPendingDelta{Address: address, Count: len(remaining)})
 	}
+	return affected
 }
 
-func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipient, status string) {
+// clearPendingReceiptLocked removes a specific relay_delivery_receipt from the
+// pending queue (matched by messageID+recipient+status). Returns affected
+// (address, newCount) pairs so the caller can emit TopicPeerPendingChanged
+// after releasing s.mu.
+func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipient, status string) []ebus.PeerPendingDelta {
 	if strings.TrimSpace(string(messageID)) == "" || strings.TrimSpace(recipient) == "" || strings.TrimSpace(status) == "" {
-		return
+		return nil
 	}
+	var affected []ebus.PeerPendingDelta
 	for address, items := range s.pending {
+		origLen := len(items)
 		remaining := items[:0]
 		for _, item := range items {
 			if item.Frame.Type == "relay_delivery_receipt" &&
@@ -3638,19 +3927,28 @@ func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipi
 			}
 			remaining = append(remaining, item)
 		}
+		if len(remaining) == origLen {
+			continue // nothing changed for this peer
+		}
 		if len(remaining) == 0 {
 			delete(s.pending, address)
+			affected = append(affected, ebus.PeerPendingDelta{Address: address, Count: 0})
 			continue
 		}
 		s.pending[address] = append([]pendingFrame(nil), remaining...)
+		affected = append(affected, ebus.PeerPendingDelta{Address: address, Count: len(remaining)})
 	}
+	return affected
 }
 
 func (s *Service) fetchMessagesFrame(topic string) protocol.Frame {
 	if strings.TrimSpace(topic) == "" {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessages}
 	}
-	s.cleanupExpiredMessages()
+	// Query paths bypass the throttle so callers always see accurate data
+	// (expired messages removed). Only storeIncomingMessage uses the
+	// throttled variant to avoid repeated scans during message bursts.
+	s.cleanupExpiredMessagesForce()
 
 	s.mu.RLock()
 	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
@@ -3676,7 +3974,7 @@ func (s *Service) fetchMessageIDsFrame(topic string) protocol.Frame {
 	if strings.TrimSpace(topic) == "" {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessageIDs}
 	}
-	s.cleanupExpiredMessages()
+	s.cleanupExpiredMessagesForce()
 
 	s.mu.RLock()
 	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
@@ -3694,7 +3992,7 @@ func (s *Service) fetchMessageFrame(topic, messageID string) protocol.Frame {
 	if strings.TrimSpace(topic) == "" || strings.TrimSpace(messageID) == "" {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessage}
 	}
-	s.cleanupExpiredMessages()
+	s.cleanupExpiredMessagesForce()
 
 	s.mu.RLock()
 	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
@@ -3714,7 +4012,7 @@ func (s *Service) fetchInboxFrame(topic, recipient string) protocol.Frame {
 	if strings.TrimSpace(topic) == "" || strings.TrimSpace(recipient) == "" {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchInbox}
 	}
-	s.cleanupExpiredMessages()
+	s.cleanupExpiredMessagesForce()
 
 	s.mu.RLock()
 	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
@@ -3813,7 +4111,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 	s.mu.Unlock()
 
 	// Capture lifecycle hook: attach sink and notify manager.
-	s.notifyCaptureNewConn(session.connID, session.conn)
+	s.notifyCaptureNewConn(session.connID)
 
 	session.netCore = pc
 	conn := session.conn
@@ -4089,7 +4387,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 // The peer is prepended to the peer list so it becomes the first dial
 // candidate on the next bootstrap tick.
 func (s *Service) fetchDMHeadersFrame() protocol.Frame {
-	s.cleanupExpiredMessages()
+	s.cleanupExpiredMessagesForce()
 
 	s.mu.RLock()
 	messages := append([]protocol.Envelope(nil), s.topics["dm"]...)
@@ -4131,8 +4429,13 @@ func (s *Service) addKnownIdentity(address string) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	_, existed := s.known[address]
 	s.known[address] = struct{}{}
+	s.mu.Unlock()
+
+	if !existed {
+		s.eventBus.Publish(ebus.TopicIdentityAdded, address)
+	}
 }
 
 func (s *Service) addKnownBoxKey(address, boxKey string) {
@@ -4213,6 +4516,13 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 	if !existed {
 		log.Info().Str("address", address).Str("source", source).Msg("trusted new contact")
 	}
+
+	s.eventBus.Publish(ebus.TopicContactAdded, ebus.ContactAddedEvent{
+		Address: address,
+		PubKey:  pubKey,
+		BoxKey:  boxKey,
+		BoxSig:  boxSig,
+	})
 }
 
 // isVerifiedSender checks whether the given sender address corresponds to
@@ -4448,10 +4758,18 @@ func (s *Service) handleInboundRelayDeliveryReceipt(connID domain.ConnID, frame 
 
 	// Gossip fallback: no reverse relay path or send failed — broadcast
 	// the receipt to routing targets so it can still reach the sender.
-	// gossipTransitReceipt marks the receipt as seen only after at least one
-	// target accepts; if no targets exist or all sends fail, the receipt
-	// remains eligible for retry on a future arrival.
-	go s.gossipTransitReceipt(receipt)
+	// Pre-mark so rapid-fire duplicate receipts from the same peer are
+	// suppressed. gossipTransitReceipt unmarks on complete failure to
+	// preserve retry eligibility.
+	if s.markTransitReceiptSeen(receipt) {
+		log.Debug().
+			Str("peer", string(peerAddr)).
+			Str("message_id", string(receipt.MessageID)).
+			Str("recipient", receipt.Recipient).
+			Msg("relay_delivery_receipt dropped: duplicate transit receipt pre-gossip (inbound)")
+		return
+	}
+	s.gossipTransitReceipt(receipt)
 	log.Debug().
 		Str("peer", string(peerAddr)).
 		Str("message_id", string(receipt.MessageID)).
@@ -4645,32 +4963,106 @@ func (s *Service) cleanupExpiredNotices() {
 	}
 }
 
+// expiredCleanupThrottle is the minimum interval between full-scan cleanup
+// runs. Inline callers (storeIncomingMessage, fetch*) skip the scan when
+// bootstrapLoop already ran it recently. This prevents the Lock()-guarded
+// full iteration from becoming a writer-starvation bottleneck on the hot
+// relay_message path.
+const expiredCleanupThrottle = 10 * time.Second
+
+// cleanupExpiredMessages removes TTL-expired envelopes from s.topics.
+// Used only by storeIncomingMessage (hot path during message bursts) —
+// throttled so repeated calls within expiredCleanupThrottle are no-ops.
+// Query paths (fetchMessagesFrame, fetchInboxFrame, etc.) and the
+// bootstrapLoop tick call cleanupExpiredMessagesForce directly to
+// guarantee callers always see accurate data.
 func (s *Service) cleanupExpiredMessages() {
 	now := time.Now().UTC()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Fast-path: check throttle under read lock to avoid the write lock
+	// entirely when the last scan was recent.
+	s.mu.RLock()
+	if now.Sub(s.lastExpiredCleanup) < expiredCleanupThrottle {
+		s.mu.RUnlock()
+		return
+	}
+	s.mu.RUnlock()
 
+	s.cleanupExpiredMessagesForce()
+}
+
+// cleanupExpiredMessagesForce unconditionally scans and removes expired
+// messages. Used by bootstrapLoop where throttling is already handled by
+// the tick interval.
+//
+// Two-phase approach avoids holding s.mu.Lock() during the full scan:
+//
+//	Phase 1 (RLock): collect expired message IDs — read-only, concurrent
+//	                  with other readers.
+//	Phase 2 (Lock):  rebuild only affected topic slices — short critical
+//	                  section proportional to expired count, not total count.
+func (s *Service) cleanupExpiredMessagesForce() {
+	now := time.Now().UTC()
+
+	// Phase 1: collect expired IDs under read lock.
+	type expiredEntry struct {
+		topic string
+		id    string
+	}
+	var expired []expiredEntry
+
+	s.mu.RLock()
 	for topic, messages := range s.topics {
-		filtered := messages[:0]
 		for _, message := range messages {
 			if message.Flag == protocol.MessageFlagAutoDeleteTTL && message.TTLSeconds > 0 {
 				expiresAt := message.CreatedAt.Add(time.Duration(message.TTLSeconds) * time.Second)
 				if !expiresAt.After(now) {
-					log.Debug().Str("node", s.identity.Address).Str("topic", topic).Str("id", string(message.ID)).Msg("cleanupExpiredMessages: removing expired")
-					continue
+					expired = append(expired, expiredEntry{topic, string(message.ID)})
 				}
 			}
-			filtered = append(filtered, message)
 		}
+	}
+	s.mu.RUnlock()
 
+	// Short-circuit: update throttle timestamp and return.
+	if len(expired) == 0 {
+		s.mu.Lock()
+		s.lastExpiredCleanup = now
+		s.mu.Unlock()
+		return
+	}
+
+	// Phase 2: remove collected entries under write lock. The critical
+	// section touches only topics that have expired messages — all other
+	// topics are untouched.
+	expiredIDs := make(map[string]map[string]struct{}, len(expired))
+	for _, e := range expired {
+		if expiredIDs[e.topic] == nil {
+			expiredIDs[e.topic] = make(map[string]struct{})
+		}
+		expiredIDs[e.topic][e.id] = struct{}{}
+	}
+
+	s.mu.Lock()
+	s.lastExpiredCleanup = now
+
+	for topic, ids := range expiredIDs {
+		messages := s.topics[topic]
+		filtered := messages[:0]
+		for _, msg := range messages {
+			if _, drop := ids[string(msg.ID)]; drop {
+				log.Debug().Str("node", s.identity.Address).Str("topic", topic).Str("id", string(msg.ID)).Msg("cleanupExpiredMessages: removing expired")
+				continue
+			}
+			filtered = append(filtered, msg)
+		}
 		if len(filtered) == 0 {
 			delete(s.topics, topic)
-			continue
+		} else {
+			s.topics[topic] = filtered
 		}
-
-		s.topics[topic] = filtered
 	}
+	s.mu.Unlock()
 }
 
 func (s *Service) validateMessageTiming(msg incomingMessage) error {

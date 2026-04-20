@@ -3,6 +3,8 @@ package service
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 func TestCacheLoadAndMessages(t *testing.T) {
@@ -98,18 +100,18 @@ func TestCacheUpdateStatusMonotonic(t *testing.T) {
 
 	// sent → delivered: should succeed.
 	deliveredAt := now.Add(1 * time.Second)
-	if !cache.UpdateStatus("m1", "delivered", &deliveredAt) {
+	if !cache.UpdateStatus("m1", "delivered", domain.TimeOf(deliveredAt)) {
 		t.Fatal("sent → delivered should succeed")
 	}
 
 	// delivered → seen: should succeed.
 	seenAt := now.Add(2 * time.Second)
-	if !cache.UpdateStatus("m1", "seen", &seenAt) {
+	if !cache.UpdateStatus("m1", "seen", domain.TimeOf(seenAt)) {
 		t.Fatal("delivered → seen should succeed")
 	}
 
 	// seen → delivered: regression should fail.
-	if cache.UpdateStatus("m1", "delivered", &now) {
+	if cache.UpdateStatus("m1", "delivered", domain.TimeOf(now)) {
 		t.Fatal("seen → delivered regression should fail")
 	}
 
@@ -118,7 +120,7 @@ func TestCacheUpdateStatusMonotonic(t *testing.T) {
 	if msgs[0].ReceiptStatus != "seen" {
 		t.Fatalf("expected status 'seen', got %q", msgs[0].ReceiptStatus)
 	}
-	if msgs[0].DeliveredAt == nil || !msgs[0].DeliveredAt.Equal(seenAt) {
+	if !msgs[0].DeliveredAt.Valid() || !msgs[0].DeliveredAt.Time().Equal(seenAt) {
 		t.Fatalf("unexpected DeliveredAt: %v", msgs[0].DeliveredAt)
 	}
 }
@@ -126,16 +128,16 @@ func TestCacheUpdateStatusMonotonic(t *testing.T) {
 func TestCacheUpdateStatusSameRankReplacesNilDeliveredAt(t *testing.T) {
 	cache := NewConversationCache()
 	cache.Load("bob", []DirectMessage{
-		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: nil},
+		{ID: "m1", ReceiptStatus: "delivered"},
 	})
 
 	// Same status "delivered" but with a real timestamp — should succeed.
 	realTime := time.Now()
-	if !cache.UpdateStatus("m1", "delivered", &realTime) {
+	if !cache.UpdateStatus("m1", "delivered", domain.TimeOf(realTime)) {
 		t.Fatal("same rank with nil→real DeliveredAt should succeed")
 	}
 	msgs := cache.Messages()
-	if msgs[0].DeliveredAt == nil || !msgs[0].DeliveredAt.Equal(realTime) {
+	if !msgs[0].DeliveredAt.Valid() || !msgs[0].DeliveredAt.Time().Equal(realTime) {
 		t.Fatalf("expected real DeliveredAt, got %v", msgs[0].DeliveredAt)
 	}
 }
@@ -144,16 +146,16 @@ func TestCacheUpdateStatusSameRankReplacesZeroDeliveredAt(t *testing.T) {
 	cache := NewConversationCache()
 	zeroTime := time.Time{}
 	cache.Load("bob", []DirectMessage{
-		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: &zeroTime},
+		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: domain.TimeOf(zeroTime)},
 	})
 
 	// Same status "delivered" but with a real timestamp — should succeed.
 	realTime := time.Now()
-	if !cache.UpdateStatus("m1", "delivered", &realTime) {
+	if !cache.UpdateStatus("m1", "delivered", domain.TimeOf(realTime)) {
 		t.Fatal("same rank with zero→real DeliveredAt should succeed")
 	}
 	msgs := cache.Messages()
-	if msgs[0].DeliveredAt == nil || !msgs[0].DeliveredAt.Equal(realTime) {
+	if !msgs[0].DeliveredAt.Valid() || !msgs[0].DeliveredAt.Time().Equal(realTime) {
 		t.Fatalf("expected real DeliveredAt, got %v", msgs[0].DeliveredAt)
 	}
 }
@@ -161,12 +163,12 @@ func TestCacheUpdateStatusSameRankReplacesZeroDeliveredAt(t *testing.T) {
 func TestCacheUpdateStatusSameRankRejectsNilToNil(t *testing.T) {
 	cache := NewConversationCache()
 	cache.Load("bob", []DirectMessage{
-		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: nil},
+		{ID: "m1", ReceiptStatus: "delivered"},
 	})
 
-	// Same status "delivered" with nil DeliveredAt — should reject (no improvement).
-	if cache.UpdateStatus("m1", "delivered", nil) {
-		t.Fatal("same rank with nil→nil DeliveredAt should be rejected")
+	// Same status "delivered" with invalid DeliveredAt — should reject (no improvement).
+	if cache.UpdateStatus("m1", "delivered", domain.OptionalTime{}) {
+		t.Fatal("same rank with invalid→invalid DeliveredAt should be rejected")
 	}
 }
 
@@ -174,18 +176,18 @@ func TestCacheUpdateStatusSameRankReplacesRealWithReal(t *testing.T) {
 	cache := NewConversationCache()
 	existingTime := time.Now()
 	cache.Load("bob", []DirectMessage{
-		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: &existingTime},
+		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: domain.TimeOf(existingTime)},
 	})
 
 	// Same status "delivered" with another real timestamp — should accept.
 	// This covers the case where a synthetic DeliveredAt (message Timestamp)
 	// is later replaced by a real receipt time.
 	newTime := existingTime.Add(1 * time.Second)
-	if !cache.UpdateStatus("m1", "delivered", &newTime) {
+	if !cache.UpdateStatus("m1", "delivered", domain.TimeOf(newTime)) {
 		t.Fatal("same rank with real→real DeliveredAt should succeed")
 	}
 	msgs := cache.Messages()
-	if !msgs[0].DeliveredAt.Equal(newTime) {
+	if !msgs[0].DeliveredAt.Time().Equal(newTime) {
 		t.Fatalf("expected new DeliveredAt, got %v", msgs[0].DeliveredAt)
 	}
 }
@@ -196,7 +198,7 @@ func TestCacheUpdateStatusNotFound(t *testing.T) {
 		{ID: "m1", ReceiptStatus: "sent"},
 	})
 
-	if cache.UpdateStatus("nonexistent", "delivered", nil) {
+	if cache.UpdateStatus("nonexistent", "delivered", domain.OptionalTime{}) {
 		t.Fatal("update for nonexistent message should return false")
 	}
 }

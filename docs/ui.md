@@ -50,14 +50,15 @@ sequenceDiagram
     App->>App: identity.LoadOrCreate()
     App->>App: LoadPreferences()
 
-    App->>Node: node.NewService(cfg, id)
+    App->>App: eventBus = ebus.New()
+    App->>Node: node.NewService(cfg, id, eventBus)
     App->>App: NodeRuntime.Start(ctx)
     Note over Node: Spawns: bootstrap loop,<br/>TCP listener, relay ticker,<br/>routing TTL loop
 
     App->>Client: NewDesktopClient(cfg, id, node)
     Note over Client: Creates chatlog.Store<br/>Registers as MessageStore
 
-    App->>Router: NewDMRouter(client)
+    App->>Router: NewDMRouter(client, fileBridge, eventBus)
     Note over Router: Empty peers, cache,<br/>32-slot event channel
 
     App->>Cmd: NewCommandTable()
@@ -79,14 +80,16 @@ sequenceDiagram
 sequenceDiagram
     participant Win as Window
     participant Router as DMRouter
+    participant eBus as ebus.Bus
     participant Client as DesktopClient
     participant DB as chatlog.Store
     participant Node as node.Service
 
     Win->>Router: Start()
+    Router->>eBus: subscribeEvents()
+    Note over Router: Subscribes to:<br/>aggregate.status.changed,<br/>peer.connected/disconnected,<br/>peer.health.changed,<br/>contacts.changed,<br/>identity.changed
     Router->>Router: runStartup() [goroutine 1]
     Router->>Router: runEventListener() [goroutine 2]
-    Router->>Router: healthTicker() [goroutine 3]
 
     Note over Router: goroutine 1: initializeFromDB
 
@@ -105,28 +108,37 @@ sequenceDiagram
     Client->>DB: Read("dm", peer)
     DB-->>Router: []DirectMessage
 
-    Router->>Router: pollHealth() [deferred]
+    Router->>Router: pollHealth() [deferred, one-time]
     Router->>Client: ProbeNode()
     Client->>Node: fetch_peer_health, fetch_dm_headers, ...
     Node-->>Router: NodeStatus
 
     Router->>Router: close(startupDone)
-    Note over Router: goroutine 3 starts<br/>5-second ticker
+    Note over Router: Real-time updates<br/>arrive via ebus events
 ```
 
 *DMRouter startup sequence*
 
 ### Event-driven UI updates
 
+The node layer pushes state changes via an internal event bus (`ebus.Bus`). The DMRouter subscribes to relevant topics and updates its snapshot on each event. Messages and receipts are still delivered via the legacy `SubscribeLocalChanges` channel during migration.
+
 ```mermaid
 flowchart LR
     subgraph Node["node.Service"]
         MSG[New message arrives]
         RCV[Receipt update]
+        PEER[Peer state change]
+        AGG[Aggregate status change]
+    end
+
+    subgraph eBus["ebus.Bus"]
+        PUB[Publish topic]
     end
 
     subgraph Router["DMRouter"]
         EVT[handleEvent]
+        EBUS_H[ebus handler]
         SIDE[updateSidebarFromEvent]
         ENSURE[ensurePeerLocked]
         NOTIFY[notify UIEvent]
@@ -141,6 +153,10 @@ flowchart LR
 
     MSG --> EVT
     RCV --> EVT
+    PEER --> PUB
+    AGG --> PUB
+    PUB --> EBUS_H
+    EBUS_H --> NOTIFY
     EVT --> SIDE
     SIDE --> ENSURE
     ENSURE --> NOTIFY
@@ -326,11 +342,24 @@ The `CommandTable` is a single registry of all available commands. Desktop UI ca
 
 The Console Window (opened via the header console button) displays per-peer diagnostic information. When a capture session is active, the following UI elements appear:
 
-- **Recording dot** — a small red ellipse on the peer card header next to the peer address. Visible when `PeerHealth.Recording == true` for any `conn_id` of the peer.
+- **Recording dot** — a small red ellipse on the peer card header next to the peer address. Visible when `NodeStatus.CaptureSessions` contains an `Active` entry whose `ConnID` matches the peer row.
 - **Recording info row** — displayed below the peer card health data. Shows scope (`conn_id` / `ip` / `all`), file path (selectable text), capture start time, and dropped event count if non-zero. An error string is shown if the capture writer encountered a disk error.
-- **Stop all recording banner** — a red banner at the top of the peers tab. Visible when at least one peer has `Recording == true`. Contains a "Stop all" button that dispatches `stopPeerTrafficRecording scope=all` via `CommandTable.Execute()`.
+- **Stop all recording banner** — a red banner at the top of the peers tab. Visible when `NodeStatus.CaptureSessions` contains any `Active` entry. Contains a "Stop all" button that dispatches `stopPeerTrafficRecording scope=all` via `CommandTable.Execute()`.
 
-Recording state is sourced exclusively from `fetchPeerHealth` (`PeerHealth` rows). The UI does not maintain independent recording state — it derives visibility from the periodic health snapshot.
+Capture sessions live in a dedicated `map[domain.ConnID]service.CaptureSession` field on `NodeStatus` — separate from `PeerHealth`. This separation guarantees that capture bookkeeping cannot corrupt peer-health rows: capture-start never materializes a peer row, and capture-stop never strips fields from one. The UI derives recording visibility by looking up the peer's `ConnID` in that map.
+
+State is seeded from `ProbeNode` at startup — `captureSessionsFromFrame` extracts one `CaptureSession` per `fetch_peer_health` entry whose `Recording` flag is set — and kept live via two ebus topics published from `traffic_capture_bridge.go`:
+
+- `TopicCaptureSessionStarted` inserts a `CaptureSession` keyed by the event's `ConnID` with `Active=true`, `FilePath`, `StartedAt`, `Scope`, and `Format` copied from the event. Unknown/empty `Format` falls back to `domain.CaptureFormatCompact`. A restart on the same `ConnID` overwrites any lingering stopped entry so diagnostic counters reset.
+- `TopicCaptureSessionStopped` marks the matching entry `Active=false`, stamps `StoppedAt` from the monitor's injectable clock, and records the terminal `Error` / `DroppedEvents`. Stopped entries linger for `NodeStatusMonitor.captureRetention` (default 60 seconds) so the UI can surface the failure reason after the writer goes away. A stop event for an unknown `ConnID` is logged and ignored — no peer-row side effects.
+
+The lazy TTL sweep runs at the start of every `applyCaptureStarted` and at the end of every `applyCaptureStopped`: entries whose `StoppedAt` is older than `captureRetention` are deleted in-place. There is no background goroutine — retention is bounded by the frequency of capture-handler invocations, which is acceptable because a stopped session only matters to the UI while the user is still looking at it.
+
+The `CaptureSessionStarted` payload carries the overlay identity envelope (`Address`, `PeerID`, `Direction`) so the UI can still label a recording when the corresponding `PeerHealth` row has not yet arrived — the label is read directly off the `CaptureSession` rather than from a cross-referenced peer row. This removes the earlier class of bugs where capture-only placeholder rows survived after stop, accidentally graduated via address-scoped traffic events, or silently overwrote real health state.
+
+The payload contract permits an empty `Address` when the publisher could not resolve the connection (torn down between `StartCapture` and the publish, or never tracked). The session is still stored on `NodeStatus.CaptureSessions` so the writer stays visible to the "Stop all recordings" path, but the desktop fallback treats such sessions as unlabeled: `captureHasIdentity` returns false when both `Address` and `PeerID` are empty, and `mergeCapturesIntoPeers` / `countUniquePeers` / `countConnectedPeers` all skip them. Without this gate, unresolved captures would render as blank peer cards and all collapse into a single phantom entry under the empty-string dedup key (`peerIdentityKey("", "") == ""`), inflating `known_peers` / `connected_peers` by exactly one regardless of how many unresolved captures are active.
+
+`mergeCapturesIntoPeers` reconciles each active capture against `peers` with three ordered rules: (1) an existing row with the same `ConnID` is authoritative and the capture is skipped; (2) otherwise, if a `ConnID=0` address-level placeholder (seeded by `applySlotStateDelta` or `applyPeerPendingDelta`) shares the capture's `Address`, the placeholder is promoted in place — `ConnID`, `Direction`, and `Connected` come from the capture, while `SlotState`, `PendingCount`, and any already-observed `PeerID` are preserved; (3) otherwise a fresh synthetic row is appended via `synthesizePeerHealthFromCapture`. Promotion prevents the split-state duplicate where a slot-only placeholder and an orphan capture for the same peer would render as two separate cards until a later health delta reconciles them. The function still honors the "does not mutate the caller's slice" contract via copy-on-write: the input slice is cloned the first time a promotion is required so diagnostic snapshots keep reading the original placeholder unchanged.
 
 ---
 
@@ -384,14 +413,15 @@ sequenceDiagram
     App->>App: identity.LoadOrCreate()
     App->>App: LoadPreferences()
 
-    App->>Node: node.NewService(cfg, id)
+    App->>App: eventBus = ebus.New()
+    App->>Node: node.NewService(cfg, id, eventBus)
     App->>App: NodeRuntime.Start(ctx)
     Note over Node: Запускает: bootstrap loop,<br/>TCP listener, relay ticker,<br/>routing TTL loop
 
     App->>Client: NewDesktopClient(cfg, id, node)
     Note over Client: Создает chatlog.Store<br/>Регистрирует как MessageStore
 
-    App->>Router: NewDMRouter(client)
+    App->>Router: NewDMRouter(client, fileBridge, eventBus)
     Note over Router: Пустые peers, cache,<br/>32-слотовый event channel
 
     App->>Cmd: NewCommandTable()
@@ -413,14 +443,16 @@ sequenceDiagram
 sequenceDiagram
     participant Win as Window
     participant Router as DMRouter
+    participant eBus as ebus.Bus
     participant Client as DesktopClient
     participant DB as chatlog.Store
     participant Node as node.Service
 
     Win->>Router: Start()
+    Router->>eBus: subscribeEvents()
+    Note over Router: Подписка на:<br/>aggregate.status.changed,<br/>peer.connected/disconnected,<br/>peer.health.changed,<br/>contacts.changed,<br/>identity.changed
     Router->>Router: runStartup() [горутина 1]
     Router->>Router: runEventListener() [горутина 2]
-    Router->>Router: healthTicker() [горутина 3]
 
     Note over Router: горутина 1: initializeFromDB
 
@@ -439,28 +471,37 @@ sequenceDiagram
     Client->>DB: Read("dm", peer)
     DB-->>Router: []DirectMessage
 
-    Router->>Router: pollHealth() [deferred]
+    Router->>Router: pollHealth() [deferred, однократно]
     Router->>Client: ProbeNode()
     Client->>Node: fetch_peer_health, fetch_dm_headers, ...
     Node-->>Router: NodeStatus
 
     Router->>Router: close(startupDone)
-    Note over Router: горутина 3 запускает<br/>5-секундный тикер
+    Note over Router: Обновления в реальном<br/>времени через ebus события
 ```
 
 *Последовательность запуска DMRouter*
 
 ### Event-driven обновление UI
 
+Слой node.Service отправляет изменения состояния через внутреннюю шину событий (`ebus.Bus`). DMRouter подписывается на нужные топики и обновляет свой снапшот при каждом событии. Сообщения и квитанции доставки пока доставляются через legacy-канал `SubscribeLocalChanges` в процессе миграции.
+
 ```mermaid
 flowchart LR
     subgraph Node["node.Service"]
         MSG[Приходит сообщение]
         RCV[Обновление статуса доставки]
+        PEER[Изменение состояния пира]
+        AGG[Изменение агрегатного статуса]
+    end
+
+    subgraph eBus["ebus.Bus"]
+        PUB[Publish topic]
     end
 
     subgraph Router["DMRouter"]
         EVT[handleEvent]
+        EBUS_H[ebus handler]
         SIDE[updateSidebarFromEvent]
         ENSURE[ensurePeerLocked]
         NOTIFY[notify UIEvent]
@@ -475,6 +516,10 @@ flowchart LR
 
     MSG --> EVT
     RCV --> EVT
+    PEER --> PUB
+    AGG --> PUB
+    PUB --> EBUS_H
+    EBUS_H --> NOTIFY
     EVT --> SIDE
     SIDE --> ENSURE
     ENSURE --> NOTIFY
@@ -620,7 +665,22 @@ flowchart TD
 
 Окно консоли (открывается кнопкой консоли в заголовке) отображает диагностическую информацию по каждому peer'у. Когда capture-сессия активна, появляются следующие UI-элементы:
 
-- **Точка записи** — маленький красный эллипс на заголовке peer-карточки рядом с адресом. Виден когда `PeerHealth.Recording == true` для любого `conn_id` этого peer'а.
+- **Точка записи** — маленький красный эллипс на заголовке peer-карточки рядом с адресом. Виден когда `NodeStatus.CaptureSessions` содержит запись с `Active=true` и `ConnID`, совпадающим со строкой пира.
 - **Строка информации о записи** — отображается под данными здоровья peer-карточки. Показывает scope (`conn_id` / `ip` / `all`), путь к файлу (выделяемый текст), время старта записи и количество потерянных событий если ненулевое. Строка ошибки показывается если capture writer столкнулся с ошибкой диска.
-- **Баннер остановки записи** — красный баннер вверху вкладки peers. Виден когда хотя бы один peer имеет `Recording == true`. Содержит кнопку "Stop all", которая отправляет `stopPeerTrafficRecording scope=all` через `CommandTable.Execute()`.
+- **Баннер остановки записи** — красный баннер вверху вкладки peers. Виден когда `NodeStatus.CaptureSessions` содержит хотя бы одну запись с `Active=true`. Содержит кнопку "Stop all", которая отправляет `stopPeerTrafficRecording scope=all` через `CommandTable.Execute()`.
+
+Capture-сессии хранятся в отдельном поле `map[domain.ConnID]service.CaptureSession` на `NodeStatus` — независимо от `PeerHealth`. Это разделение гарантирует, что capture-bookkeeping не может повредить строки peer-health: capture-start никогда не материализует строку пира, а capture-stop никогда не вычищает поля. UI определяет видимость записи, обращаясь по `ConnID` пира к этой карте.
+
+Состояние изначально заполняется из `ProbeNode` при старте — `captureSessionsFromFrame` извлекает по одной `CaptureSession` на каждую запись `fetch_peer_health` с выставленным флагом `Recording` — и поддерживается актуальным через две ebus-темы, публикуемые из `traffic_capture_bridge.go`:
+
+- `TopicCaptureSessionStarted` вставляет `CaptureSession` по ключу `ConnID` со значениями `Active=true`, `FilePath`, `StartedAt`, `Scope`, `Format`, скопированными из события. Неизвестный/пустой `Format` подменяется на `domain.CaptureFormatCompact`. Перезапуск на том же `ConnID` перезатирает любую "залежавшуюся" остановленную запись, чтобы сбросить диагностические счётчики.
+- `TopicCaptureSessionStopped` помечает соответствующую запись как `Active=false`, фиксирует `StoppedAt` через инжектируемые часы монитора и записывает терминальные `Error` / `DroppedEvents`. Остановленные записи живут `NodeStatusMonitor.captureRetention` (по умолчанию 60 секунд), чтобы UI мог показать причину сбоя после ухода writer'а. Stop для неизвестного `ConnID` логируется и игнорируется — никаких побочек на peer-строки.
+
+Ленивая чистка по TTL запускается в начале каждого `applyCaptureStarted` и в конце каждого `applyCaptureStopped`: записи, у которых `StoppedAt` старше `captureRetention`, удаляются in-place. Фоновой goroutine нет — частота чистки ограничена частотой вызовов capture-обработчиков, что приемлемо: остановленная сессия важна для UI ровно до тех пор, пока пользователь смотрит на неё.
+
+Payload `CaptureSessionStarted` несёт overlay-идентичность (`Address`, `PeerID`, `Direction`), чтобы UI мог подписать запись, даже когда соответствующая строка `PeerHealth` ещё не пришла — лейбл читается прямо из `CaptureSession`, а не через cross-reference с peer-строкой. Это устраняет прежний класс багов, когда capture-only placeholder-строки выживали после stop, ошибочно "graduate"-или через address-scoped traffic-события или молча перезатирали реальное health-состояние.
+
+Контракт payload разрешает пустой `Address`, если publisher не смог разрешить соединение (оно было закрыто между `StartCapture` и публикацией или никогда не отслеживалось). Сессия всё равно сохраняется в `NodeStatus.CaptureSessions`, чтобы writer оставался виден для пути "Stop all recordings", но desktop-fallback считает такие сессии неопознанными: `captureHasIdentity` возвращает false, когда оба поля `Address` и `PeerID` пусты, и `mergeCapturesIntoPeers` / `countUniquePeers` / `countConnectedPeers` их пропускают. Без этого фильтра неопознанные captures рендерились бы как пустые peer-карточки и все коллапсировали бы в единственную фантомную запись под пустым ключом дедупа (`peerIdentityKey("", "") == ""`), раздувая `known_peers` / `connected_peers` ровно на один элемент вне зависимости от количества активных неопознанных captures.
+
+`mergeCapturesIntoPeers` сверяет каждую активную capture со списком `peers` по трём упорядоченным правилам: (1) строка с тем же `ConnID` авторитетна и capture пропускается; (2) иначе, если существует address-level placeholder с `ConnID=0` (создан `applySlotStateDelta` либо `applyPeerPendingDelta`) и совпадающим `Address`, placeholder promote'ится на месте — `ConnID`, `Direction` и `Connected` берутся из capture, а `SlotState`, `PendingCount` и уже наблюдаемый `PeerID` сохраняются; (3) иначе через `synthesizePeerHealthFromCapture` добавляется новая синтетическая строка. Promotion исключает split-state дубликат, при котором slot-only placeholder и сиротская capture для одного и того же peer'а рендерились бы как две отдельные карточки до прихода следующей health-delta. При этом инвариант "не мутировать слайс вызывающего" сохраняется через copy-on-write: входной слайс клонируется при первой же promotion, чтобы диагностические снапшоты продолжали видеть исходный placeholder без изменений.
 

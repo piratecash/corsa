@@ -115,6 +115,56 @@ sequenceDiagram
     Cmd->>Mesh: queue direct message
 ```
 
+### Identity
+
+The SDK never auto-generates a new identity. Each consumer must supply
+identity explicitly using one of two methods:
+
+**Option 1 — PrivateKey string (preferred for production bots):**
+
+```go
+cfg.Node.PrivateKey = "base64-encoded-ed25519-private-key"
+```
+
+The X25519 box key pair is derived deterministically from the Ed25519 seed —
+the same PrivateKey always produces the same identity address and box key.
+
+**Option 2 — existing identity file:**
+
+```go
+cfg.Node.IdentityPath = "/path/to/identity.json"
+```
+
+The file must already exist. For development convenience, `sdk.EnsureIdentityFile(path)` 
+creates a new identity file if one does not exist yet.
+
+If neither `PrivateKey` nor a valid `IdentityPath` is provided, `sdk.New()` returns an error.
+
+### Идентификация
+
+SDK никогда не создаёт identity автоматически. Каждый потребитель должен
+предоставить identity явно одним из двух способов:
+
+**Способ 1 — строка PrivateKey (рекомендуется для продакшен-ботов):**
+
+```go
+cfg.Node.PrivateKey = "base64-encoded-ed25519-private-key"
+```
+
+X25519 box key пара деривируется детерминистически из Ed25519 seed —
+один и тот же PrivateKey всегда даёт один и тот же identity address и box key.
+
+**Способ 2 — существующий файл identity:**
+
+```go
+cfg.Node.IdentityPath = "/path/to/identity.json"
+```
+
+Файл должен уже существовать. Для удобства разработки `sdk.EnsureIdentityFile(path)`
+создаёт новый файл identity, если его ещё нет.
+
+Если ни `PrivateKey`, ни валидный `IdentityPath` не указаны, `sdk.New()` возвращает ошибку.
+
 ### Quick Start
 
 ```go
@@ -136,6 +186,11 @@ func main() {
 	cfg.Node.TrustStorePath = ".corsa-bot/trust-64648.json"
 	cfg.Node.QueueStatePath = ".corsa-bot/queue-64648.json"
 	cfg.Node.PeersStatePath = ".corsa-bot/peers-64648.json"
+
+	// SDK does not auto-generate identity — create file for first run.
+	if err := sdk.EnsureIdentityFile(cfg.Node.IdentityPath); err != nil {
+		log.Fatal(err)
+	}
 
 	runtime, err := sdk.New(cfg)
 	if err != nil {
@@ -332,6 +387,11 @@ func main() {
 	cfg.Node.TrustStorePath = ".corsa-bot/trust-64648.json"
 	cfg.Node.QueueStatePath = ".corsa-bot/queue-64648.json"
 	cfg.Node.PeersStatePath = ".corsa-bot/peers-64648.json"
+
+	// SDK does not auto-generate identity — create file for first run.
+	if err := sdk.EnsureIdentityFile(cfg.Node.IdentityPath); err != nil {
+		log.Fatal(err)
+	}
 
 	runtime, err := sdk.New(cfg)
 	if err != nil {

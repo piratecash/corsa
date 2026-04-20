@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,6 +19,12 @@ import (
 type CommandRequest struct {
 	Name string
 	Args map[string]interface{}
+
+	// Ctx carries cancellation for long-running commands. Handlers that
+	// perform I/O should check Ctx.Done() and return early when the
+	// caller abandons the request. Nil means no cancellation — handlers
+	// must treat a nil Ctx the same as context.Background().
+	Ctx context.Context
 }
 
 // ErrorKind categorizes command errors so the HTTP layer can map them
@@ -171,7 +178,19 @@ func (t *CommandTable) resolveHandler(name string) (CommandHandler, string, bool
 
 // Execute runs a command by name and returns the response.
 // Aliases and case-insensitive names are resolved transparently.
+// If req.Ctx is set and already cancelled, Execute returns immediately
+// without dispatching the handler — this prevents orphaned goroutines
+// from mutating node state after the caller has given up.
 func (t *CommandTable) Execute(req CommandRequest) CommandResponse {
+	if req.Ctx != nil {
+		if err := req.Ctx.Err(); err != nil {
+			return CommandResponse{
+				Error:     fmt.Errorf("command cancelled: %w", err),
+				ErrorKind: ErrInternal,
+			}
+		}
+	}
+
 	t.mu.RLock()
 	handler, canonical, exists := t.resolveHandler(req.Name)
 	t.mu.RUnlock()
@@ -278,45 +297,45 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 // to migrate. Remove after v0.18.
 func registerSnakeCaseAliases(t *CommandTable) {
 	aliases := map[string]string{
-		"get_peers":               "getPeers",
-		"fetch_peer_health":       "fetchPeerHealth",
-		"fetch_network_stats":     "fetchNetworkStats",
-		"add_peer":                "addPeer",
-		"fetch_reachable_ids":     "fetchReachableIds",
-		"fetch_aggregate_status":  "fetchAggregateStatus",
-		"fetch_relay_status":      "fetchRelayStatus",
-		"fetch_identities":        "fetchIdentities",
-		"fetch_contacts":          "fetchContacts",
-		"fetch_trusted_contacts":  "fetchTrustedContacts",
-		"delete_trusted_contact":  "deleteTrustedContact",
-		"import_contacts":         "importContacts",
-		"fetch_messages":          "fetchMessages",
-		"fetch_message_ids":       "fetchMessageIds",
-		"fetch_message":           "fetchMessage",
-		"fetch_inbox":             "fetchInbox",
-		"fetch_pending_messages":  "fetchPendingMessages",
-		"fetch_delivery_receipts": "fetchDeliveryReceipts",
-		"fetch_dm_headers":        "fetchDmHeaders",
-		"send_dm":                 "sendDm",
-		"send_message":            "sendMessage",
-		"import_message":          "importMessage",
-		"send_delivery_receipt":   "sendDeliveryReceipt",
-		"send_file_announce":      "sendFileAnnounce",
-		"fetch_file_transfers":    "fetchFileTransfers",
-		"fetch_file_mapping":      "fetchFileMapping",
-		"retry_file_chunk":        "retryFileChunk",
-		"start_file_download":     "startFileDownload",
-		"cancel_file_download":    "cancelFileDownload",
-		"restart_file_download":   "restartFileDownload",
-		"fetch_chatlog":           "fetchChatlog",
-		"fetch_chatlog_previews":  "fetchChatlogPreviews",
-		"fetch_conversations":     "fetchConversations",
-		"fetch_notices":           "fetchNotices",
-		"publish_notice":          "publishNotice",
-		"fetch_traffic_history":   "fetchTrafficHistory",
-		"fetch_route_table":       "fetchRouteTable",
-		"fetch_route_summary":     "fetchRouteSummary",
-		"fetch_route_lookup":      "fetchRouteLookup",
+		"get_peers":                      "getPeers",
+		"fetch_peer_health":              "fetchPeerHealth",
+		"fetch_network_stats":            "fetchNetworkStats",
+		"add_peer":                       "addPeer",
+		"fetch_reachable_ids":            "fetchReachableIds",
+		"fetch_aggregate_status":         "fetchAggregateStatus",
+		"fetch_relay_status":             "fetchRelayStatus",
+		"fetch_identities":               "fetchIdentities",
+		"fetch_contacts":                 "fetchContacts",
+		"fetch_trusted_contacts":         "fetchTrustedContacts",
+		"delete_trusted_contact":         "deleteTrustedContact",
+		"import_contacts":                "importContacts",
+		"fetch_messages":                 "fetchMessages",
+		"fetch_message_ids":              "fetchMessageIds",
+		"fetch_message":                  "fetchMessage",
+		"fetch_inbox":                    "fetchInbox",
+		"fetch_pending_messages":         "fetchPendingMessages",
+		"fetch_delivery_receipts":        "fetchDeliveryReceipts",
+		"fetch_dm_headers":               "fetchDmHeaders",
+		"send_dm":                        "sendDm",
+		"send_message":                   "sendMessage",
+		"import_message":                 "importMessage",
+		"send_delivery_receipt":          "sendDeliveryReceipt",
+		"send_file_announce":             "sendFileAnnounce",
+		"fetch_file_transfers":           "fetchFileTransfers",
+		"fetch_file_mapping":             "fetchFileMapping",
+		"retry_file_chunk":               "retryFileChunk",
+		"start_file_download":            "startFileDownload",
+		"cancel_file_download":           "cancelFileDownload",
+		"restart_file_download":          "restartFileDownload",
+		"fetch_chatlog":                  "fetchChatlog",
+		"fetch_chatlog_previews":         "fetchChatlogPreviews",
+		"fetch_conversations":            "fetchConversations",
+		"fetch_notices":                  "fetchNotices",
+		"publish_notice":                 "publishNotice",
+		"fetch_traffic_history":          "fetchTrafficHistory",
+		"fetch_route_table":              "fetchRouteTable",
+		"fetch_route_summary":            "fetchRouteSummary",
+		"fetch_route_lookup":             "fetchRouteLookup",
 		"get_active_peers":               "getActivePeers",
 		"get_active_connections":         "getActiveConnections",
 		"list_peers":                     "listPeers",
@@ -364,6 +383,26 @@ func validationError(err error) CommandResponse {
 // internalError creates a CommandResponse for provider/system failures (500).
 func internalError(err error) CommandResponse {
 	return CommandResponse{Error: err, ErrorKind: ErrInternal}
+}
+
+// ctxDone checks whether the command's context has been cancelled.
+// Returns a cancellation CommandResponse and true when the caller should
+// short-circuit, or a zero CommandResponse and false when the handler may
+// proceed. This is called inside handler closures at the boundary before
+// (and between) expensive operations so that abandoned console commands
+// stop as early as possible without requiring deep context threading
+// through HandleLocalFrame and its callees.
+func ctxDone(req CommandRequest) (CommandResponse, bool) {
+	if req.Ctx == nil {
+		return CommandResponse{}, false
+	}
+	if err := req.Ctx.Err(); err != nil {
+		return CommandResponse{
+			Error:     fmt.Errorf("command cancelled: %w", err),
+			ErrorKind: ErrInternal,
+		}, true
+	}
+	return CommandResponse{}, false
 }
 
 // numericArg extracts a numeric argument that may arrive as float64 (JSON path)
@@ -430,6 +469,9 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "ping", Description: "Send local ping and receive pong response", Category: "system"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "ping"})
 			return frameResponse(reply)
 		},
@@ -438,6 +480,9 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "hello", Description: "Send hello frame to identify with peers", Category: "system"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{
 				Type:                   "hello",
 				Version:                config.ProtocolVersion,
@@ -468,6 +513,9 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "getPeers", Description: "Get list of connected peers", Category: "network"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
 			return frameResponse(reply)
 		},
@@ -476,6 +524,9 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchPeerHealth", Description: "Get peer health status", Category: "network"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
 			return frameResponse(reply)
 		},
@@ -484,6 +535,9 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchNetworkStats", Description: "Get aggregated network traffic statistics per peer and total", Category: "network"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
 			return frameResponse(reply)
 		},
@@ -492,6 +546,9 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "addPeer", Description: "Add a new peer by address", Category: "network", Usage: "<address>"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			address, _ := req.Args["address"].(string)
 			if strings.TrimSpace(address) == "" {
 				return validationError(fmt.Errorf("address is required"))
@@ -507,6 +564,9 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchReachableIds", Description: "Get identities reachable via mesh routing", Category: "network"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"}))
 		},
 	)
@@ -514,6 +574,9 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchAggregateStatus", Description: "Get aggregate network health status (single source of truth for policy and UI)", Category: "network"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_aggregate_status"}))
 		},
 	)
@@ -540,6 +603,9 @@ func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider
 
 	t.Register(activePeersInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			data, err := cd.ActivePeersJSON()
 			if err != nil {
 				return internalError(fmt.Errorf("active peers: %w", err))
@@ -550,6 +616,9 @@ func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider
 
 	t.Register(activeConnsInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			data, err := cd.ActiveConnectionsJSON()
 			if err != nil {
 				return internalError(fmt.Errorf("active connections: %w", err))
@@ -560,6 +629,9 @@ func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider
 
 	t.Register(listPeersInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			data, err := cd.ListPeersJSON()
 			if err != nil {
 				return internalError(fmt.Errorf("list peers: %w", err))
@@ -570,6 +642,9 @@ func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider
 
 	t.Register(listBannedInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			data, err := cd.ListBannedJSON()
 			if err != nil {
 				return internalError(fmt.Errorf("list banned: %w", err))
@@ -584,6 +659,9 @@ func RegisterMeshCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchRelayStatus", Description: "Get hop-by-hop relay subsystem status (active states, capable peers)", Category: "mesh"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_relay_status"})
 			return frameResponse(reply)
 		},
@@ -604,6 +682,9 @@ func RegisterMetricsCommands(t *CommandTable, m MetricsProvider) {
 
 	t.Register(trafficHistoryInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := m.TrafficSnapshot()
 			return frameResponse(reply)
 		},
@@ -615,6 +696,9 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchIdentities", Description: "Fetch all known identities", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_identities"})
 			return frameResponse(reply)
 		},
@@ -623,6 +707,9 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchContacts", Description: "Fetch all contacts", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_contacts"})
 			return frameResponse(reply)
 		},
@@ -631,6 +718,9 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchTrustedContacts", Description: "Fetch trusted contacts", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
 			return frameResponse(reply)
 		},
@@ -639,6 +729,9 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "deleteTrustedContact", Description: "Remove a trusted contact by address", Category: "identity", Usage: "<address>"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			address, _ := req.Args["address"].(string)
 			if strings.TrimSpace(address) == "" {
 				return validationError(fmt.Errorf("address is required"))
@@ -651,6 +744,9 @@ func RegisterIdentityCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "importContacts", Description: "Import contacts from a list of address/pubkey/boxkey entries", Category: "identity"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			frame, err := frameFromArgs("import_contacts", req.Args)
 			if err != nil {
 				return validationError(err)
@@ -671,6 +767,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "fetchMessages", Description: "Fetch messages from a topic (supports limit, offset via JSON)", Category: "message", Usage: "[topic]"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
 				return validationError(fmt.Errorf("topic is required"))
@@ -689,6 +788,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "fetchMessageIds", Description: "Fetch message IDs from a topic (supports limit, offset via JSON)", Category: "message", Usage: "[topic]"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
 				return validationError(fmt.Errorf("topic is required"))
@@ -707,6 +809,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "fetchMessage", Description: "Fetch a specific message", Category: "message", Usage: "<topic> <id>"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			topic, _ := req.Args["topic"].(string)
 			id, _ := req.Args["id"].(string)
 			if strings.TrimSpace(topic) == "" {
@@ -726,6 +831,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "fetchInbox", Description: "Fetch inbox for a recipient (defaults to self; supports limit, offset via JSON)", Category: "message", Usage: "[topic] [recipient]"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
 				return validationError(fmt.Errorf("topic is required"))
@@ -748,6 +856,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "fetchPendingMessages", Description: "Fetch pending messages", Category: "message", Usage: "[topic]"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			topic, _ := req.Args["topic"].(string)
 			if strings.TrimSpace(topic) == "" {
 				return validationError(fmt.Errorf("topic is required"))
@@ -762,6 +873,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "fetchDeliveryReceipts", Description: "Fetch delivery receipts (defaults to self)", Category: "message", Usage: "[recipient]"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			recipient, _ := req.Args["recipient"].(string)
 			if strings.TrimSpace(recipient) == "" {
 				recipient = node.Address()
@@ -777,6 +891,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "fetchDmHeaders", Description: "Fetch direct message headers", Category: "message"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{
 				Type: "fetch_dm_headers",
 			}))
@@ -787,6 +904,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	if dmRouter != nil {
 		t.Register(sendDMInfo,
 			func(req CommandRequest) CommandResponse {
+				if r, done := ctxDone(req); done {
+					return r
+				}
 				to, _ := req.Args["to"].(string)
 				body, _ := req.Args["body"].(string)
 				if strings.TrimSpace(to) == "" {
@@ -833,6 +953,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "sendMessage", Description: "Store an incoming message (raw frame)", Category: "message"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			frame, err := frameFromArgs("send_message", req.Args)
 			if err != nil {
 				return validationError(err)
@@ -844,6 +967,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "importMessage", Description: "Import a message without delivery side-effects (raw frame)", Category: "message"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			frame, err := frameFromArgs("import_message", req.Args)
 			if err != nil {
 				return validationError(err)
@@ -855,6 +981,9 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 	t.Register(
 		CommandInfo{Name: "sendDeliveryReceipt", Description: "Store a delivery receipt (raw frame)", Category: "message"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			frame, err := frameFromArgs("send_delivery_receipt", req.Args)
 			if err != nil {
 				return validationError(err)
@@ -882,6 +1011,9 @@ func registerFileAnnounceCommand(t *CommandTable, node NodeProvider, dmRouter DM
 	}
 
 	t.Register(info, func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
 		to, _ := req.Args["to"].(string)
 		if strings.TrimSpace(to) == "" {
 			return validationError(fmt.Errorf("to is required"))
@@ -1001,6 +1133,9 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 
 	t.Register(transfersInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			data, err := node.FetchFileTransfers()
 			if err != nil {
 				return internalError(fmt.Errorf("fetch file transfers: %w", err))
@@ -1011,6 +1146,9 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 
 	t.Register(mappingInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			data, err := node.FetchFileMappings()
 			if err != nil {
 				return internalError(fmt.Errorf("fetch file mappings: %w", err))
@@ -1021,6 +1159,9 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 
 	t.Register(retryInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			fileID, _ := req.Args["file_id"].(string)
 			if strings.TrimSpace(fileID) == "" {
 				return validationError(fmt.Errorf("file_id is required"))
@@ -1034,6 +1175,9 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 
 	t.Register(startInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			fileID, _ := req.Args["file_id"].(string)
 			if strings.TrimSpace(fileID) == "" {
 				return validationError(fmt.Errorf("file_id is required"))
@@ -1047,6 +1191,9 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 
 	t.Register(cancelInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			fileID, _ := req.Args["file_id"].(string)
 			if strings.TrimSpace(fileID) == "" {
 				return validationError(fmt.Errorf("file_id is required"))
@@ -1060,6 +1207,9 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 
 	t.Register(restartInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			fileID, _ := req.Args["file_id"].(string)
 			if strings.TrimSpace(fileID) == "" {
 				return validationError(fmt.Errorf("file_id is required"))
@@ -1088,6 +1238,9 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 
 	t.Register(chatlogInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			topic, _ := req.Args["topic"].(string)
 			peerAddress, _ := req.Args["peer_address"].(string)
 			if strings.TrimSpace(topic) == "" {
@@ -1105,6 +1258,9 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 
 	t.Register(previewsInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			previews, err := chatlog.FetchChatlogPreviews()
 			if err != nil {
 				return internalError(fmt.Errorf("fetch chatlog previews: %w", err))
@@ -1115,6 +1271,9 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 
 	t.Register(conversationsInfo,
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			conversations, err := chatlog.FetchConversations()
 			if err != nil {
 				return internalError(fmt.Errorf("fetch conversations: %w", err))
@@ -1129,6 +1288,9 @@ func RegisterNoticeCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "fetchNotices", Description: "Fetch all notices", Category: "notice"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_notices"}))
 		},
 	)
@@ -1136,6 +1298,9 @@ func RegisterNoticeCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "publishNotice", Description: "Publish an encrypted notice with TTL (raw frame)", Category: "notice"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			frame, err := frameFromArgs("publish_notice", req.Args)
 			if err != nil {
 				return validationError(err)
@@ -1178,6 +1343,9 @@ func RegisterDesktopOverrides(t *CommandTable, diag DiagnosticProvider, node Nod
 	t.Register(
 		CommandInfo{Name: "hello", Description: "Send hello frame to identify with peers", Category: "system"},
 		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
 			reply := node.HandleLocalFrame(protocol.Frame{
 				Type:                   "hello",
 				Version:                config.ProtocolVersion,

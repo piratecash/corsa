@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 )
 
 // ---------------------------------------------------------------------------
@@ -201,6 +202,10 @@ type ConnectionManagerConfig struct {
 	// FillInterval overrides periodicFillInterval for testing.
 	// When zero, the default periodicFillInterval is used.
 	FillInterval time.Duration
+
+	// EventBus is used to publish TopicSlotStateChanged when a slot
+	// transitions between states. May be nil (tests, standalone usage).
+	EventBus *ebus.Bus
 }
 
 // ConnectionManager manages the lifecycle of outbound connection slots.
@@ -330,6 +335,16 @@ func (cm *ConnectionManager) EmitHint(event HintEvent) {
 	default:
 		log.Debug().Str("event", hintEventName(event)).Msg("cm: hint event dropped (buffer full)")
 	}
+}
+
+// emitSlotStateChanged publishes the slot state transition to the event bus.
+// Called from the single-threaded event loop after slot.State is updated.
+// Safe: ebus.Publish is non-blocking and uses its own mutex.
+func (cm *ConnectionManager) emitSlotStateChanged(address domain.PeerAddress, state slotState) {
+	if cm.config.EventBus == nil {
+		return
+	}
+	cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, address, state.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -568,9 +583,11 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 	// Enforce slot limit: evict one slot if at capacity.
 	maxSlots := cm.config.MaxSlotsFn()
 	var teardownInfo *SessionInfo
+	var evictedAddr domain.PeerAddress
 	if len(cm.slots) >= maxSlots {
 		victim := cm.findLowestScoringSlotLocked()
 		if victim != nil {
+			evictedAddr = victim.Address
 			log.Info().
 				Str("evicted", string(victim.Address)).
 				Str("manual", string(ev.Address)).
@@ -591,6 +608,12 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 	}
 	cm.slots = append(cm.slots, s)
 	cm.mu.Unlock()
+
+	// Emit slot events outside the lock: eviction (removal) then new dial.
+	if evictedAddr != "" && cm.config.EventBus != nil {
+		cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, evictedAddr, "")
+	}
+	cm.emitSlotStateChanged(ev.Address, slotStateDialing)
 
 	// Invoke teardown callback outside lock.
 	if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
@@ -673,7 +696,13 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 				Msg("cm: replacing slot after repeated setup failures")
 
 			replaceTeardown := cm.replaceSlotLocked(s)
+			addr := s.Address
 			cm.mu.Unlock()
+
+			// Slot removed — emit empty state so subscribers clear the peer.
+			if cm.config.EventBus != nil {
+				cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, addr, "")
+			}
 
 			if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 				cm.config.OnSessionTeardown(*teardownInfo)
@@ -696,6 +725,8 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 		retryCount := s.RetryCount
 
 		cm.mu.Unlock()
+
+		cm.emitSlotStateChanged(addr, slotStateRetryWait)
 
 		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 			cm.config.OnSessionTeardown(*teardownInfo)
@@ -724,6 +755,8 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 	dialAddrs := s.DialAddresses
 
 	cm.mu.Unlock()
+
+	cm.emitSlotStateChanged(addr, slotStateReconnecting)
 
 	if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 		cm.config.OnSessionTeardown(*teardownInfo)
@@ -762,7 +795,13 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 			Msg("cm: replacing slot")
 
 		teardownInfo := cm.replaceSlotLocked(s)
+		replacedAddr := s.Address
 		cm.mu.Unlock()
+
+		// Slot removed — emit empty state so subscribers clear the peer.
+		if cm.config.EventBus != nil {
+			cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, replacedAddr, "")
+		}
 
 		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 			cm.config.OnSessionTeardown(*teardownInfo)
@@ -784,6 +823,8 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		retryCount := s.RetryCount
 
 		cm.mu.Unlock()
+
+		cm.emitSlotStateChanged(addr, slotStateRetryWait)
 
 		// Notify Service about the failure (score update) even for retries.
 		if cm.config.OnDialFailed != nil {
@@ -931,6 +972,11 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 
 	cm.mu.Unlock()
 
+	// Emit slot state changes outside the lock.
+	for _, t := range tasks {
+		cm.emitSlotStateChanged(t.address, slotStateDialing)
+	}
+
 	// Phase 2: launch dial workers (outside lock).
 	for _, t := range tasks {
 		log.Debug().
@@ -983,9 +1029,11 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 		}
 	}
 
-	// Deactivate and remove victims.
+	// Deactivate and remove victims. Capture addresses before removal.
 	var teardowns []SessionInfo
+	evictedAddrs := make([]domain.PeerAddress, 0, len(victims))
 	for _, v := range victims {
+		evictedAddrs = append(evictedAddrs, v.Address)
 		if info := cm.deactivateSlotLocked(v); info != nil {
 			teardowns = append(teardowns, *info)
 		}
@@ -993,6 +1041,14 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 	}
 
 	cm.mu.Unlock()
+
+	// Emit slot-removed events outside the lock so subscribers see the
+	// peer disappear from CM tracking. Empty state signals removal.
+	if cm.config.EventBus != nil {
+		for _, addr := range evictedAddrs {
+			cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, addr, "")
+		}
+	}
 
 	// Invoke teardown callbacks outside the lock.
 	if cm.config.OnSessionTeardown != nil {
@@ -1016,6 +1072,8 @@ func (cm *ConnectionManager) beginInitSlotLocked(s *slot, ev DialSucceeded) Sess
 	s.ConnectedAddress = ev.ConnectedAddress
 	s.RetryCount = 0
 	s.Generation = cm.nextGenerationLocked()
+
+	cm.emitSlotStateChanged(s.Address, slotStateInitializing)
 
 	log.Info().
 		Str("address", string(s.Address)).
@@ -1044,6 +1102,9 @@ func (cm *ConnectionManager) promoteSlotLocked(s *slot) {
 		Str("address", string(s.Address)).
 		Str("connected_via", string(s.ConnectedAddress)).
 		Msg("cm: slot activated")
+
+	// Safe to call under cm.mu — ebus uses its own RWMutex.
+	cm.emitSlotStateChanged(s.Address, slotStateActive)
 }
 
 // deactivateSlotLocked performs cleanup when an active or initializing slot

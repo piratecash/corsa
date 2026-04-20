@@ -64,7 +64,8 @@ func slotActive(t *testing.T, cm *ConnectionManager, addr string) {
 // testServiceConfig returns a minimal config for Service field initialization.
 func testServiceConfig() config.Node {
 	return config.Node{
-		MaxOutgoingPeers: 8,
+		MaxOutgoingPeers:  8,
+		AllowPrivatePeers: true,
 	}
 }
 

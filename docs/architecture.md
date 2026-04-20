@@ -97,6 +97,104 @@ Current trust and discovery flow:
 - the first valid contact set is pinned locally (TOFU)
 - conflicting key rotations are ignored and recorded as trust conflicts
 
+### Event bus (ebus)
+
+`internal/core/ebus` provides a lightweight in-process pub/sub event bus that
+decouples the node layer from consumers (DMRouter, console UI, SDK).
+
+```mermaid
+flowchart LR
+    subgraph NODE["node.Service"]
+        PEER_MGMT["Peer management"]
+        MSG_STORE["Message storage"]
+        ROUTING["Routing table"]
+        CM["ConnectionManager"]
+    end
+
+    EBUS["ebus.Bus\n(async, 64-slot inbox)"]
+
+    subgraph CONSUMERS["Consumers"]
+        DMR["DMRouter\n(service layer)"]
+        CONSOLE["Console UI\n(desktop)"]
+        SDK_SUB["SDK subscribers"]
+    end
+
+    PEER_MGMT -->|"peer.health.changed\npeer.connected/disconnected"| EBUS
+    MSG_STORE -->|"message.new\nreceipt.updated"| EBUS
+    ROUTING -->|"route.table.changed"| EBUS
+    CM -->|"slot.state.changed"| EBUS
+
+    EBUS --> DMR
+    EBUS --> CONSOLE
+    EBUS --> SDK_SUB
+```
+
+*Diagram — Event bus architecture*
+
+Design principles:
+
+- ebus carries only short delta events (state transitions, counters). No bulk
+  data or heavy payloads.
+- RPC remains for commands/queries (fetch messages, send messages, routing
+  snapshots). RPC handlers may publish ebus events as side effects.
+- Each subscriber gets a dedicated drain goroutine with a 64-slot buffered
+  inbox. Publishers never block.
+- Subscriptions are registered before startup so no events are missed.
+- The node layer is fully autonomous — ebus is a notification mechanism, not
+  a control channel.
+
+Topics (defined in `internal/core/ebus/topics.go`): `peer.connected`,
+`peer.disconnected`, `peer.health.changed`, `peer.pending.changed`,
+`peer.traffic.updated`, `slot.state.changed`, `route.table.changed`,
+`message.new`, `receipt.updated`, `message.sent`, `message.send.failed`,
+`file.sent`, `file.send.failed`, `contact.added`, `contact.removed`,
+`identity.added`, `aggregate.status.changed`, `version.policy.changed`.
+
+### Optional timestamps on the snapshot boundary
+
+Types that live on the read-only snapshot boundary (`NodeStatus`,
+`PeerHealth`, `CaptureSession`, `DirectMessage`, `PendingMessage`) never
+use `*time.Time` for optional timestamp fields. They use the value type
+`domain.OptionalTime`, declared in `internal/core/domain/optional_time.go`.
+
+Rationale:
+
+- **Pointer snapshots are not deep copies.** Copying a struct that
+  contains `*time.Time` aliases the pointee. A UI goroutine that reads
+  the snapshot and a background goroutine that mutates the source see
+  the same timestamp through shared memory, which silently breaks the
+  snapshot contract.
+- **`OptionalTime` is a value.** `struct { t time.Time; valid bool }`
+  copies by value. A snapshot is a true deep copy — the UI cannot
+  observe mutations from the write path.
+- **Optionality is visible from the type.** `optional.Time` zero value
+  means "no value", distinct from `time.Time{}` ("epoch"). The project
+  rule "absence of a value must be visible from the type, not guessed
+  from a zero value" is enforced structurally.
+
+Ebus payloads (e.g. `ebus.PeerHealthDelta.LastConnectedAt`,
+`ebus.CaptureSessionStarted.StartedAt`) keep `*time.Time` because the
+nil case has a distinct semantic on a delta: "this delta does not
+update this field". That meaning is lost if the field is a value type
+with a zero-is-missing convention. Deltas cross the snapshot boundary
+only through `NodeStatusMonitor.applyX(...)`, which converts incoming
+pointers to `OptionalTime` via `domain.TimeFromPtr(...)` at the moment
+of application. From that point onwards the state lives as values.
+
+API surface on `domain.OptionalTime`:
+
+- `TimeOf(t time.Time) OptionalTime` — constructor from a concrete time
+- `TimeFromPtr(p *time.Time) OptionalTime` — copies the pointee
+  (returns an invalid value when `p == nil`)
+- `TimeFromNonZero(t time.Time) OptionalTime` — returns invalid when
+  `t.IsZero()`, useful for wire-level `time.Time{}` inputs
+- `Valid() bool` — `true` iff the value is set
+- `Time() time.Time` — returns the underlying time (zero value when
+  invalid)
+- `Ptr() *time.Time` — allocates a fresh pointee on every call (safe
+  to hand out to a ebus delta without aliasing state)
+- `Equal`, `Before`, `After`, `Sub` — value-safe comparisons
+
 ### Recommended next steps
 
 1. surface trust conflicts in the desktop UI
@@ -203,6 +301,104 @@ carve-out файлов — это failed build.
 - peer проверяет связку `address + pubkey + boxkey + boxsig`
 - первый валидный набор ключей pin-ится локально по модели TOFU
 - конфликтующие замены ключей игнорируются и записываются как trust conflicts
+
+### Шина событий (ebus)
+
+`internal/core/ebus` предоставляет лёгкую in-process pub/sub шину событий,
+отвязывающую слой ноды от потребителей (DMRouter, console UI, SDK).
+
+```mermaid
+flowchart LR
+    subgraph NODE["node.Service"]
+        PEER_MGMT["Управление пирами"]
+        MSG_STORE["Хранение сообщений"]
+        ROUTING["Таблица маршрутизации"]
+        CM["ConnectionManager"]
+    end
+
+    EBUS["ebus.Bus\n(async, 64-слотовый inbox)"]
+
+    subgraph CONSUMERS["Потребители"]
+        DMR["DMRouter\n(сервисный слой)"]
+        CONSOLE["Console UI\n(desktop)"]
+        SDK_SUB["SDK подписчики"]
+    end
+
+    PEER_MGMT -->|"peer.health.changed\npeer.connected/disconnected"| EBUS
+    MSG_STORE -->|"message.new\nreceipt.updated"| EBUS
+    ROUTING -->|"route.table.changed"| EBUS
+    CM -->|"slot.state.changed"| EBUS
+
+    EBUS --> DMR
+    EBUS --> CONSOLE
+    EBUS --> SDK_SUB
+```
+
+*Диаграмма — Архитектура шины событий*
+
+Принципы проектирования:
+
+- ebus передаёт только короткие дельта-события (переходы состояний, счётчики).
+  Никаких тяжёлых данных.
+- RPC остаётся для команд/запросов (fetch сообщений, отправка сообщений,
+  snapshot таблицы маршрутизации). RPC-обработчики могут публиковать
+  ebus-события как side-эффект.
+- Каждый подписчик получает выделенную drain-горутину с 64-слотовым
+  буферизованным inbox. Издатели никогда не блокируются.
+- Подписки регистрируются до startup, чтобы не потерять события.
+- Слой ноды полностью автономен — ebus это механизм уведомлений,
+  а не канал управления.
+
+Топики (определены в `internal/core/ebus/topics.go`): `peer.connected`,
+`peer.disconnected`, `peer.health.changed`, `peer.pending.changed`,
+`peer.traffic.updated`, `slot.state.changed`, `route.table.changed`,
+`message.new`, `receipt.updated`, `message.sent`, `message.send.failed`,
+`file.sent`, `file.send.failed`, `contact.added`, `contact.removed`,
+`identity.added`, `aggregate.status.changed`, `version.policy.changed`.
+
+### Опциональные timestamps на границе snapshot
+
+Типы, живущие на границе read-only snapshot (`NodeStatus`, `PeerHealth`,
+`CaptureSession`, `DirectMessage`, `PendingMessage`), никогда не
+используют `*time.Time` для опциональных timestamp-полей. Используется
+value-тип `domain.OptionalTime`, объявленный в
+`internal/core/domain/optional_time.go`.
+
+Почему так:
+
+- **Pointer snapshot это не deep copy.** Копирование структуры с
+  `*time.Time` aliases the pointee. UI-горутина, читающая snapshot, и
+  фоновая горутина, мутирующая источник, видят одно и то же время
+  через разделяемую память — snapshot-контракт молча нарушается.
+- **`OptionalTime` это значение.** `struct { t time.Time; valid bool }`
+  копируется по значению. Snapshot становится настоящим deep copy — UI
+  не может наблюдать мутации write-пути.
+- **Опциональность видна из типа.** Zero value `OptionalTime` означает
+  "нет значения", это отличается от `time.Time{}` ("эпоха"). Правило
+  проекта "отсутствие значения должно быть видно из типа, а не
+  угадываться по пустому значению" закрывается структурно.
+
+Ebus-пейлоады (например `ebus.PeerHealthDelta.LastConnectedAt`,
+`ebus.CaptureSessionStarted.StartedAt`) оставляют `*time.Time`, потому
+что на delta nil имеет отдельную семантику: "эта delta не обновляет
+это поле". Этот смысл теряется, если поле становится value-типом
+с конвенцией "zero = missing". Дельты попадают в snapshot-границу
+только через `NodeStatusMonitor.applyX(...)`, где входящие указатели
+преобразуются в `OptionalTime` через `domain.TimeFromPtr(...)` в
+момент применения. Дальше состояние живёт только как значения.
+
+API `domain.OptionalTime`:
+
+- `TimeOf(t time.Time) OptionalTime` — конструктор из конкретного времени
+- `TimeFromPtr(p *time.Time) OptionalTime` — копирует pointee
+  (возвращает невалидное значение, если `p == nil`)
+- `TimeFromNonZero(t time.Time) OptionalTime` — возвращает невалидное
+  значение при `t.IsZero()`, полезно для wire-level `time.Time{}`
+- `Valid() bool` — `true`, если значение установлено
+- `Time() time.Time` — возвращает время (zero value, если невалидно)
+- `Ptr() *time.Time` — аллоцирует свежий pointee на каждый вызов
+  (безопасно отдавать ebus-дельте, aliasing невозможен)
+- `Equal`, `Before`, `After`, `Sub` — value-safe сравнения
 
 ### Следующие шаги
 

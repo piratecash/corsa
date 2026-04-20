@@ -605,12 +605,13 @@ func newTestService(t *testing.T, nodeType config.NodeType) *Service {
 	}
 	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             nodeType,
-	}, id)
+		ListenAddress:     "127.0.0.1:64646",
+		AdvertiseAddress:  "127.0.0.1:64646",
+		TrustStorePath:    filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:    filepath.Join(tempDir, "queue.json"),
+		Type:              nodeType,
+		AllowPrivatePeers: true,
+	}, id, nil)
 	t.Cleanup(svc.WaitBackground)
 	return svc
 }
@@ -1457,11 +1458,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 	}
 	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-	}, id)
+		ListenAddress:     "127.0.0.1:0",
+		AdvertiseAddress:  "127.0.0.1:0",
+		TrustStorePath:    filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:    filepath.Join(tempDir, "queue.json"),
+		AllowPrivatePeers: true,
+	}, id, nil)
 	t.Cleanup(svc.WaitBackground)
 
 	t.Run("inbound_only", func(t *testing.T) {

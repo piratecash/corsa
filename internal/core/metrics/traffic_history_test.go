@@ -4,7 +4,11 @@ import (
 	"testing"
 )
 
-func TestTrafficHistoryRecord(t *testing.T) {
+func TestTrafficHistoryRecordFromZeroBaseline(t *testing.T) {
+	// Collector started at the same time as the producer (totals==0 when
+	// buffer was created). First Record reports delta = totals because the
+	// baseline is zero and the caller is observing traffic from the very
+	// first byte.
 	th := NewTrafficHistory()
 
 	th.Record(100, 200)
@@ -23,9 +27,60 @@ func TestTrafficHistoryRecord(t *testing.T) {
 	if samples[0].TotalReceived != 200 {
 		t.Errorf("expected TotalReceived=200, got %d", samples[0].TotalReceived)
 	}
-	// first sample has no previous → delta = 0
-	if samples[0].BytesSentPS != 0 {
-		t.Errorf("expected BytesSentPS=0 for first sample, got %d", samples[0].BytesSentPS)
+	if samples[0].BytesSentPS != 100 {
+		t.Errorf("expected BytesSentPS=100 (no Seed → delta is totals), got %d", samples[0].BytesSentPS)
+	}
+	if samples[0].BytesRecvPS != 200 {
+		t.Errorf("expected BytesRecvPS=200, got %d", samples[0].BytesRecvPS)
+	}
+}
+
+func TestTrafficHistorySeedSuppressesFirstSpike(t *testing.T) {
+	// Collector attaches to an already-running system whose counters are
+	// non-zero. Seed captures the current totals as baseline so the next
+	// Record reports only genuine new traffic, not the entire pre-attach
+	// accumulation as a single-second spike.
+	th := NewTrafficHistory()
+	th.Seed(10_000, 20_000)
+
+	th.Record(10_100, 20_200)
+
+	samples := th.Snapshot()
+	if len(samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(samples))
+	}
+	if samples[0].BytesSentPS != 100 {
+		t.Errorf("expected BytesSentPS=100 after Seed, got %d", samples[0].BytesSentPS)
+	}
+	if samples[0].BytesRecvPS != 200 {
+		t.Errorf("expected BytesRecvPS=200 after Seed, got %d", samples[0].BytesRecvPS)
+	}
+	if samples[0].TotalSent != 10_100 {
+		t.Errorf("expected TotalSent=10_100, got %d", samples[0].TotalSent)
+	}
+}
+
+func TestTrafficHistorySeedOverwritesPreviousBaseline(t *testing.T) {
+	// Calling Seed after Record overwrites the internal baseline (delta
+	// reference) — the previously recorded sample stays in the buffer but
+	// the next Record computes its delta against the new Seed totals.
+	// This documents the API: Seed is intended for startup, not mid-stream
+	// re-baselining, but if a caller uses it mid-stream the behavior is
+	// predictable rather than silently corrupt.
+	th := NewTrafficHistory()
+	th.Record(100, 200)
+	th.Seed(500, 1000)
+	th.Record(550, 1100)
+
+	samples := th.Snapshot()
+	if len(samples) != 2 {
+		t.Fatalf("expected 2 samples, got %d", len(samples))
+	}
+	if samples[1].BytesSentPS != 50 {
+		t.Errorf("expected BytesSentPS=50 after Seed re-baseline, got %d", samples[1].BytesSentPS)
+	}
+	if samples[1].BytesRecvPS != 100 {
+		t.Errorf("expected BytesRecvPS=100 after Seed re-baseline, got %d", samples[1].BytesRecvPS)
 	}
 }
 

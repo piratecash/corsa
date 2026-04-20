@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func testTable() *rpc.CommandTable {
 func TestExecuteCommandDispatchesViaCommandTable(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	result, err := cw.executeCommand("ping")
+	result, err := cw.executeCommand(context.Background(), "ping")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestExecuteCommandDispatchesViaCommandTable(t *testing.T) {
 func TestExecuteCommandWithArgs(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	result, err := cw.executeCommand("sendDm peer-abc hello world")
+	result, err := cw.executeCommand(context.Background(), "sendDm peer-abc hello world")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestExecuteCommandWithArgs(t *testing.T) {
 func TestExecuteCommandJSONFrame(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	result, err := cw.executeCommand(`{"type":"ping"}`)
+	result, err := cw.executeCommand(context.Background(), `{"type":"ping"}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestExecuteCommandJSONFrame(t *testing.T) {
 func TestExecuteCommandUnavailableReturnsError(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	_, err := cw.executeCommand("fetchChatlog")
+	_, err := cw.executeCommand(context.Background(), "fetchChatlog")
 	if err == nil {
 		t.Fatal("expected error for unavailable command")
 	}
@@ -139,7 +140,7 @@ func TestExecuteCommandUnavailableReturnsError(t *testing.T) {
 func TestExecuteCommandPrettyPrintsJSON(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	result, err := cw.executeCommand("ping")
+	result, err := cw.executeCommand(context.Background(), "ping")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -186,7 +187,7 @@ func TestLoadCommandsPopulatesSuggestions(t *testing.T) {
 func TestExecuteCommandHelpReturnsHumanReadable(t *testing.T) {
 	cw := newTestConsoleWindow(testTable())
 
-	result, err := cw.executeCommand("help")
+	result, err := cw.executeCommand(context.Background(), "help")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,7 +227,7 @@ func TestExecuteCommandUnknownFallsBackWithNilClient(t *testing.T) {
 	// return the CommandTable error (not panic).
 	cw := newTestConsoleWindow(testTable())
 
-	_, err := cw.executeCommand("nonexistent_command")
+	_, err := cw.executeCommand(context.Background(), "nonexistent_command")
 	if err == nil {
 		t.Fatal("expected error for unknown command with nil client")
 	}
@@ -384,6 +385,91 @@ func TestNewConsoleDonateEntries(t *testing.T) {
 	}
 }
 
+func TestCountUniquePeersExcludesPendingOnlyPlaceholders(t *testing.T) {
+	peers := []service.PeerHealth{
+		// Real observed peer with PeerID.
+		{Address: "1.2.3.4:9000", PeerID: "peer-a", State: "healthy", Connected: true},
+		// Pre-handshake peer — no PeerID but has State from health snapshot.
+		{Address: "1.2.3.5:9000", State: "reconnecting"},
+		// Inbound peer — no PeerID but Connected.
+		{Address: "1.2.3.6:9000", Connected: true, Direction: "inbound"},
+		// Pending-only placeholder (created by applyPeerPendingDelta) — should NOT count.
+		{Address: "1.2.3.7:9000", PendingCount: 5},
+		// Another pending-only placeholder.
+		{Address: "1.2.3.8:9000", PendingCount: 1},
+		// Peer with only Direction set (outbound slot allocated).
+		{Address: "1.2.3.9:9000", Direction: "outbound"},
+	}
+
+	got := countUniquePeers(service.NodeStatus{PeerHealth: peers})
+	// 4 observed peers: peer-a, 1.2.3.5, 1.2.3.6, 1.2.3.9.
+	// 2 pending-only (1.2.3.7, 1.2.3.8) excluded.
+	if got != 4 {
+		t.Fatalf("countUniquePeers = %d, want 4", got)
+	}
+}
+
+func TestCountUniquePeersIncludesSlotOnlyPeers(t *testing.T) {
+	peers := []service.PeerHealth{
+		// CM slot-only peer (queued/dialing before any health delta) — should count.
+		{Address: "1.2.3.4:9000", SlotState: "queued"},
+		// CM slot-only peer (dialing) — should count.
+		{Address: "1.2.3.5:9000", SlotState: "dialing"},
+		// CM slot-only peer (retry_wait) — should count.
+		{Address: "1.2.3.6:9000", SlotState: "retry_wait"},
+		// Pending-only placeholder — should NOT count.
+		{Address: "1.2.3.7:9000", PendingCount: 2},
+	}
+
+	got := countUniquePeers(service.NodeStatus{PeerHealth: peers})
+	// 3 slot-managed peers, 1 pending-only excluded.
+	if got != 3 {
+		t.Fatalf("countUniquePeers = %d, want 3 (slot-only peers must count)", got)
+	}
+}
+
+func TestCountUniquePeersDeduplicatesByPeerID(t *testing.T) {
+	peers := []service.PeerHealth{
+		{Address: "1.2.3.4:9000", PeerID: "peer-a", Connected: true},
+		// Same PeerID, different address (reconnect).
+		{Address: "1.2.3.5:9000", PeerID: "peer-a", Connected: false, State: "reconnecting"},
+	}
+
+	got := countUniquePeers(service.NodeStatus{PeerHealth: peers})
+	if got != 1 {
+		t.Fatalf("countUniquePeers = %d, want 1 (same PeerID)", got)
+	}
+}
+
+func TestCountUniquePeersEmptySlice(t *testing.T) {
+	if got := countUniquePeers(service.NodeStatus{}); got != 0 {
+		t.Fatalf("countUniquePeers(empty) = %d, want 0", got)
+	}
+}
+
+func TestIsPeerObserved(t *testing.T) {
+	tests := []struct {
+		name string
+		peer service.PeerHealth
+		want bool
+	}{
+		{"with PeerID", service.PeerHealth{PeerID: "abc"}, true},
+		{"connected", service.PeerHealth{Connected: true}, true},
+		{"with State", service.PeerHealth{State: "healthy"}, true},
+		{"with Direction", service.PeerHealth{Direction: "outbound"}, true},
+		{"with SlotState", service.PeerHealth{Address: "1.2.3.4:9000", SlotState: "dialing"}, true},
+		{"slot queued", service.PeerHealth{Address: "1.2.3.4:9000", SlotState: "queued"}, true},
+		{"slot retry_wait", service.PeerHealth{Address: "1.2.3.4:9000", SlotState: "retry_wait"}, true},
+		{"pending-only placeholder", service.PeerHealth{Address: "1.2.3.4:9000", PendingCount: 3}, false},
+		{"empty entry", service.PeerHealth{}, false},
+	}
+	for _, tc := range tests {
+		if got := isPeerObserved(tc.peer); got != tc.want {
+			t.Errorf("isPeerObserved(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestActivePeerHealth_FiltersCorrectly(t *testing.T) {
 	peers := []service.PeerHealth{
 		{Address: "1.2.3.4:9000", Connected: true, SlotState: "active"},         // CM slot + connected → include
@@ -428,6 +514,259 @@ func TestActivePeerHealth_EmptyInput(t *testing.T) {
 	active := activePeerHealth(nil)
 	if len(active) != 0 {
 		t.Fatalf("expected 0 active peers for nil input, got %d", len(active))
+	}
+}
+
+// trafficStatsTable returns a CommandTable wired with mocks suitable for
+// exercising loadTrafficHistory + sampleTraffic flows. sentTotal and recvTotal
+// control the cumulative byte counters reported by fetchNetworkStats; emptyHistory
+// controls whether fetchTrafficHistory returns an empty-but-well-formed frame
+// (mimicking a collector restart) or a single-sample frame.
+func trafficStatsTable(sentTotal, recvTotal int64, emptyHistory bool) *rpc.CommandTable {
+	tt := rpc.NewCommandTable()
+
+	tt.Register(
+		rpc.CommandInfo{Name: "fetchNetworkStats", Description: "Network stats", Category: "metrics"},
+		func(req rpc.CommandRequest) rpc.CommandResponse {
+			data, _ := json.Marshal(map[string]any{
+				"network_stats": map[string]any{
+					"total_bytes_sent":     sentTotal,
+					"total_bytes_received": recvTotal,
+				},
+			})
+			return rpc.CommandResponse{Data: data}
+		},
+	)
+
+	tt.Register(
+		rpc.CommandInfo{Name: "fetchTrafficHistory", Description: "Traffic history", Category: "metrics"},
+		func(req rpc.CommandRequest) rpc.CommandResponse {
+			if emptyHistory {
+				data, _ := json.Marshal(map[string]any{
+					"traffic_history": map[string]any{"samples": []any{}},
+				})
+				return rpc.CommandResponse{Data: data}
+			}
+			data, _ := json.Marshal(map[string]any{
+				"traffic_history": map[string]any{
+					"samples": []map[string]any{
+						{
+							"bytes_sent_ps":  int64(10),
+							"bytes_recv_ps":  int64(20),
+							"total_sent":     sentTotal,
+							"total_received": recvTotal,
+						},
+					},
+				},
+			})
+			return rpc.CommandResponse{Data: data}
+		},
+	)
+
+	return tt
+}
+
+func TestLoadTrafficHistoryEmptyLeavesUnloaded(t *testing.T) {
+	cw := newTestConsoleWindow(trafficStatsTable(5000, 3000, true))
+
+	if ok := cw.loadTrafficHistory(context.Background()); !ok {
+		t.Fatalf("loadTrafficHistory returned false for valid empty frame")
+	}
+
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if cw.trafficLoaded {
+		t.Error("trafficLoaded should stay false after empty history — baseline not captured yet")
+	}
+	if cw.trafficTotalSent != 0 || cw.trafficTotalRecv != 0 {
+		t.Errorf("totals should be zero for empty history, got sent=%d recv=%d",
+			cw.trafficTotalSent, cw.trafficTotalRecv)
+	}
+	if len(cw.trafficSamplesIn) != 0 || len(cw.trafficSamplesOut) != 0 {
+		t.Errorf("no samples expected for empty history, got in=%d out=%d",
+			len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
+	}
+}
+
+func TestLoadTrafficHistoryNonEmptyPopulatesAndMarksLoaded(t *testing.T) {
+	cw := newTestConsoleWindow(trafficStatsTable(5000, 3000, false))
+
+	if ok := cw.loadTrafficHistory(context.Background()); !ok {
+		t.Fatalf("loadTrafficHistory returned false")
+	}
+
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if !cw.trafficLoaded {
+		t.Error("trafficLoaded should be true after non-empty history")
+	}
+	if cw.trafficTotalSent != 5000 || cw.trafficTotalRecv != 3000 {
+		t.Errorf("totals mismatch: sent=%d recv=%d", cw.trafficTotalSent, cw.trafficTotalRecv)
+	}
+	if len(cw.trafficSamplesIn) != 1 || len(cw.trafficSamplesOut) != 1 {
+		t.Fatalf("expected 1 sample each, got in=%d out=%d",
+			len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
+	}
+	if cw.trafficSamplesIn[0] != 20 || cw.trafficSamplesOut[0] != 10 {
+		t.Errorf("sample mismatch: in=%v out=%v", cw.trafficSamplesIn[0], cw.trafficSamplesOut[0])
+	}
+}
+
+// TestSampleTrafficSeedsBaselineWhenNotLoaded verifies that the first
+// sampleTraffic call after an empty history load records the current counters
+// as baseline and flips trafficLoaded to true, without appending any sample.
+// This is the precondition for the baseline-seed fix in startTrafficTicker:
+// the seeded baseline lets the first ticker-driven tick produce a real delta
+// rather than being wasted on baseline capture.
+func TestSampleTrafficSeedsBaselineWhenNotLoaded(t *testing.T) {
+	cw := newTestConsoleWindow(trafficStatsTable(7777, 4444, true))
+
+	// Simulate the state after a successful empty-history load.
+	if ok := cw.loadTrafficHistory(context.Background()); !ok {
+		t.Fatalf("loadTrafficHistory returned false")
+	}
+
+	cw.sampleTraffic()
+
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if !cw.trafficLoaded {
+		t.Error("trafficLoaded should flip to true after baseline seed")
+	}
+	if cw.trafficTotalSent != 7777 || cw.trafficTotalRecv != 4444 {
+		t.Errorf("baseline totals mismatch: sent=%d recv=%d",
+			cw.trafficTotalSent, cw.trafficTotalRecv)
+	}
+	if len(cw.trafficSamplesIn) != 0 || len(cw.trafficSamplesOut) != 0 {
+		t.Errorf("baseline seed must NOT append a sample, got in=%d out=%d",
+			len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
+	}
+}
+
+// TestSampleTrafficAppendsDeltaAfterBaseline verifies that once the baseline
+// is captured, the next sampleTraffic call appends a real delta sample. This
+// exercises the path the first ticker tick takes after the baseline seed.
+func TestSampleTrafficAppendsDeltaAfterBaseline(t *testing.T) {
+	// First call seeds baseline at 1000/500.
+	tableBaseline := trafficStatsTable(1000, 500, true)
+	cw := newTestConsoleWindow(tableBaseline)
+	if ok := cw.loadTrafficHistory(context.Background()); !ok {
+		t.Fatalf("loadTrafficHistory returned false")
+	}
+	cw.sampleTraffic()
+
+	// Swap in a table with advanced counters to simulate a later tick.
+	cw.parent.cmdTable = trafficStatsTable(1100, 520, true)
+	cw.sampleTraffic()
+
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if cw.trafficTotalSent != 1100 || cw.trafficTotalRecv != 520 {
+		t.Errorf("cumulative totals not updated: sent=%d recv=%d",
+			cw.trafficTotalSent, cw.trafficTotalRecv)
+	}
+	if len(cw.trafficSamplesOut) != 1 || cw.trafficSamplesOut[0] != 100 {
+		t.Errorf("expected single sent delta=100, got %v", cw.trafficSamplesOut)
+	}
+	if len(cw.trafficSamplesIn) != 1 || cw.trafficSamplesIn[0] != 20 {
+		t.Errorf("expected single recv delta=20, got %v", cw.trafficSamplesIn)
+	}
+}
+
+// TestSeedTrafficBaselineIfNeededSeedsAfterEmptyHistory mirrors the
+// startTrafficTicker orchestration: after loadTrafficHistory returns with an
+// empty frame (trafficLoaded==false), the helper must populate the baseline
+// totals from fetchNetworkStats and flip trafficLoaded so the next tick
+// produces a real delta sample. This is the regression path for the
+// traffic-chart "bars appear one tick late" bug.
+func TestSeedTrafficBaselineIfNeededSeedsAfterEmptyHistory(t *testing.T) {
+	cw := newTestConsoleWindow(trafficStatsTable(9999, 8888, true))
+	if ok := cw.loadTrafficHistory(context.Background()); !ok {
+		t.Fatalf("loadTrafficHistory returned false")
+	}
+
+	cw.mu.RLock()
+	if cw.trafficLoaded {
+		cw.mu.RUnlock()
+		t.Fatal("precondition failed: empty history must leave trafficLoaded=false")
+	}
+	cw.mu.RUnlock()
+
+	cw.seedTrafficBaselineIfNeeded()
+
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if !cw.trafficLoaded {
+		t.Error("trafficLoaded should be true after baseline seed")
+	}
+	if cw.trafficTotalSent != 9999 || cw.trafficTotalRecv != 8888 {
+		t.Errorf("baseline totals mismatch: sent=%d recv=%d",
+			cw.trafficTotalSent, cw.trafficTotalRecv)
+	}
+	if len(cw.trafficSamplesIn) != 0 || len(cw.trafficSamplesOut) != 0 {
+		t.Errorf("baseline seed must NOT append a sample, got in=%d out=%d",
+			len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
+	}
+}
+
+// TestSeedTrafficBaselineIfNeededNoOpWhenLoaded verifies the helper is a
+// no-op when history already populated the baseline, so calling it after a
+// non-empty loadTrafficHistory does not double-sample or disturb the cached
+// samples.
+func TestSeedTrafficBaselineIfNeededNoOpWhenLoaded(t *testing.T) {
+	cw := newTestConsoleWindow(trafficStatsTable(5000, 3000, false))
+	if ok := cw.loadTrafficHistory(context.Background()); !ok {
+		t.Fatalf("loadTrafficHistory returned false")
+	}
+
+	beforeIn := len(cw.trafficSamplesIn)
+	beforeOut := len(cw.trafficSamplesOut)
+	beforeSent := cw.trafficTotalSent
+	beforeRecv := cw.trafficTotalRecv
+
+	cw.seedTrafficBaselineIfNeeded()
+
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if len(cw.trafficSamplesIn) != beforeIn || len(cw.trafficSamplesOut) != beforeOut {
+		t.Errorf("sample count changed on no-op path: in %d→%d, out %d→%d",
+			beforeIn, len(cw.trafficSamplesIn), beforeOut, len(cw.trafficSamplesOut))
+	}
+	if cw.trafficTotalSent != beforeSent || cw.trafficTotalRecv != beforeRecv {
+		t.Errorf("totals changed on no-op path: sent %d→%d, recv %d→%d",
+			beforeSent, cw.trafficTotalSent, beforeRecv, cw.trafficTotalRecv)
+	}
+}
+
+// TestSampleTrafficClampsNegativeDeltaToZero verifies that if the collector
+// reports a smaller cumulative value than the cached baseline (e.g. after a
+// restart without a tab reload), the delta is clamped to zero rather than
+// producing a negative sample that would render as a downward bar.
+func TestSampleTrafficClampsNegativeDeltaToZero(t *testing.T) {
+	cw := newTestConsoleWindow(trafficStatsTable(1000, 500, true))
+	if ok := cw.loadTrafficHistory(context.Background()); !ok {
+		t.Fatalf("loadTrafficHistory returned false")
+	}
+	cw.sampleTraffic() // baseline at 1000/500
+
+	// Counters regressed (lower than baseline).
+	cw.parent.cmdTable = trafficStatsTable(200, 100, true)
+	cw.sampleTraffic()
+
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if len(cw.trafficSamplesOut) != 1 || cw.trafficSamplesOut[0] != 0 {
+		t.Errorf("expected clamped sent delta=0, got %v", cw.trafficSamplesOut)
+	}
+	if len(cw.trafficSamplesIn) != 1 || cw.trafficSamplesIn[0] != 0 {
+		t.Errorf("expected clamped recv delta=0, got %v", cw.trafficSamplesIn)
 	}
 }
 
