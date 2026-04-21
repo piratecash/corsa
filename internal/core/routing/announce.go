@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/piratecash/corsa/internal/core/crashlog"
 )
 
 const (
@@ -197,6 +199,14 @@ func (a *AnnounceLoop) PendingTrigger() bool {
 
 // announceToAllPeers sends the routing table to every capable peer,
 // applying split horizon per peer and per-peer delta/cache logic.
+//
+// Per-peer work runs in its own goroutine so that a single stuck inbound
+// socket — bounded per peer by syncFlushTimeout inside
+// sender.SendAnnounceRoutes — cannot serialise delivery to the rest. The
+// wall-clock of a cycle is the slowest peer, not N × slowest. AnnouncePeerState
+// is thread-safe (embedded mutex) and each goroutine operates on its own
+// peer's state, so there is no cross-peer contention. Cycle-level counters
+// become atomic; the summary log waits for every goroutine to finish.
 func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	cycleID := a.cycleCounter.Add(1)
 
@@ -211,83 +221,95 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	// Periodic eviction of stale disconnected peer state.
 	a.stateRegistry.EvictStale()
 
-	totalRaw := 0
-	totalAggregated := 0
-	totalDelta := 0
-	skippedNoop := 0
-	forcedFull := 0
-	coalescedTrigger := 0
+	var (
+		totalRaw         atomic.Int32
+		totalAggregated  atomic.Int32
+		totalDelta       atomic.Int32
+		skippedNoop      atomic.Int32
+		forcedFull       atomic.Int32
+		coalescedTrigger atomic.Int32
+	)
 
 	now := a.stateRegistry.clock()
 	forcedFullSyncInterval := time.Duration(ForcedFullSyncMultiplier) * a.interval
 
+	var wg sync.WaitGroup
+	wg.Add(len(peers))
 	for _, peer := range peers {
-		// Check for context cancellation between peers so that a long
-		// announce cycle (many peers) can be interrupted promptly.
-		if ctx.Err() != nil {
-			return
-		}
+		go func(peer AnnounceTarget) {
+			defer wg.Done()
+			defer crashlog.DeferRecover()
 
-		peerState := a.stateRegistry.GetOrCreate(peer.Identity)
-
-		// Build peer-specific raw entries from table.
-		rawRoutes := a.table.AnnounceTo(peer.Identity)
-		totalRaw += len(rawRoutes)
-
-		// Build canonical aggregated snapshot.
-		snapshot := BuildAnnounceSnapshot(rawRoutes)
-		totalAggregated += len(snapshot.Entries)
-
-		// Read peer state atomically to decide send mode.
-		view := peerState.View()
-		needsFull := view.NeedsFullResync || view.LastSentSnapshot == nil
-
-		// Check if periodic forced full sync is due.
-		if !needsFull && !view.LastSuccessfulFullSyncAt.IsZero() {
-			if now.Sub(view.LastSuccessfulFullSyncAt) > forcedFullSyncInterval {
-				needsFull = true
-			}
-		}
-
-		if needsFull {
-			// Rate limit forced full sync attempts — but only when the peer
-			// already has a baseline. A peer that never received any data
-			// (LastSentSnapshot==nil, e.g. after a failed first attempt)
-			// must retry without delay.
-			if view.LastSentSnapshot != nil &&
-				!view.LastFullSyncAttemptAt.IsZero() &&
-				now.Sub(view.LastFullSyncAttemptAt) < MinForcedFullSyncInterval {
-				// Too soon — skip this cycle for this peer.
-				coalescedTrigger++
-				continue
+			// Early-abort when the cycle context is cancelled — avoids
+			// blocking a per-peer goroutine for up to syncFlushTimeout
+			// when shutdown is already in progress.
+			if ctx.Err() != nil {
+				return
 			}
 
-			a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, now)
-			forcedFull++
-		} else {
+			peerState := a.stateRegistry.GetOrCreate(peer.Identity)
+
+			// Build peer-specific raw entries from table.
+			rawRoutes := a.table.AnnounceTo(peer.Identity)
+			totalRaw.Add(int32(len(rawRoutes)))
+
+			// Build canonical aggregated snapshot.
+			snapshot := BuildAnnounceSnapshot(rawRoutes)
+			totalAggregated.Add(int32(len(snapshot.Entries)))
+
+			// Read peer state atomically to decide send mode.
+			view := peerState.View()
+			needsFull := view.NeedsFullResync || view.LastSentSnapshot == nil
+
+			// Check if periodic forced full sync is due.
+			if !needsFull && !view.LastSuccessfulFullSyncAt.IsZero() {
+				if now.Sub(view.LastSuccessfulFullSyncAt) > forcedFullSyncInterval {
+					needsFull = true
+				}
+			}
+
+			if needsFull {
+				// Rate limit forced full sync attempts — but only when the
+				// peer already has a baseline. A peer that never received
+				// any data (LastSentSnapshot==nil, e.g. after a failed
+				// first attempt) must retry without delay.
+				if view.LastSentSnapshot != nil &&
+					!view.LastFullSyncAttemptAt.IsZero() &&
+					now.Sub(view.LastFullSyncAttemptAt) < MinForcedFullSyncInterval {
+					// Too soon — skip this cycle for this peer.
+					coalescedTrigger.Add(1)
+					return
+				}
+
+				a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, now)
+				forcedFull.Add(1)
+				return
+			}
+
 			// Delta path.
 			delta := ComputeDelta(view.LastSentSnapshot, snapshot)
-			totalDelta += len(delta)
+			totalDelta.Add(int32(len(delta)))
 
 			if len(delta) == 0 {
 				// No changes — suppress send.
-				skippedNoop++
-				continue
+				skippedNoop.Add(1)
+				return
 			}
 
 			a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
-		}
+		}(peer)
 	}
+	wg.Wait()
 
 	log.Debug().
 		Uint64("announce_cycle_id", cycleID).
 		Int("peers", len(peers)).
-		Int("raw_routes_count", totalRaw).
-		Int("aggregated_routes_count", totalAggregated).
-		Int("delta_routes_count", totalDelta).
-		Int("announce_skipped_noop", skippedNoop).
-		Int("announce_forced_full", forcedFull).
-		Int("announce_trigger_coalesced", coalescedTrigger).
+		Int("raw_routes_count", int(totalRaw.Load())).
+		Int("aggregated_routes_count", int(totalAggregated.Load())).
+		Int("delta_routes_count", int(totalDelta.Load())).
+		Int("announce_skipped_noop", int(skippedNoop.Load())).
+		Int("announce_forced_full", int(forcedFull.Load())).
+		Int("announce_trigger_coalesced", int(coalescedTrigger.Load())).
 		Msg("announce_cycle_complete")
 }
 

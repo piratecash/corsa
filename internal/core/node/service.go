@@ -2777,8 +2777,19 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
+	//
+	// Dispatched on its own goroutine: the underlying SendAnnounceRoutes
+	// makes a synchronous inbound write bounded by syncFlushTimeout (5s).
+	// Running it inline would pin the inbound connection handler for up to
+	// that interval when the newly-connected peer already has a half-dead
+	// socket, delaying flushPendingFireAndForget and any follow-up frames
+	// on the same conn. AnnouncePeerState is thread-safe and sendCacheFn
+	// already guards cache mutation with its own mutex.
 	if s.connHasCapability(id, domain.CapMeshRoutingV1) && s.connHasCapability(id, domain.CapMeshRelayV1) {
-		s.sendFullTableSyncToInbound(id, peerIdentity)
+		go func() {
+			defer crashlog.DeferRecover()
+			s.sendFullTableSyncToInbound(id, peerIdentity)
+		}()
 	}
 
 	// Drain fire-and-forget frames (push_message, push_notice) that were
