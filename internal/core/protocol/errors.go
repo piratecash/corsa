@@ -48,6 +48,17 @@ const (
 	// as a generic handshake failure and hammering the bouncer. The
 	// responder closes the connection immediately after the notice.
 	ErrCodePeerBanned = "peer-banned"
+
+	// ErrCodeSelfIdentity is used when the counterpart of the handshake
+	// advertises the local node's own Ed25519 identity. Raised on both
+	// directions — on the inbound path when a remote hello carries our
+	// identity, and on the outbound path when a welcome does — to break
+	// accidental self-loopback through NAT reflection, peer-exchange
+	// mirrors, onion aliases or multi-homed addresses. The responder
+	// emits type="connection_notice" with details.reason="self-identity"
+	// and closes the connection; the dialler records a long cooldown on
+	// the address so it stops hammering its own endpoint.
+	ErrCodeSelfIdentity = "self-identity"
 )
 
 var (
@@ -88,6 +99,12 @@ var (
 	// failures so that the dialler can honour the carried expiration
 	// instead of applying the generic incompatible-version penalty flow.
 	ErrPeerBanned = errors.New(ErrCodePeerBanned)
+	// ErrSelfIdentity is the sentinel for ErrCodeSelfIdentity. The
+	// dialler distinguishes self-identity rejection from other
+	// handshake failures via errors.Is so that it can apply a long
+	// cooldown on the address (no redial churn) instead of treating
+	// the rejection as a generic retryable failure.
+	ErrSelfIdentity = errors.New(ErrCodeSelfIdentity)
 )
 
 func ErrorCode(err error) string {
@@ -154,6 +171,8 @@ func ErrorCode(err error) string {
 		return ErrCodeObservedAddressMismatch
 	case errors.Is(err, ErrPeerBanned):
 		return ErrCodePeerBanned
+	case errors.Is(err, ErrSelfIdentity):
+		return ErrCodeSelfIdentity
 	default:
 		return ErrCodeProtocol
 	}
@@ -221,7 +240,41 @@ func ErrorFromCode(code string) error {
 		return ErrObservedAddressMismatch
 	case ErrCodePeerBanned:
 		return ErrPeerBanned
+	case ErrCodeSelfIdentity:
+		return ErrSelfIdentity
 	default:
 		return ErrProtocol
+	}
+}
+
+// NoticeErrorFromFrame maps a connection_notice frame to its sentinel
+// error, taking details.reason into account so callers can discriminate
+// sub-kinds of the same Code. This is essential for `peer-banned`: the
+// notice carries different reasons (`peer-ban`, `blacklisted`,
+// `self-identity`) that demand different caller reactions — a
+// self-identity notice MUST route through the 24h self-loopback
+// cooldown, while a generic peer-ban triggers the advertise-mismatch
+// cooldown path. A plain ErrorFromCode(code) lookup collapses all
+// reasons into ErrPeerBanned and strips the discrimination signal, so
+// the dialler would churn against a self-looping endpoint instead of
+// suppressing it for the full window. Non-peer-banned codes fall
+// through to ErrorFromCode unchanged.
+//
+// Details parse errors degrade to the generic sentinel — a malformed
+// details blob is a wire protocol violation, but the outer code is
+// still trustworthy so the caller at least learns "peer-banned".
+func NoticeErrorFromFrame(frame Frame) error {
+	if frame.Code != ErrCodePeerBanned {
+		return ErrorFromCode(frame.Code)
+	}
+	details, _, err := ParsePeerBannedDetails(frame.Details)
+	if err != nil {
+		return ErrPeerBanned
+	}
+	switch details.Reason {
+	case PeerBannedReasonSelfIdentity:
+		return ErrSelfIdentity
+	default:
+		return ErrPeerBanned
 	}
 }

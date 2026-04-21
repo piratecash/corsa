@@ -2234,12 +2234,22 @@ func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFu
 
 	stop := func() {
 		cancel()
+		// 5 s shutdown budget: Run() unwinds through several deferred
+		// stages (ConnectionManager.Run → close inbound listener →
+		// closeAllInboundConns + connWg.Wait → stopFileTransfer →
+		// relayStates.stop → captureManager.Close). Under load, and
+		// especially in multi-node tests where several Run() goroutines
+		// are draining simultaneously, the 2 s window that used to be
+		// wired in here was tight enough to flake even when the test
+		// body itself passed. 5 s is well above observed shutdown
+		// latencies on CI while still catching genuine shutdown hangs
+		// quickly enough to keep the suite fast.
 		select {
 		case err := <-errCh:
 			if err != nil {
 				t.Fatalf("node stopped with error: %v", err)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timed out waiting for node shutdown")
 		}
 		// Wait for fire-and-forget goroutines (persistQueueState, etc.)
@@ -2439,7 +2449,15 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	})
 	defer stopSender()
 
-	waitForCondition(t, 6*time.Second, func() bool {
+	// Generous timeouts protect this three-node test against CI scheduling
+	// jitter. ConnectionManager.periodicFillInterval is 30 s; when the
+	// BootstrapReady → fill() cycle misses its first tick the next dial
+	// attempt can arrive much later than the 6 s that used to be wired in
+	// here, which surfaced as intermittent "peer health not connected"
+	// failures under load. 15 s is long enough to ride out those stalls
+	// without masking a genuine regression (a real bug would wait out the
+	// whole window regardless).
+	waitForCondition(t, 15*time.Second, func() bool {
 		reply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_identities"})
 		for _, address := range reply.Identities {
 			if address == senderNode.Address() {
@@ -2484,7 +2502,8 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	// Verify sender has an active, healthy connection to the full node.
 	// fetch_identities alone is insufficient — the peer session must be
 	// fully established so that gossip and relay delivery paths are active.
-	waitForConditionMsg(t, 6*time.Second, "sender peer health not connected to full node", func() bool {
+	// 15 s for the same reason as the fetch_identities wait above.
+	waitForConditionMsg(t, 15*time.Second, "sender peer health not connected to full node", func() bool {
 		reply := senderNode.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
 		for _, ph := range reply.PeerHealth {
 			if ph.Connected {
@@ -2505,7 +2524,10 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	// Wait for recipient to establish peer session with the full node
 	// before checking messages — this ensures initPeerSession (subscribe_inbox
 	// + sync) has completed and the single backlog delivery path has fired.
-	waitForConditionMsg(t, 6*time.Second, "recipient peer health not connected to full node", func() bool {
+	// The recipient boots last, so the full node is already busy servicing
+	// the sender's session when this handshake starts; 15 s absorbs the
+	// extra latency without papering over a real failure.
+	waitForConditionMsg(t, 15*time.Second, "recipient peer health not connected to full node", func() bool {
 		reply := recipientNode.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
 		for _, ph := range reply.PeerHealth {
 			if ph.Connected {

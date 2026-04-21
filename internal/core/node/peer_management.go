@@ -734,6 +734,48 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	if welcome.Type == protocol.FrameTypeConnectionNotice {
 		s.handleConnectionNotice(address, welcome)
 		log.Info().Str("peer", string(address)).Str("code", welcome.Code).Msg("sync_peer_connection_notice")
+		// Remote-first self-loopback discovery: when our dial lands on
+		// ourselves via NAT hairpin / peer-exchange mirror / fallback
+		// alias, the responder (which IS us) detects the collision at
+		// the inbound hello handler and sends back
+		// connection_notice{code=peer-banned, reason=self-identity}.
+		// NoticeErrorFromFrame resolves this to ErrSelfIdentity, which
+		// tells syncPeer to apply the same 24h local cooldown the
+		// managed outbound paths produce. Without this branch,
+		// handlePeerBannedNotice would only write the per-peer remote
+		// ban record in persistedMeta using the notice's (potentially
+		// empty) `until` — health.BannedUntil would stay zero and
+		// LastErrorCode would not surface the self-identity signal to
+		// the monitor/UI, leaving the fresh-dial recovery callers
+		// (syncSenderKeys, unknown-sender recovery) free to re-enter
+		// the churn loop on the next tick.
+		if errors.Is(protocol.NoticeErrorFromFrame(welcome), protocol.ErrSelfIdentity) {
+			s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
+		}
+		return 0
+	}
+	// Self-loopback guard on the sender-key / forced-refresh dial path.
+	// Abort the sync before auth_session is signed with our own key and
+	// learnIdentityFromWelcome runs; `defer pc.Close()` above tears down
+	// through the NetCore wrapper, so no raw socket operation is needed.
+	//
+	// The managed outbound paths (openPeerSession, openPeerSessionForCM)
+	// surface the collision as *selfIdentityError which onCMDialFailed
+	// converts into a 24h cooldown via applySelfIdentityCooldown. syncPeer
+	// is a standalone one-shot dial — its callers (syncSenderKeys, the
+	// unknown-sender recovery in handleInboundPushMessage) do not run
+	// through the connection-manager failure hook, so returning 0 without
+	// persisting a cooldown would let the next sender-key refresh hammer
+	// the same self-looping address on the very next tick. Route through
+	// applySelfIdentityCooldown directly to converge on the same wall-
+	// clock ban window the CM paths produce.
+	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+		log.Warn().
+			Str("peer", string(address)).
+			Str("local_identity", s.identity.Address).
+			Str("welcome_listen", welcome.Listen).
+			Msg("sync_peer_self_identity_rejected")
+		s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
 		return 0
 	}
 	if strings.TrimSpace(welcome.Challenge) != "" {
@@ -891,6 +933,23 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 				hadRelay := sessionHasCap(closedSession.capabilities, domain.CapMeshRelayV1)
 				s.onPeerSessionClosed(closedSession.peerIdentity, hadRelay)
 			}
+			// Self-identity short-circuit — must run BEFORE the generic
+			// markPeerDisconnected penalty. openPeerSession surfaces the
+			// self-loopback in two shapes: (a) *selfIdentityError when
+			// the welcome carries our Ed25519 address (line 1044), and
+			// (b) protocol.ErrSelfIdentity bubbled up from peerSessionRequest
+			// when the remote answered with connection_notice{peer-banned,
+			// reason=self-identity}. Both must land on
+			// applySelfIdentityCooldown (24h BannedUntil + LastErrorCode =
+			// self-identity) instead of the generic transient-disconnect
+			// penalty, and the loop must return so this address is NOT
+			// retried after 2s — the CM path and syncPeer already
+			// converge on this contract; runPeerSession was the last
+			// legacy path churning against self-aliases otherwise.
+			if s.tryApplySelfIdentityCooldown(address, err) {
+				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_self_identity")
+				return
+			}
 			// servePeerSession calls markPeerDisconnected before
 			// returning its error.  For all other error paths (dial
 			// failure, handshake, subscribe, sync) we must call it here
@@ -986,6 +1045,20 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		}
 		s.penalizeOldProtocolPeer(address, domain.ProtocolVersion(welcome.Version), domain.ProtocolVersion(welcome.MinimumProtocolVersion))
 		return false, fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
+	}
+	// Self-loopback guard on the legacy outbound path. Deferred cleanup
+	// (session.Close via the defer block at the top of openPeerSession)
+	// owns wrapper teardown — returning here routes through session.Close()
+	// → NetCore.Close(), no raw socket operations. The typed error is
+	// propagated to the caller so health/peer_provider penalty paths can
+	// detect self-identity via errors.As and apply the cooldown.
+	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+		log.Warn().
+			Str("peer", string(address)).
+			Str("local_identity", s.identity.Address).
+			Str("welcome_listen", welcome.Listen).
+			Msg("outbound_self_identity_rejected")
+		return false, s.newSelfIdentityError(address, welcome.Listen)
 	}
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
@@ -1948,8 +2021,23 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				// sending this notice (Status="closing"), so we record
 				// the observed IP and surface the sentinel error so the
 				// caller tears down the session.
+				//
+				// NoticeErrorFromFrame (NOT ErrorFromCode) is used here
+				// because connection_notice{peer-banned} carries a
+				// details.reason that discriminates how the caller must
+				// react: `self-identity` MUST route through
+				// applySelfIdentityCooldown (24h suppression) via the
+				// shared tryApplySelfIdentityCooldown helper consulted
+				// by every outbound failure hook (onCMDialFailed,
+				// runPeerSession), while `peer-ban` / `blacklisted` go
+				// through the generic advertise-mismatch path.
+				// Collapsing every reason to ErrPeerBanned (what
+				// ErrorFromCode would do) defeats the whole point of
+				// detecting self-loopback on the wire — the dialler
+				// would re-enter the churn loop this notice was
+				// explicitly designed to break.
 				s.handleConnectionNotice(session.address, incoming)
-				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
+				return protocol.Frame{}, protocol.NoticeErrorFromFrame(incoming)
 			}
 			if incoming.Type == "error" {
 				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
@@ -4367,6 +4455,20 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 			Cause:         err,
 		}
 	}
+	// Self-loopback guard: if the welcome carries our own Ed25519
+	// identity we just dialled ourselves. Tear down the session
+	// through the wrapper (closeOnError → session.Close() → NetCore.Close())
+	// and surface a structured selfIdentityError so the CM dial-fail
+	// path applies an address-level cooldown instead of retrying.
+	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+		closeOnError()
+		log.Warn().
+			Str("peer", string(address)).
+			Str("local_identity", s.identity.Address).
+			Str("welcome_listen", welcome.Listen).
+			Msg("outbound_self_identity_rejected")
+		return nil, s.newSelfIdentityError(address, welcome.Listen)
+	}
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
@@ -4672,6 +4774,18 @@ func (s *Service) onCMStaleSession(session *peerSession) {
 // onCMDialFailed is called by ConnectionManager when a dial attempt fails.
 // Updates health/ban state BEFORE fill() re-queries Candidates().
 func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompatible bool) {
+	// Self-identity is a terminal failure against an address: the
+	// remote answering at that endpoint IS us. Apply the long cooldown
+	// once (no accumulation) so the dial loop stops thrashing the
+	// loopback path, then return without re-feeding markPeerDisconnected
+	// which would blend self-identity into generic disconnect diagnostics.
+	// The shared helper covers both arrival shapes (structured
+	// *selfIdentityError from the local outbound guard and bare
+	// protocol.ErrSelfIdentity from the remote-first notice decode) so
+	// every dial-failure dispatcher converges on one penalty path.
+	if s.tryApplySelfIdentityCooldown(address, err) {
+		return
+	}
 	if incompatible {
 		// Extract confirmed version evidence from the structured error
 		// returned by openPeerSessionForCM. Without evidence, the penalty
@@ -4698,6 +4812,65 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 	} else {
 		s.markPeerDisconnected(address, err)
 	}
+}
+
+// applySelfIdentityCooldown sets a long BannedUntil window on the
+// address that resolved to our own Ed25519 identity so the CM dial
+// loop stops redialing the self-loopback. Writes LastErrorCode /
+// LastError to the health snapshot so diagnostics surface the real
+// cause instead of a generic disconnect reason. Runs under s.mu.
+//
+// No-accumulation contract (matches the peerBanSelfIdentity comment
+// in peer_state.go and the onCMDialFailed caller comment): the
+// address-level Score penalty and ConsecutiveFailures increment are
+// applied ONLY on the first observation — defined as "the prior
+// LastErrorCode wasn't self-identity, or the prior ban window has
+// already expired". Before this guard every outbound path that
+// resurfaced the same self-alias inside the 24h window re-entered
+// this function and stacked peerScoreOldProtocol onto Score and
+// bumped ConsecutiveFailures unboundedly, even though self-identity
+// is binary evidence that a single mark-down should cover. The
+// current-status fields (Connected, Direction, state, LastError*,
+// LastDisconnectedAt, BannedUntil) are always refreshed because
+// they reflect "right now" and must not stale-pin a prior classification.
+func (s *Service) applySelfIdentityCooldown(address domain.PeerAddress, selfErr *selfIdentityError) {
+	s.mu.Lock()
+	address = s.resolveHealthAddress(address)
+	health := s.ensurePeerHealthLocked(address)
+	now := time.Now().UTC()
+	bannedUntil := now.Add(peerBanSelfIdentity)
+	// First-observation gate for the accumulators. Evaluate BEFORE
+	// rewriting LastErrorCode / BannedUntil below so the decision
+	// reflects the PRIOR state of the record, not the one we are
+	// about to write. A prior self-identity classification whose ban
+	// window has already expired still counts as a fresh observation
+	// — the address recovered and re-collided, so the penalty should
+	// re-apply once.
+	firstObservation := health.LastErrorCode != protocol.ErrCodeSelfIdentity || !health.BannedUntil.After(now)
+	health.Connected = false
+	health.Direction = ""
+	s.updatePeerStateLocked(health, peerStateReconnecting)
+	health.LastDisconnectedAt = now
+	health.LastError = selfErr.Error()
+	health.LastErrorCode = protocol.ErrCodeSelfIdentity
+	health.LastDisconnectCode = ""
+	if health.BannedUntil.Before(bannedUntil) {
+		health.BannedUntil = bannedUntil
+	}
+	if firstObservation {
+		health.Score = clampScore(health.Score + peerScoreOldProtocol)
+		health.ConsecutiveFailures++
+	}
+	s.emitPeerHealthDeltaLocked(health)
+	s.mu.Unlock()
+
+	log.Warn().
+		Str("peer", string(address)).
+		Str("local_identity", string(selfErr.LocalIdentity)).
+		Str("welcome_listen", string(selfErr.PeerListen)).
+		Time("banned_until", bannedUntil).
+		Bool("first_observation", firstObservation).
+		Msg("self_identity_cooldown_applied")
 }
 
 // buildPeerExchangeResponse merges CM Active slots and PeerProvider Candidates,

@@ -9,6 +9,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,17 @@ type PeerHealthView struct {
 	LastDisconnectedAt  time.Time
 	BannedUntil         time.Time
 	Connected           bool
+	// LastErrorCode is the protocol.ErrorCode that produced the
+	// current BannedUntil window. Carried on the snapshot so
+	// buildBannedIPsSet can discriminate reasons that scope to a
+	// single address (ErrCodeSelfIdentity — a specific host:port
+	// answered with our own identity) from reasons that scope to
+	// the whole IP (incompatible protocol — every port on the host
+	// ships the same client, so the ban must propagate). Without
+	// this field the per-address BannedUntil was unconditionally
+	// widened to the whole IP, which silenced unrelated peers
+	// behind the same NAT for 24h on a single self-loopback hit.
+	LastErrorCode string
 }
 
 // PeerProviderConfig holds all callback functions that PeerProvider uses
@@ -370,11 +382,26 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 			continue
 		}
 
-		// 6f: check health — cooldown.
+		// 6f: check health — per-address ban and cooldown.
 		peerScore := 0
 		if cfg.HealthFn != nil {
 			if h := cfg.HealthFn(kp.Address); h != nil {
 				peerScore = h.Score
+
+				// Skip peers carrying an active address-level ban that did
+				// NOT widen to the whole IP (self-identity carve-out — see
+				// buildBannedIPsSet docstring). The IP-wide filter at step
+				// 6c no longer covers those entries, so without this check
+				// the offending address would re-appear as a candidate and
+				// ConnectionManager would immediately re-dial the self-alias
+				// that the 24h cooldown was written to suppress. For ban
+				// reasons that still widen (incompatible_protocol, etc.)
+				// this check is redundant with 6c but not incorrect — the
+				// address would have been filtered by the IP-wide ban one
+				// step earlier.
+				if !h.BannedUntil.IsZero() && now.Before(h.BannedUntil) {
+					continue
+				}
 
 				// Skip peers in cooldown.
 				// A single failure does NOT trigger cooldown — the peer gets
@@ -735,6 +762,26 @@ func (pp *PeerProvider) KnownPeerStatic(address domain.PeerAddress) *knownPeer {
 // (a) Service.bannedIPSet (IP-wide bans) via bannedIPsFn,
 // (b) per-address BannedUntil from healthFn (direct ban → whole IP banned).
 // Must be called with pp.mu held (read lock).
+//
+// Self-identity carve-out (source (b)): a BannedUntil stamped with
+// LastErrorCode == protocol.ErrCodeSelfIdentity is explicitly
+// address-scoped — the ban records that ONE host:port reflected our
+// own identity, typically via NAT reflection / peer-exchange echo /
+// fallback-port alias. Widening that to the whole IP would suppress
+// unrelated peers behind the same NAT or cloud host for 24h on a
+// single self-loopback hit, which contradicts the "terminal failure
+// against the address" contract documented in peer_state.go
+// (peerBanSelfIdentity) and peer_management.go
+// (applySelfIdentityCooldown). Entries carrying that code are
+// skipped from the IP-wide propagation; the offending address is
+// still held off the dial queue by the per-address BannedUntil
+// filter in PeerProvider.Candidates() (step 6f — see the comment
+// there), so only the sibling ports on the same IP are freed. Other
+// per-address reasons (incompatible_protocol, remote ban hint
+// applied as local state, etc.) continue to widen because the
+// underlying cause is host-level (every port on that host runs the
+// same client / the same peer refuses us at every port) and the
+// widened ban is the intended behaviour.
 func (pp *PeerProvider) buildBannedIPsSet(now time.Time) map[string]domain.BannedIPEntry {
 	cfg := pp.config
 	banned := make(map[string]domain.BannedIPEntry)
@@ -760,6 +807,11 @@ func (pp *PeerProvider) buildBannedIPsSet(now time.Time) map[string]domain.Banne
 				continue
 			}
 			if h.BannedUntil.IsZero() || !now.Before(h.BannedUntil) {
+				continue
+			}
+			// Address-scoped ban reason — do not widen to the IP.
+			// See the function docstring for the full rationale.
+			if h.LastErrorCode == protocol.ErrCodeSelfIdentity {
 				continue
 			}
 			existing, exists := banned[kp.IP]

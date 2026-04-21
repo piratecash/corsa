@@ -799,6 +799,12 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 				LastDisconnectedAt:  h.LastDisconnectedAt,
 				BannedUntil:         h.BannedUntil,
 				Connected:           h.Connected,
+				// LastErrorCode is forwarded so PeerProvider.buildBannedIPsSet
+				// can distinguish address-scoped ban reasons (self-identity)
+				// from IP-scoped ones (incompatible protocol, etc.). Without
+				// this field the carve-out at buildBannedIPsSet never fires
+				// and a single self-alias ban widens to the whole host/NAT.
+				LastErrorCode: h.LastErrorCode,
 			}
 		},
 		ConnectedFn: func() map[string]struct{} {
@@ -1552,6 +1558,41 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// (Address, PubKey, BoxKey, BoxSig), NOT frame.Client which the
 		// attacker controls. This eliminates GAP-0.
 		if connauth.HasIdentityFields(frame) {
+			// Self-loopback guard at the identity layer. The remote has
+			// cryptographic material — if it claims our Ed25519 address
+			// AND advertises a peer listen address the dial is reflecting
+			// back to us (NAT hairpin, peer-exchange mirror, fallback-port
+			// alias, onion/clearnet echo). Address helpers (isSelfAddress
+			// / isSelfDialIP) can't catch this because the reflected
+			// socket arrives on a different host:port tuple. Break the
+			// loop here before PrepareAuth can poison connauth state or
+			// learnPeerFromFrame can ingest our own key material as a
+			// foreign peer. The connection_notice teaches the dialler
+			// to cooldown the address; return=false triggers
+			// unregisterInboundConn on the handleConn defer, so teardown
+			// stays inside the NetCore wrapper.
+			//
+			// The frame.Listen != "" gate is critical: local subscribers
+			// (RPC-style clients that authenticate with the local
+			// identity to subscribe to their own inbox) dial the same
+			// TCP port but never declare a peer Listen address. Peer
+			// hellos ALWAYS include Listen because that is how the
+			// handshake propagates the peer's reachable endpoint. Without
+			// the gate the guard would break legitimate self-subscription
+			// on the same host. Every real self-loopback path surfaces
+			// Listen because it reaches us through OUR outbound dialler
+			// code, which always populates the field.
+			if frame.Listen != "" && s.isSelfIdentity(domain.PeerIdentity(frame.Address)) {
+				accepted = false
+				log.Warn().
+					Str("local_identity", s.identity.Address).
+					Str("remote_addr", addr).
+					Str("remote_listen", frame.Listen).
+					Str("remote_client", frame.Client).
+					Msg("inbound_self_identity_rejected")
+				s.emitPeerBannedNoticeByID(connID, time.Time{}, protocol.PeerBannedReasonSelfIdentity)
+				return false
+			}
 			authState, err := connauth.PrepareAuth(frame)
 			if err != nil {
 				accepted = false
@@ -4562,6 +4603,21 @@ func listenerFlag(enabled bool) string {
 }
 
 func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
+	// Self-loopback guard: if the welcome carries our own Ed25519
+	// address the remote is actually us reflected back — silently
+	// skip the learning pass so we do not re-ingest our own listen
+	// address as a peer candidate or our own box key as a contact.
+	// Call sites that also need to abort their broader pipeline
+	// (auth_session, subscribe_inbox) consult isSelfIdentity
+	// independently; this guard is a defence-in-depth boundary.
+	if s.isSelfIdentity(domain.PeerIdentity(frame.Address)) {
+		log.Warn().
+			Str("local_identity", s.identity.Address).
+			Str("welcome_listen", frame.Listen).
+			Str("welcome_client", frame.Client).
+			Msg("welcome_self_identity_skipped")
+		return
+	}
 	if listenerEnabledFromFrame(frame) {
 		if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(frame.Listen), domain.PeerAddress(frame.Listen)); ok {
 			s.promotePeerAddress(normalizedAddr)

@@ -1399,6 +1399,41 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// next outbound hello self-corrects, then abort this bootstrap write.
 	if welcome.Type == protocol.FrameTypeConnectionNotice {
 		s.handleConnectionNotice(address, welcome)
+		// Remote-first self-loopback discovery on the raw push_notice
+		// fan-out path. routingTargets() can route onto an alternate
+		// alias (alternate listen port, onion/clearnet mirror) that
+		// slips past the isSelfAddress() gate in gossipNotice, landing
+		// on our own inbound hello handler which answers with
+		// connection_notice{code=peer-banned, reason=self-identity}.
+		// Without this branch handleConnectionNotice would only record
+		// the (possibly empty) remote ban-until in persistedMeta,
+		// leaving health.BannedUntil and LastErrorCode unset. The next
+		// gossipNotice tick would then redial the same self-looping
+		// alias because the dial-gate consults health, not persistedMeta
+		// alone. Route through the same applySelfIdentityCooldown the
+		// managed session path and syncPeer use so the 24h window lands
+		// in health and blocks further churn.
+		if errors.Is(protocol.NoticeErrorFromFrame(welcome), protocol.ErrSelfIdentity) {
+			s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
+		}
+		return
+	}
+	// Local self-loopback guard on the same dial: an alternate alias
+	// may reach a responder that does not emit the peer-banned notice
+	// (older version, different role) but still welcomes us with our
+	// own Ed25519 address. Signing auth_session with our own key and
+	// sending push_notice is wasted work at best and a defence-in-depth
+	// hole at worst — we would ingest our own welcome into the peer
+	// caches via the auth_ok → recordOutboundAuthSuccess path. Abort
+	// with the same cooldown the notice branch above applies so both
+	// arrival shapes converge on one health record.
+	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+		log.Warn().
+			Str("peer", string(address)).
+			Str("local_identity", s.identity.Address).
+			Str("welcome_listen", welcome.Listen).
+			Msg("send_notice_self_identity_rejected")
+		s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
 		return
 	}
 	if strings.TrimSpace(welcome.Challenge) != "" {

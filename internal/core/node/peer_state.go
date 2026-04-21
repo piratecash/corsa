@@ -155,6 +155,12 @@ const (
 	peerBanIncompatible          = 24 * time.Hour // ban duration for peers with incompatible protocol version
 	peerBanIncrementIncompatible = 250            // overlay-level penalty per incompatible-version attempt
 	peerBanThresholdIncompatible = 1000           // overlay penalty sum that triggers the timed ban
+	// peerBanSelfIdentity is the cooldown applied to an address that
+	// answered our dial with our own Ed25519 identity. We set it on the
+	// first observation (no accumulation) because a matching identity is
+	// binary evidence of self-loopback — no benefit to letting the dial
+	// loop retry the same endpoint.
+	peerBanSelfIdentity = 24 * time.Hour
 	peerScoreMax                 = 100
 	peerScoreMin                 = -50
 	maxPersistedPeers            = 500

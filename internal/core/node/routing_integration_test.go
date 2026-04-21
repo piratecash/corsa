@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -3928,5 +3929,200 @@ func TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess(t *testing.T) {
 	}
 	if pm.TrustedAdvertisePort != wantPort {
 		t.Fatalf("trusted_advertise_port: got %q want %q", pm.TrustedAdvertisePort, wantPort)
+	}
+}
+
+// TestSendNoticeToPeer_SelfIdentityNotice_AppliesCooldown pins the
+// reason-aware self-loopback cooldown on the raw push_notice fan-out
+// path. Before the fix, the connection_notice branch in
+// sendNoticeToPeer recorded the notice via handleConnectionNotice and
+// returned without calling applySelfIdentityCooldown — so a
+// routingTargets() alias that slipped past the isSelfAddress() gate in
+// gossipNotice and landed on our own inbound hello handler would get
+// connection_notice{code=peer-banned, reason=self-identity} back and
+// this branch would drop it. The next gossip tick would redial the
+// same self-looping endpoint because the dial-gate reads health, not
+// the persistedMeta row handleConnectionNotice writes. This test
+// reproduces that wire shape against a loopback mock and asserts
+// health.BannedUntil is stamped with the 24h window and
+// LastErrorCode == ErrCodeSelfIdentity.
+func TestSendNoticeToPeer_SelfIdentityNotice_AppliesCooldown(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	// Mock peer: read hello, reply with connection_notice{peer-banned,
+	// reason=self-identity}. This is the exact wire shape our own
+	// inbound hello handler emits when a remote hello carries our
+	// identity (i.e. the self-loopback case the test is pinning).
+	peerDone := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			peerDone <- fmt.Errorf("accept: %w", err)
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		reader := bufio.NewReader(c)
+
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- fmt.Errorf("read hello: %w", err)
+			return
+		}
+		// Craft the real wire shape: peer-banned code plus
+		// details.reason=self-identity. NoticeErrorFromFrame on our
+		// side must resolve this to ErrSelfIdentity and route through
+		// applySelfIdentityCooldown — without that, handleConnectionNotice
+		// would only touch persistedMeta and the regression described
+		// above would reappear.
+		details, err := protocol.MarshalPeerBannedDetails(time.Time{}, protocol.PeerBannedReasonSelfIdentity)
+		if err != nil {
+			peerDone <- fmt.Errorf("marshal details: %w", err)
+			return
+		}
+		noticeLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:    protocol.FrameTypeConnectionNotice,
+			Code:    protocol.ErrCodePeerBanned,
+			Details: details,
+		})
+		if err != nil {
+			peerDone <- fmt.Errorf("marshal notice: %w", err)
+			return
+		}
+		if _, err := io.WriteString(c, noticeLine); err != nil {
+			peerDone <- fmt.Errorf("write notice: %w", err)
+			return
+		}
+		peerDone <- nil
+	}()
+
+	peerAddr := domain.PeerAddress(ln.Addr().String())
+	svc.sendNoticeToPeer(peerAddr, time.Minute, "self-identity-ciphertext")
+
+	select {
+	case err := <-peerDone:
+		if err != nil {
+			t.Fatalf("peer goroutine: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("self-identity notice exchange did not complete within 5s")
+	}
+
+	// Sanity on decode parity: the helper must resolve the crafted
+	// notice the same way the production call site does. If this
+	// fails, the production path is definitely broken regardless of
+	// what the cooldown assertions below report.
+	details, _ := protocol.MarshalPeerBannedDetails(time.Time{}, protocol.PeerBannedReasonSelfIdentity)
+	decoded := protocol.NoticeErrorFromFrame(protocol.Frame{
+		Type:    protocol.FrameTypeConnectionNotice,
+		Code:    protocol.ErrCodePeerBanned,
+		Details: details,
+	})
+	if !errors.Is(decoded, protocol.ErrSelfIdentity) {
+		t.Fatalf("NoticeErrorFromFrame decode sanity: %v; want errors.Is(ErrSelfIdentity)", decoded)
+	}
+
+	svc.mu.RLock()
+	health, ok := svc.health[peerAddr]
+	svc.mu.RUnlock()
+	if !ok {
+		t.Fatalf("applySelfIdentityCooldown was not reached: no peerHealth entry for %s", peerAddr)
+	}
+	if health.BannedUntil.IsZero() {
+		t.Fatal("BannedUntil not set — sendNoticeToPeer notice branch bypassed the cooldown (the bug this test pins)")
+	}
+	if got, want := health.LastErrorCode, protocol.ErrCodeSelfIdentity; got != want {
+		t.Fatalf("health.LastErrorCode = %q, want %q", got, want)
+	}
+	if health.LastError == "" {
+		t.Fatal("health.LastError is empty; applySelfIdentityCooldown must stamp the structured error message")
+	}
+	if minExpected := peerBanSelfIdentity - time.Minute; time.Until(health.BannedUntil) < minExpected {
+		t.Fatalf("BannedUntil too short: got %v until, want ≥ %v", time.Until(health.BannedUntil), minExpected)
+	}
+}
+
+// TestSendNoticeToPeer_SelfIdentityWelcome_AppliesCooldown pins the
+// defence-in-depth branch on the same raw path: if the responder is
+// an older/mismatched role that does NOT emit the peer-banned notice
+// but still welcomes us with our own Ed25519 address, the dial must
+// abort at the welcome check and apply the same cooldown. Without
+// this branch the code would sign auth_session with its own key,
+// complete the raw handshake, and drop our own welcome into the
+// peer caches via recordOutboundAuthSuccess — a defence-in-depth hole.
+func TestSendNoticeToPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	peerDone := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			peerDone <- fmt.Errorf("accept: %w", err)
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		reader := bufio.NewReader(c)
+
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			peerDone <- fmt.Errorf("read hello: %w", err)
+			return
+		}
+		// Non-notice welcome carrying our own identity. No challenge
+		// so the caller does not even attempt auth_session — the guard
+		// must short-circuit right after parsing the welcome.
+		welcomeLine, err := protocol.MarshalFrameLine(protocol.Frame{
+			Type:    "welcome",
+			Address: svc.identity.Address,
+			Listen:  ln.Addr().String(),
+		})
+		if err != nil {
+			peerDone <- fmt.Errorf("marshal welcome: %w", err)
+			return
+		}
+		if _, err := io.WriteString(c, welcomeLine); err != nil {
+			peerDone <- fmt.Errorf("write welcome: %w", err)
+			return
+		}
+		peerDone <- nil
+	}()
+
+	peerAddr := domain.PeerAddress(ln.Addr().String())
+	svc.sendNoticeToPeer(peerAddr, time.Minute, "self-welcome-ciphertext")
+
+	select {
+	case err := <-peerDone:
+		if err != nil {
+			t.Fatalf("peer goroutine: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("self-identity welcome exchange did not complete within 5s")
+	}
+
+	svc.mu.RLock()
+	health, ok := svc.health[peerAddr]
+	svc.mu.RUnlock()
+	if !ok {
+		t.Fatalf("applySelfIdentityCooldown was not reached: no peerHealth entry for %s", peerAddr)
+	}
+	if health.BannedUntil.IsZero() {
+		t.Fatal("BannedUntil not set — sendNoticeToPeer welcome-address guard missing")
+	}
+	if got, want := health.LastErrorCode, protocol.ErrCodeSelfIdentity; got != want {
+		t.Fatalf("health.LastErrorCode = %q, want %q", got, want)
+	}
+	if minExpected := peerBanSelfIdentity - time.Minute; time.Until(health.BannedUntil) < minExpected {
+		t.Fatalf("BannedUntil too short: got %v until, want ≥ %v", time.Until(health.BannedUntil), minExpected)
 	}
 }

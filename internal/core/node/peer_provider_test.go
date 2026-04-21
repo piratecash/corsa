@@ -7,6 +7,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // ---------------------------------------------------------------------------
@@ -1157,6 +1158,111 @@ func TestBannedIPs_EmptyWhenNoBans(t *testing.T) {
 	banned := pp.BannedIPs()
 	if len(banned) != 0 {
 		t.Fatalf("expected 0 banned IPs, got %d", len(banned))
+	}
+}
+
+// TestBannedIPs_SelfIdentityDoesNotWidenToIP pins the address-scoped
+// semantics of the self-identity cooldown. A BannedUntil stamped with
+// LastErrorCode == protocol.ErrCodeSelfIdentity on one port MUST NOT
+// widen to the whole IP — otherwise a single NAT-reflection / peer-exchange
+// echo on :8000 would suppress the unrelated sibling peer on :9999 for 24h,
+// contradicting the "terminal failure against the address" contract
+// documented on peerBanSelfIdentity and applySelfIdentityCooldown.
+func TestBannedIPs_SelfIdentityDoesNotWidenToIP(t *testing.T) {
+	cfg := testProviderConfig()
+	now := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+	cfg.NowFn = func() time.Time { return now }
+	selfIdentityBan := now.Add(24 * time.Hour)
+	cfg.HealthFn = func(addr domain.PeerAddress) *PeerHealthView {
+		if addr == mustAddr("1.2.3.4:8000") {
+			return &PeerHealthView{
+				BannedUntil:   selfIdentityBan,
+				LastErrorCode: protocol.ErrCodeSelfIdentity,
+			}
+		}
+		return nil
+	}
+	pp := NewPeerProvider(cfg)
+	pp.Add(mustAddr("1.2.3.4:8000"), domain.PeerSourcePeerExchange)
+	pp.Add(mustAddr("1.2.3.4:9999"), domain.PeerSourcePeerExchange)
+
+	// The self-identity ban must not propagate to the IP level.
+	banned := pp.BannedIPs()
+	if len(banned) != 0 {
+		t.Fatalf("expected 0 IP-wide bans (self-identity is address-scoped), got %d: %+v",
+			len(banned), banned)
+	}
+
+	// The sibling on the same IP must remain a viable candidate — it should
+	// NOT inherit the ban and must be selectable through Candidates().
+	candidates := pp.Candidates()
+	foundSibling := false
+	foundOffending := false
+	for _, c := range candidates {
+		if c.Address == mustAddr("1.2.3.4:9999") {
+			foundSibling = true
+		}
+		if c.Address == mustAddr("1.2.3.4:8000") {
+			foundOffending = true
+		}
+	}
+	if !foundSibling {
+		t.Error("sibling :9999 should remain a candidate (self-identity ban is address-scoped)")
+	}
+	if foundOffending {
+		t.Error(":8000 must stay excluded via its own per-address BannedUntil")
+	}
+}
+
+// TestBannedIPs_SelfIdentityCarveOutIsSurgical proves the carve-out is
+// discriminating by reason, not a blanket removal of IP-wide propagation.
+// A sibling port banned WITHOUT the self-identity reason (e.g. legacy
+// incompatible_protocol path with an empty LastErrorCode) must still
+// widen to the whole IP — otherwise we regress the host-level ban that
+// incompatible_protocol relies on.
+func TestBannedIPs_SelfIdentityCarveOutIsSurgical(t *testing.T) {
+	cfg := testProviderConfig()
+	now := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+	cfg.NowFn = func() time.Time { return now }
+	selfBan := now.Add(24 * time.Hour)
+	genericBan := now.Add(6 * time.Hour)
+	cfg.HealthFn = func(addr domain.PeerAddress) *PeerHealthView {
+		switch addr {
+		case mustAddr("1.2.3.4:8000"):
+			// Self-identity — address-scoped, must NOT widen.
+			return &PeerHealthView{
+				BannedUntil:   selfBan,
+				LastErrorCode: protocol.ErrCodeSelfIdentity,
+			}
+		case mustAddr("1.2.3.4:9999"):
+			// Non-self-identity ban on the same IP — widens as before.
+			return &PeerHealthView{BannedUntil: genericBan}
+		default:
+			return nil
+		}
+	}
+	pp := NewPeerProvider(cfg)
+	pp.Add(mustAddr("1.2.3.4:8000"), domain.PeerSourcePeerExchange)
+	pp.Add(mustAddr("1.2.3.4:9999"), domain.PeerSourcePeerExchange)
+
+	banned := pp.BannedIPs()
+	if len(banned) != 1 {
+		t.Fatalf("expected 1 IP-wide ban (generic path still widens), got %d: %+v",
+			len(banned), banned)
+	}
+	// The propagation origin must be the non-self-identity port; the
+	// self-identity entry has been filtered out before the max-expiry
+	// aggregation ran, so its later expiry must NOT appear here.
+	if banned[0].IP != "1.2.3.4" {
+		t.Errorf("IP = %v, want 1.2.3.4", banned[0].IP)
+	}
+	if !banned[0].BannedUntil.Equal(genericBan) {
+		t.Errorf("BannedUntil = %v, want %v (self-identity must not contribute to IP aggregation)",
+			banned[0].BannedUntil, genericBan)
+	}
+	if banned[0].BanOrigin != mustAddr("1.2.3.4:9999") {
+		t.Errorf("BanOrigin = %v, want 1.2.3.4:9999 (self-identity port must not be the origin)",
+			banned[0].BanOrigin)
 	}
 }
 

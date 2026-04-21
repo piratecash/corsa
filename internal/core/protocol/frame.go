@@ -351,6 +351,14 @@ const (
 	// accept and record the window on receipt today so a forthcoming
 	// server rollout does not require a concurrent client rollout.
 	PeerBannedReasonPeerBan PeerBannedReason = "peer-ban"
+	// PeerBannedReasonSelfIdentity is emitted when the responder detects
+	// that the inbound hello carries the responder's own Ed25519
+	// identity — i.e. the sender is actually the local node reflected
+	// back via NAT loopback, a peer-exchange mirror, a fallback-port
+	// alias, or an onion-to-clearnet echo. The dialler should treat this
+	// as an address-level dead-end and stop redialling the endpoint so
+	// the node does not spin in a self-loop.
+	PeerBannedReasonSelfIdentity PeerBannedReason = "self-identity"
 )
 
 // PeerBannedDetails is the schema for Frame.Details when
