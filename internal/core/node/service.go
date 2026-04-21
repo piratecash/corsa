@@ -2922,7 +2922,9 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 // failed), the disconnect is silently ignored to avoid creating phantom
 // health entries for unauthenticated connections.
 func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAddress) {
+	log.Trace().Str("site", "trackInboundDisconnect").Str("phase", "lock_wait").Uint64("conn_id", uint64(id)).Str("address", string(address)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "trackInboundDisconnect").Str("phase", "lock_held").Uint64("conn_id", uint64(id)).Msg("s_mu_writer")
 	var (
 		wasTracked   bool
 		peerIdentity domain.PeerIdentity
@@ -2959,6 +2961,7 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 		}
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "trackInboundDisconnect").Str("phase", "lock_released").Uint64("conn_id", uint64(id)).Bool("last", last).Msg("s_mu_writer")
 
 	if last {
 		s.markPeerDisconnected(resolved, nil)
@@ -4510,9 +4513,12 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 		_ = s.Network().Close(s.runCtx, id)
 	}
 
+	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_held").Msg("s_mu_writer")
 	s.unregisterConnLocked(conn)
 	s.mu.Unlock()
+	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_released").Msg("s_mu_writer")
 }
 
 // closeAllInboundConns closes every tracked inbound connection so that

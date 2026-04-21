@@ -688,10 +688,13 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 		return
 	}
 
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
 	count := s.identitySessions[peerIdentity]
 	if count <= 0 {
 		s.mu.Unlock()
+		log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Str("reason", "no_session").Msg("s_mu_writer")
 		return
 	}
 	s.identitySessions[peerIdentity]--
@@ -712,6 +715,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 		}
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("s_mu_writer")
 
 	if !lastRelay {
 		// No relay sessions left (or never had one). If this is also the

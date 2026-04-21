@@ -921,10 +921,13 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 
 		connected, err := s.openPeerSession(ctx, address)
 		if err != nil {
+			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
 			s.mu.Lock()
+			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
 			closedSession := s.sessions[address]
 			delete(s.sessions, address)
 			s.mu.Unlock()
+			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
 
 			// Routing table: deregister direct peer on session close.
 			// The hasRelayCap flag must match what was passed to
@@ -2695,7 +2698,9 @@ func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool 
 }
 
 func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
+	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -2770,6 +2775,7 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	s.recomputeVersionPolicyLocked(now)
 
 	s.mu.Unlock()
+	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
 
 	// Emit peer-connected event after releasing lock.
 	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
@@ -2778,7 +2784,9 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 }
 
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
+	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -2823,6 +2831,7 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	s.recomputeVersionPolicyLocked(time.Now().UTC())
 
 	s.mu.Unlock()
+	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
 
 	// Emit peer-disconnected event after releasing lock.
 	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
@@ -2995,8 +3004,13 @@ func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame
 		return
 	}
 
+	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+	}()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -3030,8 +3044,13 @@ func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame)
 		return
 	}
 
+	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "markPeerRead").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+	}()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -3049,8 +3068,13 @@ func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
 		return
 	}
 
+	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	}()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)

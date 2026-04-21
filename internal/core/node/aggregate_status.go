@@ -162,8 +162,13 @@ func (s *Service) refreshAggregatePendingLocked() {
 // against a dropped initial publish during a storm, so the UI eventually
 // converges to the true snapshot even if the inbox was full earlier.
 func (s *Service) refreshAggregateStatus() {
+	log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_held").Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_released").Msg("s_mu_writer")
+	}()
 	s.publishAggregateStatusChangedLocked()
 }
 

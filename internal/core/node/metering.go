@@ -28,8 +28,13 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *netco
 		return
 	}
 
+	log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	}()
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -64,8 +69,13 @@ func (s *Service) accumulateInboundTraffic(mc *netcore.MeteredConn) {
 		return
 	}
 
+	log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_held").Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_released").Msg("s_mu_writer")
+	}()
 
 	id, ok := s.connIDForLocked(mc)
 	if !ok {
