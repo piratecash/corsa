@@ -460,8 +460,9 @@ Shutdown is split between the node layer and the service layer:
 
 **Service layer** (`DesktopClient.Close()`, called via `defer` in `app.go`):
 
-4. `c.chatLog.Close()` performs the SQLite WAL checkpoint and releases
-   file handles.
+4. `DesktopClient.Close()` forwards to `ChatlogGateway.Close()`, which runs
+   the SQLite WAL checkpoint and releases the file handles owned by
+   `ChatlogGateway` (the sub-service that now owns `chatlog.Store`).
 
 Without steps 2–3, a slow peer could still be calling `MessageStore` after
 `Close()`, causing "database is closed" errors and potential data loss.
@@ -1220,8 +1221,10 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 
 **Сервисный уровень** (`DesktopClient.Close()`, вызывается через `defer` в `app.go`):
 
-4. `c.chatLog.Close()` выполняет SQLite WAL checkpoint и освобождает
-   файловые дескрипторы.
+4. `DesktopClient.Close()` делегирует закрытие в `ChatlogGateway.Close()`,
+   который выполняет SQLite WAL checkpoint и освобождает файловые
+   дескрипторы, принадлежащие `ChatlogGateway` — суб-сервису, теперь
+   владеющему `chatlog.Store`.
 
 Без шагов 2–3 медленный peer мог бы ещё вызывать `MessageStore` после
 `Close()`, вызывая ошибки «database is closed» и потенциальную потерю данных.

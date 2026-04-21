@@ -28,9 +28,9 @@ The repository contains the current Go-based CORSA stack:
 - `internal/core/identity`: `ed25519` identity, `X25519` box keys, key binding signatures
 - `internal/core/directmsg`: encrypted and signed direct-message envelopes
 - `internal/core/gazeta`: encrypted anonymous notice transport
-- `internal/core/chatlog`: append-only file-backed chat message persistence (see [chatlog.md](chatlog.md)). Owned by `DesktopClient` (service layer), not by `node.Service`.
+- `internal/core/chatlog`: append-only file-backed chat message persistence (see [chatlog.md](chatlog.md)). Owned by `ChatlogGateway` (service layer), not by `node.Service`.
 - `internal/core/node`: mesh node, trust store, peer sync, relay (see [mesh.md](mesh.md) for the full mesh network documentation). Does not own message persistence — delegates to a registered `MessageStore` handler (see [chatlog.md](chatlog.md)).
-- `internal/core/service`: desktop-facing application service layer (see [dm_router.md](dm_router.md) for the DMRouter service layer). `DesktopClient` owns `chatlog.Store` and implements `node.MessageStore`.
+- `internal/core/service`: desktop-facing application service layer (see [dm_router.md](dm_router.md) for the DMRouter service layer). `DesktopClient` is the composition root; concrete work is delegated to `AppInfo` (config snapshot), `LocalRPCClient` (frame dispatch), `ChatlogGateway` (owns `chatlog.Store`), `MessageStoreAdapter` (satisfies `node.MessageStore`), `DMCrypto` (encrypt/decrypt/send/sync), and `NodeProber` (probe + read fetches + routing snapshot). New callers should depend on the narrowest sub-service instead of the full `DesktopClient` surface.
 - `internal/core/protocol`: protocol models (see [protocol/](protocol/) for the full protocol specification)
 - `internal/core/netcore`: transport core — owns the raw `net.Conn`, the writer goroutine and the framing loop; exposes the typed `netcore.Network` boundary (`SendFrame`, `SendFrameSync`, `Enumerate`, `Close`, `RemoteAddr`, all keyed by `domain.ConnID`) that `node.Service` goes through. See [protocol/network_core.md](protocol/network_core.md).
 - `internal/core/transport`: p2p transport abstractions
@@ -288,9 +288,9 @@ API surface on `domain.OptionalTime`:
 - `internal/core/identity`: identity на `ed25519`, `X25519` box keys, подписи привязки ключей
 - `internal/core/directmsg`: зашифрованные и подписанные direct-message envelopes
 - `internal/core/gazeta`: зашифрованный анонимный transport для notices
-- `internal/core/chatlog`: append-only хранение истории сообщений на диске (см. [chatlog.md](chatlog.md)). Владеет `DesktopClient` (сервисный слой), а не `node.Service`.
+- `internal/core/chatlog`: append-only хранение истории сообщений на диске (см. [chatlog.md](chatlog.md)). Владеет `ChatlogGateway` (сервисный слой), а не `node.Service`.
 - `internal/core/node`: mesh-нода, trust store, peer sync, relay (см. [mesh.md](mesh.md) для полной документации mesh-сети). Не владеет хранением сообщений — делегирует зарегистрированному обработчику `MessageStore` (см. [chatlog.md](chatlog.md)).
-- `internal/core/service`: сервисный слой для desktop-клиента (см. [dm_router.md](dm_router.md) для сервисного слоя DMRouter). `DesktopClient` владеет `chatlog.Store` и реализует `node.MessageStore`.
+- `internal/core/service`: сервисный слой для desktop-клиента (см. [dm_router.md](dm_router.md) для сервисного слоя DMRouter). `DesktopClient` — composition root; реальная работа делегируется суб-сервисам: `AppInfo` (immutable snapshot конфигурации), `LocalRPCClient` (диспатч фреймов), `ChatlogGateway` (владеет `chatlog.Store`), `MessageStoreAdapter` (реализует `node.MessageStore`), `DMCrypto` (шифрование/дешифрование/отправка/синхронизация DM) и `NodeProber` (probe + read fetch + routing snapshot). Новые потребители должны зависеть от узкого суб-сервиса, а не от широкой поверхности `DesktopClient`.
 - `internal/core/protocol`: модели протокола (см. [protocol/](protocol/) для полной спецификации протокола)
 - `internal/core/netcore`: сетевое ядро — владеет raw `net.Conn`, writer-горутиной и циклом фреймирования; предоставляет типизированную границу `netcore.Network` (`SendFrame`, `SendFrameSync`, `Enumerate`, `Close`, `RemoteAddr`, все ключены `domain.ConnID`), через которую ходит `node.Service`. См. [protocol/network_core.md](protocol/network_core.md).
 - `internal/core/transport`: p2p-абстракции транспорта

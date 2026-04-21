@@ -46,3 +46,66 @@ func PublishIdentityAdded(bus *Bus, identity domain.PeerIdentity) {
 	}
 	bus.Publish(TopicIdentityAdded, identity)
 }
+
+// PublishPeerConnected emits TopicPeerConnected with a typed
+// (address, identity) pair. Use this instead of bus.Publish at every new
+// call site so the compiler enforces the (PeerAddress, PeerIdentity)
+// order — a raw variadic publish would allow the two strings to be swapped
+// silently.
+func PublishPeerConnected(bus *Bus, address domain.PeerAddress, identity domain.PeerIdentity) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicPeerConnected, address, identity)
+}
+
+// PublishPeerDisconnected emits TopicPeerDisconnected with a typed
+// (address, identity) pair.
+func PublishPeerDisconnected(bus *Bus, address domain.PeerAddress, identity domain.PeerIdentity) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicPeerDisconnected, address, identity)
+}
+
+// PublishSlotStateChanged emits TopicSlotStateChanged with a typed peer
+// address and the new slot-state string. An empty state string signals
+// slot removal (documented contract on TopicSlotStateChanged).
+func PublishSlotStateChanged(bus *Bus, address domain.PeerAddress, state string) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicSlotStateChanged, address, state)
+}
+
+// PublishMessageSent emits TopicMessageSent with a typed MessageSentResult.
+func PublishMessageSent(bus *Bus, result MessageSentResult) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicMessageSent, result)
+}
+
+// PublishMessageSendFailed emits TopicMessageSendFailed with a typed result.
+func PublishMessageSendFailed(bus *Bus, result MessageSendFailedResult) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicMessageSendFailed, result)
+}
+
+// PublishFileSent emits TopicFileSent with a typed FileSentResult.
+func PublishFileSent(bus *Bus, result FileSentResult) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicFileSent, result)
+}
+
+// PublishFileSendFailed emits TopicFileSendFailed with a typed result.
+func PublishFileSendFailed(bus *Bus, result FileSendFailedResult) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicFileSendFailed, result)
+}

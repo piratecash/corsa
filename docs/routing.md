@@ -848,8 +848,9 @@ internal/core/rpc/
     handler_routing_test.go      — юнит-тесты RPC-команд маршрутизации
 
 internal/core/service/
-    desktop.go                   — buildReachableIDs: populates NodeStatus.ReachableIDs via direct RoutingSnapshot() call
-    desktop_test.go              — unit tests for buildReachableIDs (nil node, empty table, empty list)
+    node_prober.go               — NodeProber.BuildReachableIDs: populates NodeStatus.ReachableIDs via direct RoutingSnapshot() call
+    desktop.go                   — DesktopClient.BuildReachableIDs: thin delegator to NodeProber
+    desktop_test.go              — unit tests for BuildReachableIDs (nil node, empty table, empty list)
 
 internal/app/desktop/
     window.go                    — layoutReachableIndicator: renders green/gray dot per contact based on ReachableIDs
@@ -857,6 +858,6 @@ internal/app/desktop/
 
 ### UI reachability indicator
 
-The desktop sidebar uses the routing table to display a per-contact reachability indicator. During each `ProbeNode` cycle, `DesktopClient.buildReachableIDs()` builds a set of all identities with at least one live route. It calls `node.Service.RoutingSnapshot()` directly via the embedded node. The reachable set covers all identities in the routing table — not just those from `fetch_identities` — so sidebar peers that entered via chatlog or DM headers also get correct status. The result is stored in `NodeStatus.ReachableIDs map[PeerIdentity]bool` and flows through `RouterSnapshot.NodeStatus` to the UI, where `layoutReachableIndicator` draws a green (reachable) or gray (unreachable) dot next to the contact name.
+The desktop sidebar uses the routing table to display a per-contact reachability indicator. During each `ProbeNode` cycle, `NodeProber.BuildReachableIDs()` (delegated from `DesktopClient.BuildReachableIDs()`) builds a set of all identities with at least one live route. It calls `node.Service.RoutingSnapshot()` directly via the embedded node. The reachable set covers all identities in the routing table — not just those from `fetch_identities` — so sidebar peers that entered via chatlog or DM headers also get correct status. The result is stored in `NodeStatus.ReachableIDs map[PeerIdentity]bool` and flows through `RouterSnapshot.NodeStatus` to the UI, where `layoutReachableIndicator` draws a green (reachable) or gray (unreachable) dot next to the contact name.
 
-**Индикатор достижимости в UI.** Sidebar десктопного приложения использует routing table для отображения индикатора достижимости каждого контакта. При каждом цикле `ProbeNode` метод `DesktopClient.buildReachableIDs()` строит набор всех identity с живым маршрутом. Используется прямой вызов `node.Service.RoutingSnapshot()` через embedded node. Набор покрывает все identity из routing table, а не только из `fetch_identities`, поэтому sidebar peers из chatlog или DM headers тоже получают корректный статус. Результат сохраняется в `NodeStatus.ReachableIDs map[PeerIdentity]bool` и поступает через `RouterSnapshot.NodeStatus` в UI, где `layoutReachableIndicator` рисует зелёную (достижим) или серую (недоступен) точку рядом с именем контакта.
+**Индикатор достижимости в UI.** Sidebar десктопного приложения использует routing table для отображения индикатора достижимости каждого контакта. При каждом цикле `ProbeNode` метод `NodeProber.BuildReachableIDs()` (делегация из `DesktopClient.BuildReachableIDs()`) строит набор всех identity с живым маршрутом. Используется прямой вызов `node.Service.RoutingSnapshot()` через embedded node. Набор покрывает все identity из routing table, а не только из `fetch_identities`, поэтому sidebar peers из chatlog или DM headers тоже получают корректный статус. Результат сохраняется в `NodeStatus.ReachableIDs map[PeerIdentity]bool` и поступает через `RouterSnapshot.NodeStatus` в UI, где `layoutReachableIndicator` рисует зелёную (достижим) или серую (недоступен) точку рядом с именем контакта.

@@ -359,7 +359,7 @@ func (cm *ConnectionManager) emitSlotStateChanged(address domain.PeerAddress, st
 	if cm.config.EventBus == nil {
 		return
 	}
-	cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, address, state.String())
+	ebus.PublishSlotStateChanged(cm.config.EventBus, address, state.String())
 }
 
 // emitSlotRemoved publishes the "slot removed" signal (empty state string)
@@ -370,7 +370,7 @@ func (cm *ConnectionManager) emitSlotRemoved(address domain.PeerAddress) {
 	if cm.config.EventBus == nil {
 		return
 	}
-	cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, address, "")
+	ebus.PublishSlotStateChanged(cm.config.EventBus, address, "")
 }
 
 // ---------------------------------------------------------------------------

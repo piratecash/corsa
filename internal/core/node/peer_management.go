@@ -2713,7 +2713,7 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	// Emit peer-connected event after releasing lock.
 	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
 	// emitted by updatePeerStateLocked (called above).
-	s.eventBus.Publish(ebus.TopicPeerConnected, address, peerID)
+	ebus.PublishPeerConnected(s.eventBus, address, peerID)
 }
 
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
@@ -2766,7 +2766,7 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	// Emit peer-disconnected event after releasing lock.
 	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
 	// emitted by updatePeerStateLocked (called above).
-	s.eventBus.Publish(ebus.TopicPeerDisconnected, address, peerID)
+	ebus.PublishPeerDisconnected(s.eventBus, address, peerID)
 }
 
 // penalizeOldProtocolPeer applies a score penalty and accumulates ban score

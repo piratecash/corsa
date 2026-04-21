@@ -1541,7 +1541,7 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	r := newTestRouter()
-	r.client.chatLog = cl
+	r.client.setChatLogForTest(cl)
 
 	r.mu.Lock()
 	r.activePeer = "peer-2" // different from sender
@@ -1658,8 +1658,10 @@ func TestRepairUnreadSubsequentSyncIncrements(t *testing.T) {
 // resetIdentityState() to panic on r.cache.Load(). The defer chain in
 // runStartup must still close startupDone.
 func TestStartupDoneClosedOnPanic(t *testing.T) {
+	client := &DesktopClient{id: &identity.Identity{Address: "me"}}
+	client.wireSubServices()
 	r := &DMRouter{
-		client:         &DesktopClient{id: &identity.Identity{Address: "me"}},
+		client:         client,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
@@ -1687,8 +1689,10 @@ func TestEbusBuffersDuringStartup(t *testing.T) {
 	db, cl := newTestChatLog(t)
 	defer func() { _ = db.Close() }()
 
+	client := &DesktopClient{id: &identity.Identity{Address: "me"}, chatLog: cl}
+	client.wireSubServices()
 	r := &DMRouter{
-		client:         &DesktopClient{id: &identity.Identity{Address: "me"}, chatLog: cl},
+		client:         client,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
@@ -1954,8 +1958,10 @@ func TestOnNewMessageActivePeerCacheReadyDecryptFailEmitsBeep(t *testing.T) {
 func TestNotifyOverflowRetainsAllEventTypes(t *testing.T) {
 	done := make(chan struct{})
 	close(done)
+	client := &DesktopClient{id: &identity.Identity{Address: "me"}}
+	client.wireSubServices()
 	r := &DMRouter{
-		client:         &DesktopClient{id: &identity.Identity{Address: "me"}},
+		client:         client,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
 		seenMessageIDs: make(map[string]struct{}),
@@ -2745,7 +2751,7 @@ func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	r := newTestRouter()
-	r.client.chatLog = cl
+	r.client.setChatLogForTest(cl)
 
 	// Simulate what repairUnreadFromHeaders does: create peer, set Unread,
 	// register seen message ID.
@@ -2796,7 +2802,7 @@ func TestRepairPathHeaderOnlyMessagePreservedAfterNilPreview(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	r := newTestRouter()
-	r.client.chatLog = cl
+	r.client.setChatLogForTest(cl)
 	// Use a larger event channel to absorb async notifications.
 	r.uiEvents = make(chan UIEvent, 64)
 
@@ -3325,7 +3331,7 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 	_ = db.Close()
 
 	r := newTestRouter()
-	r.client.chatLog = chatlog.NewStoreFromDB(db, domain.PeerIdentity("me"))
+	r.client.setChatLogForTest(chatlog.NewStoreFromDB(db, domain.PeerIdentity("me")))
 
 	r.peers["a"] = &RouterPeerState{Unread: 2}
 	r.peers["b"] = &RouterPeerState{Unread: 1}
@@ -4001,7 +4007,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 	// "chatlog not available"), simulating a transient chatlog error during
 	// mid-switch. An empty chatlog would succeed with zero results, which
 	// is not the failure path we want to test.
-	c.chatLog = nil
+	c.setChatLogForTest(nil)
 
 	done := make(chan struct{})
 	close(done)
@@ -4132,7 +4138,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Nil out chatlog so loadConversation fails → triggers the fallback path.
-	c.chatLog = nil
+	c.setChatLogForTest(nil)
 
 	done := make(chan struct{})
 	close(done)
@@ -4355,7 +4361,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 			defer r.mu.RUnlock()
 			return len(r.activeMessages) > 0
 		})
-		c.chatLog = nil
+		c.setChatLogForTest(nil)
 	}()
 
 	result := r.reloadAndRefreshPreview(peerID, "partial-success-1")
@@ -4726,6 +4732,7 @@ func newTestRouter() *DMRouter {
 	done := make(chan struct{})
 	close(done) // pre-closed so tests don't block on startupDone
 	client := &DesktopClient{id: &identity.Identity{Address: "me"}}
+	client.wireSubServices()
 	provider := &testStatusProvider{}
 	return &DMRouter{
 		client:          client,

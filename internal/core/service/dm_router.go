@@ -318,7 +318,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 			r.sendStatus = "send failed: " + err.Error()
 			r.mu.Unlock()
 			r.notify(UIEventStatusUpdated)
-			r.eventBus.Publish(ebus.TopicMessageSendFailed, ebus.MessageSendFailedResult{
+			ebus.PublishMessageSendFailed(r.eventBus, ebus.MessageSendFailedResult{
 				To:  to,
 				Err: err,
 			})
@@ -349,7 +349,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 
 		r.notify(UIEventMessagesUpdated)
 		r.notify(UIEventSidebarUpdated)
-		r.eventBus.Publish(ebus.TopicMessageSent, ebus.MessageSentResult{
+		ebus.PublishMessageSent(r.eventBus, ebus.MessageSentResult{
 			To:      to,
 			Body:    msg.Body,
 			ReplyTo: msg.ReplyTo,
@@ -386,7 +386,7 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 				onAsyncFailure()
 			}
 			r.setSendStatusNotify("file announce failed: " + err.Error())
-			r.eventBus.Publish(ebus.TopicFileSendFailed, ebus.FileSendFailedResult{
+			ebus.PublishFileSendFailed(r.eventBus, ebus.FileSendFailedResult{
 				To:  to,
 				Err: err,
 			})
@@ -405,7 +405,7 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 				onAsyncFailure()
 			}
 			r.setSendStatusNotify("file announce cancelled: peer removed")
-			r.eventBus.Publish(ebus.TopicFileSendFailed, ebus.FileSendFailedResult{
+			ebus.PublishFileSendFailed(r.eventBus, ebus.FileSendFailedResult{
 				To:     to,
 				FileID: result.FileID,
 				Err:    fmt.Errorf("peer removed during in-flight file announce"),
@@ -438,7 +438,7 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 
 		r.notify(UIEventMessagesUpdated)
 		r.notify(UIEventSidebarUpdated)
-		r.eventBus.Publish(ebus.TopicFileSent, ebus.FileSentResult{
+		ebus.PublishFileSent(r.eventBus, ebus.FileSentResult{
 			To:     to,
 			FileID: result.FileID,
 		})

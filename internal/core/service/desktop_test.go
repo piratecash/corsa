@@ -941,6 +941,7 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 		localNode: svc,
 		chatLog:   store,
 	}
+	c.wireSubServices()
 	return c, id
 }
 
@@ -1025,6 +1026,7 @@ func TestFetchConversationNilChatlogReturnsError(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	c := &DesktopClient{id: id, appCfg: config.App{Version: "test"}}
+	c.wireSubServices()
 
 	_, err = c.FetchConversation(context.Background(), "somepeer")
 	if err == nil {
@@ -1298,6 +1300,7 @@ func TestFetchConversationPreviewsNilChatlogReturnsError(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	c := &DesktopClient{id: id, appCfg: config.App{Version: "test"}}
+	c.wireSubServices()
 
 	_, err = c.FetchConversationPreviews(context.Background())
 	if err == nil {
@@ -1376,10 +1379,11 @@ func TestFetchContactsForDecryptPropagatesNetworkError(t *testing.T) {
 	}
 	// No localNode, no TCP connection — all localRequestFrameCtx calls fail.
 	c := &DesktopClient{id: id, appCfg: config.App{Version: "test"}}
+	c.wireSubServices()
 
 	// Even though this fails at fetch_trusted_contacts (first call), the
 	// contract is: any failure in contact resolution returns an error.
-	_, err = c.fetchContactsForDecrypt(context.Background(), []string{"unknown-peer"})
+	_, err = c.dm.fetchContactsForDecrypt(context.Background(), []string{"unknown-peer"})
 	if err == nil {
 		t.Fatal("expected error when localNode is nil, got nil — callers would silently get incomplete contacts")
 	}
@@ -1481,6 +1485,7 @@ func TestFetchSinglePreviewNilChatlogReturnsError(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	c := &DesktopClient{id: id, appCfg: config.App{Version: "test"}}
+	c.wireSubServices()
 
 	_, err = c.FetchSinglePreview(context.Background(), domain.PeerIdentity("somepeer"))
 	if err == nil {
@@ -1578,7 +1583,7 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 	}
 }
 
-// TestBuildReachableIDsNilNode verifies that buildReachableIDs returns nil
+// TestBuildReachableIDsNilNode verifies that BuildReachableIDs returns nil
 // when localNode is not set and no TCP connection is available (remote mode
 // without a running node). The UI treats nil map as "all gray" indicators.
 func TestBuildReachableIDsNilNode(t *testing.T) {
@@ -1587,7 +1592,8 @@ func TestBuildReachableIDsNilNode(t *testing.T) {
 		id:     mustGenerateIdentity(t),
 		appCfg: config.App{Version: "test"},
 	}
-	got := c.buildReachableIDs()
+	c.wireSubServices()
+	got := c.BuildReachableIDs()
 	if got != nil {
 		t.Fatalf("expected nil for nil localNode without TCP, got %v", got)
 	}
@@ -1600,7 +1606,7 @@ func TestBuildReachableIDsEmptyTable(t *testing.T) {
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	got := c.buildReachableIDs()
+	got := c.BuildReachableIDs()
 	if got == nil {
 		t.Fatal("expected non-nil map for embedded node with empty routing table")
 	}

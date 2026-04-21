@@ -126,22 +126,31 @@ flowchart TB
 
 *Diagram 2 — Three-layer architecture with data flow*
 
-**DesktopClient** (`internal/core/service/desktop.go`) owns `chatlog.Store`
-(SQLite persistence) and implements `node.MessageStore`. At construction, it
-registers itself with `node.Service` via `RegisterMessageStore()`. The node
-calls `StoreMessage()` and `UpdateDeliveryStatus()` before publishing
-`TopicMessageNew` / `TopicReceiptUpdated` via ebus, maintaining the
-"DB first, then event" invariant.
+**DesktopClient** (`internal/core/service/desktop.go`) is the composition
+root for the desktop sub-services. It no longer holds the SQLite handle
+itself; `ChatlogGateway` owns `chatlog.Store` and `MessageStoreAdapter`
+satisfies `node.MessageStore`. At construction, `NewDesktopClient` wires
+all sub-services (`AppInfo`, `LocalRPCClient`, `ChatlogGateway`,
+`MessageStoreAdapter`, `DMCrypto`, `NodeProber`) and registers the
+adapter with `node.Service` via `RegisterMessageStore()`. The node calls
+`StoreMessage()` / `UpdateDeliveryStatus()` on the adapter before
+publishing `TopicMessageNew` / `TopicReceiptUpdated` via ebus, maintaining
+the "DB first, then event" invariant. Public `DesktopClient` methods are
+thin delegators — callers that want a narrower dependency can reach
+through the sub-service accessors (`DMCrypto()`, `NodeProber()`,
+`ChatlogGateway()`, `RPC()`, `AppInfo()`).
 `FetchConversation`, `FetchConversationPreviews`, `FetchSinglePreview`, and
-`MarkConversationSeen` accept `context.Context` and propagate it through
-`localRequestFrameCtx` — the context-aware variant of `localRequestFrame`.
-In TCP mode, the context fully controls the dialer deadline. In embedded
-mode, `ctx.Err()` is checked before and after `HandleLocalFrame` as a
-best-effort gate (the synchronous handler itself cannot be interrupted).
-Contact fetching is deduplicated via `fetchContactsForDecrypt(ctx, senders)`
-(shared by all three Fetch methods), which skips the local identity address
-when checking for missing senders to avoid spurious `fetch_contacts`
-roundtrips on conversations with outgoing messages.
+`MarkConversationSeen` live on `DMCrypto` (exposed through the `DesktopClient`
+delegators). They accept `context.Context` and propagate it through
+`LocalRPCClient.LocalRequestFrameCtx` — the context-aware variant of
+`LocalRequestFrame`. In TCP mode, the context fully controls the dialer
+deadline. In embedded mode, `ctx.Err()` is checked before and after
+`HandleLocalFrame` as a best-effort gate (the synchronous handler itself
+cannot be interrupted). Contact fetching is deduplicated via
+`DMCrypto.fetchContactsForDecrypt(ctx, senders)` (shared by all three
+Fetch methods), which skips the local identity address when checking for
+missing senders to avoid spurious `fetch_contacts` roundtrips on
+conversations with outgoing messages.
 
 **DMRouter** (`internal/core/service/dm_router.go`) owns DM business logic:
 event routing, sidebar management, conversation cache, mark-seen, message
@@ -674,21 +683,30 @@ flowchart TB
 
 *Диаграмма 2 — Трёхуровневая архитектура с потоком данных*
 
-**DesktopClient** (`internal/core/service/desktop.go`) владеет `chatlog.Store`
-(персистентность SQLite) и реализует `node.MessageStore`. При создании
-регистрируется в `node.Service` через `RegisterMessageStore()`. Нода вызывает
-`StoreMessage()` и `UpdateDeliveryStatus()` перед генерацией `LocalChangeEvent`,
-сохраняя инвариант «сначала БД, потом UI-событие». `FetchConversation`,
-`FetchConversationPreviews`, `FetchSinglePreview` и `MarkConversationSeen`
-принимают `context.Context` и пробрасывают его через `localRequestFrameCtx` —
-context-aware вариант `localRequestFrame`. В TCP-режиме context полностью
-контролирует дедлайн dial. В embedded-режиме `ctx.Err()` проверяется до и
-после `HandleLocalFrame` как best-effort gate (сам синхронный handler не
-может быть прерван). Загрузка контактов дедуплицирована в хелпере
-`fetchContactsForDecrypt(ctx, senders)` (общем для всех трёх Fetch-методов),
-который исключает собственный адрес identity при проверке missing senders,
-избегая лишних `fetch_contacts` roundtrip'ов на диалогах с исходящими
-сообщениями.
+**DesktopClient** (`internal/core/service/desktop.go`) — composition root
+desktop-овых суб-сервисов. Сам `chatlog.Store` больше не хранит;
+владеет им `ChatlogGateway`, а `node.MessageStore` реализует
+`MessageStoreAdapter`. При создании `NewDesktopClient` собирает все
+суб-сервисы (`AppInfo`, `LocalRPCClient`, `ChatlogGateway`,
+`MessageStoreAdapter`, `DMCrypto`, `NodeProber`) и регистрирует адаптер
+в `node.Service` через `RegisterMessageStore()`. Нода вызывает
+`StoreMessage()` / `UpdateDeliveryStatus()` на адаптере перед генерацией
+`LocalChangeEvent`, сохраняя инвариант «сначала БД, потом UI-событие».
+Публичные методы `DesktopClient` — тонкие делегаторы; новые потребители
+должны пользоваться узкими суб-сервисами через акцессоры (`DMCrypto()`,
+`NodeProber()`, `ChatlogGateway()`, `RPC()`, `AppInfo()`).
+`FetchConversation`, `FetchConversationPreviews`, `FetchSinglePreview` и
+`MarkConversationSeen` живут на `DMCrypto` (проброшены делегаторами на
+`DesktopClient`). Они принимают `context.Context` и пробрасывают его
+через `LocalRPCClient.LocalRequestFrameCtx` — context-aware вариант
+`LocalRequestFrame`. В TCP-режиме context полностью контролирует дедлайн
+dial. В embedded-режиме `ctx.Err()` проверяется до и после
+`HandleLocalFrame` как best-effort gate (сам синхронный handler не может
+быть прерван). Загрузка контактов дедуплицирована в хелпере
+`DMCrypto.fetchContactsForDecrypt(ctx, senders)` (общем для всех трёх
+Fetch-методов), который исключает собственный адрес identity при
+проверке missing senders, избегая лишних `fetch_contacts` roundtrip'ов
+на диалогах с исходящими сообщениями.
 
 **DMRouter** (`internal/core/service/dm_router.go`) владеет DM бизнес-логикой:
 маршрутизация событий, управление sidebar, кеш диалогов, mark-seen, отправка
