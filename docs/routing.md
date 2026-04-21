@@ -436,6 +436,35 @@ Capability requirements for a table-directed relay next-hop depend on the role o
 
 A directly connected relay-only peer (no `mesh_routing_v1`) is still usable as a destination via table-directed delivery. Requiring both capabilities for all next-hops would drop direct delivery to relay-only peers and unnecessarily degrade to blind gossip. `resolveRouteNextHopAddress` in `routing_integration.go` enforces this distinction.
 
+### Queue-state persistence contract
+
+Every routing-driven mutation of in-memory state that must survive a restart — `trackRelayMessage`, `trackRelayReceipt`, `noteRelayAttempt`, `queuePeerFrame`, outbound status transitions, route-drain outbound cleanup — signals persistence via `s.queuePersist.MarkDirty()` after releasing `s.mu`. The call is lock-free, allocation-free and never blocks the caller. A single background goroutine owned by `queueStatePersister` (`internal/core/node/queue_state_persister.go`) observes the wake signal, debounces for 200 ms so bursts collapse into a single write, takes an `s.mu.RLock` snapshot via `queueStateSnapshotLocked`, and writes the file atomically through `saveQueueState` (temp-file + rename).
+
+The contract is strict:
+
+- **Hot-path mutation sites must not call `queueStateSnapshotLocked` or `saveQueueState` directly.** They must call `MarkDirty` only. The persister is the sole writer.
+- **The snapshot runs under `RLock`, never `Lock`.** Reader traffic (the Desktop `fetch_network_stats` tick, `SubscriberCount`, `networkStatsFrame`) is not blocked by a queued writer on `s.mu` during a reconnect storm. The writer-preference behaviour of `sync.RWMutex` on Go 1.26 would otherwise serialise readers behind any pending snapshot.
+- **Save errors re-arm the dirty flag and the wake channel** so the next loop iteration retries. Every non-nil error from `saveQueueState` wraps `ErrQueuePersistFailed`; callers must use `errors.Is(err, ErrQueuePersistFailed)` rather than substring matching.
+- **Graceful shutdown flushes once** before returning. `Run` observes ctx cancellation, calls `finalFlush` and exits. Tests that need the on-disk file current inline use `queuePersist.FlushSync()`.
+
+```mermaid
+sequenceDiagram
+    participant M as Mutation site (Lock)
+    participant P as queueStatePersister
+    participant D as Disk (saveQueueState)
+    M->>M: s.mu.Lock / mutate / s.mu.Unlock
+    M->>P: MarkDirty (atomic + non-blocking wake)
+    Note over P: debounce 200 ms, coalesce burst
+    P->>P: s.mu.RLock / snapshot / s.mu.RUnlock
+    P->>D: saveQueueState (atomic rename)
+    D-->>P: nil or ErrQueuePersistFailed
+    alt error
+        P->>P: re-arm dirty + wake, retry next tick
+    end
+```
+
+*Diagram: Queue-state persist flow*
+
 ### Package layout
 
 ```
@@ -816,6 +845,35 @@ Capability `mesh_routing_v1` рекламируется при handshake. Тол
 - **Transit (hops>1):** Next-hop должен переслать сообщение дальше по своей routing table. Нужны обе capability: `mesh_relay_v1` (принять relay) и `mesh_routing_v1` (переслать по таблице).
 
 Непосредственно подключённый relay-only peer (без `mesh_routing_v1`) остаётся пригодным как destination через table-directed delivery. Требование обеих capability для всех next-hop привело бы к потере direct-delivery path для relay-only peer'ов и ненужной деградации в blind gossip. `resolveRouteNextHopAddress` в `routing_integration.go` обеспечивает это различие.
+
+### Контракт персистентности queue-state
+
+Любая мутация in-memory состояния, которое должно пережить рестарт — `trackRelayMessage`, `trackRelayReceipt`, `noteRelayAttempt`, `queuePeerFrame`, переходы статуса outbound, очистка outbound после route drain — сигнализирует о необходимости записи через `s.queuePersist.MarkDirty()` после освобождения `s.mu`. Вызов lock-free, не аллоцирует и никогда не блокирует caller'а. Одна background-горутина, принадлежащая `queueStatePersister` (`internal/core/node/queue_state_persister.go`), наблюдает wake-сигнал, делает debounce 200 мс чтобы пачка вызовов слилась в одну запись, снимает snapshot под `s.mu.RLock` через `queueStateSnapshotLocked`, и атомарно пишет файл через `saveQueueState` (temp-file + rename).
+
+Контракт жёсткий:
+
+- **Mutation sites на hot path не должны вызывать `queueStateSnapshotLocked` или `saveQueueState` напрямую.** Только `MarkDirty`. Persister — единственный writer.
+- **Snapshot выполняется под `RLock`, никогда под `Lock`.** Reader-трафик (тикер Desktop `fetch_network_stats`, `SubscriberCount`, `networkStatsFrame`) не блокируется очередью writer'ов на `s.mu` во время reconnect-шторма. Writer-preference поведение `sync.RWMutex` в Go 1.26 иначе сериализовало бы читателей за любым ожидающим snapshot'ом.
+- **Ошибка сохранения перезарядит dirty-флаг и wake-канал**, так что следующая итерация loop'а повторит попытку. Любая non-nil ошибка из `saveQueueState` оборачивает `ErrQueuePersistFailed`; caller'ы обязаны использовать `errors.Is(err, ErrQueuePersistFailed)` а не сравнивать строки.
+- **Graceful shutdown делает один финальный flush** перед возвратом. `Run` наблюдает отмену ctx, вызывает `finalFlush` и выходит. Тесты, которым нужен актуальный on-disk файл inline, используют `queuePersist.FlushSync()`.
+
+```mermaid
+sequenceDiagram
+    participant M as Mutation site (Lock)
+    participant P as queueStatePersister
+    participant D as Диск (saveQueueState)
+    M->>M: s.mu.Lock / мутация / s.mu.Unlock
+    M->>P: MarkDirty (atomic + non-blocking wake)
+    Note over P: debounce 200 мс, коалесцирование burst'а
+    P->>P: s.mu.RLock / snapshot / s.mu.RUnlock
+    P->>D: saveQueueState (atomic rename)
+    D-->>P: nil или ErrQueuePersistFailed
+    alt ошибка
+        P->>P: re-arm dirty + wake, retry на следующем тике
+    end
+```
+
+*Диаграмма: Поток персистентности queue-state*
 
 ### Структура пакетов
 

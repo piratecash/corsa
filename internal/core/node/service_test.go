@@ -2252,8 +2252,9 @@ func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFu
 		case <-time.After(5 * time.Second):
 			t.Fatal("timed out waiting for node shutdown")
 		}
-		// Wait for fire-and-forget goroutines (persistQueueState, etc.)
-		// to finish so TempDir cleanup does not race with async disk writes.
+		// Wait for fire-and-forget goroutines (MarkDirty emitters, trust
+		// store writes, etc.) to finish so TempDir cleanup does not race
+		// with async disk writes or with the persister's final flush.
 		bgDone := make(chan struct{})
 		go func() {
 			svc.WaitBackground()
@@ -9592,17 +9593,24 @@ func TestDeleteTrustedContactPersistsOutboundOnly(t *testing.T) {
 	svc.outbound["ob-1"] = outboundDelivery{MessageID: "ob-1", Recipient: peerID.Address, Status: "delivered"}
 	svc.mu.Unlock()
 
-	// Persist initial state so the outbound entry is on disk.
-	svc.mu.RLock()
-	snapshot := svc.queueStateSnapshotLocked()
-	svc.mu.RUnlock()
-	svc.persistQueueState(snapshot)
+	// Persist initial state so the outbound entry is on disk.  MarkDirty
+	// signals the background writer, FlushSync forces the snapshot to reach
+	// disk inline so the disk file reflects the outbound entry before the
+	// delete below runs.
+	svc.queuePersist.MarkDirty()
+	svc.queuePersist.FlushSync()
 
 	// Delete the contact — should persist even though dropped == 0.
 	svc.HandleLocalFrame(protocol.Frame{
 		Type:    "delete_trusted_contact",
 		Address: peerID.Address,
 	})
+
+	// HandleLocalFrame only calls MarkDirty; drain fire-and-forget
+	// goroutines first, then flush so the on-disk file is current before
+	// we load it back.
+	svc.WaitBackground()
+	svc.queuePersist.FlushSync()
 
 	// Reload queue state from disk and verify the outbound entry is gone.
 	reloaded, err := loadQueueState(queuePath)

@@ -1900,10 +1900,9 @@ returnFrames:
 	}
 	aggSnap := s.aggregateStatus
 
-	snapshot := s.queueStateSnapshotLocked()
 	drainDone := s.drainDone
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 	for _, d := range pendingDeltas {
 		s.emitPeerPendingChanged(d.Address, d.Count)
 	}

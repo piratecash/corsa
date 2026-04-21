@@ -276,6 +276,17 @@ type Service struct {
 	// When nil, Service.Network() falls back to the standard bridge over
 	// the live s.conns registry.
 	networkOverride netcore.Network
+
+	// queuePersist is the single background writer for the on-disk queue
+	// state file. Every mutation site inside the Service must call
+	// s.queuePersist.MarkDirty() instead of the pre-existing synchronous
+	// persistQueueState helper — the persister debounces bursts into a
+	// single write and takes its snapshot under s.mu.RLock so reader
+	// callers (notably the Desktop fetch_network_stats tick) are never
+	// blocked by a queued writer during a reconnect storm. Created in
+	// NewService; the background goroutine starts in Run and is drained
+	// with a final flush on clean shutdown.
+	queuePersist *queueStatePersister
 }
 
 // subscriber describes an active subscribe_inbox registration or a hello-
@@ -783,6 +794,24 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		done:                    make(chan struct{}),
 	}
 
+	// Queue-state persister: single background writer for the on-disk
+	// queue state file.  MarkDirty from any mutation site coalesces with
+	// other calls inside the debounce window; the RLock-only snapshot
+	// never blocks UI-readers behind a writer-preference queue on s.mu
+	// during a reconnect storm.  The goroutine is started in Run; until
+	// then MarkDirty is a no-op as far as disk is concerned.
+	svc.queuePersist = newQueueStatePersister(queueStatePersisterDeps{
+		Path:             queueStatePath,
+		DebounceInterval: defaultQueueStatePersistDebounce,
+		Snapshot: func() queueStateFile {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			return svc.queueStateSnapshotLocked()
+		},
+		Save: saveQueueState,
+		Wait: realQueueStatePersistWait,
+	})
+
 	// Initialize PeerProvider (Stage 3: connection management integration).
 	svc.peerProvider = NewPeerProvider(PeerProviderConfig{
 		HealthFn: func(addr domain.PeerAddress) *PeerHealthView {
@@ -1006,6 +1035,23 @@ func (s *Service) Run(ctx context.Context) error {
 	// against a half-torn-down Service during shutdown.
 	defer close(s.done)
 
+	// Queue-state persister: start the single background writer early and
+	// tear it down last (after every mutation path has drained) so the
+	// final flush captures the end-state before Run returns.  The
+	// persister owns its own cancellation context detached from ctx so
+	// final flush can complete even if ctx is already Done.
+	persisterCtx, persisterCancel := context.WithCancel(context.Background())
+	persisterDone := make(chan struct{})
+	go func() {
+		defer crashlog.DeferRecover()
+		defer close(persisterDone)
+		s.queuePersist.Run(persisterCtx)
+	}()
+	defer func() {
+		persisterCancel()
+		<-persisterDone
+	}()
+
 	// Traffic capture manager — diagnostic feature (plan §4.5).
 	s.initCaptureManager()
 	defer s.captureManager.Close()
@@ -1050,6 +1096,13 @@ func (s *Service) Run(ctx context.Context) error {
 		s.connManager.Run(ctx)
 		close(cmDone)
 	}()
+	// Ensure the CM event loop has fully drained before the persister's
+	// final flush runs — CM emits last-chance MarkDirty calls while
+	// tearing down outbound sessions, and losing those would leave the
+	// on-disk queue state one mutation behind the in-memory truth.  This
+	// defer is a no-op in the listener-disabled branch because that
+	// branch already awaits cmDone synchronously before returning.
+	defer func() { <-cmDone }()
 	// Wait for CM event loop to be ready before starting bootstrap.
 	<-s.connManager.Ready()
 	if s.primeBootstrapOnRun {
@@ -1173,10 +1226,11 @@ func (s *Service) WaitBackground() {
 // goBackground runs fn in a new goroutine that is tracked by
 // backgroundWg, so WaitBackground observes it on shutdown. Use this
 // helper for every fire-and-forget goroutine that may transitively
-// touch persistent state (queuePeerFrame → persistQueueState, trust
-// store writes, etc.) — without it, a disk write can race with
-// TempDir cleanup in tests and with process exit in production,
-// silently corrupting or losing queue/peer state.
+// touch persistent state (queuePeerFrame → queuePersist.MarkDirty,
+// trust store writes, etc.) — without it, the MarkDirty signal
+// (and the eventual debounced Save) can race with TempDir cleanup
+// in tests and with process exit in production, silently corrupting
+// or losing queue/peer state.
 //
 // Add(1) is called on the caller's goroutine before the spawn so
 // WaitBackground cannot observe the zero counter between spawn
@@ -3295,12 +3349,11 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
 
 	if dropped > 0 || outboundDropped > 0 {
 		log.Info().Str("recipient", recipient).Int("pending_dropped", dropped).Int("outbound_dropped", outboundDropped).Msg("dropped_pending_for_deleted_contact")
-		s.persistQueueState(snapshot)
+		s.queuePersist.MarkDirty()
 	}
 
 	for _, d := range affected {
@@ -3851,7 +3904,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// nodes for offline recipients), push delivery to connected
 		// clients, and backlog drain. Never skip or filter gossip.
 		// Tracked: executeGossipTargets → sendMessageToPeer →
-		// queuePeerFrame → persistQueueState may write to disk.
+		// queuePeerFrame → queuePersist.MarkDirty schedules a
+		// debounced background disk write.
 		s.goBackground(func() { s.executeGossipTargets(envelope, decision.GossipTargets) })
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
@@ -3938,9 +3992,8 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 		s.refreshAggregatePendingLocked()
 	}
 	aggSnap := s.aggregateStatus
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 
 	// Emit pending count deltas for all peers whose queues were modified.
 	for _, d := range pendingDeltas {

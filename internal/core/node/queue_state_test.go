@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,5 +192,32 @@ func TestLoadQueueStateRejectsInvalidJSON(t *testing.T) {
 
 	if _, err := loadQueueState(path); err == nil {
 		t.Fatal("expected invalid JSON error")
+	}
+}
+
+// TestSaveQueueStateWrapsErrQueuePersistFailed verifies the sentinel contract:
+// every non-nil error returned from saveQueueState must satisfy
+// errors.Is(err, ErrQueuePersistFailed) so callers (the persister retry path,
+// the graceful-shutdown error log, future telemetry) can branch on failure
+// type without matching substrings in the message.  Driven by a read-only
+// directory so the MkdirAll step fails deterministically without depending on
+// disk-space or permission tricks that vary by OS.
+func TestSaveQueueStateWrapsErrQueuePersistFailed(t *testing.T) {
+	t.Parallel()
+
+	readOnlyDir := filepath.Join(t.TempDir(), "ro")
+	if err := os.MkdirAll(readOnlyDir, 0o500); err != nil {
+		t.Fatalf("mkdir read-only parent: %v", err)
+	}
+	// Attempt to create a queue file beneath the read-only parent.  MkdirAll
+	// for the nested directory must fail, producing a wrapped sentinel.
+	target := filepath.Join(readOnlyDir, "nested", "queue.json")
+
+	err := saveQueueState(target, queueStateFile{Version: queueStateVersion})
+	if err == nil {
+		t.Fatal("expected error when creating queue file under read-only directory")
+	}
+	if !errors.Is(err, ErrQueuePersistFailed) {
+		t.Fatalf("expected errors.Is(err, ErrQueuePersistFailed) to be true, got err=%v", err)
 	}
 }

@@ -2,12 +2,22 @@ package node
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
+
+// ErrQueuePersistFailed is the sentinel wrapped around every non-nil error
+// returned from saveQueueState.  Callers must use errors.Is(err,
+// ErrQueuePersistFailed) to distinguish queue-persistence failures from
+// other errors rather than comparing the string message.  Keeping the
+// sentinel stable makes the contract visible at the type level: the
+// queueStatePersister's retry decision and the graceful-shutdown error
+// reporting both depend on this marker.
+var ErrQueuePersistFailed = errors.New("queue state persist failed")
 
 // queueStateVersion tracks the queue-state file schema.  Bump this when the
 // on-disk format changes in a way that requires a one-time migration on load.
@@ -68,9 +78,10 @@ func loadQueueState(path string) (queueStateFile, error) {
 // state to a temporary file in the same directory, then renames it over the
 // target path. Rename on the same filesystem is atomic on POSIX, guaranteeing
 // that concurrent readers (or a crash mid-write) never observe a partial or
-// corrupted JSON file. Without atomic writes, overlapping persistQueueState
-// calls (e.g. persistRelayState + emitDeliveryReceipt) can interleave
-// os.WriteFile truncate-and-write operations, producing malformed JSON.
+// corrupted JSON file. The queueStatePersister serialises the writer side via
+// flushM so concurrent Save invocations cannot happen from the persister, but
+// FlushSync from a graceful-shutdown path and a racing Run writer on another
+// persister instance still need atomicity — the rename guarantees it.
 func saveQueueState(path string, state queueStateFile) error {
 	if path == "" {
 		return nil
@@ -78,32 +89,41 @@ func saveQueueState(path string, state queueStateFile) error {
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create queue state directory: %w", err)
+		return wrapQueuePersistErr("create queue state directory", err)
 	}
 
 	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal queue state: %w", err)
+		return wrapQueuePersistErr("marshal queue state", err)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".queue-state-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp queue state file: %w", err)
+		return wrapQueuePersistErr("create temp queue state file", err)
 	}
 	tmpPath := tmp.Name()
 
 	if _, err := tmp.Write(payload); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("write temp queue state: %w", err)
+		return wrapQueuePersistErr("write temp queue state", err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close temp queue state: %w", err)
+		return wrapQueuePersistErr("close temp queue state", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename queue state: %w", err)
+		return wrapQueuePersistErr("rename queue state", err)
 	}
 	return nil
+}
+
+// wrapQueuePersistErr joins ErrQueuePersistFailed with the underlying OS or
+// encoding error so callers can do both: errors.Is(err, ErrQueuePersistFailed)
+// to recognise the failure category, and errors.Unwrap / errors.As to reach
+// the original cause for structured logging.  errors.Join guarantees both
+// targets remain reachable without sacrificing the human-readable message.
+func wrapQueuePersistErr(stage string, cause error) error {
+	return fmt.Errorf("%w: %s: %w", ErrQueuePersistFailed, stage, cause)
 }

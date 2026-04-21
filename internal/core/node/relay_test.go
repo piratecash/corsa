@@ -1118,9 +1118,13 @@ func TestRelayStatePersistenceAfterMutation(t *testing.T) {
 		t.Fatalf("expected \"delivered\", got %q", status)
 	}
 
-	// Wait for concurrent goroutines (emitDeliveryReceipt → persistQueueState)
-	// to finish writing the queue state file before reading it.
-	time.Sleep(50 * time.Millisecond)
+	// handleRelayMessage mutation sites call queuePersist.MarkDirty from
+	// fire-and-forget goroutines (emitDeliveryReceipt).  WaitBackground
+	// drains those goroutines so all MarkDirty calls have landed, then
+	// FlushSync forces the dirty snapshot to reach disk inline — the
+	// loadQueueState below observes the final state without a sleep race.
+	svc.WaitBackground()
+	svc.queuePersist.FlushSync()
 
 	// Read the persisted queue state and verify relay forward states are there.
 	queuePath := svc.cfg.EffectiveQueueStatePath()

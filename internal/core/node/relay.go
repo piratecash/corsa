@@ -356,11 +356,13 @@ func (rs *relayStateStore) decrementTTLsAndReport() bool {
 // recently learned relay paths survive a restart. Without this, in-memory
 // mutations would only be persisted when some unrelated persistence event
 // happened to trigger a snapshot.
+//
+// Routed through the background persister so the relay TTL ticker (the only
+// infrastructure caller of this path) does not hold the eviction goroutine
+// on disk I/O — bursts of expired entries during a reconnect storm collapse
+// into a single write instead of one write per eviction.
 func (s *Service) persistRelayState() {
-	s.mu.RLock()
-	snapshot := s.queueStateSnapshotLocked()
-	s.mu.RUnlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 }
 
 // handleRelayMessage processes an incoming relay_message frame and returns the
@@ -1168,9 +1170,8 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	}
 	afterLen := len(s.relayRetry)
 	if beforeLen != afterLen {
-		snapshot := s.queueStateSnapshotLocked()
 		s.mu.Unlock()
-		s.persistQueueState(snapshot)
+		s.queuePersist.MarkDirty()
 		return out
 	}
 	s.mu.Unlock()
@@ -1197,9 +1198,8 @@ func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryRecei
 	}
 	afterLen := len(s.relayRetry)
 	if beforeLen != afterLen {
-		snapshot := s.queueStateSnapshotLocked()
 		s.mu.Unlock()
-		s.persistQueueState(snapshot)
+		s.queuePersist.MarkDirty()
 		return out
 	}
 	s.mu.Unlock()
@@ -1248,9 +1248,8 @@ func (s *Service) noteRelayAttempt(key string, now time.Time) int {
 	state.LastAttempt = now
 	state.Attempts++
 	s.relayRetry[key] = state
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 	return state.Attempts
 }
 
@@ -1269,9 +1268,8 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 		}
 		state.FirstSeen = time.Now().UTC()
 		s.relayRetry[key] = state
-		snapshot := s.queueStateSnapshotLocked()
 		s.mu.Unlock()
-		s.persistQueueState(snapshot)
+		s.queuePersist.MarkDirty()
 		return
 	}
 	s.mu.Unlock()
@@ -1301,9 +1299,8 @@ func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
 		s.mu.Unlock()
 		return
 	}
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 }
 
 func relayMessageKey(id protocol.MessageID) string {
@@ -1345,9 +1342,8 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 		return 0
 	}
 	log.Debug().Str("node", s.identity.Address).Str("recipient", recipient).Str("id", string(messageID)).Int("before", before).Int("after", len(filtered)).Int("removed", removed).Msg("deleteBacklogMessageForRecipient")
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 	return removed
 }
 
@@ -1377,9 +1373,8 @@ func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID p
 		s.mu.Unlock()
 		return 0
 	}
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 	return removed
 }
 
@@ -1434,13 +1429,6 @@ func (s *Service) queueStateSnapshotLocked() queueStateFile {
 	}
 }
 
-func (s *Service) persistQueueState(snapshot queueStateFile) {
-	path := s.cfg.EffectiveQueueStatePath()
-	if err := saveQueueState(path, snapshot); err != nil {
-		log.Error().Str("path", path).Err(err).Msg("queue state save failed")
-	}
-}
-
 func sanitizeRelayState(items map[string]relayAttempt, messages []protocol.Envelope, receipts []protocol.DeliveryReceipt) {
 	valid := make(map[string]struct{}, len(messages)+len(receipts))
 	for _, msg := range messages {
@@ -1477,9 +1465,8 @@ func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time,
 	}
 	s.mu.Lock()
 	s.markOutboundRetryingLocked(frame, queuedAt, retries, errText)
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 }
 
 // markOutboundRetryingLocked updates outbound state to "retrying" without
@@ -1511,9 +1498,8 @@ func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText str
 	}
 	s.mu.Lock()
 	s.markOutboundTerminalLocked(frame, status, errText)
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 }
 
 // markOutboundTerminalLocked updates outbound state to a terminal status
@@ -1549,9 +1535,8 @@ func (s *Service) clearOutboundQueued(messageID string) {
 		return
 	}
 	delete(s.outbound, messageID)
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 }
 
 // clearOutboundQueuedLocked removes outbound delivery state for a message
@@ -1582,9 +1567,8 @@ func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
 		return
 	}
 	delete(s.relayRetry, key)
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 }
 
 func (s *Service) emitDeliveryReceipt(msg incomingMessage) {

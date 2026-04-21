@@ -2386,14 +2386,18 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("relay_delivery_receipt dropped: duplicate transit receipt pre-gossip (session)")
 			return
 		}
-		// Must run in a goroutine: gossipTransitReceipt calls
-		// sendReceiptToPeer → queuePeerFrame → persistQueueState which
-		// does synchronous disk I/O. Running it inline blocks the peer
-		// session read loop, stalling heartbeat pong replies and causing
-		// the remote side to disconnect on pong-stall timeout.
-		// Track via backgroundWg so WaitBackground() blocks until disk
-		// I/O completes — prevents TempDir cleanup races in tests and
-		// data loss on shutdown.
+		// Must run in a goroutine: gossipTransitReceipt fans out
+		// receipts via sendReceiptToPeer → queuePeerFrame, which
+		// publishes on ebus and touches per-peer pending state under
+		// s.mu.  The per-peer writer contention alone stalls the read
+		// loop long enough to miss heartbeat pong replies and cause
+		// the remote side to disconnect on pong-stall timeout; with a
+		// fire-and-forget hop the disk write path never blocks here
+		// (the queue-state persister absorbs the MarkDirty into a
+		// coalesced background write).
+		// Track via backgroundWg so WaitBackground() blocks until the
+		// gossip fan-out completes — prevents TempDir cleanup races
+		// in tests.
 		s.goBackground(func() { s.gossipTransitReceipt(receipt) })
 		log.Debug().
 			Str("peer", string(address)).
@@ -3579,9 +3583,8 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 				break
 			}
 		}
-		snapshot := s.queueStateSnapshotLocked()
 		s.mu.Unlock()
-		s.persistQueueState(snapshot)
+		s.queuePersist.MarkDirty()
 		return true
 	}
 
@@ -3604,9 +3607,8 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	pendingCount := len(s.pending[primary])
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(primary, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 	return true
@@ -3689,9 +3691,8 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 		s.mu.Lock()
 		s.refreshAggregatePendingLocked()
 		aggSnap := s.aggregateStatus
-		snapshot := s.queueStateSnapshotLocked()
 		s.mu.Unlock()
-		s.persistQueueState(snapshot)
+		s.queuePersist.MarkDirty()
 		s.emitPeerPendingChanged(primary, 0)
 		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 		return
@@ -3705,9 +3706,8 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	pendingCount := len(s.pending[primary])
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(primary, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 }
@@ -3766,9 +3766,8 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 	}
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
-	snapshot := s.queueStateSnapshotLocked()
 	s.mu.Unlock()
-	s.persistQueueState(snapshot)
+	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(address, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 

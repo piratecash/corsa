@@ -722,6 +722,20 @@ func newTestServiceWithRouting(t *testing.T, localIdentity string) *Service {
 		newNoopMockPeerSender(t),
 		func() []routing.AnnounceTarget { return nil },
 	)
+	// Queue-state persister: MarkDirty / FlushSync are nil-safe so tests
+	// that leave svc.queuePersist unset do not crash, but wiring a
+	// no-op persister here keeps the helper closer to NewService's
+	// defaults — tests derived from this fixture can exercise paths that
+	// observe persister identity (e.g. asserting two call sites share
+	// one persister) without extra setup.  Run is never started here,
+	// so no disk I/O happens.  Tests that want to observe persistence
+	// behaviour override svc.queuePersist themselves (see
+	// persist_regression_test.go).
+	svc.queuePersist = newQueueStatePersister(queueStatePersisterDeps{
+		Snapshot: func() queueStateFile { return queueStateFile{} },
+		Save:     func(string, queueStateFile) error { return nil },
+		Wait:     realQueueStatePersistWait,
+	})
 	return svc
 }
 
