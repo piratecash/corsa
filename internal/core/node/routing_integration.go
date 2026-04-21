@@ -8,6 +8,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -750,17 +752,23 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 	// This is the immediate own-origin withdrawal path — it bypasses the
 	// announce loop and per-peer cache intentionally (see section 8.2.1
 	// of the routing-announce-traffic-optimization plan).
+	//
+	// The fanout is parallel (one goroutine per peer) because
+	// SendAnnounceRoutes is bounded by syncFlushTimeout per inbound peer;
+	// any stuck peer would otherwise serialise the whole disconnect path
+	// and starve unrelated s.mu readers (the 2s bootstrapLoop ticker and
+	// the 1s metrics collector) for N * syncFlushTimeout seconds.
+	var sent, dropped int
 	if len(result.Withdrawals) > 0 {
-		peers := s.routingCapablePeers()
-		for _, peer := range peers {
-			s.SendAnnounceRoutes(peer.Address, result.Withdrawals)
-		}
+		sent, dropped = s.fanoutAnnounceRoutes(s.runCtx, s.routingCapablePeers(), result.Withdrawals)
 	}
 
 	log.Info().
 		Str("peer", string(peerIdentity)).
 		Int("withdrawals", len(result.Withdrawals)).
 		Int("transit_invalidated", result.TransitInvalidated).
+		Int("fanout_sent", sent).
+		Int("fanout_dropped", dropped).
 		Msg("routing_direct_peer_removed")
 
 	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
@@ -771,6 +779,60 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 
 	s.announceLoop.TriggerUpdate()
 	s.triggerDrainForExposed(result.ExposedBackups)
+}
+
+// fanoutAnnounceRoutes dispatches the same announce_routes frame
+// concurrently to every peer in targets. Each peer is handled by a
+// dedicated goroutine so that one stuck inbound socket — bounded per
+// peer by syncFlushTimeout — cannot serialise delivery to the others.
+//
+// The helper returns once every peer goroutine has finished, either
+// because SendAnnounceRoutes returned or because ctx was cancelled.
+// Per-peer outcomes are aggregated into (sent, dropped) and surfaced
+// through the caller's log line so operators see fan-out health
+// without parsing per-peer noise.
+//
+// Reentrancy: SendAnnounceRoutes itself is safe to call from several
+// goroutines in parallel. Inbound delivery takes a brief s.mu.RLock
+// inside writeFrameToInbound and releases it before the blocking
+// sendFrameBytesViaNetworkSync call; outbound delivery pushes onto the
+// per-session send channel which owns its own synchronisation. No
+// shared Service state is mutated here.
+//
+// ctx is s.runCtx at the call site; goroutines that observe cancellation
+// during their blocking send return early and count as dropped.
+func (s *Service) fanoutAnnounceRoutes(
+	ctx context.Context,
+	targets []routing.AnnounceTarget,
+	withdrawals []routing.AnnounceEntry,
+) (sent, dropped int) {
+	if len(targets) == 0 || len(withdrawals) == 0 {
+		return 0, 0
+	}
+
+	var sentCnt, droppedCnt atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(len(targets))
+	for _, target := range targets {
+		go func(peer routing.AnnounceTarget) {
+			defer wg.Done()
+			defer crashlog.DeferRecover()
+			// Early-abort when the Service is already shutting down —
+			// avoids blocking a per-peer goroutine for up to
+			// syncFlushTimeout when the outer context is cancelled.
+			if err := ctx.Err(); err != nil {
+				droppedCnt.Add(1)
+				return
+			}
+			if s.SendAnnounceRoutes(peer.Address, withdrawals) {
+				sentCnt.Add(1)
+			} else {
+				droppedCnt.Add(1)
+			}
+		}(target)
+	}
+	wg.Wait()
+	return int(sentCnt.Load()), int(droppedCnt.Load())
 }
 
 // triggerDrainForExposed converts a slice of routing.PeerIdentity (identities
