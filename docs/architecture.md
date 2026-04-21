@@ -150,6 +150,61 @@ Topics (defined in `internal/core/ebus/topics.go`): `peer.connected`,
 `file.sent`, `file.send.failed`, `contact.added`, `contact.removed`,
 `identity.added`, `aggregate.status.changed`, `version.policy.changed`.
 
+#### Publisher-side no-op suppression with heartbeat resync
+
+ebus subscribers (most importantly the Desktop `NodeStatusMonitor`) react to
+every event by rebuilding a full snapshot and invalidating every window that
+observes it. When a single upstream failure — e.g. an i/o timeout cascade
+triggered by `cm_session_setup_failed` — fans out into dozens of peer-state
+transitions that land on the same aggregate value, the burst of identical
+events manifests as a frozen UI: the drain goroutines are busy, but every
+rebuilt snapshot is byte-identical to the previous one.
+
+To keep that class of storm off the wire, the two topics that carry full
+content snapshots are gated at the publisher with a no-op filter paired
+with a periodic heartbeat resync. The heartbeat is mandatory: ebus
+`Publish` intentionally drops async deliveries when a subscriber inbox is
+full (the publisher must never block), so pure content-based dedup would
+leave any subscriber whose initial publish happened to be dropped
+permanently stale. The heartbeat bounds that staleness to a known window.
+
+- `version.policy.changed` — `recomputeVersionPolicyLocked` compares the new
+  `VersionPolicySnapshot` to the previous one via direct struct equality
+  (`==`, all fields are comparable). It publishes when the snapshot content
+  changes, on the first recompute (bootstrap), or when
+  `versionPolicyHeartbeatInterval` has elapsed since the last publish.
+  The heartbeat interval is aligned with `versionPolicyRepairInterval`, so
+  the existing bootstrap-loop repair tick doubles as the heartbeat driver
+  and no extra scheduling is required.
+- `aggregate.status.changed` — `publishAggregateStatusChangedLocked` is the
+  single publish point for the topic. It compares against
+  `lastPublishedAggregateStatus` (which tracks what subscribers actually
+  saw, separately from `aggregateStatus` because init and orphan-eviction
+  paths mutate the latter without publishing) using
+  `AggregateStatusSnapshot.EqualContent`, which ignores the `ComputedAt`
+  heartbeat. It publishes when content changes, on the first call, or when
+  `aggregateStatusHeartbeatInterval` has elapsed. The 2 s `bootstrapLoop`
+  ticker calls `refreshAggregateStatus()` which funnels through the same
+  helper — the ticker is what makes the heartbeat observable. Mirroring
+  `ComputedAt` into `status.CheckedAt` in `NodeStatusMonitor` then keeps
+  the user-visible "last checked" timestamp moving on a quiet but healthy
+  node, rather than freezing when the aggregate counters stop moving.
+- `slot.state.changed` — emissions are NOT deduplicated at the publisher.
+  ebus lossiness combined with publisher-side memoisation would
+  permanently strand any subscriber whose single publish per slot state
+  was dropped; the subscriber can never recover because no heartbeat is
+  cheap enough to carry the full per-slot state map without coupling the
+  publisher to the subscriber's lifecycle. Slot transitions are distinct
+  events in a bounded state machine, so emitting them unconditionally
+  preserves correctness. Any accidental duplication is absorbed by the
+  downstream delta filter in `NodeStatusMonitor.applySlotStateDelta`.
+
+The gate is a publisher concern, not a subscriber concern: filtering on the
+subscriber side would still pay the per-event dispatch cost and the fan-out
+to every drainer. Gating at the publisher — with a heartbeat to compensate
+for lossy delivery — keeps ebus semantics honest: an observed event means
+either a content change or a periodic resync.
+
 ### Optional timestamps on the snapshot boundary
 
 Types that live on the read-only snapshot boundary (`NodeStatus`,
@@ -355,6 +410,64 @@ flowchart LR
 `message.new`, `receipt.updated`, `message.sent`, `message.send.failed`,
 `file.sent`, `file.send.failed`, `contact.added`, `contact.removed`,
 `identity.added`, `aggregate.status.changed`, `version.policy.changed`.
+
+#### Подавление no-op публикаций на стороне издателя с heartbeat-пересинхронизацией
+
+Подписчики ebus (в первую очередь Desktop `NodeStatusMonitor`) на каждое
+событие перестраивают полный snapshot и инвалидируют все окна, которые его
+наблюдают. Когда один входной сбой — например каскад i/o таймаутов после
+`cm_session_setup_failed` — разливается в десятки переходов состояния пиров,
+приводящих к одному и тому же агрегату, пакет идентичных событий
+проявляется как зависший UI: drain-горутины заняты, но каждый
+пересобранный snapshot побайтно совпадает с предыдущим.
+
+Чтобы такой шторм не доходил до шины, два топика, которые переносят
+полные content-snapshot'ы, защищены no-op гейтом на стороне издателя в
+паре с периодическим heartbeat-пересинхроном. Heartbeat обязателен:
+`Publish` в ebus намеренно сбрасывает async-доставку, если inbox
+подписчика заполнен (издатель никогда не блокируется), поэтому чистый
+content-based dedup оставил бы подписчика, у которого первая публикация
+потерялась, навсегда устаревшим. Heartbeat ограничивает это устаревание
+известным окном.
+
+- `version.policy.changed` — `recomputeVersionPolicyLocked` сравнивает новый
+  `VersionPolicySnapshot` с предыдущим напрямую через `==` (все поля
+  comparable). Публикация происходит при изменении контента, на первом
+  recompute (bootstrap) или когда с момента последней публикации прошло
+  `versionPolicyHeartbeatInterval`. Интервал heartbeat выровнен с
+  `versionPolicyRepairInterval`, поэтому существующий periodic-repair
+  тик bootstrapLoop сразу служит драйвером heartbeat — отдельная
+  планировка не нужна.
+- `aggregate.status.changed` — `publishAggregateStatusChangedLocked` —
+  единственная точка публикации этого топика. Сравнение идёт против
+  `lastPublishedAggregateStatus` (который отражает то, что реально
+  увидели подписчики, отдельно от `aggregateStatus`, потому что пути
+  init и orphan-eviction мутируют последнее без публикации) через
+  `AggregateStatusSnapshot.EqualContent`, игнорирующий heartbeat-поле
+  `ComputedAt`. Публикация происходит при изменении контента, на
+  первом вызове или когда прошло `aggregateStatusHeartbeatInterval`.
+  2-секундный тикер `bootstrapLoop` вызывает `refreshAggregateStatus()`,
+  который проходит через тот же helper — именно тикер делает heartbeat
+  наблюдаемым. Перенос `ComputedAt` в `status.CheckedAt` в
+  `NodeStatusMonitor` заодно удерживает пользовательский индикатор
+  "last checked" в движении на тихой, но здоровой ноде — он не
+  замирает, когда перестают двигаться счётчики агрегата.
+- `slot.state.changed` — публикации НЕ дедуплицируются на стороне
+  издателя. Потерявшая способность доставки ebus в сочетании с
+  publisher-side memo навсегда оставила бы любого подписчика, чья
+  единственная публикация по состоянию слота была сброшена; подписчик
+  не сможет восстановиться, потому что дешёвого heartbeat, который
+  несёт полную map per-slot состояний без привязки издателя к
+  жизненному циклу подписчика, не существует. Переходы слотов — это
+  различимые события в ограниченной state machine, поэтому безусловная
+  публикация сохраняет корректность. Случайное дублирование поглощает
+  downstream delta-фильтр в `NodeStatusMonitor.applySlotStateDelta`.
+
+Гейт — ответственность издателя, а не подписчика: фильтрация на стороне
+подписчика всё равно оплачивает диспатч события и fan-out по всем drain'ам.
+Гейт на издателе — вместе с heartbeat, компенсирующим потерю доставки —
+сохраняет честность семантики ebus: наблюдаемое событие означает либо
+изменение контента, либо периодический ресинхрон.
 
 ### Опциональные timestamps на границе snapshot
 

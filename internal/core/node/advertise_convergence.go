@@ -15,9 +15,10 @@ package node
 
 import (
 	"encoding/json"
-	"net"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -91,7 +92,7 @@ func usableListen(listen string) (host, port string, ok bool) {
 	}
 	// Reject IPv4/IPv6 wildcard binds. These mean "bind to all" on the
 	// peer's side, which is never a usable dial target for anyone else.
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+	if isUnspecifiedIPHost(host) {
 		return "", "", false
 	}
 	return host, port, true
@@ -173,11 +174,9 @@ func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) adv
 	// .onion and other non-IP address families are explicitly out of
 	// scope for the observed/advertised compare — fall through as
 	// legacy direct so the non-IP branch below accepts them.
-	advertisedIP := net.ParseIP(host)
-	observedIP := net.ParseIP(observedHost)
 	result.NormalizedAdvertisedIP = domain.PeerIP(canonicalIPFromHost(host))
 
-	if advertisedIP == nil {
+	if !isIPHost(host) {
 		// Non-IP advertise (e.g. .onion handled outside this RFC):
 		// treat as legacy-direct so we accept but don't announce via
 		// this path.
@@ -188,7 +187,7 @@ func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) adv
 		return result
 	}
 
-	if observedIP == nil {
+	if !isIPHost(observedHost) {
 		// Observed side is not a parseable IP — treat the advertise
 		// as invalid/malformed: we cannot compare, so closing as
 		// protocol error (no connection_notice payload).
@@ -199,8 +198,8 @@ func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) adv
 		return result
 	}
 
-	observedNonRoutable := isNonRoutableIP(observedIP)
-	advertisedNonRoutable := isNonRoutableIP(advertisedIP)
+	observedNonRoutable := isNonRoutableIPHost(observedHost)
+	advertisedNonRoutable := isNonRoutableIPHost(host)
 
 	// Branch 3: match after canonical normalisation.
 	if result.NormalizedObservedIP != "" && result.NormalizedObservedIP == result.NormalizedAdvertisedIP {
@@ -552,13 +551,34 @@ func (s *Service) setTrustedSelfAdvertiseIP(ip domain.PeerIP) {
 // governs the side effect:
 //   - ErrCodeObservedAddressMismatch: update the trusted self advertise
 //     IP runtime override (so subsequent outbound hellos self-correct).
+//   - ErrCodePeerBanned: record the remote ban window — scope is driven
+//     by details.Reason (peer-ban → this PeerAddress only; blacklisted
+//     → every sibling PeerAddress behind the same egress IP). The dial
+//     gate then suppresses the appropriate addresses until the window
+//     elapses, ending the cm_session_setup_failed cascade that would
+//     otherwise feed the ebus storm.
 //
-// The returned error is the sentinel for the notice code and is intended
-// to bubble up to the caller that owns the session lifecycle.
-func (s *Service) handleConnectionNotice(frame protocol.Frame) {
-	if frame.Code != protocol.ErrCodeObservedAddressMismatch {
-		return
+// peerAddress identifies the dial target — required for peer-banned so
+// the handler can attach the per-peer record AND extract the server IP
+// for the IP-wide record when reason=blacklisted. Ignored for
+// observed-address-mismatch which only updates the local self-advertise
+// override. The caller already holds the address as a domain value, so
+// accepting it here keeps the remote-ban path off the network's
+// RemoteAddr() string.
+func (s *Service) handleConnectionNotice(peerAddress domain.PeerAddress, frame protocol.Frame) {
+	switch frame.Code {
+	case protocol.ErrCodeObservedAddressMismatch:
+		s.handleObservedAddressMismatchNotice(frame)
+	case protocol.ErrCodePeerBanned:
+		s.handlePeerBannedNotice(peerAddress, frame)
 	}
+}
+
+// handleObservedAddressMismatchNotice updates the trusted self-advertise
+// IP from a peer-supplied observation. Split out of handleConnectionNotice
+// so each notice code reads top-to-bottom without the dispatcher having
+// to hold two unrelated decision trees in scope.
+func (s *Service) handleObservedAddressMismatchNotice(frame protocol.Frame) {
 	details, err := protocol.ParseObservedAddressMismatchDetails(frame.Details)
 	if err != nil {
 		return
@@ -569,10 +589,105 @@ func (s *Service) handleConnectionNotice(frame protocol.Frame) {
 	}
 	// Guard against a peer reporting a non-routable observation — the
 	// override must never downgrade us to a private range.
-	if ip := net.ParseIP(observed); ip == nil || isNonRoutableIP(ip) {
+	if isNonRoutableIPHost(observed) {
 		return
 	}
 	s.setTrustedSelfAdvertiseIP(domain.PeerIP(canonicalIPFromHost(observed)))
+}
+
+// handlePeerBannedNotice records the remote ban window communicated by
+// a connection_notice{code=peer-banned} frame. Scope is strictly driven
+// by details.Reason, matching the wire contract in
+// docs/protocol/errors.md: every notice lands in exactly one of two
+// tables, never both. Keeping the scope single-source means the dial
+// gate's read-side helpers stay authoritative and the recovery path on
+// successful handshake has nothing to keep in sync across tables.
+//
+//   - reason=peer-ban     → per-peer record on peerEntry.RemoteBannedUntil.
+//     The dial gate suppresses this PeerAddress only. Applies only to
+//     peers we already know about; unknown addresses are ignored so a
+//     hostile peer cannot grow our state by inventing names.
+//
+//   - reason=blacklisted  → IP-wide record on Service.remoteBannedIPs,
+//     keyed on the canonical host part of peerAddress. The dial gate
+//     suppresses every sibling PeerAddress behind that egress IP — NAT
+//     gateway, VPN exit, Tor exit, multi-homed host — because the
+//     responder's ban applies to the whole IP, not just the single
+//     peer that happened to carry the notice. Recorded regardless of
+//     whether the peer is known so a later discovery of a sibling peer
+//     on the same IP still hits the gate. No per-peer row is written —
+//     isPeerRemoteBannedLocked already consults the IP-wide table on
+//     read, so the sender is suppressed through the IP-wide gate
+//     without duplicating state into the per-peer map.
+//
+// Degenerate address form (peerAddress without a host:port split) is
+// the one exception: reason=blacklisted falls back to the per-peer
+// record because there is no IP to key on. The window comes from the
+// responder verbatim (no local cap) — a peer that has decided to
+// refuse us is authoritative about how long. A parse failure on
+// Details is logged but does not record a ban, so a hostile or buggy
+// responder cannot pin the dialler with a malformed payload.
+// peerAddress empty is a programmer error from the caller (no address
+// in scope to attach the ban to); the helper logs and returns rather
+// than silently fabricating an entry.
+func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame protocol.Frame) {
+	if strings.TrimSpace(string(peerAddress)) == "" {
+		log.Debug().Msg("peer_banned_notice_missing_address")
+		return
+	}
+	details, until, err := protocol.ParsePeerBannedDetails(frame.Details)
+	if err != nil {
+		log.Debug().Err(err).Str("peer", string(peerAddress)).Msg("peer_banned_notice_parse_failed")
+		return
+	}
+	reason := details.Reason
+	now := time.Now().UTC()
+
+	ip, _, hasIP := splitHostPort(string(peerAddress))
+	if hasIP {
+		if canon := canonicalIPFromHost(ip); canon != "" {
+			ip = canon
+		}
+	}
+
+	recorded := false
+	s.mu.Lock()
+	switch {
+	case reason == protocol.PeerBannedReasonBlacklisted && hasIP:
+		if !s.recordRemoteIPBanLocked(ip, reason, until, now).IsZero() {
+			recorded = true
+		}
+	case reason == protocol.PeerBannedReasonBlacklisted && !hasIP:
+		// No host:port to hash on — we cannot express an IP-wide gate.
+		// Fall back to the per-peer record so the sender at least is
+		// suppressed. Logged so the degenerate path is observable.
+		log.Debug().
+			Str("peer", string(peerAddress)).
+			Str("reason", string(reason)).
+			Msg("peer_banned_notice_blacklisted_no_ip_fallback_per_peer")
+		if !s.recordRemoteBanLocked(peerAddress, reason, until, now).IsZero() {
+			recorded = true
+		}
+	default:
+		// reason=peer-ban (and any forward-compatible reason that has
+		// per-peer blast radius): write only the per-peer row.
+		if !s.recordRemoteBanLocked(peerAddress, reason, until, now).IsZero() {
+			recorded = true
+		}
+	}
+	s.mu.Unlock()
+
+	if !recorded {
+		// Nothing recorded — reason=peer-ban on an unknown peer, or
+		// reason=blacklisted with no IP to key on. recordRemoteBanLocked
+		// already logged the unknown-peer case.
+		return
+	}
+	// Flush immediately so the remote-ban gate survives a crash and the
+	// dialler keeps skipping this peer instead of resurrecting the storm
+	// that the notice was supposed to end. Matches the direct-flush
+	// pattern used by manual peer registration.
+	s.flushPeerState()
 }
 
 // selfAdvertiseEndpoint returns the host:port we should publish in an
@@ -603,10 +718,10 @@ func (s *Service) selfAdvertiseEndpoint() string {
 	}
 
 	if override != "" {
-		return net.JoinHostPort(string(override), listenerPort)
+		return joinHostPort(string(override), listenerPort)
 	}
 	if observedIP != "" {
-		return net.JoinHostPort(string(observedIP), listenerPort)
+		return joinHostPort(string(observedIP), listenerPort)
 	}
 	// Config fallback: use the host from cfg.AdvertiseAddress but always
 	// pair it with listenerPort. The configured port may have drifted
@@ -616,7 +731,7 @@ func (s *Service) selfAdvertiseEndpoint() string {
 	// dial target is dialable. Using the raw cfg.AdvertiseAddress here
 	// would silently re-introduce a stale port for a correct host.
 	if cfgHost, _, ok := splitHostPort(s.cfg.AdvertiseAddress); ok && cfgHost != "" {
-		return net.JoinHostPort(cfgHost, listenerPort)
+		return joinHostPort(cfgHost, listenerPort)
 	}
 	return s.cfg.AdvertiseAddress
 }

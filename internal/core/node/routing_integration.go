@@ -573,7 +573,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		hasPending := len(s.pending) > 0
 		s.mu.RUnlock()
 		if hasPending {
-			go s.drainPendingForIdentities(drainIdentities)
+			s.goBackground(func() { s.drainPendingForIdentities(drainIdentities) })
 		}
 	}
 }
@@ -791,7 +791,7 @@ func (s *Service) triggerDrainForExposed(exposed []routing.PeerIdentity) {
 	hasPending := len(s.pending) > 0
 	s.mu.RUnlock()
 	if hasPending {
-		go s.drainPendingForIdentities(identities)
+		s.goBackground(func() { s.drainPendingForIdentities(identities) })
 	}
 }
 
@@ -1150,7 +1150,7 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.P
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		go s.sendMessageToPeer(address, msg)
+		s.goBackground(func() { s.sendMessageToPeer(address, msg) })
 	}
 }
 
@@ -1338,7 +1338,7 @@ func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		go s.sendNoticeToPeer(address, ttl, ciphertext)
+		s.goBackground(func() { s.sendNoticeToPeer(address, ttl, ciphertext) })
 	}
 }
 
@@ -1398,7 +1398,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// meaning it is about to close. Record the observed IP hint so the
 	// next outbound hello self-corrects, then abort this bootstrap write.
 	if welcome.Type == protocol.FrameTypeConnectionNotice {
-		s.handleConnectionNotice(welcome)
+		s.handleConnectionNotice(address, welcome)
 		return
 	}
 	if strings.TrimSpace(welcome.Challenge) != "" {
@@ -1429,7 +1429,17 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		// announceable persistedMeta row or a trusted advertise triple,
 		// so their state would diverge from the managed path and the
 		// hostname / observed-IP sweep invariants would not apply here.
-		s.recordOutboundAuthSuccessFromConn(address, conn)
+		//
+		// The helper takes the wrapper-form "host:port" string. This
+		// §4.4 raw path has no NetCore wrapper, so we read conn.RemoteAddr()
+		// inline — routing_integration.go is already in the §2.9 net-import
+		// whitelist for exactly these bootstrap edges. The defensive empty-
+		// string fallthrough keeps the contract with the helper.
+		var remoteAddr string
+		if ra := conn.RemoteAddr(); ra != nil {
+			remoteAddr = ra.String()
+		}
+		s.recordOutboundAuthSuccess(address, remoteAddr)
 	}
 	if welcome.Type == "error" {
 		return

@@ -87,6 +87,18 @@ type PeerProviderConfig struct {
 	// peer should not be dialled until the local version changes.
 	VersionLockedOutFn func(domain.PeerAddress) bool
 
+	// RemoteBannedFn reports whether the remote peer has told us (via a
+	// connection_notice{code=peer-banned}) that it is refusing our
+	// connections, and the ban has not yet expired. Honouring the remote
+	// ban keeps the dialler from hammering a bouncer that already told us
+	// it will reject us — the same cascade that produces no-op ebus
+	// storms elsewhere. The recorded window is sourced from the remote
+	// and trusted as-is, so a peer that asks for a long ban gets exactly
+	// that. Returns false when the callback is nil or when the window
+	// has elapsed; callers should not gate on the expiration timestamp
+	// separately.
+	RemoteBannedFn func(domain.PeerAddress) bool
+
 	// ListenAddr is this node's own listen address (for self-filtering).
 	ListenAddr domain.ListenAddress
 
@@ -334,6 +346,17 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		// 6c.1: skip version-locked-out peers — they rejected our
 		// protocol version and a retry would be futile until we upgrade.
 		if cfg.VersionLockedOutFn != nil && cfg.VersionLockedOutFn(kp.Address) {
+			continue
+		}
+
+		// 6c.2: skip peers that told us (via peer-banned notice) that
+		// they are refusing our connections. Honouring a remote ban
+		// removes a whole class of pointless retry storms where every
+		// failed handshake would otherwise fan out into cm_session_setup_failed
+		// cascades and churn the ebus. The window is sourced from the
+		// remote and recorded verbatim — a peer that asks for a long
+		// ban gets exactly that.
+		if cfg.RemoteBannedFn != nil && cfg.RemoteBannedFn(kp.Address) {
 			continue
 		}
 

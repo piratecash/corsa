@@ -1083,7 +1083,7 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		go s.sendReceiptToPeer(address, receipt)
+		s.goBackground(func() { s.sendReceiptToPeer(address, receipt) })
 	}
 }
 
@@ -1123,7 +1123,7 @@ func (s *Service) retryRelayDeliveries() {
 			targets[i] = string(t)
 		}
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", attempts).Strs("gossip_targets", targets).Msg("relay_retry_message")
-		go s.executeGossipTargets(msg, decision.GossipTargets)
+		s.goBackground(func() { s.executeGossipTargets(msg, decision.GossipTargets) })
 		// Table-directed relay (Phase 1.2): mirror the logic in
 		// storeIncomingMessage — use the routing table when a next-hop
 		// is known, fall back to blind gossip relay otherwise.
@@ -1136,11 +1136,7 @@ func (s *Service) retryRelayDeliveries() {
 	for _, receipt := range s.retryableRelayReceipts(now) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
 		if !s.handleRelayReceipt(receipt) {
-			s.backgroundWg.Add(1)
-			go func() {
-				defer s.backgroundWg.Done()
-				s.gossipReceipt(receipt)
-			}()
+			s.goBackground(func() { s.gossipReceipt(receipt) })
 		}
 	}
 }

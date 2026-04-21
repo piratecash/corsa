@@ -871,8 +871,8 @@ func (c *ConsoleWindow) subscribeConsoleEvents() {
 
 		// Identity/contacts changes — affects Info tab.
 		bus.Subscribe(ebus.TopicContactAdded, func(ebus.ContactAddedEvent) { invalidate() }),
-		bus.Subscribe(ebus.TopicContactRemoved, func(string) { invalidate() }),
-		bus.Subscribe(ebus.TopicIdentityAdded, func(string) { invalidate() }),
+		bus.Subscribe(ebus.TopicContactRemoved, func(domain.PeerIdentity) { invalidate() }),
+		bus.Subscribe(ebus.TopicIdentityAdded, func(domain.PeerIdentity) { invalidate() }),
 	}
 	c.ebusSubscriptions = ids
 }

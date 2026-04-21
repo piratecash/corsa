@@ -171,10 +171,32 @@ type Service struct {
 	// Protected by s.mu.
 	aggregateStatus domain.AggregateStatusSnapshot
 
+	// lastPublishedAggregateStatus and lastAggregateStatusPublishAt form the
+	// dedup anchor for TopicAggregateStatusChanged. The "last published"
+	// snapshot is distinct from aggregateStatus because other paths
+	// (refresh-without-publish during orphan eviction, init-time refresh)
+	// can update aggregateStatus without notifying subscribers — the anchor
+	// must reflect what subscribers actually saw. The timestamp drives the
+	// heartbeat that guarantees eventual consistency under lossy ebus
+	// delivery (subscriber inbox full → Publish drops the event), so a
+	// dropped publish during a storm cannot leave the UI permanently stale.
+	// Both fields are zero until the first publish.
+	// Protected by s.mu.
+	lastPublishedAggregateStatus domain.AggregateStatusSnapshot
+	lastAggregateStatusPublishAt time.Time
+
 	// versionPolicy holds the runtime state for the node-owned version
 	// upgrade detection policy. Nil until first observation; created
 	// lazily. Protected by s.mu.
 	versionPolicy *versionPolicyState
+
+	// lastVersionPolicyPublishAt is the wall-clock time of the last
+	// TopicVersionPolicyChanged publish. Drives the heartbeat resync for
+	// version policy so that a dropped async delivery during a storm is
+	// retransmitted within versionPolicyHeartbeatInterval, regardless of
+	// whether the snapshot content moves again. Zero until first publish.
+	// Protected by s.mu.
+	lastVersionPolicyPublishAt time.Time
 
 	// runCtx is the context passed to Run(). Stored so that callbacks
 	// (e.g. onCMSessionEstablished) can start goroutines bound to the
@@ -185,6 +207,20 @@ type Service struct {
 	peerProvider *PeerProvider                   // single source of dial candidates — replaces peers[] + peerDialCandidates()
 	connManager  *ConnectionManager              // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
 	bannedIPSet  map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
+
+	// remoteBannedIPs holds IP-wide bans communicated by remote responders
+	// via connection_notice{code=peer-banned, reason=blacklisted}. Separate
+	// from bannedIPSet (which is "we banned them") because the direction
+	// matters: a blacklisted-reason notice means the responder has banned
+	// our egress IP, so every peer address behind that same server IP
+	// faces the same rejection and must be skipped by the dialler — not
+	// just the single PeerAddress that carried the notice. Keyed by the
+	// server-side IP extracted from the notice's peerAddress (host part
+	// of host:port). Persisted to peers.json (remote_banned_ips) so the
+	// IP-wide gate survives restart; without persistence a crash would
+	// reintroduce the retry storm the notice was supposed to end.
+	// Protected by s.mu.
+	remoteBannedIPs map[string]remoteIPBanEntry
 
 	// peerActivityNanos is an atomic per-peer tracker that lives outside
 	// s.mu so markPeerWrite/markPeerRead can skip s.mu.Lock() entirely
@@ -424,19 +460,35 @@ type banEntry struct {
 }
 
 const (
-	peerStateHealthy                = "healthy"
-	peerStateDegraded               = "degraded"
-	peerStateStalled                = "stalled"
-	peerStateReconnecting           = "reconnecting"
-	peerDirectionOutbound           = domain.PeerDirectionOutbound
-	peerDirectionInbound            = domain.PeerDirectionInbound
-	peerRequestTimeout              = 12 * time.Second
-	pendingFrameTTL                 = 5 * time.Minute
-	relayRetryTTL                   = 3 * time.Minute
-	maxPendingFrameRetries          = 5
-	banThreshold                    = 1000
-	banIncrementInvalidSig          = 100
-	banIncrementIncompatibleVersion = 250 // accumulating: 4 attempts to reach banThreshold (1000)
+	peerStateHealthy       = "healthy"
+	peerStateDegraded      = "degraded"
+	peerStateStalled       = "stalled"
+	peerStateReconnecting  = "reconnecting"
+	peerDirectionOutbound  = domain.PeerDirectionOutbound
+	peerDirectionInbound   = domain.PeerDirectionInbound
+	peerRequestTimeout     = 12 * time.Second
+	pendingFrameTTL        = 5 * time.Minute
+	relayRetryTTL          = 3 * time.Minute
+	maxPendingFrameRetries = 5
+	banThreshold           = 1000
+	banIncrementInvalidSig = 100
+	// banIncrementIncompatibleVersion stays below banThreshold on purpose: a
+	// single incompatible hello must not arm the 24-hour IP-wide blacklist,
+	// because NAT gateways, VPN exits, Tor exits and multi-homed hosts share
+	// one egress IP across many unrelated peers. Punishing compatible
+	// siblings for one misconfigured neighbour behind a shared IP would turn
+	// a one-off protocol mismatch into a 24-hour outage for the entire host.
+	// The storm-suppression signal the dialler needs is delivered per-peer
+	// instead — a connection_notice{code=peer-banned, reason=peer-ban} is
+	// emitted on first contact from the inbound incompatible-hello branch
+	// (see dispatchNetworkFrame) and arms the dialler-side gate 6c.2 against
+	// this specific PeerAddress without touching the IP surface. The
+	// transport-level accumulation here remains the safety net for sustained
+	// noise from the same IP: 4 attempts cross banThreshold, at which point
+	// addBanScore fires a second notice with reason=blacklisted on the
+	// connection that crossed the threshold and activates the 24-hour
+	// silent-close in handleConn for all subsequent TCP attempts from that IP.
+	banIncrementIncompatibleVersion = 250
 	banIncrementRateLimit           = 200 // command rate limit violation signals intentional abuse
 	banDuration                     = 24 * time.Hour
 	// nodeName and networkName are the protocol-level identifiers included
@@ -726,6 +778,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		identitySessions:        make(map[domain.PeerIdentity]int),
 		identityRelaySessions:   make(map[domain.PeerIdentity]int),
 		bannedIPSet:             make(map[string]domain.BannedIPEntry),
+		remoteBannedIPs:         make(map[string]remoteIPBanEntry),
 		aggregateStatus:         domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                    make(chan struct{}),
 	}
@@ -784,6 +837,11 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 			defer svc.mu.RUnlock()
 			return svc.isPeerVersionLockedOutLocked(addr)
 		},
+		RemoteBannedFn: func(addr domain.PeerAddress) bool {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			return svc.isPeerRemoteBannedLocked(addr, time.Now().UTC())
+		},
 		ListenAddr:             domain.ListenAddress(cfg.ListenAddress),
 		DefaultPort:            config.DefaultPeerPort,
 		AllowPrivateCandidates: cfg.AllowPrivatePeers,
@@ -823,6 +881,20 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 				BanOrigin:     domain.PeerAddress(b.BanOrigin),
 				BanReason:     b.BanReason,
 				AffectedPeers: affected,
+			}
+		}
+	}
+
+	// Restore remote IP-wide bans ("they banned our egress IP") from
+	// persisted state. Expired entries are silently dropped. Without
+	// this restore the dial gate would re-dial sibling peers on a
+	// blacklisted egress after every restart, reintroducing the exact
+	// retry storm the blacklisted-reason notice was designed to end.
+	for _, b := range peerState.RemoteBannedIPs {
+		if b.Until.After(now) {
+			svc.remoteBannedIPs[b.IP] = remoteIPBanEntry{
+				Until:  b.Until,
+				Reason: b.Reason,
 			}
 		}
 	}
@@ -1092,6 +1164,25 @@ func (s *Service) WaitBackground() {
 	s.backgroundWg.Wait()
 }
 
+// goBackground runs fn in a new goroutine that is tracked by
+// backgroundWg, so WaitBackground observes it on shutdown. Use this
+// helper for every fire-and-forget goroutine that may transitively
+// touch persistent state (queuePeerFrame → persistQueueState, trust
+// store writes, etc.) — without it, a disk write can race with
+// TempDir cleanup in tests and with process exit in production,
+// silently corrupting or losing queue/peer state.
+//
+// Add(1) is called on the caller's goroutine before the spawn so
+// WaitBackground cannot observe the zero counter between spawn
+// request and goroutine start.
+func (s *Service) goBackground(fn func()) {
+	s.backgroundWg.Add(1)
+	go func() {
+		defer s.backgroundWg.Done()
+		fn()
+	}()
+}
+
 func (s *Service) SubscriberCount(recipient string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1125,6 +1216,14 @@ func (s *Service) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, fun
 // netcore.Network registry rather than a captured *netcore.NetCore handle.
 func (s *Service) handleConn(conn net.Conn) {
 	if !s.disableRateLimiting && s.isBlacklistedConn(conn) {
+		// The peer-banned notice was already delivered on the session
+		// that tripped the blacklist (see addBanScore), so a raw
+		// reconnect from the same IP is closed silently. No managed
+		// writer is available at this point (pre-registration) and we
+		// must not reintroduce a raw conn.Write path here — the
+		// dialler-side gate 6c.2 is already armed from the first notice
+		// and will suppress further retries until the remote ban window
+		// elapses.
 		_ = conn.Close()
 		return
 	}
@@ -1391,8 +1490,29 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 				Version:                config.ProtocolVersion,
 				MinimumProtocolVersion: config.MinimumProtocolVersion,
 			})
-			// Immediate IP blacklist (transport level): prevents the same
-			// remote IP from opening new TCP connections for 24 hours.
+			// Per-peer storm-suppression signal. Emit the peer-banned notice
+			// on the very first incompatible hello so the dialler-side
+			// gate 6c.2 can record THIS PeerAddress as banned and stop
+			// fanning out reconnects — keeping cm_session_setup_failed out
+			// of the ebus. Reason is peer-ban (not blacklisted) because a
+			// one-off incompatible hello must not be treated as an IP-wide
+			// lockout: NAT/VPN/Tor exits/multi-homed hosts share an egress
+			// IP across many peers, and punishing compatible siblings for
+			// one misconfigured neighbour would be a wider blast radius
+			// than the misbehaviour justifies. The Until window mirrors
+			// the overlay per-peer duration so the dialler's gate and
+			// server's overlay converge on the same 24-hour horizon.
+			peerBannedUntil := time.Now().UTC().Add(peerBanIncompatible)
+			s.emitPeerBannedNoticeByID(connID, peerBannedUntil, protocol.PeerBannedReasonPeerBan)
+			// Transport-level IP blacklist (graduated safety net): accumulates
+			// banIncrementIncompatibleVersion per attempt, reaching banThreshold
+			// after 4 attempts. This is the tool for sustained noise from a
+			// single IP — not the first-contact signal, which is handled above
+			// by the per-peer notice. When the threshold is crossed, addBanScore
+			// flips Blacklisted on the entry and fires a second peer-banned
+			// notice with reason=blacklisted on the connection that crossed
+			// it; from that moment handleConn silently closes all further TCP
+			// attempts from that IP for 24 hours.
 			s.addBanScore(connID, banIncrementIncompatibleVersion)
 			// Overlay-level penalty: if the hello declares a listen address
 			// that matches a known peer, accumulate incompatible-version
@@ -1591,7 +1711,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		reply, sub := s.subscribeInboxFrame(connID, frame)
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
 		if sub != nil {
-			go s.pushBacklogToSubscriber(sub)
+			s.goBackground(func() { s.pushBacklogToSubscriber(sub) })
 		}
 		// Reverse subscription: subscribe on the outbound peer so that this
 		// node receives both the stored backlog and live updates for its own
@@ -2394,7 +2514,7 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	// Only direct neighbors are notified (no recursive relay) and local
 	// addresses are excluded to avoid leaking private network topology.
 	if addr := peerListenAddress(verified.Hello); addr != "" && classifyAddress(domain.PeerAddress(addr)) != domain.NetGroupLocal {
-		go s.announcePeerToSessions(addr, verified.Hello.NodeType)
+		s.goBackground(func() { s.announcePeerToSessions(addr, verified.Hello.NodeType) })
 	}
 
 	if addr := s.inboundPeerAddress(id); addr != "" {
@@ -2863,7 +2983,10 @@ func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP s
 // isBlacklistedConn is net.Conn-first by the carve-out list in
 // conn_registry.go: pre-registration IP policy. The connection is not yet
 // in the registry, so no ConnID exists at this call site — only the
-// network-level RemoteAddr() of the raw socket is meaningful.
+// network-level RemoteAddr() of the raw socket is meaningful. The
+// peer-banned notice that informs the dialler is emitted on the original
+// session at the moment the blacklist flips on (see addBanScore); raw
+// reconnects observed here are closed silently.
 func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 	ip := remoteIP(conn.RemoteAddr())
 	if ip == "" {
@@ -2926,14 +3049,50 @@ func (s *Service) addBanScore(id domain.ConnID, delta int) {
 	ip := host
 	s.mu.Lock()
 	entry := s.bans[ip]
+	previouslyBlacklisted := !entry.Blacklisted.IsZero()
 	entry.Score += delta
 	if entry.Score >= banThreshold {
 		entry.Blacklisted = time.Now().UTC().Add(banDuration)
 	}
 	s.bans[ip] = entry
+	justBlacklisted := !previouslyBlacklisted && !entry.Blacklisted.IsZero()
 	s.mu.Unlock()
 	if !entry.Blacklisted.IsZero() {
 		log.Warn().Str("ip", ip).Int("score", entry.Score).Time("until", entry.Blacklisted).Msg("blacklist")
+	}
+	if justBlacklisted {
+		// Emit a machine-readable peer-banned notice on the still-open
+		// ConnID. This rides out through the normal managed-write path
+		// (sendFrameViaNetworkSync) so the dialler learns the remote-ban
+		// window before the session is torn down. The gate on the dialler
+		// side (PeerProvider.RemoteBannedFn) suppresses further retries
+		// that would otherwise feed cm_session_setup_failed storms into
+		// the ebus. Subsequent raw reconnects from this IP are closed
+		// silently by handleConn — no re-emission needed because the
+		// dialler-side gate is already armed from this notice.
+		s.emitPeerBannedNoticeByID(id, entry.Blacklisted, protocol.PeerBannedReasonBlacklisted)
+	}
+}
+
+// emitPeerBannedNoticeByID serialises a connection_notice{code=peer-banned}
+// frame and routes it through sendFrameViaNetworkSync on the live ConnID.
+// Best effort: a marshal or send failure is swallowed (debug-logged) — the
+// socket will close and the dialler falls back to its usual retry/back-off,
+// at most once. The notice is advisory, not a correctness hinge.
+func (s *Service) emitPeerBannedNoticeByID(id domain.ConnID, until time.Time, reason protocol.PeerBannedReason) {
+	details, err := protocol.MarshalPeerBannedDetails(until, reason)
+	if err != nil {
+		log.Debug().Err(err).Msg("peer_banned_notice_marshal_failed")
+		return
+	}
+	notice := protocol.Frame{
+		Type:    protocol.FrameTypeConnectionNotice,
+		Code:    protocol.ErrCodePeerBanned,
+		Status:  protocol.ConnectionStatusClosing,
+		Details: details,
+	}
+	if err := s.sendFrameViaNetworkSync(s.runCtx, id, notice); err != nil {
+		log.Debug().Err(err).Str("reason", string(reason)).Msg("peer_banned_notice_send_failed")
 	}
 }
 
@@ -3056,7 +3215,7 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 	// If the contact was not in the trust store, that is not an error —
 	// it may have originated from network discovery rather than the
 	// trusted contacts list.
-	s.eventBus.Publish(ebus.TopicContactRemoved, string(identity))
+	ebus.PublishContactRemoved(s.eventBus, identity)
 	return protocol.Frame{Type: "ok", Address: string(identity)}
 }
 
@@ -3646,7 +3805,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	decision := s.router.Route(envelope)
 
 	if len(decision.PushSubscribers) > 0 {
-		go s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers)
+		// Tracked: writePushFrame itself is network-only, but the
+		// spawned fan-out must complete before TempDir cleanup so
+		// subscriber state is fully torn down before tests assert
+		// on side effects.
+		s.goBackground(func() { s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers) })
 	}
 
 	if s.shouldRouteStoredMessage(msg) {
@@ -3656,7 +3819,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// It ensures store-and-forward (transit DMs stored on relay
 		// nodes for offline recipients), push delivery to connected
 		// clients, and backlog drain. Never skip or filter gossip.
-		go s.executeGossipTargets(envelope, decision.GossipTargets)
+		// Tracked: executeGossipTargets → sendMessageToPeer →
+		// queuePeerFrame → persistQueueState may write to disk.
+		s.goBackground(func() { s.executeGossipTargets(envelope, decision.GossipTargets) })
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
 		// next-hop for this recipient, send relay_message directly to that
@@ -3682,11 +3847,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// Skip for duplicates — the receipt was already sent on the first store.
 	if isLocal && storeResult != StoreDuplicate && msg.Topic == "dm" && msg.Recipient != "*" {
 		if msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
-			s.backgroundWg.Add(1)
-			go func() {
-				defer s.backgroundWg.Done()
-				s.emitDeliveryReceipt(msg)
-			}()
+			s.goBackground(func() { s.emitDeliveryReceipt(msg) })
 		}
 	}
 
@@ -3791,17 +3952,9 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	// relay chain could not forward (no state, or hop unavailable).
 	relayForwarded := s.handleRelayReceipt(receipt)
 	if !relayForwarded {
-		s.backgroundWg.Add(1)
-		go func() {
-			defer s.backgroundWg.Done()
-			s.gossipReceipt(receipt)
-		}()
+		s.goBackground(func() { s.gossipReceipt(receipt) })
 	}
-	s.backgroundWg.Add(1)
-	go func() {
-		defer s.backgroundWg.Done()
-		s.pushReceiptToSubscribers(receipt)
-	}()
+	s.goBackground(func() { s.pushReceiptToSubscribers(receipt) })
 
 	return true, count
 }
@@ -4267,7 +4420,7 @@ func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscr
 	}
 
 	for _, sub := range subs {
-		go s.writePushFrame(sub, frame)
+		s.goBackground(func() { s.writePushFrame(sub, frame) })
 	}
 }
 
@@ -4289,7 +4442,7 @@ func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
 	}
 
 	for _, sub := range subs {
-		go s.writePushFrame(sub, frame)
+		s.goBackground(func() { s.writePushFrame(sub, frame) })
 	}
 }
 
@@ -4350,7 +4503,7 @@ func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
 	s.mu.Unlock()
 
 	if s.CanForward() {
-		go s.gossipNotice(ttl, frame.Ciphertext)
+		s.goBackground(func() { s.gossipNotice(ttl, frame.Ciphertext) })
 	}
 
 	return protocol.Frame{Type: "notice_stored", ID: id, ExpiresAt: expiresAt.Unix()}
@@ -4435,7 +4588,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame) {
 		}
 	}
 	if frame.Address != "" {
-		s.addKnownIdentity(frame.Address)
+		s.addKnownIdentity(domain.PeerIdentity(frame.Address))
 	}
 	// When all key fields are present, verify the box key binding before storing.
 	if frame.Address != "" && frame.PubKey != "" && frame.BoxKey != "" && frame.BoxSig != "" {
@@ -4488,18 +4641,19 @@ func isKnownNodeType(raw string) bool {
 	return ok
 }
 
-func (s *Service) addKnownIdentity(address string) {
-	if address == "" {
+func (s *Service) addKnownIdentity(identity domain.PeerIdentity) {
+	if identity == "" {
 		return
 	}
 
+	address := string(identity)
 	s.mu.Lock()
 	_, existed := s.known[address]
 	s.known[address] = struct{}{}
 	s.mu.Unlock()
 
 	if !existed {
-		s.eventBus.Publish(ebus.TopicIdentityAdded, address)
+		ebus.PublishIdentityAdded(s.eventBus, identity)
 	}
 }
 
@@ -4575,18 +4729,19 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		return
 	}
 
-	s.addKnownIdentity(address)
+	identityFingerprint := domain.PeerIdentity(address)
+	s.addKnownIdentity(identityFingerprint)
 	s.addKnownBoxKey(address, boxKey)
 	s.addKnownPubKey(address, pubKey)
 	if !existed {
 		log.Info().Str("address", address).Str("source", source).Msg("trusted new contact")
 	}
 
-	s.eventBus.Publish(ebus.TopicContactAdded, ebus.ContactAddedEvent{
-		Address: address,
-		PubKey:  pubKey,
-		BoxKey:  boxKey,
-		BoxSig:  boxSig,
+	ebus.PublishContactAdded(s.eventBus, ebus.ContactAddedEvent{
+		Address: identityFingerprint,
+		PubKey:  domain.PeerPublicKey(pubKey),
+		BoxKey:  domain.PeerBoxKey(boxKey),
+		BoxSig:  domain.PeerBoxSignature(boxSig),
 	})
 }
 
@@ -4872,7 +5027,7 @@ func (s *Service) handleInboundPushNotice(frame protocol.Frame) {
 	s.mu.Unlock()
 
 	if s.CanForward() {
-		go s.gossipNotice(ttl, frame.Ciphertext)
+		s.goBackground(func() { s.gossipNotice(ttl, frame.Ciphertext) })
 	}
 }
 

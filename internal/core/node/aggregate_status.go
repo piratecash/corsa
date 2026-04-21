@@ -4,9 +4,23 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/rs/zerolog/log"
 )
+
+// aggregateStatusHeartbeatInterval is the upper bound on how long a
+// subscriber may remain stale if Publish dropped an async delivery
+// because the inbox was full. ebus is intentionally lossy to protect
+// publishers during storms, so dedup on the publisher side cannot rely
+// on "subscribers saw at least one event for this state" — the first
+// event during a storm is exactly the one most likely to be dropped.
+// The heartbeat forces a re-publish of the current snapshot at most
+// once per interval, even when content is byte-identical, so a dropped
+// publish cannot leave the UI permanently stale. The 2 s bootstrap
+// ticker in bootstrapLoop drives this (via refreshAggregateStatus),
+// so the effective resync latency is bounded by max(tick, interval).
+const aggregateStatusHeartbeatInterval = 5 * time.Second
 
 // computeAggregateStatusLocked derives the aggregate network status from the
 // current contents of s.health. The algorithm mirrors the logic previously
@@ -139,14 +153,61 @@ func (s *Service) refreshAggregatePendingLocked() {
 }
 
 // refreshAggregateStatus acquires the write lock and recomputes the
-// materialized aggregate status. Called periodically from bootstrapLoop
-// to catch time-based peer-state drift (e.g. peers silently aging from
-// healthy → degraded → stalled without explicit disconnect events) and
-// to keep PendingMessages up to date even between peer-state transitions.
+// materialized aggregate status, funnelling through the heartbeat-aware
+// publisher. Called periodically from bootstrapLoop to catch time-based
+// peer-state drift (e.g. peers silently aging from healthy → degraded →
+// stalled without explicit disconnect events) and to keep PendingMessages
+// current between peer-state transitions. Routing the ticker through the
+// publisher is deliberate: it is the heartbeat that protects subscribers
+// against a dropped initial publish during a storm, so the UI eventually
+// converges to the true snapshot even if the inbox was full earlier.
 func (s *Service) refreshAggregateStatus() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.publishAggregateStatusChangedLocked()
+}
+
+// publishAggregateStatusChangedLocked recomputes the aggregate status and
+// publishes TopicAggregateStatusChanged under two conditions:
+//
+//  1. The semantic payload (ignoring the ComputedAt heartbeat) differs
+//     from the last published snapshot. This collapses byte-identical
+//     bursts triggered by cascades like cm_session_setup_failed, where
+//     several peers transition through identical internal states in
+//     quick succession and every redundant publish used to force the
+//     Desktop layer to rebuild a full NodeStatus snapshot.
+//
+//  2. aggregateStatusHeartbeatInterval has elapsed since the last publish.
+//     ebus delivery is intentionally lossy: if a subscriber inbox is full,
+//     Publish drops the event rather than block the publisher. Without
+//     the heartbeat, a dropped initial publish during a storm would leave
+//     the UI permanently stale until content changes for some other
+//     reason. The heartbeat also carries the fresh ComputedAt so that
+//     user-visible "last checked" indicators keep advancing on a quiet
+//     but healthy node.
+//
+// Dedup compares against lastPublishedAggregateStatus rather than the
+// previous value of s.aggregateStatus because other paths (startup init,
+// orphan eviction rechecks) may mutate s.aggregateStatus without notifying
+// subscribers. The anchor must reflect what the bus actually saw.
+//
+// Must be called under s.mu write lock.
+func (s *Service) publishAggregateStatusChangedLocked() {
 	s.refreshAggregateStatusLocked()
+	next := s.aggregateStatus
+
+	contentChanged := !s.lastPublishedAggregateStatus.EqualContent(next)
+	heartbeatDue := !s.lastAggregateStatusPublishAt.IsZero() &&
+		next.ComputedAt.Sub(s.lastAggregateStatusPublishAt) >= aggregateStatusHeartbeatInterval
+	firstPublish := s.lastAggregateStatusPublishAt.IsZero()
+
+	if !contentChanged && !heartbeatDue && !firstPublish {
+		return
+	}
+
+	s.lastPublishedAggregateStatus = next
+	s.lastAggregateStatusPublishAt = next.ComputedAt
+	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, next)
 }
 
 // AggregateStatus returns a point-in-time snapshot of the node's aggregate

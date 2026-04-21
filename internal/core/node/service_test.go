@@ -150,10 +150,28 @@ func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
 	}
 }
 
-// TestInboundIncompatibleProtocolBlacklistsIP verifies that a single
-// incompatible hello immediately blacklists the remote IP for 24 hours
-// and closes the connection (return false from dispatchNetworkFrame).
-func TestInboundIncompatibleProtocolBlacklistsIP(t *testing.T) {
+// TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice verifies that a
+// single incompatible hello produces both the protocol error frame and —
+// on the same live session, before teardown — a machine-readable
+// connection_notice{code=peer-banned, reason=peer-ban} so the dialler
+// can record THIS peer's ban window and stop hammering the bouncer.
+// Without this notice every retry would fan out into cm_session_setup_failed
+// events that churn the ebus.
+//
+// The notice reason is peer-ban (not blacklisted): a one-off incompatible
+// hello must not trip the 24-hour IP-wide blacklist, because NAT gateways,
+// VPN exits, Tor exits and multi-homed hosts share an egress IP across many
+// peers and punishing compatible siblings for one misconfigured neighbour
+// would be a wider blast radius than the misbehaviour justifies. The
+// transport-level IP blacklist remains graduated (banIncrementIncompatible
+// = 250, banThreshold = 1000, so 4 attempts are required); TestIncompatibleHelloIPWideBlacklistAfterFourAttempts
+// covers that safety net.
+//
+// A second TCP connection from the same IP after a single incompatible
+// hello is NOT silently dropped — the IP blacklist is not armed yet. The
+// storm-suppression is keyed on PeerAddress via the dialler-side gate 6c.2,
+// which the notice has already armed for this specific peer.
+func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
@@ -164,28 +182,98 @@ func TestInboundIncompatibleProtocolBlacklistsIP(t *testing.T) {
 	})
 	defer stop()
 
-	// First connection: incompatible hello → error + blacklist.
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 0, Client: "test", ClientVersion: config.CorsaWireVersion},
-	)
-	if len(frames) != 1 || frames[0].Type != "error" {
-		t.Fatalf("expected error frame, got: %#v", frames)
-	}
-
-	// Second connection from the same IP should be rejected immediately
-	// (isBlacklistedConn closes conn before any frame exchange).
+	// First connection: incompatible hello must produce both the error
+	// frame and, on the same session before close, the peer-banned notice
+	// with reason=peer-ban (per-peer scope, 24 h window).
 	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 	if err != nil {
-		t.Fatalf("dial should succeed at TCP level: %v", err)
+		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Try to read — the server should close without sending anything.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	buf := make([]byte, 1)
-	_, readErr := conn.Read(buf)
-	if readErr == nil {
-		t.Fatal("expected connection to be closed by server (blacklisted), but read succeeded")
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:          "hello",
+		Version:       0,
+		Client:        "test",
+		ClientVersion: config.CorsaWireVersion,
+	})
+
+	reader := bufio.NewReader(conn)
+	errFrame := readJSONTestFrame(t, reader)
+	if errFrame.Type != "error" || errFrame.Code != protocol.ErrCodeIncompatibleProtocol {
+		t.Fatalf("expected incompatible-protocol error frame, got: %#v", errFrame)
+	}
+
+	noticeFrame := readJSONTestFrame(t, reader)
+	if noticeFrame.Type != protocol.FrameTypeConnectionNotice {
+		t.Fatalf("notice type = %q, want %q", noticeFrame.Type, protocol.FrameTypeConnectionNotice)
+	}
+	if noticeFrame.Code != protocol.ErrCodePeerBanned {
+		t.Fatalf("notice code = %q, want %q", noticeFrame.Code, protocol.ErrCodePeerBanned)
+	}
+	if noticeFrame.Status != protocol.ConnectionStatusClosing {
+		t.Fatalf("notice status = %q, want %q", noticeFrame.Status, protocol.ConnectionStatusClosing)
+	}
+	details, until, err := protocol.ParsePeerBannedDetails(noticeFrame.Details)
+	if err != nil {
+		t.Fatalf("parse peer-banned details: %v", err)
+	}
+	if until.IsZero() {
+		t.Fatal("peer-banned notice must carry a non-zero Until")
+	}
+	if details.Reason != protocol.PeerBannedReasonPeerBan {
+		t.Fatalf("notice reason = %q, want %q — per-peer scope, not IP-wide",
+			details.Reason, protocol.PeerBannedReasonPeerBan)
+	}
+	// The server's advertised Until mirrors peerBanIncompatible (24 h).
+	// Allow a generous tolerance for scheduling jitter between the server
+	// computing peerBannedUntil and the client parsing the frame.
+	wantUntil := time.Now().UTC().Add(peerBanIncompatible)
+	if delta := wantUntil.Sub(until); delta < -2*time.Second || delta > peerBanIncompatible {
+		t.Fatalf("peer-banned Until = %v, want ~now+%v (delta %v)", until, peerBanIncompatible, delta)
+	}
+
+	// Server tears the session down after emitting the notice.
+	if _, readErr := reader.ReadByte(); readErr == nil {
+		t.Fatal("expected connection to be closed by server after notice, but read succeeded")
+	}
+	_ = conn.Close()
+
+	// Critical invariant for the NAT/VPN/Tor-exit case: a single
+	// incompatible hello must NOT activate the IP-wide blacklist. A
+	// second TCP connection from the same IP is allowed to reach the
+	// handshake layer — compatible siblings behind the same egress IP
+	// must stay reachable. Proof: we get a welcome frame back rather
+	// than a silent close.
+	rawConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("second dial should succeed at TCP level: %v", err)
+	}
+	defer func() { _ = rawConn.Close() }()
+
+	_ = rawConn.SetDeadline(time.Now().Add(2 * time.Second))
+	// Send a valid hello so we can confirm the handshake layer replied,
+	// not just that the TCP accept succeeded. A welcome or any managed
+	// frame returning before the deadline proves the IP is not blacklisted.
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	writeJSONFrame(t, rawConn, protocol.Frame{
+		Type:          "hello",
+		Version:       config.ProtocolVersion,
+		Client:        "node",
+		ClientVersion: config.CorsaWireVersion,
+		Address:       id.Address,
+		PubKey:        identity.PublicKeyBase64(id.PublicKey),
+		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		BoxSig:        identity.SignBoxKeyBinding(id),
+	})
+	siblingReader := bufio.NewReader(rawConn)
+	welcome := readJSONTestFrame(t, siblingReader)
+	if welcome.Type != "welcome" {
+		t.Fatalf("sibling on same IP must reach the handshake layer, got frame: %#v", welcome)
 	}
 }
 
@@ -259,7 +347,17 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 
-	for i := 0; i < 10; i++ {
+	// Each bad auth_session attempt costs banIncrementInvalidSig=100 points.
+	// The first nine attempts must reply with ErrCodeInvalidAuthSignature. The
+	// tenth attempt crosses banThreshold=1000 and transitions the IP to
+	// blacklisted. At that transition addBanScore emits a peer-banned
+	// connection_notice BEFORE the invalid-auth-signature error frame (see
+	// service.go handleAuthSession → addBanScore → emitPeerBannedNoticeByID),
+	// so the first frame readable on attempt 9 is the notice, not the error.
+	// We assert the transition explicitly; otherwise a regression that drops
+	// the peer-banned notice would go unnoticed.
+	const attempts = 10
+	for i := 0; i < attempts; i++ {
 		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 		if err != nil {
 			t.Fatalf("dial attempt %d: %v", i, err)
@@ -285,8 +383,27 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 			Signature: "bad-signature",
 		})
 		reply := readJSONTestFrame(t, reader)
-		if reply.Code != protocol.ErrCodeInvalidAuthSignature {
-			t.Fatalf("expected invalid auth signature on attempt %d, got %#v", i, reply)
+		if i < attempts-1 {
+			if reply.Code != protocol.ErrCodeInvalidAuthSignature {
+				t.Fatalf("expected invalid auth signature on attempt %d, got %#v", i, reply)
+			}
+		} else {
+			// Ban-triggering attempt: expect the peer-banned connection_notice
+			// emitted on the justBlacklisted transition. The subsequent error
+			// frame is dropped when we close the connection below.
+			if reply.Type != protocol.FrameTypeConnectionNotice || reply.Code != protocol.ErrCodePeerBanned {
+				t.Fatalf("expected peer-banned connection_notice on attempt %d, got %#v", i, reply)
+			}
+			details, until, err := protocol.ParsePeerBannedDetails(reply.Details)
+			if err != nil {
+				t.Fatalf("parse peer-banned details on attempt %d: %v", i, err)
+			}
+			if details.Reason != protocol.PeerBannedReasonBlacklisted {
+				t.Fatalf("expected reason=%q on ban-triggering attempt, got %q", protocol.PeerBannedReasonBlacklisted, details.Reason)
+			}
+			if until.IsZero() || !until.After(time.Now().Add(-time.Minute)) {
+				t.Fatalf("expected ban expiration in the future, got %v", until)
+			}
 		}
 		_ = conn.Close()
 	}

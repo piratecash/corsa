@@ -63,11 +63,11 @@ const (
 	TopicReceiptUpdated = "receipt.updated"
 
 	// TopicIdentityAdded is emitted when a new identity is discovered and
-	// added to the node's known set. Carries the address so the receiver
-	// can append it locally without an RPC round-trip.
+	// added to the node's known set. Carries the peer identity so the
+	// receiver can append it locally without an RPC round-trip.
 	//
 	// Handler signature:
-	//   func(address string)
+	//   func(identity domain.PeerIdentity)
 	TopicIdentityAdded = "identity.added"
 
 	// TopicContactAdded is emitted when a trusted contact is added or
@@ -79,10 +79,11 @@ const (
 	TopicContactAdded = "contact.added"
 
 	// TopicContactRemoved is emitted when a trusted contact is deleted.
-	// Carries the removed address so the receiver can delete it locally.
+	// Carries the removed peer identity so the receiver can delete it
+	// locally.
 	//
 	// Handler signature:
-	//   func(address string)
+	//   func(identity domain.PeerIdentity)
 	TopicContactRemoved = "contact.removed"
 
 	// TopicMessageSent is emitted after a DM is successfully sent.

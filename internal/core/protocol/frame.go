@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Frame struct {
@@ -310,6 +311,90 @@ func ParseObservedAddressMismatchDetails(raw json.RawMessage) (ObservedAddressMi
 		return ObservedAddressMismatchDetails{}, err
 	}
 	return details, nil
+}
+
+// PeerBannedReason is the closed enum of machine-readable reasons the
+// responder can cite when sending a peer-banned notice. Kept as a
+// distinct string type so stray untyped assignments are a compile error.
+// The wire form is a plain JSON string; unknown values decode as-is and
+// callers must treat them as opaque — the dialler only needs Until to
+// honour the ban, the reason is advisory.
+type PeerBannedReason string
+
+const (
+	// PeerBannedReasonBlacklisted is the IP-wide blacklist hit, the sole
+	// producer today. Emission sits on the addBanScore zero→non-zero
+	// transition and rides out on the still-open ConnID so the dialler
+	// learns the ban window before teardown.
+	PeerBannedReasonBlacklisted PeerBannedReason = "blacklisted"
+	// PeerBannedReasonPeerBan is a per-peer timed ban (peerEntry.BannedUntil).
+	// Reserved for a future emission path: an inbound connect-time reject
+	// against an already-banned peer address, gated on auth since the
+	// overlay address is attacker-controlled until then. Dialers must
+	// accept and record the window on receipt today so a forthcoming
+	// server rollout does not require a concurrent client rollout.
+	PeerBannedReasonPeerBan PeerBannedReason = "peer-ban"
+)
+
+// PeerBannedDetails is the schema for Frame.Details when
+// Code == ErrCodePeerBanned. Until is the wall-clock time the ban lifts,
+// encoded as UTC RFC3339 so the dialler can parse without ambiguity.
+// Reason is advisory diagnostics for logs/UI; the dialler must not gate
+// behaviour on it (the ban is honoured regardless). Fields are omitempty
+// so a minimal notice ({code:"peer-banned"}) is valid — a dialler that
+// receives no Until falls back to a conservative local default. A
+// dialler-supplied remote Until is trusted verbatim: if the responder
+// declares a ten-year ban, the dialler records ten years. The peer has
+// authority over its own refusal window, and argument with that decision
+// on the dialler side only wastes connect attempts.
+type PeerBannedDetails struct {
+	Until  string           `json:"until,omitempty"`
+	Reason PeerBannedReason `json:"reason,omitempty"`
+}
+
+// MarshalPeerBannedDetails serialises the ban-notice payload into the
+// opaque json.RawMessage carried by Frame.Details. Until is written as
+// UTC RFC3339. Passing a zero time emits no "until" key, which the
+// dialler will treat as "ban with unknown expiration" and apply its
+// local default. Returns (nil, nil) when both fields are empty so the
+// Details field is omitted entirely by omitempty.
+func MarshalPeerBannedDetails(until time.Time, reason PeerBannedReason) (json.RawMessage, error) {
+	details := PeerBannedDetails{Reason: reason}
+	if !until.IsZero() {
+		details.Until = until.UTC().Format(time.RFC3339)
+	}
+	if details.Until == "" && details.Reason == "" {
+		return nil, nil
+	}
+	payload, err := json.Marshal(details)
+	if err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+// ParsePeerBannedDetails decodes Frame.Details for a connection_notice
+// with Code == ErrCodePeerBanned. Returns the decoded struct and, when
+// Until was present, the parsed time. A zero time.Time return means the
+// notice did not carry an expiration and the caller must fall back to a
+// local default. Empty raw input is not an error: the minimal notice
+// shape is legal.
+func ParsePeerBannedDetails(raw json.RawMessage) (PeerBannedDetails, time.Time, error) {
+	if len(raw) == 0 {
+		return PeerBannedDetails{}, time.Time{}, nil
+	}
+	var details PeerBannedDetails
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return PeerBannedDetails{}, time.Time{}, err
+	}
+	if details.Until == "" {
+		return details, time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, details.Until)
+	if err != nil {
+		return details, time.Time{}, fmt.Errorf("peer-banned details: invalid until: %w", err)
+	}
+	return details, parsed.UTC(), nil
 }
 
 func IsJSONLine(line string) bool {

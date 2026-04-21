@@ -21,6 +21,20 @@ type PeerIdentity string
 // and session map keys.
 type PeerAddress string
 
+// PeerPublicKey is a peer's Ed25519 public key encoded as base64.
+// Kept distinct from PeerIdentity: one is the routing fingerprint,
+// the other is the verification material exchanged on the wire.
+type PeerPublicKey string
+
+// PeerBoxKey is a peer's Curve25519 box public key encoded as base64.
+// Used for DM encryption and persisted trust/contact metadata.
+type PeerBoxKey string
+
+// PeerBoxSignature is the Ed25519 signature binding PeerBoxKey to
+// PeerIdentity. Stored separately so call sites cannot accidentally swap
+// the raw box key with its authentication proof.
+type PeerBoxSignature string
+
 // ListenAddress is the local node's bind address (e.g. ":64646").
 // Kept separate from PeerAddress to prevent mixing local binding
 // with remote transport addresses at compile time.
@@ -141,6 +155,20 @@ type AggregateStatusSnapshot struct {
 	// this snapshot. Desktop uses it as the "last checked" indicator in the
 	// Info tab — it proves the node layer is alive and responsive.
 	ComputedAt time.Time
+}
+
+// EqualContent reports whether two aggregate snapshots carry the same
+// semantic payload. ComputedAt is intentionally excluded: it is a liveness
+// heartbeat, not a visible part of the aggregate state, and including it
+// would make every recompute look "changed" even when nothing the UI cares
+// about moved. Publishers use this to suppress no-op events that otherwise
+// flood subscribers with identical snapshots during peer connection storms.
+func (s AggregateStatusSnapshot) EqualContent(other AggregateStatusSnapshot) bool {
+	return s.Status == other.Status &&
+		s.UsablePeers == other.UsablePeers &&
+		s.ConnectedPeers == other.ConnectedPeers &&
+		s.TotalPeers == other.TotalPeers &&
+		s.PendingMessages == other.PendingMessages
 }
 
 // RouteChangeReason describes why a routing table mutation occurred.

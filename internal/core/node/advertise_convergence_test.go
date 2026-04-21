@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -237,6 +238,7 @@ func newAdvertiseTestService(advertise string) *Service {
 		persistedMeta:           make(map[domain.PeerAddress]*peerEntry),
 		observedAddrs:           make(map[domain.PeerIdentity]string),
 		observedIPHistoryByPeer: make(map[domain.PeerAddress][]domain.PeerIP),
+		remoteBannedIPs:         make(map[string]remoteIPBanEntry),
 	}
 }
 
@@ -832,7 +834,7 @@ func TestHandleConnectionNotice_SetsOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal details: %v", err)
 	}
-	svc.handleConnectionNotice(protocol.Frame{
+	svc.handleConnectionNotice(domain.PeerAddress("198.51.100.10:64646"), protocol.Frame{
 		Type:    protocol.FrameTypeConnectionNotice,
 		Code:    protocol.ErrCodeObservedAddressMismatch,
 		Status:  protocol.ConnectionStatusClosing,
@@ -867,7 +869,7 @@ func TestHandleConnectionNotice_IgnoresNonRoutable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal details: %v", err)
 			}
-			svc.handleConnectionNotice(protocol.Frame{
+			svc.handleConnectionNotice(domain.PeerAddress("198.51.100.10:64646"), protocol.Frame{
 				Type:    protocol.FrameTypeConnectionNotice,
 				Code:    protocol.ErrCodeObservedAddressMismatch,
 				Details: details,
@@ -888,7 +890,7 @@ func TestHandleConnectionNotice_IgnoresNonRoutable(t *testing.T) {
 func TestHandleConnectionNotice_IgnoresWrongCode(t *testing.T) {
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 	details, _ := protocol.MarshalObservedAddressMismatchDetails("203.0.113.71")
-	svc.handleConnectionNotice(protocol.Frame{
+	svc.handleConnectionNotice(domain.PeerAddress("198.51.100.10:64646"), protocol.Frame{
 		Type:    protocol.FrameTypeConnectionNotice,
 		Code:    "unrelated-notice",
 		Details: details,
@@ -898,6 +900,232 @@ func TestHandleConnectionNotice_IgnoresWrongCode(t *testing.T) {
 	svc.mu.RUnlock()
 	if got != "" {
 		t.Fatalf("override set by unrelated code: got %q", got)
+	}
+}
+
+// TestHandlePeerBannedNotice_PeerBanRecordsPerPeer asserts that a
+// well-formed reason=peer-ban connection_notice stores the
+// responder-supplied expiration on the dialler's persisted peerEntry so
+// the PeerProvider gate can skip THIS address until the window elapses.
+// reason=peer-ban writes only into the per-peer table — the IP-wide
+// table must stay empty because the responder scoped the ban to one
+// address. The responder's Until is trusted verbatim — even a
+// multi-year window is preserved, since a peer that has decided to
+// refuse us is authoritative about when it will change its mind.
+func TestHandlePeerBannedNotice_PeerBanRecordsPerPeer(t *testing.T) {
+	const peerAddr domain.PeerAddress = "203.0.113.90:64646"
+	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
+
+	// Responder says: banned for ten years.
+	until := time.Now().UTC().Add(10 * 365 * 24 * time.Hour).Truncate(time.Second)
+	details, err := protocol.MarshalPeerBannedDetails(until, protocol.PeerBannedReasonPeerBan)
+	if err != nil {
+		t.Fatalf("marshal peer-banned details: %v", err)
+	}
+
+	svc.handleConnectionNotice(peerAddr, protocol.Frame{
+		Type:    protocol.FrameTypeConnectionNotice,
+		Code:    protocol.ErrCodePeerBanned,
+		Status:  protocol.ConnectionStatusClosing,
+		Details: details,
+	})
+
+	svc.mu.RLock()
+	entry := svc.persistedMeta[peerAddr]
+	ipBanCount := len(svc.remoteBannedIPs)
+	svc.mu.RUnlock()
+	if entry == nil || entry.RemoteBannedUntil == nil {
+		t.Fatalf("RemoteBannedUntil was not recorded on the peer entry")
+	}
+	if !entry.RemoteBannedUntil.Equal(until) {
+		t.Fatalf("RemoteBannedUntil: got %s want %s (responder Until must be preserved verbatim)",
+			entry.RemoteBannedUntil.Format(time.RFC3339), until.Format(time.RFC3339))
+	}
+	if entry.RemoteBanReason != string(protocol.PeerBannedReasonPeerBan) {
+		t.Fatalf("RemoteBanReason: got %q want %q",
+			entry.RemoteBanReason, protocol.PeerBannedReasonPeerBan)
+	}
+	if ipBanCount != 0 {
+		t.Fatalf("reason=peer-ban must not touch the IP-wide table, got %d entries", ipBanCount)
+	}
+}
+
+// TestHandlePeerBannedNotice_UnknownPeerIgnored asserts that a peer-banned
+// notice for an address we have never seen before is silently ignored.
+// Creating an entry on the fly here would open an unbounded growth path
+// for a hostile responder fabricating addresses in the notice payload.
+func TestHandlePeerBannedNotice_UnknownPeerIgnored(t *testing.T) {
+	const peerAddr domain.PeerAddress = "203.0.113.91:64646"
+	svc := newAdvertiseTestService("198.51.100.10:64646")
+	// Deliberately do not register peerAddr in persistedMeta.
+
+	until := time.Now().UTC().Add(time.Hour)
+	details, err := protocol.MarshalPeerBannedDetails(until, protocol.PeerBannedReasonPeerBan)
+	if err != nil {
+		t.Fatalf("marshal peer-banned details: %v", err)
+	}
+
+	svc.handleConnectionNotice(peerAddr, protocol.Frame{
+		Type:    protocol.FrameTypeConnectionNotice,
+		Code:    protocol.ErrCodePeerBanned,
+		Status:  protocol.ConnectionStatusClosing,
+		Details: details,
+	})
+
+	svc.mu.RLock()
+	_, stillUnknown := svc.persistedMeta[peerAddr]
+	svc.mu.RUnlock()
+	if stillUnknown {
+		t.Fatalf("unknown peer must not be inserted into persistedMeta by a peer-banned notice")
+	}
+}
+
+// TestHandlePeerBannedNotice_ParseFailureDoesNotRecord asserts that a
+// malformed Details payload (unparseable Until) does not install any ban
+// window. The ban is only as good as the responder-supplied timing data
+// — a dialler that invented a fallback window on a parse failure would
+// let a buggy or hostile responder pin its dial loop with garbage input.
+func TestHandlePeerBannedNotice_ParseFailureDoesNotRecord(t *testing.T) {
+	const peerAddr domain.PeerAddress = "203.0.113.92:64646"
+	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
+
+	// An Until field that is not a valid RFC3339 time.
+	bad := json.RawMessage(`{"until":"not-a-timestamp","reason":"peer-ban"}`)
+
+	svc.handleConnectionNotice(peerAddr, protocol.Frame{
+		Type:    protocol.FrameTypeConnectionNotice,
+		Code:    protocol.ErrCodePeerBanned,
+		Status:  protocol.ConnectionStatusClosing,
+		Details: bad,
+	})
+
+	svc.mu.RLock()
+	entry := svc.persistedMeta[peerAddr]
+	svc.mu.RUnlock()
+	if entry != nil && entry.RemoteBannedUntil != nil {
+		t.Fatalf("RemoteBannedUntil must remain unset when Details parsing fails, got %s",
+			entry.RemoteBannedUntil.Format(time.RFC3339))
+	}
+}
+
+// TestHandlePeerBannedNotice_BlacklistedPropagatesToSiblingIP is the
+// regression guard for the blast-radius fix: a reason=blacklisted
+// notice on one PeerAddress must populate the IP-wide record so every
+// sibling PeerAddress behind the same egress IP is gated by the
+// dialler — even siblings we have never heard of before. Without this
+// the responder's IP-wide ban would only silence the single peer that
+// happened to carry the notice and the dialler would keep hammering
+// the other peers on the blacklisted IP.
+func TestHandlePeerBannedNotice_BlacklistedPropagatesToSiblingIP(t *testing.T) {
+	const peerAddr domain.PeerAddress = "203.0.113.90:64646"
+	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc.remoteBannedIPs = make(map[string]remoteIPBanEntry)
+	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
+
+	until := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	details, err := protocol.MarshalPeerBannedDetails(until, protocol.PeerBannedReasonBlacklisted)
+	if err != nil {
+		t.Fatalf("marshal peer-banned details: %v", err)
+	}
+
+	svc.handleConnectionNotice(peerAddr, protocol.Frame{
+		Type:    protocol.FrameTypeConnectionNotice,
+		Code:    protocol.ErrCodePeerBanned,
+		Status:  protocol.ConnectionStatusClosing,
+		Details: details,
+	})
+
+	svc.mu.RLock()
+	ipEntry, ok := svc.remoteBannedIPs["203.0.113.90"]
+	svc.mu.RUnlock()
+	if !ok {
+		t.Fatal("reason=blacklisted must populate remoteBannedIPs keyed on the IP")
+	}
+	if !ipEntry.Until.Equal(until) {
+		t.Fatalf("IP-wide entry Until: got %s want %s",
+			ipEntry.Until.Format(time.RFC3339), until.Format(time.RFC3339))
+	}
+	if ipEntry.Reason != string(protocol.PeerBannedReasonBlacklisted) {
+		t.Fatalf("IP-wide entry Reason: got %q want %q",
+			ipEntry.Reason, string(protocol.PeerBannedReasonBlacklisted))
+	}
+
+	// Sibling PeerAddress on the same IP — not even known yet — must be
+	// suppressed via the IP-wide record.
+	siblingUnknown := domain.PeerAddress("203.0.113.90:7070")
+	svc.mu.RLock()
+	sibBanned := svc.isPeerRemoteBannedLocked(siblingUnknown, time.Now().UTC())
+	svc.mu.RUnlock()
+	if !sibBanned {
+		t.Fatal("unknown sibling on blacklisted IP must be suppressed by the dial gate")
+	}
+
+	// The sender's per-peer row must NOT be populated: reason=blacklisted
+	// writes only the IP-wide record (the sender is still suppressed on
+	// read through the IP-wide gate). A per-peer mirror would duplicate
+	// state and force extra sync work on the recovery path.
+	svc.mu.RLock()
+	senderEntry := svc.persistedMeta[peerAddr]
+	svc.mu.RUnlock()
+	if senderEntry != nil && senderEntry.RemoteBannedUntil != nil {
+		t.Fatalf("reason=blacklisted must not write a per-peer row on the sender, got RemoteBannedUntil=%s",
+			senderEntry.RemoteBannedUntil.Format(time.RFC3339))
+	}
+	if senderEntry != nil && senderEntry.RemoteBanReason != "" {
+		t.Fatalf("reason=blacklisted must not write RemoteBanReason on the sender, got %q",
+			senderEntry.RemoteBanReason)
+	}
+}
+
+// TestHandlePeerBannedNotice_PeerBanDoesNotPropagateToSiblings pins the
+// symmetric contract: reason=peer-ban is scoped to one PeerAddress, so
+// a sibling on the same IP MUST remain dialable when no IP-wide record
+// exists. Confusing the two scopes would over-ban legitimate peers
+// sharing an egress with one misbehaving node.
+func TestHandlePeerBannedNotice_PeerBanDoesNotPropagateToSiblings(t *testing.T) {
+	const peerAddr domain.PeerAddress = "203.0.113.91:64646"
+	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc.remoteBannedIPs = make(map[string]remoteIPBanEntry)
+	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
+
+	until := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	details, err := protocol.MarshalPeerBannedDetails(until, protocol.PeerBannedReasonPeerBan)
+	if err != nil {
+		t.Fatalf("marshal peer-banned details: %v", err)
+	}
+
+	svc.handleConnectionNotice(peerAddr, protocol.Frame{
+		Type:    protocol.FrameTypeConnectionNotice,
+		Code:    protocol.ErrCodePeerBanned,
+		Status:  protocol.ConnectionStatusClosing,
+		Details: details,
+	})
+
+	// No IP-wide record must have been written.
+	svc.mu.RLock()
+	_, hasIPRecord := svc.remoteBannedIPs["203.0.113.91"]
+	svc.mu.RUnlock()
+	if hasIPRecord {
+		t.Fatal("reason=peer-ban must NOT populate remoteBannedIPs")
+	}
+
+	// The original peer IS banned via the per-peer record.
+	svc.mu.RLock()
+	origBanned := svc.isPeerRemoteBannedLocked(peerAddr, time.Now().UTC())
+	svc.mu.RUnlock()
+	if !origBanned {
+		t.Fatal("original peer must be suppressed by per-peer remote ban")
+	}
+
+	// A sibling on the same IP must remain dialable.
+	sibling := domain.PeerAddress("203.0.113.91:7070")
+	svc.mu.RLock()
+	sibBanned := svc.isPeerRemoteBannedLocked(sibling, time.Now().UTC())
+	svc.mu.RUnlock()
+	if sibBanned {
+		t.Fatal("sibling on same IP must stay dialable when reason was peer-ban")
 	}
 }
 
@@ -1192,28 +1420,21 @@ func TestRecordOutboundConfirmed_PreservesExistingRowOnHostname(t *testing.T) {
 }
 
 // TestRecordOutboundAuthSuccess_HostnamePeerWritesCanonicalIP covers the
-// integration path for DNS/manual peers. session.address carries the
-// hostname form ("peer.example:64646"), but the live TCP connection
+// integration path for DNS/manual peers. peerAddress carries the
+// hostname form ("peer.example:64646"), but the connection wrapper
 // always exposes a canonical IP through RemoteAddr() after OS DNS
 // resolution. The auth-success hook must source the trusted advertise
-// IP from conn.RemoteAddr() — not session.address — otherwise
+// IP from the wrapper's RemoteAddr() — not peerAddress — otherwise
 // TrustedAdvertiseIP would store the unresolved hostname and silently
 // break the observed-IP downgrade sweep.
 func TestRecordOutboundAuthSuccess_HostnamePeerWritesCanonicalIP(t *testing.T) {
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 	const hostnameAddr domain.PeerAddress = "peer.example:64646"
 
-	conn := &fakeConn{
-		// OS DNS resolution gives the TCP socket a real IP; the dialed
-		// hostname is not visible on the live conn.
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP("203.0.113.160"), Port: 64646},
-	}
-	session := &peerSession{
-		address: hostnameAddr,
-		conn:    conn,
-	}
-
-	svc.recordOutboundAuthSuccess(session)
+	// The wrapper's RemoteAddr() returns the OS-resolved TCP host:port,
+	// not the dialed hostname — that is the whole reason the helper
+	// takes this string rather than peerAddress.
+	svc.recordOutboundAuthSuccess(hostnameAddr, "203.0.113.160:64646")
 
 	pm := svc.persistedMeta[hostnameAddr]
 	if pm == nil {
@@ -1245,10 +1466,11 @@ func TestRecordOutboundAuthSuccess_CanonicalisesMappedIPv6RemoteAddr(t *testing.
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 	const hostnameAddr domain.PeerAddress = "dualstack.example:64646"
 
-	conn := &fakeConn{
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP("::ffff:203.0.113.161"), Port: 64646},
-	}
-	svc.recordOutboundAuthSuccess(&peerSession{address: hostnameAddr, conn: conn})
+	// net.TCPAddr{IP: "::ffff:203.0.113.161", Port: 64646}.String() →
+	// "[::ffff:203.0.113.161]:64646"; the wrapper publishes exactly
+	// this form via RemoteAddr(), so canonicalisation must happen
+	// inside the helper.
+	svc.recordOutboundAuthSuccess(hostnameAddr, "[::ffff:203.0.113.161]:64646")
 
 	pm := svc.persistedMeta[hostnameAddr]
 	if pm == nil {
@@ -1260,79 +1482,168 @@ func TestRecordOutboundAuthSuccess_CanonicalisesMappedIPv6RemoteAddr(t *testing.
 	}
 }
 
-// TestRecordOutboundAuthSuccess_NilInputsAreNoop guards the defensive
-// nil checks at the top of the helper. Callers can hand in a nil
-// session (bail-out paths in unit tests) or a session without a
-// connection; neither must panic or mutate persistedMeta.
-func TestRecordOutboundAuthSuccess_NilInputsAreNoop(t *testing.T) {
+// TestRecordOutboundAuthSuccess_EmptyInputsAreNoop guards the defensive
+// entry checks. Callers can hand in an empty peerAddress (programmer
+// error) or an empty remoteAddr (wrapper published nothing yet / unit
+// tests); neither must panic or mutate persistedMeta.
+func TestRecordOutboundAuthSuccess_EmptyInputsAreNoop(t *testing.T) {
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 	const peerAddr domain.PeerAddress = "peer.example:64646"
 
-	// nil session must not panic and must not create a row.
-	svc.recordOutboundAuthSuccess(nil)
+	// Empty remoteAddr must bail before any write attempt.
+	svc.recordOutboundAuthSuccess(peerAddr, "")
 
-	// Session with nil conn must not panic and must not create a row.
-	svc.recordOutboundAuthSuccess(&peerSession{address: peerAddr})
+	// Empty peerAddress must bail even with a valid remote.
+	svc.recordOutboundAuthSuccess("", "203.0.113.172:64646")
 
 	if len(svc.persistedMeta) != 0 {
-		t.Fatalf("nil inputs must not mutate persistedMeta; got %d entries", len(svc.persistedMeta))
+		t.Fatalf("empty inputs must not mutate persistedMeta; got %d entries", len(svc.persistedMeta))
 	}
 }
 
-// TestRecordOutboundAuthSuccessFromConn_SharedByManagedAndBootstrap pins
-// the contract of the shared post-auth_ok hook used by both the
-// managed-session outbound path (via recordOutboundAuthSuccess, which
-// unwraps the session and delegates here) and the raw/bootstrap path
-// in sendNoticeToPeer. Given a hostname-form peer address and a live
-// conn whose RemoteAddr is a canonical IP, the helper must promote
-// the peer to announceable with the canonical IP in
-// TrustedAdvertiseIP — never the hostname from peerAddress — so both
-// paths land at the same persistedMeta state.
-func TestRecordOutboundAuthSuccessFromConn_SharedByManagedAndBootstrap(t *testing.T) {
+// TestRecordOutboundAuthSuccess_ClearsRemoteBan pins the behaviour wired
+// up for the reviewer's P1 finding: a previously-recorded remote ban
+// on the peer must be dropped as soon as the same peer completes a
+// fresh handshake. Otherwise the PeerProvider gate would keep skipping
+// a peer that is demonstrably accepting us again, silently extending
+// the suppression the ban window was introduced to end.
+func TestRecordOutboundAuthSuccess_ClearsRemoteBan(t *testing.T) {
+	const peerAddr domain.PeerAddress = "203.0.113.180:64646"
 	svc := newAdvertiseTestService("198.51.100.10:64646")
-	const hostnameAddr domain.PeerAddress = "bootstrap.example:64646"
 
-	conn := &fakeConn{
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP("203.0.113.170"), Port: 64646},
+	// Seed a remote-ban record for this peer.
+	future := time.Now().UTC().Add(24 * time.Hour)
+	svc.persistedMeta[peerAddr] = &peerEntry{
+		Address:           peerAddr,
+		RemoteBannedUntil: &future,
+		RemoteBanReason:   string(protocol.PeerBannedReasonBlacklisted),
 	}
 
-	svc.recordOutboundAuthSuccessFromConn(hostnameAddr, conn)
+	svc.recordOutboundAuthSuccess(peerAddr, "203.0.113.180:64646")
 
-	pm := svc.persistedMeta[hostnameAddr]
+	pm := svc.persistedMeta[peerAddr]
 	if pm == nil {
-		t.Fatalf("persistedMeta row not created by shared helper")
+		t.Fatalf("persistedMeta row missing after successful auth")
 	}
-	if pm.AnnounceState != announceStateAnnounceable {
-		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
+	if pm.RemoteBannedUntil != nil {
+		t.Fatalf("RemoteBannedUntil must be cleared on successful handshake, got %s",
+			pm.RemoteBannedUntil.Format(time.RFC3339))
 	}
-	if pm.TrustedAdvertiseIP != "203.0.113.170" {
-		t.Fatalf("trusted_advertise_ip: got %q want %q", pm.TrustedAdvertiseIP, "203.0.113.170")
-	}
-	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceOutbound {
-		t.Fatalf("trusted_advertise_source: got %q want %q",
-			pm.TrustedAdvertiseSource, trustedAdvertiseSourceOutbound)
-	}
-	if pm.TrustedAdvertisePort != "64646" {
-		t.Fatalf("trusted_advertise_port: got %q want %q", pm.TrustedAdvertisePort, "64646")
+	if pm.RemoteBanReason != "" {
+		t.Fatalf("RemoteBanReason must be cleared on successful handshake, got %q",
+			pm.RemoteBanReason)
 	}
 }
 
-// TestRecordOutboundAuthSuccessFromConn_NilInputsAreNoop guards the
-// defensive entry checks of the shared helper. An empty peerAddress
-// or a nil conn must bail out without mutating state — the raw
-// bootstrap path hands the conn directly, so a misconfigured call
-// site must never create phantom persistedMeta rows.
-func TestRecordOutboundAuthSuccessFromConn_NilInputsAreNoop(t *testing.T) {
+// TestRecordOutboundAuthSuccess_ClearsRemoteIPBan pins the reviewer's P1
+// finding: when a reason=blacklisted notice has stored an IP-wide record
+// in remoteBannedIPs, a subsequent successful handshake with any peer on
+// that IP must drop the IP-wide entry. Clearing only the per-peer record
+// would leave the IP-wide gate suppressing every sibling PeerAddress
+// behind the same egress until the original window elapses, even though
+// the responder has demonstrated it is accepting us again.
+func TestRecordOutboundAuthSuccess_ClearsRemoteIPBan(t *testing.T) {
+	const peerAddr domain.PeerAddress = "203.0.113.181:64646"
+	const bannedIP = "203.0.113.181"
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 
-	// nil conn must bail before touching RemoteAddr.
-	svc.recordOutboundAuthSuccessFromConn("203.0.113.171:64646", nil)
+	// Seed an IP-wide remote-ban entry for the dialled host.
+	future := time.Now().UTC().Add(24 * time.Hour)
+	svc.remoteBannedIPs[bannedIP] = remoteIPBanEntry{
+		Until:  future,
+		Reason: string(protocol.PeerBannedReasonBlacklisted),
+	}
+	// persistedMeta is intentionally empty: the IP-wide record is
+	// independent of the per-peer row and must be cleared on its own.
 
-	// Empty address must bail before any write attempt.
-	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("203.0.113.172"), Port: 64646}}
-	svc.recordOutboundAuthSuccessFromConn("", conn)
+	svc.recordOutboundAuthSuccess(peerAddr, "203.0.113.181:64646")
 
-	if len(svc.persistedMeta) != 0 {
-		t.Fatalf("nil inputs must not mutate persistedMeta; got %d entries", len(svc.persistedMeta))
+	if _, ok := svc.remoteBannedIPs[bannedIP]; ok {
+		t.Fatalf("remoteBannedIPs[%q] must be cleared on successful handshake", bannedIP)
+	}
+}
+
+// TestRecordOutboundAuthSuccess_ClearsRemoteIPBanFreesSiblings is the
+// blast-radius companion: a successful handshake from ONE sibling
+// unblocks EVERY sibling behind the same IP. Before the fix the IP-wide
+// record would linger even after the per-peer record was cleared, so
+// siblings discovered later (or re-registered from peer exchange) would
+// keep getting skipped by the PeerProvider gate.
+func TestRecordOutboundAuthSuccess_ClearsRemoteIPBanFreesSiblings(t *testing.T) {
+	const sibling1 domain.PeerAddress = "198.51.100.55:64646"
+	const sibling2 domain.PeerAddress = "198.51.100.55:64647"
+	const bannedIP = "198.51.100.55"
+	svc := newAdvertiseTestService("203.0.113.10:64646")
+
+	future := time.Now().UTC().Add(12 * time.Hour)
+	svc.remoteBannedIPs[bannedIP] = remoteIPBanEntry{
+		Until:  future,
+		Reason: string(protocol.PeerBannedReasonBlacklisted),
+	}
+
+	// Pre-gate: sibling2 must be suppressed before we recover via sibling1.
+	if !svc.isPeerRemoteBannedLocked(sibling2, time.Now().UTC()) {
+		t.Fatalf("pre-condition: sibling2 must be suppressed by the IP-wide ban")
+	}
+
+	svc.recordOutboundAuthSuccess(sibling1, "198.51.100.55:64646")
+
+	if svc.isPeerRemoteBannedLocked(sibling2, time.Now().UTC()) {
+		t.Fatalf("sibling2 must no longer be suppressed after sibling1's handshake")
+	}
+	if _, ok := svc.remoteBannedIPs[bannedIP]; ok {
+		t.Fatalf("remoteBannedIPs[%q] must be cleared after sibling1's handshake", bannedIP)
+	}
+}
+
+// TestRecordOutboundAuthSuccess_PreservesPeerBanSiblingRows pins the
+// scope boundary between the two tables after a sibling handshake on
+// the same IP. reason=peer-ban and reason=blacklisted live in separate
+// tables by construction (per-peer vs. IP-wide), and IP-wide recovery
+// must touch ONLY the IP-wide table: a standalone peer-ban on another
+// address is an independent responder decision that a sibling handshake
+// cannot speak for. Without this guard, IP-wide recovery would silently
+// forgive a peer-specific ban the responder still enforces.
+func TestRecordOutboundAuthSuccess_PreservesPeerBanSiblingRows(t *testing.T) {
+	const (
+		peerA    domain.PeerAddress = "198.51.100.105:64646"
+		peerC    domain.PeerAddress = "198.51.100.105:64648"
+		bannedIP                    = "198.51.100.105"
+	)
+	svc := newAdvertiseTestService("203.0.113.10:64646")
+
+	future := time.Now().UTC().Add(12 * time.Hour)
+	svc.remoteBannedIPs[bannedIP] = remoteIPBanEntry{
+		Until:  future,
+		Reason: string(protocol.PeerBannedReasonBlacklisted),
+	}
+	// peerC has a STANDALONE per-peer ban (reason=peer-ban) from an
+	// earlier independent notice — not a mirror of the IP-wide record.
+	cUntil := future
+	svc.persistedMeta[peerC] = &peerEntry{
+		Address:           peerC,
+		RemoteBannedUntil: &cUntil,
+		RemoteBanReason:   string(protocol.PeerBannedReasonPeerBan),
+	}
+	svc.persistedMeta[peerA] = &peerEntry{Address: peerA}
+
+	svc.recordOutboundAuthSuccess(peerA, "198.51.100.105:64646")
+
+	if _, ok := svc.remoteBannedIPs[bannedIP]; ok {
+		t.Fatalf("remoteBannedIPs[%q] must be cleared by the handshake", bannedIP)
+	}
+	// peerC's standalone peer-ban must survive: handshake with a
+	// different sibling is not proof the responder accepts peerC.
+	entryC := svc.persistedMeta[peerC]
+	if entryC.RemoteBannedUntil == nil {
+		t.Fatalf("peerC standalone peer-ban must be preserved after sibling handshake")
+	}
+	if !entryC.RemoteBannedUntil.Equal(future) {
+		t.Fatalf("peerC RemoteBannedUntil must be unchanged, got %v (want %v)",
+			entryC.RemoteBannedUntil, future)
+	}
+	if entryC.RemoteBanReason != string(protocol.PeerBannedReasonPeerBan) {
+		t.Fatalf("peerC RemoteBanReason must stay %q, got %q",
+			protocol.PeerBannedReasonPeerBan, entryC.RemoteBanReason)
 	}
 }

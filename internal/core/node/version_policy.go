@@ -63,6 +63,17 @@ const (
 	// event. 60 seconds is well below the 24-hour observation TTL while
 	// keeping the cost negligible on the 2-second bootstrapLoop ticker.
 	versionPolicyRepairInterval = 60 * time.Second
+
+	// versionPolicyHeartbeatInterval bounds the time a subscriber may
+	// remain stale when a prior TopicVersionPolicyChanged publish was
+	// dropped by the lossy ebus (inbox full). Publisher-side dedup is
+	// unsafe without this heartbeat: if the first publish during a storm
+	// is dropped and content does not change for some other reason, the
+	// UI would stay stuck on the pre-storm snapshot indefinitely.
+	// Chosen equal to versionPolicyRepairInterval so the existing periodic
+	// repair path naturally doubles as the heartbeat driver — no extra
+	// ticker is needed.
+	versionPolicyHeartbeatInterval = versionPolicyRepairInterval
 )
 
 // ---------------------------------------------------------------------------
@@ -229,13 +240,40 @@ func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 		reason = domain.UpdateReasonNone
 	}
 
-	s.versionPolicy.snapshot = domain.VersionPolicySnapshot{
+	next := domain.VersionPolicySnapshot{
 		UpdateAvailable:              updateAvailable,
 		UpdateReason:                 reason,
 		IncompatibleVersionReporters: reporterCount,
 		MaxObservedPeerBuild:         maxBuild,
 		MaxObservedPeerVersion:       maxPeerVersion,
 	}
+
+	// Publisher-side no-op gate with heartbeat resync: during peer-disconnect
+	// storms this function is called many times with identical inputs (same
+	// reporter set, same peer builds). Every redundant publish forces Desktop
+	// to rebuild a full NodeStatus snapshot and invalidate every subscribed
+	// window, which is the proximate cause of the UI freeze after
+	// cm_session_setup_failed cascades. VersionPolicySnapshot has only
+	// comparable fields, so direct struct equality is sufficient.
+	//
+	// However, ebus is intentionally lossy: if a subscriber inbox is full,
+	// Publish drops the delivery to protect the publisher. Pure content-based
+	// dedup would then leave any subscriber that missed the initial publish
+	// permanently stale. The heartbeat (versionPolicyHeartbeatInterval) forces
+	// a retransmission on the bootstrapLoop's periodic repair tick even when
+	// content is unchanged, putting an upper bound on the time a subscriber
+	// may remain out of sync. First publish always fires unconditionally.
+	contentChanged := s.versionPolicy.snapshot != next
+	heartbeatDue := !s.lastVersionPolicyPublishAt.IsZero() &&
+		now.Sub(s.lastVersionPolicyPublishAt) >= versionPolicyHeartbeatInterval
+	firstPublish := s.lastVersionPolicyPublishAt.IsZero()
+
+	if !contentChanged && !heartbeatDue && !firstPublish {
+		return
+	}
+
+	s.versionPolicy.snapshot = next
+	s.lastVersionPolicyPublishAt = now
 
 	// Notify subscribers so the UI picks up version-policy changes without
 	// polling. Safe to call under s.mu — ebus uses its own mutex and async

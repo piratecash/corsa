@@ -11,20 +11,41 @@ import (
 // events. Continuous counters (BytesSent, BytesReceived) are delivered
 // separately via TopicPeerTrafficUpdated.
 //
-// Timestamp fields are *time.Time so that nil means "this delta does not
-// update the field" — distinguishing it from an explicit zero (reset).
-// This satisfies the domain rule: optional state must be visible from the
-// type, not guessed from a zero value.
+// Timestamp-pointer semantics differ by group — applyHealthDeltaToRow
+// enforces both conventions. Publishers populate these fields exclusively
+// through TimePtr (which collapses the zero time to nil), so the wire
+// format is effectively two-valued per pointer:
 //
-// Machine-readable diagnostic fields (BannedUntil, LastErrorCode,
-// LastDisconnectCode, IncompatibleVersionAttempts, LastIncompatibleVersionAt,
-// ObservedPeerVersion, ObservedPeerMinimumVersion, VersionLockoutActive) are
-// ebus-authoritative after NodeStatusMonitor switched to one-shot
-// FetchAndSeed() + event-driven updates. Every delta carries the complete
-// current value; a zero/nil field is an explicit signal that recovery or a
-// state change cleared it, not "unchanged". Subscribers must overwrite the
-// stored value even with zeros — backfilling from a stale probe snapshot
-// would resurrect a cleared ban.
+//  1. Activity timestamps — LastConnectedAt, LastDisconnectedAt, LastPingAt,
+//     LastPongAt, LastUsefulSendAt, LastUsefulReceiveAt:
+//     nil     = skip-field (subscriber does not touch the stored value)
+//     non-nil = overwrite the stored value via domain.TimeFromPtr.
+//     Publishers that want to preserve the field emit nil; partial deltas
+//     must carry only the fields that actually changed.
+//
+//  2. Diagnostic timestamps — BannedUntil, LastIncompatibleVersionAt:
+//     nil     = explicit clear (subscriber writes an invalid OptionalTime).
+//     non-nil = overwrite with the pointee.
+//     These fields are ebus-authoritative after NodeStatusMonitor switched
+//     to one-shot FetchAndSeed() + event-driven updates; every delta carries
+//     the complete current value, and resetPeerHealthForRecoveryLocked
+//     clearing a ban is signalled by nil.
+//
+// We deliberately use *time.Time here instead of domain.OptionalTime so
+// the activity-group can express "skip" without colliding with "clear" —
+// domain.OptionalTime only distinguishes Valid vs !Valid and would merge
+// those two intents. Do not "unify" this to domain.OptionalTime without
+// first introducing a separate boolean-per-field skip mask; otherwise a
+// probe-seeded activity timestamp will silently get zeroed on every
+// partial delta.
+//
+// Non-timestamp diagnostic fields (LastErrorCode, LastDisconnectCode,
+// IncompatibleVersionAttempts, ObservedPeerVersion,
+// ObservedPeerMinimumVersion, VersionLockoutActive) are also
+// ebus-authoritative: every delta carries the complete current value,
+// and a zero/empty field is an explicit reset, not "unchanged".
+// Subscribers must overwrite the stored value even with zeros —
+// backfilling from a stale probe snapshot would resurrect a cleared ban.
 type PeerHealthDelta struct {
 	Address             domain.PeerAddress
 	PeerID              domain.PeerIdentity
@@ -48,8 +69,9 @@ type PeerHealthDelta struct {
 	LastError           string
 
 	// Machine-readable diagnostic fields — ebus-authoritative.
-	// Optional timestamps use *time.Time so that nil carries the
-	// "explicitly cleared" signal from resetPeerHealthForRecoveryLocked.
+	// BannedUntil / LastIncompatibleVersionAt follow the diagnostic-group
+	// pointer convention documented on the struct: nil = explicit clear
+	// (written by applyHealthDeltaToRow unconditionally), non-nil = set.
 	BannedUntil                 *time.Time
 	LastErrorCode               string
 	LastDisconnectCode          string
@@ -71,11 +93,26 @@ func TimePtr(t time.Time) *time.Time {
 
 // ContactAddedEvent is the payload for TopicContactAdded.
 // Carries all fields so the receiver can upsert the contact locally.
+// Address is the peer identity (Ed25519 fingerprint) keying the trust
+// store — typed as domain.PeerIdentity so subscribers cannot confuse it
+// with a transport address and a reviewer reading the handler signature
+// sees the domain intent at a glance.
+//
+// Note: Bus.Publish takes ...interface{} and dispatches via reflection,
+// so the payload type alone does not prevent a caller from passing the
+// wrong argument at a publish site (the compiler accepts it; safeCall
+// will panic at runtime on a signature mismatch). Compile-time
+// enforcement at the publish boundary lives in the typed helper
+// PublishContactAdded — always use it instead of bus.Publish directly.
+//
+// The key fields use dedicated domain aliases so ebus subscribers and
+// publishers cannot accidentally swap a public key, box key, or binding
+// signature while still keeping the transport layer on raw strings.
 type ContactAddedEvent struct {
-	Address string
-	PubKey  string
-	BoxKey  string
-	BoxSig  string
+	Address domain.PeerIdentity
+	PubKey  domain.PeerPublicKey
+	BoxKey  domain.PeerBoxKey
+	BoxSig  domain.PeerBoxSignature
 }
 
 // MessageSentResult is the payload for TopicMessageSent.

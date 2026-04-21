@@ -115,15 +115,30 @@ func (s *Service) flushPeerState() {
 			})
 		}
 	}
+	// Snapshot remote IP-wide bans ("they banned our egress IP"),
+	// filtering out expired entries. Persisted so a blacklisted-reason
+	// peer-banned notice survives restart and the dialler does not
+	// resurrect the retry storm the notice was supposed to end.
+	var remoteBannedIPs []remoteBannedIPStateEntry
+	for ip, entry := range s.remoteBannedIPs {
+		if entry.Until.After(now) {
+			remoteBannedIPs = append(remoteBannedIPs, remoteBannedIPStateEntry{
+				IP:     ip,
+				Until:  entry.Until,
+				Reason: entry.Reason,
+			})
+		}
+	}
 	s.mu.Unlock()
 
 	sortPeerEntries(entries)
 	entries = trimPeerEntries(entries)
 
 	state := peerStateFile{
-		Version:   peerStateVersion,
-		Peers:     entries,
-		BannedIPs: bannedIPs,
+		Version:         peerStateVersion,
+		Peers:           entries,
+		BannedIPs:       bannedIPs,
+		RemoteBannedIPs: remoteBannedIPs,
 	}
 	if err := savePeerState(path, state); err != nil {
 		log.Error().Str("path", path).Err(err).Msg("peer state save failed")
@@ -716,7 +731,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// and routable) and abort this sync pass — the corrected advertise
 	// will be emitted on the next hello.
 	if welcome.Type == protocol.FrameTypeConnectionNotice {
-		s.handleConnectionNotice(welcome)
+		s.handleConnectionNotice(address, welcome)
 		log.Info().Str("peer", string(address)).Str("code", welcome.Code).Msg("sync_peer_connection_notice")
 		return 0
 	}
@@ -767,7 +782,12 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		// announce_state=announceable or a trusted advertise triple,
 		// so convergence state would depend on which outbound path
 		// happened to reach the peer.
-		s.recordOutboundAuthSuccessFromConn(address, conn)
+		//
+		// pc is the bootstrap *netcore.NetCore wrapper created above; its
+		// RemoteAddr() is the same "host:port" form that the managed-
+		// session path feeds in, so both paths project onto persistedMeta
+		// through one writer.
+		s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
 	}
 	s.learnIdentityFromWelcome(welcome)
 	s.mu.RLock()
@@ -831,7 +851,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
 				continue
 			}
-			s.addKnownIdentity(contact.Address)
+			s.addKnownIdentity(domain.PeerIdentity(contact.Address))
 			s.addKnownBoxKey(contact.Address, contact.BoxKey)
 			s.addKnownPubKey(contact.Address, contact.PubKey)
 			s.addKnownBoxSig(contact.Address, contact.BoxSig)
@@ -1066,8 +1086,11 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		hasPending := len(s.pending) > 0
 		s.mu.RUnlock()
 		if hasPending {
-			go s.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{
-				session.peerIdentity: {},
+			identity := session.peerIdentity
+			s.goBackground(func() {
+				s.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{
+					identity: {},
+				})
 			})
 		}
 	}
@@ -1181,66 +1204,59 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 		return protocol.ErrAuthRequired
 	}
 	session.authOK = true
-	s.recordOutboundAuthSuccess(session)
+	var remoteAddr string
+	if session.netCore != nil {
+		remoteAddr = session.netCore.RemoteAddr()
+	}
+	s.recordOutboundAuthSuccess(session.address, remoteAddr)
 	return nil
 }
 
-// recordOutboundAuthSuccess is the managed-session entry point for the
-// outbound convergence post-handshake hook. It unwraps the session-
-// owned conn and delegates to recordOutboundAuthSuccessFromConn, so
-// the session-based and raw/bootstrap paths share a single projection
-// onto persistedMeta — no path can silently skip announce_state
-// promotion or the misadvertise repay.
-func (s *Service) recordOutboundAuthSuccess(session *peerSession) {
-	if session == nil {
-		return
-	}
-	s.recordOutboundAuthSuccessFromConn(session.address, session.conn)
-}
-
-// recordOutboundAuthSuccessFromConn is the shared post-auth_ok writer
-// used by every outbound path that completes the handshake:
+// recordOutboundAuthSuccess is the shared post-auth_ok writer used by
+// every outbound path that completes the handshake:
 //   - the managed-session path via authenticatePeerSession
-//     (→ recordOutboundAuthSuccess → here),
+//     (passing session.netCore.RemoteAddr()),
 //   - the raw/bootstrap push_notice fallback in sendNoticeToPeer,
 //   - the legacy fresh-dial path in syncPeer (sender-key recovery,
-//     forced refresh).
+//     forced refresh; passing pc.RemoteAddr()).
 //
 // Consolidating all three through one writer prevents convergence
 // state from depending on which outbound path happened to reach the
 // peer first.
 //
-// It pulls the real TCP peer IP from the live connection's
-// RemoteAddr — NOT from peerAddress, which may carry a hostname for
-// DNS / manual bootstrap peers — and feeds the canonical (IP, port)
-// pair to recordOutboundConfirmed. A hostname reaching
-// TrustedAdvertiseIP would silently break the observed-IP downgrade
-// sweep that compares the field against canonical IPs from inbound
-// TCP endpoints.
+// remoteAddr is the "host:port" string as reported by the connection
+// wrapper (*netcore.NetCore.RemoteAddr()) — NOT from peerAddress, which
+// may carry a hostname for DNS / manual bootstrap peers. The raw TCP
+// host/port is extracted here and a canonical (IP, port) pair is fed to
+// recordOutboundConfirmed. A hostname reaching TrustedAdvertiseIP would
+// silently break the observed-IP downgrade sweep that compares the
+// field against canonical IPs from inbound TCP endpoints.
+//
+// Accepting a string (rather than net.Conn) keeps the helper out of
+// the frozen §2.6.26 net.Conn carve-out: this function is not a
+// boundary translator, does not create/destroy an (id, conn) binding
+// and does not evaluate pre-registration IP policy, so it has no right
+// to speak net.Conn in its signature.
 //
 // Side effects are gated on successfully deriving an IP:port pair.
-// If conn is nil, RemoteAddr is unavailable (unit tests), or the IP
-// is unparseable, nothing is written — auth itself is still
+// If remoteAddr is empty (unit tests, wrapper not yet published), or
+// the IP is unparseable, nothing is written — auth itself is still
 // considered OK by the caller.
-func (s *Service) recordOutboundAuthSuccessFromConn(peerAddress domain.PeerAddress, conn net.Conn) {
-	if peerAddress == "" || conn == nil {
+func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remoteAddr string) {
+	if peerAddress == "" || remoteAddr == "" {
 		return
 	}
-	ra := conn.RemoteAddr()
-	if ra == nil {
-		return
-	}
-	// rawBanIP is the key addBanScore stores under — raw host from
-	// net.SplitHostPort(RemoteAddr()), not the canonicalised form. The
+	// rawBanIP is the key addBanScore stores under — raw host from the
+	// wrapper's RemoteAddr() string, not the canonicalised form. The
 	// refund must look the peer up under the exact same key, otherwise
 	// hostname-based peers get their peer-level bucket refunded while
 	// their IP-level ban score silently accumulates toward banThreshold.
-	rawBanIP := domain.PeerIP(remoteIP(ra))
+	rawBanIP := domain.PeerIP(remoteIPFromString(remoteAddr))
 	dialedIP := canonicalIPFromHost(string(rawBanIP))
 	if dialedIP == "" {
 		return
 	}
-	_, dialedPort, ok := splitHostPort(ra.String())
+	_, dialedPort, ok := splitHostPort(remoteAddr)
 	if !ok || dialedPort == "" {
 		return
 	}
@@ -1251,9 +1267,47 @@ func (s *Service) recordOutboundAuthSuccessFromConn(peerAddress domain.PeerAddre
 	// the refund onto s.bans; empty rawBanIP (never happens here
 	// because canonicalIPFromHost already rejected it above) would
 	// only move the peer-level bucket.
+	//
+	// A successful handshake also clears any remote-ban window we had
+	// recorded against this peer: the responder just let us in, so the
+	// prior peer-banned notice is no longer authoritative. Without this
+	// clear, the PeerProvider.RemoteBannedFn gate would keep skipping
+	// the peer on subsequent passes even though it is now willing to
+	// talk to us — a stale suppression indistinguishable from the ebus
+	// storm the ban window was introduced to end.
+	//
+	// The clear is symmetric with record. handlePeerBannedNotice writes
+	// into exactly one table per notice (scope driven by reason), so
+	// recovery touches exactly two tables:
+	//   (a) clearRemoteBanLocked(peerAddress) drops THIS peer's own
+	//       per-peer record unconditionally — the handshake itself is
+	//       direct proof this address accepts us again, regardless of
+	//       which reason wrote the record;
+	//   (b) clearRemoteIPBanLocked(dialedIP) drops the IP-wide entry so
+	//       every sibling behind that egress IP is dialable again.
+	// No mirror walk is needed: reason=blacklisted writes ONLY the
+	// IP-wide entry, so there is no per-peer blacklisted row on other
+	// siblings to keep in sync. Per-peer rows with reason=peer-ban on
+	// other siblings are standalone responder decisions on specific
+	// addresses and must stay untouched — a handshake with a sibling
+	// is not proof the responder has forgiven them. dialedIP is the
+	// canonical form used by recordRemoteIPBanLocked, so (b) hashes
+	// into the same map key as the original write.
 	s.mu.Lock()
 	_ = s.repayMisadvertisePenaltyOnAuthLocked(peerAddress, rawBanIP)
+	remoteBanCleared := s.clearRemoteBanLocked(peerAddress)
+	remoteIPBanCleared := s.clearRemoteIPBanLocked(dialedIP)
 	s.mu.Unlock()
+	// Mirror handlePeerBannedNotice: flush immediately when any scope
+	// mutated so the cleared state survives a crash/restart. Without
+	// this, peers.json would be re-read with stale per-peer
+	// RemoteBannedUntil or remote_banned_ips entries and the gate would
+	// keep suppressing this peer (and any siblings behind the same IP)
+	// until the old window elapses, even though the responder has
+	// already accepted us.
+	if remoteBanCleared || remoteIPBanCleared {
+		s.flushPeerState()
+	}
 }
 
 func scorePeerTargetLocked(health *peerHealth) int64 {
@@ -1292,7 +1346,7 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 		}
 	}
 	if frame.Address != "" {
-		s.addKnownIdentity(frame.Address)
+		s.addKnownIdentity(domain.PeerIdentity(frame.Address))
 	}
 	// When all key fields are present, verify the box key binding before storing.
 	// If verification fails the keys are discarded; if any field is absent the
@@ -1885,7 +1939,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				// sending this notice (Status="closing"), so we record
 				// the observed IP and surface the sentinel error so the
 				// caller tears down the session.
-				s.handleConnectionNotice(incoming)
+				s.handleConnectionNotice(session.address, incoming)
 				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
 			}
 			if incoming.Type == "error" {
@@ -2005,7 +2059,7 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 		if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
 			continue
 		}
-		s.addKnownIdentity(contact.Address)
+		s.addKnownIdentity(domain.PeerIdentity(contact.Address))
 		s.addKnownBoxKey(contact.Address, contact.BoxKey)
 		s.addKnownPubKey(contact.Address, contact.PubKey)
 		s.addKnownBoxSig(contact.Address, contact.BoxSig)
@@ -2243,11 +2297,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// Track via backgroundWg so WaitBackground() blocks until disk
 		// I/O completes — prevents TempDir cleanup races in tests and
 		// data loss on shutdown.
-		s.backgroundWg.Add(1)
-		go func() {
-			defer s.backgroundWg.Done()
-			s.gossipTransitReceipt(receipt)
-		}()
+		s.goBackground(func() { s.gossipTransitReceipt(receipt) })
 		log.Debug().
 			Str("peer", string(address)).
 			Str("message_id", string(receipt.MessageID)).
@@ -2268,7 +2318,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			// entry is reaped or never populated (tests).
 			_ = s.sendSessionFrameViaNetwork(s.runCtx, session, reply)
 			if sub != nil {
-				go s.pushBacklogToSubscriber(sub)
+				s.goBackground(func() { s.pushBacklogToSubscriber(sub) })
 			}
 		}
 	case "announce_peer":
@@ -2964,12 +3014,13 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 
 	// Any per-peer state transition may shift the aggregate network status
 	// (e.g. the last usable peer going stalled moves aggregate from healthy
-	// to limited). Recompute and store the materialized snapshot so that
-	// policy helpers and the Desktop UI always see a consistent value.
-	s.refreshAggregateStatusLocked()
+	// to limited). Recompute, store the materialized snapshot, and publish
+	// TopicAggregateStatusChanged only when the semantic payload differs —
+	// the helper owns the no-op gate that keeps peer-storm bursts from
+	// stampeding the UI with byte-identical snapshots.
+	s.publishAggregateStatusChangedLocked()
 
 	s.emitPeerHealthDeltaLocked(health)
-	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, s.aggregateStatus)
 }
 
 // emitPeerHealthDeltaLocked publishes a full PeerHealthDelta for the given
@@ -3996,6 +4047,47 @@ func isNonRoutableIP(ip net.IP) bool {
 // guard applies only to the auto-learning / announce path.
 func isForbiddenAdvertisedIP(ip net.IP) bool {
 	return isNonRoutableIP(ip)
+}
+
+// isUnspecifiedIPHost reports whether the host string parses as the
+// IPv4/IPv6 wildcard bind (0.0.0.0 or ::). Text-based companion to
+// net.IP.IsUnspecified for call sites (advertise convergence) that
+// work on host strings and must stay off the `net` import so the
+// §2.9 Gate 12 whitelist does not grow.
+func isUnspecifiedIPHost(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsUnspecified()
+}
+
+// isNonRoutableIPHost parses host as an IP and reports whether it is
+// non-routable. Returns true for unparseable hosts as well — callers
+// use this predicate to gate "observed IP must be world-reachable";
+// a non-IP observation is, by definition, not a routable world-IP
+// and fails the gate the same way. Text-based companion to
+// isNonRoutableIP for call sites that must stay off the `net` import.
+func isNonRoutableIPHost(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return true
+	}
+	return isNonRoutableIP(ip)
+}
+
+// isIPHost reports whether host parses as a valid IP literal (IPv4
+// or IPv6). Returns false for hostnames, .onion and empty input —
+// callers use this to distinguish IP-form advertises from name-form
+// ones without importing `net` outside the Gate 12 whitelist.
+func isIPHost(host string) bool {
+	return net.ParseIP(strings.TrimSpace(host)) != nil
+}
+
+// joinHostPort is the text-only wrapper over net.JoinHostPort.
+// advertise_convergence.go composes self-advertise endpoints and
+// must not import `net` itself (§2.9 Gate 12 whitelist); routing it
+// through this helper keeps the call site expressive while the
+// `net` import stays contained.
+func joinHostPort(host, port string) string {
+	return net.JoinHostPort(host, port)
 }
 
 func inCIDR(ip net.IP, cidr string) bool {

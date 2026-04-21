@@ -307,15 +307,27 @@ func TestVersionLockout_NotClearedWhenSameVersion(t *testing.T) {
 // Ban escalation tests
 // ---------------------------------------------------------------------------
 
+// TestBanIncrementIncompatibleVersion_IsNotImmediate pins the transport-level
+// constant below banThreshold so a single incompatible hello never arms the
+// 24-hour IP-wide blacklist on its own. NAT gateways, VPN exits, Tor exits
+// and multi-homed hosts share an egress IP across many peers — punishing
+// compatible siblings for one misconfigured neighbour is a wider blast
+// radius than a one-off protocol mismatch justifies. The storm-suppression
+// signal the dialler needs is delivered per-peer by the peer-banned notice
+// emitted on first contact from the incompatible-hello branch; the
+// transport-level accumulation here is only the safety net for sustained
+// noise from the same IP (4 attempts cross the threshold and silently lock
+// the IP for 24 h via handleConn).
 func TestBanIncrementIncompatibleVersion_IsNotImmediate(t *testing.T) {
 	t.Parallel()
 
 	if banIncrementIncompatibleVersion >= banThreshold {
-		t.Errorf("banIncrementIncompatibleVersion = %d, should be < banThreshold (%d)",
+		t.Errorf("banIncrementIncompatibleVersion = %d, must be < banThreshold (%d) so a single incompatible hello never blacklists the remote IP — per-peer storm suppression is delivered by connection_notice{reason=peer-ban}, not by the IP-wide hammer",
 			banIncrementIncompatibleVersion, banThreshold)
 	}
 	if banIncrementIncompatibleVersion != 250 {
-		t.Errorf("banIncrementIncompatibleVersion = %d, want 250", banIncrementIncompatibleVersion)
+		t.Errorf("banIncrementIncompatibleVersion = %d, want 250 — pin the value exactly to preserve the 4-attempt safety net before the IP-wide blacklist arms",
+			banIncrementIncompatibleVersion)
 	}
 }
 

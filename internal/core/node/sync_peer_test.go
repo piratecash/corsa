@@ -521,7 +521,7 @@ func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
 // hello → welcome → auth_session → auth_ok exchange as the managed
 // outbound session (authenticatePeerSession) and the raw/bootstrap
 // push_notice path in sendNoticeToPeer, so it must funnel success
-// through the same recordOutboundAuthSuccessFromConn helper. Before
+// through the same recordOutboundAuthSuccess helper. Before
 // the fix the legacy path returned straight from its inline
 // auth_session/auth_ok exchange without calling that helper: as a
 // result peers reached only through sender-key recovery / forced

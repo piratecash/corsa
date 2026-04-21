@@ -39,6 +39,15 @@ const (
 	// connection immediately after sending the notice — welcome is not
 	// issued, auth_session is not expected.
 	ErrCodeObservedAddressMismatch = "observed-address-mismatch"
+
+	// ErrCodePeerBanned is returned by the responder when the inbound peer
+	// is on the local ban list (IP-wide blacklist or per-peer timed ban).
+	// Used only inside type="connection_notice" frames; Details carries a
+	// machine-readable expiration so the dialler can mirror the ban and
+	// stop redialling until it lifts, instead of treating the rejection
+	// as a generic handshake failure and hammering the bouncer. The
+	// responder closes the connection immediately after the notice.
+	ErrCodePeerBanned = "peer-banned"
 )
 
 var (
@@ -74,6 +83,11 @@ var (
 	// ErrObservedAddressMismatch is the sentinel for ErrCodeObservedAddressMismatch.
 	// Callers detect a pre-welcome advertise-address rejection via errors.Is.
 	ErrObservedAddressMismatch = errors.New(ErrCodeObservedAddressMismatch)
+	// ErrPeerBanned is the sentinel for ErrCodePeerBanned. Callers use
+	// errors.Is to distinguish a ban-rejection from other pre-welcome
+	// failures so that the dialler can honour the carried expiration
+	// instead of applying the generic incompatible-version penalty flow.
+	ErrPeerBanned = errors.New(ErrCodePeerBanned)
 )
 
 func ErrorCode(err error) string {
@@ -138,6 +152,8 @@ func ErrorCode(err error) string {
 		return ErrCodeSenderIdentityNotVerified
 	case errors.Is(err, ErrObservedAddressMismatch):
 		return ErrCodeObservedAddressMismatch
+	case errors.Is(err, ErrPeerBanned):
+		return ErrCodePeerBanned
 	default:
 		return ErrCodeProtocol
 	}
@@ -203,6 +219,8 @@ func ErrorFromCode(code string) error {
 		return ErrSenderIdentityNotVerified
 	case ErrCodeObservedAddressMismatch:
 		return ErrObservedAddressMismatch
+	case ErrCodePeerBanned:
+		return ErrPeerBanned
 	default:
 		return ErrProtocol
 	}

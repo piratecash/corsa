@@ -337,14 +337,40 @@ func (cm *ConnectionManager) EmitHint(event HintEvent) {
 	}
 }
 
-// emitSlotStateChanged publishes the slot state transition to the event bus.
-// Called from the single-threaded event loop after slot.State is updated.
+// emitSlotStateChanged publishes a slot state transition on
+// TopicSlotStateChanged. Called from the single-threaded event loop after
+// slot.State is updated.
+//
+// Publisher-side dedup is intentionally NOT applied here even though the
+// retry / reconnect / eviction paths can re-enter the same slotState for
+// the same address (e.g. two consecutive failures both landing in
+// slotStateRetryWait). The reason is that ebus delivery is lossy — if a
+// subscriber inbox is full, Publish drops the event rather than block.
+// A publisher-side memo would treat the dropped publish as delivered and
+// suppress all subsequent byte-identical emissions, leaving the subscriber
+// permanently stale. Slot-state transitions are inherently distinct moments
+// in the connection lifecycle, so emitting them unconditionally is the
+// safe default; any accidental duplication is bounded by the cardinality
+// of the state machine and by the downstream delta filter in
+// NodeStatusMonitor.applySlotStateDelta.
+//
 // Safe: ebus.Publish is non-blocking and uses its own mutex.
 func (cm *ConnectionManager) emitSlotStateChanged(address domain.PeerAddress, state slotState) {
 	if cm.config.EventBus == nil {
 		return
 	}
 	cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, address, state.String())
+}
+
+// emitSlotRemoved publishes the "slot removed" signal (empty state string)
+// for an address on TopicSlotStateChanged. Equivalent to a direct
+// EventBus.Publish; kept as a helper only to localize the nil-bus guard
+// and keep call sites uniform with emitSlotStateChanged.
+func (cm *ConnectionManager) emitSlotRemoved(address domain.PeerAddress) {
+	if cm.config.EventBus == nil {
+		return
+	}
+	cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, address, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -610,8 +636,8 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 	cm.mu.Unlock()
 
 	// Emit slot events outside the lock: eviction (removal) then new dial.
-	if evictedAddr != "" && cm.config.EventBus != nil {
-		cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, evictedAddr, "")
+	if evictedAddr != "" {
+		cm.emitSlotRemoved(evictedAddr)
 	}
 	cm.emitSlotStateChanged(ev.Address, slotStateDialing)
 
@@ -700,9 +726,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 			cm.mu.Unlock()
 
 			// Slot removed — emit empty state so subscribers clear the peer.
-			if cm.config.EventBus != nil {
-				cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, addr, "")
-			}
+			cm.emitSlotRemoved(addr)
 
 			if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 				cm.config.OnSessionTeardown(*teardownInfo)
@@ -799,9 +823,7 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		cm.mu.Unlock()
 
 		// Slot removed — emit empty state so subscribers clear the peer.
-		if cm.config.EventBus != nil {
-			cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, replacedAddr, "")
-		}
+		cm.emitSlotRemoved(replacedAddr)
 
 		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 			cm.config.OnSessionTeardown(*teardownInfo)
@@ -1044,10 +1066,8 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 
 	// Emit slot-removed events outside the lock so subscribers see the
 	// peer disappear from CM tracking. Empty state signals removal.
-	if cm.config.EventBus != nil {
-		for _, addr := range evictedAddrs {
-			cm.config.EventBus.Publish(ebus.TopicSlotStateChanged, addr, "")
-		}
+	for _, addr := range evictedAddrs {
+		cm.emitSlotRemoved(addr)
 	}
 
 	// Invoke teardown callbacks outside the lock.

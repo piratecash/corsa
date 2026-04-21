@@ -41,6 +41,24 @@ type peerEntry struct {
 	// differs from the running node (protocol version or client build increased).
 	VersionLockout domain.VersionLockoutSnapshot `json:"version_lockout,omitempty"`
 
+	// RemoteBannedUntil is the expiration of a ban communicated to us by
+	// the remote peer via a connection_notice{code=peer-banned}. Kept
+	// separate from BannedUntil (which is "we banned them") because the
+	// two directions have different reconciliation semantics: the local
+	// ban is our policy, the remote ban is a hint we honour to avoid
+	// hammering a bouncer that already told us it will reject us. The
+	// value is trusted as-is from the remote — if the peer refuses us
+	// for a very long window, we record that window exactly rather than
+	// capping it. A zero/absent remote until falls back to
+	// peerBanIncompatible (see normalizeRemoteBanUntil). Cleared on
+	// successful handshake with the same address.
+	RemoteBannedUntil *time.Time `json:"remote_banned_until,omitempty"`
+	// RemoteBanReason mirrors the PeerBannedReason string carried on the
+	// wire. Advisory only — gating uses RemoteBannedUntil. Useful in
+	// diagnostics so operators can tell "peer said blacklisted" from
+	// "peer said peer-ban".
+	RemoteBanReason string `json:"remote_ban_reason,omitempty"`
+
 	// --- advertise-address convergence state ---
 	//
 	// AnnounceState is the persisted gate for peer announce. "direct_only"
@@ -101,11 +119,25 @@ type bannedIPStateEntry struct {
 	AffectedPeers []string  `json:"affected_peers,omitempty"` // addresses on this IP at ban time; survives top-500 trim
 }
 
+// remoteBannedIPStateEntry is the on-disk representation of an IP-wide
+// ban communicated TO us by a remote responder (reason=blacklisted
+// peer-banned notice). Kept in its own bucket — separate from
+// bannedIPStateEntry ("we banned them") — so direction remains explicit
+// across reload: mixing the two would let a reload treat "they refuse
+// our egress IP" as "we refuse their server IP" and mis-attribute
+// offenders in diagnostics.
+type remoteBannedIPStateEntry struct {
+	IP     string    `json:"ip"`
+	Until  time.Time `json:"until"`
+	Reason string    `json:"reason,omitempty"`
+}
+
 type peerStateFile struct {
-	Version   int                  `json:"version"`
-	UpdatedAt time.Time            `json:"updated_at"`
-	Peers     []peerEntry          `json:"peers"`
-	BannedIPs []bannedIPStateEntry `json:"banned_ips,omitempty"`
+	Version         int                        `json:"version"`
+	UpdatedAt       time.Time                  `json:"updated_at"`
+	Peers           []peerEntry                `json:"peers"`
+	BannedIPs       []bannedIPStateEntry       `json:"banned_ips,omitempty"`
+	RemoteBannedIPs []remoteBannedIPStateEntry `json:"remote_banned_ips,omitempty"`
 }
 
 // announceState is the closed enum for peerEntry.AnnounceState and for

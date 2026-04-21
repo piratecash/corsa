@@ -273,10 +273,10 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		if m.status.Contacts == nil {
 			m.status.Contacts = make(map[string]Contact)
 		}
-		m.status.Contacts[c.Address] = Contact{
-			PubKey:       c.PubKey,
-			BoxKey:       c.BoxKey,
-			BoxSignature: c.BoxSig,
+		m.status.Contacts[string(c.Address)] = Contact{
+			PubKey:       string(c.PubKey),
+			BoxKey:       string(c.BoxKey),
+			BoxSignature: string(c.BoxSig),
 		}
 		m.mu.Unlock()
 
@@ -284,16 +284,17 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 	})
 
 	// Contact removed — delete from local map.
-	m.eventBus.Subscribe(ebus.TopicContactRemoved, func(address string) {
+	m.eventBus.Subscribe(ebus.TopicContactRemoved, func(identity domain.PeerIdentity) {
 		m.mu.Lock()
-		delete(m.status.Contacts, address)
+		delete(m.status.Contacts, string(identity))
 		m.mu.Unlock()
 
 		m.onChanged()
 	})
 
 	// New identity discovered — append to local list.
-	m.eventBus.Subscribe(ebus.TopicIdentityAdded, func(address string) {
+	m.eventBus.Subscribe(ebus.TopicIdentityAdded, func(identity domain.PeerIdentity) {
+		address := string(identity)
 		m.mu.Lock()
 		found := false
 		for _, id := range m.status.KnownIDs {
