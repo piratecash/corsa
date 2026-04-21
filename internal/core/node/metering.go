@@ -3,6 +3,8 @@ package node
 import (
 	"sort"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/netcore"
@@ -143,7 +145,10 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 		Connected bool
 	}
 
+	log.Trace().Msg("network_stats_frame_begin")
+	log.Trace().Msg("network_stats_frame_before_rlock")
 	s.mu.RLock()
+	log.Trace().Msg("network_stats_frame_rlock_acquired")
 	live := s.liveTrafficLocked()
 
 	healthSnaps := make([]healthSnap, 0, len(s.health))
@@ -161,6 +166,7 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 		peerAddrs[i] = p.Address
 	}
 	s.mu.RUnlock()
+	log.Trace().Int("health_count", len(healthSnaps)).Int("peer_count", len(peerAddrs)).Msg("network_stats_frame_rlock_released")
 
 	// Build traffic frames from snapshots — no lock held.
 	var totalSent, totalReceived int64
@@ -236,6 +242,8 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 		KnownPeers:         len(knownSet),
 		PeerTraffic:        peerTraffic,
 	}
+
+	log.Trace().Int("connected", connectedCount).Int("known", len(knownSet)).Msg("network_stats_frame_end")
 
 	return protocol.Frame{
 		Type:         "network_stats",

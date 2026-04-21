@@ -1511,12 +1511,17 @@ func (s *Service) observedAnnounceAddressFromHello(observedAddr string, hello pr
 func (s *Service) announcePeerToSessions(peerAddress, nodeType string) {
 	defer crashlog.DeferRecover()
 
+	log.Trace().Str("peer", peerAddress).Str("node_type", nodeType).Msg("announce_peer_to_sessions_begin")
+
+	log.Trace().Str("peer", peerAddress).Msg("announce_peer_to_sessions_before_rlock")
 	s.mu.RLock()
+	log.Trace().Str("peer", peerAddress).Msg("announce_peer_to_sessions_rlock_acquired")
 	sessions := make([]*peerSession, 0, len(s.sessions))
 	for _, session := range s.sessions {
 		sessions = append(sessions, session)
 	}
 	s.mu.RUnlock()
+	log.Trace().Str("peer", peerAddress).Int("sessions", len(sessions)).Msg("announce_peer_to_sessions_rlock_released")
 
 	frame := protocol.Frame{
 		Type:     "announce_peer",

@@ -312,15 +312,20 @@ func (s *Service) inboundConnKeyForID(id domain.ConnID) domain.PeerAddress {
 // next announce cycle can compute a meaningful delta instead of
 // re-sending the full table.
 func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, peerIdentity domain.PeerIdentity) {
+	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", string(peerIdentity)).Msg("send_full_table_sync_inbound_begin")
 	if peerIdentity == "" {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("send_full_table_sync_inbound_no_identity")
 		return
 	}
 	if s.Network().RemoteAddr(id) == "" {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("send_full_table_sync_inbound_conn_gone")
 		return
 	}
 
 	sendAddr := s.inboundConnKeyForID(id)
+	log.Trace().Uint64("conn_id", uint64(id)).Str("send_addr", string(sendAddr)).Msg("send_full_table_sync_inbound_before_connect_time")
 	s.sendConnectTimeFullSync(peerIdentity, sendAddr)
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("send_full_table_sync_inbound_end")
 }
 
 // sendOutboundFullTableSync sends the current routing table to an outbound
@@ -340,12 +345,14 @@ func (s *Service) sendOutboundFullTableSync(peerIdentity domain.PeerIdentity, ad
 // without sending a wire frame — the protocol is additive so an empty
 // table needs no explicit announcement.
 func (s *Service) sendConnectTimeFullSync(peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
+	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Msg("connect_time_full_sync_begin")
 	routes := s.routingTable.AnnounceTo(peerIdentity)
 	snapshot := routing.BuildAnnounceSnapshot(routes)
 	registry := s.announceLoop.StateRegistry()
 
 	now := registry.Clock()
 	peerState := registry.GetOrCreate(peerIdentity)
+	log.Trace().Str("peer_identity", string(peerIdentity)).Int("entries", len(snapshot.Entries)).Msg("connect_time_full_sync_snapshot_built")
 
 	if len(snapshot.Entries) == 0 {
 		// No routes to send, but register the empty baseline so that future
@@ -362,7 +369,10 @@ func (s *Service) sendConnectTimeFullSync(peerIdentity domain.PeerIdentity, addr
 
 	peerState.RecordFullSyncAttempt(now)
 
-	if !s.SendAnnounceRoutes(address, snapshot.Entries) {
+	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Int("routes", len(snapshot.Entries)).Msg("connect_time_full_sync_before_send")
+	sendOk := s.SendAnnounceRoutes(address, snapshot.Entries)
+	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Bool("sent", sendOk).Msg("connect_time_full_sync_after_send")
+	if !sendOk {
 		log.Warn().
 			Str("peer", string(peerIdentity)).
 			Str("address", string(address)).
@@ -372,6 +382,7 @@ func (s *Service) sendConnectTimeFullSync(peerIdentity domain.PeerIdentity, addr
 	}
 
 	peerState.RecordFullSyncSuccess(snapshot, now)
+	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Msg("connect_time_full_sync_end")
 }
 
 // handleAnnounceRoutes processes an incoming announce_routes frame from a

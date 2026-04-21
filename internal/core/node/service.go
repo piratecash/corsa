@@ -1948,6 +1948,12 @@ func isP2PWireCommand(cmd string) bool {
 }
 
 func (s *Service) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
+	log.Trace().
+		Str("protocol", "json/local").
+		Str("addr", "local").
+		Str("direction", "recv").
+		Str("command", frame.Type).
+		Msg("local_frame_dispatch_begin")
 	resp := s.handleLocalFrameDispatch(frame)
 	accepted := resp.Type != "error"
 	log.Trace().
@@ -2562,16 +2568,23 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 // surface (RemoteAddr(id) returns "" for an unregistered ConnID, which is
 // what learnPeerFromFrame already tolerates).
 func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (protocol.Frame, bool) {
+	// Trace checkpoints along this function share conn_id as the
+	// correlation key so the inbound-auth arc can be reconstructed from
+	// interleaved goroutine logs (announce + full-sync are spawned async).
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_begin")
+
 	state := s.connAuthStateByID(id)
 	verified, reply, ok := connauth.VerifyAuthSession(state, frame)
 	if !ok {
 		if reply.Code == protocol.ErrCodeInvalidAuthSignature {
 			s.addBanScore(id, banIncrementInvalidSig)
 		}
+		log.Trace().Uint64("conn_id", uint64(id)).Str("reply_code", reply.Code).Msg("handle_auth_session_verify_failed")
 		return reply, false
 	}
 	// Already verified — idempotent re-auth returns success immediately.
 	if state != nil && state.Verified {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_idempotent")
 		return reply, true
 	}
 
@@ -2581,8 +2594,13 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	// returns "" for an unregistered ConnID — learnPeerFromFrame tolerates
 	// that, and registerHelloRoute treats it as a silent no-op.
 	remoteAddr := s.Network().RemoteAddr(id)
+	log.Trace().Uint64("conn_id", uint64(id)).Str("remote_addr", remoteAddr).Str("hello_listen", verified.Hello.Listen).Str("peer_identity", verified.Hello.Address).Msg("handle_auth_session_verified")
+
 	s.learnPeerFromFrame(remoteAddr, verified.Hello)
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_after_learn")
+
 	s.registerHelloRoute(id, verified.Hello)
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_after_register_route")
 
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
@@ -2596,10 +2614,20 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	// an ephemeral NAT mapping that no neighbour could dial into.
 	if announceAddr, ok := s.observedAnnounceAddressFromHello(remoteAddr, verified.Hello); ok && classifyAddress(announceAddr) != domain.NetGroupLocal {
 		nodeType := verified.Hello.NodeType
-		s.goBackground(func() { s.announcePeerToSessions(string(announceAddr), nodeType) })
+		connID := id
+		log.Trace().Uint64("conn_id", uint64(connID)).Str("announce_addr", string(announceAddr)).Msg("handle_auth_session_announce_spawn")
+		s.goBackground(func() {
+			log.Trace().Uint64("conn_id", uint64(connID)).Str("announce_addr", string(announceAddr)).Msg("announce_goroutine_begin")
+			s.announcePeerToSessions(string(announceAddr), nodeType)
+			log.Trace().Uint64("conn_id", uint64(connID)).Str("announce_addr", string(announceAddr)).Msg("announce_goroutine_end")
+		})
+	} else {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_announce_skipped")
 	}
 
 	if addr := s.inboundPeerAddress(id); addr != "" {
+		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_inbound_addr")
+
 		// Log duplicate but allow: see the hello-path comment for the
 		// full rationale — rejecting breaks one-way gossip when both
 		// sides dial simultaneously.
@@ -2607,7 +2635,9 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
 		s.addPeerID(addr, domain.PeerIdentity(verified.Hello.Address))
+		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_begin")
 		s.trackInboundConnect(id, addr, domain.PeerIdentity(verified.Hello.Address))
+		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_end")
 		s.addPeerVersion(addr, verified.Hello.ClientVersion)
 		s.addPeerBuild(addr, verified.Hello.ClientBuild)
 
@@ -2628,8 +2658,11 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 			core.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
 			core.SetAddress(addr)
 		}
+	} else {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_no_inbound_addr")
 	}
 
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_end")
 	return reply, true
 }
 
@@ -2806,17 +2839,24 @@ func (s *Service) trackedInboundPeerAddress(id domain.ConnID) domain.PeerAddress
 // from the hello/auth frame — used for routing table registration instead
 // of the transport address.
 func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddress, peerIdentity domain.PeerIdentity) {
+	log.Trace().Uint64("conn_id", uint64(id)).Str("address", string(address)).Str("peer_identity", string(peerIdentity)).Msg("track_inbound_connect_begin")
+
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_before_lock")
 	s.mu.Lock()
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_lock_acquired")
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
 	s.inboundHealthRefs[resolved]++
 	s.setTrackedByIDLocked(id, true)
 	s.mu.Unlock()
+	log.Trace().Uint64("conn_id", uint64(id)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect_lock_released")
 
 	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
 
 	if first {
+		log.Trace().Uint64("conn_id", uint64(id)).Str("resolved", string(resolved)).Msg("track_inbound_connect_before_mark_connected")
 		s.markPeerConnected(resolved, peerDirectionInbound)
+		log.Trace().Uint64("conn_id", uint64(id)).Str("resolved", string(resolved)).Msg("track_inbound_connect_after_mark_connected")
 	}
 
 	// Downstream helpers (connHasCapability, sendFullTableSyncToInbound,
@@ -2826,13 +2866,16 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	// tied to a live connection. The empty-RemoteAddr probe is the
 	// ConnID-first equivalent of the prior *netcore.NetCore nil-guard.
 	if s.Network().RemoteAddr(id) == "" {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_conn_gone")
 		return
 	}
 
 	// Routing table: register direct peer using the identity fingerprint,
 	// not the transport address. The relay capability flag ensures only
 	// peers that can accept relay_message become direct routes.
+	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", string(peerIdentity)).Msg("track_inbound_connect_before_on_peer_session")
 	s.onPeerSessionEstablished(peerIdentity, s.connHasCapability(id, domain.CapMeshRelayV1))
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_after_on_peer_session")
 
 	// Send full table sync to the inbound peer (Phase 1.2: full sync on
 	// connect, symmetric with the outbound path).
@@ -2848,10 +2891,15 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	// on the same conn. AnnouncePeerState is thread-safe and sendCacheFn
 	// already guards cache mutation with its own mutex.
 	if s.connHasCapability(id, domain.CapMeshRoutingV1) && s.connHasCapability(id, domain.CapMeshRelayV1) {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_full_sync_spawn")
 		go func() {
 			defer crashlog.DeferRecover()
+			log.Trace().Uint64("conn_id", uint64(id)).Msg("full_sync_goroutine_begin")
 			s.sendFullTableSyncToInbound(id, peerIdentity)
+			log.Trace().Uint64("conn_id", uint64(id)).Msg("full_sync_goroutine_end")
 		}()
+	} else {
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_full_sync_skipped")
 	}
 
 	// Drain fire-and-forget frames (push_message, push_notice) that were
@@ -2860,7 +2908,9 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	// conn can carry these frames. Only fire-and-forget frames are safe to
 	// send on the inbound conn because they don't expect a response that
 	// would interleave with the peer's request/reply traffic.
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_before_flush_ff")
 	s.flushPendingFireAndForget(id, resolved)
+	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_end")
 }
 
 // trackInboundDisconnect decrements the inbound connection reference count
