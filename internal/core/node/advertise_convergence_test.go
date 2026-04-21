@@ -40,11 +40,19 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
+			// Pre-v11 peer with no explicit listener flag AND no usable
+			// listen string: falls to legacy_direct (accept, direct_only)
+			// because we cannot claim the peer is a listener without an
+			// explicit Listener="1" flag and without a usable listen
+			// endpoint. Under v11 an explicit Listener="1" with the same
+			// world-routable observed IP would instead produce `match` —
+			// that path is covered by match_after_canonicalisation /
+			// world_routable_observed_overrides_listen_host below.
 			name:        "legacy_direct_no_listen",
 			observedTCP: "203.0.113.11:45123",
 			frame: protocol.Frame{
 				Type:     "hello",
-				Listener: "1",
+				Listener: "",
 				Listen:   "",
 			},
 			wantDecision:      advertiseDecisionLegacyDirect,
@@ -52,11 +60,15 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
+			// Pre-v11 peer with wildcard bind in hello.listen and no
+			// explicit listener flag. usableListen rejects 0.0.0.0 as a
+			// dial target, and without Listener="1" we cannot promote
+			// the peer to announceable — the branch falls to legacy_direct.
 			name:        "legacy_direct_wildcard_bind",
 			observedTCP: "203.0.113.12:45123",
 			frame: protocol.Frame{
 				Type:     "hello",
-				Listener: "1",
+				Listener: "",
 				Listen:   "0.0.0.0:64646",
 			},
 			wantDecision:      advertiseDecisionLegacyDirect,
@@ -88,45 +100,57 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			name:        "world_mismatch_different_world_ips",
+			// v11 contract: hello.listen is no longer a truth input.
+			// The observed IP is world-routable, so the decision is
+			// match and the runtime NEVER rejects on this difference
+			// nor emits a connection_notice. The pre-v11 matrix
+			// classified this case as world_mismatch; we keep the
+			// test name and assert the v11 outcome.
+			name:        "world_routable_observed_overrides_listen_host",
 			observedTCP: "203.0.113.15:45123",
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "1",
 				Listen:   "198.51.100.99:64646",
 			},
-			wantDecision:      advertiseDecisionWorldMismatch,
-			wantShouldReject:  true,
-			wantNoticePresent: true,
-			wantAnnounceState: announceStateDirectOnly,
-			wantWriteMode:     persistWriteModeUpdateExisting,
+			wantDecision:      advertiseDecisionMatch,
+			wantAnnounceState: announceStateAnnounceable,
+			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			name:        "world_mismatch_advertise_private_observed_public",
+			// v11: peer claiming a private range in hello.listen
+			// while coming in on a world-routable observed IP is
+			// still announceable — the observed IP wins. Old code
+			// rejected on "world mismatch"; the runtime no longer
+			// uses hello.listen as truth, so no reject / no notice.
+			name:        "world_routable_observed_with_private_listen_is_match",
 			observedTCP: "203.0.113.16:45123",
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "1",
 				Listen:   "10.0.0.7:64646",
 			},
-			wantDecision:      advertiseDecisionWorldMismatch,
-			wantShouldReject:  true,
-			wantNoticePresent: true,
-			wantAnnounceState: announceStateDirectOnly,
-			wantWriteMode:     persistWriteModeUpdateExisting,
+			wantDecision:      advertiseDecisionMatch,
+			wantAnnounceState: announceStateAnnounceable,
+			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			name:        "invalid_unparseable_observed",
+			// v11: an unparseable observed TCP address falls to
+			// local_exception rather than invalid-reject. We accept
+			// the handshake but never learn a candidate — the
+			// non-IP transport case stays compatible with the
+			// advertise-learning contract (no observed-IP rewrite
+			// for non-IP transports).
+			name:        "unparseable_observed_is_local_exception",
 			observedTCP: "not-a-host:port",
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "1",
 				Listen:   "203.0.113.17:64646",
 			},
-			wantDecision:      advertiseDecisionInvalid,
-			wantShouldReject:  true,
-			wantAnnounceState: announceStateUnset,
-			wantWriteMode:     persistWriteModeSkip,
+			wantDecision:      advertiseDecisionLocalException,
+			wantAnnounceState: announceStateDirectOnly,
+			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 	}
 
@@ -575,25 +599,46 @@ func TestValidateAdvertisedAddress_IPv6Mapped(t *testing.T) {
 	}
 }
 
-// TestValidateAdvertisedAddress_ForbiddenAdvertise verifies that a
-// world-reachable observed address combined with a non-routable
-// advertise (e.g. peer claiming 10.0.0.7) is classified as
-// world_mismatch and rejected. No peer should be able to poison us into
-// announcing a private-range address.
-func TestValidateAdvertisedAddress_ForbiddenAdvertise(t *testing.T) {
+// TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored pins the
+// v11 contract for the "peer claims a private range in hello.listen"
+// case. Before phase 1 deprecation this triggered world_mismatch with a
+// reject + connection_notice, on the theory that accepting the peer
+// would poison us into announcing a private-range address. Under v11
+// hello.listen is not a truth input at all: the announce candidate is
+// derived from the observed TCP IP exclusively, so a malicious / buggy
+// hello.listen cannot poison the candidate. The runtime path accepts
+// the handshake, records announceable against the OBSERVED IP, and
+// never emits the reject notice. NormalizedAdvertisedIP mirrors the
+// observed IP — not the forbidden one claimed in hello.listen — which
+// is what keeps the trusted advertise triple clean.
+func TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored(t *testing.T) {
 	result := validateAdvertisedAddress("203.0.113.60:45123", protocol.Frame{
-		Type:     "hello",
-		Listener: "1",
-		Listen:   "10.0.0.7:64646",
+		Type:          "hello",
+		Listener:      "1",
+		Listen:        "10.0.0.7:64646",
+		AdvertisePort: domain.PeerPort(64646),
 	})
-	if result.Decision != advertiseDecisionWorldMismatch {
-		t.Fatalf("expected world_mismatch, got %q", result.Decision)
+	if result.Decision != advertiseDecisionMatch {
+		t.Fatalf("expected match (v11 ignores hello.listen as truth), got %q", result.Decision)
 	}
-	if !result.ShouldReject {
-		t.Fatalf("world_mismatch must set ShouldReject")
+	if result.ShouldReject {
+		t.Fatalf("v11 must NEVER set ShouldReject: private-range hello.listen is ignored, not rejected")
 	}
-	if result.RejectNotice == nil {
-		t.Fatalf("world_mismatch must carry a RejectNotice")
+	if result.RejectNotice != nil {
+		t.Fatalf("v11 must NEVER emit a connection_notice on advertise mismatch; got %+v", result.RejectNotice)
+	}
+	if result.NormalizedAdvertisedIP != "203.0.113.60" {
+		t.Fatalf("NormalizedAdvertisedIP: got %q want %q (must mirror observed IP, never the forbidden listen host)",
+			result.NormalizedAdvertisedIP, "203.0.113.60")
+	}
+	if result.ObservedIPHint != "203.0.113.60" {
+		t.Fatalf("ObservedIPHint: got %q want %q", result.ObservedIPHint, "203.0.113.60")
+	}
+	if !result.AllowAnnounce {
+		t.Fatalf("AllowAnnounce must be true for world-routable observed IP, got false")
+	}
+	if result.AdvertisePort != domain.PeerPort(64646) {
+		t.Fatalf("AdvertisePort: got %d want 64646 (v11 takes the self-reported advertise_port)", result.AdvertisePort)
 	}
 }
 
@@ -1170,18 +1215,37 @@ func TestObservedConsensusIPLocked_Threshold(t *testing.T) {
 	}
 }
 
-// TestSelfAdvertiseEndpoint_Priority exercises the override → consensus
-// → config priority. The port always comes from cfg.AdvertiseAddress
-// (or DefaultPeerPort) when no net.Listener is bound in tests.
+// TestSelfAdvertiseEndpoint_Priority exercises the v11 host-selection
+// priority: learned observed consensus → legacy override → config host.
+// The port always comes from cfg.EffectiveAdvertisePort() (or
+// DefaultPeerPort) regardless of whether a net.Listener is bound.
 func TestSelfAdvertiseEndpoint_Priority(t *testing.T) {
-	t.Run("override_wins_over_consensus", func(t *testing.T) {
+	t.Run("consensus_wins_over_legacy_override", func(t *testing.T) {
+		// Phase 1 deprecation (ProtocolVersion=11): passive learning from
+		// inbound observed IPs is the primary truth source. A legacy
+		// observed-address-mismatch notice only produces a weak fallback
+		// (trustedSelfAdvertiseIP) and must NEVER override a v11 learned
+		// consensus — otherwise a stray v10 peer could silently demote
+		// the node to a stale endpoint.
 		svc := newAdvertiseTestService("198.51.100.10:64646")
 		svc.trustedSelfAdvertiseIP = "203.0.113.90"
-		// Consensus that should be ignored in favour of the override.
 		svc.observedAddrs = map[domain.PeerIdentity]string{
 			"peer-aaa": "203.0.113.91",
 			"peer-bbb": "203.0.113.91",
 		}
+		if got := svc.selfAdvertiseEndpoint(); got != "203.0.113.91:64646" {
+			t.Fatalf("endpoint: got %q want %q (v11 consensus must win over the legacy override)",
+				got, "203.0.113.91:64646")
+		}
+	})
+
+	t.Run("override_wins_without_consensus", func(t *testing.T) {
+		// No observed-IP consensus yet → the legacy override is the best
+		// host we have. This is the weak-fallback path: mixed-network
+		// nodes that have only spoken to v10 peers still get a routable
+		// self-advertise from the legacy notice.
+		svc := newAdvertiseTestService("198.51.100.10:64646")
+		svc.trustedSelfAdvertiseIP = "203.0.113.90"
 		if got := svc.selfAdvertiseEndpoint(); got != "203.0.113.90:64646" {
 			t.Fatalf("endpoint: got %q want %q", got, "203.0.113.90:64646")
 		}
@@ -1214,15 +1278,15 @@ func TestSelfAdvertiseEndpoint_Priority(t *testing.T) {
 		}
 	})
 
-	// Config-fallback branch must take the real local listener port and
-	// only the HOST from cfg.AdvertiseAddress. Using the raw
-	// cfg.AdvertiseAddress string in this branch would silently
-	// re-introduce a stale port whenever the config drifts from the
-	// bound port (operator edited config, listener picked a different
-	// port on startup). The invariant is that hello.listen always
-	// advertises the real listener port.
-	t.Run("config_fallback_uses_listener_port", func(t *testing.T) {
-		svc := newAdvertiseTestService("198.51.100.10:55555") // stale port
+	// Under the phase 1 deprecation contract (ProtocolVersion=11) the
+	// advertised port is ALWAYS cfg.EffectiveAdvertisePort() — never the
+	// real local listener port and never the stale port baked into
+	// cfg.AdvertiseAddress. The operator-declared CORSA_ADVERTISE_PORT
+	// (or DefaultPeerPort on absence) is the single source of truth,
+	// which matters for NAT / port-forward setups where the bind port
+	// and the advertised port legitimately differ.
+	t.Run("config_fallback_uses_effective_advertise_port", func(t *testing.T) {
+		svc := newAdvertiseTestService("198.51.100.10:55555") // stale port in cfg
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatalf("net.Listen: %v", err)
@@ -1230,17 +1294,27 @@ func TestSelfAdvertiseEndpoint_Priority(t *testing.T) {
 		defer func() { _ = ln.Close() }()
 		svc.listener = ln
 
-		_, listenerPort, ok := splitHostPort(ln.Addr().String())
-		if !ok || listenerPort == "" || listenerPort == "0" {
-			t.Fatalf("listener port unusable: %q", ln.Addr().String())
-		}
-		if listenerPort == "55555" {
-			t.Skipf("OS handed out the stale port, cannot distinguish fallback branches")
-		}
-
-		want := net.JoinHostPort("198.51.100.10", listenerPort)
+		// Neither the stale cfg port (55555) nor the OS-assigned listener
+		// port may appear in the result — only DefaultPeerPort (the
+		// EffectiveAdvertisePort fallback when CORSA_ADVERTISE_PORT is
+		// unset) is allowed.
+		want := net.JoinHostPort("198.51.100.10", config.DefaultPeerPort)
 		if got := svc.selfAdvertiseEndpoint(); got != want {
-			t.Fatalf("endpoint: got %q want %q (cfg port 55555 must be ignored in favour of listener port)",
+			t.Fatalf("endpoint: got %q want %q (v11 always uses EffectiveAdvertisePort, never the listener or stale cfg port)",
+				got, want)
+		}
+	})
+
+	// Explicit CORSA_ADVERTISE_PORT override must flow through
+	// EffectiveAdvertisePort into the config-fallback branch.
+	t.Run("config_fallback_honours_explicit_advertise_port", func(t *testing.T) {
+		svc := newAdvertiseTestService("198.51.100.10:55555")
+		override := domain.PeerPort(40000)
+		svc.cfg.AdvertisePort = &override
+
+		want := net.JoinHostPort("198.51.100.10", "40000")
+		if got := svc.selfAdvertiseEndpoint(); got != want {
+			t.Fatalf("endpoint: got %q want %q (explicit AdvertisePort must win over cfg port and DefaultPeerPort)",
 				got, want)
 		}
 	})
@@ -1300,7 +1374,7 @@ func entryIP(i int) domain.PeerIP {
 func TestRecordOutboundConfirmed_WritesTrustedAdvertise(t *testing.T) {
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 	const peerAddr domain.PeerAddress = "203.0.113.120:64646"
-	svc.recordOutboundConfirmed(peerAddr, "203.0.113.120", "64646")
+	svc.recordOutboundConfirmed(peerAddr, "203.0.113.120", domain.PeerPort(64646))
 
 	pm := svc.persistedMeta[peerAddr]
 	if pm == nil {
@@ -1327,7 +1401,7 @@ func TestRecordOutboundConfirmed_WritesTrustedAdvertise(t *testing.T) {
 func TestRecordOutboundConfirmed_CanonicalisesMappedIPv6(t *testing.T) {
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 	const peerAddr domain.PeerAddress = "203.0.113.121:64646"
-	svc.recordOutboundConfirmed(peerAddr, "::ffff:203.0.113.121", "64646")
+	svc.recordOutboundConfirmed(peerAddr, "::ffff:203.0.113.121", domain.PeerPort(64646))
 
 	pm := svc.persistedMeta[peerAddr]
 	if pm == nil {
@@ -1368,7 +1442,7 @@ func TestRecordOutboundConfirmed_RejectsHostname(t *testing.T) {
 		"garbage::bad",   // looks like IPv6 but is not parseable
 	}
 	for _, badIP := range cases {
-		svc.recordOutboundConfirmed(peerAddr, badIP, "64646")
+		svc.recordOutboundConfirmed(peerAddr, badIP, domain.PeerPort(64646))
 	}
 
 	if _, exists := svc.persistedMeta[peerAddr]; exists {
@@ -1398,7 +1472,7 @@ func TestRecordOutboundConfirmed_PreservesExistingRowOnHostname(t *testing.T) {
 		TrustedAdvertisePort:   "64646",
 	}
 
-	svc.recordOutboundConfirmed(peerAddr, domain.PeerIP("peer.example"), "64646")
+	svc.recordOutboundConfirmed(peerAddr, domain.PeerIP("peer.example"), domain.PeerPort(64646))
 
 	pm := svc.persistedMeta[peerAddr]
 	if pm == nil {

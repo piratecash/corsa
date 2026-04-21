@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2119,6 +2120,49 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 	}
 }
 
+// deriveTestAdvertisePort pins cfg.AdvertisePort to the port component of
+// cfg.AdvertiseAddress (or cfg.ListenAddress as a last resort) when the
+// caller has not set it explicitly. Production v11 resolution goes
+// CORSA_ADVERTISE_PORT → DefaultPeerPort and intentionally ignores the
+// deprecated port baked into CORSA_ADVERTISE_ADDRESS; that is correct
+// for operators and the strict RFC contract. Test fixtures, however,
+// allocate ephemeral ports (freeAddress → net.Listen 127.0.0.1:0) and
+// put that "host:ephemeral_port" straight into cfg.AdvertiseAddress
+// without a matching cfg.AdvertisePort — applying the production rule
+// would silently rewrite the advertised endpoint to
+// 127.0.0.1:DefaultPeerPort and every inbound sanitizeInboundAddress
+// would then key health / routing state under a port nobody is listening
+// on. Deriving AdvertisePort from the test's own listener address keeps
+// the fixture honest while leaving the strict v11 contract unchanged
+// for real operators.
+func deriveTestAdvertisePort(cfg config.Node) config.Node {
+	if cfg.AdvertisePort != nil {
+		return cfg
+	}
+	candidates := []string{cfg.AdvertiseAddress, cfg.ListenAddress}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		_, portStr, err := net.SplitHostPort(candidate)
+		if err != nil || portStr == "" || portStr == "0" {
+			continue
+		}
+		portInt, err := strconv.Atoi(portStr)
+		if err != nil {
+			continue
+		}
+		port := domain.PeerPort(portInt)
+		if !port.IsValid() {
+			continue
+		}
+		cfg.AdvertisePort = &port
+		return cfg
+	}
+	return cfg
+}
+
 func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	t.Helper()
 
@@ -2135,6 +2179,7 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	// Tests that explicitly verify forbidden-IP filtering should
 	// override this on the returned service after construction.
 	cfg.AllowPrivatePeers = true
+	cfg = deriveTestAdvertisePort(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	id, err := identity.Generate()
 	if err != nil {
@@ -2159,6 +2204,7 @@ func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Ident
 		cfg.QueueStatePath = filepath.Join(tmpDir, "queue.json")
 	}
 	cfg.AllowPrivatePeers = true
+	cfg = deriveTestAdvertisePort(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	svc := NewService(cfg, id, nil)

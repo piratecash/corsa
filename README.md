@@ -98,7 +98,8 @@ For public or VPS nodes, the practical network settings are:
 
 - `CORSA_LISTEN_ADDRESS` — local bind address
 - `CORSA_LISTENER` — explicit inbound listener override: `1` enables listen, `0` disables it
-- `CORSA_ADVERTISE_ADDRESS` — external address announced to peers
+- `CORSA_ADVERTISE_ADDRESS` — **Deprecated since `ProtocolVersion=11`.** External address the node used to actively announce to peers. Kept only as a manual fallback hint for the outbound `hello.listen.host` composition while mixed rollouts with `version=10` peers are in flight. The authoritative advertise IP is now derived passively from observed TCP `RemoteAddr` — see `docs/advertise-address-phase1-deprecation.md`. Scheduled for full removal when `MinimumProtocolVersion` reaches `12`
+- `CORSA_ADVERTISE_PORT` — self-reported listening port placed into `hello.advertise_port` and used on the receive side as the authoritative listening-port source when building an announce candidate from the observed TCP IP. Accepts an integer in the inclusive `1..65535` range; empty, non-numeric, or out-of-range values fall back to `64646`. Set this explicitly only when the public dial port differs from the local bind port (e.g. NAT port-forward, reverse proxy rewrite) — the inbound TCP source port is NEVER reused as a listening port
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_QUEUE_STATE_PATH` — persisted pending-delivery and relay-retry state
@@ -299,7 +300,8 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
 
 - `CORSA_LISTEN_ADDRESS` — локальный bind-адрес
 - `CORSA_LISTENER` — явное переопределение входящего listener: `1` включает прослушивание, `0` выключает
-- `CORSA_ADVERTISE_ADDRESS` — внешний адрес, который нода объявляет пирам
+- `CORSA_ADVERTISE_ADDRESS` — **Deprecated с `ProtocolVersion=11`.** Внешний адрес, который нода раньше активно объявляла пирам. Сохраняется только как ручная fallback-подсказка для host-компонента исходящего `hello.listen`, пока идут смешанные rollout'ы с пирами `version=10`. Авторитетный advertise IP теперь выводится пассивно из observed TCP `RemoteAddr` — см. `docs/advertise-address-phase1-deprecation.md`. Запланирован к полному удалению, когда `MinimumProtocolVersion` достигнет `12`
+- `CORSA_ADVERTISE_PORT` — self-reported слушающий порт, помещаемый в `hello.advertise_port` и используемый приёмной стороной как авторитетный источник listening-порта при построении announce-кандидата из observed TCP IP. Принимает целое число в диапазоне `1..65535` включительно; пустые, нечисловые или вне диапазона значения фолбэчат к `64646`. Задавайте явно только если публичный dial-порт отличается от локального bind-порта (например, NAT port-forward, переписывание портов reverse proxy) — входящий TCP source port НИКОГДА не переиспользуется как listening-порт
 - `CORSA_BOOTSTRAP_PEERS` — список seed-нод через запятую
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
 - `CORSA_QUEUE_STATE_PATH` — persisted-состояние очереди доставки и relay retry

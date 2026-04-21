@@ -10,7 +10,17 @@ services:
     #  - "46464:46464"
     environment:
       CORSA_LISTEN_ADDRESS: ":64646"
+      # CORSA_ADVERTISE_ADDRESS is deprecated since ProtocolVersion=11:
+      # the observed inbound TCP IP is now the authoritative advertise host.
+      # The value below is kept only as a legacy manual fallback for rollout
+      # compatibility and may be removed once MinimumProtocolVersion reaches 12.
       CORSA_ADVERTISE_ADDRESS: "<your-public-ip>:64646"
+      # CORSA_ADVERTISE_PORT overrides the self-reported listening port sent
+      # in hello.advertise_port. Accepts 1..65535; empty / invalid values
+      # fall back to the built-in default (64646). Uncomment and set only
+      # when the public dial port differs from the bind port (e.g. port
+      # forwarding, NAT rewrite).
+      # CORSA_ADVERTISE_PORT: "64646"
       CORSA_BOOTSTRAP_PEERS: "65.108.204.190:64646"
       CORSA_RPC_HOST: "0.0.0.0"
       CORSA_RPC_PORT: "46464"

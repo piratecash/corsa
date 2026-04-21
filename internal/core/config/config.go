@@ -34,6 +34,16 @@ const (
 type Node struct {
 	ListenAddress    string
 	AdvertiseAddress string
+	// AdvertisePort is the validated self-reported listening port published
+	// in hello.advertise_port. nil means "operator did not supply a valid
+	// CORSA_ADVERTISE_PORT" — callers must resolve the runtime value through
+	// EffectiveAdvertisePort (falls back to DefaultPeerPort). Explicit
+	// *domain.PeerPort models the optional state at the type level instead
+	// of reusing 0 as a sentinel, per the project's "zero is not a business
+	// signal" rule, and the domain type prevents silent mix-ups with raw
+	// ints elsewhere in the config. Any invalid input (empty, non-numeric,
+	// out of 1..65535) collapses to nil at env-parse time.
+	AdvertisePort    *domain.PeerPort
 	BootstrapPeers   []string
 	IdentityPath     string
 	TrustStorePath   string
@@ -70,10 +80,18 @@ type Config struct {
 }
 
 const (
-	CorsaVersion           = "0.37 alpha"
-	CorsaWireVersion       = "0.37-alpha"
-	ClientBuild            = 37
-	ProtocolVersion        = 10
+	CorsaVersion     = "0.37 alpha"
+	CorsaWireVersion = "0.37-alpha"
+	ClientBuild      = 37
+	// ProtocolVersion is the wire version this build emits in hello/welcome.
+	// Bumped to 11 for the advertise-address phase 1 deprecation rollout:
+	// observed-address-mismatch is no longer produced in the штатный runtime
+	// path, hello carries the new additive field advertise_port, and inbound
+	// mismatch between observed TCP IP and hello.listen.host no longer rejects
+	// the connection. The change is additive on the wire but alters runtime
+	// semantics of the handshake, which is why the bump is mandatory even
+	// though MinimumProtocolVersion stays at 8.
+	ProtocolVersion        = 11
 	MinimumProtocolVersion = 8
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
@@ -83,7 +101,12 @@ func Default() Config {
 	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":"+DefaultPeerPort)
 	nodeType := nodeTypeFromEnv()
 	listenerEnabled, listenerSet := listenerFromEnv()
+	// CORSA_ADVERTISE_ADDRESS is deprecated in the advertise-address phase 1
+	// deprecation rollout: it is kept for backwards compatibility and as a
+	// manual fallback, but it no longer participates in truth-of-advertise
+	// selection. See docs/advertise-address-phase1-deprecation.md §7.1.
 	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress, listenerSet, listenerEnabled, nodeType))
+	advertisePort := advertisePortFromEnv()
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
 	identityPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress)))
 	trustStorePath := resolveStartupPath(envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress)))
@@ -107,6 +130,7 @@ func Default() Config {
 		Node: Node{
 			ListenAddress:    listenAddress,
 			AdvertiseAddress: advertiseAddress,
+			AdvertisePort:    advertisePort,
 			BootstrapPeers:   bootstrapPeers,
 			IdentityPath:     identityPath,
 			TrustStorePath:   trustStorePath,
@@ -154,6 +178,30 @@ func (n Node) EffectiveListenerEnabled() bool {
 		return n.ListenerEnabled
 	}
 	return n.NormalizedType() != NodeTypeClient
+}
+
+// EffectiveAdvertisePort returns the runtime value that fills
+// hello.advertise_port and feeds candidate-building on inbound observed-IP
+// learning. A nil AdvertisePort (operator did not supply a valid
+// CORSA_ADVERTISE_PORT) collapses to DefaultPeerPort — the single-source
+// fallback required by the advertise-address phase 1 deprecation contract.
+// The explicit nil check mirrors the "absence is a type, not a zero value"
+// invariant and keeps the fallback logic in exactly one place. Callers that
+// need the string form (net.JoinHostPort, persisted JSON row) convert
+// through strconv.Itoa at their boundary — the runtime path never stores
+// the port as a string. The fallback path re-parses DefaultPeerPort so the
+// string constant remains the single source of truth for the default; a
+// malformed DefaultPeerPort (programmer error only) yields a zero PeerPort,
+// which the rest of the pipeline already treats as "absent / invalid".
+func (n Node) EffectiveAdvertisePort() domain.PeerPort {
+	if n.AdvertisePort != nil && n.AdvertisePort.IsValid() {
+		return *n.AdvertisePort
+	}
+	value, err := strconv.Atoi(DefaultPeerPort)
+	if err != nil {
+		return 0
+	}
+	return domain.PeerPort(value)
 }
 
 func (n Node) EffectiveMaxOutgoingPeers() int {
@@ -302,6 +350,30 @@ func nodeTypeFromEnv() NodeType {
 		return t
 	}
 	return NodeTypeFull
+}
+
+// advertisePortFromEnv parses CORSA_ADVERTISE_PORT. Valid input is a
+// string integer in the inclusive range 1..65535; any other value
+// (empty, non-numeric, 0, >65535, negative) returns nil so the caller can
+// fall back to DefaultPeerPort via EffectiveAdvertisePort. The pointer
+// return models optional-presence explicitly at the type level — zero is
+// never used as a sentinel for "operator did not configure this" — and
+// the domain.PeerPort element type keeps the value distinct from other
+// small integers as it flows through the config and handshake layers.
+func advertisePortFromEnv() *domain.PeerPort {
+	raw := strings.TrimSpace(os.Getenv("CORSA_ADVERTISE_PORT"))
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return nil
+	}
+	port := domain.PeerPort(value)
+	if !port.IsValid() {
+		return nil
+	}
+	return &port
 }
 
 func listenerFromEnv() (bool, bool) {

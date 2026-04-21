@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 type Frame struct {
@@ -16,6 +18,21 @@ type Frame struct {
 	Network                string                `json:"network,omitempty"`
 	Listen                 string                `json:"listen,omitempty"`
 	Listener               string                `json:"listener,omitempty"`
+	// AdvertisePort is the self-reported listening port introduced by the
+	// advertise-address phase 1 deprecation rollout (ProtocolVersion=11).
+	// It is the only authoritative wire source of the peer's listening
+	// port from this rollout onward — Listen/host loses truth status, the
+	// inbound TCP source port must NEVER be reused as a listening port.
+	// Canonical wire shape is a JSON integer in the inclusive range
+	// 1..65535. The parser side accepts a v10-style JSON string shape too
+	// (see domain.PeerPort.UnmarshalJSON): an unparseable string, a
+	// missing field, a null, or any value outside 1..65535 collapses to
+	// the zero PeerPort sentinel, which callers combine with IsValid() to
+	// fall back to config.DefaultPeerPort. omitempty on the writer side
+	// keeps legacy v10 frames indistinguishable on the wire from a v11
+	// frame with no port set — legacy parsers treat the absent field as
+	// "no advertise_port", which is the same as the v11 fallback.
+	AdvertisePort          domain.PeerPort       `json:"advertise_port,omitempty"`
 	NodeType               string                `json:"node_type,omitempty"`
 	ClientVersion          string                `json:"client_version,omitempty"`
 	ClientBuild            int                   `json:"client_build,omitempty"`

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1256,11 +1257,19 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	if dialedIP == "" {
 		return
 	}
-	_, dialedPort, ok := splitHostPort(remoteAddr)
-	if !ok || dialedPort == "" {
+	_, dialedPortStr, ok := splitHostPort(remoteAddr)
+	if !ok || dialedPortStr == "" {
 		return
 	}
-	s.recordOutboundConfirmed(peerAddress, domain.PeerIP(dialedIP), dialedPort)
+	// RemoteAddr() strings always carry a decimal port — if the parse
+	// fails or the value is out of PeerPort range the call becomes a
+	// no-op inside recordOutboundConfirmed, which is the correct
+	// behaviour for a malformed transport report.
+	dialedPortInt, err := strconv.Atoi(dialedPortStr)
+	if err != nil {
+		return
+	}
+	s.recordOutboundConfirmed(peerAddress, domain.PeerIP(dialedIP), domain.PeerPort(dialedPortInt))
 	// Forgivable misadvertise bucket repays a fixed amount on every
 	// successful auth — keeps honest but flaky peers from drifting
 	// toward a ban after transient NAT-remap events. rawBanIP mirrors

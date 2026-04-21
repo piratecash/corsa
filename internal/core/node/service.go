@@ -1540,43 +1540,14 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			return true
 		}
 		// Advertise convergence decision. Runs after version compatibility
-		// but before auth. Decides whether the hello's advertised listen
-		// address matches the observed TCP peer, and rejects with
-		// connection_notice when the peer is trying to advertise a
-		// world-reachable address that disagrees with the observed one.
-		// Accept branches are applied to persistedMeta after
-		// rememberConnPeerAddr so the domain record is consistent with
-		// NetCore's view.
+		// but before auth. Phase 1 deprecation contract (ProtocolVersion=11):
+		// the decision helper never rejects on advertise-mismatch grounds
+		// and never emits connection_notice{observed-address-mismatch}. It
+		// surfaces only the persistence write mode and the resolved
+		// advertise_port for passive learning. Accept branches are applied
+		// to persistedMeta after rememberConnPeerAddr so the domain record
+		// stays consistent with NetCore's view of the inbound session.
 		advertiseResult := validateAdvertisedAddress(addr, frame)
-		if advertiseResult.ShouldReject {
-			accepted = false
-			log.Warn().
-				Str("addr", addr).
-				Str("advertised_listen", frame.Listen).
-				Str("observed_ip", string(advertiseResult.NormalizedObservedIP)).
-				Str("advertised_ip", string(advertiseResult.NormalizedAdvertisedIP)).
-				Str("decision", string(advertiseResult.Decision)).
-				Msg("inbound_hello_rejected_advertise_mismatch")
-			if advertiseResult.RejectNotice != nil {
-				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, *advertiseResult.RejectNotice)
-			}
-			// Forgivable penalty: bucket tracked in persistedMeta via
-			// apply helper below, transport-level score tracked here so
-			// a noisy peer eventually gets a TCP-level rate limit.
-			s.addBanScore(connID, banIncrementAdvertiseMismatch)
-			// Best-effort downgrade of an already-known peer. No new row
-			// is created for world_mismatch (update_existing_only write).
-			claimed := strings.TrimSpace(frame.Listen)
-			if claimed == "" {
-				claimed = strings.TrimSpace(frame.Address)
-			}
-			if claimed != "" {
-				if peerAddr := sanitizeInboundAddress(addr, claimed); peerAddr != "" {
-					s.applyAdvertiseValidationResult(domain.PeerAddress(peerAddr), advertiseResult)
-				}
-			}
-			return false
-		}
 		// Determine auth path by checking server-verifiable identity fields
 		// (Address, PubKey, BoxKey, BoxSig), NOT frame.Client which the
 		// attacker controls. This eliminates GAP-0.
@@ -2417,9 +2388,16 @@ func logUnregisteredWrite(addr string, frame protocol.Frame, origin string) {
 }
 
 func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.Frame {
+	// Phase 1 deprecation (ProtocolVersion=11): welcome also carries
+	// advertise_port so a v11 peer that jumped straight from hello to
+	// auth without re-reading our hello still sees the authoritative
+	// port value. observed_address is kept for wire compat but is no
+	// longer a self-correction trigger on the receive side.
 	listen := ""
+	var advertisePort domain.PeerPort
 	if s.cfg.EffectiveListenerEnabled() {
 		listen = s.cfg.AdvertiseAddress
+		advertisePort = s.cfg.EffectiveAdvertisePort()
 	}
 	return protocol.Frame{
 		Type:                   "welcome",
@@ -2429,6 +2407,7 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		Network:                networkName,
 		Listen:                 listen,
 		Listener:               listenerFlag(s.cfg.EffectiveListenerEnabled()),
+		AdvertisePort:          advertisePort,
 		NodeType:               string(s.NodeType()),
 		ClientVersion:          s.ClientVersion(),
 		ClientBuild:            config.ClientBuild,
@@ -4527,14 +4506,18 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 }
 
 func (s *Service) nodeHelloJSONLine() string {
-	// Advertise convergence: priority is runtime override (learned from
-	// observed-address-mismatch notices) → observed consensus IP →
-	// configured AdvertiseAddress. selfAdvertiseEndpoint returns "" when
-	// the node is non-listener, which collapses Listen to "" so peers
-	// see listener=0.
+	// Advertise convergence under phase 1 deprecation (ProtocolVersion=11):
+	// Listen host is selected via selfAdvertiseEndpoint (observed learning
+	// → legacy override → deprecated CORSA_ADVERTISE_ADDRESS fallback) and
+	// is no longer treated as authoritative by receivers — it stays only
+	// for wire-compat with v10 peers. AdvertisePort is the sole port truth
+	// source on the receive side and carries CORSA_ADVERTISE_PORT, with
+	// fallback to DefaultPeerPort resolved by EffectiveAdvertisePort.
 	listen := ""
+	var advertisePort domain.PeerPort
 	if s.cfg.EffectiveListenerEnabled() {
 		listen = s.selfAdvertiseEndpoint()
+		advertisePort = s.cfg.EffectiveAdvertisePort()
 	}
 	line, err := protocol.MarshalFrameLine(protocol.Frame{
 		Type:          "hello",
@@ -4542,6 +4525,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		Client:        "node",
 		Listen:        listen,
 		Listener:      listenerFlag(s.cfg.EffectiveListenerEnabled()),
+		AdvertisePort: advertisePort,
 		NodeType:      string(s.NodeType()),
 		ClientVersion: s.ClientVersion(),
 		ClientBuild:   config.ClientBuild,

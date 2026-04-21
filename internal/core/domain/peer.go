@@ -5,7 +5,12 @@
 // (and vice versa).
 package domain
 
-import "time"
+import (
+	"bytes"
+	"encoding/json"
+	"strconv"
+	"time"
+)
 
 // ---------------------------------------------------------------------------
 // Typed scalars
@@ -50,6 +55,71 @@ type ListenAddress string
 // rather than a separate optional wrapper because the canonical form of
 // a missing IP is still an empty string on the wire.
 type PeerIP string
+
+// PeerPort is a peer's listening port. Kept as a distinct type so the
+// compiler prevents silent mix-ups between a port and any other small
+// integer flowing through the advertise-convergence layer (peer counters,
+// build numbers, version levels). Value range is the TCP/UDP-legal
+// inclusive 1..65535; zero is the explicit "no valid port on the wire"
+// sentinel used by passive-learning fallbacks to collapse to
+// config.DefaultPeerPort. Callers that persist or JoinHostPort the value
+// perform the single textual conversion at their boundary — the runtime
+// path never stores the port as a string.
+type PeerPort int
+
+// IsValid reports whether p falls inside the inclusive 1..65535 range
+// that both the TCP stack and the hello.advertise_port wire contract
+// require. Every other value — zero, negative, or >65535 — must be
+// treated by the receiver as "no valid advertise port" and collapsed
+// to config.DefaultPeerPort per docs/advertise-address-phase1-deprecation.md
+// §7.2.
+func (p PeerPort) IsValid() bool {
+	return p >= 1 && p <= 65535
+}
+
+// UnmarshalJSON decodes a JSON value into PeerPort with a lenient contract:
+// a JSON integer decodes as-is, a JSON string is accepted as a v10-style
+// compatibility shape (some implementations historically used a string
+// wire form for ports), and any other representation — null, float with
+// a fractional part, boolean, object, array, unparseable text — collapses
+// silently to zero. The zero value is the explicit "no valid port" sentinel
+// that callers combine with IsValid to trigger the config.DefaultPeerPort
+// fallback. This keeps a malformed advertise_port from failing the whole
+// Frame decode and guarantees the advertise-address phase 1 deprecation
+// contract: "any non-integer payload, missing field, or value outside
+// 1..65535 collapses to DefaultPeerPort".
+func (p *PeerPort) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*p = 0
+		return nil
+	}
+	// JSON string: unwrap and try to parse as a decimal integer.
+	if trimmed[0] == '"' {
+		var raw string
+		if err := json.Unmarshal(trimmed, &raw); err != nil {
+			*p = 0
+			return nil
+		}
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			*p = 0
+			return nil
+		}
+		*p = PeerPort(value)
+		return nil
+	}
+	// JSON number: decode into int. json.Number handling is not needed
+	// because we do not accept floats as valid ports — fractional wire
+	// values collapse to zero so IsValid rejects them downstream.
+	var value int
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		*p = 0
+		return nil
+	}
+	*p = PeerPort(value)
+	return nil
+}
 
 // PeerSource describes how a peer address was discovered.
 type PeerSource string

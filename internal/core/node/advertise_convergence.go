@@ -15,6 +15,7 @@ package node
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,13 @@ import (
 // advertiseDecision is the machine-readable classification produced by
 // validateAdvertisedAddress. Callers switch on this value rather than
 // re-running the same string/IP checks inline.
+//
+// Phase 1 deprecation note (ProtocolVersion=11):
+// advertiseDecisionWorldMismatch is no longer produced by the штатный
+// runtime path — observed TCP IP is authoritative and no longer compared
+// against hello.listen.host for reject decisions. The constant is kept so
+// compat / legacy test call sites still compile; runtime logic must treat
+// it as unreachable and must never emit RejectNotice on this path.
 type advertiseDecision string
 
 const (
@@ -35,8 +43,13 @@ const (
 	advertiseDecisionLegacyDirect   advertiseDecision = "legacy_direct"
 	advertiseDecisionMatch          advertiseDecision = "match"
 	advertiseDecisionLocalException advertiseDecision = "local_exception"
-	advertiseDecisionWorldMismatch  advertiseDecision = "world_mismatch"
-	advertiseDecisionInvalid        advertiseDecision = "invalid"
+	// advertiseDecisionWorldMismatch is deprecated in the phase 1
+	// deprecation rollout (ProtocolVersion=11). validateAdvertisedAddress
+	// never returns it; it survives only for legacy compat and tests that
+	// exercise the dead-code downgrade sweep helper. Do not branch штатный
+	// logic on it.
+	advertiseDecisionWorldMismatch advertiseDecision = "world_mismatch"
+	advertiseDecisionInvalid       advertiseDecision = "invalid"
 )
 
 // persistWriteMode is the closed enum for advertiseValidationResult.PersistWriteMode.
@@ -61,11 +74,24 @@ const (
 // inbound advertise check. No side effects — the caller is responsible
 // for sending RejectNotice, closing the socket, and applying the
 // persistence write through the dedicated Service helpers.
+//
+// AdvertisePort is the resolved self-reported listening port for this
+// inbound frame. Phase 1 deprecation (ProtocolVersion=11) introduces it as
+// the single authoritative port source for passive learning: value is
+// frame.AdvertisePort when PeerPort.IsValid, else the PeerPort form of
+// config.DefaultPeerPort. The inbound TCP source port is NEVER used as a
+// listening port — that was the contract violation the phase 1 rollout
+// eliminates. Textual conversion happens only at persisted / JoinHostPort
+// boundaries; the runtime result carries the domain value.
+//
+// ShouldReject / RejectNotice survive only for compat with the deprecated
+// world_mismatch reject path; the штатный v11 runtime never sets them.
 type advertiseValidationResult struct {
 	Decision               advertiseDecision
 	NormalizedObservedIP   domain.PeerIP
 	NormalizedAdvertisedIP domain.PeerIP
 	ObservedIPHint         domain.PeerIP
+	AdvertisePort          domain.PeerPort  // resolved listening port; DefaultPeerPort on absent/invalid wire value
 	PersistAnnounceState   announceState    // announceStateDirectOnly | announceStateAnnounceable | announceStateUnset
 	PersistWriteMode       persistWriteMode // persistWriteMode* constants
 	AllowAnnounce          bool
@@ -122,31 +148,59 @@ func buildObservedMismatchNotice(observedIP domain.PeerIP) *protocol.Frame {
 	}
 }
 
+// extractAdvertisePort resolves the listening port the peer is announcing
+// in an inbound hello frame under the phase 1 deprecation contract
+// (ProtocolVersion=11). The only authoritative port source is
+// frame.AdvertisePort: accepted when PeerPort.IsValid (inclusive 1..65535),
+// collapsed to the PeerPort form of config.DefaultPeerPort on any other
+// value (zero, missing, negative, out-of-range, or — at the decoder level
+// — a non-integer wire payload which already arrives as zero after
+// json.Unmarshal into PeerPort). The inbound TCP source port is
+// intentionally never considered here; reusing it as a listening port is
+// exactly the contract violation the phase 1 rollout eliminates.
+func extractAdvertisePort(frame protocol.Frame) domain.PeerPort {
+	if frame.AdvertisePort.IsValid() {
+		return frame.AdvertisePort
+	}
+	value, err := strconv.Atoi(config.DefaultPeerPort)
+	if err != nil {
+		return 0
+	}
+	return domain.PeerPort(value)
+}
+
 // validateAdvertisedAddress is the pure decision helper invoked from
 // dispatchNetworkFrame's case "hello". It does not touch shared state
 // and does not write to the network — the caller is responsible for
-// applying the persistence write and sending RejectNotice.
+// applying the persistence write. Phase 1 deprecation contract
+// (ProtocolVersion=11): observed TCP IP is the sole authoritative source
+// of the peer's IP, hello.listen.host is ignored as a truth input, and
+// the штатный runtime path NEVER rejects on mismatch and NEVER emits
+// connection_notice{observed-address-mismatch}. Legacy constants
+// (advertiseDecisionWorldMismatch, advertiseDecisionInvalid) survive in
+// the type for test/compat reasons but are unreachable from this helper.
 //
-// Ordering matches the inbound decision matrix:
-//  1. listener="0"            → non_listener
-//  2. no usable listen        → legacy_direct
-//  3. observed == advertised  → match
-//  4. observed local/private  → local_exception
-//  5. observed world,
-//     advertised != observed   → world_mismatch
-//  6. invalid/malformed       → invalid
+// Ordering of the v11 decision matrix:
+//  1. listener="0"                          → non_listener (accept, direct_only)
+//  2. listener not "1" and listen unusable  → legacy_direct (accept, direct_only)
+//  3. observed IP not parseable as IPv4/IPv6 → local_exception (accept, direct_only, no candidate)
+//  4. observed IP non-routable / local       → local_exception (accept, direct_only, no candidate)
+//  5. observed IP world-routable             → match (accept, announceable,
+//                                              candidate = observed_IP:advertise_port)
 //
 // observedTCPAddr is the RemoteAddr() string of the inbound conn
 // (host:port). frame is the parsed hello frame.
 func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) advertiseValidationResult {
 	result := advertiseValidationResult{
 		PersistWriteMode: persistWriteModeSkip,
+		AdvertisePort:    extractAdvertisePort(frame),
 	}
 
 	observedHost := remoteIPFromString(observedTCPAddr)
 	result.NormalizedObservedIP = domain.PeerIP(canonicalIPFromHost(observedHost))
 
-	// Branch 1: peer explicitly declared itself non-listener.
+	// Branch 1: peer explicitly declared itself non-listener. Accept,
+	// record as direct_only, never learn a candidate.
 	if strings.TrimSpace(frame.Listener) == "0" {
 		result.Decision = advertiseDecisionNonListener
 		result.PersistAnnounceState = announceStateDirectOnly
@@ -155,97 +209,70 @@ func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) adv
 		return result
 	}
 
-	// Branch 2: legacy peer without usable listen. Listener absent OR
-	// listener="1" but listen field unusable both fall here — a peer
-	// with listener="1" and usable listen but no explicit listener
-	// string will be handled by the match / local_exception / mismatch
-	// branches below.
-	host, port, ok := usableListen(frame.Listen)
-	if !ok {
-		result.Decision = advertiseDecisionLegacyDirect
-		result.PersistAnnounceState = announceStateDirectOnly
-		result.PersistWriteMode = persistWriteModeCreateOrUpdate
-		result.AllowAnnounce = false
-		return result
-	}
-	_ = port // port is not consumed for the inbound decision; kept for clarity.
-
-	// For the remaining branches we only act on IPv4 / IPv6 advertises.
-	// .onion and other non-IP address families are explicitly out of
-	// scope for the observed/advertised compare — fall through as
-	// legacy direct so the non-IP branch below accepts them.
-	result.NormalizedAdvertisedIP = domain.PeerIP(canonicalIPFromHost(host))
-
-	if !isIPHost(host) {
-		// Non-IP advertise (e.g. .onion handled outside this RFC):
-		// treat as legacy-direct so we accept but don't announce via
-		// this path.
-		result.Decision = advertiseDecisionLegacyDirect
-		result.PersistAnnounceState = announceStateDirectOnly
-		result.PersistWriteMode = persistWriteModeCreateOrUpdate
-		result.AllowAnnounce = false
-		return result
+	// Branch 2: legacy peer with no explicit listener flag AND no usable
+	// listen string. A peer that sends listener="1" explicitly passes
+	// through to the observed-IP branches below, even if its listen field
+	// is empty — hello.listen is not a truth source under v11, only an
+	// RFC-compatibility echo. Without an explicit listener="1" flag and
+	// without a usable listen string we cannot claim the peer is a
+	// listener, so we fall back to direct_only accept.
+	if strings.TrimSpace(frame.Listener) != "1" {
+		if _, _, ok := usableListen(frame.Listen); !ok {
+			result.Decision = advertiseDecisionLegacyDirect
+			result.PersistAnnounceState = announceStateDirectOnly
+			result.PersistWriteMode = persistWriteModeCreateOrUpdate
+			result.AllowAnnounce = false
+			return result
+		}
 	}
 
+	// hello.listen.host is intentionally NOT consulted as a truth input in
+	// v11. We keep it only as a diagnostic echo for mixed-network compat:
+	// the NormalizedAdvertisedIP field still surfaces in logs / tests, but
+	// no branch below decides on it.
+	if host, _, listenOK := usableListen(frame.Listen); listenOK && isIPHost(host) {
+		result.NormalizedAdvertisedIP = domain.PeerIP(canonicalIPFromHost(host))
+	}
+
+	// Branch 3: observed side is not a parseable IP (e.g. non-IP
+	// transport, or malformed RemoteAddr from a buggy transport wrapper).
+	// We cannot learn a candidate from it, but v11 contract says we still
+	// accept the handshake — never reject on advertise-learning grounds.
 	if !isIPHost(observedHost) {
-		// Observed side is not a parseable IP — treat the advertise
-		// as invalid/malformed: we cannot compare, so closing as
-		// protocol error (no connection_notice payload).
-		result.Decision = advertiseDecisionInvalid
-		result.ShouldReject = true
-		result.PersistAnnounceState = announceStateUnset
-		result.PersistWriteMode = persistWriteModeSkip
-		return result
-	}
-
-	observedNonRoutable := isNonRoutableIPHost(observedHost)
-	advertisedNonRoutable := isNonRoutableIPHost(host)
-
-	// Branch 3: match after canonical normalisation.
-	if result.NormalizedObservedIP != "" && result.NormalizedObservedIP == result.NormalizedAdvertisedIP {
-		result.Decision = advertiseDecisionMatch
-		result.PersistAnnounceState = announceStateAnnounceable
+		result.Decision = advertiseDecisionLocalException
+		result.PersistAnnounceState = announceStateDirectOnly
 		result.PersistWriteMode = persistWriteModeCreateOrUpdate
-		result.AllowAnnounce = true
+		result.AllowAnnounce = false
 		return result
 	}
 
-	// Branch 4: observed is local/private, advertised is world-reachable.
-	// Accept silently as direct-only knowledge with optimistic announce
-	// allowed at <advertised>:DefaultPeerPort.
-	if observedNonRoutable && !advertisedNonRoutable {
+	// Branch 4: observed IP is local / private / CGNAT / link-local /
+	// ULA / loopback / wildcard. Accept quietly, record direct_only, and
+	// explicitly do NOT write any announce candidate — routing a
+	// non-routable address through peer exchange would leak it to peers
+	// that cannot reach it.
+	if isNonRoutableIPHost(observedHost) {
 		result.Decision = advertiseDecisionLocalException
 		result.PersistAnnounceState = announceStateDirectOnly
 		result.PersistWriteMode = persistWriteModeCreateOrUpdate
 		result.ObservedIPHint = result.NormalizedObservedIP
-		// Announce is allowed via optimistic <advertised>:64646 form, but
-		// this flag is authoritative only for the announce path — the
-		// inbound source port is still never reused.
-		result.AllowAnnounce = true
+		result.AllowAnnounce = false
 		return result
 	}
 
-	// Branches 5 and 6 both close the connection. When observed is
-	// world-reachable but disagrees with the advertise, send machine-
-	// readable notice; when the advertise itself is non-routable while
-	// observed is world-reachable, behave identically (still mismatch).
-	if !observedNonRoutable && (advertisedNonRoutable || result.NormalizedObservedIP != result.NormalizedAdvertisedIP) {
-		result.Decision = advertiseDecisionWorldMismatch
-		result.ShouldReject = true
-		result.PersistAnnounceState = announceStateDirectOnly
-		result.PersistWriteMode = persistWriteModeUpdateExisting
-		result.ObservedIPHint = result.NormalizedObservedIP
-		result.RejectNotice = buildObservedMismatchNotice(result.NormalizedObservedIP)
-		return result
-	}
-
-	// Anything that slips through — for example observed non-routable
-	// AND advertised non-routable but unequal — is treated as a quiet
-	// direct-only accept so loopback/test setups still work. We do NOT
-	// learn announceable trust from this branch.
-	result.Decision = advertiseDecisionLocalException
-	result.PersistAnnounceState = announceStateDirectOnly
+	// Branch 5: observed IP is world-routable. This is the sole announce
+	// candidate source under v11 — hello.listen.host disagreement is not
+	// a reject trigger and not a mismatch event. The candidate endpoint
+	// is observed_IP:advertise_port (advertise_port already collapsed to
+	// DefaultPeerPort on absent/invalid wire value). The persisted
+	// TrustedAdvertiseIP follows the same rule: it mirrors observed IP,
+	// NOT the advertised listen host.
+	result.Decision = advertiseDecisionMatch
+	result.NormalizedAdvertisedIP = result.NormalizedObservedIP
+	result.ObservedIPHint = result.NormalizedObservedIP
+	result.PersistAnnounceState = announceStateAnnounceable
 	result.PersistWriteMode = persistWriteModeCreateOrUpdate
+	result.AllowAnnounce = true
 	return result
 }
 
@@ -389,9 +416,22 @@ func (s *Service) applyAdvertiseValidationResultLocked(peerAddress domain.PeerAd
 	switch result.Decision {
 	case advertiseDecisionMatch:
 		pm.AnnounceState = announceStateAnnounceable
+		// Under v11 NormalizedAdvertisedIP mirrors the observed IP (see
+		// validateAdvertisedAddress branch 5). TrustedAdvertisePort is the
+		// self-reported hello.advertise_port, validated and collapsed to
+		// DefaultPeerPort on absent/invalid wire value by extractAdvertisePort.
 		pm.TrustedAdvertiseIP = result.NormalizedAdvertisedIP
 		pm.TrustedAdvertiseSource = trustedAdvertiseSourceInbound
-		pm.TrustedAdvertisePort = config.DefaultPeerPort
+		// Defensive: synthesised results from legacy tests may leave
+		// AdvertisePort at the zero PeerPort sentinel. Collapse to
+		// DefaultPeerPort so the persisted row never stores an empty port.
+		// Persisted schema keeps the port as string; domain→string conversion
+		// happens here at the single persistence-writer boundary.
+		if result.AdvertisePort.IsValid() {
+			pm.TrustedAdvertisePort = strconv.Itoa(int(result.AdvertisePort))
+		} else {
+			pm.TrustedAdvertisePort = config.DefaultPeerPort
+		}
 	case advertiseDecisionNonListener, advertiseDecisionLegacyDirect:
 		// Do not clobber announceable trust for an already-known
 		// listener peer just because the current session declared
@@ -463,18 +503,23 @@ func (s *Service) applyAdvertiseOnInboundAccept(tcpAddr string, frame protocol.F
 // — the caller is expected to derive it from the live TCP
 // connection's RemoteAddr, not from peerAddress (which may be a
 // hostname for DNS/manual peers). dialedPort is the real port used
-// for the session — never 64646 as a default.
+// for the session — never 64646 as a default — expressed as a
+// domain.PeerPort so the compiler catches any silent mix-up with
+// generic ints the caller might have lying around.
 //
-// Contract: if dialedIP is not a parseable IP, the call is a no-op.
-// TrustedAdvertiseIP is consumed as a canonical IP by the observed-IP
-// downgrade sweep (downgradeAnnounceableByObservedIPLocked compares it
-// against observed IPs extracted from real TCP RemoteAddrs). Storing a
+// Contract: if dialedIP is not a parseable IP, or dialedPort is not a
+// valid PeerPort (1..65535), the call is a no-op. TrustedAdvertiseIP
+// is consumed as a canonical IP by the observed-IP downgrade sweep
+// (downgradeAnnounceableByObservedIPLocked compares it against
+// observed IPs extracted from real TCP RemoteAddrs). Storing a
 // hostname here would permanently break that compare: a later
 // world_mismatch targeting the same peer could not match its
 // hostname-valued TrustedAdvertiseIP and the announceable row would
-// survive the downgrade.
-func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialedIP domain.PeerIP, dialedPort string) {
-	if peerAddress == "" || dialedIP == "" || dialedPort == "" {
+// survive the downgrade. Persisted schema keeps the port as string;
+// the domain→string conversion happens here at the single writer
+// boundary.
+func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialedIP domain.PeerIP, dialedPort domain.PeerPort) {
+	if peerAddress == "" || dialedIP == "" || !dialedPort.IsValid() {
 		return
 	}
 	canonIP := domain.PeerIP(canonicalIPFromHost(string(dialedIP)))
@@ -500,7 +545,7 @@ func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialed
 	pm.AnnounceState = announceStateAnnounceable
 	pm.TrustedAdvertiseIP = canonIP
 	pm.TrustedAdvertiseSource = trustedAdvertiseSourceOutbound
-	pm.TrustedAdvertisePort = dialedPort
+	pm.TrustedAdvertisePort = strconv.Itoa(int(dialedPort))
 }
 
 // recordObservedIPHintLocked updates the runtime-only history of
@@ -574,10 +619,17 @@ func (s *Service) handleConnectionNotice(peerAddress domain.PeerAddress, frame p
 	}
 }
 
-// handleObservedAddressMismatchNotice updates the trusted self-advertise
-// IP from a peer-supplied observation. Split out of handleConnectionNotice
-// so each notice code reads top-to-bottom without the dispatcher having
-// to hold two unrelated decision trees in scope.
+// handleObservedAddressMismatchNotice consumes a legacy
+// connection_notice{code=observed-address-mismatch} hint produced by v10
+// peers. Under the phase 1 deprecation contract (ProtocolVersion=11) this
+// notice is no longer authoritative: the v11 truth source is passive
+// learning from inbound observed IPs (see selfAdvertiseEndpoint /
+// observedConsensusIPLocked). The hint is only applied as a weak fallback
+// when the node has NOT yet accumulated an observed-IP consensus, so a
+// legacy notice can never downgrade or override a stronger v11-derived
+// advertise endpoint. Parser path and session survival are unconditional
+// — the notice must never break a session or persisted state, per the
+// mixed-network compatibility invariant.
 func (s *Service) handleObservedAddressMismatchNotice(frame protocol.Frame) {
 	details, err := protocol.ParseObservedAddressMismatchDetails(frame.Details)
 	if err != nil {
@@ -590,6 +642,16 @@ func (s *Service) handleObservedAddressMismatchNotice(frame protocol.Frame) {
 	// Guard against a peer reporting a non-routable observation — the
 	// override must never downgrade us to a private range.
 	if isNonRoutableIPHost(observed) {
+		return
+	}
+	// Weak-hint gate: if v11 passive learning already produced an observed
+	// consensus IP, the legacy notice is advisory only and does not touch
+	// the runtime override. This keeps mixed-network nodes from having a
+	// stronger learned endpoint silently replaced by a v10 peer's claim.
+	s.mu.RLock()
+	_, hasObservedConsensus := s.observedConsensusIPLocked()
+	s.mu.RUnlock()
+	if hasObservedConsensus {
 		return
 	}
 	s.setTrustedSelfAdvertiseIP(domain.PeerIP(canonicalIPFromHost(observed)))
@@ -691,10 +753,21 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 }
 
 // selfAdvertiseEndpoint returns the host:port we should publish in an
-// outbound hello frame. Priority: runtime override → observed
-// consensus IP → configured advertise address. The port always comes
-// from the real local listener so convergence never swaps our port to
-// an unproven one.
+// outbound hello.listen under the phase 1 deprecation contract
+// (ProtocolVersion=11).
+//
+// Host selection priority:
+//   1. learned observed IP (passive-learning consensus from inbound path);
+//   2. runtime override set from legacy observed-address-mismatch notice
+//      (deprecated compat hint, not an authoritative source);
+//   3. host component of the deprecated CORSA_ADVERTISE_ADDRESS fallback.
+//
+// Port selection is a single rule: config.Node.EffectiveAdvertisePort(),
+// which resolves CORSA_ADVERTISE_PORT or falls back to DefaultPeerPort.
+// The real local listener port is NOT reused as the advertised port —
+// operators commonly run behind a NAT/port-forward where the advertised
+// port differs from the bind port, and the v11 contract makes the
+// operator-declared advertise_port the single source of truth.
 func (s *Service) selfAdvertiseEndpoint() string {
 	if !s.cfg.EffectiveListenerEnabled() {
 		return ""
@@ -704,34 +777,29 @@ func (s *Service) selfAdvertiseEndpoint() string {
 	observedIP, _ := s.observedConsensusIPLocked()
 	s.mu.RUnlock()
 
-	// Port preference: real local listener over config.AdvertiseAddress.
-	listenerPort := s.localListenerPort()
-	if listenerPort == "" {
-		// Fallback: AdvertiseAddress port if listener port is unknown
-		// (unit tests without a real net.Listener).
-		if _, port, ok := splitHostPort(s.cfg.AdvertiseAddress); ok {
-			listenerPort = port
-		}
-	}
-	if listenerPort == "" {
-		listenerPort = config.DefaultPeerPort
-	}
+	// advertisePort is carried as a domain.PeerPort through the selection
+	// logic; the textual form is derived once here at the JoinHostPort
+	// boundary so the runtime path does not fan out stringly-typed copies.
+	advertisePort := s.cfg.EffectiveAdvertisePort()
+	advertisePortStr := strconv.Itoa(int(advertisePort))
 
-	if override != "" {
-		return joinHostPort(string(override), listenerPort)
-	}
+	// Learned observed IP wins over the deprecated legacy override and the
+	// deprecated CORSA_ADVERTISE_ADDRESS host. This is the v11 contract:
+	// passive learning from inbound observed IP is the primary truth source.
 	if observedIP != "" {
-		return joinHostPort(string(observedIP), listenerPort)
+		return joinHostPort(string(observedIP), advertisePortStr)
 	}
-	// Config fallback: use the host from cfg.AdvertiseAddress but always
-	// pair it with listenerPort. The configured port may have drifted
-	// from the real listener (operator edited config, listener picked a
-	// different port on startup), and the contract is that hello.listen
-	// must always advertise the real local listener port so the peer
-	// dial target is dialable. Using the raw cfg.AdvertiseAddress here
-	// would silently re-introduce a stale port for a correct host.
+	// Override comes from handleObservedAddressMismatchNotice, which in v11
+	// is weakened to a compat-only hint (never authoritative). Still better
+	// than nothing when the node has not yet seen a v11 inbound.
+	if override != "" {
+		return joinHostPort(string(override), advertisePortStr)
+	}
+	// Deprecated fallback: host from CORSA_ADVERTISE_ADDRESS. Always paired
+	// with EffectiveAdvertisePort, never with the stale port baked into the
+	// config value.
 	if cfgHost, _, ok := splitHostPort(s.cfg.AdvertiseAddress); ok && cfgHost != "" {
-		return joinHostPort(cfgHost, listenerPort)
+		return joinHostPort(cfgHost, advertisePortStr)
 	}
 	return s.cfg.AdvertiseAddress
 }
@@ -757,35 +825,6 @@ func (s *Service) observedConsensusIPLocked() (domain.PeerIP, bool) {
 		return "", false
 	}
 	return best, true
-}
-
-// localListenerPort returns the port from the real net.Listener, if any.
-// Empty string when the listener is not yet bound.
-//
-// We intentionally parse listener.Addr().String() via splitHostPort
-// instead of type-asserting to *net.TCPAddr: the listener type is opaque
-// to this module (wrapped listeners, tls.Listener, test fakes), and the
-// string form is already the canonical "host:port" everywhere else in
-// this package.
-func (s *Service) localListenerPort() string {
-	s.mu.RLock()
-	listener := s.listener
-	s.mu.RUnlock()
-	if listener == nil {
-		return ""
-	}
-	addr := listener.Addr()
-	if addr == nil {
-		return ""
-	}
-	_, port, ok := splitHostPort(addr.String())
-	if !ok {
-		return ""
-	}
-	if port == "" || port == "0" {
-		return ""
-	}
-	return port
 }
 
 // repayMisadvertisePenaltyOnAuthLocked decreases the forgivable

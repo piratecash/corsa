@@ -3,9 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/appdata"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 func expectedDefaultDataDir(t *testing.T) string {
@@ -148,6 +150,127 @@ func TestDefaultConfigIncludesPeersAndProxy(t *testing.T) {
 	if cfg.Node.ChatLogDir != wantChatlog {
 		t.Fatalf("unexpected default ChatLogDir: %s", cfg.Node.ChatLogDir)
 	}
+}
+
+// TestAdvertisePortFromEnv covers the full CORSA_ADVERTISE_PORT parse
+// matrix required by the advertise-address phase 1 deprecation contract.
+// Only a string integer in the inclusive range 1..65535 produces a
+// non-nil *domain.PeerPort — every other input (empty, non-numeric, out
+// of range, negative, zero, whitespace-only) returns nil so the caller
+// falls back to config.DefaultPeerPort through EffectiveAdvertisePort.
+// The return type is a pointer so "operator did not configure this" is
+// modelled explicitly at the type level and a stray zero never leaks
+// through as a silent "valid port" signal.
+func TestAdvertisePortFromEnv(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantNil bool
+		want    domain.PeerPort
+	}{
+		{name: "empty_returns_nil", raw: "", wantNil: true},
+		{name: "whitespace_only_returns_nil", raw: "   ", wantNil: true},
+		{name: "non_numeric_returns_nil", raw: "abc", wantNil: true},
+		{name: "numeric_zero_returns_nil", raw: "0", wantNil: true},
+		{name: "negative_returns_nil", raw: "-1", wantNil: true},
+		{name: "above_upper_bound_returns_nil", raw: "65536", wantNil: true},
+		{name: "large_returns_nil", raw: "1000000", wantNil: true},
+		{name: "fractional_returns_nil", raw: "64646.5", wantNil: true},
+		{name: "low_bound_accepted", raw: "1", want: 1},
+		{name: "default_accepted", raw: "64646", want: 64646},
+		{name: "upper_bound_accepted", raw: "65535", want: 65535},
+		{name: "leading_whitespace_trimmed", raw: "  64646  ", want: 64646},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CORSA_ADVERTISE_PORT", tc.raw)
+			got := advertisePortFromEnv()
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("advertisePortFromEnv(%q) = &%d, want nil", tc.raw, *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("advertisePortFromEnv(%q) = nil, want &%d", tc.raw, tc.want)
+			}
+			if *got != tc.want {
+				t.Fatalf("advertisePortFromEnv(%q) = &%d, want &%d", tc.raw, *got, tc.want)
+			}
+			if !got.IsValid() {
+				t.Fatalf("advertisePortFromEnv(%q) returned non-IsValid PeerPort %d — parser must only surface values in 1..65535", tc.raw, *got)
+			}
+		})
+	}
+}
+
+// TestNodeEffectiveAdvertisePort asserts the fallback cascade: a nil or
+// invalid AdvertisePort collapses to the PeerPort form of DefaultPeerPort,
+// a valid pointer is returned verbatim. The EffectiveAdvertisePort result
+// flows into both hello.advertise_port on the wire and JoinHostPort on
+// the self-advertise endpoint, so the single-source fallback rule is
+// enforced here rather than fanning out to every call site.
+func TestNodeEffectiveAdvertisePort(t *testing.T) {
+	t.Parallel()
+
+	defaultValue, err := parseDefaultPeerPort()
+	if err != nil {
+		t.Fatalf("parse DefaultPeerPort %q: %v", DefaultPeerPort, err)
+	}
+
+	t.Run("nil_falls_back_to_default", func(t *testing.T) {
+		t.Parallel()
+		n := Node{}
+		if got := n.EffectiveAdvertisePort(); got != defaultValue {
+			t.Fatalf("EffectiveAdvertisePort with nil AdvertisePort: got %d want %d", got, defaultValue)
+		}
+	})
+
+	t.Run("valid_pointer_wins", func(t *testing.T) {
+		t.Parallel()
+		value := domain.PeerPort(55555)
+		n := Node{AdvertisePort: &value}
+		if got := n.EffectiveAdvertisePort(); got != 55555 {
+			t.Fatalf("EffectiveAdvertisePort with explicit value: got %d want 55555", got)
+		}
+	})
+
+	t.Run("invalid_pointer_falls_back_to_default", func(t *testing.T) {
+		t.Parallel()
+		// An invalid value at the pointer is still treated as "not
+		// configured" so the fallback is consistent with env-parse
+		// behaviour (which would never surface such a pointer in the
+		// first place, but a synthetic Node in a test or a manually
+		// constructed Config could).
+		value := domain.PeerPort(0)
+		n := Node{AdvertisePort: &value}
+		if got := n.EffectiveAdvertisePort(); got != defaultValue {
+			t.Fatalf("EffectiveAdvertisePort with invalid pointer: got %d want %d", got, defaultValue)
+		}
+	})
+
+	t.Run("out_of_range_pointer_falls_back_to_default", func(t *testing.T) {
+		t.Parallel()
+		value := domain.PeerPort(70000)
+		n := Node{AdvertisePort: &value}
+		if got := n.EffectiveAdvertisePort(); got != defaultValue {
+			t.Fatalf("EffectiveAdvertisePort with out-of-range pointer: got %d want %d", got, defaultValue)
+		}
+	})
+}
+
+// parseDefaultPeerPort re-parses the string DefaultPeerPort constant
+// into its PeerPort form via the same strconv.Atoi path used by the
+// runtime fallback in EffectiveAdvertisePort. Keeping the parse in the
+// test helper rather than hardcoding the numeric value prevents the
+// test from drifting if DefaultPeerPort is retuned.
+func parseDefaultPeerPort() (domain.PeerPort, error) {
+	value, err := strconv.Atoi(DefaultPeerPort)
+	if err != nil {
+		return 0, err
+	}
+	return domain.PeerPort(value), nil
 }
 
 func TestDefaultAnchorsPathsToStartupDirectory(t *testing.T) {
