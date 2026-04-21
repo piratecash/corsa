@@ -302,13 +302,27 @@ sequenceDiagram
   `shouldRequestPeers()` (skipped once the node is `Healthy`). No periodic
   polling in steady-state.
 - **Peer announcement** — when a new peer authenticates on an inbound
-  connection, its advertised listen address is announced to all active
-  outbound sessions via `announce_peer`. The frame includes the peer's
-  `node_type` ("full" or "client"), but recipients treat it as advisory
-  third-party metadata rather than a trusted type override. The
-  announcement is non-recursive: recipients learn
-  the address locally but do not relay it further.
-  Local/private addresses are excluded. If the outbound send channel is
+  connection, its dialable address is announced to all active outbound
+  sessions via `announce_peer`. **Trust contract:** the address we gossip
+  is the **observed TCP source host** combined with the **advertised
+  listen port** from `hello.Listen` — never the claimed hello.Listen host
+  verbatim. A peer can lie about its listen IP (stale DDNS, misconfig,
+  or deliberately), but it cannot forge the IP the packets actually
+  arrive from; the TCP source port, however, is an ephemeral NAT
+  mapping and is unusable for dial-back, so the port is taken from the
+  peer's self-reported `hello.Listen`. Both halves are passed through
+  `normalizePeerAddress(observedAddr, hello.Listen)` so the announce
+  path shares the exact same trust rules as the learn path
+  (`learnPeerFromFrame`). When `normalizePeerAddress` returns `false`
+  (listener disabled, empty observed, malformed advertised, or any
+  forbidden range) no announcement is emitted. The frame includes the
+  peer's `node_type` ("full" or "client"), but recipients treat it as
+  advisory third-party metadata rather than a trusted type override.
+  The announcement is non-recursive: recipients learn the address
+  locally but do not relay it further. Local/private addresses are
+  excluded via `classifyAddress` after normalization, so a peer behind
+  CGNAT whose observed IP is public is still announceable even when
+  its advertised host was private. If the outbound send channel is
   full, the frame is queued via the pending mechanism and delivered after
   drain. If a frame with the same dedup key is already queued, its
   payload is **replaced** with the newer version so that metadata changes
@@ -1016,12 +1030,28 @@ sequenceDiagram
   aggregate status ноды (пропускается после достижения `Healthy`).
   В steady-state нет периодического polling.
 - **Анонс peer'ов** — когда новый peer аутентифицируется через входящее
-  соединение, его объявленный listen-адрес анонсируется всем активным
-  исходящим сессиям через `announce_peer`. Фрейм включает `node_type`
-  пира ("full" или "client"), но получатели трактуют его только как
-  подсказку о третьей стороне, а не как доверенный override типа.
-  Анонс нерекурсивный: получатели сохраняют адрес локально, но
-  не ретранслируют дальше. Локальные/приватные адреса исключаются. Если
+  соединение, его дозваниваемый адрес анонсируется всем активным
+  исходящим сессиям через `announce_peer`. **Контракт доверия:**
+  анонсируем **наблюдаемый TCP source host** в паре с **объявленным
+  портом** из `hello.Listen` — никогда не заявленный в `hello.Listen`
+  хост дословно. Пир может соврать про свой listen IP (устаревший
+  DDNS, ошибка конфига или умышленно), но не может подделать IP,
+  с которого реально приходят пакеты; TCP source port, напротив,
+  эфемерное NAT-mapping и для dial-back непригодно, поэтому порт
+  берём из самозаявленного `hello.Listen` пира. Обе половины
+  проходят через `normalizePeerAddress(observedAddr, hello.Listen)`,
+  поэтому announce-путь использует ровно те же правила доверия,
+  что и learn-путь (`learnPeerFromFrame`). Если `normalizePeerAddress`
+  вернёт `false` (listener отключён, пустой observed, некорректный
+  advertised или запрещённый диапазон) — анонс не отправляется.
+  Фрейм включает `node_type` пира ("full" или "client"), но
+  получатели трактуют его только как подсказку о третьей стороне,
+  а не как доверенный override типа. Анонс нерекурсивный:
+  получатели сохраняют адрес локально, но не ретранслируют
+  дальше. Локальные/приватные адреса отфильтровываются через
+  `classifyAddress` уже после нормализации, поэтому пир за CGNAT
+  с публичным наблюдаемым IP анонсируется корректно даже когда
+  его заявленный хост был приватным. Если
   канал отправки переполнен, фрейм ставится в pending-очередь и
   доставляется после освобождения. Если фрейм с таким же ключом
   дедупликации уже в очереди, его payload **заменяется** на новую

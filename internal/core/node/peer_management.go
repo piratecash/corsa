@@ -1445,11 +1445,63 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 
 // peerListenAddress extracts the advertised listen address from a hello frame.
 // Returns empty string if the peer does not accept inbound connections.
+//
+// NOTE: the returned value is the peer's self-reported claim; it must not
+// be used to gossip the peer's address to neighbours. Use
+// observedAnnounceAddressFromHello for the announce path so we broadcast
+// the observed TCP source host combined with the advertised port.
 func peerListenAddress(hello protocol.Frame) string {
 	if !listenerEnabledFromFrame(hello) {
 		return ""
 	}
 	return strings.TrimSpace(hello.Listen)
+}
+
+// observedAnnounceAddressFromHello returns the peer address we should gossip
+// to neighbours via announce_peer: observed TCP source host combined with
+// the advertised listen port — falling back to config.DefaultPeerPort when
+// hello.Listen carries a bare host without an explicit port.
+//
+// Trust model:
+//   - host — taken from the observed TCP remote address, because it is the
+//     only host we cryptographically trust (the peer cannot lie about where
+//     packets actually come from without hijacking routing).
+//   - port — taken from hello.Listen if it carries one; otherwise
+//     config.DefaultPeerPort. The TCP source port is an ephemeral NAT
+//     mapping that no neighbour could dial into, so it is never used.
+//     The bare-host fallback matches the add_peer RPC contract
+//     (addPeerFrame applies the same default).
+//
+// Returns ("", false) when:
+//   - the peer disabled its listener (Listener="0");
+//   - the observed address is empty (unregistered ConnID, post-close read);
+//   - hello.Listen is empty / whitespace-only;
+//   - normalizePeerAddress rejects the observed host (forbidden range,
+//     self-address, ::/::1 unspecified, etc.).
+//
+// All downstream filtering is delegated to normalizePeerAddress so the
+// announce path shares the exact same trust rules as the learn path.
+func (s *Service) observedAnnounceAddressFromHello(observedAddr string, hello protocol.Frame) (domain.PeerAddress, bool) {
+	if !listenerEnabledFromFrame(hello) {
+		return "", false
+	}
+	if strings.TrimSpace(observedAddr) == "" {
+		return "", false
+	}
+	advertised := strings.TrimSpace(hello.Listen)
+	if advertised == "" {
+		return "", false
+	}
+	// When hello.Listen carries a bare host without an explicit port,
+	// attach config.DefaultPeerPort so downstream normalization has a
+	// dialable endpoint to work with. Without this fallback a legitimate
+	// peer that advertises its listen host without a port (older clients,
+	// simple configs) would never appear in gossip — the observed IP is
+	// still trusted, we just need a canonical port to pair it with.
+	if _, _, ok := splitHostPort(advertised); !ok {
+		advertised = net.JoinHostPort(advertised, config.DefaultPeerPort)
+	}
+	return s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(advertised))
 }
 
 // announcePeerToSessions sends an announce_peer frame with a single new

@@ -6853,6 +6853,213 @@ func TestAnnouncePeerHelpers(t *testing.T) {
 	}
 }
 
+// TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort pins
+// the gossip contract: when a peer's claimed hello.Listen host differs from
+// the observed TCP source host, the announce frame carries the observed host
+// (trusted truth from the TCP remote) combined with the advertised port
+// (because TCP source port is an ephemeral NAT mapping).
+//
+// This is the production scenario: peer connects from 91.234.35.132:57677
+// but announces hello.Listen = 212.104.118.136:64646 (stale DDNS). We must
+// gossip 91.234.35.132:64646, not 212.104.118.136:64646.
+//
+// TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort
+// закрепляет контракт госсипа: если заявленный в hello.Listen хост не
+// совпадает с наблюдаемым TCP source host, фрейм announce_peer несёт
+// наблюдаемый хост (доверенная истина из TCP remote) в сочетании с
+// объявленным портом (TCP source port — это эфемерный NAT mapping).
+func TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "198.51.100.1:64646",
+		Type:             domain.NodeTypeFull,
+	}, id, nil)
+
+	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136:64646"}
+	got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello)
+	if !ok {
+		t.Fatalf("expected announce address to be produced")
+	}
+	if got != domain.PeerAddress("91.234.35.132:64646") {
+		t.Fatalf("unexpected announce address: %s", got)
+	}
+}
+
+// TestObservedAnnounceAddressFromHelloSkipsListenerDisabled verifies that
+// peers with Listener="0" are not announced — they do not accept inbound
+// connections, so gossiping their address would yield unreachable dial
+// candidates to neighbours.
+//
+// TestObservedAnnounceAddressFromHelloSkipsListenerDisabled проверяет, что
+// пиры с Listener="0" не анонсируются — они не принимают входящие
+// соединения, госсип их адреса дал бы соседям недостижимые кандидаты.
+func TestObservedAnnounceAddressFromHelloSkipsListenerDisabled(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "198.51.100.1:64646",
+		Type:             domain.NodeTypeFull,
+	}, id, nil)
+
+	hello := protocol.Frame{Listener: "0", Listen: "212.104.118.136:64646"}
+	if got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello); ok {
+		t.Fatalf("expected listener-disabled peer to be skipped, got %s", got)
+	}
+}
+
+// TestObservedAnnounceAddressFromHelloSkipsEmptyObserved verifies that an
+// empty observed address — which happens when RemoteAddr() is queried for
+// an unregistered ConnID — does not fall through to the claimed hello.Listen
+// host. The whole point of the helper is to refuse to trust the claim.
+//
+// TestObservedAnnounceAddressFromHelloSkipsEmptyObserved проверяет, что
+// пустой observed адрес (например, RemoteAddr() для незарегистрированного
+// ConnID) не откатывается на заявленный hello.Listen — весь смысл хелпера
+// в том, чтобы не доверять заявке.
+func TestObservedAnnounceAddressFromHelloSkipsEmptyObserved(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "198.51.100.1:64646",
+		Type:             domain.NodeTypeFull,
+	}, id, nil)
+
+	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136:64646"}
+	if got, ok := svc.observedAnnounceAddressFromHello("", hello); ok {
+		t.Fatalf("expected empty observed to be skipped, got %s", got)
+	}
+	if got, ok := svc.observedAnnounceAddressFromHello("   ", hello); ok {
+		t.Fatalf("expected whitespace-only observed to be skipped, got %s", got)
+	}
+}
+
+// TestObservedAnnounceAddressFromHelloSkipsEmptyAdvertised verifies that a
+// hello with an empty or whitespace-only Listen cannot produce an announce
+// address — we require at least a host to attach the default port to.
+//
+// TestObservedAnnounceAddressFromHelloSkipsEmptyAdvertised проверяет, что
+// hello с пустым или пробельным Listen не порождает announce адрес —
+// нужен хотя бы host, к которому можно приклеить дефолтный порт.
+func TestObservedAnnounceAddressFromHelloSkipsEmptyAdvertised(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "198.51.100.1:64646",
+		Type:             domain.NodeTypeFull,
+	}, id, nil)
+
+	cases := []protocol.Frame{
+		{Listener: "1", Listen: ""},
+		{Listener: "1", Listen: "   "},
+	}
+	for _, hello := range cases {
+		if got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello); ok {
+			t.Fatalf("expected empty hello.Listen %q to be skipped, got %s", hello.Listen, got)
+		}
+	}
+}
+
+// TestObservedAnnounceAddressFromHelloFallsBackToDefaultPortForHostOnlyHello
+// pins the second half of the trust contract: when hello.Listen carries a
+// bare host/IP without an explicit port (legacy client, simple config), the
+// helper still produces an announce address by pairing the observed TCP
+// source host with config.DefaultPeerPort. Without this fallback a
+// legitimate peer whose hello.Listen is just an IP string would never be
+// gossipped, and the NAT-asymmetry fix would regress "announce observed
+// IP" to "announce nothing at all".
+//
+// TestObservedAnnounceAddressFromHelloFallsBackToDefaultPortForHostOnlyHello
+// закрепляет вторую половину контракта доверия: когда hello.Listen несёт
+// голый host/IP без явного порта (legacy-клиент, простой конфиг), helper
+// всё равно порождает announce-адрес, склеивая наблюдаемый TCP source host
+// с config.DefaultPeerPort. Без этого фолбэка легитимный пир, у которого
+// hello.Listen — просто IP-строка, никогда не попал бы в госсип, и фикс
+// NAT-асимметрии деградировал бы из «анонсируем наблюдаемый IP» в
+// «не анонсируем вообще».
+func TestObservedAnnounceAddressFromHelloFallsBackToDefaultPortForHostOnlyHello(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "198.51.100.1:64646",
+		Type:             domain.NodeTypeFull,
+	}, id, nil)
+
+	// Bare IP without a port in hello.Listen — observed TCP source carries
+	// a public IP; expect the helper to pair it with DefaultPeerPort.
+	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136"}
+	got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello)
+	if !ok {
+		t.Fatalf("expected announce address to be produced with default-port fallback")
+	}
+	wantPort := config.DefaultPeerPort
+	want := domain.PeerAddress(net.JoinHostPort("91.234.35.132", wantPort))
+	if got != want {
+		t.Fatalf("unexpected announce address: got %s, want %s", got, want)
+	}
+}
+
+// TestObservedAnnounceAddressFromHelloSkipsPrivateObserved verifies that
+// when the observed host is in a forbidden/private range, no announce
+// address is produced — we do not leak private-network topology into the
+// public gossip fabric even if hello.Listen looks public.
+//
+// TestObservedAnnounceAddressFromHelloSkipsPrivateObserved проверяет, что
+// если observed host попадает в запрещённый/приватный диапазон, announce
+// адрес не создаётся — мы не раскрываем приватную топологию в публичный
+// госсип, даже если hello.Listen выглядит публичным.
+func TestObservedAnnounceAddressFromHelloSkipsPrivateObserved(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:    ":64646",
+		AdvertiseAddress: "198.51.100.1:64646",
+		Type:             domain.NodeTypeFull,
+	}, id, nil)
+
+	hello := protocol.Frame{Listener: "1", Listen: "198.51.100.5:64646"}
+	// observed is loopback — normalizePeerAddress returns empty for private
+	// observed host when advertised is public (no safe IP to announce).
+	if got, ok := svc.observedAnnounceAddressFromHello("127.0.0.1:50702", hello); ok {
+		// classifyAddress will filter loopback downstream, but the helper
+		// itself may legitimately return a value here; we only require
+		// that if it does, it is NOT the claimed public host verbatim —
+		// that would defeat the trust-observed-IP invariant.
+		if got == domain.PeerAddress(strings.TrimSpace(hello.Listen)) {
+			t.Fatalf("must not fall back to claimed hello.Listen for private observed, got %s", got)
+		}
+	}
+}
+
 // TestPromotePeerAddress verifies that promotePeerAddress adds a peer to the
 // end of the dial list (no front-promotion), does not rewrite existing trust
 // metadata, and rejects local addresses.

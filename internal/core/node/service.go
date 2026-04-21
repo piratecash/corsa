@@ -2587,8 +2587,16 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
 	// addresses are excluded to avoid leaking private network topology.
-	if addr := peerListenAddress(verified.Hello); addr != "" && classifyAddress(domain.PeerAddress(addr)) != domain.NetGroupLocal {
-		s.goBackground(func() { s.announcePeerToSessions(addr, verified.Hello.NodeType) })
+	//
+	// We gossip the observed TCP source host combined with the advertised
+	// listen port — never the claimed hello.Listen host verbatim. The peer
+	// can lie about its listen IP (stale DDNS, misconfig, or on purpose),
+	// but it cannot forge the IP the packets actually arrive from. Port,
+	// however, must come from hello.Listen because the TCP source port is
+	// an ephemeral NAT mapping that no neighbour could dial into.
+	if announceAddr, ok := s.observedAnnounceAddressFromHello(remoteAddr, verified.Hello); ok && classifyAddress(announceAddr) != domain.NetGroupLocal {
+		nodeType := verified.Hello.NodeType
+		s.goBackground(func() { s.announcePeerToSessions(string(announceAddr), nodeType) })
 	}
 
 	if addr := s.inboundPeerAddress(id); addr != "" {
