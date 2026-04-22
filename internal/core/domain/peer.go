@@ -146,6 +146,41 @@ const (
 // String returns the raw direction label.
 func (d PeerDirection) String() string { return string(d) }
 
+// SlotState names the lifecycle phase of a ConnectionManager outbound slot.
+// The string values are part of the wire contract used by three downstream
+// consumers and must stay stable:
+//   - protocol.PeerHealthFrame.SlotState (JSON wire field)
+//   - ebus TopicSlotStateChanged payload (string, consumed by
+//     NodeStatusMonitor.applySlotStateDelta)
+//   - SlotInfo JSON (diagnostics / active-connections endpoint)
+//
+// Kept in the domain layer so producer (ConnectionManager) and consumers
+// (peer_management.go, RPC handlers, NodeStatusMonitor, tests) compare
+// against the same typed constants instead of raw string literals — the
+// typed-enum discipline that prevents "initialising" vs "initializing"
+// drift at the boundaries.
+type SlotState string
+
+const (
+	// SlotStateQueued — slot is reserved, waiting for dial worker.
+	SlotStateQueued SlotState = "queued"
+	// SlotStateDialing — dial worker is running.
+	SlotStateDialing SlotState = "dialing"
+	// SlotStateInitializing — TCP handshake done, application-level init
+	// (hello/auth) in progress.
+	SlotStateInitializing SlotState = "initializing"
+	// SlotStateActive — fully operational; initPeerSession succeeded.
+	SlotStateActive SlotState = "active"
+	// SlotStateReconnecting — previously-active session lost, immediate
+	// retry pending.
+	SlotStateReconnecting SlotState = "reconnecting"
+	// SlotStateRetryWait — backoff timer running before next dial attempt.
+	SlotStateRetryWait SlotState = "retry_wait"
+)
+
+// String returns the raw slot-state label.
+func (s SlotState) String() string { return string(s) }
+
 // ---------------------------------------------------------------------------
 // Role-specific aggregate types
 // ---------------------------------------------------------------------------

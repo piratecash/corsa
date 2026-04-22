@@ -2990,6 +2990,13 @@ func TestOutboundIncompatibleReject_HealthSnapshotComplete(t *testing.T) {
 	}
 	svc.onCMDialFailed(addr, cmErr, true)
 
+	// Prime the peer_health snapshot: the hot RPC path loads it atomically
+	// and never synchronously rebuilds on miss (see peer_health_snapshot.go).
+	// Production code gets this invariant from primeHotReadSnapshots() in
+	// Run(); this test constructs a bare Service and bypasses Run(), so we
+	// must rebuild explicitly after mutating s.health.
+	svc.rebuildPeerHealthSnapshot()
+
 	// Obtain the operator-visible snapshot.
 	frames := svc.peerHealthFrames()
 

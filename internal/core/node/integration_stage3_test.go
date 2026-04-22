@@ -16,6 +16,18 @@ import (
 
 // buildTestServiceWithCM creates a minimal Service with a running CM and PP
 // for testing buildPeerExchangeResponse.
+//
+// buildPeerExchangeResponse reads from two atomic snapshots (cm_slots and
+// peers_exchange) and never synchronously rebuilds — see
+// peer_management.go buildPeerExchangeResponse and cm_slots_snapshot.go
+// docstrings for the lock-free hot-path contract.  Production wiring gets
+// the initial prime from primeHotReadSnapshots() in Run(); tests that
+// bypass Run() must prime explicitly.  This helper primes both snapshots
+// before returning so callers observing an un-mutated service see the
+// initial state.  Tests that mutate state afterwards (e.g. slotActive,
+// pp.Add, direct writes to svc.persistedMeta) must call
+// primePeerExchangeSnapshots(svc) again before asserting
+// buildPeerExchangeResponse output.
 func buildTestServiceWithCM(t *testing.T, addresses []string, maxSlots int) (*Service, *ConnectionManager, *PeerProvider, context.CancelFunc) {
 	t.Helper()
 
@@ -36,7 +48,20 @@ func buildTestServiceWithCM(t *testing.T, addresses []string, maxSlots int) (*Se
 	cancel := runCM(cm)
 	cm.NotifyBootstrapReady()
 
+	primePeerExchangeSnapshots(svc)
+
 	return svc, cm, b.Cfg.Provider, cancel
+}
+
+// primePeerExchangeSnapshots rebuilds the two snapshots consumed by
+// buildPeerExchangeResponse: cm_slots (active slot view) and
+// peers_exchange (persistedMeta gate + inbound-connected list +
+// candidate addresses from peerProvider).  The hot RPC path loads them
+// atomically and never rebuilds on miss, so tests that seed state after
+// construction must call this explicitly to publish the new view.
+func primePeerExchangeSnapshots(svc *Service) {
+	svc.rebuildCMSlotsSnapshot()
+	svc.rebuildPeersExchangeSnapshot()
 }
 
 // collectAddresses returns sorted addresses from buildPeerExchangeResponse.
@@ -53,7 +78,7 @@ func slotActive(t *testing.T, cm *ConnectionManager, addr string) {
 	t.Helper()
 	waitFor(t, 2*time.Second, "slot "+addr+" active", func() bool {
 		for _, s := range cm.Slots() {
-			if string(s.Address) == addr && s.State == "active" {
+			if string(s.Address) == addr && s.State == domain.SlotStateActive {
 				return true
 			}
 		}
@@ -84,6 +109,7 @@ func TestBuildPeerExchange_ActivePriorityOverCandidate(t *testing.T) {
 	// Add a candidate on the same IP but different port.
 	pp.Add(mustAddr("1.2.3.4:9001"), domain.PeerSourcePeerExchange)
 
+	primePeerExchangeSnapshots(svc)
 	result := svc.buildPeerExchangeResponse(nil)
 	addrs := collectAddresses(result)
 
@@ -113,6 +139,7 @@ func TestBuildPeerExchange_NoDuplicatesSameAddress(t *testing.T) {
 
 	slotActive(t, cm, "1.2.3.4:9000")
 
+	primePeerExchangeSnapshots(svc)
 	result := svc.buildPeerExchangeResponse(nil)
 	count := 0
 	for _, a := range result {
@@ -137,6 +164,7 @@ func TestBuildPeerExchange_NoDuplicatesMultipleIPs(t *testing.T) {
 	pp.Add(mustAddr("1.2.3.4:9999"), domain.PeerSourcePeerExchange)
 	pp.Add(mustAddr("5.6.7.8:9999"), domain.PeerSourcePeerExchange)
 
+	primePeerExchangeSnapshots(svc)
 	result := svc.buildPeerExchangeResponse(nil)
 	ipSeen := make(map[string]int)
 	for _, a := range result {
@@ -158,6 +186,8 @@ func TestBuildPeerExchange_FilterByNetworkGroups(t *testing.T) {
 
 	slotActive(t, cm, "1.2.3.4:9000")
 	pp.Add(mustAddr("5.6.7.8:9000"), domain.PeerSourcePeerExchange)
+
+	primePeerExchangeSnapshots(svc)
 
 	// Caller supports IPv4 → both should appear.
 	groups := map[domain.NetGroup]struct{}{domain.NetGroupIPv4: {}}
@@ -181,6 +211,7 @@ func TestBuildPeerExchange_NilCallerGroupsUnfiltered(t *testing.T) {
 	slotActive(t, cm, "1.2.3.4:9000")
 	pp.Add(mustAddr("5.6.7.8:9000"), domain.PeerSourcePeerExchange)
 
+	primePeerExchangeSnapshots(svc)
 	result := svc.buildPeerExchangeResponse(nil)
 	if len(result) < 2 {
 		t.Errorf("expected at least 2 peers for nil callerGroups, got %d: %v", len(result), collectAddresses(result))
@@ -203,6 +234,7 @@ func TestBuildPeerExchange_OnlyActiveNoCandidate(t *testing.T) {
 
 	slotActive(t, cm, "1.2.3.4:9000")
 
+	primePeerExchangeSnapshots(svc)
 	result := svc.buildPeerExchangeResponse(nil)
 	addrs := collectAddresses(result)
 	if len(addrs) != 1 || addrs[0] != "1.2.3.4:9000" {
@@ -221,6 +253,7 @@ func TestBuildPeerExchange_OnlyCandidatesNoActive(t *testing.T) {
 		peerProvider: pp,
 	}
 
+	primePeerExchangeSnapshots(svc)
 	result := svc.buildPeerExchangeResponse(nil)
 	if len(result) != 2 {
 		t.Errorf("expected 2 candidates, got %d: %v", len(result), collectAddresses(result))
@@ -241,6 +274,7 @@ func TestBuildPeerExchange_HidesLoopbackAndRFC1918IPv4(t *testing.T) {
 		peerProvider: pp,
 	}
 
+	primePeerExchangeSnapshots(svc)
 	result := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	if len(result) != 1 {
 		t.Fatalf("expected only public peer in peer exchange response, got %v", result)
@@ -494,7 +528,7 @@ func TestBuildPeerExchange_InitializingSlotExcluded(t *testing.T) {
 	// Wait for slot to appear as initializing.
 	waitFor(t, 2*time.Second, "initializing", func() bool {
 		for _, s := range cm.Slots() {
-			if s.State == "initializing" {
+			if s.State == domain.SlotStateInitializing {
 				return true
 			}
 		}
@@ -502,6 +536,7 @@ func TestBuildPeerExchange_InitializingSlotExcluded(t *testing.T) {
 	})
 
 	// buildPeerExchangeResponse should NOT include the initializing slot.
+	primePeerExchangeSnapshots(svc)
 	result := svc.buildPeerExchangeResponse(nil)
 	for _, addr := range result {
 		if string(addr) == "1.2.3.4:9000" {
@@ -536,6 +571,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlyCandidate(t *testing.T) {
 		},
 	}
 
+	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	for _, a := range addrs {
 		if a == "8.8.8.8:9000" {
@@ -572,6 +608,7 @@ func TestBuildPeerExchange_ExcludesUnsetAnnounceState(t *testing.T) {
 		},
 	}
 
+	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	for _, a := range addrs {
 		if a == "8.8.4.4:9000" {
@@ -598,6 +635,7 @@ func TestBuildPeerExchange_IncludesUnknownBootstrapPeer(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{},
 	}
 
+	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	found := false
 	for _, a := range addrs {
@@ -636,6 +674,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlyActiveSlot(t *testing.T) {
 	}
 	svc.mu.Unlock()
 
+	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	for _, a := range addrs {
 		if a == "1.2.3.4:9000" {
@@ -689,6 +728,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByCanonicalKey(t *testing.T) {
 	}
 	svc.mu.Unlock()
 
+	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	for _, a := range addrs {
 		if a == canonical || a == fallback {
@@ -738,6 +778,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByFallbackKey(t *testing.T) {
 	}
 	svc.mu.Unlock()
 
+	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	for _, a := range addrs {
 		if a == canonical || a == fallback {
@@ -769,6 +810,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlyInbound(t *testing.T) {
 		},
 	}
 
+	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
 	for _, a := range addrs {
 		if a == string(inboundAddr) {

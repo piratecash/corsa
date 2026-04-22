@@ -19,9 +19,19 @@ import (
 // activeConnTestService creates a minimal Service suitable for
 // ActiveConnectionsJSON unit tests. Health, sessions, peerIDs and the
 // conn registry are populated directly — no CM or network I/O required.
+//
+// Primes the peer_health and cm_slots snapshots at construction so the
+// hot-path handler (peerHealthFrames, invoked by ActiveConnectionsJSON)
+// observes a non-nil snapshot on first call.  Production code gets the
+// same invariant from primeHotReadSnapshots() in Run(); bypassing Run()
+// means the test must prime explicitly — there is no synchronous
+// fallback rebuild on the RPC path (see peer_health_snapshot.go docstring).
+// Tests that mutate state after construction must call
+// primeActiveConnSnapshots(svc) again before invoking ActiveConnectionsJSON
+// so the snapshots reflect the new state.
 func activeConnTestService(t *testing.T) *Service {
 	t.Helper()
-	return &Service{
+	svc := &Service{
 		health:          make(map[domain.PeerAddress]*peerHealth),
 		sessions:        make(map[domain.PeerAddress]*peerSession),
 		peerIDs:         make(map[domain.PeerAddress]domain.PeerIdentity),
@@ -32,6 +42,19 @@ func activeConnTestService(t *testing.T) *Service {
 		pending:         make(map[domain.PeerAddress][]pendingFrame),
 		cfg:             config.Node{MaxOutgoingPeers: 8},
 	}
+	primeActiveConnSnapshots(svc)
+	return svc
+}
+
+// primeActiveConnSnapshots rebuilds the two snapshots read by peerHealthFrames
+// (and therefore ActiveConnectionsJSON): peer_health and cm_slots.  Called
+// from activeConnTestService after construction and from the seeding helpers
+// after they mutate state.  Tests that do direct map mutations between
+// helper calls and the RPC assertion must invoke this explicitly — there is
+// no synchronous fallback rebuild on the hot path.
+func primeActiveConnSnapshots(svc *Service) {
+	svc.rebuildPeerHealthSnapshot()
+	svc.rebuildCMSlotsSnapshot()
 }
 
 // testInboundCore creates a real netcore.NetCore for an inbound connection
@@ -51,7 +74,8 @@ func testInboundCore(t *testing.T, addr domain.PeerAddress, identity domain.Peer
 }
 
 // addOutboundPeer populates health + session entries for a connected
-// outbound peer directly in the Service internal maps.
+// outbound peer directly in the Service internal maps, then refreshes the
+// hot-read snapshots so peerHealthFrames sees the seeded state.
 func addOutboundPeer(svc *Service, addr string, identity string, connID domain.ConnID) {
 	pa := domain.PeerAddress(addr)
 	now := time.Now().UTC()
@@ -69,10 +93,12 @@ func addOutboundPeer(svc *Service, addr string, identity string, connID domain.C
 		connID:       connID,
 	}
 	svc.peerIDs[pa] = domain.PeerIdentity(identity)
+	primeActiveConnSnapshots(svc)
 }
 
 // addInboundPeer populates health entry and registers a real NetCore in the
-// conn registry so inboundConnIDsLocked can find it.
+// conn registry so inboundConnIDsLocked can find it, then refreshes the
+// hot-read snapshots so peerHealthFrames sees the seeded state.
 func addInboundPeer(t *testing.T, svc *Service, addr string, identity string, connID domain.ConnID) func() {
 	t.Helper()
 	pa := domain.PeerAddress(addr)
@@ -89,10 +115,16 @@ func addInboundPeer(t *testing.T, svc *Service, addr string, identity string, co
 
 	core, cleanup := testInboundCore(t, pa, domain.PeerIdentity(identity), connID)
 	svc.conns[connID] = &connEntry{core: core}
+	primeActiveConnSnapshots(svc)
 	return cleanup
 }
 
-// addDisconnectedPeer adds a health entry with Connected=false.
+// addDisconnectedPeer adds a health entry with Connected=false and
+// refreshes the hot-read snapshots so peerHealthFrames sees the seeded
+// state (or, more precisely, continues to exclude it — disconnected peers
+// never appear in ActiveConnectionsJSON, but the rebuild keeps the rest
+// of the snapshot current for tests that mix disconnected and connected
+// entries).
 func addDisconnectedPeer(svc *Service, addr string) {
 	pa := domain.PeerAddress(addr)
 	svc.health[pa] = &peerHealth{
@@ -101,6 +133,7 @@ func addDisconnectedPeer(svc *Service, addr string) {
 		Direction: peerDirectionOutbound,
 		State:     peerStateReconnecting,
 	}
+	primeActiveConnSnapshots(svc)
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +252,11 @@ func TestActiveConnectionsJSON_OutboundWithSlotState(t *testing.T) {
 	}
 	svc.peerIDs[pa] = "id-1.2.3.4:9000"
 	svc.mu.Unlock()
+
+	// Post-mutation prime: the snapshots are loaded atomically by the hot
+	// path and never synchronously rebuilt, so direct map writes are only
+	// visible once we rebuild explicitly.
+	primeActiveConnSnapshots(svc)
 
 	data, err := svc.ActiveConnectionsJSON()
 	if err != nil {
@@ -569,6 +607,10 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 		svc.conns[domain.ConnID(999)] = &connEntry{core: core}
 	}()
 
+	// Post-mutation prime so peerHealthFrames observes the seeded state —
+	// the hot path never rebuilds synchronously.
+	primeActiveConnSnapshots(svc)
+
 	// getActivePeers should return 4 (CM slots only).
 	peersData, err := svc.ActivePeersJSON()
 	if err != nil {
@@ -664,6 +706,10 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 	}
 	svc.peerIDs[pa] = "id-fallback"
 	svc.mu.Unlock()
+
+	// Post-mutation prime so peerHealthFrames observes the seeded state —
+	// the hot path never rebuilds synchronously.
+	primeActiveConnSnapshots(svc)
 
 	data, err := svc.ActiveConnectionsJSON()
 	if err != nil {

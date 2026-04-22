@@ -301,7 +301,7 @@ func TestCM_ReconnectFail_Replace(t *testing.T) {
 		if len(s) != 1 {
 			return false
 		}
-		return s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == "active"
+		return s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == domain.SlotStateActive
 	})
 }
 
@@ -333,7 +333,7 @@ func TestCM_DialFailed_Incompatible_ImmediateReplace(t *testing.T) {
 	// Should skip retries and replace with peer2.
 	waitFor(t, 5*time.Second, "peer2 active", func() bool {
 		s := cm.Slots()
-		return len(s) == 1 && s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == "active"
+		return len(s) == 1 && s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == domain.SlotStateActive
 	})
 
 	// Should have dialled exactly twice: peer1 (fail) + peer2 (success).
@@ -597,7 +597,7 @@ func TestCM_GenerationGuard_StaleActiveSessionLost(t *testing.T) {
 	// hasn't processed ActiveSessionLost yet.
 	waitFor(t, 3*time.Second, "reconnected (generation advanced)", func() bool {
 		s := cm.Slots()
-		return len(s) == 1 && s[0].State == "active" && s[0].Generation != oldGen
+		return len(s) == 1 && s[0].State == domain.SlotStateActive && s[0].Generation != oldGen
 	})
 
 	teardownBefore := atomic.LoadInt32(&teardownCount)
@@ -832,7 +832,7 @@ func TestCM_ReplaceSlot_ActiveSlot_Cleanup(t *testing.T) {
 	// Wait for replacement to complete.
 	waitFor(t, 5*time.Second, "replaced with peer2", func() bool {
 		s := cm.Slots()
-		return len(s) == 1 && s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == "active"
+		return len(s) == 1 && s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == domain.SlotStateActive
 	})
 
 	// Teardown should have been called for peer1 (deactivate before reconnect).
@@ -874,7 +874,7 @@ func TestCM_ReplaceSlot_NonActive_NoTeardown(t *testing.T) {
 	// Peer1 fails incompatible (never was active) → replaced by peer2.
 	waitFor(t, 5*time.Second, "peer2 active", func() bool {
 		s := cm.Slots()
-		return len(s) == 1 && s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == "active"
+		return len(s) == 1 && s[0].Address == mustAddr("10.0.0.2:64646") && s[0].State == domain.SlotStateActive
 	})
 
 	// No teardown for peer1 — it was never active.
@@ -1076,7 +1076,7 @@ func TestCM_Slots_RPCView(t *testing.T) {
 	if s.Address != mustAddr("10.0.0.1:64646") {
 		t.Errorf("Address = %s, want 10.0.0.1:64646", s.Address)
 	}
-	if s.State != "active" {
+	if s.State != domain.SlotStateActive {
 		t.Errorf("State = %s, want active", s.State)
 	}
 	if s.Identity == nil {
@@ -1646,25 +1646,34 @@ func TestCM_Run_PanicsOnSecondCall(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: slotState.String()
+// Tests: domain.SlotState wire labels
 // ---------------------------------------------------------------------------
 
-func TestSlotState_String(t *testing.T) {
+// TestSlotState_WireLabels pins the exact string values of every
+// domain.SlotState constant. Three downstream consumers depend on these
+// labels — PeerHealthFrame.SlotState (wire JSON), ebus
+// TopicSlotStateChanged payload, and the active-connections JSON
+// response — so a silent rename of any constant would corrupt the wire
+// contract. Keep this as a direct value pin rather than a round-trip
+// through String(): the raw label IS the contract.
+func TestSlotState_WireLabels(t *testing.T) {
 	tests := []struct {
-		state slotState
+		state domain.SlotState
 		want  string
 	}{
-		{slotStateQueued, "queued"},
-		{slotStateDialing, "dialing"},
-		{slotStateInitializing, "initializing"},
-		{slotStateActive, "active"},
-		{slotStateReconnecting, "reconnecting"},
-		{slotStateRetryWait, "retry_wait"},
-		{slotState(99), "unknown"},
+		{domain.SlotStateQueued, "queued"},
+		{domain.SlotStateDialing, "dialing"},
+		{domain.SlotStateInitializing, "initializing"},
+		{domain.SlotStateActive, "active"},
+		{domain.SlotStateReconnecting, "reconnecting"},
+		{domain.SlotStateRetryWait, "retry_wait"},
 	}
 	for _, tt := range tests {
+		if got := string(tt.state); got != tt.want {
+			t.Errorf("string(%v) = %q, want %q", tt.state, got, tt.want)
+		}
 		if got := tt.state.String(); got != tt.want {
-			t.Errorf("slotState(%d).String() = %q, want %q", tt.state, got, tt.want)
+			t.Errorf("%v.String() = %q, want %q", tt.state, got, tt.want)
 		}
 	}
 }
@@ -1700,7 +1709,7 @@ func TestCM_SlotInitializing_NotVisibleAsActive(t *testing.T) {
 	// Wait for the slot to appear as "initializing".
 	waitFor(t, 2*time.Second, "initializing", func() bool {
 		s := cm.Slots()
-		return len(s) == 1 && s[0].State == "initializing"
+		return len(s) == 1 && s[0].State == domain.SlotStateInitializing
 	})
 
 	// ActiveCount must be 0 — the slot is not yet promoted.
@@ -1723,7 +1732,7 @@ func TestCM_SlotInitializing_NotVisibleAsActive(t *testing.T) {
 
 	waitFor(t, 2*time.Second, "active after promotion", func() bool {
 		s := cm.Slots()
-		return len(s) == 1 && s[0].State == "active"
+		return len(s) == 1 && s[0].State == domain.SlotStateActive
 	})
 
 	if got := cm.ActiveCount(); got != 1 {
@@ -1800,7 +1809,7 @@ func TestCM_SessionInitReady_StaleGeneration(t *testing.T) {
 
 	waitFor(t, 2*time.Second, "initializing", func() bool {
 		s := cm.Slots()
-		return len(s) == 1 && s[0].State == "initializing"
+		return len(s) == 1 && s[0].State == domain.SlotStateInitializing
 	})
 
 	info := initInfo.Load().(SessionInfo)
@@ -1816,7 +1825,7 @@ func TestCM_SessionInitReady_StaleGeneration(t *testing.T) {
 
 	// Slot should still be initializing.
 	slots := cm.Slots()
-	if len(slots) != 1 || slots[0].State != "initializing" {
+	if len(slots) != 1 || slots[0].State != domain.SlotStateInitializing {
 		t.Fatalf("slot state = %q, want 'initializing' (stale gen should be ignored)", slots[0].State)
 	}
 }

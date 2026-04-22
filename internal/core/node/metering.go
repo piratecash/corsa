@@ -1,8 +1,6 @@
 package node
 
 import (
-	"sort"
-
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -140,125 +138,33 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 	return result
 }
 
-// networkStatsFrame builds a network_stats frame with cumulative and live
-// traffic counters for all known peers.
+// networkStatsFrame returns the cached network_stats snapshot.
+//
+// The frame is rebuilt in the background by hotReadsRefreshLoop every
+// networkStatsSnapshotInterval under a short s.mu.RLock and primed
+// synchronously by primeHotReadSnapshots() from Run() before the listener
+// opens; the RPC path here performs a single atomic load and no locking
+// at all.  This statically decouples fetch_network_stats from every
+// writer holding s.mu — previously a burst of writers on s.mu.Lock
+// (bootstrapLoop eviction, announce_routes fanout, inbound connect path)
+// starved the RPC's RLock until the command timeout.
+//
+// If the atomic load returns nil (a unit test that bypasses Run() and
+// does not prime), toFrame() emits an empty-but-valid network_stats
+// frame rather than falling back to a synchronous rebuild — the
+// fallback would reach s.mu.RLock on the RPC goroutine and break the
+// lock-free contract the snapshot infrastructure enforces.
 func (s *Service) networkStatsFrame() protocol.Frame {
-	// ---------------------------------------------------------------
-	// Short critical section: snapshot health, live traffic and peer
-	// list under lock, then release before sorting and frame building.
-	// Prevents writer starvation on s.mu (see peerHealthFrames comment).
-	// ---------------------------------------------------------------
-	type healthSnap struct {
-		Address   domain.PeerAddress
-		Sent      int64
-		Received  int64
-		Connected bool
-	}
-
 	log.Trace().Msg("network_stats_frame_begin")
-	log.Trace().Msg("network_stats_frame_before_rlock")
-	s.mu.RLock()
-	log.Trace().Msg("network_stats_frame_rlock_acquired")
-	live := s.liveTrafficLocked()
-
-	healthSnaps := make([]healthSnap, 0, len(s.health))
-	for _, health := range s.health {
-		healthSnaps = append(healthSnaps, healthSnap{
-			Address:   health.Address,
-			Sent:      health.BytesSent,
-			Received:  health.BytesReceived,
-			Connected: health.Connected,
-		})
+	snap := s.loadNetworkStatsSnapshot()
+	frame := snap.toFrame()
+	if snap != nil && frame.NetworkStats != nil {
+		log.Trace().
+			Int("connected", frame.NetworkStats.ConnectedPeers).
+			Int("known", frame.NetworkStats.KnownPeers).
+			Msg("network_stats_frame_end")
 	}
-
-	peerAddrs := make([]domain.PeerAddress, len(s.peers))
-	for i, p := range s.peers {
-		peerAddrs[i] = p.Address
-	}
-	s.mu.RUnlock()
-	log.Trace().Int("health_count", len(healthSnaps)).Int("peer_count", len(peerAddrs)).Msg("network_stats_frame_rlock_released")
-
-	// Build traffic frames from snapshots — no lock held.
-	var totalSent, totalReceived int64
-	var connectedCount int
-	peerTraffic := make([]protocol.PeerTrafficFrame, 0, len(healthSnaps)+len(live))
-	seen := make(map[domain.PeerAddress]struct{}, len(healthSnaps))
-
-	for _, h := range healthSnaps {
-		seen[h.Address] = struct{}{}
-		sent := h.Sent
-		recv := h.Received
-		if lv, ok := live[h.Address]; ok {
-			sent += lv.sent
-			recv += lv.received
-		}
-		totalSent += sent
-		totalReceived += recv
-		if h.Connected {
-			connectedCount++
-		}
-		peerTraffic = append(peerTraffic, protocol.PeerTrafficFrame{
-			Address:       string(h.Address),
-			BytesSent:     sent,
-			BytesReceived: recv,
-			TotalTraffic:  sent + recv,
-			Connected:     h.Connected,
-		})
-	}
-
-	// Include inbound-only peers whose address is not yet in s.health.
-	for addr, lv := range live {
-		if _, ok := seen[addr]; ok {
-			continue
-		}
-		totalSent += lv.sent
-		totalReceived += lv.received
-		connectedCount++
-		peerTraffic = append(peerTraffic, protocol.PeerTrafficFrame{
-			Address:       string(addr),
-			BytesSent:     lv.sent,
-			BytesReceived: lv.received,
-			TotalTraffic:  lv.sent + lv.received,
-			Connected:     true,
-		})
-	}
-
-	sort.Slice(peerTraffic, func(i, j int) bool {
-		if peerTraffic[i].TotalTraffic != peerTraffic[j].TotalTraffic {
-			return peerTraffic[i].TotalTraffic > peerTraffic[j].TotalTraffic
-		}
-		return peerTraffic[i].Address < peerTraffic[j].Address
-	})
-
-	// known_peers is the union of the configured peer list and any peers
-	// we've seen via health/live traffic (includes non-listener clients
-	// that don't appear in s.peers but are actively connected).
-	knownSet := make(map[string]struct{}, len(peerAddrs)+len(seen))
-	for _, addr := range peerAddrs {
-		knownSet[string(addr)] = struct{}{}
-	}
-	for addr := range seen {
-		knownSet[string(addr)] = struct{}{}
-	}
-	for addr := range live {
-		knownSet[string(addr)] = struct{}{}
-	}
-
-	stats := &protocol.NetworkStatsFrame{
-		TotalBytesSent:     totalSent,
-		TotalBytesReceived: totalReceived,
-		TotalTraffic:       totalSent + totalReceived,
-		ConnectedPeers:     connectedCount,
-		KnownPeers:         len(knownSet),
-		PeerTraffic:        peerTraffic,
-	}
-
-	log.Trace().Int("connected", connectedCount).Int("known", len(knownSet)).Msg("network_stats_frame_end")
-
-	return protocol.Frame{
-		Type:         "network_stats",
-		NetworkStats: stats,
-	}
+	return frame
 }
 
 // emitTrafficDeltas publishes a single PeerTrafficBatch event containing

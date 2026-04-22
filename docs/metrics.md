@@ -31,14 +31,16 @@ graph TB
         CMD["fetch_traffic_history"]
         CMD_NS["fetch_network_stats"]
         CMD_PH["fetch_peer_health"]
+        CMD_GP["get_peers"]
     end
 
     TICK -->|"every 1s"| NSF
     NSF -->|"total_sent, total_received"| TH
     SNAP -->|"Snapshot()"| TH
     CMD -->|"calls"| SNAP
-    CMD_NS -->|"calls"| NSF
-    CMD_PH -->|"calls"| Node
+    CMD_NS -->|"atomic snapshot load"| NSF
+    CMD_PH -->|"atomic snapshot load"| Node
+    CMD_GP -->|"atomic snapshot load"| Node
 ```
 
 *Metrics data collection flow*
@@ -48,9 +50,11 @@ graph TB
 1. Every TCP connection (inbound and outbound) is wrapped in `MeteredConn`, which atomically counts bytes read/written
 2. When a connection closes, its final byte counts are accumulated into the peer's `peerHealth.BytesSent` / `peerHealth.BytesReceived`
 3. While connections are active, `liveTrafficLocked()` reads current counters directly from `MeteredConn` instances
-4. `networkStatsFrame()` combines accumulated (closed sessions) and live (active sessions) traffic into a single response
+4. Three hot local RPCs (`fetch_network_stats`, `fetch_peer_health`, `get_peers`) each return a pre-built snapshot via a single `atomic.Pointer` load — `networkStatsSnapshot`, `peerHealthSnapshot`, `peersExchangeSnapshot`, and `cmSlotsSnapshot` respectively. The fourth snapshot caches `ConnectionManager.Slots()` so `peerHealthFrames` and `buildPeerExchangeResponse` never call `Slots()` on the RPC path — `Slots()` takes `cm.mu.RLock`, and Go's writer-preferring `sync.RWMutex` would otherwise serialise these RPC readers behind any queued CM-writer just like `s.mu` used to. Snapshots are primed **synchronously** by `primeHotReadSnapshots()` in `Run()` before the TCP listener opens, then refreshed every 500 ms by `hotReadsRefreshLoop` — the only path that takes `s.mu.RLock` (first three snapshots) or `cm.mu.RLock` (fourth) to read `health` / `peers` / `persistedMeta` / live counters / slot state. The RPC handlers themselves never touch `s.mu` or `cm.mu` and **do not fall back to a synchronous rebuild** on a snapshot miss — the previous fallback re-coupled the hot path to the very locks the snapshot infrastructure was meant to bypass. With the prime step in place, every hot-path handler observes a non-nil snapshot on its first load (see `bug-self-loopback-reconnect-storm.md` §B.6)
 5. The `metrics.Collector` calls `fetch_network_stats` every second and records the totals into a ring buffer (`TrafficHistory`)
 6. RPC clients call `fetch_traffic_history` to get the full 1-hour rolling window
+
+Snapshot staleness is bounded by `networkStatsSnapshotInterval` (500 ms) for all four snapshots. Even if a writer holds `s.mu.Lock` or `cm.mu.Lock` for many seconds, the RPCs keep serving the last successfully-built snapshot instead of blocking — clients prefer bounded-stale data over a frozen UI. The four rebuilds run in independent per-snapshot goroutines inside `hotReadsRefreshLoop`, each on its own 500 ms ticker. The fan-out isolates slow rebuilds (notably `peersExchangeSnapshot`, which re-acquires `s.mu.RLock` via `peerProvider.Candidates()` callbacks, and `cmSlotsSnapshot`, which takes `cm.mu.RLock`) so they do not delay the other three snapshots' refreshes or widen their staleness windows.
 
 ### TrafficHistory Ring Buffer
 
@@ -129,14 +133,16 @@ graph TB
         CMD["fetch_traffic_history"]
         CMD_NS["fetch_network_stats"]
         CMD_PH["fetch_peer_health"]
+        CMD_GP["get_peers"]
     end
 
     TICK -->|"каждую 1 сек"| NSF
     NSF -->|"total_sent, total_received"| TH
     SNAP -->|"Snapshot()"| TH
     CMD -->|"вызывает"| SNAP
-    CMD_NS -->|"вызывает"| NSF
-    CMD_PH -->|"вызывает"| Node
+    CMD_NS -->|"atomic snapshot load"| NSF
+    CMD_PH -->|"atomic snapshot load"| Node
+    CMD_GP -->|"atomic snapshot load"| Node
 ```
 
 *Диаграмма сбора данных метрик*
@@ -146,9 +152,11 @@ graph TB
 1. Каждое TCP-соединение (входящее и исходящее) оборачивается в `MeteredConn`, который атомарно считает прочитанные/записанные байты
 2. При закрытии соединения финальные счётчики аккумулируются в `peerHealth.BytesSent` / `peerHealth.BytesReceived`
 3. Пока соединения активны, `liveTrafficLocked()` читает текущие счётчики напрямую из экземпляров `MeteredConn`
-4. `networkStatsFrame()` объединяет аккумулированный (закрытые сессии) и live (активные сессии) трафик в один ответ
+4. Три hot local RPC (`fetch_network_stats`, `fetch_peer_health`, `get_peers`) отдают заранее подготовленный snapshot одним `atomic.Pointer`-load'ом — `networkStatsSnapshot`, `peerHealthSnapshot`, `peersExchangeSnapshot` и `cmSlotsSnapshot` соответственно. Четвёртый snapshot кэширует `ConnectionManager.Slots()`, чтобы `peerHealthFrames` и `buildPeerExchangeResponse` не звали `Slots()` на RPC-пути — `Slots()` берёт `cm.mu.RLock`, и writer-preferring `sync.RWMutex` в Go иначе сериализовал бы этих RPC-читателей за любым queued CM-writer'ом ровно той же формы, что `s.mu` раньше. Snapshot'ы **синхронно** инициализируются в `Run()` вызовом `primeHotReadSnapshots()` ДО открытия TCP-listener'а, и далее пересобираются каждые 500 мс в `hotReadsRefreshLoop` — это единственный путь, который берёт `s.mu.RLock` (первые три snapshot'а) или `cm.mu.RLock` (четвёртый) для чтения `health` / `peers` / `persistedMeta` / live-счётчиков / slot state. Сами RPC-handler'ы не касаются ни `s.mu`, ни `cm.mu`, и **не делают синхронный rebuild на miss** — прежний fallback как раз возвращал hot-path обратно на те самые локи, от которых snapshot-инфраструктура должна была его отвязать. С prime-шагом каждый handler на первом же load'е видит непустой snapshot (см. `bug-self-loopback-reconnect-storm.md` §B.6)
 5. `metrics.Collector` вызывает `fetch_network_stats` каждую секунду и записывает итоги в кольцевой буфер (`TrafficHistory`)
 6. RPC-клиенты вызывают `fetch_traffic_history` для получения полного часового окна
+
+Максимальная устаревшесть каждого snapshot'а ограничена `networkStatsSnapshotInterval` (500 мс) для всех четырёх snapshot'ов. Даже если writer держит `s.mu.Lock` или `cm.mu.Lock` много секунд, RPC продолжает отдавать последний успешно построенный snapshot вместо того, чтобы блокироваться — клиент предпочитает bounded-stale данные замёрзшему UI. Четыре rebuild'а выполняются в независимых под-горутинах внутри `hotReadsRefreshLoop`, по одной на snapshot, каждая со своим 500 мс тикером. Fan-out изолирует медленные rebuild'ы (особенно `peersExchangeSnapshot`, который повторно берёт `s.mu.RLock` через callback'и `peerProvider.Candidates()`, и `cmSlotsSnapshot`, который берёт `cm.mu.RLock`), так что они не задерживают refresh остальных трёх snapshot'ов и не расширяют их окна staleness.
 
 ### Кольцевой буфер TrafficHistory
 

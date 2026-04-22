@@ -2838,6 +2838,14 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	s.mu.Unlock()
 	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
 
+	// Refresh peer-health snapshot immediately so UI pollers that call
+	// fetch_peer_health right after a connection transition observe the
+	// new state without waiting for the 500 ms refresher tick.  Rebuild
+	// acquires s.mu.RLock only — the writer was just released.  See
+	// refreshHotReadSnapshotsAfterPeerStateChange for why peers_exchange
+	// is intentionally left to the ticker.
+	s.refreshHotReadSnapshotsAfterPeerStateChange()
+
 	// Emit peer-connected event after releasing lock.
 	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
 	// emitted by updatePeerStateLocked (called above).
@@ -2893,6 +2901,12 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 
 	s.mu.Unlock()
 	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+
+	// Refresh peer-health snapshot immediately so UI pollers observe the
+	// disconnect without waiting for the 500 ms refresher tick.  Same
+	// rationale as markPeerConnected.  Skipped during shutdown — see
+	// refreshHotReadSnapshotsAfterPeerStateChange.
+	s.refreshHotReadSnapshotsAfterPeerStateChange()
 
 	// Emit peer-disconnected event after releasing lock.
 	// TopicAggregateStatusChanged and TopicPeerHealthChanged are already
@@ -3333,52 +3347,37 @@ func (s *Service) emitPeerPendingChanged(address domain.PeerAddress, count int) 
 	})
 }
 
-// peerHealthSnap holds the minimal per-peer data extracted from s.mu-protected
-// state in a single short critical section. All subsequent formatting and
-// enrichment runs lock-free, preventing the long RLock hold that caused
-// writer starvation (bootstrapLoop's refreshAggregateStatus needs s.mu.Lock
-// every 2 s, and Go's RWMutex is writer-preferring — a long RLock blocks
-// subsequent RLock callers once a writer is queued, freezing the entire
-// ProbeNode RPC chain and the UI).
-type peerHealthSnap struct {
-	health               peerHealth
-	peerID               domain.PeerIdentity
-	clientVersion        string
-	clientBuild          int
-	pendingCount         int
-	capabilities         []string
-	sessionVersion       int
-	sessionConnID        domain.ConnID
-	inboundConnIDs       []uint64
-	versionLockoutActive bool
-}
-
+// peerHealthFrames returns the fetch_peer_health RPC body.
+//
+// The hot path is statically decoupled from both s.mu and cm.mu.  All
+// per-peer state is read from s.peerHealthSnap; all CM-slot fields are
+// read from s.cmSlotsSnap.  Both snapshots are rebuilt every
+// networkStatsSnapshotInterval by hotReadsRefreshLoop (see
+// peer_health_snapshot.go, cm_slots_snapshot.go) and primed synchronously
+// by primeHotReadSnapshots() from Run() before the listener opens — so
+// this handler performs only atomic loads, never synchronously rebuilds,
+// and therefore never reaches cm.mu.RLock or s.mu.RLock on the RPC
+// goroutine.  A writer holding s.mu for many seconds can stall the
+// refresher ticks but cannot stall this handler.
+//
+// If either atomic load ever returns nil (refresher goroutine crashed or
+// a unit test that bypasses Run() invokes the handler without priming),
+// the handler returns nil rather than falling back to a synchronous
+// rebuild: taking the locks here would reintroduce the starvation shape
+// the snapshot infrastructure exists to eliminate.  Tests that invoke
+// this handler directly must prime the snapshots explicitly (mirrors the
+// pattern in peer_health_snapshot_test.go).
 func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
-	// Collect CM slot snapshots before taking s.mu to avoid nested locking
-	// (connManager.Slots() acquires cm.mu independently).
-	type slotSnapshot struct {
-		State         string
-		RetryCount    int
-		Generation    uint64
-		ConnectedAddr string
-	}
-	slotByAddr := make(map[domain.PeerAddress]slotSnapshot)
-	if s.connManager != nil {
-		for _, si := range s.connManager.Slots() {
-			snap := slotSnapshot{
-				State:      si.State,
-				RetryCount: si.RetryCount,
-				Generation: si.Generation,
-			}
-			if si.ConnectedAddress != nil {
-				snap.ConnectedAddr = string(*si.ConnectedAddress)
-			}
-			slotByAddr[si.Address] = snap
-		}
-	}
+	// Load the cached ConnectionManager slots view instead of calling
+	// cm.Slots() on the RPC path.  Slots() takes cm.mu.RLock which, under
+	// writer-preferring semantics, would queue behind any CM writer and
+	// re-introduce the reader-starvation shape the s.mu decoupling
+	// eliminated.  See cm_slots_snapshot.go for the contract.
+	slotsSnap := s.loadCMSlotsSnapshot()
 
-	// Collect capture snapshots before taking s.mu to avoid nested locking
-	// (captureManager.SessionSnapshotByID acquires its own mu).
+	// Capture snapshots — independent of s.mu; captureManager owns its own
+	// mutex.  Done before loading the health snapshot so the two views are
+	// as closely aligned as possible in wall-clock time.
 	captureByConn := make(map[domain.ConnID]captureSnap)
 	if cm := s.captureManager; cm != nil {
 		for _, snap := range cm.AllSessionSnapshots() {
@@ -3393,108 +3392,29 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		}
 	}
 
-	// ---------------------------------------------------------------
-	// Short critical section: copy all s.mu-protected data into local
-	// snapshots so the lock is released before any formatting work.
-	// This prevents writer starvation on s.mu — bootstrapLoop calls
-	// refreshAggregateStatus (write lock) every 2 s, and Go's RWMutex
-	// is writer-preferring: once a writer is queued, new RLock callers
-	// block. Holding RLock for the full frame-building loop made
-	// subsequent ProbeNode RPCs (each needing RLock) wait behind the
-	// queued writer, freezing the UI for the entire 3-second timeout.
-	// ---------------------------------------------------------------
-	s.mu.RLock()
-	now := time.Now().UTC()
-
-	live := s.liveTrafficLocked()
-
-	healthSnaps := make([]peerHealthSnap, 0, len(s.health))
-	for _, health := range s.health {
-		snap := peerHealthSnap{
-			health:               *health,
-			peerID:               s.peerIDs[health.Address],
-			clientVersion:        s.peerVersions[health.Address],
-			clientBuild:          s.peerBuilds[health.Address],
-			pendingCount:         len(s.pending[health.Address]),
-			capabilities:         s.peerCapabilitiesLocked(health.Address),
-			versionLockoutActive: s.isPeerVersionLockedOutLocked(health.Address),
-			inboundConnIDs:       s.inboundConnIDsLocked(health.Address),
-		}
-		snap.health.State = s.computePeerStateAtLocked(health, now)
-		for dialAddr, session := range s.sessions {
-			if s.resolveHealthAddress(dialAddr) == health.Address {
-				snap.sessionVersion = session.version
-				snap.sessionConnID = session.connID
-				break
-			}
-		}
-		healthSnaps = append(healthSnaps, snap)
+	snap := s.loadPeerHealthSnapshot()
+	if snap == nil {
+		// No primed snapshot and no refresher tick yet — should not happen
+		// in production because Run() calls primeHotReadSnapshots() before
+		// the listener opens.  Return nil rather than synchronously
+		// rebuilding (which would take s.mu.RLock on the RPC goroutine and
+		// break the lock-free contract).
+		return nil
 	}
 
-	// Snapshot inbound-only peers (live traffic but no health entry).
-	type inboundLiveSnap struct {
-		address        domain.PeerAddress
-		peerID         domain.PeerIdentity
-		clientVersion  string
-		clientBuild    int
-		capabilities   []string
-		sessionVersion int
-		sent           int64
-		received       int64
-		inboundConnIDs []uint64
-	}
-	healthAddrs := make(map[domain.PeerAddress]struct{}, len(s.health))
-	for _, h := range s.health {
-		healthAddrs[h.Address] = struct{}{}
-	}
-	var inboundSnaps []inboundLiveSnap
-	for addr, lv := range live {
-		if _, ok := healthAddrs[addr]; ok {
-			continue
-		}
-		ils := inboundLiveSnap{
-			address:        addr,
-			peerID:         s.peerIDs[addr],
-			clientVersion:  s.peerVersions[addr],
-			clientBuild:    s.peerBuilds[addr],
-			capabilities:   s.peerCapabilitiesLocked(addr),
-			sent:           lv.sent,
-			received:       lv.received,
-			inboundConnIDs: s.inboundConnIDsLocked(addr),
-		}
-		if session, ok := s.sessions[addr]; ok {
-			ils.sessionVersion = session.version
-		}
-		inboundSnaps = append(inboundSnaps, ils)
-	}
-
-	s.mu.RUnlock()
-	// ---------------------------------------------------------------
-	// Lock released — all remaining work is pure computation on local
-	// copies, safe to run without holding any lock.
-	// ---------------------------------------------------------------
-
-	seen := make(map[domain.PeerAddress]struct{}, len(healthSnaps))
-	items := make([]protocol.PeerHealthFrame, 0, len(healthSnaps)+len(inboundSnaps))
-	for _, snap := range healthSnaps {
-		h := &snap.health
-		seen[h.Address] = struct{}{}
-		sent := h.BytesSent
-		recv := h.BytesReceived
-		if lv, ok := live[h.Address]; ok {
-			sent += lv.sent
-			recv += lv.received
-		}
+	items := make([]protocol.PeerHealthFrame, 0, len(snap.records)+len(snap.inboundOnly))
+	for _, rec := range snap.records {
+		h := &rec.health
 		phf := protocol.PeerHealthFrame{
 			Address:             string(h.Address),
-			PeerID:              string(snap.peerID),
+			PeerID:              string(rec.peerID),
 			Network:             classifyAddress(h.Address).String(),
 			Direction:           string(h.Direction),
-			ClientVersion:       snap.clientVersion,
-			ClientBuild:         snap.clientBuild,
+			ClientVersion:       rec.clientVersion,
+			ClientBuild:         rec.clientBuild,
 			State:               h.State,
 			Connected:           h.Connected,
-			PendingCount:        snap.pendingCount,
+			PendingCount:        rec.pendingCount,
 			LastConnectedAt:     formatTime(h.LastConnectedAt),
 			LastDisconnectedAt:  formatTime(h.LastDisconnectedAt),
 			LastPingAt:          formatTime(h.LastPingAt),
@@ -3505,10 +3425,10 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			LastError:           h.LastError,
 			Score:               h.Score,
 			BannedUntil:         formatTime(h.BannedUntil),
-			BytesSent:           sent,
-			BytesReceived:       recv,
-			TotalTraffic:        sent + recv,
-			Capabilities:        snap.capabilities,
+			BytesSent:           h.BytesSent,
+			BytesReceived:       h.BytesReceived,
+			TotalTraffic:        h.BytesSent + h.BytesReceived,
+			Capabilities:        rec.capabilities,
 
 			// Machine-readable disconnect diagnostics.
 			LastErrorCode:               h.LastErrorCode,
@@ -3517,31 +3437,38 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 			LastIncompatibleVersionAt:   formatTime(h.LastIncompatibleVersionAt),
 			ObservedPeerVersion:         int(h.ObservedPeerVersion),
 			ObservedPeerMinimumVersion:  int(h.ObservedPeerMinimumVersion),
-			VersionLockoutActive:        snap.versionLockoutActive,
+			VersionLockoutActive:        rec.versionLockoutActive,
 
-			ProtocolVersion: snap.sessionVersion,
-			ConnID:          uint64(snap.sessionConnID),
+			ProtocolVersion: rec.sessionVersion,
+			ConnID:          uint64(rec.sessionConnID),
 		}
-		// Enrich with CM slot lifecycle data if this peer has an outbound slot.
-		if sl, ok := slotByAddr[h.Address]; ok {
-			phf.SlotState = sl.State
-			phf.SlotRetryCount = sl.RetryCount
-			phf.SlotGeneration = sl.Generation
-			phf.SlotConnectedAddr = sl.ConnectedAddr
+		// Enrich with CM slot lifecycle data if this peer has an outbound
+		// slot.  Read from the cached snapshot's byAddress index — no
+		// cm.mu.RLock on the RPC path.
+		if slotsSnap != nil {
+			if sl, ok := slotsSnap.byAddress[h.Address]; ok {
+				// PeerHealthFrame.SlotState is a wire-format string; convert
+				// from the typed domain.SlotState at the transport boundary.
+				phf.SlotState = string(sl.State)
+				phf.SlotRetryCount = sl.RetryCount
+				phf.SlotGeneration = sl.Generation
+				if sl.ConnectedAddress != nil {
+					phf.SlotConnectedAddr = string(*sl.ConnectedAddress)
+				}
+			}
 		}
 		// When an outbound session exists, emit a single row with the
 		// outbound ConnID — even if inbound connections coexist (both
-		// directions are now allowed for simultaneous dials). For inbound-only
-		// peers, emit one row per active TCP connection so that
+		// directions are now allowed for simultaneous dials). For
+		// inbound-only peers, emit one row per active TCP connection so
 		// UI/diagnostics can distinguish multiple sessions to the same
 		// overlay address.
 		if phf.ConnID != 0 {
-			// Outbound session present — single authoritative row.
 			enrichCaptureFields(&phf, captureByConn)
 			items = append(items, phf)
 		} else {
-			if len(snap.inboundConnIDs) > 0 {
-				for _, cid := range snap.inboundConnIDs {
+			if len(rec.inboundConnIDs) > 0 {
+				for _, cid := range rec.inboundConnIDs {
 					row := phf
 					row.ConnID = cid
 					row.Direction = string(peerDirectionInbound)
@@ -3554,27 +3481,25 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		}
 	}
 
-	// Include inbound-only peers that have live traffic but no health entry yet.
-	for _, ils := range inboundSnaps {
+	// Inbound-only peers — live traffic without a health entry yet.
+	for _, ilr := range snap.inboundOnly {
 		inboundPHF := protocol.PeerHealthFrame{
-			Address:         string(ils.address),
-			PeerID:          string(ils.peerID),
-			Network:         classifyAddress(ils.address).String(),
+			Address:         string(ilr.address),
+			PeerID:          string(ilr.peerID),
+			Network:         classifyAddress(ilr.address).String(),
 			Direction:       string(peerDirectionInbound),
-			ClientVersion:   ils.clientVersion,
-			ClientBuild:     ils.clientBuild,
+			ClientVersion:   ilr.clientVersion,
+			ClientBuild:     ilr.clientBuild,
 			State:           peerStateHealthy,
 			Connected:       true,
-			BytesSent:       ils.sent,
-			BytesReceived:   ils.received,
-			TotalTraffic:    ils.sent + ils.received,
-			Capabilities:    ils.capabilities,
-			ProtocolVersion: ils.sessionVersion,
+			BytesSent:       ilr.sent,
+			BytesReceived:   ilr.received,
+			TotalTraffic:    ilr.sent + ilr.received,
+			Capabilities:    ilr.capabilities,
+			ProtocolVersion: ilr.sessionVersion,
 		}
-		// Emit one row per inbound conn_id (same pattern as health-based
-		// inbound peers) so capture enrichment can match by ConnID.
-		if len(ils.inboundConnIDs) > 0 {
-			for _, cid := range ils.inboundConnIDs {
+		if len(ilr.inboundConnIDs) > 0 {
+			for _, cid := range ilr.inboundConnIDs {
 				row := inboundPHF
 				row.ConnID = cid
 				enrichCaptureFields(&row, captureByConn)
@@ -4727,7 +4652,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// Apply welcome metadata — pure map writes, no I/O.
 	// Session is NOT yet registered in s.sessions / s.upstream — that
 	// happens only after initPeerSession succeeds (Phase 2).
-	// The CM slot is in slotStateInitializing (not Active) until
+	// The CM slot is in domain.SlotStateInitializing (not Active) until
 	// SessionInitReady is emitted, so Slots(), ActiveCount(), and
 	// buildPeerExchangeResponse() do not expose this peer during setup.
 	if wm := session.welcomeMeta; wm != nil {
@@ -5222,7 +5147,7 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 		Network       domain.NetGroup
 		State         string
 		ConnID        domain.ConnID
-		SlotState     string
+		SlotState     domain.SlotState
 	}
 
 	// Wire DTO projected at serialization boundary.
@@ -5263,9 +5188,12 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 
 		// Filter slot_state: only active and initializing are allowed for
 		// live connections. Other slot states (queued, dialing, retry_wait,
-		// reconnecting) mean no established transport.
-		slotState := f.SlotState
-		if slotState != "" && slotState != "active" && slotState != "initializing" {
+		// reconnecting) mean no established transport.  The wire field is
+		// a raw string (protocol.PeerHealthFrame) — lift it into the typed
+		// domain.SlotState at the decoding boundary so downstream callers
+		// compile-compare against the enum constants instead of literals.
+		slotState := domain.SlotState(f.SlotState)
+		if slotState != "" && slotState != domain.SlotStateActive && slotState != domain.SlotStateInitializing {
 			continue
 		}
 
@@ -5322,7 +5250,7 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 			Network:       c.Network.String(),
 			State:         c.State,
 			ConnID:        c.ConnID,
-			SlotState:     c.SlotState,
+			SlotState:     string(c.SlotState),
 		}
 	}
 
@@ -5337,40 +5265,53 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]struct{}) []domain.PeerAddress {
 	seenIPs := make(map[string]struct{})
 
-	// Snapshot the announce-state gate once under s.mu. Any peer whose
-	// persistedMeta.AnnounceState is NOT announceable must be excluded
-	// from peer exchange — the advertise-convergence contract forbids
-	// relaying direct-only knowledge to third parties. Peers without any
-	// persistedMeta row fall back to "allow" so bootstrap/manual peers
-	// that have never been through a handshake still propagate.
-	s.mu.RLock()
-	announceable := make(map[domain.PeerAddress]struct{}, len(s.persistedMeta))
-	knownInPersistedMeta := make(map[domain.PeerAddress]struct{}, len(s.persistedMeta))
-	for addr, pm := range s.persistedMeta {
-		if pm == nil {
-			continue
-		}
-		knownInPersistedMeta[addr] = struct{}{}
-		if pm.AnnounceState == announceStateAnnounceable {
-			announceable[addr] = struct{}{}
-		}
-	}
-	s.mu.RUnlock()
+	// Read the announce-state gate + inbound list from the cached
+	// peers_exchange snapshot.  The snapshot is rebuilt every
+	// networkStatsSnapshotInterval by hotReadsRefreshLoop under a short
+	// s.mu.RLock (see peers_exchange_snapshot.go); this handler never
+	// acquires s.mu, so get_peers is not serialised behind a queued
+	// writer on the coarse Service lock.  The snapshot is primed
+	// synchronously by primeHotReadSnapshots() before the listener
+	// opens, so pxSnap is non-nil in production; any nil observed here
+	// comes from a test that bypasses Run() without priming.
+	//
+	// Any peer whose persistedMeta.AnnounceState is NOT announceable
+	// must be excluded from peer exchange — the advertise-convergence
+	// contract forbids relaying direct-only knowledge to third parties.
+	// Peers without any persistedMeta row fall back to "allow" so
+	// bootstrap/manual peers that have never been through a handshake
+	// still propagate (snap.isAnnounceable encodes this fallback).
+	pxSnap := s.loadPeersExchangeSnapshot()
 	isAnnounceable := func(addr domain.PeerAddress) bool {
-		if _, ok := knownInPersistedMeta[addr]; !ok {
-			// No convergence decision yet — fall through so bootstrap
-			// and manual peers remain propagatable.
+		if pxSnap == nil {
+			// No primed snapshot — default to "allow" so bootstrap/manual
+			// peers still propagate on startup corner cases, matching the
+			// fallback the snapshot itself encodes for addresses with no
+			// persisted meta.
 			return true
 		}
-		_, ok := announceable[addr]
-		return ok
+		return pxSnap.isAnnounceable(addr)
 	}
 
 	// 1. Active connections first — verified by live TCP, highest priority.
+	//
+	// Iterates the cached cm_slots snapshot rather than calling
+	// s.connManager.Slots() directly.  Slots() takes cm.mu.RLock, and
+	// Go's RWMutex is writer-preferring: a queued CM writer (slot state
+	// transition, dial completion, eviction) would block this RPC reader
+	// exactly the way s.mu used to.  The snapshot is rebuilt every
+	// networkStatsSnapshotInterval by hotReadsRefreshLoop and primed
+	// synchronously in Run() before the listener opens, so this handler
+	// performs only atomic loads and never acquires cm.mu.  When the
+	// atomic load returns nil (only possible from tests that bypass
+	// Run()), the active branch is skipped rather than falling back to a
+	// synchronous rebuild — the fallback would reach cm.mu.RLock and
+	// break the lock-free contract the snapshot infrastructure enforces.
+	slotsSnap := s.loadCMSlotsSnapshot()
 	var active []domain.PeerAddress
-	if s.connManager != nil {
-		for _, slot := range s.connManager.Slots() {
-			if slot.State != "active" {
+	if slotsSnap != nil {
+		for _, slot := range slotsSnap.all {
+			if slot.State != domain.SlotStateActive {
 				continue
 			}
 			// The convergence decision for a CM-managed peer may be
@@ -5409,47 +5350,54 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 		}
 	}
 
-	// 2. Inbound-only peers — authenticated but not in CM (CM tracks outbound).
-	// Without this, live inbound peers would be invisible to get_peers because
-	// Candidates() excludes connected IPs via ConnectedFn.
+	// 2. Inbound-only peers — authenticated but not in CM (CM tracks
+	// outbound).  Without this, live inbound peers would be invisible
+	// to get_peers because Candidates() excludes connected IPs via
+	// ConnectedFn.  Inbound list comes from the cached snapshot —
+	// already filtered to Direction==inbound && Connected==true inside
+	// the refresher, so this handler only applies the pure-function
+	// filters (shouldHidePeerExchangeAddress, isAnnounceable) and the
+	// per-IP dedup.
 	var inbound []domain.PeerAddress
-	s.mu.RLock()
-	for addr, h := range s.health {
-		if h.Direction != peerDirectionInbound || !h.Connected {
-			continue
-		}
-		if shouldHidePeerExchangeAddress(addr) {
-			continue
-		}
-		if !isAnnounceable(addr) {
-			continue
-		}
-		ip, _, ok := splitHostPort(string(addr))
-		if ok {
-			if _, exists := seenIPs[ip]; !exists {
-				seenIPs[ip] = struct{}{}
-				inbound = append(inbound, addr)
-			}
-		}
-	}
-	s.mu.RUnlock()
-
-	// 3. Supplement with candidates from PeerProvider (already sorted by
-	// score descending inside Candidates()).
-	var candidates []domain.PeerAddress
-	if s.peerProvider != nil {
-		for _, candidate := range s.peerProvider.Candidates() {
-			if shouldHidePeerExchangeAddress(candidate.Address) {
+	if pxSnap != nil {
+		for _, addr := range pxSnap.inboundConnected {
+			if shouldHidePeerExchangeAddress(addr) {
 				continue
 			}
-			if !isAnnounceable(candidate.Address) {
+			if !isAnnounceable(addr) {
 				continue
 			}
-			ip, _, ok := splitHostPort(string(candidate.Address))
+			ip, _, ok := splitHostPort(string(addr))
 			if ok {
 				if _, exists := seenIPs[ip]; !exists {
 					seenIPs[ip] = struct{}{}
-					candidates = append(candidates, candidate.Address)
+					inbound = append(inbound, addr)
+				}
+			}
+		}
+	}
+
+	// 3. Supplement with candidates from the peers_exchange snapshot.  The
+	// list was produced by peerProvider.Candidates() at refresh time
+	// (already sorted by score descending) and baked into the snapshot
+	// precisely because Candidates() re-enters s.mu.RLock via its callbacks
+	// — iterating it directly here would recouple get_peers to s.mu and
+	// reintroduce the writer-storm starvation (see peer_management.go
+	// buildPeerExchangeResponse comment and peers_exchange_snapshot.go).
+	var candidates []domain.PeerAddress
+	if pxSnap != nil {
+		for _, addr := range pxSnap.candidateAddresses {
+			if shouldHidePeerExchangeAddress(addr) {
+				continue
+			}
+			if !isAnnounceable(addr) {
+				continue
+			}
+			ip, _, ok := splitHostPort(string(addr))
+			if ok {
+				if _, exists := seenIPs[ip]; !exists {
+					seenIPs[ip] = struct{}{}
+					candidates = append(candidates, addr)
 				}
 			}
 		}

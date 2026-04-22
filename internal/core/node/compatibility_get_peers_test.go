@@ -58,8 +58,18 @@ func TestCompatibility_InboundGetPeersFrameShape(t *testing.T) {
 
 	// Seed a known candidate so the peers array is non-empty — this lets the
 	// test distinguish "field missing" from "field present but empty".
+	//
+	// buildPeerExchangeResponse reads the candidate list from the
+	// peers_exchange snapshot instead of calling peerProvider.Candidates()
+	// directly (see peers_exchange_snapshot.go for why).  The snapshot is
+	// rebuilt by hotReadsRefreshLoop on an interval, so without an explicit
+	// rebuild here the test would race the refresher and frequently observe
+	// the pre-Add snapshot with zero candidates.  Production callers tolerate
+	// that bounded staleness; test assertions do not, so we force a sync
+	// rebuild, mirroring peers_exchange_snapshot_test.go.
 	if svc.peerProvider != nil {
 		svc.peerProvider.Add(mustAddr("203.0.113.10:64646"), domain.PeerSourceBootstrap)
+		svc.rebuildPeersExchangeSnapshot()
 	}
 
 	conn, reader, _ := authenticatedConn(t, svc)
@@ -284,6 +294,15 @@ func TestCompatibility_LocalRPCGetPeersKeepsKnownCandidates(t *testing.T) {
 		peerProvider: pp,
 		cfg:          testServiceConfig(),
 	}
+
+	// buildPeerExchangeResponse reads the candidate list from the
+	// peers_exchange snapshot instead of calling peerProvider.Candidates()
+	// directly (see peers_exchange_snapshot.go for why).  Production code
+	// gets this invariant from primeHotReadSnapshots() in Run(); this test
+	// constructs a bare Service and never goes through Run(), so we rebuild
+	// the snapshot explicitly after seeding the PeerProvider.  Without this
+	// the RPC path loads a nil snapshot and returns an empty peers array.
+	svc.rebuildPeersExchangeSnapshot()
 
 	reply := svc.HandleLocalFrame(protocol.Frame{Type: "get_peers"})
 

@@ -242,6 +242,32 @@ type Service struct {
 	trafficMu       sync.Mutex
 	lastTrafficSnap map[domain.PeerAddress][2]int64 // [sent, received] from last emission
 
+	// networkStatsSnap / peerHealthSnap / peersExchangeSnap hold the
+	// precomputed frames for fetch_network_stats, fetch_peer_health and
+	// get_peers respectively.  A single background goroutine
+	// (hotReadsRefreshLoop) refreshes all three every
+	// networkStatsSnapshotInterval under short s.mu.RLock sections; the
+	// RPC handlers load the snapshots atomically with zero locking —
+	// decoupled from every writer holding s.mu.
+	//
+	// Each Load returns nil until the first refresh of that snapshot
+	// completes; the networkStatsFrame handler falls back to a synchronous
+	// rebuild in that window.  peer_health and peers_exchange handlers
+	// accept a nil snapshot and return an empty slice — same semantics the
+	// caller saw during a 0-peer startup window.  See
+	// network_stats_snapshot.go / peer_health_snapshot.go /
+	// peers_exchange_snapshot.go for the per-path contract.
+	networkStatsSnap  networkStatsSnapPtr
+	peerHealthSnap    peerHealthSnapPtr
+	peersExchangeSnap peersExchangeSnapPtr
+	// cmSlotsSnap caches ConnectionManager.Slots() so peerHealthFrames and
+	// buildPeerExchangeResponse do not call Slots() (which takes cm.mu.RLock)
+	// on the RPC path.  Without this cache those handlers would still stall
+	// behind a queued CM writer under slot churn even after the s.mu
+	// decoupling.  Rebuilt by hotReadsRefreshLoop on its own ticker; see
+	// cm_slots_snapshot.go.
+	cmSlotsSnap cmSlotsSnapPtr
+
 	// File transfer subsystem (Iteration 21).
 	fileStore    *filetransfer.FileStore // content-addressed file storage in transmit dir
 	fileTransfer *filetransfer.Manager   // sender/receiver state machines
@@ -1116,9 +1142,32 @@ func (s *Service) Run(ctx context.Context) error {
 		close(bootstrapDone)
 	}()
 
+	// Prime the atomic snapshots consumed by the hot local RPC paths
+	// (fetch_network_stats, fetch_peer_health, get_peers) synchronously on
+	// the Run goroutine BEFORE the listener opens.  This establishes the
+	// invariant that every hot-path handler sees a non-nil snapshot on its
+	// first load, which lets those handlers drop the sync-rebuild fallbacks
+	// that otherwise re-couple the RPC path to cm.mu.RLock / s.mu.RLock.
+	// Running on the main goroutine here means the CM is already Ready()
+	// (see above) and no inbound connection can dispatch RPCs yet.
+	s.primeHotReadSnapshots()
+
+	// Background refresher for the atomic snapshots consumed by the hot
+	// local RPC paths.  Runs in its own goroutine so a stalled rebuild
+	// (s.mu writer storm) delays the next refresh tick without affecting
+	// any other loop; RPC readers keep serving the last good snapshot.
+	// See hot_reads_refresh.go for the contract.
+	hotReadsDone := make(chan struct{})
+	go func() {
+		defer crashlog.DeferRecover()
+		defer close(hotReadsDone)
+		s.hotReadsRefreshLoop(ctx)
+	}()
+
 	if !s.cfg.EffectiveListenerEnabled() {
 		<-ctx.Done()
 		<-bootstrapDone
+		<-hotReadsDone
 		<-cmDone
 		return nil
 	}
@@ -1147,6 +1196,7 @@ func (s *Service) Run(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				<-bootstrapDone
+				<-hotReadsDone
 				<-cmDone
 				return nil
 			default:

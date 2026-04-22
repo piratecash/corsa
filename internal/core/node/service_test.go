@@ -2027,17 +2027,31 @@ func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {
 	})
 	defer stop()
 
+	// RFC3339 formats at whole-second granularity, so CreatedAt is the
+	// current second truncated down (e.g. wall-clock 12:00:40.9 → ts
+	// "12:00:40").  With TTL=1s the absolute expiry (CreatedAt + TTL) can
+	// be as little as a few ms in the future, which is too tight when the
+	// node is running under parallel-test CPU load: cleanupExpiredMessagesForce
+	// inside fetch_messages calls time.Now() and, if scheduled even ~100 ms
+	// after ts was captured, sees the message as already expired and prunes
+	// it before the pre-expiry assertion below.  A 3-second TTL keeps the
+	// "stored → visible → expires → pruned" contract this test is meant to
+	// exercise, while leaving enough margin for scheduler jitter.
+	const ttlSeconds = 3
 	ts := time.Now().UTC().Format(time.RFC3339)
-	storedTTL := svc.HandleLocalFrame(sendMessageFrame("global", "ttl-msg-1", svc.Address(), "*", "auto-delete-ttl", ts, 1, "burn-after-read"))
+	storedTTL := svc.HandleLocalFrame(sendMessageFrame("global", "ttl-msg-1", svc.Address(), "*", "auto-delete-ttl", ts, ttlSeconds, "burn-after-read"))
 	if storedTTL.Type != "message_stored" {
 		t.Fatalf("unexpected ttl store response: %#v", storedTTL)
 	}
 	msgBefore := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
 	assertMessageFrame(t, msgBefore, "messages", "global", 1, protocol.MessageFrame{
-		ID: "ttl-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "auto-delete-ttl", CreatedAt: ts, TTLSeconds: 1, Body: "burn-after-read",
+		ID: "ttl-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "auto-delete-ttl", CreatedAt: ts, TTLSeconds: ttlSeconds, Body: "burn-after-read",
 	})
 
-	time.Sleep(1500 * time.Millisecond)
+	// Sleep past the TTL window with enough slack that the post-sleep fetch
+	// is guaranteed to run after absolute expiry even if ts was truncated
+	// down by almost a full second.
+	time.Sleep(time.Duration(ttlSeconds)*time.Second + 500*time.Millisecond)
 
 	msgAfter := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "global"})
 	if msgAfter.Type != "messages" || msgAfter.Count != 0 {
@@ -2858,6 +2872,15 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("expected first relay attempt, got %d", attempts)
 	}
+
+	// This test deliberately bypasses Run() so the persister's background
+	// writer never starts.  Every mutation above has marked the persister
+	// dirty; without a synchronous flush here the restart branch below
+	// would read the empty on-disk file that NewService created.  See
+	// queue_state_persister.go — MarkDirty is fire-and-forget, FlushSync
+	// is the escape hatch for Run-less fixtures and graceful shutdown.
+	svc.queuePersist.MarkDirty()
+	svc.queuePersist.FlushSync()
 
 	reloaded := NewService(cfg, id, nil)
 	reloaded.mu.RLock()

@@ -37,36 +37,14 @@ import (
 // ---------------------------------------------------------------------------
 // Slot state machine
 // ---------------------------------------------------------------------------
-
-type slotState int
-
-const (
-	slotStateQueued       slotState = iota // reserved, waiting for dial
-	slotStateDialing                       // dial worker running
-	slotStateInitializing                  // TCP handshake done, application-level init in progress
-	slotStateActive                        // fully operational — initPeerSession succeeded
-	slotStateReconnecting                  // active session lost, immediate retry
-	slotStateRetryWait                     // backoff timer before next dial
-)
-
-func (s slotState) String() string {
-	switch s {
-	case slotStateQueued:
-		return "queued"
-	case slotStateDialing:
-		return "dialing"
-	case slotStateInitializing:
-		return "initializing"
-	case slotStateActive:
-		return "active"
-	case slotStateReconnecting:
-		return "reconnecting"
-	case slotStateRetryWait:
-		return "retry_wait"
-	default:
-		return "unknown"
-	}
-}
+//
+// The typed enum for slot lifecycle (queued / dialing / initializing / active
+// / reconnecting / retry_wait) lives in domain.SlotState. Producer (this
+// file) and all consumers (peer_management.go, NodeStatusMonitor,
+// active-connections RPC, tests) reference the same constants, so a typo
+// or rename surfaces as a compile error instead of a silent "unknown"
+// fallback on the wire. See domain/peer.go for the type definition and
+// wire-contract note.
 
 // slot is the internal bookkeeping record for one outbound connection.
 // Only mutated by the event loop goroutine (under cm.mu.Lock).
@@ -74,7 +52,7 @@ type slot struct {
 	Address          domain.PeerAddress
 	DialAddresses    []domain.PeerAddress
 	ConnectedAddress domain.PeerAddress // actual endpoint after fallback dial
-	State            slotState
+	State            domain.SlotState
 	RetryCount       int
 	Generation       uint64 // incremented on every state transition
 	Session          *peerSession
@@ -342,9 +320,9 @@ func (cm *ConnectionManager) EmitHint(event HintEvent) {
 // slot.State is updated.
 //
 // Publisher-side dedup is intentionally NOT applied here even though the
-// retry / reconnect / eviction paths can re-enter the same slotState for
+// retry / reconnect / eviction paths can re-enter the same SlotState for
 // the same address (e.g. two consecutive failures both landing in
-// slotStateRetryWait). The reason is that ebus delivery is lossy — if a
+// domain.SlotStateRetryWait). The reason is that ebus delivery is lossy — if a
 // subscriber inbox is full, Publish drops the event rather than block.
 // A publisher-side memo would treat the dropped publish as delivered and
 // suppress all subsequent byte-identical emissions, leaving the subscriber
@@ -355,7 +333,7 @@ func (cm *ConnectionManager) EmitHint(event HintEvent) {
 // NodeStatusMonitor.applySlotStateDelta.
 //
 // Safe: ebus.Publish is non-blocking and uses its own mutex.
-func (cm *ConnectionManager) emitSlotStateChanged(address domain.PeerAddress, state slotState) {
+func (cm *ConnectionManager) emitSlotStateChanged(address domain.PeerAddress, state domain.SlotState) {
 	if cm.config.EventBus == nil {
 		return
 	}
@@ -400,7 +378,7 @@ func (cm *ConnectionManager) ActiveCount() int {
 
 	count := 0
 	for _, s := range cm.slots {
-		if s.State == slotStateActive {
+		if s.State == domain.SlotStateActive {
 			count++
 		}
 	}
@@ -414,10 +392,13 @@ func (cm *ConnectionManager) SlotCount() int {
 	return len(cm.slots)
 }
 
-// SlotInfo is the RPC-facing view of a single slot.
+// SlotInfo is the RPC-facing view of a single slot.  State carries the
+// typed domain.SlotState (underlying string) so producers and consumers
+// compile-share the enum vocabulary; JSON serialization is unchanged —
+// the underlying string type serializes as its raw label.
 type SlotInfo struct {
 	Address          domain.PeerAddress   `json:"address"`
-	State            string               `json:"state"`
+	State            domain.SlotState     `json:"state"`
 	RetryCount       int                  `json:"retry_count"`
 	Generation       uint64               `json:"generation"`
 	Identity         *domain.PeerIdentity `json:"identity,omitempty"`
@@ -438,12 +419,12 @@ func (cm *ConnectionManager) Slots() []SlotInfo {
 
 		info := SlotInfo{
 			Address:       s.Address,
-			State:         s.State.String(),
+			State:         s.State,
 			RetryCount:    s.RetryCount,
 			Generation:    s.Generation,
 			DialAddresses: dialAddrs,
 		}
-		if (s.State == slotStateActive || s.State == slotStateInitializing) && s.Session != nil {
+		if (s.State == domain.SlotStateActive || s.State == domain.SlotStateInitializing) && s.Session != nil {
 			id := s.Session.peerIdentity
 			info.Identity = &id
 			addr := s.ConnectedAddress
@@ -629,7 +610,7 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 	s := &slot{
 		Address:       ev.Address,
 		DialAddresses: dialAddrs,
-		State:         slotStateDialing,
+		State:         domain.SlotStateDialing,
 		Generation:    gen,
 	}
 	cm.slots = append(cm.slots, s)
@@ -639,7 +620,7 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 	if evictedAddr != "" {
 		cm.emitSlotRemoved(evictedAddr)
 	}
-	cm.emitSlotStateChanged(ev.Address, slotStateDialing)
+	cm.emitSlotStateChanged(ev.Address, domain.SlotStateDialing)
 
 	// Invoke teardown callback outside lock.
 	if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
@@ -664,7 +645,7 @@ func (cm *ConnectionManager) findLowestScoringSlotLocked() *slot {
 	bestActive := true
 
 	for _, s := range cm.slots {
-		isActive := s.State == slotStateActive
+		isActive := s.State == domain.SlotStateActive
 		score := 0
 		if cm.config.Provider != nil {
 			score = cm.config.Provider.Score(s.Address)
@@ -742,7 +723,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 		}
 
 		addr := s.Address
-		s.State = slotStateRetryWait
+		s.State = domain.SlotStateRetryWait
 		gen := cm.nextGenerationLocked()
 		s.Generation = gen
 		dialAddrs := s.DialAddresses
@@ -750,7 +731,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 
 		cm.mu.Unlock()
 
-		cm.emitSlotStateChanged(addr, slotStateRetryWait)
+		cm.emitSlotStateChanged(addr, domain.SlotStateRetryWait)
 
 		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 			cm.config.OnSessionTeardown(*teardownInfo)
@@ -771,7 +752,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 
 	// WasHealthy: true — genuine connection loss from a working session.
 	// Reset retry count and reconnect immediately.
-	s.State = slotStateReconnecting
+	s.State = domain.SlotStateReconnecting
 	s.RetryCount = 0
 	gen := cm.nextGenerationLocked()
 	s.Generation = gen
@@ -780,7 +761,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 
 	cm.mu.Unlock()
 
-	cm.emitSlotStateChanged(addr, slotStateReconnecting)
+	cm.emitSlotStateChanged(addr, domain.SlotStateReconnecting)
 
 	if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
 		cm.config.OnSessionTeardown(*teardownInfo)
@@ -838,7 +819,7 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		cm.fill(ctx)
 	} else {
 		addr := s.Address
-		s.State = slotStateRetryWait
+		s.State = domain.SlotStateRetryWait
 		gen := cm.nextGenerationLocked()
 		s.Generation = gen
 		dialAddrs := s.DialAddresses
@@ -846,7 +827,7 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 
 		cm.mu.Unlock()
 
-		cm.emitSlotStateChanged(addr, slotStateRetryWait)
+		cm.emitSlotStateChanged(addr, domain.SlotStateRetryWait)
 
 		// Notify Service about the failure (score update) even for retries.
 		if cm.config.OnDialFailed != nil {
@@ -903,7 +884,7 @@ func (cm *ConnectionManager) handleSessionInitReady(_ context.Context, ev Sessio
 		cm.mu.Unlock()
 		return
 	}
-	if s.State != slotStateInitializing {
+	if s.State != domain.SlotStateInitializing {
 		// Already promoted, deactivated, or replaced — stale event.
 		cm.mu.Unlock()
 		return
@@ -981,7 +962,7 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 		s := &slot{
 			Address:       candidates[i].Address,
 			DialAddresses: candidates[i].DialAddresses,
-			State:         slotStateDialing,
+			State:         domain.SlotStateDialing,
 			Generation:    gen,
 		}
 		cm.slots = append(cm.slots, s)
@@ -996,7 +977,7 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 
 	// Emit slot state changes outside the lock.
 	for _, t := range tasks {
-		cm.emitSlotStateChanged(t.address, slotStateDialing)
+		cm.emitSlotStateChanged(t.address, domain.SlotStateDialing)
 	}
 
 	// Phase 2: launch dial workers (outside lock).
@@ -1037,7 +1018,7 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 		if len(victims) >= excess {
 			break
 		}
-		if s.State != slotStateActive {
+		if s.State != domain.SlotStateActive {
 			victims = append(victims, s)
 		}
 	}
@@ -1046,7 +1027,7 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 		if len(victims) >= excess {
 			break
 		}
-		if s.State == slotStateActive {
+		if s.State == domain.SlotStateActive {
 			victims = append(victims, s)
 		}
 	}
@@ -1087,13 +1068,13 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 // Caller must hold cm.mu.Lock. Returns SessionInfo for the caller to invoke
 // OnSessionEstablished AFTER releasing the lock.
 func (cm *ConnectionManager) beginInitSlotLocked(s *slot, ev DialSucceeded) SessionInfo {
-	s.State = slotStateInitializing
+	s.State = domain.SlotStateInitializing
 	s.Session = ev.Session
 	s.ConnectedAddress = ev.ConnectedAddress
 	s.RetryCount = 0
 	s.Generation = cm.nextGenerationLocked()
 
-	cm.emitSlotStateChanged(s.Address, slotStateInitializing)
+	cm.emitSlotStateChanged(s.Address, domain.SlotStateInitializing)
 
 	log.Info().
 		Str("address", string(s.Address)).
@@ -1116,7 +1097,7 @@ func (cm *ConnectionManager) beginInitSlotLocked(s *slot, ev DialSucceeded) Sess
 // Called when the application-level init (initPeerSession) succeeds.
 // Caller must hold cm.mu.Lock.
 func (cm *ConnectionManager) promoteSlotLocked(s *slot) {
-	s.State = slotStateActive
+	s.State = domain.SlotStateActive
 
 	log.Info().
 		Str("address", string(s.Address)).
@@ -1124,7 +1105,7 @@ func (cm *ConnectionManager) promoteSlotLocked(s *slot) {
 		Msg("cm: slot activated")
 
 	// Safe to call under cm.mu — ebus uses its own RWMutex.
-	cm.emitSlotStateChanged(s.Address, slotStateActive)
+	cm.emitSlotStateChanged(s.Address, domain.SlotStateActive)
 }
 
 // deactivateSlotLocked performs cleanup when an active or initializing slot
@@ -1133,7 +1114,7 @@ func (cm *ConnectionManager) promoteSlotLocked(s *slot) {
 // caller must invoke OnSessionTeardown AFTER releasing the lock.
 // Returns nil when the slot had no session to tear down.
 //
-// Handles both slotStateActive and slotStateInitializing — during init the
+// Handles both domain.SlotStateActive and domain.SlotStateInitializing — during init the
 // slot already holds a Session that must be closed on failure or shutdown.
 //
 // CM owns the transport lifecycle: it closes the underlying connection here.
@@ -1141,7 +1122,7 @@ func (cm *ConnectionManager) promoteSlotLocked(s *slot) {
 // ActiveSessionLost — which the generation guard suppresses because the
 // slot's generation was already incremented by the caller.
 func (cm *ConnectionManager) deactivateSlotLocked(s *slot) *SessionInfo {
-	if (s.State != slotStateActive && s.State != slotStateInitializing) || s.Session == nil {
+	if (s.State != domain.SlotStateActive && s.State != domain.SlotStateInitializing) || s.Session == nil {
 		return nil
 	}
 
