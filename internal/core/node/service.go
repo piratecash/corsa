@@ -1129,9 +1129,12 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	defer func() { _ = listener.Close() }()
 
+	log.Trace().Str("site", "Run_setListener").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "Run_setListener").Str("phase", "lock_held").Msg("s_mu_writer")
 	s.listener = listener
 	s.mu.Unlock()
+	log.Trace().Str("site", "Run_setListener").Str("phase", "lock_released").Msg("s_mu_writer")
 
 	go func() {
 		<-ctx.Done()
@@ -1252,17 +1255,23 @@ func (s *Service) SubscriberCount(recipient string) int {
 func (s *Service) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, func()) {
 	ch := make(chan protocol.LocalChangeEvent, 16)
 
+	log.Trace().Str("site", "SubscribeLocalChanges_register").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "SubscribeLocalChanges_register").Str("phase", "lock_held").Msg("s_mu_writer")
 	s.events[ch] = struct{}{}
 	s.mu.Unlock()
+	log.Trace().Str("site", "SubscribeLocalChanges_register").Str("phase", "lock_released").Msg("s_mu_writer")
 
 	cancel := func() {
+		log.Trace().Str("site", "SubscribeLocalChanges_cancel").Str("phase", "lock_wait").Msg("s_mu_writer")
 		s.mu.Lock()
+		log.Trace().Str("site", "SubscribeLocalChanges_cancel").Str("phase", "lock_held").Msg("s_mu_writer")
 		if _, ok := s.events[ch]; ok {
 			delete(s.events, ch)
 			close(ch)
 		}
 		s.mu.Unlock()
+		log.Trace().Str("site", "SubscribeLocalChanges_cancel").Str("phase", "lock_released").Msg("s_mu_writer")
 	}
 
 	return ch, cancel
@@ -1591,9 +1600,12 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 				// diagnostics. On the inbound rejection path the hello
 				// frame is the only source of this metadata.
 				if frame.ClientVersion != "" {
+					log.Trace().Str("site", "helloRejectStoreVersion").Str("phase", "lock_wait").Str("address", peerAddr).Msg("s_mu_writer")
 					s.mu.Lock()
+					log.Trace().Str("site", "helloRejectStoreVersion").Str("phase", "lock_held").Str("address", peerAddr).Msg("s_mu_writer")
 					s.peerVersions[domain.PeerAddress(peerAddr)] = frame.ClientVersion
 					s.mu.Unlock()
+					log.Trace().Str("site", "helloRejectStoreVersion").Str("phase", "lock_released").Str("address", peerAddr).Msg("s_mu_writer")
 				}
 				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr), peerVer, peerMin)
 			}
@@ -2842,13 +2854,16 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	log.Trace().Uint64("conn_id", uint64(id)).Str("address", string(address)).Str("peer_identity", string(peerIdentity)).Msg("track_inbound_connect_begin")
 
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_before_lock")
+	log.Trace().Str("site", "trackInboundConnect").Str("phase", "lock_wait").Uint64("conn_id", uint64(id)).Str("address", string(address)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "trackInboundConnect").Str("phase", "lock_held").Uint64("conn_id", uint64(id)).Str("address", string(address)).Msg("s_mu_writer")
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_lock_acquired")
 	resolved := s.resolveHealthAddress(address)
 	first := s.inboundHealthRefs[resolved] == 0
 	s.inboundHealthRefs[resolved]++
 	s.setTrackedByIDLocked(id, true)
 	s.mu.Unlock()
+	log.Trace().Str("site", "trackInboundConnect").Str("phase", "lock_released").Uint64("conn_id", uint64(id)).Str("address", string(address)).Msg("s_mu_writer")
 	log.Trace().Uint64("conn_id", uint64(id)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect_lock_released")
 
 	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
@@ -3089,8 +3104,13 @@ func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP s
 		return
 	}
 
+	log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_wait").Str("peer_id", string(peerID)).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_held").Str("peer_id", string(peerID)).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_released").Str("peer_id", string(peerID)).Msg("s_mu_writer")
+	}()
 
 	s.observedAddrs[peerID] = observedIP
 
@@ -3138,8 +3158,13 @@ func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 	if ip == "" {
 		return false
 	}
+	log.Trace().Str("site", "isBlacklistedConn").Str("phase", "lock_wait").Str("ip", ip).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "isBlacklistedConn").Str("phase", "lock_held").Str("ip", ip).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "isBlacklistedConn").Str("phase", "lock_released").Str("ip", ip).Msg("s_mu_writer")
+	}()
 	entry, ok := s.bans[ip]
 	if !ok {
 		return false
@@ -3160,8 +3185,13 @@ func (s *Service) tryIncrementIPConn(ip string) bool {
 	if ip == "" {
 		return true
 	}
+	log.Trace().Str("site", "tryIncrementIPConn").Str("phase", "lock_wait").Str("ip", ip).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "tryIncrementIPConn").Str("phase", "lock_held").Str("ip", ip).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "tryIncrementIPConn").Str("phase", "lock_released").Str("ip", ip).Msg("s_mu_writer")
+	}()
 	if s.inboundByIP[ip] >= maxConnPerIP {
 		return false
 	}
@@ -3174,8 +3204,13 @@ func (s *Service) decrementIPConn(ip string) {
 	if ip == "" {
 		return
 	}
+	log.Trace().Str("site", "decrementIPConn").Str("phase", "lock_wait").Str("ip", ip).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "decrementIPConn").Str("phase", "lock_held").Str("ip", ip).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "decrementIPConn").Str("phase", "lock_released").Str("ip", ip).Msg("s_mu_writer")
+	}()
 	if s.inboundByIP[ip] > 1 {
 		s.inboundByIP[ip]--
 	} else {
@@ -3193,7 +3228,9 @@ func (s *Service) addBanScore(id domain.ConnID, delta int) {
 		return
 	}
 	ip := host
+	log.Trace().Str("site", "addBanScore").Str("phase", "lock_wait").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "addBanScore").Str("phase", "lock_held").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("s_mu_writer")
 	entry := s.bans[ip]
 	previouslyBlacklisted := !entry.Blacklisted.IsZero()
 	entry.Score += delta
@@ -3203,6 +3240,7 @@ func (s *Service) addBanScore(id domain.ConnID, delta int) {
 	s.bans[ip] = entry
 	justBlacklisted := !previouslyBlacklisted && !entry.Blacklisted.IsZero()
 	s.mu.Unlock()
+	log.Trace().Str("site", "addBanScore").Str("phase", "lock_released").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("s_mu_writer")
 	if !entry.Blacklisted.IsZero() {
 		log.Warn().Str("ip", ip).Int("score", entry.Score).Time("until", entry.Blacklisted).Msg("blacklist")
 	}
@@ -3370,7 +3408,9 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 // corresponding outbound delivery tracking entries and pending dedup keys,
 // then persists the updated queue state to disk.
 func (s *Service) dropPendingForRecipient(recipient string) {
+	log.Trace().Str("site", "dropPendingForRecipient").Str("phase", "lock_wait").Str("recipient", recipient).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "dropPendingForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Msg("s_mu_writer")
 
 	var dropped int
 	var affected []ebus.PeerPendingDelta
@@ -3411,6 +3451,7 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
 	s.mu.Unlock()
+	log.Trace().Str("site", "dropPendingForRecipient").Str("phase", "lock_released").Str("recipient", recipient).Msg("s_mu_writer")
 
 	if dropped > 0 || outboundDropped > 0 {
 		log.Info().Str("recipient", recipient).Int("pending_dropped", dropped).Int("outbound_dropped", outboundDropped).Msg("dropped_pending_for_deleted_contact")
@@ -3595,7 +3636,9 @@ func (s *Service) subscribeInboxFrame(connID domain.ConnID, frame protocol.Frame
 		subID = s.Network().RemoteAddr(connID)
 	}
 
+	log.Trace().Str("site", "subscribeInboxFrame").Str("phase", "lock_wait").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "subscribeInboxFrame").Str("phase", "lock_held").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
 	}
@@ -3611,6 +3654,7 @@ func (s *Service) subscribeInboxFrame(connID domain.ConnID, frame protocol.Frame
 	s.subs[recipient][subID] = sub
 	count := len(s.subs[recipient])
 	s.mu.Unlock()
+	log.Trace().Str("site", "subscribeInboxFrame").Str("phase", "lock_released").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 	log.Info().Str("recipient", recipient).Str("subscriber", subID).Int("active", count).Msg("subscribe_inbox")
 
 	return protocol.Frame{
@@ -3645,8 +3689,13 @@ func (s *Service) registerHelloRoute(connID domain.ConnID, frame protocol.Frame)
 	}
 	subID := "node-route:" + addr
 
+	log.Trace().Str("site", "registerHelloRoute").Str("phase", "lock_wait").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "registerHelloRoute").Str("phase", "lock_held").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "registerHelloRoute").Str("phase", "lock_released").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
+	}()
 
 	if _, ok := s.subs[recipient]; !ok {
 		s.subs[recipient] = make(map[string]*subscriber)
@@ -3713,9 +3762,12 @@ func (s *Service) refreshKnowledgeFromPeers() {
 
 	s.ensurePeerSessions(ctx)
 
+	log.Trace().Str("site", "refreshKnowledgeFromPeers").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "refreshKnowledgeFromPeers").Str("phase", "lock_held").Msg("s_mu_writer")
 	s.lastSync = time.Now().UTC()
 	s.mu.Unlock()
+	log.Trace().Str("site", "refreshKnowledgeFromPeers").Str("phase", "lock_released").Msg("s_mu_writer")
 }
 
 func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
@@ -3828,7 +3880,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 
 	s.cleanupExpiredMessages()
 
+	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 	// DM senders are cryptographically verified above (VerifyEnvelope),
 	// so they are safe to register as known identities unconditionally.
 	// Non-DM senders are only registered when the node already holds
@@ -3846,6 +3900,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	if _, ok := s.seen[string(msg.ID)]; ok {
 		count := len(s.topics[msg.Topic])
 		s.mu.Unlock()
+		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_dedup").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_dedup")
 		return false, count, ""
 	}
@@ -3889,8 +3944,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		isOutgoing := msg.Sender == s.identity.Address
 		// Unlock before calling into the store — it may do SQLite I/O.
 		s.mu.Unlock()
+		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_mid").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 		storeResult = s.messageStore.StoreMessage(envelope, isOutgoing)
+		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait_reacquire").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 		s.mu.Lock()
+		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held_reacquire").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 	}
 
 	// Duplicate local messages must NOT enter s.topics. The message is
@@ -3910,6 +3968,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		}
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 
 	// Only notify the desktop UI for messages this node participates in.
 	// Transit relay traffic must not wake up the UI.
@@ -4034,10 +4093,13 @@ func (s *Service) shouldRouteStoredMessage(msg incomingMessage) bool {
 func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, int) {
 	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
 
+	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	if _, ok := s.seenReceipts[key]; ok {
 		count := len(s.receipts[receipt.Recipient])
 		s.mu.Unlock()
+		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_dup").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 		return false, count
 	}
 	s.seenReceipts[key] = struct{}{}
@@ -4054,6 +4116,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	}
 	aggSnap := s.aggregateStatus
 	s.mu.Unlock()
+	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 
 	// Emit pending count deltas for all peers whose queues were modified.
@@ -4133,13 +4196,17 @@ func (s *Service) isTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
 func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
 	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
 
+	log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	if _, ok := s.seenReceipts[key]; ok {
 		s.mu.Unlock()
+		log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_released_dup").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 		return true
 	}
 	s.seenReceipts[key] = struct{}{}
 	s.mu.Unlock()
+	log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	return false
 }
 
@@ -4152,9 +4219,12 @@ func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool 
 func (s *Service) unmarkTransitReceiptSeen(receipt protocol.DeliveryReceipt) {
 	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
 
+	log.Trace().Str("site", "unmarkTransitReceiptSeen").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "unmarkTransitReceiptSeen").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	delete(s.seenReceipts, key)
 	s.mu.Unlock()
+	log.Trace().Str("site", "unmarkTransitReceiptSeen").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 }
 
 // gossipTransitReceipt is the transit-receipt variant of gossipReceipt.
@@ -4429,8 +4499,13 @@ func (s *Service) countInboundConnsLocked() int {
 // carve-out list in conn_registry.go: there is no ConnID before this
 // function runs.
 func (s *Service) registerInboundConn(conn net.Conn) bool {
+	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_held").Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_released").Msg("s_mu_writer")
+	}()
 
 	limit := s.cfg.EffectiveMaxIncomingPeers()
 	if limit > 0 && s.countInboundConnsLocked() >= limit {
@@ -4464,9 +4539,12 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{})
 
+	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_wait").Uint64("conn_id", uint64(session.connID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_held").Uint64("conn_id", uint64(session.connID)).Msg("s_mu_writer")
 	s.attachOutboundCoreLocked(session.conn, pc)
 	s.mu.Unlock()
+	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_released").Uint64("conn_id", uint64(session.connID)).Msg("s_mu_writer")
 
 	// Capture lifecycle hook: attach sink and notify manager.
 	s.notifyCaptureNewConn(session.connID)
@@ -4477,9 +4555,12 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 	session.onClose = func() {
 		// Capture lifecycle hook: stop capture before registry removal.
 		s.notifyCaptureConnClosed(connID)
+		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_wait").Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 		s.mu.Lock()
+		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_held").Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 		s.unregisterConnLocked(conn)
 		s.mu.Unlock()
+		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_released").Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 	}
 	return pc
 }
@@ -4637,9 +4718,12 @@ func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
 	id := gazeta.ID(frame.Ciphertext)
 	expiresAt := time.Now().UTC().Add(ttl)
 
+	log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_wait").Str("notice_id", id).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_held").Str("notice_id", id).Msg("s_mu_writer")
 	if existing, ok := s.notices[id]; ok && existing.ExpiresAt.After(time.Now().UTC()) {
 		s.mu.Unlock()
+		log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_released_dup").Str("notice_id", id).Msg("s_mu_writer")
 		return protocol.Frame{Type: "notice_known", ID: id, ExpiresAt: existing.ExpiresAt.Unix()}
 	}
 
@@ -4649,6 +4733,7 @@ func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
 		ExpiresAt:  expiresAt,
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_released").Str("notice_id", id).Msg("s_mu_writer")
 
 	if s.CanForward() {
 		s.goBackground(func() { s.gossipNotice(ttl, frame.Ciphertext) })
@@ -4815,10 +4900,13 @@ func (s *Service) addKnownIdentity(identity domain.PeerIdentity) {
 	}
 
 	address := string(identity)
+	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_wait").Str("address", address).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_held").Str("address", address).Msg("s_mu_writer")
 	_, existed := s.known[address]
 	s.known[address] = struct{}{}
 	s.mu.Unlock()
+	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_released").Str("address", address).Msg("s_mu_writer")
 
 	if !existed {
 		ebus.PublishIdentityAdded(s.eventBus, identity)
@@ -4830,8 +4918,13 @@ func (s *Service) addKnownBoxKey(address, boxKey string) {
 		return
 	}
 
+	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_wait").Str("address", address).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_held").Str("address", address).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_released").Str("address", address).Msg("s_mu_writer")
+	}()
 	s.boxKeys[address] = boxKey
 }
 
@@ -4840,8 +4933,13 @@ func (s *Service) addKnownPubKey(address, pubKey string) {
 		return
 	}
 
+	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_wait").Str("address", address).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_held").Str("address", address).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_released").Str("address", address).Msg("s_mu_writer")
+	}()
 	s.pubKeys[address] = pubKey
 }
 
@@ -4850,8 +4948,13 @@ func (s *Service) addKnownBoxSig(address, boxSig string) {
 		return
 	}
 
+	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_wait").Str("address", address).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_held").Str("address", address).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_released").Str("address", address).Msg("s_mu_writer")
+	}()
 	s.boxSigs[address] = boxSig
 }
 
@@ -5182,9 +5285,12 @@ func (s *Service) handleInboundPushNotice(frame protocol.Frame) {
 	id := gazeta.ID(frame.Ciphertext)
 	expiresAt := time.Now().UTC().Add(ttl)
 
+	log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_wait").Str("notice_id", id).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_held").Str("notice_id", id).Msg("s_mu_writer")
 	if existing, ok := s.notices[id]; ok && existing.ExpiresAt.After(time.Now().UTC()) {
 		s.mu.Unlock()
+		log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_released_dup").Str("notice_id", id).Msg("s_mu_writer")
 		return
 	}
 	s.notices[id] = gazeta.Notice{
@@ -5193,6 +5299,7 @@ func (s *Service) handleInboundPushNotice(frame protocol.Frame) {
 		ExpiresAt:  expiresAt,
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_released").Str("notice_id", id).Msg("s_mu_writer")
 
 	if s.CanForward() {
 		s.goBackground(func() { s.gossipNotice(ttl, frame.Ciphertext) })
@@ -5310,8 +5417,13 @@ func (s *Service) removeSubscriberConnID(connID domain.ConnID) {
 	if connID == 0 {
 		return
 	}
+	log.Trace().Str("site", "removeSubscriberConnID").Str("phase", "lock_wait").Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "removeSubscriberConnID").Str("phase", "lock_held").Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "removeSubscriberConnID").Str("phase", "lock_released").Uint64("conn_id", uint64(connID)).Msg("s_mu_writer")
+	}()
 	for recipient, group := range s.subs {
 		for id, sub := range group {
 			if sub != nil && sub.connID == connID {
@@ -5325,8 +5437,13 @@ func (s *Service) removeSubscriberConnID(connID domain.ConnID) {
 }
 
 func (s *Service) removeSubscriberByID(recipient, id string) {
+	log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_wait").Str("recipient", recipient).Str("sub_id", id).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_held").Str("recipient", recipient).Str("sub_id", id).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_released").Str("recipient", recipient).Str("sub_id", id).Msg("s_mu_writer")
+	}()
 
 	group := s.subs[recipient]
 	if group == nil {
@@ -5341,8 +5458,13 @@ func (s *Service) removeSubscriberByID(recipient, id string) {
 func (s *Service) cleanupExpiredNotices() {
 	now := time.Now().UTC()
 
+	log.Trace().Str("site", "cleanupExpiredNotices").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "cleanupExpiredNotices").Str("phase", "lock_held").Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "cleanupExpiredNotices").Str("phase", "lock_released").Msg("s_mu_writer")
+	}()
 
 	for id, notice := range s.notices {
 		if !notice.ExpiresAt.After(now) {
@@ -5414,9 +5536,12 @@ func (s *Service) cleanupExpiredMessagesForce() {
 
 	// Short-circuit: update throttle timestamp and return.
 	if len(expired) == 0 {
+		log.Trace().Str("site", "cleanupExpiredMessagesForce_empty").Str("phase", "lock_wait").Msg("s_mu_writer")
 		s.mu.Lock()
+		log.Trace().Str("site", "cleanupExpiredMessagesForce_empty").Str("phase", "lock_held").Msg("s_mu_writer")
 		s.lastExpiredCleanup = now
 		s.mu.Unlock()
+		log.Trace().Str("site", "cleanupExpiredMessagesForce_empty").Str("phase", "lock_released").Msg("s_mu_writer")
 		return
 	}
 
@@ -5431,7 +5556,9 @@ func (s *Service) cleanupExpiredMessagesForce() {
 		expiredIDs[e.topic][e.id] = struct{}{}
 	}
 
+	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_wait").Int("expired", len(expired)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_held").Int("expired", len(expired)).Msg("s_mu_writer")
 	s.lastExpiredCleanup = now
 
 	for topic, ids := range expiredIDs {
@@ -5451,6 +5578,7 @@ func (s *Service) cleanupExpiredMessagesForce() {
 		}
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_released").Msg("s_mu_writer")
 }
 
 func (s *Service) validateMessageTiming(msg incomingMessage) error {

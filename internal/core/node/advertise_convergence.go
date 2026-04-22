@@ -361,8 +361,13 @@ func (s *Service) applyAdvertiseValidationResult(peerAddress domain.PeerAddress,
 		return
 	}
 
+	log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	}()
 	s.applyAdvertiseValidationResultLocked(peerAddress, result)
 }
 
@@ -530,8 +535,13 @@ func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialed
 		// non-IP value in TrustedAdvertiseIP.
 		return
 	}
+	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	}()
 	pm := s.persistedMeta[peerAddress]
 	if pm == nil {
 		now := time.Now().UTC()
@@ -586,8 +596,13 @@ func (s *Service) observedIPHistoryForPeer(peerAddress domain.PeerAddress) []dom
 // outbound hello frame. Empty string clears the override and falls back
 // to observed consensus / config.
 func (s *Service) setTrustedSelfAdvertiseIP(ip domain.PeerIP) {
+	log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_held").Msg("s_mu_writer")
+	defer func() {
+		s.mu.Unlock()
+		log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_released").Msg("s_mu_writer")
+	}()
 	s.trustedSelfAdvertiseIP = domain.PeerIP(strings.TrimSpace(string(ip)))
 }
 
@@ -713,7 +728,9 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 	}
 
 	recorded := false
+	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
 	switch {
 	case reason == protocol.PeerBannedReasonBlacklisted && hasIP:
 		if !s.recordRemoteIPBanLocked(ip, reason, until, now).IsZero() {
@@ -738,6 +755,7 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 		}
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
 
 	if !recorded {
 		// Nothing recorded — reason=peer-ban on an unknown peer, or

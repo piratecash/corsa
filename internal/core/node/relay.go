@@ -1144,7 +1144,9 @@ func (s *Service) retryRelayDeliveries() {
 }
 
 func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
+	log.Trace().Str("site", "retryableRelayMessages").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "retryableRelayMessages").Str("phase", "lock_held").Msg("s_mu_writer")
 
 	items := append([]protocol.Envelope(nil), s.topics["dm"]...)
 	out := make([]protocol.Envelope, 0)
@@ -1171,15 +1173,19 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	afterLen := len(s.relayRetry)
 	if beforeLen != afterLen {
 		s.mu.Unlock()
+		log.Trace().Str("site", "retryableRelayMessages").Str("phase", "lock_released_dirty").Msg("s_mu_writer")
 		s.queuePersist.MarkDirty()
 		return out
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "retryableRelayMessages").Str("phase", "lock_released").Msg("s_mu_writer")
 	return out
 }
 
 func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryReceipt {
+	log.Trace().Str("site", "retryableRelayReceipts").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "retryableRelayReceipts").Str("phase", "lock_held").Msg("s_mu_writer")
 
 	out := make([]protocol.DeliveryReceipt, 0)
 	beforeLen := len(s.relayRetry)
@@ -1199,10 +1205,12 @@ func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryRecei
 	afterLen := len(s.relayRetry)
 	if beforeLen != afterLen {
 		s.mu.Unlock()
+		log.Trace().Str("site", "retryableRelayReceipts").Str("phase", "lock_released_dirty").Msg("s_mu_writer")
 		s.queuePersist.MarkDirty()
 		return out
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "retryableRelayReceipts").Str("phase", "lock_released").Msg("s_mu_writer")
 	return out
 }
 
@@ -1240,7 +1248,9 @@ func relayRetryBackoff(attempts int) time.Duration {
 }
 
 func (s *Service) noteRelayAttempt(key string, now time.Time) int {
+	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_wait").Str("key", key).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_held").Str("key", key).Msg("s_mu_writer")
 	state := s.relayRetry[key]
 	if state.FirstSeen.IsZero() {
 		state.FirstSeen = now
@@ -1249,6 +1259,7 @@ func (s *Service) noteRelayAttempt(key string, now time.Time) int {
 	state.Attempts++
 	s.relayRetry[key] = state
 	s.mu.Unlock()
+	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_released").Str("key", key).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 	return state.Attempts
 }
@@ -1257,26 +1268,33 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 	if msg.Topic != "dm" || msg.Recipient == "" || msg.Recipient == "*" {
 		return
 	}
+	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_wait").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_held").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 	key := relayMessageKey(msg.ID)
 	state := s.relayRetry[key]
 	if state.FirstSeen.IsZero() {
 		// Enforce capacity: reject new entries when the retry map is full.
 		if len(s.relayRetry) >= maxRelayRetryEntries {
 			s.mu.Unlock()
+			log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released_full").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 			return
 		}
 		state.FirstSeen = time.Now().UTC()
 		s.relayRetry[key] = state
 		s.mu.Unlock()
+		log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released_new").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 		s.queuePersist.MarkDirty()
 		return
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("s_mu_writer")
 }
 
 func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
+	log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	key := relayReceiptKey(receipt)
 	state := s.relayRetry[key]
 	dirty := false
@@ -1297,9 +1315,11 @@ func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
 	}
 	if !dirty {
 		s.mu.Unlock()
+		log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_released_clean").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 		return
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 }
 
@@ -1321,7 +1341,9 @@ func (s *Service) hasReceiptForMessageLocked(originalSender string, messageID pr
 }
 
 func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID protocol.MessageID) int {
+	log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_wait").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 	before := len(s.topics["dm"])
 	filtered := s.topics["dm"][:0]
 	for _, msg := range s.topics["dm"] {
@@ -1339,19 +1361,24 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 	removed := before - len(filtered)
 	if removed <= 0 {
 		s.mu.Unlock()
+		log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_released_empty").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 		return 0
 	}
 	log.Debug().Str("node", s.identity.Address).Str("recipient", recipient).Str("id", string(messageID)).Int("before", before).Int("after", len(filtered)).Int("removed", removed).Msg("deleteBacklogMessageForRecipient")
 	s.mu.Unlock()
+	log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_released").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 	return removed
 }
 
 func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID protocol.MessageID, status string) int {
+	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_wait").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 	list := s.receipts[recipient]
 	if len(list) == 0 {
 		s.mu.Unlock()
+		log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_released_empty").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 		return 0
 	}
 	filtered := list[:0]
@@ -1371,9 +1398,11 @@ func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID p
 	}
 	if removed <= 0 {
 		s.mu.Unlock()
+		log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_released_noop").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 		return 0
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_released").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 	return removed
 }
@@ -1463,9 +1492,12 @@ func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time,
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
 	}
+	log.Trace().Str("site", "markOutboundRetrying").Str("phase", "lock_wait").Str("msg_id", frame.ID).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "markOutboundRetrying").Str("phase", "lock_held").Str("msg_id", frame.ID).Msg("s_mu_writer")
 	s.markOutboundRetryingLocked(frame, queuedAt, retries, errText)
 	s.mu.Unlock()
+	log.Trace().Str("site", "markOutboundRetrying").Str("phase", "lock_released").Str("msg_id", frame.ID).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 }
 
@@ -1496,9 +1528,12 @@ func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText str
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
 	}
+	log.Trace().Str("site", "markOutboundTerminal").Str("phase", "lock_wait").Str("msg_id", frame.ID).Str("status", status).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "markOutboundTerminal").Str("phase", "lock_held").Str("msg_id", frame.ID).Str("status", status).Msg("s_mu_writer")
 	s.markOutboundTerminalLocked(frame, status, errText)
 	s.mu.Unlock()
+	log.Trace().Str("site", "markOutboundTerminal").Str("phase", "lock_released").Str("msg_id", frame.ID).Str("status", status).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 }
 
@@ -1529,13 +1564,17 @@ func (s *Service) clearOutboundQueued(messageID string) {
 	if strings.TrimSpace(messageID) == "" {
 		return
 	}
+	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_wait").Str("msg_id", messageID).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_held").Str("msg_id", messageID).Msg("s_mu_writer")
 	if _, ok := s.outbound[messageID]; !ok {
 		s.mu.Unlock()
+		log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_released_noop").Str("msg_id", messageID).Msg("s_mu_writer")
 		return
 	}
 	delete(s.outbound, messageID)
 	s.mu.Unlock()
+	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_released").Str("msg_id", messageID).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 }
 
@@ -1561,13 +1600,17 @@ func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
 		Status:    frame.Status,
 	})
 
+	log.Trace().Str("site", "clearRelayRetryForOutbound").Str("phase", "lock_wait").Str("key", key).Str("msg_id", frame.ID).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "clearRelayRetryForOutbound").Str("phase", "lock_held").Str("key", key).Str("msg_id", frame.ID).Msg("s_mu_writer")
 	if _, ok := s.relayRetry[key]; !ok {
 		s.mu.Unlock()
+		log.Trace().Str("site", "clearRelayRetryForOutbound").Str("phase", "lock_released_noop").Str("key", key).Str("msg_id", frame.ID).Msg("s_mu_writer")
 		return
 	}
 	delete(s.relayRetry, key)
 	s.mu.Unlock()
+	log.Trace().Str("site", "clearRelayRetryForOutbound").Str("phase", "lock_released").Str("key", key).Str("msg_id", frame.ID).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 }
 

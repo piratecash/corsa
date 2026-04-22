@@ -615,7 +615,9 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 		return
 	}
 
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
 	s.identitySessions[peerIdentity]++
 
 	if hasRelayCap {
@@ -623,6 +625,7 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 	}
 	firstRelay := s.identityRelaySessions[peerIdentity] == 1
 	s.mu.Unlock()
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
 
 	if !hasRelayCap {
 		log.Debug().
@@ -1656,7 +1659,9 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	// No persist happens here — the on-disk state still contains the
 	// extracted frames. If the process crashes before we persist below,
 	// frames survive in queue-*.json and will be retried on restart.
+	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_wait").Int("identities", len(identities)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_held").Int("identities", len(identities)).Msg("s_mu_writer")
 	var extracted []pendingMatch
 	extractMeta := make(map[domain.PeerAddress]*addrExtractMeta)
 	for addr, frames := range s.pending {
@@ -1689,6 +1694,7 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 		}
 	}
 	s.mu.Unlock()
+	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_released").Int("extracted", len(extracted)).Msg("s_mu_writer")
 
 	if len(extracted) == 0 {
 		return
@@ -1797,7 +1803,9 @@ returnFrames:
 	// Apply all state changes in a single lock+persist. This is the
 	// only persist in the entire drain cycle — no intermediate writes
 	// that could snapshot s.pending without extracted frames.
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_wait").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_held").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("s_mu_writer")
 
 	// Merge failed frames back into their original positions in the
 	// per-address pending queue. The extraction phase recorded each
@@ -1917,6 +1925,7 @@ returnFrames:
 
 	drainDone := s.drainDone
 	s.mu.Unlock()
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_released").Int("pending_deltas", len(pendingDeltas)).Msg("s_mu_writer")
 	s.queuePersist.MarkDirty()
 	for _, d := range pendingDeltas {
 		s.emitPeerPendingChanged(d.Address, d.Count)

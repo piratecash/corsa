@@ -77,11 +77,14 @@ func (s *Service) initFileTransfer() {
 		},
 	})
 
+	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_wait").Msg("s_mu_writer")
 	s.mu.Lock()
+	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_held").Msg("s_mu_writer")
 	s.fileStore = store
 	s.fileTransfer = manager
 	s.fileRouter = router
 	s.mu.Unlock()
+	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_released").Msg("s_mu_writer")
 
 	manager.Start()
 	log.Info().Msg("file_transfer: subsystem initialized")
