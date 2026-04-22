@@ -46,8 +46,8 @@ func newControllableMockPeerSender(t *testing.T) (*routingmocks.MockPeerSender, 
 	t.Helper()
 	cs := &controllableSender{}
 	m := routingmocks.NewMockPeerSender(t)
-	m.EXPECT().SendAnnounceRoutes(mock.Anything, mock.Anything).RunAndReturn(
-		func(addr routing.PeerAddress, routes []routing.AnnounceEntry) bool {
+	m.EXPECT().SendAnnounceRoutes(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, addr routing.PeerAddress, routes []routing.AnnounceEntry) bool {
 			cs.mu.Lock()
 			defer cs.mu.Unlock()
 			cs.calls = append(cs.calls, sendCall{PeerAddress: addr, Routes: routes})

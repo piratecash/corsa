@@ -104,12 +104,30 @@ writer's contention with the peer, not a race with an unrelated caller.
 
 `SendStatus` is an internal enum of partial-failure outcomes (`SendOK`,
 `SendBufferFull`, `SendWriterDone`, `SendTimeout`, `SendChanClosed`,
-`SendMarshalError`, `SendStatusInvalid`). At the bridge boundary
-`SendStatusToError` maps each value to the corresponding exported
-sentinel (`ErrSendBufferFull`, `ErrSendWriterDone`, `ErrSendTimeout`,
-`ErrSendChanClosed`, `ErrSendMarshalError`, `ErrSendInvalidStatus`) plus
-`ErrUnknownConn` for the pre-flight registry miss. Callers discriminate
-via `errors.Is`, never by string.
+`SendMarshalError`, `SendCtxCancelled`, `SendStatusInvalid`). At the
+bridge boundary `SendStatusToError` maps each value to the corresponding
+exported sentinel (`ErrSendBufferFull`, `ErrSendWriterDone`,
+`ErrSendTimeout`, `ErrSendChanClosed`, `ErrSendMarshalError`,
+`ErrSendCtxCancelled`, `ErrSendInvalidStatus`) plus `ErrUnknownConn` for
+the pre-flight registry miss. Callers discriminate via `errors.Is`,
+never by string.
+
+### Context honoured end-to-end on sync sends
+
+`Network.SendFrameSync` takes a caller `ctx` and that `ctx` is observed
+for the full lifetime of the call — including the flush-wait on the
+writer. The bridge routes every sync send through
+`NetCore.SendRawSyncCtx`, which returns `SendCtxCancelled` when the
+caller cancels mid-flight and `SendTimeout` only when the internal
+`syncFlushTimeout` (5 s) elapses with no cancellation.
+
+This closes a prior gap where the non-ctx twin `SendRawSync` waited
+solely on its internal 5 s deadline. Routing-layer cancellation — the
+per-cycle context threaded through `fanoutAnnounceRoutes` and any
+request-scoped timeout — now aborts the send wait instead of being
+silently upgraded to `s.runCtx` at the routing-layer entry. The
+defensive `ErrSendCtxCancelled` mapping exists for any future caller
+that bypasses the bridge path.
 
 ### Lifecycle carve-out
 
@@ -316,13 +334,30 @@ short-write, так что сигнал slow-peer eviction чётко опред
 
 `SendStatus` — внутренний enum partial-failure исходов (`SendOK`,
 `SendBufferFull`, `SendWriterDone`, `SendTimeout`, `SendChanClosed`,
-`SendMarshalError`, `SendStatusInvalid`). На границе bridge
-`SendStatusToError` мапит каждое значение в соответствующий
+`SendMarshalError`, `SendCtxCancelled`, `SendStatusInvalid`). На границе
+bridge `SendStatusToError` мапит каждое значение в соответствующий
 экспортированный sentinel (`ErrSendBufferFull`, `ErrSendWriterDone`,
 `ErrSendTimeout`, `ErrSendChanClosed`, `ErrSendMarshalError`,
-`ErrSendInvalidStatus`) плюс `ErrUnknownConn` для pre-flight miss
-реестра. Caller'ы дискриминируют через `errors.Is`, никогда не по
-строке.
+`ErrSendCtxCancelled`, `ErrSendInvalidStatus`) плюс `ErrUnknownConn`
+для pre-flight miss реестра. Caller'ы дискриминируют через `errors.Is`,
+никогда не по строке.
+
+### Context соблюдается end-to-end на sync-отправках
+
+`Network.SendFrameSync` принимает caller'ский `ctx`, и этот `ctx`
+учитывается на всём протяжении вызова — включая flush-wait на writer'е.
+Bridge маршрутизирует каждую sync-отправку через
+`NetCore.SendRawSyncCtx`, который возвращает `SendCtxCancelled`, если
+caller отменяет запрос mid-flight, и `SendTimeout` только тогда, когда
+истекает внутренний `syncFlushTimeout` (5 с) без отмены.
+
+Это закрывает прежний разрыв, где non-ctx-twin `SendRawSync` ждал
+исключительно на своём внутреннем 5-секундном дедлайне. Отмена на
+routing-слое — per-cycle контекст, пробрасываемый через
+`fanoutAnnounceRoutes`, и любой request-scoped timeout — теперь
+прерывает ожидание отправки, а не поднимается молча до `s.runCtx` на
+входе в routing-слой. Defensive-маппинг `ErrSendCtxCancelled`
+существует для любого будущего caller'а, который обойдёт bridge-путь.
 
 ### Lifecycle carve-out
 

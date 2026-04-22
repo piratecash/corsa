@@ -120,9 +120,10 @@ func TestRespondToInboxRequestPushesMessages(t *testing.T) {
 		Payload:   []byte("encrypted-payload"),
 		CreatedAt: time.Now().UTC(),
 	}
-	svc.peerMu.Lock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], envelope)
-	svc.peerMu.Unlock()
+	svc.gossipMu.Unlock()
 
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -188,9 +189,10 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 		Payload:   []byte("encrypted-payload"),
 		CreatedAt: time.Now().UTC(),
 	}
-	svc.peerMu.Lock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], envelope)
-	svc.peerMu.Unlock()
+	svc.gossipMu.Unlock()
 
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()

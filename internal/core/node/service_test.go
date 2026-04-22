@@ -2663,7 +2663,13 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 	}, id, nil)
 
 	createdAt := time.Now().UTC().Truncate(time.Second)
-	svc.peerMu.Lock()
+	// s.topics is under s.gossipMu; s.receipts is under s.deliveryMu.
+	// The two writes are independent — no field from one domain is read
+	// while mutating the other — so we acquire each lock separately
+	// rather than nest.  If this block is ever combined with a cross-domain
+	// read that needs both snapshots to be consistent, switch to canonical
+	// deliveryMu OUTER → gossipMu INNER order per docs/locking.md.
+	svc.gossipMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], protocol.Envelope{
 		ID:         protocol.MessageID("delivered-dm-1"),
 		Topic:      "dm",
@@ -2674,7 +2680,8 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 		TTLSeconds: 0,
 		Payload:    []byte("ciphertext"),
 	})
-	// s.receipts is under s.deliveryMu; nest deliveryMu INNER under s.peerMu.
+	svc.gossipMu.Unlock()
+
 	svc.deliveryMu.Lock()
 	svc.receipts["sender-1"] = append(svc.receipts["sender-1"], protocol.DeliveryReceipt{
 		MessageID:   protocol.MessageID("delivered-dm-1"),
@@ -2684,7 +2691,6 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 		DeliveredAt: createdAt.Add(time.Second),
 	})
 	svc.deliveryMu.Unlock()
-	svc.peerMu.Unlock()
 
 	reply := svc.fetchInboxFrame("dm", id.Address)
 	if reply.Type != "inbox" || reply.Count != 0 || len(reply.Messages) != 0 {
@@ -5879,9 +5885,10 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 	}
 
 	// Clear s.seen so the node-level dedup doesn't catch it (simulates restart).
-	svc.peerMu.Lock()
+	// s.seen is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.Lock()
 	delete(svc.seen, string(msgID))
-	svc.peerMu.Unlock()
+	svc.gossipMu.Unlock()
 
 	// Second store — StoreMessage returns StoreDuplicate.
 	// The duplicate is NOT added to s.topics (prevents DMHeaders
@@ -5906,14 +5913,15 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 
 	// Verify the duplicate did NOT enter s.topics — this is the key
 	// invariant that closes the DMHeaders → repairUnreadFromHeaders path.
-	svc.peerMu.RLock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	dmCount := 0
 	for _, env := range svc.topics["dm"] {
 		if string(env.ID) == string(msgID) {
 			dmCount++
 		}
 	}
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 	if dmCount != 1 {
 		t.Fatalf("expected exactly 1 copy in s.topics[dm], got %d", dmCount)
 	}
@@ -5999,9 +6007,10 @@ func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
 	}
 
 	// Simulate restart: clear s.seen so the node-level dedup won't catch it.
-	svc.peerMu.Lock()
+	// s.seen is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.Lock()
 	delete(svc.seen, string(msgID))
-	svc.peerMu.Unlock()
+	svc.gossipMu.Unlock()
 
 	// Second store — StoreDuplicate → must NOT add another copy to DMHeaders.
 	svc.storeIncomingMessage(msg, false)
@@ -6178,9 +6187,10 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 	}, false)
 
 	// Both should be in s.topics[dm] (in-memory for relay).
-	svc.peerMu.RLock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	topicCount := len(svc.topics["dm"])
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 	if topicCount != 2 {
 		t.Fatalf("expected 2 messages in topics[dm], got %d", topicCount)
 	}
@@ -6368,9 +6378,10 @@ func TestNodeWithoutMessageStoreStillRelays(t *testing.T) {
 	}
 
 	// Message should be in s.topics for relay.
-	svc.peerMu.RLock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	n := len(svc.topics["dm"])
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 	if n != 1 {
 		t.Fatalf("expected 1 message in topics, got %d", n)
 	}

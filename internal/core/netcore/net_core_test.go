@@ -2,6 +2,8 @@ package netcore
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -266,6 +268,7 @@ func TestSendStatusStringCoversAllValues(t *testing.T) {
 		{SendTimeout, "timeout"},
 		{SendChanClosed, "chan_closed"},
 		{SendMarshalError, "marshal_error"},
+		{SendCtxCancelled, "ctx_cancelled"},
 	}
 	for _, tc := range cases {
 		if got := tc.s.String(); got != tc.want {
@@ -420,6 +423,138 @@ func TestNetCoreSendRawSyncBlockingDoesNotStarveOnFullQueue(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 			return
 		}
+	}
+}
+
+// TestNetCoreSendRawSyncCtx_PreCancelledCtxFastFails asserts that a ctx
+// already cancelled before call-site never consumes a sendCh slot. This is
+// the fast-fail contract: a stale request-scoped context at the call site
+// must not push a frame onto the socket's writer queue.
+func TestNetCoreSendRawSyncCtx_PreCancelledCtxFastFails(t *testing.T) {
+	conn, cb := newBufferedMockConn(t)
+	pc := New(50, conn, Inbound, Options{})
+	defer pc.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if st := pc.SendRawSyncCtx(ctx, []byte(line)); st != SendCtxCancelled {
+		t.Fatalf("SendRawSyncCtx(pre-cancelled) = %s, want SendCtxCancelled", st.String())
+	}
+
+	// Give any stray writer time to surface. The frame must never reach
+	// the socket because ctx was already done on entry.
+	time.Sleep(50 * time.Millisecond)
+	if bytes.Contains(cb.Written(), []byte(`"type":"ping"`)) {
+		t.Fatal("pre-cancelled ctx still delivered the frame — sendCh slot was consumed")
+	}
+}
+
+// TestNetCoreSendRawSyncCtx_MidFlightCancelUnblocks asserts that a ctx
+// cancelled while the caller is waiting for the writer to flush aborts the
+// wait without consuming the full syncFlushTimeout. This is the whole
+// reason SendRawSyncCtx exists — SendRawSync stays blocked on its internal
+// timer regardless of caller ctx state.
+func TestNetCoreSendRawSyncCtx_MidFlightCancelUnblocks(t *testing.T) {
+	release := make(chan struct{})
+	conn := newMockConnWithWriter(t, func(b []byte) (int, error) {
+		<-release
+		return len(b), nil
+	})
+	pc := New(51, conn, Inbound, Options{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		pc.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	got := make(chan SendStatus, 1)
+	go func() {
+		got <- pc.SendRawSyncCtx(ctx, []byte(line))
+	}()
+
+	// Let the writer pick up the frame but stay blocked on release; the
+	// caller must now be parked on <-ack.
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	cancel()
+
+	select {
+	case st := <-got:
+		if st != SendCtxCancelled {
+			t.Fatalf("mid-flight cancel: got %s, want SendCtxCancelled", st.String())
+		}
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("ctx cancel took %v — did not abort the wait", elapsed)
+		}
+	case <-time.After(syncFlushTimeout + time.Second):
+		t.Fatal("SendRawSyncCtx did not return after ctx cancel — wait was not ctx-aware")
+	}
+}
+
+// TestNetCoreSendRawSyncCtx_FastFailOnFullQueue keeps the SendRawSync
+// fast-fail contract intact on the ctx-aware variant: a saturated sendCh
+// still returns SendBufferFull immediately so slow-peer eviction remains
+// available on the inbound error path.
+func TestNetCoreSendRawSyncCtx_FastFailOnFullQueue(t *testing.T) {
+	writerStarted := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	conn := newMockConnWithWriter(t, func(b []byte) (int, error) {
+		once.Do(func() { close(writerStarted) })
+		<-release
+		return len(b), nil
+	})
+	pc := New(52, conn, Inbound, Options{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		pc.Close()
+	}()
+
+	saturateSendCh(t, pc, writerStarted)
+
+	line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	start := time.Now()
+	st := pc.SendRawSyncCtx(context.Background(), []byte(line))
+	elapsed := time.Since(start)
+
+	if st != SendBufferFull {
+		t.Fatalf("SendRawSyncCtx on saturated queue: got %s, want SendBufferFull", st.String())
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("SendRawSyncCtx took %v on saturated queue — fast-fail contract violated", elapsed)
+	}
+}
+
+// TestNetCoreSendRawSyncCtx_SentinelSurvivesMapping guards the bridge path:
+// the SendCtxCancelled status must map to ErrSendCtxCancelled on the
+// defensive SendStatusToError boundary, so that any future caller that
+// bypasses the networkBridge still receives a typed error (not a silent
+// zero-value).
+func TestNetCoreSendRawSyncCtx_SentinelSurvivesMapping(t *testing.T) {
+	if err := SendStatusToError(SendCtxCancelled); !errors.Is(err, ErrSendCtxCancelled) {
+		t.Fatalf("SendStatusToError(SendCtxCancelled) = %v, want errors.Is == ErrSendCtxCancelled", err)
 	}
 }
 

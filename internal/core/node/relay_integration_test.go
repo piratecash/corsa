@@ -192,9 +192,10 @@ func TestRelayDedupeFromTwoNeighbors(t *testing.T) {
 	}
 
 	// Verify only one copy stored.
-	svc.peerMu.RLock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	count := len(svc.topics["dm"])
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 	if count != 1 {
 		t.Fatalf("expected exactly 1 stored message, got %d", count)
 	}

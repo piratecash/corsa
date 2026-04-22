@@ -5,6 +5,8 @@
 package routing
 
 import (
+	"context"
+
 	"github.com/piratecash/corsa/internal/core/routing"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -37,16 +39,16 @@ func (_m *MockPeerSender) EXPECT() *MockPeerSender_Expecter {
 }
 
 // SendAnnounceRoutes provides a mock function for the type MockPeerSender
-func (_mock *MockPeerSender) SendAnnounceRoutes(peerAddress routing.PeerAddress, routes []routing.AnnounceEntry) bool {
-	ret := _mock.Called(peerAddress, routes)
+func (_mock *MockPeerSender) SendAnnounceRoutes(ctx context.Context, peerAddress routing.PeerAddress, routes []routing.AnnounceEntry) bool {
+	ret := _mock.Called(ctx, peerAddress, routes)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SendAnnounceRoutes")
 	}
 
 	var r0 bool
-	if returnFunc, ok := ret.Get(0).(func(routing.PeerAddress, []routing.AnnounceEntry) bool); ok {
-		r0 = returnFunc(peerAddress, routes)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, routing.PeerAddress, []routing.AnnounceEntry) bool); ok {
+		r0 = returnFunc(ctx, peerAddress, routes)
 	} else {
 		r0 = ret.Get(0).(bool)
 	}
@@ -59,25 +61,31 @@ type MockPeerSender_SendAnnounceRoutes_Call struct {
 }
 
 // SendAnnounceRoutes is a helper method to define mock.On call
+//   - ctx context.Context
 //   - peerAddress routing.PeerAddress
 //   - routes []routing.AnnounceEntry
-func (_e *MockPeerSender_Expecter) SendAnnounceRoutes(peerAddress interface{}, routes interface{}) *MockPeerSender_SendAnnounceRoutes_Call {
-	return &MockPeerSender_SendAnnounceRoutes_Call{Call: _e.mock.On("SendAnnounceRoutes", peerAddress, routes)}
+func (_e *MockPeerSender_Expecter) SendAnnounceRoutes(ctx interface{}, peerAddress interface{}, routes interface{}) *MockPeerSender_SendAnnounceRoutes_Call {
+	return &MockPeerSender_SendAnnounceRoutes_Call{Call: _e.mock.On("SendAnnounceRoutes", ctx, peerAddress, routes)}
 }
 
-func (_c *MockPeerSender_SendAnnounceRoutes_Call) Run(run func(peerAddress routing.PeerAddress, routes []routing.AnnounceEntry)) *MockPeerSender_SendAnnounceRoutes_Call {
+func (_c *MockPeerSender_SendAnnounceRoutes_Call) Run(run func(ctx context.Context, peerAddress routing.PeerAddress, routes []routing.AnnounceEntry)) *MockPeerSender_SendAnnounceRoutes_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 routing.PeerAddress
+		var arg0 context.Context
 		if args[0] != nil {
-			arg0 = args[0].(routing.PeerAddress)
+			arg0 = args[0].(context.Context)
 		}
-		var arg1 []routing.AnnounceEntry
+		var arg1 routing.PeerAddress
 		if args[1] != nil {
-			arg1 = args[1].([]routing.AnnounceEntry)
+			arg1 = args[1].(routing.PeerAddress)
+		}
+		var arg2 []routing.AnnounceEntry
+		if args[2] != nil {
+			arg2 = args[2].([]routing.AnnounceEntry)
 		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -88,7 +96,7 @@ func (_c *MockPeerSender_SendAnnounceRoutes_Call) Return(b bool) *MockPeerSender
 	return _c
 }
 
-func (_c *MockPeerSender_SendAnnounceRoutes_Call) RunAndReturn(run func(peerAddress routing.PeerAddress, routes []routing.AnnounceEntry) bool) *MockPeerSender_SendAnnounceRoutes_Call {
+func (_c *MockPeerSender_SendAnnounceRoutes_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, routes []routing.AnnounceEntry) bool) *MockPeerSender_SendAnnounceRoutes_Call {
 	_c.Call.Return(run)
 	return _c
 }

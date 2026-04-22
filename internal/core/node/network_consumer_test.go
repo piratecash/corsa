@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"testing"
@@ -488,10 +489,10 @@ func TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend(t *testing.
 	t.Parallel()
 
 	cases := []struct {
-		name               string
-		registerInBackend  bool
-		expectReturn       bool
-		expectFrameOnWire  bool
+		name              string
+		registerInBackend bool
+		expectReturn      bool
+		expectFrameOnWire bool
 	}{
 		{
 			name:              "sent_registered_in_backend",
@@ -552,7 +553,7 @@ func TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend(t *testing.
 			addr := domain.PeerAddress("inbound:" + pc.RemoteAddr())
 			frame := protocol.Frame{Type: "ping"}
 
-			got := svc.writeFrameToInbound(addr, frame)
+			got := svc.writeFrameToInbound(context.Background(), addr, frame)
 			if got != tc.expectReturn {
 				t.Fatalf("%s: writeFrameToInbound returned %v, want %v",
 					tc.name, got, tc.expectReturn)

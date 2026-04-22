@@ -50,9 +50,10 @@ func TestIsVerifiedSender_KnownPubKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc.peerMu.Lock()
+	// s.pubKeys lives under s.knowledgeMu.
+	svc.knowledgeMu.Lock()
 	svc.pubKeys[knownID.Address] = identity.PublicKeyBase64(knownID.PublicKey)
-	svc.peerMu.Unlock()
+	svc.knowledgeMu.Unlock()
 
 	if !svc.isVerifiedSender(knownID.Address, "unrelated-peer") {
 		t.Fatal("sender with registered pubKey must be accepted")
@@ -117,10 +118,15 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 	})
 
 	// Verify: message must NOT be stored.
-	svc.peerMu.RLock()
+	// s.seen is guarded by s.gossipMu; s.known is guarded by s.knowledgeMu.
+	// Reads are independent, so we acquire each lock separately rather
+	// than nest under the canonical knowledgeMu OUTER → gossipMu INNER order.
+	svc.gossipMu.RLock()
 	_, seen := svc.seen["forged-msg-1"]
+	svc.gossipMu.RUnlock()
+	svc.knowledgeMu.RLock()
 	_, inKnown := svc.known["completely-fake-sender"]
-	svc.peerMu.RUnlock()
+	svc.knowledgeMu.RUnlock()
 
 	if seen {
 		t.Fatal("forged non-DM message should not be stored (seen set)")
@@ -142,9 +148,10 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc.peerMu.Lock()
+	// s.pubKeys lives under s.knowledgeMu.
+	svc.knowledgeMu.Lock()
 	svc.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
-	svc.peerMu.Unlock()
+	svc.knowledgeMu.Unlock()
 
 	// Set up an authenticated inbound connection.
 	peerConn, _ := net.Pipe()
@@ -180,9 +187,10 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	})
 
 	// Verify: message IS stored.
-	svc.peerMu.RLock()
+	// s.seen is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	_, seen := svc.seen["legit-msg-1"]
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 
 	if !seen {
 		t.Fatal("message from verified sender should be stored")
@@ -229,9 +237,10 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 		},
 	})
 
-	svc.peerMu.RLock()
+	// s.seen is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	_, seen := svc.seen["peer-authored-msg-1"]
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 
 	if !seen {
 		t.Fatal("message where sender matches relay peer identity should be stored")
@@ -291,9 +300,10 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 	// would show "non-DM sender identity not verified" and the ban score
 	// would include banIncrementInvalidSig. The DM path should produce
 	// "unknown sender key" instead.
-	svc.peerMu.RLock()
+	// s.seen is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	_, seen := svc.seen["dm-msg-unknown-sender"]
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 
 	// Message should NOT be in seen because VerifyEnvelope will reject it —
 	// but that's the expected DM path, not the non-DM gate path.
@@ -326,9 +336,10 @@ func TestStoreIncomingMessage_NonDM_DoesNotPoisonKnown(t *testing.T) {
 
 	svc.storeIncomingMessage(msg, false)
 
-	svc.peerMu.RLock()
+	// s.known lives under s.knowledgeMu.
+	svc.knowledgeMu.RLock()
 	_, inKnown := svc.known["unregistered-sender-xyz"]
-	svc.peerMu.RUnlock()
+	svc.knowledgeMu.RUnlock()
 
 	if inKnown {
 		t.Fatal("non-DM sender without pubKey must not be added to s.known")
@@ -347,9 +358,10 @@ func TestStoreIncomingMessage_NonDM_VerifiedSenderAddedToKnown(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc.peerMu.Lock()
+	// s.pubKeys lives under s.knowledgeMu.
+	svc.knowledgeMu.Lock()
 	svc.pubKeys[knownSender.Address] = identity.PublicKeyBase64(knownSender.PublicKey)
-	svc.peerMu.Unlock()
+	svc.knowledgeMu.Unlock()
 
 	msg := incomingMessage{
 		ID:         protocol.MessageID("known-legit-test-1"),
@@ -364,9 +376,10 @@ func TestStoreIncomingMessage_NonDM_VerifiedSenderAddedToKnown(t *testing.T) {
 
 	svc.storeIncomingMessage(msg, false)
 
-	svc.peerMu.RLock()
+	// s.known lives under s.knowledgeMu.
+	svc.knowledgeMu.RLock()
 	_, inKnown := svc.known[knownSender.Address]
-	svc.peerMu.RUnlock()
+	svc.knowledgeMu.RUnlock()
 
 	if !inKnown {
 		t.Fatal("non-DM sender with registered pubKey should be added to s.known")
@@ -443,9 +456,10 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 	_ = ban
 	_ = exists
 
-	svc.peerMu.RLock()
+	// s.seen is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	_, seen := svc.seen["ban-test-msg-1"]
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 
 	if seen {
 		t.Fatal("forged non-DM message must not be stored")

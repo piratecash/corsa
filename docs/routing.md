@@ -295,7 +295,7 @@ flowchart TD
 
 **Transit route invalidation for routing-only peers.** When the last total session of a routing-only peer (no relay-capable sessions were ever active) closes, `onPeerSessionClosed` calls `Table.InvalidateTransitRoutes(peerIdentity)` as a defense-in-depth measure. This method marks all transit routes (non-direct, hops < 16) where `NextHop == peerIdentity` as withdrawn (hops=16) without incrementing SeqNo (local-only invalidation — no wire withdrawal is generated). Direct routes are skipped because their lifecycle is governed by `RemoveDirectPeer`. When at least one route is invalidated, `announceLoop.TriggerUpdate()` fires an immediate announce cycle so neighbors learn the stale routes are withdrawn without waiting for the next periodic cycle (up to 30s). Under normal operation, the announce_routes relay gate prevents routes from routing-only peers from entering the table. `InvalidateTransitRoutes` guards against edge cases: routes learned before capability was fully negotiated, or stale entries from a previous relay-capable session of the same identity. The method returns the count of invalidated routes for logging.
 
-**Disconnect withdrawal fan-out (parallel contract).** When a direct peer's last relay-capable session closes, `onPeerSessionClosed` in `node/routing_integration.go` has to deliver the own-origin wire withdrawals returned by `RemoveDirectPeer.Withdrawals` to every remaining routing-capable peer **immediately** — the announce loop would otherwise delay withdrawal delivery up to one periodic cycle (30s). The fan-out is implemented by the dedicated helper `fanoutAnnounceRoutes(ctx, targets []routing.AnnounceTarget, withdrawals []routing.AnnounceEntry) (sent, dropped int)`. Its contract: (1) **one goroutine per target** — every peer is handled by its own goroutine so a single stuck inbound socket does not serialise delivery to the rest; (2) **per-peer bound = `syncFlushTimeout`** — inside each goroutine `SendAnnounceRoutes → writeFrameToInbound → sendFrameBytesViaNetworkSync` is bounded by the netcore sync-flush timeout (default 5s) regardless of the other peers; (3) **wall-clock bound = `syncFlushTimeout` of the slowest peer**, never `N × syncFlushTimeout` — this is the property that prevents peer-cleanup from starving the 1s metrics collector and the 2s `bootstrapLoop` under a writer-preferring `sync.RWMutex`; (4) **shared cancellation** — `ctx` is `s.runCtx`, so shutdown short-circuits every goroutine at the top of its body and counts it as dropped; (5) **no shared state** — goroutines share only two `atomic.Int32` counters, no `Service` map is mutated; `SendAnnounceRoutes` takes its own short `s.mu.RLock` inside `writeFrameToInbound` and releases it before the blocking send; (6) **`crashlog.DeferRecover()` per goroutine** — one panicking target does not leave a WaitGroup hung or take down the cleanup goroutine; (7) **observability** — the outer `routing_direct_peer_removed` log line exposes `fanout_sent` and `fanout_dropped`, so a `sent ≪ dropped` divergence is a direct signal of stuck inbound sockets (e.g. NAT hairpin half-dead TCP) without stack traces. Regression coverage: `TestOnPeerSessionClosed_FanoutIsParallel`, `TestOnPeerSessionClosed_FanoutRespectsRunCtx`, `TestOnPeerSessionClosed_NoPanicOnZeroPeers`, `TestOnPeerSessionClosed_CollectsSentAndDroppedCounters` in `node/routing_integration_fanout_test.go`.
+**Disconnect withdrawal fan-out (parallel contract).** When a direct peer's last relay-capable session closes, `onPeerSessionClosed` in `node/routing_integration.go` has to deliver the own-origin wire withdrawals returned by `RemoveDirectPeer.Withdrawals` to every remaining routing-capable peer **immediately** — the announce loop would otherwise delay withdrawal delivery up to one periodic cycle (30s). The fan-out is implemented by the dedicated helper `fanoutAnnounceRoutes(ctx, targets []routing.AnnounceTarget, withdrawals []routing.AnnounceEntry) (sent, dropped int)`. Its contract: (1) **one goroutine per target** — every peer is handled by its own goroutine so a single stuck inbound socket does not serialise delivery to the rest; (2) **per-peer bound = `syncFlushTimeout`** — inside each goroutine `SendAnnounceRoutes(ctx, …) → writeFrameToInbound(ctx, …) → sendFrameBytesViaNetworkSync(ctx, …) → networkBridge.SendFrameSync(ctx, …) → NetCore.SendRawSyncCtx(ctx, …)` threads the caller ctx end-to-end, and the write-path is bounded by the netcore sync-flush timeout (default 5s) regardless of the other peers; (3) **wall-clock bound = `syncFlushTimeout` of the slowest peer**, never `N × syncFlushTimeout` — this is the property that prevents peer-cleanup from starving the 1s metrics collector and the 2s `bootstrapLoop` under a writer-preferring `sync.RWMutex`; (4) **shared cancellation** — the fanout call site in `onPeerSessionClosed` passes `s.runCtx`, so shutdown short-circuits every goroutine at the top of its body and counts it as dropped; that same `ctx` is now observed *inside* the netcore sync send (via `SendRawSyncCtx`), so cancellation aborts an in-flight flush instead of silently waiting out the full 5s `syncFlushTimeout`; (5) **no shared state** — goroutines share only two `atomic.Int32` counters, no `Service` map is mutated; `SendAnnounceRoutes` takes its own short `s.mu.RLock` inside `writeFrameToInbound` and releases it before the blocking send; (6) **`crashlog.DeferRecover()` per goroutine** — one panicking target does not leave a WaitGroup hung or take down the cleanup goroutine; (7) **observability** — the outer `routing_direct_peer_removed` log line exposes `fanout_sent` and `fanout_dropped`, so a `sent ≪ dropped` divergence is a direct signal of stuck inbound sockets (e.g. NAT hairpin half-dead TCP) without stack traces. Regression coverage: `TestOnPeerSessionClosed_FanoutIsParallel`, `TestOnPeerSessionClosed_FanoutRespectsRunCtx`, `TestOnPeerSessionClosed_NoPanicOnZeroPeers`, `TestOnPeerSessionClosed_CollectsSentAndDroppedCounters` in `node/routing_integration_fanout_test.go`.
 
 ```mermaid
 sequenceDiagram
@@ -311,20 +311,20 @@ sequenceDiagram
     RT-->>CL: Withdrawals, ExposedBackups, TransitInvalidated
     CL->>CL: routingCapablePeers() under s.mu.RLock
     CL->>FO: fanoutAnnounceRoutes(runCtx, targets, withdrawals)
-    FO->>G1: go SendAnnounceRoutes(P1, w)
-    FO->>G2: go SendAnnounceRoutes(P2, w)
-    FO->>G3: go SendAnnounceRoutes(P3, w)
+    FO->>G1: go SendAnnounceRoutes(ctx, P1, w)
+    FO->>G2: go SendAnnounceRoutes(ctx, P2, w)
+    FO->>G3: go SendAnnounceRoutes(ctx, P3, w)
     par P1 (fast)
-        G1->>N: SendRawSync
+        G1->>N: SendRawSyncCtx(ctx)
         N-->>G1: ok (~ms)
         G1->>FO: sent++
     and P2 (stuck inbound, bounded per-peer)
-        G2->>N: SendRawSync
-        Note over G2,N: blocked up to syncFlushTimeout (5s)
-        N-->>G2: ErrSendTimeout → Close
+        G2->>N: SendRawSyncCtx(ctx)
+        Note over G2,N: blocked up to syncFlushTimeout (5s)<br/>or until ctx cancel
+        N-->>G2: ErrSendTimeout / ErrSendCtxCancelled → Close
         G2->>FO: dropped++
     and P3 (fast)
-        G3->>N: SendRawSync
+        G3->>N: SendRawSyncCtx(ctx)
         N-->>G3: ok (~ms)
         G3->>FO: sent++
     end
@@ -707,7 +707,7 @@ flowchart TD
 
 **Инвалидация транзитных маршрутов для routing-only peer'ов.** Когда закрывается последняя общая сессия routing-only peer'a (relay-capable сессии никогда не были активны), `onPeerSessionClosed` вызывает `Table.InvalidateTransitRoutes(peerIdentity)` как защитную меру (defense-in-depth). Метод помечает все транзитные маршруты (не-direct, hops < 16) с `NextHop == peerIdentity` как отозванные (hops=16) без инкрементации SeqNo (только локальная инвалидация — wire withdrawal не генерируется). Direct-маршруты пропускаются, поскольку их жизненный цикл управляется через `RemoveDirectPeer`. Когда хотя бы один маршрут инвалидирован, `announceLoop.TriggerUpdate()` запускает немедленный цикл анонсов, чтобы соседи узнали об отозванных маршрутах без ожидания следующего периодического цикла (до 30с). При нормальной работе relay-гейт announce_routes предотвращает попадание маршрутов от routing-only peer'ов в таблицу. `InvalidateTransitRoutes` защищает от пограничных случаев: маршруты, усвоенные до полного согласования capability, или устаревшие записи от предыдущей relay-capable сессии того же identity. Метод возвращает количество инвалидированных маршрутов для логирования.
 
-**Параллельный fan-out withdrawal'ов при disconnect.** Когда закрывается последняя relay-capable сессия direct peer'а, `onPeerSessionClosed` в `node/routing_integration.go` обязан доставить own-origin wire-withdrawal'ы из `RemoveDirectPeer.Withdrawals` каждому routing-capable peer'у немедленно — иначе announce-цикл задержит доставку до следующего периодического прохода (до 30s). Fan-out реализован в dedicated helper'е `fanoutAnnounceRoutes(ctx, targets, withdrawals) (sent, dropped int)`. Контракт: (1) одна goroutine на target, один залипший inbound socket не сериализует доставку остальным; (2) per-peer bound = `syncFlushTimeout` (по умолчанию 5s) из `SendAnnounceRoutes → writeFrameToInbound → sendFrameBytesViaNetworkSync`; (3) wall-clock bound = `syncFlushTimeout` самого медленного peer'а, а не `N × syncFlushTimeout` — это свойство не даёт peer-cleanup'у душить 1s metrics collector и 2s `bootstrapLoop` под writer-preferring `sync.RWMutex`; (4) общая отмена через `s.runCtx`, при shutdown'е горутины делают ранний exit и инкрементят `dropped`; (5) shared state = только два `atomic.Int32`-счётчика, `Service`-карты не мутируются; `writeFrameToInbound` сам берёт короткий `s.mu.RLock` и отпускает его до блокирующей отправки; (6) `crashlog.DeferRecover()` в каждой горутине, паника одного target'а не оставит WaitGroup повисшим; (7) лог `routing_direct_peer_removed` содержит поля `fanout_sent`/`fanout_dropped`, расхождение `sent ≪ dropped` — прямой сигнал о залипших inbound сокетах (NAT-hairpin half-dead TCP) без stack trace'ов. Регрессионные тесты: `TestOnPeerSessionClosed_FanoutIsParallel`, `TestOnPeerSessionClosed_FanoutRespectsRunCtx`, `TestOnPeerSessionClosed_NoPanicOnZeroPeers`, `TestOnPeerSessionClosed_CollectsSentAndDroppedCounters` в `node/routing_integration_fanout_test.go`.
+**Параллельный fan-out withdrawal'ов при disconnect.** Когда закрывается последняя relay-capable сессия direct peer'а, `onPeerSessionClosed` в `node/routing_integration.go` обязан доставить own-origin wire-withdrawal'ы из `RemoveDirectPeer.Withdrawals` каждому routing-capable peer'у немедленно — иначе announce-цикл задержит доставку до следующего периодического прохода (до 30s). Fan-out реализован в dedicated helper'е `fanoutAnnounceRoutes(ctx, targets, withdrawals) (sent, dropped int)`. Контракт: (1) одна goroutine на target, один залипший inbound socket не сериализует доставку остальным; (2) per-peer bound = `syncFlushTimeout` (по умолчанию 5s); цепочка `SendAnnounceRoutes(ctx, …) → writeFrameToInbound(ctx, …) → sendFrameBytesViaNetworkSync(ctx, …) → networkBridge.SendFrameSync(ctx, …) → NetCore.SendRawSyncCtx(ctx, …)` прокидывает caller'ский `ctx` end-to-end; (3) wall-clock bound = `syncFlushTimeout` самого медленного peer'а, а не `N × syncFlushTimeout` — это свойство не даёт peer-cleanup'у душить 1s metrics collector и 2s `bootstrapLoop` под writer-preferring `sync.RWMutex`; (4) общая отмена: call site `onPeerSessionClosed` передаёт `s.runCtx`, при shutdown'е горутины делают ранний exit и инкрементят `dropped`; этот же `ctx` теперь наблюдается *внутри* sync-отправки netcore (через `SendRawSyncCtx`), так что отмена прерывает in-flight flush вместо того чтобы молча ждать все 5s `syncFlushTimeout`; (5) shared state = только два `atomic.Int32`-счётчика, `Service`-карты не мутируются; `writeFrameToInbound` сам берёт короткий `s.mu.RLock` и отпускает его до блокирующей отправки; (6) `crashlog.DeferRecover()` в каждой горутине, паника одного target'а не оставит WaitGroup повисшим; (7) лог `routing_direct_peer_removed` содержит поля `fanout_sent`/`fanout_dropped`, расхождение `sent ≪ dropped` — прямой сигнал о залипших inbound сокетах (NAT-hairpin half-dead TCP) без stack trace'ов. Регрессионные тесты: `TestOnPeerSessionClosed_FanoutIsParallel`, `TestOnPeerSessionClosed_FanoutRespectsRunCtx`, `TestOnPeerSessionClosed_NoPanicOnZeroPeers`, `TestOnPeerSessionClosed_CollectsSentAndDroppedCounters` в `node/routing_integration_fanout_test.go`.
 
 ```mermaid
 sequenceDiagram
@@ -723,20 +723,20 @@ sequenceDiagram
     RT-->>CL: Withdrawals, ExposedBackups, TransitInvalidated
     CL->>CL: routingCapablePeers() под s.mu.RLock
     CL->>FO: fanoutAnnounceRoutes(runCtx, targets, withdrawals)
-    FO->>G1: go SendAnnounceRoutes(P1, w)
-    FO->>G2: go SendAnnounceRoutes(P2, w)
-    FO->>G3: go SendAnnounceRoutes(P3, w)
+    FO->>G1: go SendAnnounceRoutes(ctx, P1, w)
+    FO->>G2: go SendAnnounceRoutes(ctx, P2, w)
+    FO->>G3: go SendAnnounceRoutes(ctx, P3, w)
     par P1 (быстрый)
-        G1->>N: SendRawSync
+        G1->>N: SendRawSyncCtx(ctx)
         N-->>G1: ok (~ms)
         G1->>FO: sent++
     and P2 (залипший inbound, ограничен per-peer)
-        G2->>N: SendRawSync
-        Note over G2,N: блокируется до syncFlushTimeout (5s)
-        N-->>G2: ErrSendTimeout → Close
+        G2->>N: SendRawSyncCtx(ctx)
+        Note over G2,N: блокируется до syncFlushTimeout (5s)<br/>или до ctx cancel
+        N-->>G2: ErrSendTimeout / ErrSendCtxCancelled → Close
         G2->>FO: dropped++
     and P3 (быстрый)
-        G3->>N: SendRawSync
+        G3->>N: SendRawSyncCtx(ctx)
         N-->>G3: ok (~ms)
         G3->>FO: sent++
     end

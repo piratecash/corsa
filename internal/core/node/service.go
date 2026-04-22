@@ -65,13 +65,13 @@ type MessageStore interface {
 }
 
 type Service struct {
-	identity     *identity.Identity
-	selfBoxSig   string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
-	cfg          config.Node
-	eventBus     *ebus.Bus
-	trust        *trustStore
-	peerMu    sync.RWMutex
-	peers []transport.Peer // dial candidates (typed: Address + Source)
+	identity   *identity.Identity
+	selfBoxSig string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
+	cfg        config.Node
+	eventBus   *ebus.Bus
+	trust      *trustStore
+	peerMu     sync.RWMutex
+	peers      []transport.Peer // dial candidates (typed: Address + Source)
 
 	// deliveryMu guards the "message-delivery" domain: the per-recipient
 	// pending queues, outbound delivery state, relay retry bookkeeping,
@@ -3189,7 +3189,11 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 		go func() {
 			defer crashlog.DeferRecover()
 			log.Trace().Uint64("conn_id", uint64(id)).Msg("full_sync_goroutine_begin")
-			s.sendFullTableSyncToInbound(id, peerIdentity)
+			// s.runCtx bounds the spawned full-sync goroutine so that
+			// service shutdown can abort a half-flushed inbound write
+			// instead of waiting the full syncFlushTimeout on a stuck
+			// hairpin socket.
+			s.sendFullTableSyncToInbound(s.runCtx, id, peerIdentity)
 			log.Trace().Uint64("conn_id", uint64(id)).Msg("full_sync_goroutine_end")
 		}()
 	} else {
@@ -4359,7 +4363,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// fallback — receivers dedupe via seen[messageID].
 		if msg.Topic == "dm" && msg.Recipient != "" && msg.Recipient != "*" {
 			if decision.RelayNextHop != nil {
-				s.sendTableDirectedRelay(envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+				s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
 			} else {
 				// No table route — fall back to blind gossip relay to
 				// capable full nodes (pre-Phase 1.2 behavior).

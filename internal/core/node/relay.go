@@ -516,7 +516,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// incoming frame.PreviousHop) to prevent sending the message back.
 	var tableRouteOrigin domain.PeerIdentity
 	if forwardedTo == "" {
-		result := s.tryForwardViaRoutingTable(domain.PeerIdentity(recipient), forwardFrame, domain.PeerIdentity(frame.PreviousHop))
+		result := s.tryForwardViaRoutingTable(s.runCtx, domain.PeerIdentity(recipient), forwardFrame, domain.PeerIdentity(frame.PreviousHop))
 		forwardedTo = result.Address
 		tableRouteOrigin = result.RouteOrigin
 	}
@@ -1130,7 +1130,7 @@ func (s *Service) retryRelayDeliveries() {
 		// storeIncomingMessage — use the routing table when a next-hop
 		// is known, fall back to blind gossip relay otherwise.
 		if decision.RelayNextHop != nil {
-			s.sendTableDirectedRelay(msg, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+			s.sendTableDirectedRelay(s.runCtx, msg, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
 		} else {
 			s.tryRelayToCapableFullNodes(msg, decision.GossipTargets)
 		}

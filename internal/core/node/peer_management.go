@@ -1236,7 +1236,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
 	if session.peerIdentity != "" && s.sessionHasCapability(address, domain.CapMeshRoutingV1) && s.sessionHasCapability(address, domain.CapMeshRelayV1) {
-		s.sendOutboundFullTableSync(session.peerIdentity, address)
+		s.sendOutboundFullTableSync(ctx, session.peerIdentity, address)
 	}
 
 	return true, s.servePeerSession(ctx, session)
@@ -4975,7 +4975,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 
 		// Send full table sync to the new peer (Phase 1.2).
 		if session.peerIdentity != "" && s.sessionHasCapability(dialAddress, domain.CapMeshRoutingV1) && s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1) {
-			s.sendOutboundFullTableSync(session.peerIdentity, dialAddress)
+			s.sendOutboundFullTableSync(s.runCtx, session.peerIdentity, dialAddress)
 		}
 
 		// --- Phase 3: main session loop ---

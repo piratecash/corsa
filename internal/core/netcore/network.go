@@ -128,6 +128,14 @@ var (
 	// (zero value). Should never appear in correct code; its presence
 	// indicates an uninitialised status reached the bridge boundary.
 	ErrSendInvalidStatus = errors.New("netcore: invalid send status")
+
+	// ErrSendCtxCancelled — defensive sentinel for SendCtxCancelled. The
+	// bridge boundary (networkBridge.SendFrameSync) intercepts this status
+	// and returns the caller's ctx.Err() verbatim, preserving the
+	// context.Canceled / context.DeadlineExceeded distinction. This
+	// sentinel exists so that any future caller bypassing the bridge still
+	// receives a typed error instead of a silent mis-mapping.
+	ErrSendCtxCancelled = errors.New("netcore: caller ctx cancelled")
 )
 
 // SendStatusToError maps a SendStatus to the corresponding public sentinel
@@ -149,6 +157,8 @@ func SendStatusToError(s SendStatus) error {
 		return ErrSendChanClosed
 	case SendMarshalError:
 		return ErrSendMarshalError
+	case SendCtxCancelled:
+		return ErrSendCtxCancelled
 	case SendStatusInvalid:
 		return ErrSendInvalidStatus
 	default:

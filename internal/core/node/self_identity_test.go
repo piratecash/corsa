@@ -153,17 +153,18 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 	// Snapshot the pre-state and verify equality after the call. Any
 	// ingest would either overwrite a field with "filler-*" or insert
 	// a new listen binding, both caught by the comparison.
-	svc.peerMu.RLock()
+	// s.known, s.boxKeys, s.pubKeys, s.boxSigs all live under s.knowledgeMu.
+	svc.knowledgeMu.RLock()
 	_, knownHad := svc.known[selfAddr]
 	boxKeysBefore, boxKeysHad := svc.boxKeys[selfAddr]
 	pubKeysBefore, pubKeysHad := svc.pubKeys[selfAddr]
 	boxSigsBefore, boxSigsHad := svc.boxSigs[selfAddr]
-	svc.peerMu.RUnlock()
+	svc.knowledgeMu.RUnlock()
 
 	svc.learnIdentityFromWelcome(welcome)
 
-	svc.peerMu.RLock()
-	defer svc.peerMu.RUnlock()
+	svc.knowledgeMu.RLock()
+	defer svc.knowledgeMu.RUnlock()
 
 	// known is map[string]struct{} — only presence can change under the
 	// guarded call. A flipped presence bit is the tell-tale of ingest.

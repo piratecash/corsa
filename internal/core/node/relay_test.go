@@ -566,12 +566,13 @@ func registerSenderKey(t *testing.T, svc *Service) *identity.Identity {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc.peerMu.Lock()
+	// s.pubKeys, s.boxKeys, s.boxSigs, s.known all live under s.knowledgeMu.
+	svc.knowledgeMu.Lock()
 	svc.pubKeys[sender.Address] = identity.PublicKeyBase64(sender.PublicKey)
 	svc.boxKeys[sender.Address] = identity.BoxPublicKeyBase64(sender.BoxPublicKey)
 	svc.boxSigs[sender.Address] = identity.SignBoxKeyBinding(sender)
 	svc.known[sender.Address] = struct{}{}
-	svc.peerMu.Unlock()
+	svc.knowledgeMu.Unlock()
 	return sender
 }
 
@@ -824,10 +825,11 @@ func TestRelayedDMEmitsDeliveryReceipt(t *testing.T) {
 	}
 
 	// Register sender's keys so storeIncomingMessage passes the DM checks.
-	svc.peerMu.Lock()
+	// s.pubKeys and s.boxKeys live under s.knowledgeMu.
+	svc.knowledgeMu.Lock()
 	svc.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
 	svc.boxKeys[senderID.Address] = identity.BoxPublicKeyBase64(senderID.BoxPublicKey)
-	svc.peerMu.Unlock()
+	svc.knowledgeMu.Unlock()
 
 	// Create a properly encrypted DM payload.
 	ciphertext, err := directmsg.EncryptForParticipants(
@@ -1416,12 +1418,13 @@ func TestRelayMessageRejectsNonDMTopic(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 
 	senderKey, _ := identity.Generate()
-	svc.peerMu.Lock()
+	// s.pubKeys, s.boxKeys, s.boxSigs, s.known all live under s.knowledgeMu.
+	svc.knowledgeMu.Lock()
 	svc.pubKeys[senderKey.Address] = identity.PublicKeyBase64(senderKey.PublicKey)
 	svc.boxKeys[senderKey.Address] = identity.BoxPublicKeyBase64(senderKey.BoxPublicKey)
 	svc.boxSigs[senderKey.Address] = identity.SignBoxKeyBinding(senderKey)
 	svc.known[senderKey.Address] = struct{}{}
-	svc.peerMu.Unlock()
+	svc.knowledgeMu.Unlock()
 
 	nonDMTopics := []string{"general", "announcements", "custom-topic", ""}
 
@@ -1713,20 +1716,20 @@ func TestRetryRelayDeliveriesCallsTryRelay(t *testing.T) {
 	}
 
 	// s.topics is under s.gossipMu; s.relayRetry is under s.deliveryMu.
-	// This test takes s.peerMu + s.deliveryMu from a single goroutine
-	// during pre-listener setup, which is safe because no concurrent
-	// reader/writer exists yet — retryRelayDeliveries() is called below
-	// only after the mutation completes.  When this block is ever made
-	// concurrent with Service, it must be rewritten to take s.peerMu →
-	// s.deliveryMu → s.gossipMu in canonical OUTER → INNER order.
-	svc.peerMu.Lock()
+	// The two writes are independent — no field from one domain is read
+	// while mutating the other — so we acquire each lock separately rather
+	// than nest.  If this block is ever combined with a cross-domain read
+	// that needs both snapshots to be consistent, switch to canonical
+	// deliveryMu OUTER → gossipMu INNER order per docs/locking.md.
+	svc.gossipMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], envelope)
+	svc.gossipMu.Unlock()
+
 	svc.deliveryMu.Lock()
 	svc.relayRetry[relayMessageKey(envelope.ID)] = relayAttempt{
 		FirstSeen: time.Now().UTC().Add(-2 * time.Minute),
 	}
 	svc.deliveryMu.Unlock()
-	svc.peerMu.Unlock()
 
 	// Register a peer session with mesh_relay_v1 capability.
 	peerAddr := "relay-full-node-1"

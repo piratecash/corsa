@@ -410,9 +410,10 @@ func TestDispatchPeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.
 	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
 
 	// Verify the message was NOT stored.
-	svc.peerMu.RLock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	count := len(svc.topics["dm"])
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 	if count != 0 {
 		t.Fatalf("oversized push_message should be dropped; found %d stored messages", count)
 	}
@@ -449,9 +450,10 @@ func TestDispatchPeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T
 	// the sender key is unknown, not because of the body cap).
 	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
 
-	svc.peerMu.RLock()
+	// s.topics is guarded by s.gossipMu, not s.peerMu.
+	svc.gossipMu.RLock()
 	count := len(svc.topics["dm"])
-	svc.peerMu.RUnlock()
+	svc.gossipMu.RUnlock()
 	// Message won't be stored (unknown sender), but we proved the body
 	// cap did not reject it — coverage of the !oversized branch.
 	if count != 0 {

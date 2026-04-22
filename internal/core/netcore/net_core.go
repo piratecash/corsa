@@ -1,6 +1,7 @@
 package netcore
 
 import (
+	"context"
 	"net"
 	"sync"
 	"time"
@@ -250,6 +251,7 @@ const (
 	SendTimeout                         // sync flush deadline expired
 	SendChanClosed                      // sendCh closed during send (conn shutting down)
 	SendMarshalError                    // frame serialisation failed — caller's data is bad
+	SendCtxCancelled                    // caller ctx cancelled or deadline exceeded mid-flight
 )
 
 // String returns a human-readable label for diagnostics and logging.
@@ -269,6 +271,8 @@ func (s SendStatus) String() string {
 		return "chan_closed"
 	case SendMarshalError:
 		return "marshal_error"
+	case SendCtxCancelled:
+		return "ctx_cancelled"
 	default:
 		return "unknown"
 	}
@@ -344,6 +348,57 @@ func (pc *NetCore) SendRawSync(data []byte) (result SendStatus) {
 		return SendOK
 	case <-pc.writerDone:
 		return SendWriterDone
+	case <-time.After(syncFlushTimeout):
+		return SendTimeout
+	}
+}
+
+// SendRawSyncCtx is the ctx-aware twin of SendRawSync. It preserves the
+// fast-fail-on-full-queue contract (SendBufferFull on saturated sendCh) and
+// additionally honours caller ctx cancellation while waiting for the writer
+// goroutine to flush. This is the only sync entry point that lets a
+// request-scoped timeout interrupt the 5s syncFlushTimeout wait — direct
+// callers of SendRawSync wait out the full deadline regardless of ctx.
+//
+// Ctx is checked both before enqueue (pre-cancelled fast-fail, no sendCh
+// slot consumed) and during the flush wait (mid-flight cancel abort). On
+// ctx cancellation during the wait, the ack slot is abandoned; the writer
+// goroutine will still eventually consume the already-enqueued frame and
+// close the ack channel, but no one is listening — this is benign because
+// sendItem owns the ack chan and nothing else references it.
+//
+// Return value is SendStatus only; ctx.Err() is surfaced through
+// SendCtxCancelled. The caller (network_bridge.SendFrameSync) preserves
+// the original ctx error (context.Canceled vs context.DeadlineExceeded)
+// by intercepting this status and returning ctx.Err() directly before the
+// SendStatusToError mapping.
+func (pc *NetCore) SendRawSyncCtx(ctx context.Context, data []byte) (result SendStatus) {
+	if err := ctx.Err(); err != nil {
+		return SendCtxCancelled
+	}
+
+	ack := make(chan struct{})
+
+	defer func() {
+		if r := recover(); r != nil {
+			result = SendChanClosed
+		}
+	}()
+
+	select {
+	case pc.sendCh <- sendItem{data: data, ack: ack}:
+		// Enqueued — wait for the writer goroutine to flush.
+	default:
+		return SendBufferFull
+	}
+
+	select {
+	case <-ack:
+		return SendOK
+	case <-pc.writerDone:
+		return SendWriterDone
+	case <-ctx.Done():
+		return SendCtxCancelled
 	case <-time.After(syncFlushTimeout):
 		return SendTimeout
 	}

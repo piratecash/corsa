@@ -87,7 +87,13 @@ type tableForwardResult struct {
 //
 // excludeIdentity is the identity of the peer that sent the relay to us —
 // we must not send back to them (split horizon on relay path).
-func (s *Service) tryForwardViaRoutingTable(recipient domain.PeerIdentity, frame protocol.Frame, excludeIdentity domain.PeerIdentity) tableForwardResult {
+//
+// ctx is the caller's request/cycle context. It is threaded into
+// sendFrameToAddress so that a pre-cancelled or mid-flight cancelled ctx
+// aborts the inbound sync-flush wait instead of letting the NetCore writer
+// burn the full syncFlushTimeout. Outbound enqueue is non-blocking and
+// does not observe ctx beyond the pre-entry check.
+func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domain.PeerIdentity, frame protocol.Frame, excludeIdentity domain.PeerIdentity) tableForwardResult {
 	routes := s.routingTable.Lookup(recipient)
 	if len(routes) == 0 {
 		return tableForwardResult{}
@@ -103,7 +109,7 @@ func (s *Service) tryForwardViaRoutingTable(recipient domain.PeerIdentity, frame
 		if address == "" {
 			continue
 		}
-		if s.sendFrameToAddress(address, frame) {
+		if s.sendFrameToAddress(ctx, address, frame) {
 			log.Debug().
 				Str("id", frame.ID).
 				Str("recipient", string(recipient)).
@@ -123,7 +129,13 @@ func (s *Service) tryForwardViaRoutingTable(recipient domain.PeerIdentity, frame
 // announce_routes frame and sends it to the peer. Supports both outbound
 // sessions (by session address) and inbound connections (by "inbound:"
 // prefixed address from inboundConnKeyForID).
-func (s *Service) SendAnnounceRoutes(peerAddress domain.PeerAddress, routes []routing.AnnounceEntry) bool {
+//
+// ctx is propagated down to the network bridge: a pre-cancelled ctx fails
+// fast without touching the transport, and a mid-flight cancel during the
+// inbound sync-flush wait aborts the send rather than consuming the full
+// syncFlushTimeout. Outbound enqueue is non-blocking so ctx only matters
+// for the inbound path.
+func (s *Service) SendAnnounceRoutes(ctx context.Context, peerAddress domain.PeerAddress, routes []routing.AnnounceEntry) bool {
 	if len(routes) == 0 {
 		return true
 	}
@@ -146,7 +158,7 @@ func (s *Service) SendAnnounceRoutes(peerAddress domain.PeerAddress, routes []ro
 
 	// Inbound connections use synchronous write; outbound use enqueue.
 	if strings.HasPrefix(string(peerAddress), "inbound:") {
-		return s.sendAnnounceRoutesToInbound(string(peerAddress), frame)
+		return s.sendAnnounceRoutesToInbound(ctx, string(peerAddress), frame)
 	}
 	return s.enqueuePeerFrame(peerAddress, frame)
 }
@@ -155,8 +167,8 @@ func (s *Service) SendAnnounceRoutes(peerAddress domain.PeerAddress, routes []ro
 // "inbound:remoteAddr" key and writes the frame synchronously. Returns
 // false if the connection is gone or the write fails, so the announce
 // loop can log the failure.
-func (s *Service) sendAnnounceRoutesToInbound(key string, frame protocol.Frame) bool {
-	return s.writeFrameToInbound(domain.PeerAddress(key), frame)
+func (s *Service) sendAnnounceRoutesToInbound(ctx context.Context, key string, frame protocol.Frame) bool {
+	return s.writeFrameToInbound(ctx, domain.PeerAddress(key), frame)
 }
 
 // writeFrameToInbound writes a marshaled frame to an inbound connection
@@ -166,7 +178,16 @@ func (s *Service) sendAnnounceRoutesToInbound(key string, frame protocol.Frame) 
 //
 // This is the inbound equivalent of enqueuePeerFrame for outbound sessions.
 // Used by both announce_routes and relay_message paths.
-func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol.Frame) bool {
+//
+// ctx is the caller's request/cycle context. It is propagated into the
+// sync network write so that a pre-cancelled or mid-flight cancelled ctx
+// aborts the wait instead of letting the NetCore writer burn through the
+// full syncFlushTimeout (~5 s). This is the whole reason the per-cycle
+// fan-out from fanoutAnnounceRoutes and request-scoped timeouts from
+// ordinary RPC paths actually interrupt the send — the previous
+// hard-coded s.runCtx meant those cancellations were silently dropped at
+// routing-layer entry.
+func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAddress, frame protocol.Frame) bool {
 	remoteAddr := strings.TrimPrefix(string(address), "inbound:")
 
 	var targetID domain.ConnID
@@ -204,7 +225,7 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 	// other non-nil (buffer-full / writer-done / chan-closed / sync-timeout
 	// / ctx-error) → transport drop. The legacy 3-state enqueueResult
 	// switch maps directly onto these classes.
-	sendErr := s.sendFrameBytesViaNetworkSync(s.runCtx, targetID, []byte(line))
+	sendErr := s.sendFrameBytesViaNetworkSync(ctx, targetID, []byte(line))
 	switch {
 	case sendErr == nil:
 		return true
@@ -227,9 +248,13 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 // both outbound sessions (plain address) and inbound connections ("inbound:"
 // prefixed key). This is the unified send dispatch for all table-directed
 // relay and forwarding paths.
-func (s *Service) sendFrameToAddress(address domain.PeerAddress, frame protocol.Frame) bool {
+//
+// ctx is propagated to the inbound sync-write path so cancellation from
+// request-scoped contexts actually interrupts the send wait. Outbound
+// enqueue is non-blocking and does not wait on a transport flush.
+func (s *Service) sendFrameToAddress(ctx context.Context, address domain.PeerAddress, frame protocol.Frame) bool {
 	if strings.HasPrefix(string(address), "inbound:") {
-		return s.writeFrameToInbound(address, frame)
+		return s.writeFrameToInbound(ctx, address, frame)
 	}
 	return s.enqueuePeerFrame(address, frame)
 }
@@ -311,7 +336,11 @@ func (s *Service) inboundConnKeyForID(id domain.ConnID) domain.PeerAddress {
 // The per-peer announce cache is updated on successful send so that the
 // next announce cycle can compute a meaningful delta instead of
 // re-sending the full table.
-func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, peerIdentity domain.PeerIdentity) {
+//
+// ctx bounds the whole connect-time sync: callers pass s.runCtx so that
+// service shutdown aborts a half-flushed inbound write instead of letting
+// NetCore.SendRawSync burn through the full syncFlushTimeout.
+func (s *Service) sendFullTableSyncToInbound(ctx context.Context, id domain.ConnID, peerIdentity domain.PeerIdentity) {
 	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", string(peerIdentity)).Msg("send_full_table_sync_inbound_begin")
 	if peerIdentity == "" {
 		log.Trace().Uint64("conn_id", uint64(id)).Msg("send_full_table_sync_inbound_no_identity")
@@ -324,7 +353,7 @@ func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, peerIdentity doma
 
 	sendAddr := s.inboundConnKeyForID(id)
 	log.Trace().Uint64("conn_id", uint64(id)).Str("send_addr", string(sendAddr)).Msg("send_full_table_sync_inbound_before_connect_time")
-	s.sendConnectTimeFullSync(peerIdentity, sendAddr)
+	s.sendConnectTimeFullSync(ctx, peerIdentity, sendAddr)
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("send_full_table_sync_inbound_end")
 }
 
@@ -333,8 +362,12 @@ func (s *Service) sendFullTableSyncToInbound(id domain.ConnID, peerIdentity doma
 // outbound-path counterpart of sendFullTableSyncToInbound. Both paths
 // delegate to sendConnectTimeFullSync which builds a canonical snapshot
 // so that subsequent announce cycles can compute meaningful deltas.
-func (s *Service) sendOutboundFullTableSync(peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
-	s.sendConnectTimeFullSync(peerIdentity, address)
+//
+// ctx is threaded through so that caller-scope cancellation (session
+// teardown, service shutdown) interrupts the send instead of blocking
+// for the full syncFlushTimeout on a stuck writer.
+func (s *Service) sendOutboundFullTableSync(ctx context.Context, peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
+	s.sendConnectTimeFullSync(ctx, peerIdentity, address)
 }
 
 // sendConnectTimeFullSync is the shared core for inbound and outbound
@@ -344,7 +377,11 @@ func (s *Service) sendOutboundFullTableSync(peerIdentity domain.PeerIdentity, ad
 // success. When the snapshot is empty, the empty baseline is recorded
 // without sending a wire frame — the protocol is additive so an empty
 // table needs no explicit announcement.
-func (s *Service) sendConnectTimeFullSync(peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
+//
+// ctx flows down into SendAnnounceRoutes → writeFrameToInbound →
+// sendFrameBytesViaNetworkSync; cancelling ctx aborts the inbound
+// sync-flush wait rather than waiting for the internal syncFlushTimeout.
+func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Msg("connect_time_full_sync_begin")
 	routes := s.routingTable.AnnounceTo(peerIdentity)
 	snapshot := routing.BuildAnnounceSnapshot(routes)
@@ -370,7 +407,7 @@ func (s *Service) sendConnectTimeFullSync(peerIdentity domain.PeerIdentity, addr
 	peerState.RecordFullSyncAttempt(now)
 
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Int("routes", len(snapshot.Entries)).Msg("connect_time_full_sync_before_send")
-	sendOk := s.SendAnnounceRoutes(address, snapshot.Entries)
+	sendOk := s.SendAnnounceRoutes(ctx, address, snapshot.Entries)
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Bool("sent", sendOk).Msg("connect_time_full_sync_after_send")
 	if !sendOk {
 		log.Warn().
@@ -817,8 +854,13 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 // per-session send channel which owns its own synchronisation. No
 // shared Service state is mutated here.
 //
-// ctx is s.runCtx at the call site; goroutines that observe cancellation
-// during their blocking send return early and count as dropped.
+// ctx propagates end-to-end: a pre-cancelled ctx causes every per-peer
+// goroutine to count as dropped before touching the transport; a
+// mid-flight cancel (e.g. service shutdown) interrupts the inbound
+// sync-flush wait inside NetCore.SendRawSyncCtx instead of consuming
+// the full syncFlushTimeout. The ctx threaded through SendAnnounceRoutes
+// is the same ctx observed by each goroutine, so routing-layer
+// cancellation is no longer silently upgraded to s.runCtx at writeFrameToInbound.
 func (s *Service) fanoutAnnounceRoutes(
 	ctx context.Context,
 	targets []routing.AnnounceTarget,
@@ -842,7 +884,7 @@ func (s *Service) fanoutAnnounceRoutes(
 				droppedCnt.Add(1)
 				return
 			}
-			if s.SendAnnounceRoutes(peer.Address, withdrawals) {
+			if s.SendAnnounceRoutes(ctx, peer.Address, withdrawals) {
 				sentCnt.Add(1)
 			} else {
 				droppedCnt.Add(1)
@@ -893,7 +935,10 @@ func (s *Service) triggerDrainForExposed(exposed []routing.PeerIdentity) {
 // falls back to resolveRouteNextHopAddress with the original hop role.
 //
 // Handles both outbound sessions and inbound connections ("inbound:" prefix).
-func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, routeOrigin domain.PeerIdentity, nextHopHops int) {
+//
+// ctx is the caller's request/cycle context and is propagated to
+// sendRelayToAddress so the inbound sync-flush wait honours cancellation.
+func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, routeOrigin domain.PeerIdentity, nextHopHops int) {
 	address := validatedAddress
 	if address == "" {
 		// Retry path or caller without cached address — re-resolve with
@@ -912,7 +957,7 @@ func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity 
 		return
 	}
 
-	if !s.sendRelayToAddress(address, msg, routeOrigin) {
+	if !s.sendRelayToAddress(ctx, address, msg, routeOrigin) {
 		// Send failed — gossip fallback.
 		log.Debug().
 			Str("recipient", msg.Recipient).
@@ -940,7 +985,12 @@ func (s *Service) sendTableDirectedRelay(msg protocol.Envelope, nextHopIdentity 
 //
 // routeOrigin is the Origin field from the routing decision. Stored in
 // relayForwardState for triple-scoped hop_ack confirmation.
-func (s *Service) sendRelayToAddress(address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity) bool {
+//
+// ctx is the caller's request/cycle context and is propagated into
+// writeFrameToInbound so the inbound sync-flush wait honours cancellation.
+// Outbound enqueue is non-blocking and does not observe ctx beyond the
+// pre-entry check inside the network bridge.
+func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity) bool {
 	if strings.HasPrefix(string(address), "inbound:") {
 		frame := protocol.Frame{
 			Type:        "relay_message",
@@ -956,7 +1006,7 @@ func (s *Service) sendRelayToAddress(address domain.PeerAddress, msg protocol.En
 			MaxHops:     defaultMaxHops,
 			PreviousHop: s.identity.Address,
 		}
-		if !s.writeFrameToInbound(address, frame) {
+		if !s.writeFrameToInbound(ctx, address, frame) {
 			return false
 		}
 		// Persist relay state — mirrors what sendRelayMessage does for outbound.
@@ -1753,7 +1803,11 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			delivered = s.enqueuePeerFrame(m.peerAddr, m.item.Frame)
 			attempted = delivered
 		} else {
-			delivered, attempted = s.drainSendMessage(m.item.Frame, m.peerAddr)
+			// drainPendingForIdentities is a fire-and-forget goroutine
+			// (s.goBackground); its natural lifetime is the service itself,
+			// so s.runCtx is the right context to bound the inbound
+			// sync-flush wait inside sendRelayToAddress.
+			delivered, attempted = s.drainSendMessage(s.runCtx, m.item.Frame, m.peerAddr)
 		}
 		if !delivered {
 			// Only increment retry counter when a real delivery attempt was
@@ -1967,7 +2021,11 @@ returnFrames:
 // On success, the caller is responsible for clearing outbound state —
 // this function does not call clearOutboundQueued to avoid intermediate
 // persists during the drain cycle.
-func (s *Service) drainSendMessage(frame protocol.Frame, originalPeer domain.PeerAddress) (delivered, attempted bool) {
+//
+// ctx is the drain cycle's context (caller passes s.runCtx or a scoped
+// drain timeout). Propagated into sendRelayToAddress so that an inbound
+// next-hop with a stuck sync-flush wait does not pin the whole drain.
+func (s *Service) drainSendMessage(ctx context.Context, frame protocol.Frame, originalPeer domain.PeerAddress) (delivered, attempted bool) {
 	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(frame.CreatedAt))
 	if err != nil {
 		// Parse error is a data problem, not a routing problem.
@@ -2006,7 +2064,7 @@ func (s *Service) drainSendMessage(frame protocol.Frame, originalPeer domain.Pee
 	// enqueued in a session or persistent peer queue, with relayForwardState
 	// stored. No silent gossip fallback — if this fails, the frame goes
 	// back to pending for the normal retry loop.
-	if !s.sendRelayToAddress(address, envelope, decision.RelayRouteOrigin) {
+	if !s.sendRelayToAddress(ctx, address, envelope, decision.RelayRouteOrigin) {
 		// Real send attempt failed — this is a genuine delivery failure.
 		return false, true
 	}

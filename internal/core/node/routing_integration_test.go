@@ -1437,7 +1437,7 @@ func (c *fakeConn) RemoteAddr() net.Addr { return c.remoteAddr }
 func newNoopMockPeerSender(t *testing.T) *routingmocks.MockPeerSender {
 	t.Helper()
 	m := routingmocks.NewMockPeerSender(t)
-	m.EXPECT().SendAnnounceRoutes(mock.Anything, mock.Anything).Return(true).Maybe()
+	m.EXPECT().SendAnnounceRoutes(mock.Anything, mock.Anything, mock.Anything).Return(true).Maybe()
 	return m
 }
 
@@ -1500,7 +1500,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 
 	// Call the function under test.
 	id, _ := svc.connIDFor(conn)
-	svc.sendFullTableSyncToInbound(id, idPeerB)
+	svc.sendFullTableSyncToInbound(context.Background(), id, idPeerB)
 
 	select {
 	case data := <-received:
@@ -1551,7 +1551,7 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 	// Call the function — with only peer-B's own route in the table,
 	// split horizon should filter it out, resulting in no send.
 	id, _ := svc.connIDFor(conn)
-	svc.sendFullTableSyncToInbound(id, idPeerB)
+	svc.sendFullTableSyncToInbound(context.Background(), id, idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1590,7 +1590,7 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	id, _ := svc.connIDFor(conn)
-	svc.sendFullTableSyncToInbound(id, idPeerB)
+	svc.sendFullTableSyncToInbound(context.Background(), id, idPeerB)
 
 	readDone := make(chan int, 1)
 	go func() {
@@ -2050,7 +2050,7 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 		Recipient: idTargetX,
 	}
 
-	result := svc.tryForwardViaRoutingTable(idTargetX, frame, idPeerA)
+	result := svc.tryForwardViaRoutingTable(context.Background(), idTargetX, frame, idPeerA)
 
 	if result.Address == "" {
 		t.Fatal("expected table-directed forward to succeed")
@@ -2083,7 +2083,7 @@ func TestTryForwardViaRoutingTableExcludesSender(t *testing.T) {
 		Recipient: idTargetX,
 	}
 
-	result := svc.tryForwardViaRoutingTable(idTargetX, frame, idPeerA)
+	result := svc.tryForwardViaRoutingTable(context.Background(), idTargetX, frame, idPeerA)
 
 	if result.Address != "" {
 		t.Fatalf("should not forward back to sender, got address=%s", result.Address)
@@ -2100,7 +2100,7 @@ func TestTryForwardViaRoutingTableNoRoute(t *testing.T) {
 		Recipient: "unknown",
 	}
 
-	result := svc.tryForwardViaRoutingTable("unknown", frame, idPeerA)
+	result := svc.tryForwardViaRoutingTable(context.Background(), "unknown", frame, idPeerA)
 
 	if result.Address != "" {
 		t.Fatalf("expected empty address for unknown recipient, got %s", result.Address)

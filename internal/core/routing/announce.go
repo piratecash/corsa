@@ -34,13 +34,21 @@ const (
 type PeerSender interface {
 	// SendAnnounceRoutes sends a list of AnnounceEntry items as an
 	// announce_routes frame to the peer identified by peerAddress.
-	// peerIdentity is the Ed25519 fingerprint of the peer — used by
-	// the routing table for split horizon (exclude routes learned from
-	// this peer). peerAddress is the transport address used by
-	// node.Service to locate the session.
+	// ctx is the caller's request/cycle context: a pre-cancelled ctx
+	// fails fast without touching the transport, and a mid-flight cancel
+	// during the inbound sync-flush wait aborts the send rather than
+	// consuming the full syncFlushTimeout. This is the contract that
+	// makes fanoutAnnounceRoutes cancellable end-to-end — a stuck
+	// inbound hairpin socket no longer pins the caller for 5 s once
+	// its cycle/shutdown context has cancelled.
 	//
-	// Returns true if the frame was enqueued successfully.
-	SendAnnounceRoutes(peerAddress PeerAddress, routes []AnnounceEntry) bool
+	// peerAddress is the transport address used by node.Service to
+	// locate the session. Returns true if the frame was enqueued
+	// successfully. A false return collapses ctx-cancel, ctx-deadline,
+	// transport timeout, writer-done, buffer-full and unregistered-conn
+	// into one negative outcome; the PeerSender implementation handles
+	// observability internally.
+	SendAnnounceRoutes(ctx context.Context, peerAddress PeerAddress, routes []AnnounceEntry) bool
 }
 
 // AnnounceLoop runs periodic and triggered routing announcements. It
@@ -316,7 +324,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 // sendFullAnnounce sends a complete announce snapshot to the peer and
 // updates cache state on success via thread-safe Record* methods.
 func (a *AnnounceLoop) sendFullAnnounce(
-	_ context.Context,
+	ctx context.Context,
 	cycleID uint64,
 	peer AnnounceTarget,
 	state *AnnouncePeerState,
@@ -333,7 +341,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 		return
 	}
 
-	if !a.sender.SendAnnounceRoutes(peer.Address, snapshot.Entries) {
+	if !a.sender.SendAnnounceRoutes(ctx, peer.Address, snapshot.Entries) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
 			Str("peer_identity", string(peer.Identity)).
@@ -350,7 +358,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 // updates cache to the full new snapshot on success via thread-safe
 // Record* methods.
 func (a *AnnounceLoop) sendIncrementalAnnounce(
-	_ context.Context,
+	ctx context.Context,
 	cycleID uint64,
 	peer AnnounceTarget,
 	state *AnnouncePeerState,
@@ -358,7 +366,7 @@ func (a *AnnounceLoop) sendIncrementalAnnounce(
 	delta []AnnounceEntry,
 	now time.Time,
 ) {
-	if !a.sender.SendAnnounceRoutes(peer.Address, delta) {
+	if !a.sender.SendAnnounceRoutes(ctx, peer.Address, delta) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
 			Str("peer_identity", string(peer.Identity)).

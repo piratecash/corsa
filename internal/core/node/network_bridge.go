@@ -89,11 +89,20 @@ func (b *networkBridge) SendFrame(ctx context.Context, id domain.ConnID, frame [
 	return netcore.SendStatusToError(status)
 }
 
-// SendFrameSync enqueues frame and blocks until the writer flushes it.
-// Honours ctx on entry identically to SendFrame. The underlying
-// SendRawSync has its own internal deadline (syncFlushTimeout) which
-// bounds the wait; ctx is checked up-front so a pre-cancelled request
-// fails fast without consuming a queue slot.
+// SendFrameSync enqueues frame and blocks until one of: the writer flushes
+// it, the caller ctx is cancelled (including mid-flight), or the
+// per-connection sync deadline (syncFlushTimeout) elapses. Honours the
+// Network.SendFrameSync contract end-to-end: a request-scoped timeout set
+// by the caller interrupts the flush wait instead of being silently
+// upgraded to the 5 s NetCore deadline.
+//
+// Routing through SendRawSyncCtx is the only way to preserve ctx mid-flight:
+// SendRawSync (the non-ctx twin) waits solely on its internal timer and would
+// ignore ctx cancellation once the frame has been enqueued. When the
+// returned status is SendCtxCancelled, ctx.Err() is returned verbatim so
+// callers can discriminate context.Canceled from context.DeadlineExceeded
+// via errors.Is — the defensive ErrSendCtxCancelled mapping exists for
+// any future caller that bypasses this bridge path.
 func (b *networkBridge) SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -102,7 +111,16 @@ func (b *networkBridge) SendFrameSync(ctx context.Context, id domain.ConnID, fra
 	if core == nil {
 		return netcore.ErrUnknownConn
 	}
-	status := core.SendRawSync(frame)
+	status := core.SendRawSyncCtx(ctx, frame)
+	if status == netcore.SendCtxCancelled {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Defensive: core reported ctx-cancel but ctx reports no error —
+		// surface the typed sentinel rather than nil so the caller never
+		// mistakes "ctx said cancelled mid-flight" for a successful send.
+		return netcore.ErrSendCtxCancelled
+	}
 	return netcore.SendStatusToError(status)
 }
 

@@ -22,6 +22,7 @@ func TestSendStatusToErrorMapping(t *testing.T) {
 		{"timeout", SendTimeout, ErrSendTimeout},
 		{"chan_closed", SendChanClosed, ErrSendChanClosed},
 		{"marshal_error", SendMarshalError, ErrSendMarshalError},
+		{"ctx_cancelled", SendCtxCancelled, ErrSendCtxCancelled},
 		{"invalid_zero", SendStatusInvalid, ErrSendInvalidStatus},
 	}
 
@@ -53,6 +54,7 @@ func TestSentinelErrorsAreDistinct(t *testing.T) {
 		ErrSendTimeout,
 		ErrSendChanClosed,
 		ErrSendMarshalError,
+		ErrSendCtxCancelled,
 		ErrSendInvalidStatus,
 	}
 	for i, a := range sentinels {
