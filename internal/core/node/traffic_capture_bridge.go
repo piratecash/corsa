@@ -28,8 +28,8 @@ type serviceCaptureResolver struct {
 }
 
 func (r *serviceCaptureResolver) ConnInfoByID(id domain.ConnID) (capture.ConnInfo, bool) {
-	r.svc.mu.RLock()
-	defer r.svc.mu.RUnlock()
+	r.svc.peerMu.RLock()
+	defer r.svc.peerMu.RUnlock()
 
 	info, ok := r.svc.connInfoByIDLocked(id)
 	if !ok {
@@ -43,8 +43,8 @@ func (r *serviceCaptureResolver) ConnInfoByID(id domain.ConnID) (capture.ConnInf
 }
 
 func (r *serviceCaptureResolver) ConnInfoByIP(ip netip.Addr) []capture.ConnInfo {
-	r.svc.mu.RLock()
-	defer r.svc.mu.RUnlock()
+	r.svc.peerMu.RLock()
+	defer r.svc.peerMu.RUnlock()
 
 	var result []capture.ConnInfo
 	r.svc.forEachConnLocked(func(info connInfo) bool {
@@ -61,8 +61,8 @@ func (r *serviceCaptureResolver) ConnInfoByIP(ip netip.Addr) []capture.ConnInfo 
 }
 
 func (r *serviceCaptureResolver) AllConnInfo() []capture.ConnInfo {
-	r.svc.mu.RLock()
-	defer r.svc.mu.RUnlock()
+	r.svc.peerMu.RLock()
+	defer r.svc.peerMu.RUnlock()
 
 	result := make([]capture.ConnInfo, 0, r.svc.connCountLocked())
 	r.svc.forEachConnLocked(func(info connInfo) bool {

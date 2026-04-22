@@ -664,7 +664,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlyActiveSlot(t *testing.T) {
 	// Inject the direct_only convergence decision AFTER the slot is
 	// active. The filter snapshot happens on each buildPeerExchangeResponse
 	// call, so the next call must see the downgrade immediately.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	if svc.persistedMeta == nil {
 		svc.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
 	}
@@ -672,7 +672,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlyActiveSlot(t *testing.T) {
 		Address:       domain.PeerAddress("1.2.3.4:9000"),
 		AnnounceState: announceStateDirectOnly,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
@@ -716,7 +716,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByCanonicalKey(t *testing.T) {
 
 	slotActive(t, cm, canonical)
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	if svc.persistedMeta == nil {
 		svc.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
 	}
@@ -726,7 +726,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByCanonicalKey(t *testing.T) {
 		Address:       domain.PeerAddress(canonical),
 		AnnounceState: announceStateDirectOnly,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))
@@ -768,7 +768,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByFallbackKey(t *testing.T) {
 
 	slotActive(t, cm, canonical)
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	if svc.persistedMeta == nil {
 		svc.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
 	}
@@ -776,7 +776,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByFallbackKey(t *testing.T) {
 		Address:       domain.PeerAddress(fallback),
 		AnnounceState: announceStateDirectOnly,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	primePeerExchangeSnapshots(svc)
 	addrs := collectAddresses(svc.buildPeerExchangeResponse(nil))

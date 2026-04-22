@@ -15,7 +15,7 @@ import (
 // TestHotPathMutationDoesNotBlockOnDiskSave is the headline regression test
 // for the reconnect-storm fetch_network_stats stall.  Before the async
 // persister landed, every hot-path mutation (trackRelayMessage, queuePeerFrame,
-// etc.) took s.mu.Lock, called queueStateSnapshotLocked *under the lock*, and
+// etc.) took s.peerMu.Lock, called queueStateSnapshotLocked *under the lock*, and
 // then wrote the snapshot to disk on the calling goroutine.  During a
 // reconnect storm (72 pending addresses, 100+ concurrent mutations) this
 // starved RLock-readers for seconds on Docker-constrained GOMAXPROCS because
@@ -43,8 +43,11 @@ func TestHotPathMutationDoesNotBlockOnDiskSave(t *testing.T) {
 		Path:             "test-regression.json",
 		DebounceInterval: 1 * time.Millisecond,
 		Snapshot: func() queueStateFile {
-			svc.mu.RLock()
-			defer svc.mu.RUnlock()
+			// queueStateSnapshotLocked now reads under deliveryMu (pending,
+			// orphaned, relayRetry, receipts, outbound all live in the
+			// delivery domain after the Phase 2 split).
+			svc.deliveryMu.RLock()
+			defer svc.deliveryMu.RUnlock()
 			return svc.queueStateSnapshotLocked()
 		},
 		Save: func(path string, state queueStateFile) error {
@@ -70,7 +73,7 @@ func TestHotPathMutationDoesNotBlockOnDiskSave(t *testing.T) {
 	})
 
 	// Burst 100 concurrent trackRelayMessage calls.  Each mutation takes
-	// s.mu.Lock, mutates s.relayRetry, Unlocks, and MarkDirty's.  If the
+	// s.peerMu.Lock, mutates s.relayRetry, Unlocks, and MarkDirty's.  If the
 	// old synchronous persist code path were still here, every mutation
 	// would block on Save and the burst would take >= 1s.
 	const bursts = 100
@@ -112,8 +115,8 @@ func TestHotPathMutationDoesNotBlockOnDiskSave(t *testing.T) {
 
 // TestReaderNotStarvedDuringMutationBurst verifies the specific RLock
 // starvation scenario that caused the 7-second fetch_network_stats stall.
-// A stream of hot-path mutations (each one taking s.mu.Lock briefly)
-// concurrently with a reader that takes s.mu.RLock.  Under the old
+// A stream of hot-path mutations (each one taking s.peerMu.Lock briefly)
+// concurrently with a reader that takes s.peerMu.RLock.  Under the old
 // synchronous-persist code path, the Lock hold time included the snapshot
 // deep-copy of every map (pending, orphaned, relayRetry, relayMessages,
 // relayReceipts, outbound, relayStates), which under writer-preference
@@ -128,23 +131,28 @@ func TestReaderNotStarvedDuringMutationBurst(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 
 	// Seed a realistically sized queue so queueStateSnapshotLocked would
-	// have been expensive under the old code.
-	svc.mu.Lock()
+	// have been expensive under the old code.  s.relayRetry lives under
+	// s.deliveryMu after the Phase 2 step 5 split, not s.peerMu.
+	svc.deliveryMu.Lock()
 	for i := 0; i < 72; i++ {
 		svc.relayRetry[relayMessageKey(protocol.MessageID("seed-"+strconv.Itoa(i)))] = relayAttempt{
 			FirstSeen: time.Now().UTC(),
 		}
 	}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// The persister runs with a no-op Save so we isolate the reader-vs-mutation
-	// contention from disk I/O entirely — the test only measures s.mu latency.
+	// contention from disk I/O entirely — the test only measures s.deliveryMu
+	// latency (the snapshot closure takes that lock, not s.peerMu).
 	svc.queuePersist = newQueueStatePersister(queueStatePersisterDeps{
 		Path:             "test-reader-regression.json",
 		DebounceInterval: 5 * time.Millisecond,
 		Snapshot: func() queueStateFile {
-			svc.mu.RLock()
-			defer svc.mu.RUnlock()
+			// queueStateSnapshotLocked now reads under deliveryMu (pending,
+			// orphaned, relayRetry, receipts, outbound all live in the
+			// delivery domain after the Phase 2 split).
+			svc.deliveryMu.RLock()
+			defer svc.deliveryMu.RUnlock()
 			return svc.queueStateSnapshotLocked()
 		},
 		Save: func(path string, state queueStateFile) error { return nil },
@@ -162,7 +170,7 @@ func TestReaderNotStarvedDuringMutationBurst(t *testing.T) {
 	})
 
 	// Launch two pressures:
-	//   1. A continuous writer burst hammering s.mu.Lock via trackRelayMessage.
+	//   1. A continuous writer burst hammering s.peerMu.Lock via trackRelayMessage.
 	//   2. A reader calling SubscriberCount (cheap RLock reader) and
 	//      measuring its own acquisition + body latency.
 	stop := make(chan struct{})

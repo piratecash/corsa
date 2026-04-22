@@ -82,7 +82,9 @@ const (
 
 // versionPolicyState holds the runtime state for the node-owned version
 // upgrade detection policy. It is NOT a separate goroutine — reads and
-// writes happen exclusively under Service.mu.
+// writes happen under Service.statusMu (writes require Service.peerMu +
+// Service.statusMu because recomputes derive from peer-domain state; pure
+// readers of the materialised snapshot take Service.statusMu.RLock alone).
 //
 // Ownership boundary: this struct owns the per-identity reporter dedup
 // set that drives the update_available signal. It does NOT own per-address
@@ -114,7 +116,8 @@ func newVersionPolicyState() *versionPolicyState {
 }
 
 // ---------------------------------------------------------------------------
-// Service helpers — all called under Service.mu
+// Service helpers — called under the canonical peerMu → statusMu lock stack
+// (writers) or Service.statusMu.RLock (pure snapshot reader).
 // ---------------------------------------------------------------------------
 
 // recordIncompatibleObservationLocked records an incompatible-version
@@ -128,7 +131,13 @@ func newVersionPolicyState() *versionPolicyState {
 // the "you need to upgrade" signal. The caller (penalizeOldProtocolPeer)
 // enforces this guard.
 //
-// Must be called under s.mu write lock.
+// Caller MUST hold:
+//   - s.peerMu at least for read (recomputeVersionPolicyLocked reads
+//     s.peerBuilds, s.peerIDs, s.peerVersions, s.persistedMeta — all
+//     owned by the peer domain)
+//   - s.statusMu.Lock (status domain — s.versionPolicy is written here)
+//
+// Canonical order: peerMu → statusMu with statusMu INNERMOST.
 func (s *Service) recordIncompatibleObservationLocked(
 	peerID domain.PeerIdentity,
 	peerVersion domain.ProtocolVersion,
@@ -153,7 +162,15 @@ func (s *Service) recordIncompatibleObservationLocked(
 }
 
 // recomputeVersionPolicyLocked rebuilds the VersionPolicySnapshot from
-// current state. Must be called under s.mu write lock.
+// current state.
+//
+// Caller MUST hold:
+//   - s.peerMu at least for read (s.peerBuilds, s.peerIDs, s.peerVersions
+//     and s.persistedMeta are peer-domain fields read here)
+//   - s.statusMu.Lock (status domain — s.versionPolicy and
+//     s.lastVersionPolicyPublishAt are written here)
+//
+// Canonical order: peerMu → statusMu with statusMu INNERMOST.
 func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 	if s.versionPolicy == nil {
 		s.versionPolicy = newVersionPolicyState()
@@ -276,8 +293,8 @@ func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 	s.lastVersionPolicyPublishAt = now
 
 	// Notify subscribers so the UI picks up version-policy changes without
-	// polling. Safe to call under s.mu — ebus uses its own mutex and async
-	// handlers run in separate goroutines.
+	// polling. Safe to call under peerMu+statusMu — ebus uses its own mutex
+	// and async handlers run in separate goroutines.
 	s.eventBus.Publish(ebus.TopicVersionPolicyChanged, s.versionPolicy.snapshot)
 }
 
@@ -288,7 +305,12 @@ func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 // reporter observations are cleaned up within a bounded window even
 // when no new observation events arrive.
 //
-// Must be called under s.mu write lock.
+// Caller MUST hold:
+//   - s.peerMu at least for read (transitively via
+//     recomputeVersionPolicyLocked — reads peer-domain fields)
+//   - s.statusMu.Lock (status domain — s.versionPolicy is written here)
+//
+// Canonical order: peerMu → statusMu with statusMu INNERMOST.
 func (s *Service) maybeRecomputeVersionPolicyPeriodic(now time.Time) {
 	if s.versionPolicy == nil {
 		return
@@ -301,9 +323,15 @@ func (s *Service) maybeRecomputeVersionPolicyPeriodic(now time.Time) {
 }
 
 // VersionPolicySnapshot returns the current policy snapshot. Thread-safe.
+//
+// Uses s.statusMu.RLock alone — s.versionPolicy lives in the status
+// domain and the snapshot was already materialised by the most recent
+// recomputeVersionPolicyLocked under the full peerMu → statusMu stack.
+// This decouples Desktop UI readers from peer-management writers during
+// a reconnect storm.
 func (s *Service) VersionPolicySnapshot() domain.VersionPolicySnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
 	if s.versionPolicy == nil {
 		return domain.VersionPolicySnapshot{}
 	}
@@ -314,7 +342,8 @@ func (s *Service) VersionPolicySnapshot() domain.VersionPolicySnapshot {
 // version lockout that is still active. Identity-bound lockouts persist
 // until local version change; address-only lockouts expire after
 // VersionLockoutMaxTTL to avoid suppressing reassigned addresses.
-// Must be called under s.mu read lock.
+// Reads s.persistedMeta, which lives in the peer domain — must be called
+// under s.peerMu (read lock sufficient).
 func (s *Service) isPeerVersionLockedOutLocked(address domain.PeerAddress) bool {
 	entry, ok := s.persistedMeta[address]
 	if !ok {
@@ -335,7 +364,14 @@ func (s *Service) isPeerVersionLockedOutLocked(address domain.PeerAddress) bool 
 // alternative address — the incompatibility is a property of the peer's
 // software version, not of a specific network endpoint.
 //
-// Must be called under s.mu write lock.
+// Writes s.persistedMeta and reads s.peerIDs — both live in the peer
+// domain, so callers must hold s.peerMu (write lock).  Callers that
+// also recompute version policy in the same critical section (see
+// penalizeOldProtocolPeer) nest s.statusMu INNER under s.peerMu to
+// preserve the canonical peerMu → statusMu order; this helper itself
+// does not touch statusMu, so it is safe to invoke both with and
+// without statusMu held, as long as the enclosing peerMu write is
+// still active.
 func (s *Service) setVersionLockoutLocked(
 	address domain.PeerAddress,
 	peerVersion domain.ProtocolVersion,
@@ -412,8 +448,10 @@ func (s *Service) setVersionLockoutLocked(
 //     are cleared regardless of identity binding.
 //  2. Address-only (identity-less) lockouts whose hard TTL has expired.
 //
-// Called eagerly on startup after loading peers.json.
-// Must be called under s.mu write lock.
+// Called eagerly on startup after loading peers.json, before the
+// network is accepting frames, so no concurrent peer-domain readers
+// exist at that point.  Mutates s.persistedMeta, which is peer-domain
+// state — must be called under s.peerMu write lock.
 func (s *Service) clearStaleVersionLockoutsLocked() {
 	localFP := domain.LocalVersionFingerprint{
 		ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),

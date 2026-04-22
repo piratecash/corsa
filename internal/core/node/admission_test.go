@@ -410,9 +410,9 @@ func TestDispatchPeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.
 	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
 
 	// Verify the message was NOT stored.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.topics["dm"])
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 0 {
 		t.Fatalf("oversized push_message should be dropped; found %d stored messages", count)
 	}
@@ -449,9 +449,9 @@ func TestDispatchPeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T
 	// the sender key is unknown, not because of the body cap).
 	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.topics["dm"])
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	// Message won't be stored (unknown sender), but we proved the body
 	// cap did not reject it — coverage of the !oversized branch.
 	if count != 0 {
@@ -484,12 +484,12 @@ func TestDispatchPeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
 
 	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	// newTestService starts with zero peers (no bootstrap).
 	// Public IPs (44.x.x.x) are used to avoid domain.NetGroupLocal filtering
 	// that drops private ranges (10.x, 192.168.x, etc.).
 	learnedCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if learnedCount > maxAnnouncePeers {
 		t.Fatalf("announce_peer should truncate to %d peers; learned %d", maxAnnouncePeers, learnedCount)
@@ -519,9 +519,9 @@ func TestDispatchPeerSessionFrame_AnnouncePeerUnderLimitPassesAll(t *testing.T) 
 
 	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	learnedCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if learnedCount != peerCount {
 		t.Fatalf("announce_peer with %d peers (under limit) should learn all; got %d", peerCount, learnedCount)

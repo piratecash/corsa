@@ -154,9 +154,9 @@ func TestScenario_ColdStart_UsesGetPeers(t *testing.T) {
 		t.Fatalf("cold start must still send fetch_contacts, got %v", received)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != len(discovered) {
 		t.Fatalf("cold start must import discovered peers: got %d, want %d",
 			peerCount, len(discovered))
@@ -200,9 +200,9 @@ func TestScenario_SteadyState_SkipsGetPeers(t *testing.T) {
 		t.Fatalf("steady state must still send fetch_contacts, got %v", received)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 0 {
 		t.Fatalf("steady state must not import peers via peer exchange: got %d", peerCount)
 	}
@@ -240,9 +240,9 @@ func TestScenario_ReconnectWhileHealthy_DoesNotReinitiate(t *testing.T) {
 		}
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 0 {
 		t.Fatalf("reconnect while healthy must not import peers: got %d", peerCount)
 	}
@@ -342,9 +342,9 @@ func TestScenario_LossOfAllConnections_ReenablesRecovery(t *testing.T) {
 
 	// The recovered sync must actually import the advertised peers so
 	// that announce_peer gossip can resume from a seeded peer set.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount == 0 {
 		t.Fatalf("recovery path must import peers via get_peers, got %d", peerCount)
 	}

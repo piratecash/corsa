@@ -28,14 +28,15 @@ import (
 )
 
 func (s *Service) Peers() []transport.Peer {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 
 	return s.peersSnapshotLocked()
 }
 
 // peersSnapshotLocked returns a shallow copy of the peers slice.
-// Must be called with s.mu held (read or write).
+// Reads s.peers, which is peer-domain state — caller MUST hold
+// s.peerMu (read or write).
 func (s *Service) peersSnapshotLocked() []transport.Peer {
 	out := make([]transport.Peer, len(s.peers))
 	copy(out, s.peers)
@@ -82,9 +83,9 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 // maybeSavePeerState persists peer addresses if enough time has elapsed
 // since the last flush.
 func (s *Service) maybeSavePeerState() {
-	s.mu.RLock()
+	s.peerMu.RLock()
 	elapsed := time.Since(s.lastPeerSave)
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 
 	if elapsed < time.Duration(peerStateSaveMinutes)*time.Minute {
 		return
@@ -94,15 +95,36 @@ func (s *Service) maybeSavePeerState() {
 
 // flushPeerState builds a snapshot from in-memory state and writes it to disk.
 func (s *Service) flushPeerState() {
-	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_held").Msg("s_mu_writer")
-	entries := s.buildPeerEntriesLocked()
+	// Snapshot peerProvider metadata OUTSIDE s.peerMu.  PeerProvider.Candidates()
+	// runs under pp.mu.RLock and calls back into Service via RemoteBannedFn
+	// / BannedIPsFn, which take s.peerMu.RLock and s.ipStateMu.RLock — that
+	// is the existing pp.mu → s.peerMu edge.  Calling peerProvider.KnownPeerStatic
+	// from inside buildPeerEntriesLocked (which runs under s.peerMu.Lock) would
+	// close the cycle and, under Go's writer-preferring RWMutex, deadlock
+	// in a three-goroutine interleaving: refresher holds pp.mu.RLock and
+	// waits on s.peerMu; a concurrent pp.mu.Lock writer (Promote/Add) queues
+	// up; this path holds s.peerMu.Lock and is then blocked from becoming a
+	// new pp.mu reader by the queued writer.  Capturing the snapshot first
+	// keeps the lock graph acyclic.
+	var providerSnap map[domain.PeerAddress]knownPeer
+	if s.peerProvider != nil {
+		providerSnap = s.peerProvider.StaticSnapshotAll()
+	}
+
+	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_wait").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_held").Msg("peer_mu_writer")
+	entries := s.buildPeerEntriesLocked(providerSnap)
 	path := s.peersStatePath
 
-	// Snapshot IP-wide bans, filtering out expired entries.
+	// Snapshot IP-wide bans, filtering out expired entries.  bannedIPSet
+	// and remoteBannedIPs live in the IP/advertise domain; nest
+	// s.ipStateMu inside the already-held s.peerMu per the canonical
+	// peerMu → ipStateMu order documented in docs/locking.md.
 	now := time.Now().UTC()
 	var bannedIPs []bannedIPStateEntry
+	var remoteBannedIPs []remoteBannedIPStateEntry
+	s.ipStateMu.RLock()
 	for ip, entry := range s.bannedIPSet {
 		if entry.BannedUntil.After(now) {
 			affected := make([]string, len(entry.AffectedPeers))
@@ -122,7 +144,6 @@ func (s *Service) flushPeerState() {
 	// filtering out expired entries. Persisted so a blacklisted-reason
 	// peer-banned notice survives restart and the dialler does not
 	// resurrect the retry storm the notice was supposed to end.
-	var remoteBannedIPs []remoteBannedIPStateEntry
 	for ip, entry := range s.remoteBannedIPs {
 		if entry.Until.After(now) {
 			remoteBannedIPs = append(remoteBannedIPs, remoteBannedIPStateEntry{
@@ -132,8 +153,9 @@ func (s *Service) flushPeerState() {
 			})
 		}
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_released_mid").Msg("s_mu_writer")
+	s.ipStateMu.RUnlock()
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_released_mid").Msg("peer_mu_writer")
 
 	sortPeerEntries(entries)
 	entries = trimPeerEntries(entries)
@@ -149,12 +171,12 @@ func (s *Service) flushPeerState() {
 		return
 	}
 
-	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_wait_tail").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_held_tail").Msg("s_mu_writer")
+	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_wait_tail").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_held_tail").Msg("peer_mu_writer")
 	s.lastPeerSave = time.Now()
-	s.mu.Unlock()
-	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_released_tail").Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_released_tail").Msg("peer_mu_writer")
 }
 
 // evictStalePeers removes in-memory peers whose score has dropped below
@@ -163,9 +185,9 @@ func (s *Service) flushPeerState() {
 // and make room for fresh peer-exchange discoveries.
 // Bootstrap peers are never evicted — they act as permanent seeds.
 func (s *Service) evictStalePeers() {
-	s.mu.RLock()
+	s.peerMu.RLock()
 	elapsed := time.Since(s.lastPeerEvict)
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 	if elapsed < peerEvictInterval {
 		return
 	}
@@ -177,7 +199,7 @@ func (s *Service) evictStalePeers() {
 	// the write lock. This keeps the write-lock window short, reducing
 	// contention with ProbeNode RPCs that need RLock.
 	// ---------------------------------------------------------------
-	s.mu.RLock()
+	s.peerMu.RLock()
 	candidates := make(map[domain.PeerAddress]struct{})
 	for _, peer := range s.peers {
 		health := s.health[peer.Address]
@@ -210,17 +232,17 @@ func (s *Service) evictStalePeers() {
 			}
 		}
 	}
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 
 	if len(candidates) == 0 {
 		// Still update the timestamp under a short lock so the interval
 		// check does not re-run the scan on every tick.
-		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_wait").Msg("s_mu_writer")
-		s.mu.Lock()
-		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_held").Msg("s_mu_writer")
+		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_wait").Msg("peer_mu_writer")
+		s.peerMu.Lock()
+		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_held").Msg("peer_mu_writer")
 		s.lastPeerEvict = now
-		s.mu.Unlock()
-		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_released").Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_released").Msg("peer_mu_writer")
 		return
 	}
 
@@ -231,9 +253,9 @@ func (s *Service) evictStalePeers() {
 	// ---------------------------------------------------------------
 	var evicted []domain.PeerAddress
 
-	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_held").Msg("s_mu_writer")
+	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_wait").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_held").Msg("peer_mu_writer")
 	s.lastPeerEvict = now
 
 	kept := make([]transport.Peer, 0, len(s.peers))
@@ -277,8 +299,8 @@ func (s *Service) evictStalePeers() {
 		kept = append(kept, peer)
 	}
 	s.peers = kept
-	s.mu.Unlock()
-	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_released").Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_released").Msg("peer_mu_writer")
 
 	// Remove evicted peers from PeerProvider so they no longer
 	// appear in Candidates() and stop consuming dial attempts.
@@ -308,7 +330,7 @@ func (s *Service) evictOrphanedHealthEntries() {
 	// Phase 1 (RLock): build the set of addresses owned by s.peers,
 	// then identify orphaned health entries outside that set.
 	// ---------------------------------------------------------------
-	s.mu.RLock()
+	s.peerMu.RLock()
 	peerAddrs := make(map[domain.PeerAddress]struct{}, len(s.peers))
 	for _, p := range s.peers {
 		peerAddrs[p.Address] = struct{}{}
@@ -332,7 +354,7 @@ func (s *Service) evictOrphanedHealthEntries() {
 		}
 		candidates = append(candidates, addr)
 	}
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 
 	if len(candidates) == 0 {
 		return
@@ -342,10 +364,17 @@ func (s *Service) evictOrphanedHealthEntries() {
 	// Phase 2 (Lock): apply evictions. Re-check each candidate under
 	// write lock — state may have changed between phases (a peer-exchange
 	// frame may have added the address to s.peers).
+	// Cross-domain: peer fields (health/peerTypes/etc) under peerMu,
+	// s.pending under deliveryMu, refreshAggregateStatusLocked writes
+	// s.aggregateStatus under statusMu.  Canonical order
+	// peerMu → deliveryMu → statusMu.
 	// ---------------------------------------------------------------
-	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_held").Msg("s_mu_writer")
+	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_wait").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_held").Msg("peer_mu_writer")
+	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_wait").Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_held").Msg("delivery_mu_writer")
 
 	// Rebuild peerAddrs under write lock — s.peers may have grown.
 	peerAddrs = make(map[domain.PeerAddress]struct{}, len(s.peers))
@@ -378,10 +407,14 @@ func (s *Service) evictOrphanedHealthEntries() {
 		evicted++
 	}
 	if evicted > 0 {
+		s.statusMu.Lock()
 		s.refreshAggregateStatusLocked()
+		s.statusMu.Unlock()
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("s_mu_writer")
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("peer_mu_writer")
 
 	if evicted > 0 {
 		log.Info().Int("evicted", evicted).Int("candidates", len(candidates)).Msg("evicted_orphaned_health_entries")
@@ -393,9 +426,19 @@ func (s *Service) evictOrphanedHealthEntries() {
 // that values loaded from disk survive a restart+flush cycle without being
 // overwritten by transient runtime state.  Only truly new peers (not yet in
 // persistedMeta) derive these fields from runtime maps.
-// Must be called with s.mu held (write lock required — updates persistedMeta
-// for newly discovered peers).
-func (s *Service) buildPeerEntriesLocked() []peerEntry {
+//
+// providerSnap is a pre-captured snapshot of PeerProvider.known taken by
+// the caller OUTSIDE any s.peerMu hold.  This function never calls back
+// into peerProvider: doing so would close the peerMu → pp.mu edge and —
+// combined with the existing pp.mu → peerMu edge via Candidates()
+// callbacks — deadlock under Go's writer-preferring RWMutex.  nil is
+// permitted (tests that construct a bare Service without a provider can
+// pass nil; in that case the persistedMeta row is treated as
+// authoritative for Source / AddedAt).
+//
+// Must be called with s.peerMu held (write lock required — updates
+// persistedMeta for newly discovered peers).
+func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]knownPeer) []peerEntry {
 	entries := make([]peerEntry, 0, len(s.peers))
 	now := time.Now().UTC()
 	for _, peer := range s.peers {
@@ -421,13 +464,13 @@ func (s *Service) buildPeerEntriesLocked() []peerEntry {
 			// Add(bootstrap) upgrades Source; Promote() refreshes both
 			// Source and AddedAt. persistedMeta still holds the on-disk
 			// values, so we prefer the provider's copy to ensure
-			// promotions round-trip through peers.json.
-			if s.peerProvider != nil {
-				if kp := s.peerProvider.KnownPeerStatic(peer.Address); kp != nil {
-					entry.Source = kp.Source
-					t := kp.AddedAt
-					entry.AddedAt = &t
-				}
+			// promotions round-trip through peers.json.  We read from the
+			// pre-captured providerSnap — never call back into peerProvider
+			// from under s.peerMu (see deadlock note above).
+			if kp, ok := providerSnap[peer.Address]; ok {
+				entry.Source = kp.Source
+				t := kp.AddedAt
+				entry.AddedAt = &t
 			}
 		} else {
 			// New peer discovered at runtime — derive from live state.
@@ -504,12 +547,16 @@ func peerSource(id string) domain.PeerSource {
 
 func (s *Service) ensurePeerSessions(ctx context.Context) {
 	for _, candidate := range s.peerDialCandidates() {
-		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_wait").Str("address", string(candidate.address)).Msg("s_mu_writer")
-		s.mu.Lock()
-		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_held").Str("address", string(candidate.address)).Msg("s_mu_writer")
+		// Cross-domain: s.upstream lives under s.deliveryMu, s.dialOrigin
+		// under s.peerMu.  Canonical s.peerMu OUTER → s.deliveryMu INNER.
+		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_wait").Str("address", string(candidate.address)).Msg("peer_mu_writer")
+		s.peerMu.Lock()
+		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_held").Str("address", string(candidate.address)).Msg("peer_mu_writer")
+		s.deliveryMu.Lock()
 		if _, ok := s.upstream[candidate.address]; ok {
-			s.mu.Unlock()
-			log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released_dup").Str("address", string(candidate.address)).Msg("s_mu_writer")
+			s.deliveryMu.Unlock()
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released_dup").Str("address", string(candidate.address)).Msg("peer_mu_writer")
 			continue
 		}
 		s.upstream[candidate.address] = struct{}{}
@@ -519,18 +566,21 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 		if candidate.primary != candidate.address {
 			s.dialOrigin[candidate.address] = candidate.primary
 		}
-		s.mu.Unlock()
-		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released").Str("address", string(candidate.address)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released").Str("address", string(candidate.address)).Msg("peer_mu_writer")
 		go func(c peerDialCandidate) {
 			defer func() {
-				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_wait").Str("address", string(c.address)).Msg("s_mu_writer")
-				s.mu.Lock()
-				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("s_mu_writer")
+				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_wait").Str("address", string(c.address)).Msg("peer_mu_writer")
+				s.peerMu.Lock()
+				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("peer_mu_writer")
+				s.deliveryMu.Lock()
 				delete(s.sessions, c.address)
 				delete(s.upstream, c.address)
 				delete(s.dialOrigin, c.address)
-				s.mu.Unlock()
-				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_released").Str("address", string(c.address)).Msg("s_mu_writer")
+				s.deliveryMu.Unlock()
+				s.peerMu.Unlock()
+				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_released").Str("address", string(c.address)).Msg("peer_mu_writer")
 			}()
 			s.runPeerSession(ctx, c.address)
 		}(candidate)
@@ -548,7 +598,10 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 // advertises a different endpoint would not reserve its real host if we
 // relied on NetCore.Address(), allowing a second outbound connection
 // to the same machine.
-// Caller must hold s.mu at least for read.
+// Cross-domain read: s.upstream is delivery-domain (s.deliveryMu);
+// inbound conn state is peer-domain (s.peerMu).  Caller MUST hold
+// s.peerMu AND s.deliveryMu at least for read, acquired in canonical
+// s.peerMu OUTER → s.deliveryMu INNER order.
 func (s *Service) connectedHostsLocked() map[string]struct{} {
 	hosts := make(map[string]struct{})
 
@@ -592,8 +645,15 @@ type peerDialCandidate struct {
 }
 
 func (s *Service) peerDialCandidates() []peerDialCandidate {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// Cross-domain: reads s.peers/s.health (peer-domain, under s.peerMu)
+	// and s.upstream (delivery-domain, under s.deliveryMu).  Canonical
+	// s.peerMu OUTER → s.deliveryMu INNER; both held for the whole scan
+	// so the candidate set stays consistent with the current upstream
+	// registry.
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	s.deliveryMu.RLock()
+	defer s.deliveryMu.RUnlock()
 
 	limit := s.cfg.EffectiveMaxOutgoingPeers()
 	active := len(s.upstream)
@@ -855,9 +915,9 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
 	}
 	s.learnIdentityFromWelcome(welcome)
-	s.mu.RLock()
+	s.peerMu.RLock()
 	syncHealthKey := s.resolveHealthAddress(address)
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 	s.addPeerVersion(syncHealthKey, welcome.ClientVersion)
 	s.addPeerBuild(syncHealthKey, welcome.ClientBuild)
 
@@ -943,13 +1003,13 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 
 		connected, err := s.openPeerSession(ctx, address)
 		if err != nil {
-			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-			s.mu.Lock()
-			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+			s.peerMu.Lock()
+			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 			closedSession := s.sessions[address]
 			delete(s.sessions, address)
-			s.mu.Unlock()
-			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 			// Routing table: deregister direct peer on session close.
 			// The hasRelayCap flag must match what was passed to
@@ -980,10 +1040,10 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			// failure, handshake, subscribe, sync) we must call it here
 			// so that Score decreases and cooldown engages.
 			if connected {
-				s.mu.RLock()
+				s.peerMu.RLock()
 				h := s.health[s.resolveHealthAddress(address)]
 				stillConnected := h != nil && h.Connected
-				s.mu.RUnlock()
+				s.peerMu.RUnlock()
 				if stillConnected {
 					s.markPeerDisconnected(address, err)
 				}
@@ -1035,12 +1095,12 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	reader := bufio.NewReader(conn)
-	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	cid := s.nextConnIDLocked()
-	s.mu.Unlock()
-	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	session = &peerSession{
 		address:      address,
 		peerIdentity: "",
@@ -1066,13 +1126,13 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		// addPeerVersion never run, so without this the lockout would store
 		// an empty ObservedClientVersion.
 		if welcome.ClientVersion != "" {
-			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-			s.mu.Lock()
-			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+			s.peerMu.Lock()
+			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 			healthKey := s.resolveHealthAddress(address)
 			s.peerVersions[healthKey] = welcome.ClientVersion
-			s.mu.Unlock()
-			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 		}
 		s.penalizeOldProtocolPeer(address, domain.ProtocolVersion(welcome.Version), domain.ProtocolVersion(welcome.MinimumProtocolVersion))
 		return false, fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
@@ -1119,9 +1179,9 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// entirely when the peer omits the listen field). Store by the
 	// health-tracking key (resolveHealthAddress) so peerHealthFrames can
 	// always find the version — even for fallback-port dial variants.
-	s.mu.RLock()
+	s.peerMu.RLock()
 	healthKey := s.resolveHealthAddress(address)
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 	s.addPeerID(healthKey, session.peerIdentity)
 	s.addPeerVersion(healthKey, welcome.ClientVersion)
 	s.addPeerBuild(healthKey, welcome.ClientBuild)
@@ -1141,12 +1201,12 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		s.logPeerExchangeSkipped(peerExchangePathSessionOutbound, address, peerExchangeSkipByAggregateHealthy)
 	}
 
-	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	s.sessions[address] = session
-	s.mu.Unlock()
-	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.markPeerConnected(address, peerDirectionOutbound)
 
 	if _, err := s.peerSessionRequest(session, protocol.Frame{
@@ -1190,9 +1250,10 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	// inboxCh is actively read (preventing overflow), drain any pending
 	// frames (push_message, etc.) that target this peer's identity.
 	if session.peerIdentity != "" {
-		s.mu.RLock()
+		// Pure-delivery probe: s.pending lives under deliveryMu.
+		s.deliveryMu.RLock()
 		hasPending := len(s.pending) > 0
-		s.mu.RUnlock()
+		s.deliveryMu.RUnlock()
 		if hasPending {
 			identity := session.peerIdentity
 			s.goBackground(func() {
@@ -1409,14 +1470,22 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	// is not proof the responder has forgiven them. dialedIP is the
 	// canonical form used by recordRemoteIPBanLocked, so (b) hashes
 	// into the same map key as the original write.
-	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	// Cross-domain write: peer-domain (persistedMeta via clearRemoteBan /
+	// repayMisadvertisePenalty) + ipState-domain (remoteBannedIPs via
+	// clearRemoteIPBanLocked, and bans via repayMisadvertisePenalty's
+	// inner ipStateMu section).  Canonical lock order per docs/locking.md:
+	// s.peerMu → s.ipStateMu.  clearRemoteIPBanLocked takes s.ipStateMu
+	// itself below.
+	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	_ = s.repayMisadvertisePenaltyOnAuthLocked(peerAddress, rawBanIP)
 	remoteBanCleared := s.clearRemoteBanLocked(peerAddress)
+	s.ipStateMu.Lock()
 	remoteIPBanCleared := s.clearRemoteIPBanLocked(dialedIP)
-	s.mu.Unlock()
-	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	s.ipStateMu.Unlock()
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	// Mirror handlePeerBannedNotice: flush immediately when any scope
 	// mutated so the cleared state survives a crash/restart. Without
 	// this, peers.json would be re-read with stale per-peer
@@ -1551,13 +1620,13 @@ func (s *Service) announcePeerToSessions(peerAddress, nodeType string) {
 	log.Trace().Str("peer", peerAddress).Str("node_type", nodeType).Msg("announce_peer_to_sessions_begin")
 
 	log.Trace().Str("peer", peerAddress).Msg("announce_peer_to_sessions_before_rlock")
-	s.mu.RLock()
+	s.peerMu.RLock()
 	log.Trace().Str("peer", peerAddress).Msg("announce_peer_to_sessions_rlock_acquired")
 	sessions := make([]*peerSession, 0, len(s.sessions))
 	for _, session := range s.sessions {
 		sessions = append(sessions, session)
 	}
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 	log.Trace().Str("peer", peerAddress).Int("sessions", len(sessions)).Msg("announce_peer_to_sessions_rlock_released")
 
 	frame := protocol.Frame{
@@ -1601,9 +1670,9 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(peerAddress))}
 	}
 
-	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
 	now := time.Now().UTC()
 
@@ -1673,14 +1742,24 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	if peerID != "" {
 		// Remove from the incompatible-reporter dedup set so the
 		// operator override also reduces the reporter count.
+		// statusMu guards s.versionPolicy (INNERMOST — acquired while
+		// peerMu is held per canonical order).
 		if s.versionPolicy != nil {
+			s.statusMu.Lock()
 			delete(s.versionPolicy.incompatibleReporters, peerID)
+			s.statusMu.Unlock()
 		}
 		// Clear lockout, health diagnostics, and dial-suppression state
 		// for all sibling addresses of the same identity. Without this,
 		// stale ban/cooldown fields keep siblings out of candidate
 		// selection even though the operator explicitly overrode the
 		// penalty on the primary address.
+		//
+		// Cross-domain: sibling loop reads peer-domain state
+		// (peerIDs, persistedMeta, health) under peerMu and mutates
+		// ipState-domain bannedIPSet.  Canonical order
+		// peerMu → ipStateMu.
+		s.ipStateMu.Lock()
 		for otherAddr, otherID := range s.peerIDs {
 			if otherAddr == peerAddress || otherID != peerID {
 				continue
@@ -1701,21 +1780,27 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 				delete(s.bannedIPSet, ip)
 			}
 		}
+		s.ipStateMu.Unlock()
 	}
 
 	// Recompute version policy since we may have removed lockouts and/or
 	// a reporter that were contributing to the update_available signal.
+	// statusMu is INNERMOST per canonical peerMu → statusMu order.
+	s.statusMu.Lock()
 	s.recomputeVersionPolicyLocked(time.Now().UTC())
+	s.statusMu.Unlock()
 
 	// Also clear the IP-wide ban — without this, buildBannedIPsSet still
 	// excludes the peer from Candidates() even though per-address health
-	// is unbanned.
+	// is unbanned.  Short ipStateMu section nested inside s.peerMu.
 	if ip, _, ok := splitHostPort(string(peerAddress)); ok {
+		s.ipStateMu.Lock()
 		delete(s.bannedIPSet, ip)
+		s.ipStateMu.Unlock()
 	}
 
-	s.mu.Unlock()
-	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
 	// Flush immediately so the manual peer survives a crash.
 	s.flushPeerState()
@@ -1779,12 +1864,12 @@ func (s *Service) applyStartupBootstrapPeer(address string) {
 // Injection happens later in Run(), after ConnectionManager is ready, so the
 // add_peer path can enqueue immediate dials instead of being called too early.
 func (s *Service) PrimeBootstrapPeers() {
-	log.Trace().Str("site", "PrimeBootstrapPeers").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "PrimeBootstrapPeers").Str("phase", "lock_held").Msg("s_mu_writer")
+	log.Trace().Str("site", "PrimeBootstrapPeers").Str("phase", "lock_wait").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "PrimeBootstrapPeers").Str("phase", "lock_held").Msg("peer_mu_writer")
 	s.primeBootstrapOnRun = true
-	s.mu.Unlock()
-	log.Trace().Str("site", "PrimeBootstrapPeers").Str("phase", "lock_released").Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "PrimeBootstrapPeers").Str("phase", "lock_released").Msg("peer_mu_writer")
 }
 
 // primeStartupBootstrapPeers applies compiled/default bootstrap peers once the
@@ -1798,9 +1883,9 @@ func (s *Service) primeStartupBootstrapPeers() {
 			continue
 		}
 
-		s.mu.RLock()
+		s.peerMu.RLock()
 		_, restoredFromState := s.persistedMeta[peerAddress]
-		s.mu.RUnlock()
+		s.peerMu.RUnlock()
 
 		if restoredFromState {
 			continue
@@ -1821,9 +1906,9 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 		return false
 	}
 
-	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	if existing, exists := s.findKnownPeerByIPLocked(address); exists {
 		if existing == address {
 			// Peer already known — do not overwrite its node type.
@@ -1834,15 +1919,15 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 			if peerID != "" {
 				s.peerIDs[address] = peerID
 			}
-			s.mu.Unlock()
-			log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released_exists").Str("address", string(address)).Msg("s_mu_writer")
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released_exists").Str("address", string(address)).Msg("peer_mu_writer")
 			return false
 		}
 		// Peer exchange keeps only one stored address per IP. Alternative
 		// ports learned from the network are ignored to avoid peer-list
 		// poisoning via many addresses on the same host.
-		s.mu.Unlock()
-		log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released_sameIP").Str("address", string(address)).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released_sameIP").Str("address", string(address)).Msg("peer_mu_writer")
 		return false
 	}
 
@@ -1867,8 +1952,8 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 			AddedAt:  &now,
 		}
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 	if s.peerProvider != nil {
 		s.peerProvider.Add(address, domain.PeerSourcePeerExchange)
@@ -1885,15 +1970,15 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 	}
 
 	shouldMarkFresh := false
-	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	existing, found := s.findKnownPeerByIPLocked(address)
 	if found && existing != address {
 		// Network-learned/promoted peers keep a single stored address per IP.
 		// Manual/bootstrap paths are intentionally exempt and do not call here.
-		s.mu.Unlock()
-		log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released_sameIP").Str("address", string(address)).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released_sameIP").Str("address", string(address)).Msg("peer_mu_writer")
 		return
 	}
 
@@ -1913,8 +1998,8 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 		}
 		shouldMarkFresh = true
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 	if s.peerProvider != nil {
 		s.peerProvider.Add(address, domain.PeerSourceAnnounce)
@@ -1944,12 +2029,12 @@ func (s *Service) addPeerID(address domain.PeerAddress, peerID domain.PeerIdenti
 	if address == "" || peerID == "" {
 		return
 	}
-	log.Trace().Str("site", "addPeerID").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "addPeerID").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "addPeerID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "addPeerID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerIDs[address] = peerID
-	s.mu.Unlock()
-	log.Trace().Str("site", "addPeerID").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "addPeerID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 }
 
 func (s *Service) addPeerVersion(address domain.PeerAddress, clientVersion string) {
@@ -1959,12 +2044,12 @@ func (s *Service) addPeerVersion(address domain.PeerAddress, clientVersion strin
 		return
 	}
 
-	log.Trace().Str("site", "addPeerVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "addPeerVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "addPeerVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "addPeerVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerVersions[address] = clientVersion
-	s.mu.Unlock()
-	log.Trace().Str("site", "addPeerVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "addPeerVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 }
 
 func (s *Service) addPeerBuild(address domain.PeerAddress, build int) {
@@ -1973,12 +2058,12 @@ func (s *Service) addPeerBuild(address domain.PeerAddress, build int) {
 		return
 	}
 
-	log.Trace().Str("site", "addPeerBuild").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "addPeerBuild").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "addPeerBuild").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "addPeerBuild").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerBuilds[address] = build
-	s.mu.Unlock()
-	log.Trace().Str("site", "addPeerBuild").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "addPeerBuild").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 }
 
 func parseKnownPeerNodeType(raw string) domain.NodeType {
@@ -1993,17 +2078,17 @@ func (s *Service) rememberPeerType(address domain.PeerAddress, raw string) {
 	if !ok {
 		return
 	}
-	log.Trace().Str("site", "rememberPeerType").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "rememberPeerType").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "rememberPeerType").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "rememberPeerType").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerTypes[address] = peerType
-	s.mu.Unlock()
-	log.Trace().Str("site", "rememberPeerType").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "rememberPeerType").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 }
 
 func (s *Service) peerTypeForAddress(address domain.PeerAddress) domain.NodeType {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	return s.peerTypeForAddressLocked(address)
 }
 
@@ -2023,8 +2108,8 @@ func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
 }
 
 func (s *Service) peerIdentityForAddress(address domain.PeerAddress) domain.PeerIdentity {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	return s.peerIDs[address]
 }
 
@@ -2510,7 +2595,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// Must run in a goroutine: gossipTransitReceipt fans out
 		// receipts via sendReceiptToPeer → queuePeerFrame, which
 		// publishes on ebus and touches per-peer pending state under
-		// s.mu.  The per-peer writer contention alone stalls the read
+		// s.peerMu.  The per-peer writer contention alone stalls the read
 		// loop long enough to miss heartbeat pong replies and cause
 		// the remote side to disconnect on pong-stall timeout; with a
 		// fire-and-forget hop the disk write path never blocks here
@@ -2594,9 +2679,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
 			return
 		}
-		s.mu.RLock()
+		s.peerMu.RLock()
 		session := s.sessions[address]
-		s.mu.RUnlock()
+		s.peerMu.RUnlock()
 		if session != nil {
 			s.handleAnnounceRoutes(session.peerIdentity, frame)
 		}
@@ -2747,8 +2832,8 @@ func (s *Service) sendAckDeleteByID(connID domain.ConnID, ackType string, msgID 
 // Returns true when the inbound connection should be rejected because an
 // outbound session already covers this peer.
 func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	target := s.resolveHealthAddress(address)
 	for dialAddr := range s.sessions {
 		if s.resolveHealthAddress(dialAddr) == target {
@@ -2759,9 +2844,9 @@ func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool 
 }
 
 func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
-	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -2784,13 +2869,25 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	// A completed handshake proves the peer (and its IP) is compatible.
 	// Clear the IP-wide ban so sibling ports are also unblocked in
 	// Candidates() and list_banned no longer reports a stale entry.
+	//
+	// bannedIPSet lives in the IP/advertise domain.  Nest s.ipStateMu
+	// inside the already-held s.peerMu per the canonical peerMu →
+	// ipStateMu order documented in docs/locking.md.  A single ipStateMu
+	// section covers both the primary-address clear and the sibling
+	// sweep below so the expensive peerIDs iteration does not flap the
+	// mutex.
+	s.ipStateMu.Lock()
 	if ip, _, ok := splitHostPort(string(address)); ok {
 		delete(s.bannedIPSet, ip)
 	}
 
 	// Remove from the incompatible-reporter dedup set if present.
+	// statusMu guards s.versionPolicy (INNERMOST — acquired while peerMu
+	// and ipStateMu are held; nested self-contained section).
 	if peerID != "" && s.versionPolicy != nil {
+		s.statusMu.Lock()
 		delete(s.versionPolicy.incompatibleReporters, peerID)
+		s.statusMu.Unlock()
 	}
 
 	// Clear persisted version lockout — the peer just proved compatibility.
@@ -2831,17 +2928,21 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 			}
 		}
 	}
+	s.ipStateMu.Unlock()
 
 	// Recompute version policy to reflect the cleared evidence.
+	// statusMu is INNERMOST per canonical peerMu → statusMu order.
+	s.statusMu.Lock()
 	s.recomputeVersionPolicyLocked(now)
+	s.statusMu.Unlock()
 
-	s.mu.Unlock()
-	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 	// Refresh peer-health snapshot immediately so UI pollers that call
 	// fetch_peer_health right after a connection transition observe the
 	// new state without waiting for the 500 ms refresher tick.  Rebuild
-	// acquires s.mu.RLock only — the writer was just released.  See
+	// acquires s.peerMu.RLock only — the writer was just released.  See
 	// refreshHotReadSnapshotsAfterPeerStateChange for why peers_exchange
 	// is intentionally left to the ticker.
 	s.refreshHotReadSnapshotsAfterPeerStateChange()
@@ -2853,9 +2954,9 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 }
 
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
-	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -2886,7 +2987,12 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	}
 	peerID := s.peerIDs[address]
 	if peerID != "" {
+		// observedAddrs is IP/advertise-domain state; nest s.ipStateMu
+		// inside the already-held s.peerMu per the canonical peerMu →
+		// ipStateMu order documented in docs/locking.md.
+		s.ipStateMu.Lock()
 		delete(s.observedAddrs, peerID)
+		s.ipStateMu.Unlock()
 	}
 
 	// Remove session-scoped metadata so disconnected peers do not
@@ -2897,10 +3003,13 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 
 	// Recompute version policy so that the build signal immediately
 	// reflects the loss of this peer's vote.
+	// statusMu is INNERMOST per canonical peerMu → statusMu order.
+	s.statusMu.Lock()
 	s.recomputeVersionPolicyLocked(time.Now().UTC())
+	s.statusMu.Unlock()
 
-	s.mu.Unlock()
-	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 	// Refresh peer-health snapshot immediately so UI pollers observe the
 	// disconnect without waiting for the 500 ms refresher tick.  Same
@@ -2922,9 +3031,9 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 // peerVersion and peerMinimum carry the remote peer's version evidence
 // when available (from the wire error frame or welcome); pass 0 when unknown.
 func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersion, peerMinimum domain.ProtocolVersion) {
-	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 
@@ -2961,6 +3070,13 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 
 		// Propagate ban to the IP level so that other ports on the same
 		// host are also excluded from dial candidates.
+		//
+		// bannedIPSet lives in the IP/advertise domain; nest s.ipStateMu
+		// inside the already-held s.peerMu per the canonical peerMu →
+		// ipStateMu order documented in docs/locking.md.  s.peers is
+		// peer-domain so the sibling enumeration stays outside the
+		// ipStateMu window — the map write is the only ipState
+		// mutation here.
 		if ip, _, ok := splitHostPort(string(address)); ok {
 			var affected []domain.PeerAddress
 			for _, p := range s.peers {
@@ -2968,6 +3084,7 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 					affected = append(affected, p.Address)
 				}
 			}
+			s.ipStateMu.Lock()
 			s.bannedIPSet[ip] = domain.BannedIPEntry{
 				IP:            ip,
 				BannedUntil:   bannedUntil,
@@ -2975,6 +3092,7 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 				BanReason:     "incompatible_protocol",
 				AffectedPeers: affected,
 			}
+			s.ipStateMu.Unlock()
 		}
 
 		log.Info().
@@ -3006,6 +3124,13 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 	now := time.Now().UTC()
 	if peerMinimum > domain.ProtocolVersion(config.ProtocolVersion) {
 		peerID := s.peerIDs[address]
+		// statusMu guards s.versionPolicy for both
+		// recordIncompatibleObservationLocked and the trailing
+		// recomputeVersionPolicyLocked. Acquired INNERMOST per canonical
+		// peerMu → statusMu order; held across setVersionLockoutLocked
+		// too so the reporter update and the lockout-based signal stay
+		// consistent inside a single status-domain section.
+		s.statusMu.Lock()
 		s.recordIncompatibleObservationLocked(peerID, peerVersion, peerMinimum, now)
 
 		peerClientVer := domain.ClientVersion(s.peerVersions[address])
@@ -3017,11 +3142,16 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 		// existed. Without this second recompute the snapshot would be
 		// stale until the next unrelated event.
 		s.recomputeVersionPolicyLocked(now)
+		s.statusMu.Unlock()
 	}
 
+	// emitPeerHealthDeltaLocked reads s.pending (delivery-domain, under
+	// s.deliveryMu).  Canonical order s.peerMu OUTER → s.deliveryMu INNER.
+	s.deliveryMu.RLock()
 	s.emitPeerHealthDeltaLocked(health)
-	s.mu.Unlock()
-	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.deliveryMu.RUnlock()
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 }
 
 // markPeerStateInterval is the minimum interval between full state
@@ -3029,12 +3159,12 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 // aggregate refresh) for the same peer in markPeerWrite / markPeerRead.
 //
 // The throttle is enforced via peerActivityNanos (sync.Map of
-// *atomic.Int64) which lives entirely outside s.mu. On the fast path
+// *atomic.Int64) which lives entirely outside s.peerMu. On the fast path
 // (< 1s since last recompute) the functions return immediately with
 // zero locking. Only when the interval elapses does the slow path
-// acquire s.mu.Lock(), flush timestamps into health, and run the
+// acquire s.peerMu.Lock(), flush timestamps into health, and run the
 // state machine. This eliminates the continuous writer pressure that
-// previously starved s.mu.RLock() callers (loadConversation,
+// previously starved s.peerMu.RLock() callers (loadConversation,
 // fetch_network_stats).
 const markPeerStateInterval = time.Second
 
@@ -3082,12 +3212,12 @@ func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame
 		return
 	}
 
-	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
 	}()
 
 	address = s.resolveHealthAddress(address)
@@ -3122,12 +3252,12 @@ func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame)
 		return
 	}
 
-	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "markPeerRead").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "markPeerRead").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
 	}()
 
 	address = s.resolveHealthAddress(address)
@@ -3146,12 +3276,12 @@ func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
 		return
 	}
 
-	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	}()
 
 	address = s.resolveHealthAddress(address)
@@ -3161,7 +3291,8 @@ func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
 }
 
 // nextConnIDLocked returns a monotonically increasing connection ID.
-// Must be called with s.mu held (write lock).
+// Mutates s.connIDCounter, which is peer-domain state — caller MUST
+// hold s.peerMu write lock.
 func (s *Service) nextConnIDLocked() domain.ConnID {
 	s.connIDCounter++
 	return domain.ConnID(s.connIDCounter)
@@ -3169,7 +3300,8 @@ func (s *Service) nextConnIDLocked() domain.ConnID {
 
 // inboundConnIDsLocked returns the connection IDs for all active inbound
 // connections that declared the given overlay address in their hello frame.
-// Must be called with s.mu held (read lock).
+// Reads peer-domain inbound-conn state — caller MUST hold s.peerMu
+// (read or write).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
 	s.forEachInboundConnLocked(func(info connInfo) bool {
@@ -3188,9 +3320,10 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 // inbound connection for the given overlay address, or zero value and
 // false if none exists. When multiple connections are active, any one of
 // them is returned (all are equally valid for fire-and-forget writes).
-// Must be called with s.mu held (read lock). ConnID-first (PR 10.6):
-// callers resolve the transport through the registry rather than holding
-// a raw net.Conn across the lock boundary.
+// Reads peer-domain inbound-conn state — caller MUST hold s.peerMu
+// (read or write). ConnID-first (PR 10.6): callers resolve the
+// transport through the registry rather than holding a raw net.Conn
+// across the lock boundary.
 func (s *Service) inboundConnIDForAddressLocked(address domain.PeerAddress) (domain.ConnID, bool) {
 	var result domain.ConnID
 	var found bool
@@ -3258,7 +3391,20 @@ func resetPeerHealthForRecoveryLocked(h *peerHealth) {
 	}
 }
 
+// updatePeerStateLocked transitions a peer's State field and fans out side
+// effects (aggregate status recomputation + ebus delta).
+//
+// Caller MUST hold s.peerMu.Lock.  This function internally acquires
+// s.deliveryMu.RLock for the full body — both the pending log line and
+// publishAggregateStatusChangedLocked need to read s.pending / s.orphaned.
+// It also nests s.statusMu.Lock around publishAggregateStatusChangedLocked
+// because s.aggregateStatus / s.lastPublishedAggregateStatus /
+// s.lastAggregateStatusPublishAt live in the status domain.
+//
+// Canonical order: peerMu → deliveryMu → statusMu with statusMu INNERMOST.
 func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
+	s.deliveryMu.RLock()
+	defer s.deliveryMu.RUnlock()
 	if health.State == next {
 		// State unchanged — still emit the delta so that timestamp updates
 		// (LastPongAt, LastUsefulReceiveAt) reach ebus subscribers.
@@ -3268,7 +3414,8 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 		return
 	}
 	if health.State != "" {
-		log.Info().Str("peer", string(health.Address)).Str("from", health.State).Str("to", next).Int("pending", len(s.pending[health.Address])).Int("failures", health.ConsecutiveFailures).Msg("peer_state_change")
+		pendingCount := len(s.pending[health.Address])
+		log.Info().Str("peer", string(health.Address)).Str("from", health.State).Str("to", next).Int("pending", pendingCount).Int("failures", health.ConsecutiveFailures).Msg("peer_state_change")
 	}
 	health.State = next
 
@@ -3278,7 +3425,9 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 	// TopicAggregateStatusChanged only when the semantic payload differs —
 	// the helper owns the no-op gate that keeps peer-storm bursts from
 	// stampeding the UI with byte-identical snapshots.
+	s.statusMu.Lock()
 	s.publishAggregateStatusChangedLocked()
+	s.statusMu.Unlock()
 
 	s.emitPeerHealthDeltaLocked(health)
 }
@@ -3290,9 +3439,17 @@ func (s *Service) updatePeerStateLocked(health *peerHealth, next string) {
 //
 // Callers are rate-limited by peerActivityNeedsRecompute (~1 call/sec/peer)
 // and pong bypass (~30 s interval), so emission frequency is bounded and
-// does not create writer pressure on s.mu.
-// Caller must hold s.mu.
+// does not create writer pressure on s.peerMu.
+//
+// Caller MUST hold s.peerMu at least for read (peer-domain fields
+// s.peerIDs / s.peerVersions / s.peerBuilds / s.persistedMeta are read
+// here) AND s.deliveryMu at least for read (s.pending feeds PendingCount).
+// statusMu is NOT required — this helper reads no status-domain fields.
+// Keeping the delivery RLock in the caller avoids nested s.deliveryMu.RLock
+// recursion, which is unsafe on a writer-preferring RWMutex when another
+// writer is queued.
 func (s *Service) emitPeerHealthDeltaLocked(health *peerHealth) {
+	pendingCount := len(s.pending[health.Address])
 	delta := ebus.PeerHealthDelta{
 		Address:             health.Address,
 		PeerID:              s.peerIDs[health.Address],
@@ -3302,7 +3459,7 @@ func (s *Service) emitPeerHealthDeltaLocked(health *peerHealth) {
 		State:               health.State,
 		Connected:           health.Connected,
 		Score:               health.Score,
-		PendingCount:        len(s.pending[health.Address]),
+		PendingCount:        pendingCount,
 		ConsecutiveFailures: health.ConsecutiveFailures,
 		LastConnectedAt:     ebus.TimePtr(health.LastConnectedAt),
 		LastDisconnectedAt:  ebus.TimePtr(health.LastDisconnectedAt),
@@ -3339,7 +3496,9 @@ func (s *Service) emitPeerHealthDeltaLocked(health *peerHealth) {
 // emitPeerPendingChanged publishes a lightweight TopicPeerPendingChanged event.
 // Called after queue mutations (enqueue, flush, expiry) so subscribers can
 // update the per-peer pending badge without waiting for the next state
-// transition. Must be called WITHOUT s.mu held (Publish is non-blocking).
+// transition. Must be called WITHOUT any Service mutex held (Publish is
+// non-blocking but the publisher must not retain peer-domain locks around
+// unbounded downstream handlers).
 func (s *Service) emitPeerPendingChanged(address domain.PeerAddress, count int) {
 	s.eventBus.Publish(ebus.TopicPeerPendingChanged, ebus.PeerPendingDelta{
 		Address: address,
@@ -3349,15 +3508,15 @@ func (s *Service) emitPeerPendingChanged(address domain.PeerAddress, count int) 
 
 // peerHealthFrames returns the fetch_peer_health RPC body.
 //
-// The hot path is statically decoupled from both s.mu and cm.mu.  All
-// per-peer state is read from s.peerHealthSnap; all CM-slot fields are
-// read from s.cmSlotsSnap.  Both snapshots are rebuilt every
+// The hot path is statically decoupled from both s.peerMu and cm.mu.
+// All per-peer state is read from s.peerHealthSnap; all CM-slot fields
+// are read from s.cmSlotsSnap.  Both snapshots are rebuilt every
 // networkStatsSnapshotInterval by hotReadsRefreshLoop (see
 // peer_health_snapshot.go, cm_slots_snapshot.go) and primed synchronously
 // by primeHotReadSnapshots() from Run() before the listener opens — so
 // this handler performs only atomic loads, never synchronously rebuilds,
-// and therefore never reaches cm.mu.RLock or s.mu.RLock on the RPC
-// goroutine.  A writer holding s.mu for many seconds can stall the
+// and therefore never reaches cm.mu.RLock or s.peerMu.RLock on the RPC
+// goroutine.  A writer holding s.peerMu for many seconds can stall the
 // refresher ticks but cannot stall this handler.
 //
 // If either atomic load ever returns nil (refresher goroutine crashed or
@@ -3371,13 +3530,13 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	// Load the cached ConnectionManager slots view instead of calling
 	// cm.Slots() on the RPC path.  Slots() takes cm.mu.RLock which, under
 	// writer-preferring semantics, would queue behind any CM writer and
-	// re-introduce the reader-starvation shape the s.mu decoupling
+	// re-introduce the reader-starvation shape the s.peerMu decoupling
 	// eliminated.  See cm_slots_snapshot.go for the contract.
 	slotsSnap := s.loadCMSlotsSnapshot()
 
-	// Capture snapshots — independent of s.mu; captureManager owns its own
-	// mutex.  Done before loading the health snapshot so the two views are
-	// as closely aligned as possible in wall-clock time.
+	// Capture snapshots — independent of s.peerMu; captureManager owns
+	// its own mutex.  Done before loading the health snapshot so the two
+	// views are as closely aligned as possible in wall-clock time.
 	captureByConn := make(map[domain.ConnID]captureSnap)
 	if cm := s.captureManager; cm != nil {
 		for _, snap := range cm.AllSessionSnapshots() {
@@ -3397,7 +3556,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		// No primed snapshot and no refresher tick yet — should not happen
 		// in production because Run() calls primeHotReadSnapshots() before
 		// the listener opens.  Return nil rather than synchronously
-		// rebuilding (which would take s.mu.RLock on the RPC goroutine and
+		// rebuilding (which would take s.peerMu.RLock on the RPC goroutine and
 		// break the lock-free contract).
 		return nil
 	}
@@ -3517,7 +3676,8 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 }
 
 // captureSnap is the pre-fetched, lock-free view of a capture session
-// used to enrich PeerHealthFrame without holding s.mu and m.mu together.
+// used to enrich PeerHealthFrame without holding s.peerMu and m.mu
+// together.
 type captureSnap struct {
 	Recording  bool
 	File       string
@@ -3548,7 +3708,8 @@ func enrichCaptureFields(phf *protocol.PeerHealthFrame, snaps map[domain.ConnID]
 // peerCapabilitiesLocked returns the negotiated capabilities for a peer
 // as wire-format strings for PeerHealthFrame.  Checks outbound sessions
 // first, then falls back to inbound NetCores.
-// Must be called while holding s.mu at least for read.
+// Reads s.sessions and peer-domain inbound-conn state — caller MUST
+// hold s.peerMu (read or write).
 func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
 	if session := s.resolveSessionLocked(address); session != nil && len(session.capabilities) > 0 {
 		return domain.CapabilityStrings(session.capabilities)
@@ -3633,16 +3794,30 @@ func (s *Service) enqueuePeerFrame(address domain.PeerAddress, frame protocol.Fr
 	}
 }
 
+// queuePeerFrame is cross-domain:
+//   - s.resolveHealthAddress touches peer-domain fields → s.peerMu.Lock.
+//   - s.pending / s.pendingKeys / noteOutboundQueuedLocked / outbound live in the
+//     delivery domain → s.deliveryMu.Lock.
+//   - refreshAggregatePendingLocked + read of s.aggregateStatus touch the
+//     status domain → s.statusMu.Lock (INNERMOST).
+//
+// Canonical order: peerMu → deliveryMu → statusMu.
 func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Frame) bool {
-	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("s_mu_writer")
+	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
 	primary := s.resolveHealthAddress(address)
+
+	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("delivery_mu_writer")
 
 	key := pendingFrameKey(primary, frame)
 	if key == "" {
-		s.mu.Unlock()
-		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_nokey").Str("address", string(address)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_nokey").Str("address", string(address)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_nokey").Str("address", string(address)).Msg("peer_mu_writer")
 		return false
 	}
 
@@ -3656,21 +3831,27 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 				break
 			}
 		}
-		s.mu.Unlock()
-		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_dup").Str("address", string(address)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_dup").Str("address", string(address)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_dup").Str("address", string(address)).Msg("peer_mu_writer")
 		s.queuePersist.MarkDirty()
 		return true
 	}
 
 	// Enforce per-peer and global capacity limits.
 	if len(s.pending[primary]) >= maxPendingFramesPerPeer {
-		s.mu.Unlock()
-		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_peerfull").Str("address", string(address)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_peerfull").Str("address", string(address)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_peerfull").Str("address", string(address)).Msg("peer_mu_writer")
 		return false
 	}
 	if len(s.pendingKeys) >= maxPendingFramesTotal {
-		s.mu.Unlock()
-		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_globalfull").Str("address", string(address)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_globalfull").Str("address", string(address)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_globalfull").Str("address", string(address)).Msg("peer_mu_writer")
 		return false
 	}
 
@@ -3681,10 +3862,17 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	s.pendingKeys[key] = struct{}{}
 	s.noteOutboundQueuedLocked(frame, "")
 	pendingCount := len(s.pending[primary])
+	// statusMu is INNERMOST — nest inside the peerMu/deliveryMu section
+	// to update the materialised aggregate pending count and snapshot
+	// the value for the post-unlock ebus publish.
+	s.statusMu.Lock()
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
-	s.mu.Unlock()
-	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.statusMu.Unlock()
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(primary, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
@@ -3725,23 +3913,36 @@ func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) string {
 	}
 }
 
+// flushPendingPeerFrames is cross-domain:
+//   - s.resolveHealthAddress touches peer-domain fields → s.peerMu.Lock.
+//   - s.pending / s.pendingKeys → s.deliveryMu.
+//   - refreshAggregatePendingLocked + read of s.aggregateStatus touch the
+//     status domain → s.statusMu.Lock (INNERMOST).
+//
+// Each lock section below uses the canonical order
+// peerMu → deliveryMu → statusMu.
 func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	session, ok := s.activePeerSession(address)
 	if !ok || session == nil {
 		return
 	}
 
-	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	primary := s.resolveHealthAddress(address)
+	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_wait").Str("address", string(address)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_held").Str("address", string(address)).Msg("delivery_mu_writer")
 	frames := append([]pendingFrame(nil), s.pending[primary]...)
 	delete(s.pending, primary)
 	for _, frame := range frames {
 		delete(s.pendingKeys, pendingFrameKey(primary, frame.Frame))
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 	remaining := make([]pendingFrame, 0)
 	now := time.Now().UTC()
@@ -3768,31 +3969,47 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 		}
 	}
 	if len(remaining) == 0 {
-		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-		s.mu.Lock()
-		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+		// refreshAggregatePendingLocked reads s.pending / s.orphaned
+		// (deliveryMu) and writes s.aggregateStatus (statusMu, INNERMOST).
+		// Canonical order: peerMu → deliveryMu → statusMu.
+		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+		s.peerMu.Lock()
+		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
+		s.deliveryMu.RLock()
+		s.statusMu.Lock()
 		s.refreshAggregatePendingLocked()
 		aggSnap := s.aggregateStatus
-		s.mu.Unlock()
-		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+		s.statusMu.Unlock()
+		s.deliveryMu.RUnlock()
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 		s.queuePersist.MarkDirty()
 		s.emitPeerPendingChanged(primary, 0)
 		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 		return
 	}
 
-	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_wait").Str("address", string(address)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_held").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.pending[primary] = append(s.pending[primary], remaining...)
 	for _, item := range remaining {
 		s.pendingKeys[pendingFrameKey(primary, item.Frame)] = struct{}{}
 	}
 	pendingCount := len(s.pending[primary])
+	// statusMu is INNERMOST per canonical peerMu → deliveryMu → statusMu
+	// order — refreshAggregatePendingLocked writes s.aggregateStatus.
+	s.statusMu.Lock()
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
-	s.mu.Unlock()
-	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.statusMu.Unlock()
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(primary, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
@@ -3812,6 +4029,13 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 // Only fire-and-forget frames are flushed here — request/reply frames
 // (send_message, relay_message) must go through the outbound session to
 // avoid interleaving with the peer's inbound request dispatch loop.
+//
+// Cross-domain:
+//   - refreshAggregatePendingLocked writes s.aggregateStatus → s.statusMu.Lock.
+//   - s.pending / s.pendingKeys → s.deliveryMu.
+//   - peer-domain iteration stays under s.peerMu.
+//
+// Canonical order: peerMu → deliveryMu → statusMu with statusMu INNERMOST.
 func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.PeerAddress) {
 	// If there is already an active outbound session, let flushPendingPeerFrames
 	// handle it to avoid double delivery.
@@ -3819,13 +4043,18 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 		return
 	}
 
-	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_wait").Str("address", string(address)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_held").Str("address", string(address)).Msg("delivery_mu_writer")
 	frames := s.pending[address]
 	if len(frames) == 0 {
-		s.mu.Unlock()
-		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_empty").Str("address", string(address)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_empty").Str("address", string(address)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_empty").Str("address", string(address)).Msg("peer_mu_writer")
 		return
 	}
 
@@ -3844,8 +4073,10 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 		}
 	}
 	if len(toSend) == 0 {
-		s.mu.Unlock()
-		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_none").Str("address", string(address)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_none").Str("address", string(address)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_none").Str("address", string(address)).Msg("peer_mu_writer")
 		return
 	}
 	pendingCount := len(remaining)
@@ -3854,10 +4085,16 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 	} else {
 		delete(s.pending, address)
 	}
+	// statusMu is INNERMOST per canonical peerMu → deliveryMu → statusMu
+	// order — refreshAggregatePendingLocked writes s.aggregateStatus.
+	s.statusMu.Lock()
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
-	s.mu.Unlock()
-	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.statusMu.Unlock()
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(address, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
@@ -3872,14 +4109,14 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 }
 
 func (s *Service) peerSession(address domain.PeerAddress) *peerSession {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	return s.resolveSessionLocked(address)
 }
 
 func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	session := s.resolveSessionLocked(address)
 	if session == nil {
 		return nil, false
@@ -3892,8 +4129,8 @@ func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, b
 }
 
 func (s *Service) peerState(address domain.PeerAddress) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	health := s.health[s.resolveHealthAddress(address)]
 	if health == nil {
 		return peerStateReconnecting
@@ -3942,11 +4179,11 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress,
 			case <-time.After(pongStallTimeout):
 			}
 
-			s.mu.RLock()
+			s.peerMu.RLock()
 			health := s.health[s.resolveHealthAddress(address)]
 			pongReceived := health != nil && !health.LastPongAt.IsZero() && health.LastPongAt.After(sentAt)
 			connected := health != nil && health.Connected
-			s.mu.RUnlock()
+			s.peerMu.RUnlock()
 
 			if !connected {
 				return
@@ -3990,7 +4227,7 @@ func (s *Service) evictStaleInboundConns() {
 		remote string
 	}
 
-	s.mu.RLock()
+	s.peerMu.RLock()
 	var stale []staleEntry
 	s.forEachInboundConnLocked(func(info connInfo) bool {
 		if info.lastActivity.IsZero() {
@@ -4006,7 +4243,7 @@ func (s *Service) evictStaleInboundConns() {
 		}
 		return true
 	})
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 
 	ctx := context.Background()
 	network := s.Network()
@@ -4392,7 +4629,8 @@ func enableTCPKeepAlive(conn net.Conn) {
 // host:defaultPort instead of the original host:customPort), the origin
 // map translates back to the primary address so that score/cooldown
 // accumulate on a single entry regardless of which port was dialled.
-// Must be called with s.mu held (read lock sufficient).
+// Reads s.dialOrigin, which is peer-domain state — caller MUST hold
+// s.peerMu (read or write).
 func (s *Service) resolveHealthAddress(address domain.PeerAddress) domain.PeerAddress {
 	if origin, ok := s.dialOrigin[address]; ok {
 		return origin
@@ -4406,7 +4644,8 @@ func (s *Service) resolveHealthAddress(address domain.PeerAddress) domain.PeerAd
 // address while the session is stored under a fallback dial address.
 // In that case we scan dialOrigin (fallback→primary) to find the
 // reverse mapping.
-// Must be called with s.mu held (read lock sufficient).
+// Reads s.sessions and s.dialOrigin, which are peer-domain state —
+// caller MUST hold s.peerMu (read or write).
 func (s *Service) resolveSessionLocked(address domain.PeerAddress) *peerSession {
 	if session := s.sessions[address]; session != nil {
 		return session
@@ -4452,12 +4691,12 @@ func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress)
 		// collapses health updates onto one entry regardless of which port
 		// the TCP connection used.
 		if address != primary {
-			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-			s.mu.Lock()
-			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+			s.peerMu.Lock()
+			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 			s.dialOrigin[address] = primary
-			s.mu.Unlock()
-			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 		}
 		return DialResult{
 			Session:          session,
@@ -4503,12 +4742,12 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	reader := bufio.NewReader(conn)
-	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	cid := s.nextConnIDLocked()
-	s.mu.Unlock()
-	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	session := &peerSession{
 		address:      address,
 		peerIdentity: "",
@@ -4640,13 +4879,15 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// application-level setup (initPeerSession) fails, the protocol is
 	// compatible. Without this, a subscribe/sync failure would leave sibling
 	// ports on the same host incorrectly excluded from Candidates().
+	//
+	// s.ipStateMu, not s.peerMu: bannedIPSet is IP-domain state.
 	if ip, _, ok := splitHostPort(string(dialAddress)); ok {
-		log.Trace().Str("site", "onCMSessionEstablished_clearIPBan").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("s_mu_writer")
-		s.mu.Lock()
-		log.Trace().Str("site", "onCMSessionEstablished_clearIPBan").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("s_mu_writer")
+		log.Trace().Str("site", "onCMSessionEstablished_clearIPBan").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("ip_state_mu_writer")
+		s.ipStateMu.Lock()
+		log.Trace().Str("site", "onCMSessionEstablished_clearIPBan").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("ip_state_mu_writer")
 		delete(s.bannedIPSet, ip)
-		s.mu.Unlock()
-		log.Trace().Str("site", "onCMSessionEstablished_clearIPBan").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("s_mu_writer")
+		s.ipStateMu.Unlock()
+		log.Trace().Str("site", "onCMSessionEstablished_clearIPBan").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("ip_state_mu_writer")
 	}
 
 	// Apply welcome metadata — pure map writes, no I/O.
@@ -4657,9 +4898,9 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// buildPeerExchangeResponse() do not expose this peer during setup.
 	if wm := session.welcomeMeta; wm != nil {
 		s.learnIdentityFromWelcome(wm.welcome)
-		s.mu.RLock()
+		s.peerMu.RLock()
 		healthKey := s.resolveHealthAddress(dialAddress)
-		s.mu.RUnlock()
+		s.peerMu.RUnlock()
 		s.addPeerID(healthKey, session.peerIdentity)
 		s.addPeerVersion(healthKey, wm.clientVersion)
 		s.addPeerBuild(healthKey, wm.clientBuild)
@@ -4678,12 +4919,12 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("cm_session_setup_failed")
 			// Session was never registered in s.sessions / s.upstream, so
 			// only dialOrigin (set by dialForCM for fallback ports) needs cleanup.
-			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("s_mu_writer")
-			s.mu.Lock()
-			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("s_mu_writer")
+			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+			s.peerMu.Lock()
+			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 			delete(s.dialOrigin, dialAddress)
-			s.mu.Unlock()
-			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("s_mu_writer")
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 			_ = session.Close()
 			// Notify CM so it can reconnect with backoff.
 			s.connManager.EmitSlot(ActiveSessionLost{
@@ -4709,13 +4950,22 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		// Register session in Service maps. This is the first point where
 		// the session becomes visible to routingTargets, enqueuePeerFrame,
 		// connectedHostsLocked, and other lookups.
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("s_mu_writer")
-		s.mu.Lock()
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("s_mu_writer")
+		//
+		// Cross-domain: s.sessions belongs to peer domain (s.peerMu),
+		// s.upstream belongs to delivery domain (s.deliveryMu).  Canonical
+		// s.peerMu OUTER → s.deliveryMu INNER.
+		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+		s.peerMu.Lock()
+		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+		s.deliveryMu.Lock()
+		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 		s.sessions[dialAddress] = session
 		s.upstream[dialAddress] = struct{}{}
-		s.mu.Unlock()
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 
 		s.markPeerConnected(dialAddress, peerDirectionOutbound)
 		s.flushPendingPeerFrames(dialAddress)
@@ -4744,17 +4994,26 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		// must NOT call onPeerSessionClosed a second time — that would
 		// double-decrement the identity session counter and could remove
 		// a live route belonging to a replacement session.
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("s_mu_writer")
-		s.mu.Lock()
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("s_mu_writer")
+		//
+		// Cross-domain cleanup: s.sessions / s.dialOrigin → s.peerMu;
+		// s.upstream → s.deliveryMu.  Canonical s.peerMu OUTER →
+		// s.deliveryMu INNER.
+		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+		s.peerMu.Lock()
+		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+		s.deliveryMu.Lock()
+		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 		ownedCleanup := s.sessions[dialAddress] == session
 		if ownedCleanup {
 			delete(s.sessions, dialAddress)
 			delete(s.upstream, dialAddress)
 			delete(s.dialOrigin, dialAddress)
 		}
-		s.mu.Unlock()
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("s_mu_writer")
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 
 		// Routing table: deregister direct peer only if this goroutine
 		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
@@ -4806,17 +5065,25 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// deactivateSlot path). In that case the goroutine already called
 	// onPeerSessionClosed, and calling it again here would double-decrement
 	// the identity session counter.
-	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_wait").Str("address", string(addr)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("s_mu_writer")
+	//
+	// Cross-domain: s.sessions / s.dialOrigin → s.peerMu; s.upstream →
+	// s.deliveryMu.  Canonical s.peerMu OUTER → s.deliveryMu INNER.
+	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_wait").Str("address", string(addr)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_wait").Str("address", string(addr)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("delivery_mu_writer")
 	ownedCleanup := info.Session != nil && s.sessions[addr] == info.Session
 	if ownedCleanup {
 		delete(s.sessions, addr)
 		delete(s.upstream, addr)
 		delete(s.dialOrigin, addr)
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("s_mu_writer")
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("peer_mu_writer")
 
 	// Routing table: deregister direct peer only if we owned the entry.
 	// Pointer-compare ensures we don't accidentally delete or deregister
@@ -4875,14 +5142,14 @@ func (s *Service) initPeerSession(session *peerSession) error {
 // dialOrigin[fallback]=primary BEFORE the generation check. This callback
 // cleans up that leaked entry.
 func (s *Service) onCMStaleSession(session *peerSession) {
-	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_wait").Str("address", string(session.address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_held").Str("address", string(session.address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_wait").Str("address", string(session.address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_held").Str("address", string(session.address)).Msg("peer_mu_writer")
 	// Clean up dialOrigin if it was registered for this address.
 	// No pointer-compare needed — dialOrigin maps addresses, not sessions.
 	delete(s.dialOrigin, session.address)
-	s.mu.Unlock()
-	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_released").Str("address", string(session.address)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_released").Str("address", string(session.address)).Msg("peer_mu_writer")
 }
 
 // onCMDialFailed is called by ConnectionManager when a dial attempt fails.
@@ -4917,12 +5184,12 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 			// handshake failed before onCMSessionEstablished could populate
 			// these maps from the welcome frame.
 			if ipe.ClientVersion != "" {
-				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-				s.mu.Lock()
-				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+				s.peerMu.Lock()
+				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 				s.peerVersions[address] = ipe.ClientVersion
-				s.mu.Unlock()
-				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+				s.peerMu.Unlock()
+				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 			}
 		}
 		s.penalizeOldProtocolPeer(address, peerVersion, peerMinimum)
@@ -4935,7 +5202,7 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 // address that resolved to our own Ed25519 identity so the CM dial
 // loop stops redialing the self-loopback. Writes LastErrorCode /
 // LastError to the health snapshot so diagnostics surface the real
-// cause instead of a generic disconnect reason. Runs under s.mu.
+// cause instead of a generic disconnect reason. Runs under s.peerMu.
 //
 // No-accumulation contract (matches the peerBanSelfIdentity comment
 // in peer_state.go and the onCMDialFailed caller comment): the
@@ -4951,9 +5218,9 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 // LastDisconnectedAt, BannedUntil) are always refreshed because
 // they reflect "right now" and must not stale-pin a prior classification.
 func (s *Service) applySelfIdentityCooldown(address domain.PeerAddress, selfErr *selfIdentityError) {
-	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 	now := time.Now().UTC()
@@ -4980,9 +5247,13 @@ func (s *Service) applySelfIdentityCooldown(address domain.PeerAddress, selfErr 
 		health.Score = clampScore(health.Score + peerScoreOldProtocol)
 		health.ConsecutiveFailures++
 	}
+	// emitPeerHealthDeltaLocked reads s.pending (delivery-domain, under
+	// s.deliveryMu).  Canonical order s.peerMu OUTER → s.deliveryMu INNER.
+	s.deliveryMu.RLock()
 	s.emitPeerHealthDeltaLocked(health)
-	s.mu.Unlock()
-	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+	s.deliveryMu.RUnlock()
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 	log.Warn().
 		Str("peer", string(address)).
@@ -5268,9 +5539,9 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	// Read the announce-state gate + inbound list from the cached
 	// peers_exchange snapshot.  The snapshot is rebuilt every
 	// networkStatsSnapshotInterval by hotReadsRefreshLoop under a short
-	// s.mu.RLock (see peers_exchange_snapshot.go); this handler never
-	// acquires s.mu, so get_peers is not serialised behind a queued
-	// writer on the coarse Service lock.  The snapshot is primed
+	// s.peerMu.RLock (see peers_exchange_snapshot.go); this handler never
+	// acquires s.peerMu, so get_peers is not serialised behind a queued
+	// writer on the peer-domain lock.  The snapshot is primed
 	// synchronously by primeHotReadSnapshots() before the listener
 	// opens, so pxSnap is non-nil in production; any nil observed here
 	// comes from a test that bypasses Run() without priming.
@@ -5299,7 +5570,7 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	// s.connManager.Slots() directly.  Slots() takes cm.mu.RLock, and
 	// Go's RWMutex is writer-preferring: a queued CM writer (slot state
 	// transition, dial completion, eviction) would block this RPC reader
-	// exactly the way s.mu used to.  The snapshot is rebuilt every
+	// exactly the way the pre-split s.mu used to.  The snapshot is rebuilt every
 	// networkStatsSnapshotInterval by hotReadsRefreshLoop and primed
 	// synchronously in Run() before the listener opens, so this handler
 	// performs only atomic loads and never acquires cm.mu.  When the
@@ -5380,9 +5651,9 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	// 3. Supplement with candidates from the peers_exchange snapshot.  The
 	// list was produced by peerProvider.Candidates() at refresh time
 	// (already sorted by score descending) and baked into the snapshot
-	// precisely because Candidates() re-enters s.mu.RLock via its callbacks
-	// — iterating it directly here would recouple get_peers to s.mu and
-	// reintroduce the writer-storm starvation (see peer_management.go
+	// precisely because Candidates() re-enters s.peerMu.RLock via its callbacks
+	// — iterating it directly here would recouple get_peers to s.peerMu
+	// and reintroduce the writer-storm starvation (see peer_management.go
 	// buildPeerExchangeResponse comment and peers_exchange_snapshot.go).
 	var candidates []domain.PeerAddress
 	if pxSnap != nil {

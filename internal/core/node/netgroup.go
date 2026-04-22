@@ -96,6 +96,14 @@ func computeReachableGroups(cfg config.Node) map[domain.NetGroup]struct{} {
 }
 
 // canReach returns true if the given address belongs to a reachable group.
+//
+// reachableGroups is populated exactly once by computeReachableGroups
+// during Service construction and treated as immutable thereafter, so
+// this read is intentionally lock-free. The invariant is documented on
+// the ipStateMu field declaration in service.go: any future change that
+// introduces a runtime writer for reachableGroups must also add
+// synchronisation on every reader path (this helper, NetworksFn, and
+// the hello-frame builder) in the same commit.
 func (s *Service) canReach(address domain.PeerAddress) bool {
 	g := classifyAddress(address)
 	_, ok := s.reachableGroups[g]

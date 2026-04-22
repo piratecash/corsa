@@ -225,9 +225,9 @@ func TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend(t *testing.T) 
 			// connHasCapability — resolves to this test pc. The backend
 			// override still owns the Network.SendFrame path, so the outbound
 			// bytes surface on backend.Outbound regardless.
-			svc.mu.Lock()
+			svc.peerMu.Lock()
 			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
-			svc.mu.Unlock()
+			svc.peerMu.Unlock()
 
 			if ok := svc.dispatchNetworkFrame(connID, tc.inboundFrameLine); !ok {
 				t.Fatalf("dispatchNetworkFrame(%s) returned false; expected accepted=true", tc.name)
@@ -420,9 +420,9 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 				pc.SetAuth(&connauth.State{Verified: true})
 			}
 
-			svc.mu.Lock()
+			svc.peerMu.Lock()
 			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
-			svc.mu.Unlock()
+			svc.peerMu.Unlock()
 
 			// Sync error paths return accepted=false; the dispatch return
 			// value still says "false" because the frame was not accepted
@@ -541,9 +541,9 @@ func TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend(t *testing.
 			// Tracked inbound entry — required so
 			// forEachTrackedInboundConnLocked locates this NetCore by
 			// RemoteAddr and hands its ConnID to the bytes helper.
-			svc.mu.Lock()
+			svc.peerMu.Lock()
 			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc, tracked: true})
-			svc.mu.Unlock()
+			svc.peerMu.Unlock()
 
 			if tc.registerInBackend {
 				backend.Register(connID, netcore.Inbound, pc.RemoteAddr())
@@ -681,7 +681,7 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 			// when netCoreForID returns nil (that is the "already
 			// unregistered" legacy path and would mask the bytes-helper
 			// outcome we are asserting).
-			svc.mu.Lock()
+			svc.peerMu.Lock()
 			svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
 			// Install the subscriber we expect writePushFrame to either
 			// keep (sent) or evict (drop).
@@ -690,7 +690,7 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 			svc.subs[recipient] = map[string]*subscriber{
 				subID: {id: subID, recipient: recipient, connID: connID},
 			}
-			svc.mu.Unlock()
+			svc.peerMu.Unlock()
 
 			backend.Register(connID, netcore.Inbound, pc.RemoteAddr())
 
@@ -705,9 +705,9 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 			sub := &subscriber{id: subID, recipient: recipient, connID: connID}
 			svc.writePushFrame(sub, protocol.Frame{Type: "inbox_item", Recipient: recipient})
 
-			svc.mu.RLock()
+			svc.peerMu.RLock()
 			_, stillPresent := svc.subs[recipient][subID]
-			svc.mu.RUnlock()
+			svc.peerMu.RUnlock()
 
 			if stillPresent != tc.expectSubscriber {
 				t.Fatalf("%s: subscriber present=%v, want %v",

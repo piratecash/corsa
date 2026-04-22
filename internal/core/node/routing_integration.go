@@ -171,7 +171,7 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 
 	var targetID domain.ConnID
 	var found bool
-	s.mu.RLock()
+	s.peerMu.RLock()
 	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
 		if info.remoteAddr == remoteAddr {
 			targetID = info.id
@@ -180,7 +180,7 @@ func (s *Service) writeFrameToInbound(address domain.PeerAddress, frame protocol
 		}
 		return true
 	})
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 
 	if !found {
 		return false
@@ -243,8 +243,8 @@ func (s *Service) sendFrameToAddress(address domain.PeerAddress, frame protocol.
 // without mesh_relay_v1) cannot carry data-plane relay traffic. Advertising
 // routes through such a peer would create non-deliverable paths.
 func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 
 	seen := make(map[domain.PeerIdentity]struct{})
 	var targets []routing.AnnounceTarget
@@ -582,9 +582,9 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 	// This avoids unnecessary Lock contention on every announce_routes,
 	// which was causing inter-test timing regressions in full package runs.
 	if len(drainIdentities) > 0 {
-		s.mu.RLock()
+		s.deliveryMu.RLock()
 		hasPending := len(s.pending) > 0
-		s.mu.RUnlock()
+		s.deliveryMu.RUnlock()
 		if hasPending {
 			s.goBackground(func() { s.drainPendingForIdentities(drainIdentities) })
 		}
@@ -615,17 +615,17 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 		return
 	}
 
-	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
 	s.identitySessions[peerIdentity]++
 
 	if hasRelayCap {
 		s.identityRelaySessions[peerIdentity]++
 	}
 	firstRelay := s.identityRelaySessions[peerIdentity] == 1
-	s.mu.Unlock()
-	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
 
 	if !hasRelayCap {
 		log.Debug().
@@ -691,13 +691,13 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 		return
 	}
 
-	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("s_mu_writer")
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
 	count := s.identitySessions[peerIdentity]
 	if count <= 0 {
-		s.mu.Unlock()
-		log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Str("reason", "no_session").Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Str("reason", "no_session").Msg("peer_mu_writer")
 		return
 	}
 	s.identitySessions[peerIdentity]--
@@ -717,8 +717,8 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 			}
 		}
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("peer_mu_writer")
 
 	if !lastRelay {
 		// No relay sessions left (or never had one). If this is also the
@@ -774,8 +774,8 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 	// The fanout is parallel (one goroutine per peer) because
 	// SendAnnounceRoutes is bounded by syncFlushTimeout per inbound peer;
 	// any stuck peer would otherwise serialise the whole disconnect path
-	// and starve unrelated s.mu readers (the 2s bootstrapLoop ticker and
-	// the 1s metrics collector) for N * syncFlushTimeout seconds.
+	// and starve unrelated s.peerMu readers (the 2s bootstrapLoop ticker
+	// and the 1s metrics collector) for N * syncFlushTimeout seconds.
 	var sent, dropped int
 	if len(result.Withdrawals) > 0 {
 		sent, dropped = s.fanoutAnnounceRoutes(s.runCtx, s.routingCapablePeers(), result.Withdrawals)
@@ -811,7 +811,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 // without parsing per-peer noise.
 //
 // Reentrancy: SendAnnounceRoutes itself is safe to call from several
-// goroutines in parallel. Inbound delivery takes a brief s.mu.RLock
+// goroutines in parallel. Inbound delivery takes a brief s.peerMu.RLock
 // inside writeFrameToInbound and releases it before the blocking
 // sendFrameBytesViaNetworkSync call; outbound delivery pushes onto the
 // per-session send channel which owns its own synchronisation. No
@@ -867,9 +867,9 @@ func (s *Service) triggerDrainForExposed(exposed []routing.PeerIdentity) {
 	for _, id := range exposed {
 		identities[domain.PeerIdentity(id)] = struct{}{}
 	}
-	s.mu.RLock()
+	s.deliveryMu.RLock()
 	hasPending := len(s.pending) > 0
-	s.mu.RUnlock()
+	s.deliveryMu.RUnlock()
 	if hasPending {
 		s.goBackground(func() { s.drainPendingForIdentities(identities) })
 	}
@@ -998,8 +998,8 @@ func (s *Service) sendRelayToAddress(address domain.PeerAddress, msg protocol.En
 // peers, the returned address is an "inbound:" prefixed key that must be
 // handled by sendFrameToAddress (not enqueuePeerFrame directly).
 func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domain.PeerAddress {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 
 	// Outbound sessions first — preferred because they have async send queues.
 	for address, session := range s.sessions {
@@ -1036,8 +1036,8 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 // Checks both outbound sessions and inbound connections. For inbound-only
 // peers, the returned address is an "inbound:" prefixed key.
 func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.PeerAddress {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 
 	// Outbound sessions first.
 	for address, session := range s.sessions {
@@ -1197,8 +1197,8 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 // (conn.RemoteAddr().String()). The returned value is the peer's Ed25519
 // identity fingerprint.
 func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIdentity {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 
 	// Outbound session: address is the session map key.
 	if session := s.sessions[address]; session != nil {
@@ -1256,7 +1256,7 @@ func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddr
 }
 
 func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool) []domain.PeerAddress {
-	s.mu.RLock()
+	s.peerMu.RLock()
 	now := time.Now().UTC()
 
 	// Phase 1: collect scored session targets (preferred — health-checked,
@@ -1307,7 +1307,7 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 	// are up gets gossipped only to existing sessions (possibly back to the
 	// sender) and never reaches peers whose sessions haven't started yet.
 	peers := s.peersSnapshotLocked()
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 
 	var pendingPeers []domain.PeerAddress
 	for _, peer := range peers {
@@ -1391,9 +1391,9 @@ func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Env
 	// full). push_message is fire-and-forget so it is safe to interleave on
 	// the inbound conn without disrupting request/reply traffic.
 	resolved := s.resolveHealthAddress(address)
-	s.mu.RLock()
+	s.peerMu.RLock()
 	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 	if haveInbound {
 		// Fire-and-forget gossip inbound-direct fallback — Network-routed
 		// so a test backend can intercept it; ctx is Service lifecycle.
@@ -1435,9 +1435,9 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 
 	// Try authenticated inbound connection before expensive TCP dial.
 	resolved := s.resolveHealthAddress(address)
-	s.mu.RLock()
+	s.peerMu.RLock()
 	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 	if haveInbound {
 		// Fire-and-forget push_notice inbound-direct fallback — see
 		// gossip-message counterpart above for the same ctx rationale.
@@ -1629,7 +1629,7 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	// Bail out if the service is shutting down. Drain goroutines are
 	// fire-and-forget; without this check they could run against a
 	// half-torn-down Service (closed connections, cancelled contexts),
-	// causing write-deadline timeouts that serialize on s.mu and stall
+	// causing write-deadline timeouts that serialize on s.peerMu and stall
 	// other goroutines sharing the same lock.
 	select {
 	case <-s.done:
@@ -1659,9 +1659,9 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	// No persist happens here — the on-disk state still contains the
 	// extracted frames. If the process crashes before we persist below,
 	// frames survive in queue-*.json and will be retried on restart.
-	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_wait").Int("identities", len(identities)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_held").Int("identities", len(identities)).Msg("s_mu_writer")
+	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_wait").Int("identities", len(identities)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_held").Int("identities", len(identities)).Msg("delivery_mu_writer")
 	var extracted []pendingMatch
 	extractMeta := make(map[domain.PeerAddress]*addrExtractMeta)
 	for addr, frames := range s.pending {
@@ -1693,8 +1693,8 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			s.pending[addr] = kept
 		}
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_released").Int("extracted", len(extracted)).Msg("s_mu_writer")
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_released").Int("extracted", len(extracted)).Msg("delivery_mu_writer")
 
 	if len(extracted) == 0 {
 		return
@@ -1803,9 +1803,17 @@ returnFrames:
 	// Apply all state changes in a single lock+persist. This is the
 	// only persist in the entire drain cycle — no intermediate writes
 	// that could snapshot s.pending without extracted frames.
-	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_wait").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_held").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("s_mu_writer")
+	//
+	// Cross-domain: deliveryMu covers pending / pendingKeys / outbound
+	// mutations; statusMu covers aggregate status recomputation via
+	// refreshAggregatePendingLocked.  Canonical order
+	// peerMu → deliveryMu → statusMu with statusMu INNERMOST.
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_wait").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_held").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_wait").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_held").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("delivery_mu_writer")
 
 	// Merge failed frames back into their original positions in the
 	// per-address pending queue. The extraction phase recorded each
@@ -1918,14 +1926,21 @@ returnFrames:
 			Count:   len(s.pending[addr]),
 		})
 	}
+	// statusMu is INNERMOST per canonical peerMu → deliveryMu → statusMu
+	// order — refreshAggregatePendingLocked writes s.aggregateStatus and
+	// the snapshot read must observe that write under the same lock.
+	s.statusMu.Lock()
 	if len(pendingDeltas) > 0 {
 		s.refreshAggregatePendingLocked()
 	}
 	aggSnap := s.aggregateStatus
+	s.statusMu.Unlock()
 
 	drainDone := s.drainDone
-	s.mu.Unlock()
-	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_released").Int("pending_deltas", len(pendingDeltas)).Msg("s_mu_writer")
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_released").Int("pending_deltas", len(pendingDeltas)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_released").Int("pending_deltas", len(pendingDeltas)).Msg("peer_mu_writer")
 	s.queuePersist.MarkDirty()
 	for _, d := range pendingDeltas {
 		s.emitPeerPendingChanged(d.Address, d.Count)

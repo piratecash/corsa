@@ -153,17 +153,17 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 	// Snapshot the pre-state and verify equality after the call. Any
 	// ingest would either overwrite a field with "filler-*" or insert
 	// a new listen binding, both caught by the comparison.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, knownHad := svc.known[selfAddr]
 	boxKeysBefore, boxKeysHad := svc.boxKeys[selfAddr]
 	pubKeysBefore, pubKeysHad := svc.pubKeys[selfAddr]
 	boxSigsBefore, boxSigsHad := svc.boxSigs[selfAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	svc.learnIdentityFromWelcome(welcome)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// known is map[string]struct{} — only presence can change under the
 	// guarded call. A flipped presence bit is the tell-tale of ingest.
@@ -249,9 +249,9 @@ func TestOnCMDialFailed_SelfIdentityError_AppliesCooldown(t *testing.T) {
 
 	svc.onCMDialFailed(addr, selfErr, false)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("onCMDialFailed did not create a peerHealth entry for %s", addr)
 	}
@@ -327,9 +327,9 @@ func TestOnCMDialFailed_WireSentinelSelfIdentity_AppliesCooldown(t *testing.T) {
 	addr := domain.PeerAddress("203.0.113.5:64646")
 	svc.onCMDialFailed(addr, decoded, false)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("onCMDialFailed did not create a peerHealth entry for %s", addr)
 	}
@@ -436,9 +436,9 @@ func TestSyncPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 	}
 	<-done
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("applySelfIdentityCooldown was not reached: no peerHealth entry for %s", peerAddr)
 	}
@@ -492,9 +492,9 @@ func TestTryApplySelfIdentityCooldown_StructuredError_Hit(t *testing.T) {
 		t.Fatal("tryApplySelfIdentityCooldown(structured, wrapped) returned false; expected true")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("no peerHealth entry for %s after hit", addr)
 	}
@@ -538,9 +538,9 @@ func TestTryApplySelfIdentityCooldown_WireSentinel_Hit(t *testing.T) {
 		t.Fatal("tryApplySelfIdentityCooldown(sentinel, wrapped) returned false; expected true")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("no peerHealth entry for %s after hit", addr)
 	}
@@ -580,9 +580,9 @@ func TestTryApplySelfIdentityCooldown_UnrelatedError_Miss(t *testing.T) {
 		t.Fatal("tryApplySelfIdentityCooldown(unrelated) returned true; expected false")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, ok := svc.health[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if ok {
 		t.Fatal("peerHealth entry created for unrelated error; helper must leave state untouched on miss")
 	}
@@ -615,9 +615,9 @@ func TestTryApplySelfIdentityCooldown_NilError_Miss(t *testing.T) {
 		t.Fatal("tryApplySelfIdentityCooldown(nil) returned true; expected false")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, ok := svc.health[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if ok {
 		t.Fatal("peerHealth entry created for nil error; helper must leave state untouched on miss")
 	}
@@ -728,9 +728,9 @@ func TestRunPeerSession_SelfIdentity_AppliesCooldownAndExits(t *testing.T) {
 		t.Fatalf("listener saw %d accepts; want exactly 1 (retry loop still churning against self-alias)", got)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("applySelfIdentityCooldown was not reached: no peerHealth entry for %s", peerAddr)
 	}
@@ -791,11 +791,11 @@ func TestApplySelfIdentityCooldown_NoAccumulation_WithinBanWindow(t *testing.T) 
 
 	svc.applySelfIdentityCooldown(addr, selfErr)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	firstScore := svc.health[addr].Score
 	firstFailures := svc.health[addr].ConsecutiveFailures
 	firstBannedUntil := svc.health[addr].BannedUntil
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if firstFailures != 1 {
 		t.Fatalf("after first observation ConsecutiveFailures = %d, want 1", firstFailures)
@@ -811,11 +811,11 @@ func TestApplySelfIdentityCooldown_NoAccumulation_WithinBanWindow(t *testing.T) 
 	// intervening state change. The accumulators must stay put.
 	svc.applySelfIdentityCooldown(addr, selfErr)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	secondScore := svc.health[addr].Score
 	secondFailures := svc.health[addr].ConsecutiveFailures
 	secondBannedUntil := svc.health[addr].BannedUntil
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if secondFailures != firstFailures {
 		t.Fatalf("ConsecutiveFailures accumulated across self-identity hits: first=%d second=%d (contract: no accumulation)", firstFailures, secondFailures)
@@ -875,7 +875,7 @@ func TestApplySelfIdentityCooldown_ReAppliesAfterBanExpired(t *testing.T) {
 	// test is in the same package, so the private field is visible.
 	priorFailures := 3
 	priorScore := -10
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr] = &peerHealth{
 		Address:             addr,
 		LastErrorCode:       protocol.ErrCodeSelfIdentity,
@@ -883,15 +883,15 @@ func TestApplySelfIdentityCooldown_ReAppliesAfterBanExpired(t *testing.T) {
 		ConsecutiveFailures: priorFailures,
 		Score:               priorScore,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.applySelfIdentityCooldown(addr, selfErr)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	gotFailures := svc.health[addr].ConsecutiveFailures
 	gotScore := svc.health[addr].Score
 	gotBannedUntil := svc.health[addr].BannedUntil
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if gotFailures != priorFailures+1 {
 		t.Fatalf("ConsecutiveFailures after expired-ban re-collision = %d, want %d (seeded %d + 1 fresh observation)", gotFailures, priorFailures+1, priorFailures)

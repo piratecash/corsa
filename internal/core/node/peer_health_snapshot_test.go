@@ -14,17 +14,17 @@ import (
 // used to freeze fetch_network_stats (see §B.6 in the bug postmortem).
 //
 // Before the atomic snapshot fix, peerHealthFrames() started with
-// s.mu.RLock().  Go's RWMutex is writer-preferring: once any writer queues on
-// s.mu.Lock(), subsequent RLock callers block behind it.  A writer holding
-// s.mu for tens of seconds (sendAnnounceRoutesToInbound on a sync network
-// write, admission decisions under s.mu.Lock, etc.) therefore starved
+// s.peerMu.RLock().  Go's RWMutex is writer-preferring: once any writer queues on
+// s.peerMu.Lock(), subsequent RLock callers block behind it.  A writer holding
+// s.peerMu for tens of seconds (sendAnnounceRoutesToInbound on a sync network
+// write, admission decisions under s.peerMu.Lock, etc.) therefore starved
 // ProbeNode / fetch_peer_health until the command timeout.
 //
 // The fix: peerHealthFrames() reads a precomputed snapshot via atomic load.
-// The snapshot is rebuilt by a background refresher under a short s.mu.RLock.
-// The RPC reader never acquires s.mu.
+// The snapshot is rebuilt by a background refresher under a short s.peerMu.RLock.
+// The RPC reader never acquires s.peerMu.
 //
-// This test holds s.mu.Lock for 2 s from a helper goroutine and asserts that
+// This test holds s.peerMu.Lock for 2 s from a helper goroutine and asserts that
 // peerHealthFrames() completes within 100 ms.  With the old implementation
 // the call would block for the full 2 s.
 func TestPeerHealthFramesDoesNotBlockOnSMu(t *testing.T) {
@@ -36,7 +36,7 @@ func TestPeerHealthFramesDoesNotBlockOnSMu(t *testing.T) {
 	// content — the test should prove freshness of the cached data, not
 	// just that an empty snapshot loads quickly.
 	addr := domain.PeerAddress("test-peer-1")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr] = &peerHealth{
 		Address:       addr,
 		BytesSent:     1111,
@@ -44,9 +44,9 @@ func TestPeerHealthFramesDoesNotBlockOnSMu(t *testing.T) {
 		Connected:     true,
 		Direction:     peerDirectionOutbound,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
-	// Prime the snapshot once BEFORE the writer grabs s.mu.  In production
+	// Prime the snapshot once BEFORE the writer grabs s.peerMu.  In production
 	// hotReadsRefreshLoop does this every networkStatsSnapshotInterval; in
 	// this test we skip the Run() wiring and prime directly.
 	svc.rebuildPeerHealthSnapshot()
@@ -59,14 +59,14 @@ func TestPeerHealthFramesDoesNotBlockOnSMu(t *testing.T) {
 		t.Fatal("primed snapshot has zero records despite seeded health")
 	}
 
-	// Hold s.mu.Lock for 2 s from a helper goroutine.
+	// Hold s.peerMu.Lock for 2 s from a helper goroutine.
 	writerStarted := make(chan struct{})
 	writerDone := make(chan struct{})
 	go func() {
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		close(writerStarted)
 		time.Sleep(2 * time.Second)
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 		close(writerDone)
 	}()
 	<-writerStarted
@@ -76,10 +76,10 @@ func TestPeerHealthFramesDoesNotBlockOnSMu(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// 100 ms leaves plenty of headroom for slow CI with GOMAXPROCS=1 while
-	// still catching any regression that pulls the handler back onto s.mu.
+	// still catching any regression that pulls the handler back onto s.peerMu.
 	const maxTolerated = 100 * time.Millisecond
 	if elapsed > maxTolerated {
-		t.Fatalf("peerHealthFrames took %s while writer held s.mu; expected < %s (RPC still coupled to s.mu)", elapsed, maxTolerated)
+		t.Fatalf("peerHealthFrames took %s while writer held s.peerMu; expected < %s (RPC still coupled to s.peerMu)", elapsed, maxTolerated)
 	}
 
 	// Content sanity: seeded peer appears with the byte counts we set.
@@ -107,9 +107,9 @@ func TestPeerHealthFramesDoesNotBlockOnSMu(t *testing.T) {
 // contract: when no snapshot has been primed (e.g. a unit test that bypasses
 // Run() and therefore skips primeHotReadSnapshots), peerHealthFrames()
 // returns nil rather than synchronously rebuilding.  The synchronous
-// rebuild was removed because it acquired s.mu.RLock on the RPC goroutine
-// and re-coupled the hot path to s.mu — exactly the starvation shape the
-// snapshot infrastructure was built to eliminate.
+// rebuild was removed because it acquired s.peerMu.RLock on the RPC goroutine
+// and re-coupled the hot path to s.peerMu — exactly the starvation shape
+// the snapshot infrastructure was built to eliminate.
 //
 // In production, Run() calls primeHotReadSnapshots() before the listener
 // opens so this branch never fires on real traffic.
@@ -127,7 +127,7 @@ func TestPeerHealthFramesSnapshotMissReturnsNil(t *testing.T) {
 	}
 
 	// The handler must NOT silently populate the cache as a side effect.
-	// Doing so would mean the RPC path had reached s.mu.RLock, violating
+	// Doing so would mean the RPC path had reached s.peerMu.RLock, violating
 	// the lock-free contract.
 	if svc.loadPeerHealthSnapshot() != nil {
 		t.Fatal("peerHealthFrames() must not synchronously rebuild on miss (lock-free contract)")
@@ -143,7 +143,7 @@ func TestPeerHealthSnapshotRefreshReflectsMutations(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 	addr := domain.PeerAddress("mutation-peer-1")
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr] = &peerHealth{
 		Address:       addr,
 		BytesSent:     100,
@@ -151,7 +151,7 @@ func TestPeerHealthSnapshotRefreshReflectsMutations(t *testing.T) {
 		Connected:     true,
 		Direction:     peerDirectionOutbound,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.rebuildPeerHealthSnapshot()
 	snap1 := svc.loadPeerHealthSnapshot()
@@ -163,9 +163,9 @@ func TestPeerHealthSnapshotRefreshReflectsMutations(t *testing.T) {
 	}
 
 	// Mutate health.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr].BytesSent = 999
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Until the refresher runs, the cached snapshot still reflects the old
 	// value — bounded staleness, asserted here so it does not silently

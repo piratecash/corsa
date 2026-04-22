@@ -10,11 +10,12 @@ import (
 )
 
 // connInfo is a read-only snapshot of registry state for a single connection,
-// captured under s.mu and handed to walker callbacks. It is the abstraction
-// boundary that keeps callers off the *netcore.NetCore handle and off the
-// connEntry shape: walkers no longer leak the live core pointer, so callbacks
-// cannot inadvertently mutate identity/address/auth or race with the
-// handshake-time writes that coreForIDLocked still permits.
+// captured under s.peerMu (registry state is peer-domain) and handed to
+// walker callbacks. It is the abstraction boundary that keeps callers off
+// the *netcore.NetCore handle and off the connEntry shape: walkers no
+// longer leak the live core pointer, so callbacks cannot inadvertently
+// mutate identity/address/auth or race with the handshake-time writes
+// that coreForIDLocked still permits.
 //
 // All fields are value-typed; the capabilities slice is a defensive copy so
 // callers cannot scribble back into the live *netcore.NetCore. Walkers must
@@ -54,7 +55,7 @@ func (c connInfo) HasCapability(cap domain.Capability) bool {
 // snapshotEntryLocked builds a connInfo from a registry entry. The capability
 // slice is copied so the caller never aliases NetCore-owned storage. Returns
 // the zero value and false if the entry or its core is missing — the caller
-// must treat that as "skip this connection". The caller must hold s.mu.
+// must treat that as "skip this connection". The caller must hold s.peerMu.
 func snapshotEntryLocked(id domain.ConnID, entry *connEntry) (connInfo, bool) {
 	if entry == nil || entry.core == nil {
 		return connInfo{}, false
@@ -137,8 +138,9 @@ func coreToPeerDirection(d netcore.Direction) domain.PeerDirection {
 
 // conn_registry.go contains the narrow helper layer that encapsulates all
 // direct access to s.conns and its secondary index s.connIDByNetConn.
-// Every helper carries the -Locked suffix and assumes the caller holds
-// s.mu (either Lock or RLock, matching the existing convention for
+// Both maps are peer-domain state (see service.go struct comments);
+// every helper carries the -Locked suffix and assumes the caller holds
+// s.peerMu (either Lock or RLock, matching the existing convention for
 // peerTypeForAddressLocked, ensurePeerHealthLocked, computePeerStateAtLocked).
 // Helpers do not acquire locks themselves.
 //
@@ -230,7 +232,7 @@ func coreToPeerDirection(d netcore.Direction) domain.PeerDirection {
 // secondary index. Returns zero value and false if the connection is not
 // registered. This is the single point where net.Conn is translated into
 // ConnID for read paths; all pure-lookup helpers below take ConnID directly.
-// The caller must hold s.mu.
+// The caller must hold s.peerMu.
 func (s *Service) connIDForLocked(conn net.Conn) (domain.ConnID, bool) {
 	id, ok := s.connIDByNetConn[conn]
 	if !ok {
@@ -241,19 +243,19 @@ func (s *Service) connIDForLocked(conn net.Conn) (domain.ConnID, bool) {
 }
 
 // connIDFor resolves a net.Conn to its domain.ConnID without requiring the
-// caller to hold s.mu. Returns zero value and false if the connection is
+// caller to hold s.peerMu. Returns zero value and false if the connection is
 // not registered. This is the public adapter over connIDForLocked used by
 // non-lock-holding call sites to cross the net.Conn → ConnID boundary
 // exactly once; downstream lookups (netCoreForID, meteredForID,
 // isInboundTrackedByID) take ConnID directly.
 func (s *Service) connIDFor(conn net.Conn) (domain.ConnID, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	return s.connIDForLocked(conn)
 }
 
 // coreForIDLocked returns the NetCore for a given ConnID, or nil if the
-// connection is not registered. The caller must hold s.mu.
+// connection is not registered. The caller must hold s.peerMu.
 func (s *Service) coreForIDLocked(id domain.ConnID) *netcore.NetCore {
 	entry := s.conns[id]
 	if entry == nil {
@@ -264,7 +266,7 @@ func (s *Service) coreForIDLocked(id domain.ConnID) *netcore.NetCore {
 
 // meteredForIDLocked returns the MeteredConn wrapper for a given ConnID,
 // or nil if the connection is not registered or not metered.
-// The caller must hold s.mu.
+// The caller must hold s.peerMu.
 func (s *Service) meteredForIDLocked(id domain.ConnID) *netcore.MeteredConn {
 	entry := s.conns[id]
 	if entry == nil {
@@ -275,7 +277,7 @@ func (s *Service) meteredForIDLocked(id domain.ConnID) *netcore.MeteredConn {
 
 // isInboundTrackedByIDLocked returns whether the connection is marked as
 // tracked (i.e., has completed authentication and health management).
-// The caller must hold s.mu.
+// The caller must hold s.peerMu.
 func (s *Service) isInboundTrackedByIDLocked(id domain.ConnID) bool {
 	entry := s.conns[id]
 	if entry == nil {
@@ -289,7 +291,7 @@ func (s *Service) isInboundTrackedByIDLocked(id domain.ConnID) bool {
 // need access to entry-level fields beyond what coreForIDLocked /
 // isInboundTrackedByIDLocked expose (e.g. trackedInboundPeerAddress needs
 // both the tracked flag and core.Address() in a single critical section).
-// The caller must hold s.mu.
+// The caller must hold s.peerMu.
 func (s *Service) connEntryByIDLocked(id domain.ConnID) *connEntry {
 	return s.conns[id]
 }
@@ -299,7 +301,7 @@ func (s *Service) connEntryByIDLocked(id domain.ConnID) *connEntry {
 // This is the narrow ConnID-first read path used by consumers that must
 // not see *netcore.NetCore or net.Conn (e.g. the traffic capture bridge
 // resolving remote IP / peer direction for a single connection).
-// The caller must hold s.mu.
+// The caller must hold s.peerMu.
 func (s *Service) connInfoByIDLocked(id domain.ConnID) (connInfo, bool) {
 	return snapshotEntryLocked(id, s.conns[id])
 }
@@ -308,7 +310,7 @@ func (s *Service) connInfoByIDLocked(id domain.ConnID) (connInfo, bool) {
 // direction recorded on the live connection at id, or zero values when the
 // id is unknown (or the core has been torn down). Callers who need an
 // atomic triple read of these three fields use this helper to avoid
-// dereferencing entry.core themselves. The caller must hold s.mu.
+// dereferencing entry.core themselves. The caller must hold s.peerMu.
 func (s *Service) overlayIdentityByIDLocked(id domain.ConnID) (domain.PeerAddress, domain.PeerIdentity, domain.PeerDirection) {
 	entry := s.conns[id]
 	if entry == nil || entry.core == nil {
@@ -319,24 +321,24 @@ func (s *Service) overlayIdentityByIDLocked(id domain.ConnID) (domain.PeerAddres
 
 // overlayIdentityByID is the lock-free adapter over overlayIdentityByIDLocked.
 // Public-enough for in-package callers that need the triple atomically without
-// holding s.mu themselves; behaves identically to the locked variant otherwise.
+// holding s.peerMu themselves; behaves identically to the locked variant otherwise.
 func (s *Service) overlayIdentityByID(id domain.ConnID) (domain.PeerAddress, domain.PeerIdentity, domain.PeerDirection) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	return s.overlayIdentityByIDLocked(id)
 }
 
 // attachCaptureSinkByID attaches a netcore.CaptureSink to the NetCore at id
 // and returns a snapshot of the fields the caller needs to build a
 // capture.ConnInfo (RemoteIP, PeerDir). Returns (zero, zero, false) when id
-// is unknown. The method takes s.mu.RLock internally — SetCaptureSink has
+// is unknown. The method takes s.peerMu.RLock internally — SetCaptureSink has
 // its own sync on *netcore.NetCore, so the registry lock only protects the
 // s.conns lookup, not the sink write. This is the single ConnID-first entry
 // point for capture-sink lifecycle; the traffic bridge never reaches for
 // entry.core.SetCaptureSink directly.
 func (s *Service) attachCaptureSinkByID(id domain.ConnID, sink netcore.CaptureSink) (netip.Addr, domain.PeerDirection, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	entry := s.conns[id]
 	if entry == nil || entry.core == nil {
 		return netip.Addr{}, "", false
@@ -347,7 +349,7 @@ func (s *Service) attachCaptureSinkByID(id domain.ConnID, sink netcore.CaptureSi
 
 // forEachConnLocked iterates over every registered connection regardless
 // of direction, calling fn with a connInfo snapshot per entry. Iteration
-// stops if fn returns false. The caller must hold s.mu. Walkers no longer
+// stops if fn returns false. The caller must hold s.peerMu. Walkers no longer
 // expose *netcore.NetCore — callbacks receive a value-typed snapshot so
 // they cannot mutate identity/address/auth concurrently with the
 // handshake-time writes that coreForIDLocked still permits. Direction-
@@ -368,7 +370,7 @@ func (s *Service) forEachConnLocked(fn func(connInfo) bool) {
 
 // forEachInboundConnLocked iterates over all registered inbound connections
 // (Direction == Inbound), calling fn with a connInfo snapshot per entry.
-// Iteration stops if fn returns false. The caller must hold s.mu.
+// Iteration stops if fn returns false. The caller must hold s.peerMu.
 func (s *Service) forEachInboundConnLocked(fn func(connInfo) bool) {
 	for id, entry := range s.conns {
 		info, ok := snapshotEntryLocked(id, entry)
@@ -387,7 +389,7 @@ func (s *Service) forEachInboundConnLocked(fn func(connInfo) bool) {
 // forEachTrackedInboundConnLocked iterates over all registered inbound
 // connections that are marked as tracked (i.e., have completed
 // authentication), calling fn with a connInfo snapshot per entry. Iteration
-// stops if fn returns false. The caller must hold s.mu.
+// stops if fn returns false. The caller must hold s.peerMu.
 func (s *Service) forEachTrackedInboundConnLocked(fn func(connInfo) bool) {
 	for id, entry := range s.conns {
 		info, ok := snapshotEntryLocked(id, entry)
@@ -411,7 +413,7 @@ func (s *Service) forEachTrackedInboundConnLocked(fn func(connInfo) bool) {
 // promoted via trackInboundConnect. Returns the zero PeerAddress when the
 // id is unknown, points at an outbound entry, or has not been promoted.
 // Callers use this to gate health-mutating side-effects on tracked status
-// without materialising *netcore.NetCore. The caller must hold s.mu.
+// without materialising *netcore.NetCore. The caller must hold s.peerMu.
 func (s *Service) trackedInboundAddressByIDLocked(id domain.ConnID) domain.PeerAddress {
 	entry := s.conns[id]
 	if entry == nil || entry.core == nil || !entry.tracked {
@@ -426,7 +428,7 @@ func (s *Service) trackedInboundAddressByIDLocked(id domain.ConnID) domain.PeerA
 // connIdentityByIDLocked returns the peer identity recorded on the
 // connection at id, or the zero PeerIdentity when the id is unknown.
 // Callers use this on disconnect / reconciliation paths that previously
-// reached for entry.core.Identity() directly. The caller must hold s.mu.
+// reached for entry.core.Identity() directly. The caller must hold s.peerMu.
 func (s *Service) connIdentityByIDLocked(id domain.ConnID) domain.PeerIdentity {
 	entry := s.conns[id]
 	if entry == nil || entry.core == nil {
@@ -436,7 +438,7 @@ func (s *Service) connIdentityByIDLocked(id domain.ConnID) domain.PeerIdentity {
 }
 
 // inboundConnCountLocked returns the number of registered inbound connections.
-// The caller must hold s.mu. Implementation reads entry.core.Dir() directly
+// The caller must hold s.peerMu. Implementation reads entry.core.Dir() directly
 // because this is one of the conn_registry-internal sites that owns the
 // entry.core access shape; external call sites must go through the walker
 // snapshots above.
@@ -454,7 +456,7 @@ func (s *Service) inboundConnCountLocked() int {
 // (inbound + outbound) regardless of tracked state. Callers use this as a
 // capacity hint before iterating via forEachConnLocked; the abstraction
 // keeps direct len(s.conns) reads out of external files. The caller must
-// hold s.mu.
+// hold s.peerMu.
 func (s *Service) connCountLocked() int {
 	return len(s.conns)
 }
@@ -464,7 +466,7 @@ func (s *Service) connCountLocked() int {
 // ConnID is the single identity currency inside the registry after PR 9.7 —
 // callers that start from a net.Conn must cross the boundary via
 // connIDForLocked once, then operate on ConnID.
-// The caller must hold s.mu.
+// The caller must hold s.peerMu.
 func (s *Service) setTrackedByIDLocked(id domain.ConnID, tracked bool) {
 	if entry := s.conns[id]; entry != nil {
 		entry.tracked = tracked
@@ -474,8 +476,8 @@ func (s *Service) setTrackedByIDLocked(id domain.ConnID, tracked bool) {
 // registerInboundConnLocked registers an inbound NetCore in the connection registry.
 // It writes to both the primary (ConnID-keyed) map and the secondary (net.Conn-keyed)
 // index in lock-step — the only place in the codebase where a (conn, id, entry)
-// triple is created for an inbound connection. The caller must hold s.mu and must
-// ensure the connection is not already registered.
+// triple is created for an inbound connection. The caller must hold s.peerMu
+// write lock and must ensure the connection is not already registered.
 func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore, metered *netcore.MeteredConn) {
 	entry := &connEntry{core: core}
 	if metered != nil {
@@ -489,7 +491,8 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 // attachOutboundCoreLocked registers an outbound NetCore in the connection registry.
 // Mirrors registerInboundConnLocked on the outbound side and preserves the
 // invariant that every entry in s.conns has a matching entry in s.connIDByNetConn.
-// The caller must hold s.mu and must ensure the connection is not already registered.
+// The caller must hold s.peerMu write lock and must ensure the connection is
+// not already registered.
 func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore) {
 	id := core.ConnID()
 	s.conns[id] = &connEntry{core: core}
@@ -500,7 +503,7 @@ func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore)
 // the primary ConnID entry and the secondary net.Conn index in lock-step.
 // If the connection is not present in the secondary index (e.g. a second
 // teardown path racing with the first), the call is a no-op — both deletes
-// are idempotent. The caller must hold s.mu.
+// are idempotent. The caller must hold s.peerMu.
 func (s *Service) unregisterConnLocked(conn net.Conn) {
 	id, ok := s.connIDByNetConn[conn]
 	if !ok {

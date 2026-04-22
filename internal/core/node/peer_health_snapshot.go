@@ -9,10 +9,13 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// peerHealthRecord is the per-peer data captured from s.mu-protected state in
-// a single short RLock section.  After s.mu is released the fields are frozen
-// — the RPC handler (fetch_peer_health) reads records from the cached
-// snapshot concurrently and must never mutate them.
+// peerHealthRecord is the per-peer data captured from peer-domain state
+// (s.peerMu) combined with delivery-domain pending counts (s.deliveryMu),
+// snapshotted in a single short RLock section held in canonical
+// s.peerMu OUTER → s.deliveryMu INNER order.  After both RLocks are
+// released the fields are frozen — the RPC handler (fetch_peer_health)
+// reads records from the cached snapshot concurrently and must never
+// mutate them.
 //
 // BytesSent / BytesReceived on the embedded health are adjusted to include
 // the live MeteredConn delta at refresh time, so the RPC handler renders the
@@ -49,24 +52,25 @@ type inboundLiveRecord struct {
 // peerHealthSnapshot is the cached, lock-free view consumed by peerHealthFrames
 // (fetch_peer_health RPC).  Primed synchronously by primeHotReadSnapshots()
 // in Run() before the listener opens, then rebuilt by hotReadsRefreshLoop
-// every networkStatsSnapshotInterval under a short s.mu.RLock.  The RPC
-// handler performs a single atomic load and never acquires s.mu — there
-// is no synchronous fallback rebuild on the RPC goroutine, so the hot
-// path is statically decoupled from s.mu.
+// every networkStatsSnapshotInterval under a short
+// s.peerMu.RLock → s.deliveryMu.RLock window.  The RPC handler performs a
+// single atomic load and never acquires either Service mutex — there is
+// no synchronous fallback rebuild on the RPC goroutine, so the hot path
+// is statically decoupled from peer-domain and delivery-domain writers.
 //
-// If a writer holds s.mu for many seconds, the refresher may stall on its
-// RLock but the RPC keeps returning the previous snapshot — the hot read path
-// is completely decoupled from writer behaviour.
+// If a peerMu writer holds the lock for many seconds, the refresher may
+// stall on its RLock but the RPC keeps returning the previous snapshot —
+// the hot read path is completely decoupled from writer behaviour.
 //
 // Peer state transitions (markPeerConnected / markPeerDisconnected) also
-// trigger an out-of-band rebuild after releasing s.mu.Lock so UI pollers
+// trigger an out-of-band rebuild after releasing s.peerMu.Lock so UI pollers
 // observe the new state without waiting for the next 500 ms tick — see
 // refreshHotReadSnapshotsAfterPeerStateChange in hot_reads_refresh.go.
 // The eager rebuild is skipped when s.runCtx is done so the shutdown
-// disconnect storm does not multiply s.mu.RLock contention onto the
-// session-teardown goroutines.  Other state mutations (traffic bytes,
-// score adjustments, etc.) rely on the bounded-staleness model: the next
-// refresher tick captures them.
+// disconnect storm does not multiply s.peerMu.RLock → s.deliveryMu.RLock
+// contention onto the session-teardown goroutines.  Other state mutations
+// (traffic bytes, score adjustments, etc.) rely on the bounded-staleness
+// model: the next refresher tick captures them.
 type peerHealthSnapshot struct {
 	records     []peerHealthRecord
 	inboundOnly []inboundLiveRecord
@@ -86,11 +90,13 @@ func (s *Service) loadPeerHealthSnapshot() *peerHealthSnapshot {
 }
 
 // rebuildPeerHealthSnapshot constructs a fresh snapshot under a short
-// s.mu.RLock, then stores it atomically.  All derived lookups
-// (peerCapabilitiesLocked, inboundConnIDsLocked, resolveHealthAddress, etc.)
-// run inside the RLock window — they require read access to s.mu-protected
-// state — but no formatting, sorting or wire conversion happens here.  The
-// RPC handler performs those steps lock-free against the cached records.
+// s.peerMu.RLock → s.deliveryMu.RLock window, then stores it atomically.
+// All derived lookups (peerCapabilitiesLocked, inboundConnIDsLocked,
+// resolveHealthAddress, etc.) run inside the RLock window — they require
+// read access to peer-domain state (and pendingCount requires delivery-
+// domain state) — but no formatting, sorting or wire conversion happens
+// here.  The RPC handler performs those steps lock-free against the
+// cached records.
 //
 // The per-peer live traffic delta is folded into record.health.BytesSent /
 // BytesReceived so the handler can emit the frame without revisiting
@@ -98,7 +104,14 @@ func (s *Service) loadPeerHealthSnapshot() *peerHealthSnapshot {
 func (s *Service) rebuildPeerHealthSnapshot() {
 	log.Trace().Msg("peer_health_snapshot_refresh_begin")
 
-	s.mu.RLock()
+	s.peerMu.RLock()
+	// Cross-domain read: peer state (s.peers, s.health, s.peerIDs,
+	// s.peerVersions, s.peerBuilds, s.persistedMeta) lives under s.peerMu;
+	// s.pending lives under s.deliveryMu.  Canonical order
+	// s.peerMu OUTER → s.deliveryMu INNER so the whole snapshot observes
+	// a consistent peer↔pending view without reintroducing a reverse
+	// edge that the Phase 2 split was designed to prevent.
+	s.deliveryMu.RLock()
 	now := time.Now().UTC()
 
 	live := s.liveTrafficLocked()
@@ -158,7 +171,8 @@ func (s *Service) rebuildPeerHealthSnapshot() {
 		inboundOnly = append(inboundOnly, ilr)
 	}
 
-	s.mu.RUnlock()
+	s.deliveryMu.RUnlock()
+	s.peerMu.RUnlock()
 	log.Trace().Int("records", len(records)).Int("inbound_only", len(inboundOnly)).Msg("peer_health_snapshot_rlock_released")
 
 	snap := &peerHealthSnapshot{

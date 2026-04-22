@@ -29,11 +29,11 @@ func TestVersionPolicy_IncompatibleReporterThreshold(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Two reporters should not trigger the signal (threshold is 3).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.UpdateAvailable {
 		t.Error("update_available should be false with only 2 reporters")
@@ -43,10 +43,10 @@ func TestVersionPolicy_IncompatibleReporterThreshold(t *testing.T) {
 	}
 
 	// Third reporter should trigger.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
 	snap = svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !snap.UpdateAvailable {
 		t.Error("update_available should be true with 3 reporters")
@@ -66,12 +66,12 @@ func TestVersionPolicy_EmptyIdentityDoesNotCountAsReporter(t *testing.T) {
 	}
 	now := time.Now().UTC()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("", 10, 10, now.Add(time.Second))
 	svc.recordIncompatibleObservationLocked("", 10, 10, now.Add(2*time.Second))
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.IncompatibleVersionReporters != 0 {
 		t.Errorf("reporters = %d, want 0 (no identity)", snap.IncompatibleVersionReporters)
@@ -91,12 +91,12 @@ func TestVersionPolicy_DedupByIdentity(t *testing.T) {
 	}
 	now := time.Now().UTC()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now.Add(time.Minute))
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now.Add(2*time.Minute))
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.IncompatibleVersionReporters != 1 {
 		t.Errorf("reporters = %d, want 1 (same identity deduped)", snap.IncompatibleVersionReporters)
@@ -113,17 +113,17 @@ func TestVersionPolicy_ObservationTTLExpiry(t *testing.T) {
 	}
 
 	stale := time.Now().UTC().Add(-25 * time.Hour)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.IncompatibleVersionReporters != 0 {
 		t.Errorf("reporters = %d, want 0 (all expired)", snap.IncompatibleVersionReporters)
@@ -149,11 +149,11 @@ func TestVersionPolicy_PeerBuildSignal(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !snap.UpdateAvailable {
 		t.Error("update_available should be true with 2 peers having higher build")
@@ -182,13 +182,13 @@ func TestVersionPolicy_BothSignals(t *testing.T) {
 	}
 	now := time.Now().UTC()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !snap.UpdateAvailable {
 		t.Error("update_available should be true with both signals")
@@ -216,7 +216,7 @@ func TestVersionLockout_SetAndCheck(t *testing.T) {
 		peerVersions: make(map[domain.PeerAddress]string),
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.setVersionLockoutLocked(
 		"1.2.3.4:100",
 		domain.ProtocolVersion(10),
@@ -224,7 +224,7 @@ func TestVersionLockout_SetAndCheck(t *testing.T) {
 		"v1.0.0",
 	)
 	active := svc.isPeerVersionLockedOutLocked("1.2.3.4:100")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !active {
 		t.Error("version lockout should be active after set")
@@ -260,10 +260,10 @@ func TestVersionLockout_ClearedAfterUpgrade(t *testing.T) {
 		},
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.clearStaleVersionLockoutsLocked()
 	active := svc.isPeerVersionLockedOutLocked("1.2.3.4:100")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if active {
 		t.Error("lockout should be cleared after local version upgrade")
@@ -293,10 +293,10 @@ func TestVersionLockout_NotClearedWhenSameVersion(t *testing.T) {
 		},
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.clearStaleVersionLockoutsLocked()
 	active := svc.isPeerVersionLockedOutLocked("1.2.3.4:100")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !active {
 		t.Error("lockout should remain active when local version unchanged")
@@ -452,14 +452,14 @@ func TestVersionPolicy_LockoutKeepsUpdateAvailableAfterTTLExpiry(t *testing.T) {
 
 	// Record 3 stale observations (expired).
 	stale := now.Add(-25 * time.Hour)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
 	// Recompute with current time — observations expire, but lockout persists.
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.IncompatibleVersionReporters != 0 {
 		t.Errorf("reporters = %d, want 0 (all expired)", snap.IncompatibleVersionReporters)
@@ -484,11 +484,11 @@ func TestVersionPolicy_NoLockoutNoFalsePositive(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.UpdateAvailable {
 		t.Error("update_available should be false with no signals")
@@ -571,9 +571,9 @@ func TestVersionLockout_ClearStale_ExpiredIdentityLess(t *testing.T) {
 		},
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.clearStaleVersionLockoutsLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if entry.VersionLockout.IsActive() {
 		t.Error("expired identity-less lockout should be cleared on startup")
@@ -607,11 +607,11 @@ func TestVersionPolicy_DisconnectClearsBuildSignal(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !snap.UpdateAvailable {
 		t.Fatal("precondition: update_available should be true with 2 higher-build peers")
@@ -620,19 +620,19 @@ func TestVersionPolicy_DisconnectClearsBuildSignal(t *testing.T) {
 	// Disconnect one peer — should drop below threshold (need 2).
 	svc.markPeerDisconnected("1.2.3.4:100", nil)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	snap = svc.versionPolicy.snapshot
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if snap.UpdateAvailable {
 		t.Error("update_available should be false after disconnecting a peer below build threshold")
 	}
 
 	// Verify session-scoped maps are cleaned up.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, hasBuild := svc.peerBuilds["1.2.3.4:100"]
 	_, hasVer := svc.peerVersions["1.2.3.4:100"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if hasBuild {
 		t.Error("peerBuilds should be cleared for disconnected peer")
@@ -690,9 +690,9 @@ func TestAddPeer_ClearsVersionLockout(t *testing.T) {
 	}
 
 	// Verify lockout is active before add_peer.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	activeBefore := svc.isPeerVersionLockedOutLocked(addr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !activeBefore {
 		t.Fatal("precondition: lockout should be active before add_peer")
 	}
@@ -700,7 +700,7 @@ func TestAddPeer_ClearsVersionLockout(t *testing.T) {
 	// Simulate add_peer — call the addPeerFrame directly is complex because
 	// it requires full Service wiring. Instead, replicate the lockout-clearing
 	// logic that addPeerFrame executes under the lock.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	h := svc.health[addr]
 	h.ConsecutiveFailures = 0
 	h.LastDisconnectedAt = time.Time{}
@@ -717,12 +717,12 @@ func TestAddPeer_ClearsVersionLockout(t *testing.T) {
 		}
 	}
 	svc.recomputeVersionPolicyLocked(time.Now().UTC())
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Verify lockout is cleared.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	activeAfter := svc.isPeerVersionLockedOutLocked(addr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if activeAfter {
 		t.Error("version lockout should be cleared after operator add_peer override")
@@ -780,9 +780,9 @@ func TestVersionPolicy_DisconnectDoesNotAffectLockoutSignal(t *testing.T) {
 	svc.markPeerDisconnected(addr, nil)
 
 	// Lockout signal should still be active (persisted, not session-scoped).
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	snap := svc.versionPolicy.snapshot
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !snap.UpdateAvailable {
 		t.Error("update_available should remain true — persisted lockout survives disconnect")
@@ -818,9 +818,9 @@ func TestDisconnectCode_ClearedOnCleanDisconnect(t *testing.T) {
 	// Clean disconnect (err == nil) should clear the stale code.
 	svc.markPeerDisconnected(addr, nil)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	code := svc.health[addr].LastDisconnectCode
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if code != "" {
 		t.Errorf("LastDisconnectCode = %q, want empty after clean disconnect", code)
@@ -843,9 +843,9 @@ func TestDisconnectCode_SetOnProtocolError(t *testing.T) {
 	// Disconnect with a known protocol error.
 	svc.markPeerDisconnected(addr, protocol.ErrFrameTooLarge)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	code := svc.health[addr].LastDisconnectCode
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if code != protocol.ErrCodeFrameTooLarge {
 		t.Errorf("LastDisconnectCode = %q, want %q", code, protocol.ErrCodeFrameTooLarge)
@@ -875,11 +875,11 @@ func TestErrorCodes_ClearedOnSuccessfulReconnect(t *testing.T) {
 	// Successful reconnect should clear both codes.
 	svc.markPeerConnected(addr, "outbound")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h := svc.health[addr]
 	errCode := h.LastErrorCode
 	dcCode := h.LastDisconnectCode
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if errCode != "" {
 		t.Errorf("LastErrorCode = %q, want empty after successful reconnect", errCode)
@@ -909,11 +909,11 @@ func TestVersionPolicy_BuildSignalBelowThreshold(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.UpdateAvailable {
 		t.Error("update_available should be false with only 1 higher-build peer (threshold 2)")
@@ -945,11 +945,11 @@ func TestVersionPolicy_BuildSignalIgnoresEqualBuild(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.UpdateAvailable {
 		t.Error("update_available should be false when peers have equal build")
@@ -974,23 +974,23 @@ func TestVersionPolicy_ReasonTransition_BuildToBoth(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.UpdateReason != domain.UpdateReasonPeerBuild {
 		t.Fatalf("precondition: reason = %q, want %q", snap.UpdateReason, domain.UpdateReasonPeerBuild)
 	}
 
 	// Add 3 incompatible-version reporters — transitions to "both".
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, now)
 	snap = svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.UpdateReason != domain.UpdateReasonBoth {
 		t.Errorf("reason = %q, want %q after adding incompatible reporters", snap.UpdateReason, domain.UpdateReasonBoth)
@@ -1015,21 +1015,21 @@ func TestVersionPolicy_ReasonTransition_BothToBuildonlyAfterTTL(t *testing.T) {
 	}
 
 	stale := time.Now().UTC().Add(-25 * time.Hour)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	// Record stale observations — they'll appear active during recording
 	// but expire on the next recompute with a future timestamp.
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, stale)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Recompute with current time — observations expire, only build remains.
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !snap.UpdateAvailable {
 		t.Fatal("update_available should still be true (build signal remains)")
@@ -1073,11 +1073,11 @@ func TestVersionPolicy_BuildPlusLockout_ReasonIsBoth(t *testing.T) {
 		},
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !snap.UpdateAvailable {
 		t.Fatal("update_available should be true (build + lockout)")
@@ -1113,9 +1113,9 @@ func TestVersionLockout_NoEvidenceNoLockout_ZeroMinimum(t *testing.T) {
 	// Call with peerMinimum=0 (no evidence from wire).
 	svc.penalizeOldProtocolPeer(addr, 0, 0)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lockoutActive := svc.isPeerVersionLockedOutLocked(addr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if lockoutActive {
 		t.Error("lockout must NOT be set when peerMinimum is 0 (no version evidence)")
@@ -1146,9 +1146,9 @@ func TestVersionLockout_NoEvidenceNoLockout_MinimumBelowLocal(t *testing.T) {
 	localProto := domain.ProtocolVersion(config.ProtocolVersion)
 	svc.penalizeOldProtocolPeer(addr, localProto, localProto)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lockoutActive := svc.isPeerVersionLockedOutLocked(addr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if lockoutActive {
 		t.Error("lockout must NOT be set when peerMinimum <= local protocol version")
@@ -1178,9 +1178,9 @@ func TestVersionLockout_EvidenceConfirmed_LockoutSet(t *testing.T) {
 	higherMinimum := domain.ProtocolVersion(config.ProtocolVersion + 1)
 	svc.penalizeOldProtocolPeer(addr, higherMinimum, higherMinimum)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lockoutActive := svc.isPeerVersionLockedOutLocked(addr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !lockoutActive {
 		t.Error("lockout MUST be set when peerMinimum > local protocol version (confirmed evidence)")
@@ -1236,10 +1236,10 @@ func TestInboundOldPeer_DoesNotFeedReporterSet(t *testing.T) {
 	// Ban scoring should have happened (health counters incremented).
 	for i := 0; i < 4; i++ {
 		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:100", i+1))
-		svc.mu.RLock()
+		svc.peerMu.RLock()
 		h := svc.health[addr]
 		attempts := h.IncompatibleVersionAttempts
-		svc.mu.RUnlock()
+		svc.peerMu.RUnlock()
 		if attempts != 1 {
 			t.Errorf("peer %s: IncompatibleVersionAttempts = %d, want 1", addr, attempts)
 		}
@@ -1340,9 +1340,9 @@ func TestCompatibleObservation_ClearsReporterAndLockout(t *testing.T) {
 		t.Fatalf("after penalize: reporters = %d, want 1", snap.IncompatibleVersionReporters)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lockoutActive := svc.isPeerVersionLockedOutLocked(addr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !lockoutActive {
 		t.Fatal("after penalize: lockout must be active")
 	}
@@ -1358,21 +1358,21 @@ func TestCompatibleObservation_ClearsReporterAndLockout(t *testing.T) {
 	}
 
 	// Lockout should be cleared.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lockoutActive = svc.isPeerVersionLockedOutLocked(addr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if lockoutActive {
 		t.Error("after connect: lockout must be cleared by successful handshake")
 	}
 
 	// Health diagnostic fields should be reset.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h := svc.health[addr]
 	attempts := h.IncompatibleVersionAttempts
 	lastAt := h.LastIncompatibleVersionAt
 	obsVer := h.ObservedPeerVersion
 	obsMin := h.ObservedPeerMinimumVersion
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if attempts != 0 {
 		t.Errorf("IncompatibleVersionAttempts = %d, want 0", attempts)
@@ -1480,11 +1480,11 @@ func TestVersionLockout_PropagatedByIdentity(t *testing.T) {
 	// but NOT to addr3 (different identity).
 	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lockout1 := svc.isPeerVersionLockedOutLocked(addr1)
 	lockout2 := svc.isPeerVersionLockedOutLocked(addr2)
 	lockout3 := svc.isPeerVersionLockedOutLocked(addr3)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !lockout1 {
 		t.Error("addr1: lockout must be set (directly penalized)")
@@ -1533,10 +1533,10 @@ func TestVersionLockout_NoIdentity_NoPropagation(t *testing.T) {
 
 	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lockout1 := svc.isPeerVersionLockedOutLocked(addr1)
 	lockout2 := svc.isPeerVersionLockedOutLocked(addr2)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !lockout1 {
 		t.Error("addr1: lockout must be set (directly penalized)")
@@ -1562,12 +1562,12 @@ func TestPeriodicRepair_ExpiresStaleReporters(t *testing.T) {
 
 	// Record 3 reporters (above threshold) 25 hours ago → stale.
 	stale := time.Now().UTC().Add(-25 * time.Hour)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Snapshot was computed at recording time → reporters counted as live
 	// because cutoff = stale - 24h is before the observations.
@@ -1577,10 +1577,10 @@ func TestPeriodicRepair_ExpiresStaleReporters(t *testing.T) {
 
 	// Simulate periodic repair at "now" — all reporters are beyond 24h TTL.
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.maybeRecomputeVersionPolicyPeriodic(now)
 	snap = svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.IncompatibleVersionReporters != 0 {
 		t.Errorf("after periodic repair: reporters = %d, want 0 (all expired)", snap.IncompatibleVersionReporters)
@@ -1602,36 +1602,36 @@ func TestPeriodicRepair_ThrottledByInterval(t *testing.T) {
 
 	// Record 3 stale reporters.
 	stale := time.Now().UTC().Add(-25 * time.Hour)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// First periodic call at t0 — should recompute and expire reporters.
 	t0 := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.maybeRecomputeVersionPolicyPeriodic(t0)
 	snap0 := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap0.IncompatibleVersionReporters != 0 {
 		t.Fatalf("after first repair: reporters = %d, want 0", snap0.IncompatibleVersionReporters)
 	}
 
 	// Re-inject 3 fresh reporters (simulating new events between repair ticks).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, t0)
 	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, t0)
 	svc.recordIncompatibleObservationLocked("peer-fff", 10, 10, t0)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Second call 10 seconds later — within throttle window, should be a no-op.
 	t1 := t0.Add(10 * time.Second)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.maybeRecomputeVersionPolicyPeriodic(t1)
 	snap1 := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Snapshot should still reflect the event-driven recompute from
 	// recordIncompatibleObservationLocked, NOT the periodic path.
@@ -1641,10 +1641,10 @@ func TestPeriodicRepair_ThrottledByInterval(t *testing.T) {
 
 	// Third call after the full interval — should trigger periodic recompute.
 	t2 := t0.Add(versionPolicyRepairInterval + time.Second)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.maybeRecomputeVersionPolicyPeriodic(t2)
 	snap2 := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Reporters are still fresh (recorded at t0, TTL is 24h), so they
 	// should survive the periodic recompute.
@@ -1664,9 +1664,9 @@ func TestPeriodicRepair_NilPolicyIsNoOp(t *testing.T) {
 	}
 
 	// Should not panic when versionPolicy is nil.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.maybeRecomputeVersionPolicyPeriodic(time.Now().UTC())
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if svc.versionPolicy != nil {
 		t.Error("periodic repair should not create versionPolicy from nil")
@@ -1729,8 +1729,8 @@ func TestCMDialFailed_PropagatesVersionEvidence(t *testing.T) {
 	// The version evidence should have reached penalizeOldProtocolPeer,
 	// which means the reporter set should contain the peer identity and
 	// the persisted lockout should be active.
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	if svc.versionPolicy == nil {
 		t.Fatal("versionPolicy must be created by recordIncompatibleObservationLocked")
@@ -1764,8 +1764,8 @@ func TestCMDialFailed_ZeroEvidence_NoReporterOrLockout(t *testing.T) {
 	plainErr := fmt.Errorf("%w: some reason", errIncompatibleProtocol)
 	svc.onCMDialFailed(addr, plainErr, true)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// Without version evidence (peerMinimum=0), the direction guard in
 	// penalizeOldProtocolPeer must NOT feed the reporter set or set lockout.
@@ -1818,7 +1818,7 @@ func TestCompatibleObservation_ClearsLockoutAcrossIdentity(t *testing.T) {
 	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin)
 
 	// Verify lockouts are active.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	if !svc.persistedMeta[addr1].VersionLockout.IsActive() {
 		t.Fatal("pre-check: addr1 lockout must be active")
 	}
@@ -1828,14 +1828,14 @@ func TestCompatibleObservation_ClearsLockoutAcrossIdentity(t *testing.T) {
 	if !svc.persistedMeta[addr3].VersionLockout.IsActive() {
 		t.Fatal("pre-check: addr3 lockout must be active")
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Simulate successful handshake on addr1 — should clear lockout
 	// for addr1 AND addr2 (same identity), but NOT addr3.
 	svc.markPeerConnected(addr1, domain.PeerDirectionOutbound)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	if svc.persistedMeta[addr1].VersionLockout.IsActive() {
 		t.Error("addr1: lockout must be cleared (directly handshook)")
@@ -1948,11 +1948,11 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	wantMax := localProto + 5
 	if snap.MaxObservedPeerVersion != wantMax {
@@ -1995,8 +1995,8 @@ func TestCMDialFailed_PersistsObservedClientVersion(t *testing.T) {
 
 	svc.onCMDialFailed(addr, cmErr, true)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	entry := svc.persistedMeta[addr]
 	if !entry.VersionLockout.IsActive() {
@@ -2044,7 +2044,7 @@ func TestAddPeer_ClearsLockoutAcrossIdentity(t *testing.T) {
 	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin)
 
 	// Verify all lockouts active.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	if !svc.persistedMeta[addr1].VersionLockout.IsActive() {
 		t.Fatal("pre: addr1 lockout must be active")
 	}
@@ -2054,11 +2054,11 @@ func TestAddPeer_ClearsLockoutAcrossIdentity(t *testing.T) {
 	if !svc.persistedMeta[addr3].VersionLockout.IsActive() {
 		t.Fatal("pre: addr3 lockout must be active")
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Simulate add_peer for addr1 — replicate the operator override logic
 	// from addPeerFrame under the lock.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	peerID := svc.peerIDs[addr1]
 	if pm := svc.persistedMeta[addr1]; pm != nil && pm.VersionLockout.IsActive() {
 		pm.VersionLockout = domain.VersionLockoutSnapshot{}
@@ -2077,10 +2077,10 @@ func TestAddPeer_ClearsLockoutAcrossIdentity(t *testing.T) {
 		}
 	}
 	svc.recomputeVersionPolicyLocked(time.Now().UTC())
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	if svc.persistedMeta[addr1].VersionLockout.IsActive() {
 		t.Error("addr1: lockout must be cleared (directly overridden)")
@@ -2121,15 +2121,15 @@ func TestAddPeer_ClearsReporterForIdentity(t *testing.T) {
 	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
 	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	reportersBefore := svc.versionPolicy.snapshot.IncompatibleVersionReporters
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if reportersBefore != 2 {
 		t.Fatalf("pre: reporters = %d, want 2", reportersBefore)
 	}
 
 	// Simulate add_peer for addr1 — remove reporter for "peer-aaa".
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	peerID := svc.peerIDs[addr1]
 	if pm := svc.persistedMeta[addr1]; pm != nil && pm.VersionLockout.IsActive() {
 		pm.VersionLockout = domain.VersionLockoutSnapshot{}
@@ -2139,7 +2139,7 @@ func TestAddPeer_ClearsReporterForIdentity(t *testing.T) {
 	}
 	svc.recomputeVersionPolicyLocked(time.Now().UTC())
 	snap := svc.versionPolicy.snapshot
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if snap.IncompatibleVersionReporters != 1 {
 		t.Errorf("after override: reporters = %d, want 1", snap.IncompatibleVersionReporters)
@@ -2178,9 +2178,9 @@ func TestVersionLockout_SiblingRefreshedWithStrongerEvidence(t *testing.T) {
 	// First penalize on addr1 with initial evidence → propagates to addr2.
 	svc.penalizeOldProtocolPeer(addr1, initialMin, initialMin)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	siblingMin1 := svc.persistedMeta[addr2].VersionLockout.ObservedMinimumProtocolVersion
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if siblingMin1 != initialMin {
 		t.Fatalf("initial sibling min = %d, want %d", siblingMin1, initialMin)
 	}
@@ -2188,9 +2188,9 @@ func TestVersionLockout_SiblingRefreshedWithStrongerEvidence(t *testing.T) {
 	// Second penalize on addr1 with stronger evidence → must refresh addr2.
 	svc.penalizeOldProtocolPeer(addr1, strongerMin, strongerMin)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	siblingMin2 := svc.persistedMeta[addr2].VersionLockout.ObservedMinimumProtocolVersion
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if siblingMin2 != strongerMin {
 		t.Errorf("refreshed sibling min = %d, want %d (must update with stronger evidence)",
@@ -2227,24 +2227,24 @@ func TestVersionLockout_SiblingRefreshedWithFresherTimestamp(t *testing.T) {
 	// First penalize with client version "corsa/1.0.0".
 	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	cv1 := string(svc.persistedMeta[addr2].VersionLockout.ObservedClientVersion)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if cv1 != "corsa/1.0.0" {
 		t.Fatalf("initial sibling client version = %q, want %q", cv1, "corsa/1.0.0")
 	}
 
 	// Update the client version and penalize again with same min but
 	// fresher timestamp → sibling must pick up the new client version.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.peerVersions[addr1] = "corsa/2.0.0"
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	cv2 := string(svc.persistedMeta[addr2].VersionLockout.ObservedClientVersion)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if cv2 != "corsa/2.0.0" {
 		t.Errorf("refreshed sibling client version = %q, want %q (must update with fresher evidence)",
@@ -2290,13 +2290,13 @@ func TestCompatibleObservation_ClearsSiblingHealthDiagnostics(t *testing.T) {
 
 	// Simulate a prior post-handshake disconnect on sibling to populate
 	// LastDisconnectCode — penalizeOldProtocolPeer only sets LastErrorCode.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr2].LastDisconnectCode = "frame-too-large"
 	svc.health[addr3].LastDisconnectCode = "rate-limited"
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Verify sibling health diagnostics are populated before handshake.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h2Pre := svc.health[addr2]
 	h3Pre := svc.health[addr3]
 	if h2Pre == nil || h2Pre.IncompatibleVersionAttempts == 0 {
@@ -2317,14 +2317,14 @@ func TestCompatibleObservation_ClearsSiblingHealthDiagnostics(t *testing.T) {
 	if h2Pre.LastDisconnectCode == "" {
 		t.Fatal("pre: addr2 must have non-empty LastDisconnectCode")
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Successful handshake on addr1 — should clear health diagnostics
 	// for addr2 (same identity), but NOT addr3 (different identity).
 	svc.markPeerConnected(addr1, domain.PeerDirectionOutbound)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// addr2: sibling of addr1 — all failure-related fields must be cleared.
 	h2 := svc.health[addr2]
@@ -2413,14 +2413,14 @@ func TestAddPeerFrame_ClearsLockoutAcrossIdentity(t *testing.T) {
 	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin)
 
 	// Verify pre-conditions.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	for _, a := range []domain.PeerAddress{addr1, addr2, addr3} {
 		if !svc.persistedMeta[a].VersionLockout.IsActive() {
 			t.Fatalf("pre: %s lockout must be active", a)
 		}
 	}
 	reportersPre := svc.versionPolicy.snapshot.IncompatibleVersionReporters
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if reportersPre < 2 {
 		t.Fatalf("pre: reporters = %d, want >= 2", reportersPre)
 	}
@@ -2434,8 +2434,8 @@ func TestAddPeerFrame_ClearsLockoutAcrossIdentity(t *testing.T) {
 		t.Fatalf("addPeerFrame returned error: %s", resp.Error)
 	}
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// addr1: directly overridden — lockout must be cleared.
 	if svc.persistedMeta[addr1].VersionLockout.IsActive() {
@@ -2512,15 +2512,15 @@ func TestCompatibleObservation_ClearsSiblingBansAndCooldowns(t *testing.T) {
 	// LastDisconnectedAt — that is set by markPeerDisconnected.
 	// We set it manually so the cooldown filter is active.
 	recentDisconnect := time.Now().UTC().Add(-10 * time.Second)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	for _, addr := range []domain.PeerAddress{addr2, addr3, addr4} {
 		svc.health[addr].LastDisconnectedAt = recentDisconnect
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Verify pre-conditions: siblings must be banned, have failures,
 	// and have a recent disconnect timestamp (cooldown active).
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	for _, addr := range []domain.PeerAddress{addr2, addr3, addr4} {
 		h := svc.health[addr]
 		if h == nil {
@@ -2540,14 +2540,14 @@ func TestCompatibleObservation_ClearsSiblingBansAndCooldowns(t *testing.T) {
 	if _, ok := svc.bannedIPSet["10.0.0.2"]; !ok {
 		t.Fatal("pre: IP 10.0.0.2 must be banned")
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Successful handshake on addr1 — should clear ban/cooldown for
 	// addr2 and addr3 (same identity), but NOT addr4 (different identity).
 	svc.markPeerConnected(addr1, domain.PeerDirectionOutbound)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// addr2: same identity, same IP — must be fully unblocked.
 	h2 := svc.health[addr2]
@@ -2638,14 +2638,14 @@ func TestAddPeerFrame_ClearsSiblingBansAndCooldowns(t *testing.T) {
 
 	// Simulate prior disconnects so cooldown is active.
 	recentDisconnect := time.Now().UTC().Add(-10 * time.Second)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	for _, addr := range []domain.PeerAddress{addr1, addr2, addr3, addr4} {
 		svc.health[addr].LastDisconnectedAt = recentDisconnect
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Verify pre-conditions.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	for _, addr := range []domain.PeerAddress{addr2, addr3, addr4} {
 		h := svc.health[addr]
 		if h.BannedUntil.IsZero() {
@@ -2658,7 +2658,7 @@ func TestAddPeerFrame_ClearsSiblingBansAndCooldowns(t *testing.T) {
 	if _, ok := svc.bannedIPSet["10.0.0.2"]; !ok {
 		t.Fatal("pre: IP 10.0.0.2 must be banned")
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Call the real add_peer handler for addr1.
 	resp := svc.addPeerFrame(protocol.Frame{
@@ -2669,8 +2669,8 @@ func TestAddPeerFrame_ClearsSiblingBansAndCooldowns(t *testing.T) {
 		t.Fatalf("addPeerFrame returned error: %s", resp.Error)
 	}
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// addr1: directly overridden — must be fully unblocked.
 	h1 := svc.health[addr1]
@@ -2763,11 +2763,11 @@ func TestCompatibleObservation_RepairsStaleScorePenalties(t *testing.T) {
 	}
 
 	// Verify scores are negative before handshake.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	score1Pre := svc.health[addr1].Score
 	score2Pre := svc.health[addr2].Score
 	score3Pre := svc.health[addr3].Score
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if score1Pre >= 0 {
 		t.Fatalf("pre: addr1 score = %d, want negative", score1Pre)
 	}
@@ -2778,8 +2778,8 @@ func TestCompatibleObservation_RepairsStaleScorePenalties(t *testing.T) {
 	// Successful handshake on addr1 — score must be repaired.
 	svc.markPeerConnected(addr1, domain.PeerDirectionOutbound)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// addr1: direct handshake — score must be >= peerScoreConnect (floor + bonus).
 	if svc.health[addr1].Score < peerScoreConnect {
@@ -2840,10 +2840,10 @@ func TestAddPeerFrame_RepairsStaleScorePenalties(t *testing.T) {
 		}
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	score2Pre := svc.health[addr2].Score
 	score3Pre := svc.health[addr3].Score
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if score2Pre >= 0 {
 		t.Fatalf("pre: addr2 score = %d, want negative", score2Pre)
 	}
@@ -2857,8 +2857,8 @@ func TestAddPeerFrame_RepairsStaleScorePenalties(t *testing.T) {
 		t.Fatalf("addPeerFrame returned error: %s", resp.Error)
 	}
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// addr1: directly overridden — score must be >= 0.
 	if svc.health[addr1].Score < 0 {
@@ -2905,27 +2905,27 @@ func TestPenalizeOldProtocol_ClearsStaleLastDisconnectCode(t *testing.T) {
 	}
 
 	// Simulate a prior post-handshake disconnect that left LastDisconnectCode.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	h := svc.ensurePeerHealthLocked(addr)
 	h.LastDisconnectCode = "frame-too-large"
 	h.LastErrorCode = ""
 	h.LastError = ""
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Precondition: LastDisconnectCode is populated.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	if svc.health[addr].LastDisconnectCode == "" {
 		t.Fatal("pre: LastDisconnectCode must be non-empty")
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// penalizeOldProtocolPeer records a pre-handshake incompatible reject.
 	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
 
 	// Post: LastDisconnectCode must be cleared — the newest event is a
 	// pre-handshake rejection, not a post-handshake teardown.
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	health := svc.health[addr]
 	if health == nil {
@@ -2976,10 +2976,10 @@ func TestOutboundIncompatibleReject_HealthSnapshotComplete(t *testing.T) {
 
 	// Simulate a prior post-handshake disconnect that left a stale
 	// LastDisconnectCode. The outbound reject must supersede it.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	h := svc.ensurePeerHealthLocked(addr)
 	h.LastDisconnectCode = "frame-too-large"
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Simulate an outbound incompatible reject through the CM path.
 	cmErr := &incompatibleProtocolError{
@@ -3210,19 +3210,19 @@ func TestVersionDiagnostics_BuildAndRestoreRoundTrip(t *testing.T) {
 	}
 
 	// Snapshot the health state before flush.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	hPre := svc.health[addr]
 	preErrorCode := hPre.LastErrorCode
 	preAttempts := hPre.IncompatibleVersionAttempts
 	preVersion := hPre.ObservedPeerVersion
 	preMinVersion := hPre.ObservedPeerMinimumVersion
 	preLastIncompat := hPre.LastIncompatibleVersionAt
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Build entries (simulates the flush serialization path).
-	svc.mu.Lock()
-	entries := svc.buildPeerEntriesLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Lock()
+	entries := svc.buildPeerEntriesLocked(nil)
+	svc.peerMu.Unlock()
 
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -3335,17 +3335,17 @@ func TestClientVersion_SurvivesRestartViaLockout(t *testing.T) {
 	svc.onCMDialFailed(addr, cmErr, true)
 
 	// Verify pre-flush: peerVersions has the client version.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	preCV := svc.peerVersions[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if preCV != "corsa/2.0.0-rc1" {
 		t.Fatalf("pre: peerVersions[addr] = %q, want %q", preCV, "corsa/2.0.0-rc1")
 	}
 
 	// Build entries (simulates the flush serialization path).
-	svc.mu.Lock()
-	entries := svc.buildPeerEntriesLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Lock()
+	entries := svc.buildPeerEntriesLocked(nil)
+	svc.peerMu.Unlock()
 
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -3522,9 +3522,9 @@ func TestVersionDiagnostics_DiskRestartRoundTrip(t *testing.T) {
 
 	// Pre-populate ClientVersion in peerVersions so that
 	// setVersionLockoutLocked captures it into VersionLockout.
-	svc1.mu.Lock()
+	svc1.peerMu.Lock()
 	svc1.peerVersions[peerAddr] = clientVer
-	svc1.mu.Unlock()
+	svc1.peerMu.Unlock()
 
 	// Penalize 4 times to trigger ban and accumulate full diagnostics.
 	for i := 0; i < 4; i++ {
@@ -3532,7 +3532,7 @@ func TestVersionDiagnostics_DiskRestartRoundTrip(t *testing.T) {
 	}
 
 	// Snapshot the expected values before flush.
-	svc1.mu.RLock()
+	svc1.peerMu.RLock()
 	h := svc1.health[peerAddr]
 	wantErrorCode := h.LastErrorCode
 	wantAttempts := int(h.IncompatibleVersionAttempts)
@@ -3541,7 +3541,7 @@ func TestVersionDiagnostics_DiskRestartRoundTrip(t *testing.T) {
 	wantScore := h.Score
 	wantFailures := h.ConsecutiveFailures
 	wantLastError := h.LastError
-	svc1.mu.RUnlock()
+	svc1.peerMu.RUnlock()
 
 	// Flush to disk.
 	svc1.flushPeerState()

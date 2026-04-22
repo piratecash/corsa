@@ -35,9 +35,9 @@ func TestDispatchPeerSessionFrame_PingRespondsPong(t *testing.T) {
 		sendCh:  make(chan protocol.Frame, 8),
 	}
 	attachTestNetCore(svc, session)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	type readResult struct {
 		frame protocol.Frame
@@ -90,10 +90,10 @@ func TestPeerSessionRequest_PingDuringWaitRespondsPong(t *testing.T) {
 		sendCh:  make(chan protocol.Frame, 8),
 	}
 	attachTestNetCore(svc, session)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session
 	svc.health[peerAddr] = &peerHealth{Connected: true}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Read outbound frames from the pipe in a goroutine. The pipe is
 	// synchronous, so this must run concurrently with the writes that

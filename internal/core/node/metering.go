@@ -26,12 +26,12 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *netco
 		return
 	}
 
-	log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_wait").Str("address", string(address)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_held").Str("address", string(address)).Msg("s_mu_writer")
+	log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_released").Str("address", string(address)).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "accumulateSessionTraffic").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	}()
 
 	address = s.resolveHealthAddress(address)
@@ -44,7 +44,8 @@ func (s *Service) accumulateSessionTraffic(address domain.PeerAddress, mc *netco
 // peer address can be trusted for traffic attribution.  On the session-auth
 // path NetCore.auth exists and we require Verified==true; on the legacy
 // (no-session-auth) path auth is nil and attribution is allowed.
-// Caller must hold s.mu (read or write).
+// Reads peer-domain registry state (s.conns via coreForIDLocked) —
+// caller MUST hold s.peerMu (read or write).
 func (s *Service) isConnTrafficTrustedByIDLocked(id domain.ConnID) bool {
 	core := s.coreForIDLocked(id)
 	if core == nil {
@@ -67,12 +68,12 @@ func (s *Service) accumulateInboundTraffic(mc *netcore.MeteredConn) {
 		return
 	}
 
-	log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_held").Msg("s_mu_writer")
+	log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_wait").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_held").Msg("peer_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_released").Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "accumulateInboundTraffic").Str("phase", "lock_released").Msg("peer_mu_writer")
 	}()
 
 	id, ok := s.connIDForLocked(mc)
@@ -94,7 +95,8 @@ func (s *Service) accumulateInboundTraffic(mc *netcore.MeteredConn) {
 
 // liveTrafficLocked collects current byte counters from all active
 // MeteredConn instances (both outbound peer sessions and inbound
-// connections). Must be called while holding s.mu at least for read.
+// connections). Reads peer-domain session / registry state — caller
+// MUST hold s.peerMu at least for read.
 func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 	result := make(map[domain.PeerAddress]liveTraffic)
 
@@ -141,18 +143,18 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 // networkStatsFrame returns the cached network_stats snapshot.
 //
 // The frame is rebuilt in the background by hotReadsRefreshLoop every
-// networkStatsSnapshotInterval under a short s.mu.RLock and primed
+// networkStatsSnapshotInterval under a short s.peerMu.RLock and primed
 // synchronously by primeHotReadSnapshots() from Run() before the listener
 // opens; the RPC path here performs a single atomic load and no locking
 // at all.  This statically decouples fetch_network_stats from every
-// writer holding s.mu — previously a burst of writers on s.mu.Lock
+// writer holding s.peerMu — previously a burst of writers on s.peerMu.Lock
 // (bootstrapLoop eviction, announce_routes fanout, inbound connect path)
 // starved the RPC's RLock until the command timeout.
 //
 // If the atomic load returns nil (a unit test that bypasses Run() and
 // does not prime), toFrame() emits an empty-but-valid network_stats
 // frame rather than falling back to a synchronous rebuild — the
-// fallback would reach s.mu.RLock on the RPC goroutine and break the
+// fallback would reach s.peerMu.RLock on the RPC goroutine and break the
 // lock-free contract the snapshot infrastructure enforces.
 func (s *Service) networkStatsFrame() protocol.Frame {
 	log.Trace().Msg("network_stats_frame_begin")
@@ -173,7 +175,7 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 // (~2s). Uses a short RLock to snapshot health + live counters, then
 // compares and publishes outside the lock.
 func (s *Service) emitTrafficDeltas() {
-	s.mu.RLock()
+	s.peerMu.RLock()
 	live := s.liveTrafficLocked()
 
 	type snap struct {
@@ -199,7 +201,7 @@ func (s *Service) emitTrafficDeltas() {
 		}
 		snaps = append(snaps, snap{addr, lv.sent, lv.received})
 	}
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 
 	// Compare with last emission and publish only changed peers.
 	s.trafficMu.Lock()

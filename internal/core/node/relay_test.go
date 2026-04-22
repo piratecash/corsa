@@ -566,12 +566,12 @@ func registerSenderKey(t *testing.T, svc *Service) *identity.Identity {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.pubKeys[sender.Address] = identity.PublicKeyBase64(sender.PublicKey)
 	svc.boxKeys[sender.Address] = identity.BoxPublicKeyBase64(sender.BoxPublicKey)
 	svc.boxSigs[sender.Address] = identity.SignBoxKeyBinding(sender)
 	svc.known[sender.Address] = struct{}{}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	return sender
 }
 
@@ -824,10 +824,10 @@ func TestRelayedDMEmitsDeliveryReceipt(t *testing.T) {
 	}
 
 	// Register sender's keys so storeIncomingMessage passes the DM checks.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
 	svc.boxKeys[senderID.Address] = identity.BoxPublicKeyBase64(senderID.BoxPublicKey)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Create a properly encrypted DM payload.
 	ciphertext, err := directmsg.EncryptForParticipants(
@@ -864,9 +864,9 @@ func TestRelayedDMEmitsDeliveryReceipt(t *testing.T) {
 	// emitDeliveryReceipt runs in a goroutine — wait briefly.
 	time.Sleep(200 * time.Millisecond)
 
-	svc.mu.Lock()
+	svc.deliveryMu.RLock()
 	receipts := svc.receipts[senderID.Address]
-	svc.mu.Unlock()
+	svc.deliveryMu.RUnlock()
 
 	found := false
 	for _, r := range receipts {
@@ -1318,13 +1318,13 @@ func TestHandleRelayReceiptPropagatesSendResult(t *testing.T) {
 	// Create a session with mesh_relay_v1 capability. enqueuePeerFrame will
 	// fail (no health → activePeerSession returns nil), but queuePeerFrame
 	// succeeds, so the overall send returns true.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 		address:      domain.PeerAddress(peerAddr),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       make(chan protocol.Frame),
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.relayStates.store(&relayForwardState{
 		MessageID:        "receipt-prop-test-1",
@@ -1416,12 +1416,12 @@ func TestRelayMessageRejectsNonDMTopic(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 
 	senderKey, _ := identity.Generate()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.pubKeys[senderKey.Address] = identity.PublicKeyBase64(senderKey.PublicKey)
 	svc.boxKeys[senderKey.Address] = identity.BoxPublicKeyBase64(senderKey.BoxPublicKey)
 	svc.boxSigs[senderKey.Address] = identity.SignBoxKeyBinding(senderKey)
 	svc.known[senderKey.Address] = struct{}{}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	nonDMTopics := []string{"general", "announcements", "custom-topic", ""}
 
@@ -1476,7 +1476,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c1.Close() }()
 		defer func() { _ = c2.Close() }()
 
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		pc := netcore.New(netcore.ConnID(1), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-peer-1"),
 			Identity: domain.PeerIdentity("inbound-peer-1"),
@@ -1491,7 +1491,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			LastConnectedAt:     time.Now().UTC(),
 			LastUsefulReceiveAt: time.Now().UTC(),
 		}
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 1 {
@@ -1499,10 +1499,10 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		}
 
 		// Cleanup.
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress("inbound-peer-1"))
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 	})
 
 	t.Run("dedup_outbound_and_inbound", func(t *testing.T) {
@@ -1513,7 +1513,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c1.Close() }()
 		defer func() { _ = c2.Close() }()
 
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 			address:      domain.PeerAddress(peerAddr),
 			peerIdentity: domain.PeerIdentity(peerID),
@@ -1533,7 +1533,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			LastConnectedAt:     time.Now().UTC(),
 			LastUsefulReceiveAt: time.Now().UTC(),
 		}
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 1 {
@@ -1541,11 +1541,11 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		}
 
 		// Cleanup.
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		delete(svc.sessions, domain.PeerAddress(peerAddr))
 		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress(peerAddr))
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 	})
 
 	t.Run("mixed_outbound_and_inbound", func(t *testing.T) {
@@ -1554,7 +1554,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c1.Close() }()
 		defer func() { _ = c2.Close() }()
 
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress("outbound-peer")] = &peerSession{
 			address:      "outbound-peer",
 			peerIdentity: "outbound-id",
@@ -1580,7 +1580,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			LastConnectedAt:     time.Now().UTC(),
 			LastUsefulReceiveAt: time.Now().UTC(),
 		}
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 2 {
@@ -1588,12 +1588,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		}
 
 		// Cleanup.
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-peer"))
 		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress("outbound-peer"))
 		delete(svc.health, domain.PeerAddress("inbound-peer-2"))
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 	})
 
 	t.Run("dedup_by_identity_not_address", func(t *testing.T) {
@@ -1605,7 +1605,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c2.Close() }()
 
 		sharedID := "shared-identity-1"
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress("outbound-addr-X")] = &peerSession{
 			address:      "outbound-addr-X",
 			peerIdentity: domain.PeerIdentity(sharedID),
@@ -1632,7 +1632,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			LastConnectedAt:     time.Now().UTC(),
 			LastUsefulReceiveAt: time.Now().UTC(),
 		}
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 1 {
@@ -1640,12 +1640,12 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		}
 
 		// Cleanup.
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-addr-X"))
 		svc.deleteTestConn(c1)
 		delete(svc.health, domain.PeerAddress("outbound-addr-X"))
 		delete(svc.health, domain.PeerAddress("127.0.0.1:64646"))
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 	})
 
 	// Regression for the pre-activation visibility leak: a session inserted
@@ -1658,7 +1658,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c1.Close() }()
 		defer func() { _ = c2.Close() }()
 
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress("outbound-preactivation")] = &peerSession{
 			address:      "outbound-preactivation",
 			peerIdentity: "preactivation-id-1",
@@ -1673,7 +1673,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
 		// Intentionally no s.health entries — mirrors the insert →
 		// markPeerConnected window on both bring-up paths.
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 
 		got := svc.countCapablePeers(domain.CapMeshRelayV1)
 		if got != 0 {
@@ -1681,10 +1681,10 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		}
 
 		// Cleanup.
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		delete(svc.sessions, domain.PeerAddress("outbound-preactivation"))
 		svc.deleteTestConn(c1)
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 	})
 }
 
@@ -1712,24 +1712,33 @@ func TestRetryRelayDeliveriesCallsTryRelay(t *testing.T) {
 		TTLSeconds: 86400,
 	}
 
-	svc.mu.Lock()
+	// s.topics is under s.gossipMu; s.relayRetry is under s.deliveryMu.
+	// This test takes s.peerMu + s.deliveryMu from a single goroutine
+	// during pre-listener setup, which is safe because no concurrent
+	// reader/writer exists yet — retryRelayDeliveries() is called below
+	// only after the mutation completes.  When this block is ever made
+	// concurrent with Service, it must be rewritten to take s.peerMu →
+	// s.deliveryMu → s.gossipMu in canonical OUTER → INNER order.
+	svc.peerMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], envelope)
+	svc.deliveryMu.Lock()
 	svc.relayRetry[relayMessageKey(envelope.ID)] = relayAttempt{
 		FirstSeen: time.Now().UTC().Add(-2 * time.Minute),
 	}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Register a peer session with mesh_relay_v1 capability.
 	peerAddr := "relay-full-node-1"
 	sendCh := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 		address:      domain.PeerAddress(peerAddr),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
 	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.retryRelayDeliveries()
 
@@ -1771,7 +1780,7 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 	// Session B: HAS mesh_relay_v1 capability (healthy path).
 	capableCh := make(chan protocol.Frame, 100)
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		address:      "addr-A",
 		peerIdentity: domain.PeerIdentity(recipientID.Address),
@@ -1786,7 +1795,7 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 		sendCh:       capableCh,
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{Connected: true}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	frame := protocol.Frame{
 		Type:       "relay_message",
@@ -1845,10 +1854,10 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 	}
 	attachTestNetCore(svc, session)
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = session
 	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Close the remote end so the next write fails with a pipe error.
 	_ = remote.Close()
@@ -1876,9 +1885,9 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 	}
 
 	// Verify the peer was marked as disconnected.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[domain.PeerAddress(peerAddr)]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if health == nil {
 		t.Fatal("health entry should exist")
@@ -1915,10 +1924,10 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 	}
 	attachTestNetCore(svc, session)
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = session
 	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	_ = remote.Close()
 
@@ -1942,9 +1951,9 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 		t.Fatal("servePeerSession did not return within timeout")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[domain.PeerAddress(peerAddr)]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if health == nil || health.Connected {
 		t.Fatal("peer should be disconnected after relay_hop_ack write failure")
@@ -1960,14 +1969,14 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 
 	peerAddr := "relay-hop-back"
 	sendCh := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 		address:      domain.PeerAddress(peerAddr),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
 	svc.health[domain.PeerAddress(peerAddr)] = &peerHealth{Connected: true}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Store relay forward state so handleRelayReceipt can find the return path.
 	svc.relayStates.store(&relayForwardState{
@@ -1988,12 +1997,12 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 	}
 
 	// Store the receipt and set up relay retry state.
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.receipts[receipt.Recipient] = append(svc.receipts[receipt.Recipient], receipt)
 	svc.relayRetry[relayReceiptKey(receipt)] = relayAttempt{
 		FirstSeen: time.Now().UTC().Add(-2 * time.Minute),
 	}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	svc.retryRelayDeliveries()
 

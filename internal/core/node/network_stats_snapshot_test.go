@@ -12,23 +12,25 @@ import (
 
 // TestNetworkStatsFrameDoesNotBlockOnSMu is the regression test for the
 // 116-second fetch_network_stats stall observed in production when a writer
-// held s.mu (sendAnnounceRoutesToInbound waiting on a sync network write).
+// held s.peerMu (sendAnnounceRoutesToInbound waiting on a sync network
+// write).  The "SMu" in the test name preserves the historical identifier
+// from the pre-split era — the lock has since been renamed s.peerMu.
 //
-// Before the atomic snapshot fix, networkStatsFrame() acquired s.mu.RLock
+// Before the atomic snapshot fix, networkStatsFrame() acquired s.peerMu.RLock
 // directly.  Go's RWMutex is writer-preferring: once any writer queues on
-// s.mu.Lock(), subsequent RLock callers block behind it.  The RPC would
-// therefore sit in s.mu.RLock() for the entire writer hold time — up to
+// s.peerMu.Lock(), subsequent RLock callers block behind it.  The RPC would
+// therefore sit in s.peerMu.RLock() for the entire writer hold time — up to
 // the command timeout (≈90 s) — freezing the UI.
 //
 // The fix: networkStatsFrame() reads a precomputed snapshot via atomic
 // load.  The snapshot is rebuilt by a background refresher under a short
-// s.mu.RLock.  RPC reader never acquires s.mu.
+// s.peerMu.RLock.  RPC reader never acquires s.peerMu.
 //
-// The test holds s.mu.Lock for 2 seconds from a helper goroutine and asserts
+// The test holds s.peerMu.Lock for 2 seconds from a helper goroutine and asserts
 // that networkStatsFrame() completes within 100 ms.  With the old
 // implementation the call would block for the full 2 s; with the fix it
 // returns almost instantly because the snapshot load path never touches
-// s.mu.
+// s.peerMu.
 func TestNetworkStatsFrameDoesNotBlockOnSMu(t *testing.T) {
 	t.Parallel()
 
@@ -38,16 +40,16 @@ func TestNetworkStatsFrameDoesNotBlockOnSMu(t *testing.T) {
 	// content — the test should prove freshness of the cached data, not
 	// just that an empty snapshot loads quickly.
 	addr := domain.PeerAddress("test-peer-1")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr] = &peerHealth{
 		Address:       addr,
 		BytesSent:     1000,
 		BytesReceived: 2000,
 		Connected:     true,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
-	// Prime the snapshot once BEFORE the writer grabs s.mu.  In production
+	// Prime the snapshot once BEFORE the writer grabs s.peerMu.  In production
 	// the background refresher does this every networkStatsSnapshotInterval;
 	// in this test we skip the Run() wiring and prime directly.
 	svc.rebuildNetworkStatsSnapshot()
@@ -61,21 +63,21 @@ func TestNetworkStatsFrameDoesNotBlockOnSMu(t *testing.T) {
 		t.Fatal("primed snapshot has zero known peers despite seeded health")
 	}
 
-	// Hold s.mu.Lock for 2 s from a helper goroutine — the exact pattern
+	// Hold s.peerMu.Lock for 2 s from a helper goroutine — the exact pattern
 	// that starves RLock readers in production.
 	writerStarted := make(chan struct{})
 	writerDone := make(chan struct{})
 	go func() {
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		close(writerStarted)
 		time.Sleep(2 * time.Second)
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 		close(writerDone)
 	}()
 
 	// Wait for the writer to actually hold the mutex before measuring the
 	// RPC timing.  Without this, the test could race and call the RPC
-	// before the writer acquired s.mu, giving a false pass.
+	// before the writer acquired s.peerMu, giving a false pass.
 	<-writerStarted
 
 	start := time.Now()
@@ -88,7 +90,7 @@ func TestNetworkStatsFrameDoesNotBlockOnSMu(t *testing.T) {
 	// comfortably.
 	const maxTolerated = 100 * time.Millisecond
 	if elapsed > maxTolerated {
-		t.Fatalf("networkStatsFrame took %s while writer held s.mu; expected < %s (RPC still coupled to s.mu)", elapsed, maxTolerated)
+		t.Fatalf("networkStatsFrame took %s while writer held s.peerMu; expected < %s (RPC still coupled to s.peerMu)", elapsed, maxTolerated)
 	}
 
 	// Content sanity: the frame returned is the primed snapshot, not an
@@ -113,8 +115,8 @@ func TestNetworkStatsFrameDoesNotBlockOnSMu(t *testing.T) {
 // that bypasses Run() and therefore skips primeHotReadSnapshots),
 // networkStatsFrame() returns an empty-but-valid network_stats frame
 // rather than synchronously rebuilding.  The synchronous rebuild was
-// removed because it acquired s.mu.RLock on the RPC goroutine and
-// re-coupled the hot path to s.mu — exactly the starvation shape the
+// removed because it acquired s.peerMu.RLock on the RPC goroutine and
+// re-coupled the hot path to s.peerMu — exactly the starvation shape the
 // snapshot infrastructure was built to eliminate.
 //
 // In production, Run() calls primeHotReadSnapshots() before the
@@ -143,7 +145,7 @@ func TestNetworkStatsFrameSnapshotMissReturnsEmptyFrame(t *testing.T) {
 	}
 
 	// The handler must NOT silently populate the cache as a side effect.
-	// Doing so would mean the RPC path had reached s.mu.RLock, violating
+	// Doing so would mean the RPC path had reached s.peerMu.RLock, violating
 	// the lock-free contract.
 	if svc.loadNetworkStatsSnapshot() != nil {
 		t.Fatal("networkStatsFrame() must not synchronously rebuild on miss (lock-free contract)")
@@ -159,14 +161,14 @@ func TestNetworkStatsSnapshotRefreshReflectsMutations(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 	addr := domain.PeerAddress("traffic-peer-1")
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr] = &peerHealth{
 		Address:       addr,
 		BytesSent:     100,
 		BytesReceived: 200,
 		Connected:     true,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.rebuildNetworkStatsSnapshot()
 	snap1 := svc.loadNetworkStatsSnapshot()
@@ -175,10 +177,10 @@ func TestNetworkStatsSnapshotRefreshReflectsMutations(t *testing.T) {
 	}
 
 	// Mutate health — simulates an accumulate* call finishing.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[addr].BytesSent = 500
 	svc.health[addr].BytesReceived = 700
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Until the refresher runs, the cached snapshot still reflects the
 	// previous value.  That is intentional (bounded staleness) and is

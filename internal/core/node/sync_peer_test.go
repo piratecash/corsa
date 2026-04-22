@@ -164,9 +164,9 @@ func TestSyncPeer_RequestPeersTrue_SendsGetPeers(t *testing.T) {
 	}
 
 	// Verify peers were added via addPeerAddress.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != len(discoveredPeers) {
 		t.Errorf("expected %d peers added, got %d", len(discoveredPeers), peerCount)
 	}
@@ -222,9 +222,9 @@ func TestSyncPeer_RequestPeersFalse_SkipsGetPeers(t *testing.T) {
 	}
 
 	// Verify no peers were added (get_peers was skipped).
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 0 {
 		t.Errorf("expected 0 peers (get_peers skipped), got %d", peerCount)
 	}
@@ -312,9 +312,9 @@ func TestSyncPeer_SkipGetPeers_NoAddPeerAddress(t *testing.T) {
 
 	<-receivedCh
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 0 {
 		t.Errorf("expected 0 peers (get_peers was skipped), got %d", peerCount)
 	}
@@ -407,9 +407,9 @@ func TestSyncSenderKeys_FreshDialFallback_SkipsGetPeers(t *testing.T) {
 
 	// Regression: addPeerAddress must not be called — the recovery path
 	// is narrow contact/key sync, not a discovery event.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 0 {
 		t.Errorf("expected 0 peers (recovery path must not discover), got %d", peerCount)
 	}
@@ -628,9 +628,9 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 		t.Fatalf("syncPeer handshake did not complete within 5s")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	pm := svc.persistedMeta[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if pm == nil {
 		t.Fatalf("persistedMeta row not created by syncPeer path")
 	}

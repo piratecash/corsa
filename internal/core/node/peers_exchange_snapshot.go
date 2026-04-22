@@ -9,27 +9,28 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// peersExchangeSnapshot caches the s.mu-protected slices used by
+// peersExchangeSnapshot caches the peer-domain slices used by
 // buildPeerExchangeResponse (get_peers RPC).  Primed synchronously by
 // primeHotReadSnapshots() in Run() before the listener opens, then rebuilt
 // by hotReadsRefreshLoop every networkStatsSnapshotInterval under a short
-// s.mu.RLock.  The RPC handler performs a single atomic load and never
-// acquires s.mu — there is no synchronous fallback rebuild on the RPC
-// goroutine, so the hot path is statically decoupled from s.mu.
+// s.peerMu.RLock.  The RPC handler performs a single atomic load and never
+// acquires s.peerMu — there is no synchronous fallback rebuild on the RPC
+// goroutine, so the hot path is statically decoupled from peer-domain
+// writers.
 //
 // The sets are small (len(persistedMeta) + len(health)) and stable between
 // reconnect events, so even a brief staleness window does not change
-// peer-exchange outcomes materially — but under a writer storm on s.mu the
-// snapshot lets get_peers return in microseconds instead of waiting behind a
-// queued writer.
+// peer-exchange outcomes materially — but under a writer storm on
+// s.peerMu the snapshot lets get_peers return in microseconds instead of
+// waiting behind a queued writer.
 //
 // Peer state transitions (markPeerConnected / markPeerDisconnected) do NOT
 // force an out-of-band rebuild of this snapshot.  The eager refresh helper
 // on the peer-transition path only rebuilds peer_health because
 // rebuildPeersExchangeSnapshot calls peerProvider.Candidates() which
-// re-acquires s.mu.RLock via its callbacks — doing so from the caller's
+// re-acquires s.peerMu.RLock via its callbacks — doing so from the caller's
 // goroutine (session teardown, shutdown drain) couples those paths to
-// s.mu contention from other writers.  The 500 ms staleness window on
+// s.peerMu contention from other writers.  The 500 ms staleness window on
 // get_peers is acceptable because it feeds gossip propagation, not the
 // click-to-render UI paths.
 type peersExchangeSnapshot struct {
@@ -48,13 +49,14 @@ type peersExchangeSnapshot struct {
 	inboundConnected []domain.PeerAddress
 	// candidateAddresses holds the addresses returned by
 	// peerProvider.Candidates() captured at refresh time.  The candidates
-	// helper itself acquires s.mu.RLock via its HealthFn / ConnectedFn /
-	// NetworksFn / BannedIPsFn / VersionLockedOutFn / RemoteBannedFn
-	// callbacks, so invoking it on the RPC path would re-couple get_peers
-	// to s.mu and reintroduce the writer-storm starvation the snapshot is
-	// meant to break.  Computing the list inside the refresher moves that
-	// coupling onto the background goroutine (which is allowed to stall
-	// under bounded staleness) and leaves the handler lock-free.
+	// helper itself acquires s.peerMu.RLock via its HealthFn / ConnectedFn /
+	// NetworksFn / VersionLockedOutFn / RemoteBannedFn callbacks and
+	// s.ipStateMu.RLock via BannedIPsFn, so invoking it on the RPC path
+	// would re-couple get_peers to peer-domain and ipState-domain writers
+	// and reintroduce the writer-storm starvation the snapshot is meant to
+	// break.  Computing the list inside the refresher moves that coupling
+	// onto the background goroutine (which is allowed to stall under
+	// bounded staleness) and leaves the handler lock-free.
 	candidateAddresses []domain.PeerAddress
 	generatedAt        time.Time
 }
@@ -68,13 +70,13 @@ func (s *Service) loadPeersExchangeSnapshot() *peersExchangeSnapshot {
 }
 
 // rebuildPeersExchangeSnapshot reads persistedMeta and health under a short
-// s.mu.RLock and stores the resulting snapshot atomically.  The RPC handler
+// s.peerMu.RLock and stores the resulting snapshot atomically.  The RPC handler
 // runs its filtering logic (shouldHidePeerExchangeAddress, isAnnounceable,
-// splitHostPort) on the snapshot without touching s.mu.
+// splitHostPort) on the snapshot without touching s.peerMu.
 func (s *Service) rebuildPeersExchangeSnapshot() {
 	log.Trace().Msg("peers_exchange_snapshot_refresh_begin")
 
-	s.mu.RLock()
+	s.peerMu.RLock()
 
 	announceable := make(map[domain.PeerAddress]struct{}, len(s.persistedMeta))
 	knownInPersistedMeta := make(map[domain.PeerAddress]struct{}, len(s.persistedMeta))
@@ -96,15 +98,16 @@ func (s *Service) rebuildPeersExchangeSnapshot() {
 		inboundConnected = append(inboundConnected, addr)
 	}
 
-	s.mu.RUnlock()
+	s.peerMu.RUnlock()
 	log.Trace().Int("persisted", len(knownInPersistedMeta)).Int("inbound", len(inboundConnected)).Msg("peers_exchange_snapshot_rlock_released")
 
-	// Capture the candidate list OUTSIDE the s.mu.RLock window.  Candidates()
+	// Capture the candidate list OUTSIDE the s.peerMu.RLock window.  Candidates()
 	// acquires pp.mu.RLock internally and, via its callbacks, reacquires
-	// s.mu.RLock per call — doing this from inside the snapshot's s.mu.RLock
+	// s.peerMu.RLock per call — doing this from inside the snapshot's s.peerMu.RLock
 	// window would be a recursive RLock and is forbidden by sync.RWMutex.
-	// The refresher itself may stall here if a writer is holding s.mu; that
-	// is the bounded-staleness price we pay so the RPC path stays lock-free.
+	// The refresher itself may stall here if a writer is holding s.peerMu;
+	// that is the bounded-staleness price we pay so the RPC path stays
+	// lock-free.
 	var candidateAddresses []domain.PeerAddress
 	if s.peerProvider != nil {
 		cands := s.peerProvider.Candidates()

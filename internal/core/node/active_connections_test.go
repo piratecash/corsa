@@ -222,7 +222,7 @@ func TestActiveConnectionsJSON_OutboundWithSlotState(t *testing.T) {
 	// buildTestServiceWithCM does not populate health/sessions; the CM-only
 	// test helper skips markPeerConnected. Populate manually so that
 	// peerHealthFrames() sees the outbound peer.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	if svc.health == nil {
 		svc.health = make(map[domain.PeerAddress]*peerHealth)
 	}
@@ -251,7 +251,7 @@ func TestActiveConnectionsJSON_OutboundWithSlotState(t *testing.T) {
 		connID:       domain.ConnID(1),
 	}
 	svc.peerIDs[pa] = "id-1.2.3.4:9000"
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Post-mutation prime: the snapshots are loaded atomically by the hot
 	// path and never synchronously rebuilt, so direct map writes are only
@@ -552,7 +552,7 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 
 	// buildTestServiceWithCM does not populate health/sessions; populate
 	// manually so peerHealthFrames() can see outbound peers.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	if svc.health == nil {
 		svc.health = make(map[domain.PeerAddress]*peerHealth)
 	}
@@ -596,14 +596,14 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 		LastUsefulReceiveAt: now,
 	}
 	svc.peerIDs[inAddr] = domain.PeerIdentity("inbound_identity")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Register the inbound core in the conn registry.
 	core, coreCleanup := testInboundCore(t, inAddr, domain.PeerIdentity("inbound_identity"), domain.ConnID(999))
 	defer coreCleanup()
 	func() {
-		svc.mu.Lock()
-		defer svc.mu.Unlock()
+		svc.peerMu.Lock()
+		defer svc.peerMu.Unlock()
 		svc.conns[domain.ConnID(999)] = &connEntry{core: core}
 	}()
 
@@ -684,7 +684,7 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 	slotActive(t, cm, canonical)
 
 	// Populate health/sessions manually (buildTestServiceWithCM skips this).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
 	svc.sessions = make(map[domain.PeerAddress]*peerSession)
 	svc.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
@@ -705,7 +705,7 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 		connID:       domain.ConnID(1),
 	}
 	svc.peerIDs[pa] = "id-fallback"
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Post-mutation prime so peerHealthFrames observes the seeded state —
 	// the hot path never rebuilds synchronously.

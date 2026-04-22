@@ -409,9 +409,9 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 		_ = conn.Close()
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	entry := svc.bans["127.0.0.1"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if entry.Score != 1000 {
 		t.Fatalf("expected ban score 1000, got %#v", entry)
 	}
@@ -1448,9 +1448,9 @@ func TestRoutingTargetsIncludeNonSessionPeers(t *testing.T) {
 
 	// nodeB is a known peer but has no active session yet.
 	addrB := domain.PeerAddress("nodeB:1")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.peers = append(svc.peers, transport.Peer{Address: addrB})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	targets := svc.routingTargets()
 
@@ -1486,9 +1486,9 @@ func TestRoutingTargetsSessionOnlyWhenAllPeersHaveSessions(t *testing.T) {
 	svc.health[addrA] = &peerHealth{Address: addrA, Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
 
 	// Same address in peers — should not create a duplicate.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.peers = append(svc.peers, transport.Peer{Address: addrA})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	targets := svc.routingTargets()
 	if len(targets) != 1 {
@@ -2663,7 +2663,7 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 	}, id, nil)
 
 	createdAt := time.Now().UTC().Truncate(time.Second)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], protocol.Envelope{
 		ID:         protocol.MessageID("delivered-dm-1"),
 		Topic:      "dm",
@@ -2674,6 +2674,8 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 		TTLSeconds: 0,
 		Payload:    []byte("ciphertext"),
 	})
+	// s.receipts is under s.deliveryMu; nest deliveryMu INNER under s.peerMu.
+	svc.deliveryMu.Lock()
 	svc.receipts["sender-1"] = append(svc.receipts["sender-1"], protocol.DeliveryReceipt{
 		MessageID:   protocol.MessageID("delivered-dm-1"),
 		Sender:      id.Address,
@@ -2681,7 +2683,8 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 		Status:      protocol.ReceiptStatusDelivered,
 		DeliveredAt: createdAt.Add(time.Second),
 	})
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
+	svc.peerMu.Unlock()
 
 	reply := svc.fetchInboxFrame("dm", id.Address)
 	if reply.Type != "inbox" || reply.Count != 0 || len(reply.Messages) != 0 {
@@ -2717,7 +2720,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		Body:      "ciphertext",
 	}
 
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[domain.PeerAddress("198.51.100.2:64646")] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
 	svc.pending[domain.PeerAddress("198.51.100.2:64647")] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
 	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("198.51.100.2:64646"), frame)] = struct{}{}
@@ -2738,7 +2741,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		Status:    "queued",
 		QueuedAt:  time.Now().UTC(),
 	}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	receipt := protocol.DeliveryReceipt{
 		MessageID:   protocol.MessageID(frame.ID),
@@ -2753,8 +2756,8 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		t.Fatalf("expected receipt to be stored")
 	}
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.deliveryMu.RLock()
+	defer svc.deliveryMu.RUnlock()
 	if len(svc.pending) != 0 {
 		t.Fatalf("expected pending send_message entries to be cleared, got %#v", svc.pending)
 	}
@@ -2814,8 +2817,8 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.deliveryMu.RLock()
+	defer svc.deliveryMu.RUnlock()
 	if _, ok := svc.relayRetry[relayMessageKey(protocol.MessageID("self-dm-1"))]; ok {
 		t.Fatalf("recipient-local dm should not be tracked for relay retry: %#v", svc.relayRetry)
 	}
@@ -2883,8 +2886,8 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	svc.queuePersist.FlushSync()
 
 	reloaded := NewService(cfg, id, nil)
-	reloaded.mu.RLock()
-	defer reloaded.mu.RUnlock()
+	reloaded.peerMu.RLock()
+	defer reloaded.peerMu.RUnlock()
 
 	items := reloaded.pending[domain.PeerAddress("127.0.0.1:65001")]
 	if len(items) != 1 {
@@ -3013,7 +3016,10 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 	}, id, nil)
 
 	address := domain.PeerAddress("127.0.0.1:65001")
-	svc.mu.Lock()
+	// s.sessions/s.health are under s.peerMu; pending/pendingKeys under s.deliveryMu.
+	// Canonical order: s.peerMu OUTER, s.deliveryMu INNER.
+	svc.peerMu.Lock()
+	svc.deliveryMu.Lock()
 	svc.sessions[address] = &peerSession{address: address, sendCh: make(chan protocol.Frame)}
 	svc.health[address] = &peerHealth{Address: address, Connected: true, State: peerStateHealthy}
 	svc.pending[address] = []pendingFrame{{
@@ -3031,12 +3037,13 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 		QueuedAt: time.Now().UTC().Add(-90 * time.Second),
 	}}
 	svc.pendingKeys[pendingFrameKey(address, svc.pending[address][0].Frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.flushPendingPeerFrames(address)
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.deliveryMu.RLock()
+	defer svc.deliveryMu.RUnlock()
 	if len(svc.pending[address]) != 0 {
 		t.Fatalf("expected expired dm to be removed from pending queue, got %#v", svc.pending[address])
 	}
@@ -3071,12 +3078,12 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 	}
 	svc.trackRelayReceipt(receipt)
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	if _, ok := svc.relayRetry[relayReceiptKey(receipt)]; !ok {
-		svc.mu.RUnlock()
+		svc.deliveryMu.RUnlock()
 		t.Fatalf("expected receipt relay retry state before clear")
 	}
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	svc.clearRelayRetryForOutbound(protocol.Frame{
 		Type:      "relay_delivery_receipt",
@@ -3085,8 +3092,8 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 		Status:    receipt.Status,
 	})
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.deliveryMu.RLock()
+	defer svc.deliveryMu.RUnlock()
 	if _, ok := svc.relayRetry[relayReceiptKey(receipt)]; ok {
 		t.Fatalf("expected receipt relay retry state to be cleared")
 	}
@@ -3117,9 +3124,9 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 		DeliveredAt: time.Now().UTC(),
 	}
 
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.receipts[receipt.Recipient] = append(svc.receipts[receipt.Recipient], receipt)
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 	svc.trackRelayReceipt(receipt)
 	svc.clearRelayRetryForOutbound(protocol.Frame{
 		Type:      "relay_delivery_receipt",
@@ -3365,8 +3372,8 @@ func TestTwoNodesPeerExchangePersistedOnShutdown(t *testing.T) {
 
 	// Wait until A discovers B via peer exchange.
 	waitForCondition(t, 5*time.Second, func() bool {
-		nodeA.mu.RLock()
-		defer nodeA.mu.RUnlock()
+		nodeA.peerMu.RLock()
+		defer nodeA.peerMu.RUnlock()
 		normalizedB := domain.PeerAddress(normalizeAddress(addressB))
 		for _, p := range nodeA.peers {
 			if p.Address == normalizedB {
@@ -3489,13 +3496,13 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 	})
 	defer stop2()
 
-	svc2.mu.RLock()
+	svc2.peerMu.RLock()
 	// Should have: bootstrap (10.0.0.99) + persisted (10.0.0.5, 10.0.0.6).
 	peerAddrs := make(map[domain.PeerAddress]bool)
 	for _, p := range svc2.peers {
 		peerAddrs[p.Address] = true
 	}
-	svc2.mu.RUnlock()
+	svc2.peerMu.RUnlock()
 
 	if !peerAddrs["10.0.0.99:64646"] {
 		t.Fatal("expected bootstrap peer 10.0.0.99:64646")
@@ -3508,10 +3515,10 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 	}
 
 	// Verify health was seeded from persisted state.
-	svc2.mu.RLock()
+	svc2.peerMu.RLock()
 	h5 := svc2.health[domain.PeerAddress("10.0.0.5:64646")]
 	h6 := svc2.health[domain.PeerAddress("10.0.0.6:64646")]
-	svc2.mu.RUnlock()
+	svc2.peerMu.RUnlock()
 
 	if h5 == nil {
 		t.Fatal("expected health entry for 10.0.0.5:64646")
@@ -3595,9 +3602,9 @@ func TestMaybeSavePeerStateRespectsInterval(t *testing.T) {
 	// First explicit flush.
 	svc.flushPeerState()
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	firstSave := svc.lastPeerSave
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if firstSave.IsZero() {
 		t.Fatal("expected lastPeerSave to be set after flush")
@@ -3606,9 +3613,9 @@ func TestMaybeSavePeerStateRespectsInterval(t *testing.T) {
 	// maybeSavePeerState should NOT write again because not enough time elapsed.
 	svc.maybeSavePeerState()
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	secondSave := svc.lastPeerSave
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !secondSave.Equal(firstSave) {
 		t.Fatalf("expected lastPeerSave unchanged (%v), got %v", firstSave, secondSave)
@@ -3822,11 +3829,11 @@ func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
 	svc.markPeerDisconnected("10.0.0.1:64646", fmt.Errorf("timeout"))
 
 	// Backdate LastDisconnectedAt to simulate cooldown expiry.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	if h := svc.health[domain.PeerAddress("10.0.0.1:64646")]; h != nil {
 		h.LastDisconnectedAt = time.Now().Add(-1 * time.Minute)
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
 	found := false
@@ -3858,10 +3865,10 @@ func TestPeerDialCandidatesSkipsBannedPeer(t *testing.T) {
 	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
 
 	// Ban peer-1 for 24 hours (incompatible protocol).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	h := svc.ensurePeerHealthLocked("10.0.0.1:64646")
 	h.BannedUntil = time.Now().UTC().Add(24 * time.Hour)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
 	for _, c := range candidates {
@@ -3897,10 +3904,10 @@ func TestPeerDialCandidatesBanExpires(t *testing.T) {
 	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
 
 	// Set an expired ban (1 minute ago).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	h := svc.ensurePeerHealthLocked("10.0.0.1:64646")
 	h.BannedUntil = time.Now().UTC().Add(-1 * time.Minute)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
 	found := false
@@ -3933,10 +3940,10 @@ func TestPromotePeerAddressDoesNotClearBannedUntil(t *testing.T) {
 	svc.addPeerAddress(peer, "full", "peer-99")
 
 	// Set an active ban (23 hours from now).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	h := svc.ensurePeerHealthLocked(peer)
 	h.BannedUntil = time.Now().UTC().Add(23 * time.Hour)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Verify peer is banned — should not appear in candidates.
 	candidates := candidateAddresses(svc.peerDialCandidates())
@@ -3949,9 +3956,9 @@ func TestPromotePeerAddressDoesNotClearBannedUntil(t *testing.T) {
 	// promotePeerAddress must not clear the ban.
 	svc.promotePeerAddress(peer)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	banned := svc.health[peer].BannedUntil
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if banned.IsZero() {
 		t.Fatal("BannedUntil should remain set after promotePeerAddress")
 	}
@@ -3992,10 +3999,10 @@ func TestPromotePeerAddressDoesNotClearIPWideBanForAlternatePort(t *testing.T) {
 
 	svc.promotePeerAddress(alternate)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, ipStillBanned := svc.bannedIPSet["10.0.0.99"]
 	_, altKnown := svc.persistedMeta[alternate]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ipStillBanned {
 		t.Fatal("IP-wide ban should remain after promotePeerAddress on alternate port")
 	}
@@ -4029,7 +4036,7 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
 
 	// Make peer-1 terrible: low score, last seen >24h ago.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[domain.PeerAddress("10.0.0.1:64646")] = &peerHealth{
 		Address:             domain.PeerAddress("10.0.0.1:64646"),
 		Score:               -30,
@@ -4047,12 +4054,12 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 	}
 	// Reset eviction timer so it runs immediately.
 	svc.lastPeerEvict = time.Time{}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.evictStalePeers()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 	for _, p := range svc.peers {
 		if p.Address == "10.0.0.1:64646" {
 			t.Fatal("expected peer 10.0.0.1 to be evicted, but it still exists")
@@ -4087,7 +4094,7 @@ func TestEvictStalePeersKeepsBootstrap(t *testing.T) {
 	defer stop()
 
 	// Give the bootstrap peer a terrible score.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[domain.PeerAddress("10.0.0.99:64646")] = &peerHealth{
 		Address:             domain.PeerAddress("10.0.0.99:64646"),
 		Score:               peerScoreMin,
@@ -4096,12 +4103,12 @@ func TestEvictStalePeersKeepsBootstrap(t *testing.T) {
 		LastDisconnectedAt:  time.Now().Add(-71 * time.Hour),
 	}
 	svc.lastPeerEvict = time.Time{}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.evictStalePeers()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 	found := false
 	for _, p := range svc.peers {
 		if p.Address == "10.0.0.99:64646" {
@@ -4128,7 +4135,7 @@ func TestEvictStalePeersRespectsInterval(t *testing.T) {
 
 	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[domain.PeerAddress("10.0.0.1:64646")] = &peerHealth{
 		Address:             domain.PeerAddress("10.0.0.1:64646"),
 		Score:               -40,
@@ -4138,13 +4145,13 @@ func TestEvictStalePeersRespectsInterval(t *testing.T) {
 	}
 	// Set lastPeerEvict to recent time → eviction should be skipped.
 	svc.lastPeerEvict = time.Now()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.evictStalePeers()
 
 	// Peer should still be present because the interval hasn't elapsed.
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 	found := false
 	for _, p := range svc.peers {
 		if p.Address == "10.0.0.1:64646" {
@@ -4174,7 +4181,7 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
 
 	addedAt := time.Now().Add(-48 * time.Hour)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	// Peer has never successfully connected (LastConnectedAt is zero).
 	// LastDisconnectedAt is recent (simulating repeated retries), but
 	// eviction should look at AddedAt, not LastDisconnectedAt.
@@ -4189,12 +4196,12 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 		AddedAt: &addedAt,
 	}
 	svc.lastPeerEvict = time.Time{}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.evictStalePeers()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 	for _, p := range svc.peers {
 		if p.Address == "10.0.0.1:64646" {
 			t.Fatal("perpetually-failing peer should be evicted (AddedAt > 24h, never connected)")
@@ -4229,7 +4236,7 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 	now := time.Now()
 	staleTime := now.Add(-48 * time.Hour)
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 
 	// Locked peer: terrible score, stale, but has an active VersionLockout.
 	svc.health[lockedAddr] = &peerHealth{
@@ -4262,12 +4269,12 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 	}
 
 	svc.lastPeerEvict = time.Time{} // allow immediate eviction
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.evictStalePeers()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// Locked peer must survive.
 	foundLocked := false
@@ -4380,7 +4387,7 @@ func TestEvictOrphanedHealthEntries(t *testing.T) {
 
 	staleTime := time.Now().Add(-20 * time.Minute) // well past orphanedHealthEvictWindow
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 
 	// Create a health entry for the real peer — addPeerAddress only adds
 	// to s.peers, not to s.health. In production, health entries are
@@ -4437,12 +4444,12 @@ func TestEvictOrphanedHealthEntries(t *testing.T) {
 	}
 	svc.inboundHealthRefs[refAddr] = 1
 
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.evictOrphanedHealthEntries()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// Stale orphan must be evicted.
 	if svc.health[orphanAddr] != nil {
@@ -4493,7 +4500,7 @@ func TestEvictOrphanedHealthEntriesRefreshesAggregate(t *testing.T) {
 
 	staleTime := time.Now().Add(-20 * time.Minute)
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	// Create several orphaned entries to inflate TotalPeers.
 	for i := 0; i < 5; i++ {
 		addr := domain.PeerAddress(fmt.Sprintf("127.0.0.1:%d", 40000+i))
@@ -4507,7 +4514,7 @@ func TestEvictOrphanedHealthEntriesRefreshesAggregate(t *testing.T) {
 	}
 	svc.refreshAggregateStatusLocked()
 	totalBefore := svc.aggregateStatus.TotalPeers
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if totalBefore < 5 {
 		t.Fatalf("expected at least 5 total peers before eviction, got %d", totalBefore)
@@ -4539,18 +4546,18 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 	svc.addPeerAddress("10.0.0.1:64647", "full", "peer-1")
 
 	// Simulate what ensurePeerSessions does: register dialOrigin for fallback.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.dialOrigin["10.0.0.1:64646"] = "10.0.0.1:64647"
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// markPeerDisconnected on the fallback address should record health
 	// under the primary address.
 	svc.markPeerDisconnected("10.0.0.1:64646", fmt.Errorf("refused"))
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	primaryHealth := svc.health[domain.PeerAddress("10.0.0.1:64647")]
 	fallbackHealth := svc.health[domain.PeerAddress("10.0.0.1:64646")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if primaryHealth == nil {
 		t.Fatal("expected health to be recorded under primary address 10.0.0.1:64647")
@@ -4565,9 +4572,9 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 	// Now markPeerConnected on fallback should also go to primary.
 	svc.markPeerConnected("10.0.0.1:64646", "outbound")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	primaryHealth = svc.health[domain.PeerAddress("10.0.0.1:64647")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !primaryHealth.Connected {
 		t.Fatal("expected primary health to show connected after fallback connect")
@@ -4627,10 +4634,10 @@ func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
 
 	// Simulate a fallback session on :64646.
 	fallbackAddr := domain.PeerAddress("10.0.0.1:64646")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.dialOrigin[fallbackAddr] = "10.0.0.1:64647"
 	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.markPeerConnected(fallbackAddr, "outbound")
 
 	// routingTargets() filters out client peers. Since 10.0.0.1:64647 is
@@ -4674,7 +4681,7 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
 
 	// Backdate the AddedAt so it looks old.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	old := time.Now().Add(-48 * time.Hour)
 	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
 		pm.AddedAt = &old
@@ -4688,13 +4695,13 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 		ConsecutiveFailures: 10,
 	}
 	svc.lastPeerEvict = time.Time{}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Note: flushPeerState has NOT been called.
 	svc.evictStalePeers()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 	for _, p := range svc.peers {
 		if p.Address == "10.0.0.1:64646" {
 			t.Fatal("runtime-discovered peer should be evicted without waiting for flush")
@@ -4724,9 +4731,9 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 	fallbackAddr := domain.PeerAddress("10.0.0.1:64646")
 
 	// Register fallback→primary mapping as ensurePeerSessions would.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.dialOrigin[fallbackAddr] = primaryAddr
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Queue a frame targeting the fallback dial address.
 	frame := protocol.Frame{
@@ -4742,10 +4749,10 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 	}
 
 	// Verify the frame is stored under primary, not fallback.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	primaryPending := len(svc.pending[primaryAddr])
 	fallbackPending := len(svc.pending[fallbackAddr])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if primaryPending != 1 {
 		t.Fatalf("expected 1 pending frame under primary %s, got %d", primaryAddr, primaryPending)
@@ -4756,18 +4763,18 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 
 	// Now create a session on the PRIMARY address and flush.
 	sendCh := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[primaryAddr] = &peerSession{address: primaryAddr, sendCh: sendCh}
 	svc.health[primaryAddr] = &peerHealth{Address: primaryAddr, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.flushPendingPeerFrames(primaryAddr)
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remainingPrimary := len(svc.pending[primaryAddr])
 	remainingFallback := len(svc.pending[fallbackAddr])
 	keysCount := len(svc.pendingKeys)
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remainingPrimary != 0 {
 		t.Fatalf("expected pending queue for primary to be drained, got %d", remainingPrimary)
@@ -4888,10 +4895,10 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 		QueueStatePath:   queuePath,
 	}, id, nil)
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	primaryPending := len(svc.pending[domain.PeerAddress(primaryAddr)])
 	fallbackPending := len(svc.pending[domain.PeerAddress(fallbackAddr)])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if primaryPending != 1 {
 		t.Fatalf("expected 1 pending frame migrated to primary %s, got %d", primaryAddr, primaryPending)
@@ -4902,19 +4909,19 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 
 	// Verify pendingKeys were rebuilt with the primary address.
 	expectedKey := pendingFrameKey(domain.PeerAddress(primaryAddr), qs.Pending[fallbackAddr][0].Frame)
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	_, hasKey := svc.pendingKeys[expectedKey]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if !hasKey {
 		t.Fatalf("expected pending key %q to exist after migration", expectedKey)
 	}
 
 	// Old fallback-keyed entry should NOT exist.
 	oldKey := pendingFrameKey(domain.PeerAddress(fallbackAddr), qs.Pending[fallbackAddr][0].Frame)
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	_, hasOldKey := svc.pendingKeys[oldKey]
 	orphanedCount := len(svc.orphaned)
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if hasOldKey {
 		t.Fatal("expected old fallback-keyed pending key to be absent after migration")
 	}
@@ -4979,12 +4986,12 @@ func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
 		QueueStatePath:   queuePath,
 	}, id, nil)
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	fallbackPending := len(svc.pending[domain.PeerAddress(fallbackAddr)])
 	aPending := len(svc.pending[domain.PeerAddress(primaryA)])
 	bPending := len(svc.pending[domain.PeerAddress(primaryB)])
 	orphanedCount := len(svc.orphaned[domain.PeerAddress(fallbackAddr)])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	// Frames must NOT be in the active pending map (runtime would never flush them).
 	if fallbackPending != 0 {
@@ -5058,10 +5065,10 @@ func TestQueueStateMigrationOrphansUnknownHost(t *testing.T) {
 		AllowPrivatePeers: true,
 	}, id, nil)
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	pendingCount := len(svc.pending[domain.PeerAddress(unknownAddr)])
 	orphanedCount := len(svc.orphaned[domain.PeerAddress(unknownAddr)])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	// Unknown-host entries are orphaned during migration — the runtime
 	// only drains primary-keyed entries so they would be stranded.
@@ -5126,10 +5133,10 @@ func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
 		AllowPrivatePeers: true,
 	}, id, nil)
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	pendingCount := len(svc.pending[domain.PeerAddress(runtimeAddr)])
 	orphanedCount := len(svc.orphaned[domain.PeerAddress(runtimeAddr)])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	// Current-version entries stay in pending — no migration runs.
 	if pendingCount != 1 {
@@ -5152,9 +5159,9 @@ func TestRecordObservedAddressIgnoresEmpty(t *testing.T) {
 
 	svc.recordObservedAddress("peer-fingerprint-a", "")
 	svc.recordObservedAddress("", "203.0.113.50")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 0 {
 		t.Fatalf("expected 0 observed addresses after empty input, got %d", count)
 	}
@@ -5171,9 +5178,9 @@ func TestRecordObservedAddressIgnoresPrivate(t *testing.T) {
 	svc.recordObservedAddress("peer-fingerprint-a", "10.0.0.1")
 	svc.recordObservedAddress("peer-fingerprint-b", "192.168.1.5")
 	svc.recordObservedAddress("peer-fingerprint-c", "127.0.0.1")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 0 {
 		t.Fatalf("expected 0 observed addresses for private/loopback IPs, got %d", count)
 	}
@@ -5188,9 +5195,9 @@ func TestRecordObservedAddressStoresPublicIP(t *testing.T) {
 	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	got := svc.observedAddrs["peer-fingerprint-a"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if got != "203.0.113.50" {
 		t.Fatalf("expected observed IP 203.0.113.50, got %q", got)
 	}
@@ -5206,18 +5213,18 @@ func TestRecordObservedAddressConsensusRequiresTwoPeers(t *testing.T) {
 
 	// Single observation — no consensus yet.
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 1 {
 		t.Fatalf("expected 1 observed address, got %d", count)
 	}
 
 	// Second peer (different identity) agrees — consensus reached.
 	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.50")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count = len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 2 {
 		t.Fatalf("expected 2 observed addresses, got %d", count)
 	}
@@ -5234,9 +5241,9 @@ func TestRecordObservedAddressSameNodeOneVote(t *testing.T) {
 	// Same peer identity reached via two different addresses — still one vote.
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 1 {
 		t.Fatalf("expected 1 observed address (same identity = one vote), got %d", count)
 	}
@@ -5254,9 +5261,9 @@ func TestRecordObservedAddressNoConsensusWhenPeersDisagree(t *testing.T) {
 	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.99")
 
 	// Both stored, but they disagree — no consensus.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 2 {
 		t.Fatalf("expected 2 observed addresses, got %d", count)
 	}
@@ -5273,9 +5280,9 @@ func TestRecordObservedAddressSkipsWhenAdvertiseIsPublic(t *testing.T) {
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
 	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.50")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	// Observations still stored, but the consensus path exits early
 	// because advertise address already matches observed.
 	if count != 2 {
@@ -5296,21 +5303,21 @@ func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
 	// Simulate what openPeerSession does: record observation keyed by identity,
 	// and register the peerID mapping so markPeerDisconnected can find it.
 	svc.recordObservedAddress(domain.PeerIdentity(peerID.Address), "203.0.113.50")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.peerIDs[peerAddr] = domain.PeerIdentity(peerID.Address)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	before := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if before != 1 {
 		t.Fatalf("expected 1 observed address before disconnect, got %d", before)
 	}
 
 	svc.markPeerDisconnected(peerAddr, fmt.Errorf("test disconnect"))
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	after := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if after != 0 {
 		t.Fatalf("expected 0 observed addresses after disconnect, got %d", after)
 	}
@@ -5332,17 +5339,17 @@ func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
 
 	// Set up dialOrigin (fallback → primary) and peerIDs (primary → fingerprint)
 	// as the real code does when a fallback connection succeeds.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.dialOrigin[fallbackAddr] = primaryAddr
 	svc.peerIDs[primaryAddr] = domain.PeerIdentity(peerID.Address)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Disconnect using fallback address — resolveHealthAddress maps to primary,
 	// then peerIDs lookup finds the fingerprint.
 	svc.markPeerDisconnected(fallbackAddr, fmt.Errorf("connection lost"))
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	after := len(svc.observedAddrs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if after != 0 {
 		t.Fatalf("expected 0 observed addresses after fallback disconnect, got %d", after)
 	}
@@ -5371,9 +5378,9 @@ func TestAddPeerFrameNewPeerPrependedToList(t *testing.T) {
 		t.Fatalf("expected ok, got %#v", reply)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	first := svc.peers[0].Address
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if first != "10.0.0.2:64646" {
 		t.Fatalf("expected manually added peer first, got %s", first)
 	}
@@ -5398,7 +5405,7 @@ func TestAddPeerFrameExistingPeerMovedToFront(t *testing.T) {
 		t.Fatalf("expected ok, got %#v", reply)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	first := svc.peers[0].Address
 	count := 0
 	for _, p := range svc.peers {
@@ -5406,7 +5413,7 @@ func TestAddPeerFrameExistingPeerMovedToFront(t *testing.T) {
 			count++
 		}
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if first != "10.0.0.3:64646" {
 		t.Fatalf("expected moved peer first, got %s", first)
 	}
@@ -5586,12 +5593,12 @@ func TestAddPeerFrameUpdatesSourceToManual(t *testing.T) {
 	defer stop()
 
 	// Peer was added via bootstrap — source is "bootstrap" or similar.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	var before domain.PeerSource
 	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
 		before = pm.Source
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if before == domain.PeerSourceManual {
 		t.Fatalf("expected non-manual source before add_peer, got %q", before)
 	}
@@ -5603,12 +5610,12 @@ func TestAddPeerFrameUpdatesSourceToManual(t *testing.T) {
 		t.Fatalf("expected ok, got %#v", reply)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	var after domain.PeerSource
 	if pm := svc.persistedMeta["10.0.0.1:64646"]; pm != nil {
 		after = pm.Source
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if after != domain.PeerSourceManual {
 		t.Fatalf("expected source updated to 'manual' after add_peer, got %q", after)
 	}
@@ -5872,9 +5879,9 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 	}
 
 	// Clear s.seen so the node-level dedup doesn't catch it (simulates restart).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	delete(svc.seen, string(msgID))
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Second store — StoreMessage returns StoreDuplicate.
 	// The duplicate is NOT added to s.topics (prevents DMHeaders
@@ -5899,14 +5906,14 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 
 	// Verify the duplicate did NOT enter s.topics — this is the key
 	// invariant that closes the DMHeaders → repairUnreadFromHeaders path.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	dmCount := 0
 	for _, env := range svc.topics["dm"] {
 		if string(env.ID) == string(msgID) {
 			dmCount++
 		}
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if dmCount != 1 {
 		t.Fatalf("expected exactly 1 copy in s.topics[dm], got %d", dmCount)
 	}
@@ -5992,9 +5999,9 @@ func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
 	}
 
 	// Simulate restart: clear s.seen so the node-level dedup won't catch it.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	delete(svc.seen, string(msgID))
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Second store — StoreDuplicate → must NOT add another copy to DMHeaders.
 	svc.storeIncomingMessage(msg, false)
@@ -6171,9 +6178,9 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 	}, false)
 
 	// Both should be in s.topics[dm] (in-memory for relay).
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	topicCount := len(svc.topics["dm"])
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if topicCount != 2 {
 		t.Fatalf("expected 2 messages in topics[dm], got %d", topicCount)
 	}
@@ -6361,9 +6368,9 @@ func TestNodeWithoutMessageStoreStillRelays(t *testing.T) {
 	}
 
 	// Message should be in s.topics for relay.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	n := len(svc.topics["dm"])
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if n != 1 {
 		t.Fatalf("expected 1 message in topics, got %d", n)
 	}
@@ -6705,13 +6712,13 @@ func TestComputePeerStateThresholds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc.mu.Lock()
+			svc.peerMu.Lock()
 			svc.health[domain.PeerAddress("test:1")] = &tt.health
-			svc.mu.Unlock()
+			svc.peerMu.Unlock()
 
-			svc.mu.RLock()
+			svc.peerMu.RLock()
 			got := svc.computePeerStateAtLocked(svc.health[domain.PeerAddress("test:1")], now)
-			svc.mu.RUnlock()
+			svc.peerMu.RUnlock()
 
 			if got != tt.wantState {
 				t.Errorf("got state %q, want %q", got, tt.wantState)
@@ -6744,7 +6751,7 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	}
 
 	// Verify the announced address was added to the peer dial list.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	found := false
 	for _, p := range svc.peers {
 		if p.Address == "83.172.44.178:64646" {
@@ -6752,7 +6759,7 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 			break
 		}
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !found {
 		t.Error("expected announced peer to be added to dial list")
 	}
@@ -6770,7 +6777,7 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 		t.Fatalf("expected announce_peer_ack for local address, got %q", ack2.Type)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	foundLocal := false
 	for _, p := range svc.peers {
 		if p.Address == "192.168.1.100:64646" {
@@ -6778,7 +6785,7 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 			break
 		}
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if foundLocal {
 		t.Error("local address should not be added from announce_peer")
 	}
@@ -6801,9 +6808,9 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 	// Add a peer as "full" — simulates trusted initial discovery.
 	svc.addPeerAddress("5.5.5.5:64646", "full", "")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	before := svc.peerTypes[domain.PeerAddress("5.5.5.5:64646")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if before != domain.NodeTypeFull {
 		t.Fatalf("expected full, got %s", before)
 	}
@@ -6811,9 +6818,9 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 	// Call addPeerAddress again with "client" — must not overwrite.
 	svc.addPeerAddress("5.5.5.5:64646", "client", "")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	after := svc.peerTypes[domain.PeerAddress("5.5.5.5:64646")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if after != domain.NodeTypeFull {
 		t.Fatalf("addPeerAddress must not retag existing peer; expected full, got %s", after)
 	}
@@ -6832,8 +6839,8 @@ func TestAddPeerAddressWithoutNodeTypeKeepsTypeUnknown(t *testing.T) {
 
 	svc.addPeerAddress("6.6.6.6:64646", "", "")
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 	if _, ok := svc.peerTypes[domain.PeerAddress("6.6.6.6:64646")]; ok {
 		t.Fatal("peer learned without self-reported node type must not get peerTypes entry")
 	}
@@ -7102,25 +7109,25 @@ func TestPromotePeerAddress(t *testing.T) {
 	svc.addPeerAddress("2.2.2.2:64646", "full", "")
 
 	// Set cooldown on first peer to simulate failed connections.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[domain.PeerAddress("1.1.1.1:64646")] = &peerHealth{
 		Address:             domain.PeerAddress("1.1.1.1:64646"),
 		ConsecutiveFailures: 5,
 		LastDisconnectedAt:  time.Now(),
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Promote a new peer — it should be appended at the end (not front).
 	svc.promotePeerAddress("3.3.3.3:64646")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	if len(svc.peers) < 3 {
-		svc.mu.RUnlock()
+		svc.peerMu.RUnlock()
 		t.Fatalf("expected at least 3 peers, got %d", len(svc.peers))
 	}
 	lastAddr := svc.peers[len(svc.peers)-1].Address
 	firstAddr := svc.peers[0].Address
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if lastAddr != "3.3.3.3:64646" {
 		t.Fatalf("expected new peer at end, got %s", lastAddr)
 	}
@@ -7131,19 +7138,19 @@ func TestPromotePeerAddress(t *testing.T) {
 	// Promote existing peer with cooldown — cooldown must stay untouched.
 	svc.promotePeerAddress("1.1.1.1:64646")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h := svc.health[domain.PeerAddress("1.1.1.1:64646")]
 	if h == nil || h.ConsecutiveFailures != 5 {
-		svc.mu.RUnlock()
+		svc.peerMu.RUnlock()
 		t.Fatal("expected cooldown to remain unchanged after promote")
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Promote with different type — network announce must not retag peer.
 	svc.promotePeerAddress("1.1.1.1:64646")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	pt := svc.peerTypes[domain.PeerAddress("1.1.1.1:64646")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if pt != domain.NodeTypeFull {
 		t.Errorf("expected existing type to remain full, got %s", pt)
 	}
@@ -7152,10 +7159,10 @@ func TestPromotePeerAddress(t *testing.T) {
 	// on the network-learned promote path.
 	peersBefore := len(svc.peers)
 	svc.promotePeerAddress("2.2.2.2:12345")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peersAfter := len(svc.peers)
 	_, hasAltPort := svc.peerTypes[domain.PeerAddress("2.2.2.2:12345")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peersAfter != peersBefore {
 		t.Errorf("different port on same IP should be ignored, count went from %d to %d", peersBefore, peersAfter)
 	}
@@ -7177,14 +7184,14 @@ func TestAddPeerAddressSkipsAlternatePortOnKnownIP(t *testing.T) {
 
 	svc.addPeerAddress("9.9.9.9:64646", "full", "")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	before := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	svc.addPeerAddress("9.9.9.9:7777", "client", "")
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 	if len(svc.peers) != before {
 		t.Fatalf("alternate port on same IP should be ignored, count went from %d to %d", before, len(svc.peers))
 	}
@@ -7256,14 +7263,14 @@ func TestPendingQueueReplacesStaleFrame(t *testing.T) {
 
 	// Directly populate pending to simulate a full sendCh scenario.
 	frameV1 := protocol.Frame{Type: "announce_peer", Peers: []string{"7.7.7.7:64646"}, NodeType: "full"}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	key := pendingFrameKey(domain.PeerAddress(target), frameV1)
 	svc.pending[domain.PeerAddress(target)] = append(svc.pending[domain.PeerAddress(target)], pendingFrame{
 		Frame:    frameV1,
 		QueuedAt: time.Now().UTC(),
 	})
 	svc.pendingKeys[key] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Queue the same peer address but with a different node_type.
 	frameV2 := protocol.Frame{Type: "announce_peer", Peers: []string{"7.7.7.7:64646"}, NodeType: "client"}
@@ -7271,20 +7278,20 @@ func TestPendingQueueReplacesStaleFrame(t *testing.T) {
 
 	// The pending queue should still have exactly one entry for this key,
 	// but the frame should be updated to the latest version.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	frames := svc.pending[target]
 	var found bool
 	for _, pf := range frames {
 		if pendingFrameKey(target, pf.Frame) == key {
 			if pf.Frame.NodeType != "client" {
-				svc.mu.RUnlock()
+				svc.deliveryMu.RUnlock()
 				t.Fatalf("expected replaced frame to have node_type=client, got %q", pf.Frame.NodeType)
 			}
 			found = true
 			break
 		}
 	}
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if !found {
 		t.Fatal("expected to find the queued frame in pending")
 	}
@@ -7776,9 +7783,9 @@ func TestMarkPeerConnectedSetsDirection(t *testing.T) {
 
 	svc.markPeerConnected("10.0.0.1:64646", peerDirectionOutbound)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h := svc.health[domain.PeerAddress("10.0.0.1:64646")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if h == nil {
 		t.Fatal("expected health entry")
@@ -7790,9 +7797,9 @@ func TestMarkPeerConnectedSetsDirection(t *testing.T) {
 	// Inbound connection records inbound direction.
 	svc.markPeerConnected("10.0.0.2:64646", peerDirectionInbound)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h2 := svc.health[domain.PeerAddress("10.0.0.2:64646")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if h2 == nil {
 		t.Fatal("expected health entry for inbound peer")
@@ -7818,9 +7825,9 @@ func TestMarkPeerDisconnectedClearsDirection(t *testing.T) {
 	svc.markPeerConnected("10.0.0.1:64646", peerDirectionOutbound)
 	svc.markPeerDisconnected("10.0.0.1:64646", nil)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h := svc.health[domain.PeerAddress("10.0.0.1:64646")]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if h == nil {
 		t.Fatal("expected health entry")
@@ -7867,9 +7874,13 @@ func TestConnectedHostsLocked(t *testing.T) {
 	server := <-connCh
 	defer func() { _ = server.Close() }()
 
-	svc.mu.Lock()
+	// svc.upstream is under s.deliveryMu; conn/registry state under s.peerMu.
+	// Canonical order: s.peerMu OUTER, s.deliveryMu INNER.
+	svc.peerMu.Lock()
+	svc.deliveryMu.Lock()
 	// Simulate an outbound upstream session.
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
+	svc.deliveryMu.Unlock()
 	// Register the real TCP connection as inbound. The unified registry
 	// distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by
@@ -7880,7 +7891,7 @@ func TestConnectedHostsLocked(t *testing.T) {
 	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
 
 	hosts := svc.connectedHostsLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if _, ok := hosts["10.0.0.1"]; !ok {
 		t.Error("expected outbound host 10.0.0.1 in connectedHosts")
@@ -7933,7 +7944,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	server := <-connCh
 	defer func() { _ = server.Close() }()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	// Register the real TCP connection as inbound. The unified registry
 	// distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by the
@@ -7942,7 +7953,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 		LastActivity: time.Now().UTC(),
 	})
 	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	candidates := svc.peerDialCandidates()
 	addrs := candidateAddresses(candidates)
@@ -8043,9 +8054,9 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	svc.trackInboundConnect(id2a, peer, "test-peer-identity")
 
 	// Peer should be connected.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h := svc.health[peer]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if h == nil || !h.Connected {
 		t.Fatal("expected peer to be connected after two inbound connects")
@@ -8055,14 +8066,14 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	_ = conn1a.Close()
 	svc.trackInboundDisconnect(id1a, peer)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h = svc.health[peer]
 	connected := h != nil && h.Connected
 	var dir domain.PeerDirection
 	if h != nil {
 		dir = h.Direction
 	}
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !connected {
 		t.Fatal("expected peer to remain connected after first disconnect (second conn still alive)")
@@ -8075,9 +8086,9 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	_ = conn2a.Close()
 	svc.trackInboundDisconnect(id2a, peer)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	h = svc.health[peer]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if h == nil {
 		t.Fatal("expected health entry to exist")
@@ -8134,12 +8145,12 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	netcoreIdentity := domain.PeerIdentity("netcore-mirror-identity")
 	mapIdentity := domain.PeerIdentity("persistence-cache-identity")
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	if e := svc.testConnEntry(connA); e != nil && e.core != nil {
 		e.core.SetIdentity(netcoreIdentity)
 	}
 	svc.peerIDs[peer] = mapIdentity
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	idA, _ := svc.connIDFor(connA)
 	svc.trackInboundConnect(idA, peer, mapIdentity)
@@ -8200,9 +8211,9 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	// Deliberately do NOT call SetIdentity on the NetCore — only populate
 	// the persistence cache so the fallback path is exercised.
 	mapIdentity := domain.PeerIdentity("fallback-map-identity")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.peerIDs[peer] = mapIdentity
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	idA, _ := svc.connIDFor(connA)
 	svc.trackInboundConnect(idA, peer, mapIdentity)
@@ -8258,7 +8269,7 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 	server := <-connCh
 	defer func() { _ = server.Close() }()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	// Register inbound connection + peer info with a different overlay address.
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
@@ -8266,7 +8277,7 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
 
 	hosts := svc.connectedHostsLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// The real remote IP (127.0.0.1) should be in the set.
 	if _, ok := hosts["127.0.0.1"]; !ok {
@@ -9037,17 +9048,17 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	// Now register sender keys on nodeA — after the initial peer sync,
 	// so nodeB has not yet learned them. The relay delivery path will
 	// trigger syncPeer to fetch these keys on demand.
-	nodeA.mu.Lock()
+	nodeA.peerMu.Lock()
 	nodeA.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
 	nodeA.boxKeys[senderID.Address] = identity.BoxPublicKeyBase64(senderID.BoxPublicKey)
 	nodeA.boxSigs[senderID.Address] = identity.SignBoxKeyBinding(senderID)
 	nodeA.known[senderID.Address] = struct{}{}
-	nodeA.mu.Unlock()
+	nodeA.peerMu.Unlock()
 
 	// Verify nodeB does NOT know the sender's key yet.
-	nodeB.mu.RLock()
+	nodeB.peerMu.RLock()
 	_, hasSenderKey := nodeB.pubKeys[senderID.Address]
-	nodeB.mu.RUnlock()
+	nodeB.peerMu.RUnlock()
 	if hasSenderKey {
 		t.Fatal("precondition failed: nodeB should not know sender key before relay")
 	}
@@ -9089,10 +9100,10 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	status := nodeB.handleRelayMessage(domain.PeerAddress(normalizeAddress(addressA)), nil, frame)
 	if status != "delivered" {
 		// Dump nodeB state for diagnostics.
-		nodeB.mu.RLock()
+		nodeB.peerMu.RLock()
 		hasPub := nodeB.pubKeys[senderID.Address] != ""
 		hasBox := nodeB.boxKeys[senderID.Address] != ""
-		nodeB.mu.RUnlock()
+		nodeB.peerMu.RUnlock()
 		t.Logf("post-relay nodeB state: hasPubKey=%v, hasBoxKey=%v", hasPub, hasBox)
 		t.Fatalf("expected \"delivered\" after key sync from previous hop, got %q — "+
 			"deliverRelayedMessage should sync unknown sender keys before rejecting", status)
@@ -9141,18 +9152,18 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 
 	// Register as inbound connection with per-connection lastActivity
 	// old enough to be considered stale.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address:      peerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
 	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Verify the connection is in conns before eviction.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	exists := svc.testConnEntry(server) != nil
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !exists {
 		t.Fatal("expected server conn in conns before eviction")
 	}
@@ -9205,13 +9216,13 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 
 	peerAddr := domain.PeerAddress("10.0.0.88:64646")
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address:      peerAddr,
 		LastActivity: time.Now(), // recent activity — should not be evicted
 	})
 	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.evictStaleInboundConns()
 
@@ -9266,7 +9277,9 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 
 	stalledPeerAddr := domain.PeerAddress("10.0.0.50:64646")
 
-	svc.mu.Lock()
+	// svc.upstream is under s.deliveryMu; conn/registry state under s.peerMu.
+	// Canonical order: s.peerMu OUTER, s.deliveryMu INNER.
+	svc.peerMu.Lock()
 	// Clear any pre-existing inbound connections left over from
 	// startTestNode's health-check dial to avoid 127.0.0.1 collisions.
 	for c := range svc.connIDByNetConn {
@@ -9279,10 +9292,12 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	svc.setTestConnEntryLocked(server1, &connEntry{core: pc})
 
 	// Also add an outbound session as control.
+	svc.deliveryMu.Lock()
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
+	svc.deliveryMu.Unlock()
 
 	hosts := svc.connectedHostsLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Outbound host must still be present.
 	if _, ok := hosts["10.0.0.1"]; !ok {
@@ -9312,10 +9327,10 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 	svc.addPeerVersion(directAddr, "0.22-alpha")
 	svc.addPeerBuild(directAddr, 22)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	ver := svc.peerVersions[directAddr]
 	build := svc.peerBuilds[directAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if ver != "0.22-alpha" {
 		t.Errorf("peerVersions[%q] = %q, want %q", directAddr, ver, "0.22-alpha")
@@ -9330,14 +9345,14 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 	primaryAddr := domain.PeerAddress("10.0.0.5:12345")
 	fallbackAddr := domain.PeerAddress("10.0.0.5:64646")
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.dialOrigin[fallbackAddr] = primaryAddr
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Simulate what openPeerSession does: resolve then store.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	healthKey := svc.resolveHealthAddress(fallbackAddr)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	svc.addPeerVersion(healthKey, "0.21-beta")
 	svc.addPeerBuild(healthKey, 21)
@@ -9346,10 +9361,10 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 		t.Fatalf("resolveHealthAddress(%q) = %q, want %q", fallbackAddr, healthKey, primaryAddr)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	ver2 := svc.peerVersions[primaryAddr]
 	build2 := svc.peerBuilds[primaryAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if ver2 != "0.21-beta" {
 		t.Errorf("peerVersions[%q] = %q, want %q", primaryAddr, ver2, "0.21-beta")
@@ -9364,10 +9379,10 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 	svc.addPeerVersion(inboundAddr, "0.20-gamma")
 	svc.addPeerBuild(inboundAddr, 20)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	ver3 := svc.peerVersions[inboundAddr]
 	build3 := svc.peerBuilds[inboundAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if ver3 != "0.20-gamma" {
 		t.Errorf("peerVersions[%q] = %q, want %q", inboundAddr, ver3, "0.20-gamma")
@@ -9399,9 +9414,9 @@ func TestHasOutboundSessionForInbound(t *testing.T) {
 	}
 
 	// Register an outbound session.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan protocol.Frame)}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Now should return true.
 	if !svc.hasOutboundSessionForInbound(peerAddr) {
@@ -9409,9 +9424,9 @@ func TestHasOutboundSessionForInbound(t *testing.T) {
 	}
 
 	// Clean up session.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	delete(svc.sessions, peerAddr)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Should return false again.
 	if svc.hasOutboundSessionForInbound(peerAddr) {
@@ -9443,10 +9458,10 @@ func TestHasOutboundSessionForInboundResolvesDialOrigin(t *testing.T) {
 
 	// Simulate production: outbound session dialed via fallback port,
 	// dialOrigin maps fallback → primary (the real production direction).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr, sendCh: make(chan protocol.Frame)}
 	svc.dialOrigin[fallbackAddr] = primaryAddr
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Inbound peer declares the primary address. The method should
 	// resolve the fallback session key to primaryAddr and match.
@@ -9456,9 +9471,9 @@ func TestHasOutboundSessionForInboundResolvesDialOrigin(t *testing.T) {
 
 	// Direct lookup under primaryAddr should fail (no session there),
 	// confirming the test exercises the resolution path.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, directHit := svc.sessions[primaryAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if directHit {
 		t.Fatal("session should NOT be keyed by primaryAddr; test does not exercise resolution")
 	}
@@ -9483,9 +9498,9 @@ func TestDuplicateInboundConnectionAllowed(t *testing.T) {
 	peerAddr := domain.PeerAddress("10.0.0.8:64646")
 
 	// Simulate an existing outbound session.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan protocol.Frame)}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.markPeerConnected(peerAddr, peerDirectionOutbound)
 
 	// Connect as an inbound peer with a hello that declares the same
@@ -9536,13 +9551,13 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	peerAddr := domain.PeerAddress("10.0.0.7:64646")
 
 	// Mark peer connected as outbound and register session.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = &peerSession{
 		address: peerAddr,
 		connID:  42,
 		sendCh:  make(chan protocol.Frame),
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.markPeerConnected(peerAddr, peerDirectionOutbound)
 
 	// Simulate a stale inbound connection entry (should not generate
@@ -9550,13 +9565,13 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	staleConn, staleRemote := net.Pipe()
 	defer func() { _ = staleConn.Close() }()
 	defer func() { _ = staleRemote.Close() }()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(99), staleConn, netcore.Inbound, netcore.Options{
 		Address:  peerAddr,
 		Identity: domain.PeerIdentity("stale-identity"),
 	})
 	svc.setTestConnEntryLocked(staleConn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	frames := svc.peerHealthFrames()
 
@@ -9734,7 +9749,7 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 	relay := domain.PeerAddress("10.0.0.1:64646")
 	otherRecipient := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[relay] = []pendingFrame{
 		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Recipient: peerID.Address}, QueuedAt: time.Now()},
 		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Recipient: peerID.Address}, QueuedAt: time.Now()},
@@ -9746,7 +9761,7 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 	svc.outbound["msg-1"] = outboundDelivery{MessageID: "msg-1", Recipient: peerID.Address, Status: "queued"}
 	svc.outbound["msg-2"] = outboundDelivery{MessageID: "msg-2", Recipient: peerID.Address, Status: "retrying"}
 	svc.outbound["msg-3"] = outboundDelivery{MessageID: "msg-3", Recipient: otherRecipient, Status: "queued"}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Delete the contact.
 	deleteReply := svc.HandleLocalFrame(protocol.Frame{
@@ -9758,12 +9773,12 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 	}
 
 	// Verify: pending messages for deleted contact are gone, other messages remain.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := svc.pending[relay]
 	outbound1 := svc.outbound["msg-1"]
 	outbound2 := svc.outbound["msg-2"]
 	outbound3 := svc.outbound["msg-3"]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if len(remaining) != 1 {
 		t.Fatalf("expected 1 remaining pending frame, got %d", len(remaining))
@@ -9819,9 +9834,9 @@ func TestDeleteTrustedContactPersistsOutboundOnly(t *testing.T) {
 	})
 
 	// Only outbound entries, no pending frames.
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.outbound["ob-1"] = outboundDelivery{MessageID: "ob-1", Recipient: peerID.Address, Status: "delivered"}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Persist initial state so the outbound entry is on disk.  MarkDirty
 	// signals the background writer, FlushSync forces the snapshot to reach

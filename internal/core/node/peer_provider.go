@@ -754,6 +754,35 @@ func (pp *PeerProvider) KnownPeerStatic(address domain.PeerAddress) *knownPeer {
 	return &cp
 }
 
+// StaticSnapshotAll returns a copy of every known peer's static fields,
+// keyed by address.  The returned map is owned by the caller and never
+// reflects later mutations to pp.known — safe to read without holding any
+// Service-side lock.
+//
+// Exists so Service can consume provider metadata WITHOUT creating an
+// s.peerMu → pp.mu lock edge from inside an s.peerMu write section.  The
+// reverse edge (pp.mu → s.peerMu via Candidates() → RemoteBannedFn /
+// HealthFn / ConnectedFn / NetworksFn / VersionLockedOutFn) already
+// exists, so the forward edge would close a cycle and — under Go's
+// writer-preferring RWMutex — deadlock in a three-goroutine interleaving
+// (refresher holds pp.mu.RLock and waits on s.peerMu; a concurrent
+// Promote/Add queues pp.mu.Lock; flushPeerState holds s.peerMu.Lock and
+// tries to take pp.mu.RLock as a new reader, which the queued writer
+// blocks).  Take this snapshot OUTSIDE any s.peerMu hold and feed it in.
+func (pp *PeerProvider) StaticSnapshotAll() map[domain.PeerAddress]knownPeer {
+	pp.mu.RLock()
+	defer pp.mu.RUnlock()
+
+	snap := make(map[domain.PeerAddress]knownPeer, len(pp.known))
+	for addr, kp := range pp.known {
+		if kp == nil {
+			continue
+		}
+		snap[addr] = *kp
+	}
+	return snap
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

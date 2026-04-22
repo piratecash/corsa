@@ -11,8 +11,10 @@ import (
 // list of addresses.
 type RoutingDecision struct {
 	// PushSubscribers are locally connected subscribers for the recipient.
-	// The slice is a snapshot taken under s.mu — safe to iterate without
-	// holding the lock. Maps to the existing subscribersForRecipient() path.
+	// The slice is a snapshot taken under s.gossipMu (subscriber state is
+	// gossip-domain) — safe to iterate without holding the lock because
+	// the slice is detached from the live map at capture time. Maps to
+	// the existing subscribersForRecipient() path.
 	PushSubscribers []*subscriber
 
 	// DirectPeers are peers that the recipient is directly connected to.

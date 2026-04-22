@@ -223,9 +223,9 @@ func setupFanoutFixture(t *testing.T, disconnectingIdentity domain.PeerIdentity,
 		})
 		t.Cleanup(pc.Close)
 
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 
 		netFixture.register(id, fanoutPeerBehaviour{
 			remoteAddr: target.remoteAddr,

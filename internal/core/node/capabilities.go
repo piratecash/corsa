@@ -45,8 +45,8 @@ func intersectCapabilities(local []domain.Capability, remote []string) []domain.
 // sessionHasCapability returns true when the outbound peer session for the
 // given address has the specified capability in its negotiated set.
 func (s *Service) sessionHasCapability(address domain.PeerAddress, capability domain.Capability) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	session := s.resolveSessionLocked(address)
 	if session == nil {
 		return false

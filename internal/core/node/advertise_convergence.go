@@ -297,7 +297,12 @@ func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) adv
 //
 // Scans are bounded by len(persistedMeta) which is capped at
 // maxPersistedPeers, so cost is predictable.
-// Must be called with s.mu held.
+//
+// Mutates persistedMeta, which is peer-domain state — caller MUST hold
+// s.peerMu write lock. This helper does NOT touch ipState-domain state
+// (observedIPHistoryByPeer / bans / remoteBannedIPs); callers that also
+// need an ipStateMu write acquire it nested inside s.peerMu per the
+// canonical peerMu → ipStateMu order.
 func (s *Service) downgradeAnnounceableByObservedIPLocked(observedIP domain.PeerIP) map[domain.PeerAddress]struct{} {
 	if observedIP == "" {
 		return nil
@@ -342,7 +347,7 @@ func (s *Service) downgradeAnnounceableByObservedIPLocked(observedIP domain.Peer
 
 // applyAdvertiseValidationResult is the single Service-owned writer that
 // projects an advertiseValidationResult onto persistedMeta and the
-// runtime observed-IP history. All writes happen under s.mu.
+// runtime observed-IP history. All writes happen under s.peerMu.
 //
 // peerAddress is the sanitised overlay address used for health keying —
 // the caller must have already derived it from the verified TCP IP.
@@ -361,19 +366,23 @@ func (s *Service) applyAdvertiseValidationResult(peerAddress domain.PeerAddress,
 		return
 	}
 
-	log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "applyAdvertiseValidationResult").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	}()
 	s.applyAdvertiseValidationResultLocked(peerAddress, result)
 }
 
 // applyAdvertiseValidationResultLocked is the same writer without the
-// lock acquisition. Used by callers that already hold s.mu (notably the
-// outbound convergence path).
+// lock acquisition. Used by callers that already hold s.peerMu write
+// lock (notably the outbound convergence path). Mutates peer-domain
+// state (persistedMeta) under s.peerMu and, when an observed-IP hint is
+// present, nests ipStateMu inside s.peerMu to update
+// observedIPHistoryByPeer — matches the canonical peerMu → ipStateMu
+// order.
 func (s *Service) applyAdvertiseValidationResultLocked(peerAddress domain.PeerAddress, result advertiseValidationResult) {
 	// World-mismatch downgrade must also sweep any announceable entry
 	// keyed by the same observed IP but a different port. Without this,
@@ -397,7 +406,12 @@ func (s *Service) applyAdvertiseValidationResultLocked(peerAddress domain.PeerAd
 			if result.ObservedIPHint != "" {
 				// Keep a transient observation hint in runtime memory
 				// so the outbound convergence loop can still use it.
+				// observedIPHistoryByPeer is ipState-domain; nest
+				// ipStateMu inside the already-held s.peerMu per the
+				// canonical peerMu → ipStateMu order.
+				s.ipStateMu.Lock()
 				s.recordObservedIPHintLocked(peerAddress, result.ObservedIPHint)
+				s.ipStateMu.Unlock()
 			}
 			return
 		}
@@ -472,7 +486,12 @@ func (s *Service) applyAdvertiseValidationResultLocked(peerAddress domain.PeerAd
 		now := time.Now().UTC()
 		pm.LastObservedIP = result.ObservedIPHint
 		pm.LastObservedAt = &now
+		// observedIPHistoryByPeer is ipState-domain; nest ipStateMu
+		// inside the already-held s.peerMu per the canonical peerMu →
+		// ipStateMu order.
+		s.ipStateMu.Lock()
 		s.recordObservedIPHintLocked(peerAddress, result.ObservedIPHint)
+		s.ipStateMu.Unlock()
 	}
 }
 
@@ -535,12 +554,12 @@ func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialed
 		// non-IP value in TrustedAdvertiseIP.
 		return
 	}
-	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	}()
 	pm := s.persistedMeta[peerAddress]
 	if pm == nil {
@@ -560,7 +579,13 @@ func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialed
 
 // recordObservedIPHintLocked updates the runtime-only history of
 // observed IP hints for a single remote peer. Bounded at
-// observedIPHistoryMaxSize. Must be called with s.mu held.
+// observedIPHistoryMaxSize.
+//
+// observedIPHistoryByPeer is ipState-domain state. Caller MUST hold
+// ipStateMu write lock. Cross-domain callers (peer-domain writers that
+// also record a hint, e.g. applyAdvertiseValidationResultLocked) acquire
+// ipStateMu nested inside s.peerMu per the canonical peerMu → ipStateMu
+// lock order.
 func (s *Service) recordObservedIPHintLocked(peerAddress domain.PeerAddress, observedIP domain.PeerIP) {
 	if peerAddress == "" || observedIP == "" {
 		return
@@ -580,9 +605,19 @@ func (s *Service) recordObservedIPHintLocked(peerAddress domain.PeerAddress, obs
 
 // observedIPHistoryForPeer returns a defensive copy of the runtime
 // observed IP history for a peer. Intended for tests and diagnostics.
+//
+// Pure ipState-domain read: acquires ipStateMu read lock. Callers MUST
+// NOT hold ipStateMu already (this helper takes it); cross-domain
+// callers that already hold s.peerMu may call this safely because the
+// canonical lock order is peerMu → ipStateMu (outer → inner).
 func (s *Service) observedIPHistoryForPeer(peerAddress domain.PeerAddress) []domain.PeerIP {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	log.Trace().Str("site", "observedIPHistoryForPeer").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("ip_state_mu_reader")
+	s.ipStateMu.RLock()
+	log.Trace().Str("site", "observedIPHistoryForPeer").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("ip_state_mu_reader")
+	defer func() {
+		s.ipStateMu.RUnlock()
+		log.Trace().Str("site", "observedIPHistoryForPeer").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("ip_state_mu_reader")
+	}()
 	history := s.observedIPHistoryByPeer[peerAddress]
 	if len(history) == 0 {
 		return nil
@@ -595,13 +630,16 @@ func (s *Service) observedIPHistoryForPeer(peerAddress domain.PeerAddress) []dom
 // setTrustedSelfAdvertiseIP updates the runtime override used by the
 // outbound hello frame. Empty string clears the override and falls back
 // to observed consensus / config.
+//
+// Pure ipState-domain write: trustedSelfAdvertiseIP is owned by
+// ipStateMu. Callers MUST NOT hold ipStateMu already.
 func (s *Service) setTrustedSelfAdvertiseIP(ip domain.PeerIP) {
-	log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_held").Msg("s_mu_writer")
+	log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_wait").Msg("ip_state_mu_writer")
+	s.ipStateMu.Lock()
+	log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_held").Msg("ip_state_mu_writer")
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_released").Msg("s_mu_writer")
+		s.ipStateMu.Unlock()
+		log.Trace().Str("site", "setTrustedSelfAdvertiseIP").Str("phase", "lock_released").Msg("ip_state_mu_writer")
 	}()
 	s.trustedSelfAdvertiseIP = domain.PeerIP(strings.TrimSpace(string(ip)))
 }
@@ -663,9 +701,13 @@ func (s *Service) handleObservedAddressMismatchNotice(frame protocol.Frame) {
 	// consensus IP, the legacy notice is advisory only and does not touch
 	// the runtime override. This keeps mixed-network nodes from having a
 	// stronger learned endpoint silently replaced by a v10 peer's claim.
-	s.mu.RLock()
+	// observedAddrs is ipState-domain, so read under ipStateMu.
+	log.Trace().Str("site", "handleObservedAddressMismatchNotice").Str("phase", "lock_wait").Msg("ip_state_mu_reader")
+	s.ipStateMu.RLock()
+	log.Trace().Str("site", "handleObservedAddressMismatchNotice").Str("phase", "lock_held").Msg("ip_state_mu_reader")
 	_, hasObservedConsensus := s.observedConsensusIPLocked()
-	s.mu.RUnlock()
+	s.ipStateMu.RUnlock()
+	log.Trace().Str("site", "handleObservedAddressMismatchNotice").Str("phase", "lock_released").Msg("ip_state_mu_reader")
 	if hasObservedConsensus {
 		return
 	}
@@ -728,14 +770,25 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 	}
 
 	recorded := false
-	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	// Cross-domain: peer-domain (persistedMeta via recordRemoteBanLocked)
+	// under s.peerMu, ipState-domain (remoteBannedIPs via
+	// recordRemoteIPBanLocked) under s.ipStateMu. Canonical lock order
+	// peerMu → ipStateMu. Each branch acquires only the lock(s) it
+	// needs, keeping the write windows narrow.
+	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	switch {
 	case reason == protocol.PeerBannedReasonBlacklisted && hasIP:
+		// Pure ipState write: nest ipStateMu inside the already-held
+		// s.peerMu (canonical peerMu → ipStateMu order) so any
+		// concurrent peer-domain writer still sees a consistent
+		// snapshot of the blacklisted event ordering.
+		s.ipStateMu.Lock()
 		if !s.recordRemoteIPBanLocked(ip, reason, until, now).IsZero() {
 			recorded = true
 		}
+		s.ipStateMu.Unlock()
 	case reason == protocol.PeerBannedReasonBlacklisted && !hasIP:
 		// No host:port to hash on — we cannot express an IP-wide gate.
 		// Fall back to the per-peer record so the sender at least is
@@ -754,8 +807,8 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 			recorded = true
 		}
 	}
-	s.mu.Unlock()
-	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("s_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
 	if !recorded {
 		// Nothing recorded — reason=peer-ban on an unknown peer, or
@@ -790,10 +843,15 @@ func (s *Service) selfAdvertiseEndpoint() string {
 	if !s.cfg.EffectiveListenerEnabled() {
 		return ""
 	}
-	s.mu.RLock()
+	// trustedSelfAdvertiseIP + observedAddrs are both ipState-domain.
+	// Pure ipState read — no peer-domain state touched here.
+	log.Trace().Str("site", "selfAdvertiseEndpoint").Str("phase", "lock_wait").Msg("ip_state_mu_reader")
+	s.ipStateMu.RLock()
+	log.Trace().Str("site", "selfAdvertiseEndpoint").Str("phase", "lock_held").Msg("ip_state_mu_reader")
 	override := s.trustedSelfAdvertiseIP
 	observedIP, _ := s.observedConsensusIPLocked()
-	s.mu.RUnlock()
+	s.ipStateMu.RUnlock()
+	log.Trace().Str("site", "selfAdvertiseEndpoint").Str("phase", "lock_released").Msg("ip_state_mu_reader")
 
 	// advertisePort is carried as a domain.PeerPort through the selection
 	// logic; the textual form is derived once here at the JoinHostPort
@@ -824,7 +882,11 @@ func (s *Service) selfAdvertiseEndpoint() string {
 
 // observedConsensusIPLocked returns the observed IP that crossed the
 // consensus threshold, or ("", false) when there is no consensus yet.
-// Must be called with s.mu held.
+//
+// observedAddrs is ipState-domain state. Caller MUST hold ipStateMu
+// (read or write) — the *Locked suffix here refers to ipStateMu, not
+// s.peerMu. Cross-domain callers that also hold s.peerMu may hold both
+// under the canonical peerMu → ipStateMu ordering.
 func (s *Service) observedConsensusIPLocked() (domain.PeerIP, bool) {
 	if len(s.observedAddrs) < observedAddrConsensusThreshold {
 		return "", false
@@ -849,7 +911,13 @@ func (s *Service) observedConsensusIPLocked() (domain.PeerIP, bool) {
 // misadvertise bucket for a peer after a successful authentication and
 // mirrors that refund onto the per-IP ban score accumulated by
 // addBanScore. Returns the number of points repaid in this call (may be
-// zero). Must be called with s.mu held.
+// zero).
+//
+// Cross-domain: persistedMeta is peer-domain (s.peerMu), bans is
+// ipState-domain (s.ipStateMu). Caller MUST hold s.peerMu write lock;
+// this helper acquires s.ipStateMu internally when mirroring the
+// refund onto s.bans, following the canonical peerMu → ipStateMu
+// ordering documented in docs/locking.md.
 //
 // banIP must be the verified TCP peer IP extracted from the live
 // connection's RemoteAddr (the same source addBanScore keys under) —
@@ -889,13 +957,21 @@ func (s *Service) repayMisadvertisePenaltyOnAuthLocked(peerAddress domain.PeerAd
 
 	// Mirror the refund onto the IP-level ban table under the exact key
 	// addBanScore used (the raw host from conn.RemoteAddr()). If the IP
-	// is unknown (empty banIP, nil bans map, peer was never world-
-	// mismatched), skip the mirror silently — the peer-level bookkeeping
-	// is still correct and the next successful auth will try again.
-	if s.bans == nil || banIP == "" {
+	// is unknown (empty banIP, peer was never world-mismatched), skip
+	// the mirror silently — the peer-level bookkeeping is still correct
+	// and the next successful auth will try again.
+	if banIP == "" {
 		return repay
 	}
 	key := string(banIP)
+	// ipStateMu, nested inside the already-held s.peerMu per the
+	// canonical peerMu → ipStateMu order.  bans is read+write here so
+	// take the writer lock.
+	s.ipStateMu.Lock()
+	defer s.ipStateMu.Unlock()
+	if s.bans == nil {
+		return repay
+	}
 	entry, exists := s.bans[key]
 	if !exists || entry.Score <= 0 {
 		return repay

@@ -202,13 +202,13 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 	}
 
 	// Register inbound peer info with NO capabilities (legacy peer).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	connID, _ := svc.connIDFor(conn)
 	svc.trackInboundConnect(connID, idPeerB, idPeerB)
@@ -234,14 +234,14 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 	}
 
 	// Register inbound peer info WITH mesh_relay_v1.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	connID, _ := svc.connIDFor(conn)
 	svc.trackInboundConnect(connID, idPeerB, idPeerB)
@@ -270,9 +270,9 @@ func TestOnPeerSessionEstablishedSuppressesDirectRouteWithoutRelayCap(t *testing
 	}
 
 	// Verify session counter was incremented despite no route.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	count := svc.identitySessions[idPeerB]
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	if count != 1 {
 		t.Fatalf("expected identitySessions[peer-B]=1, got %d", count)
 	}
@@ -332,10 +332,10 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 	}
 
 	// The legacy session is still tracked.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	totalCount := svc.identitySessions[idPeerB]
 	relayCount := svc.identityRelaySessions[idPeerB]
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	if totalCount != 1 {
 		t.Fatalf("expected identitySessions=1, got %d", totalCount)
 	}
@@ -1146,14 +1146,14 @@ func TestResolveRelayAddress_InboundPeer(t *testing.T) {
 
 	// Set up an inbound connection with relay capability.
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	addr := svc.resolveRelayAddress(idPeerB)
 	if addr == "" {
@@ -1168,13 +1168,13 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress(idPeerB),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1}, // only relay, no routing
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Should NOT resolve — transit requires both caps.
 	addr := svc.resolveRoutableAddress(idPeerB)
@@ -1183,10 +1183,10 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 	}
 
 	// Now add routing cap.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc.SetIdentity(domain.PeerIdentity(idPeerB))
 	pc.SetCapabilities([]domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	addr = svc.resolveRoutableAddress(idPeerB)
 	if addr == "" {
@@ -1204,14 +1204,14 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 	}
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Should prefer outbound session (has async send queue).
 	addr := svc.resolveRelayAddress(idPeerB)
@@ -1226,13 +1226,13 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Pass the transport address — should resolve to identity.
 	id := svc.resolvePeerIdentity("10.0.0.5:8080")
@@ -1480,9 +1480,9 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 	pc := netcore.New(1, conn, netcore.Inbound, netcore.Options{})
 	defer pc.Close()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Start the pipe reader BEFORE calling the function under test.
 	// net.Pipe() is unbuffered — NetCore.writerLoop will block on Write
@@ -1544,9 +1544,9 @@ func TestSendFullTableSyncToInboundSplitHorizon(t *testing.T) {
 
 	pc := netcore.New(netcore.ConnID(2), conn, netcore.Inbound, netcore.Options{})
 	defer pc.Close()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Call the function — with only peer-B's own route in the table,
 	// split horizon should filter it out, resulting in no send.
@@ -1585,9 +1585,9 @@ func TestSendFullTableSyncToInboundEmptyTable(t *testing.T) {
 
 	pc := netcore.New(netcore.ConnID(3), conn, netcore.Inbound, netcore.Options{})
 	defer pc.Close()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	id, _ := svc.connIDFor(conn)
 	svc.sendFullTableSyncToInbound(id, idPeerB)
@@ -1685,14 +1685,14 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	}
 
 	// Register inbound peer info WITHOUT mesh_routing_v1 (relay-only).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// connHasCapability should return false.
 	connID, _ := svc.connIDFor(conn)
@@ -1745,9 +1745,9 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	})
 	defer pc.Close()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	connID, _ := svc.connIDFor(conn)
 	if !svc.connHasCapability(connID, domain.CapMeshRoutingV1) {
@@ -1840,14 +1840,14 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 	}
 
 	// Register inbound peer info with routing cap but WITHOUT relay cap.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	connID, _ := svc.connIDFor(conn)
 	if !svc.connHasCapability(connID, domain.CapMeshRoutingV1) {
@@ -1913,14 +1913,14 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.11"), Port: 12351},
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	targets := svc.routingCapablePeers()
 	if len(targets) != 0 {
@@ -2039,9 +2039,9 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 		sendCh:       sendCh,
 	}
 	// activePeerSession requires health entry with Connected=true.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health["addr-C"] = &peerHealth{Address: "addr-C", Connected: true}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Build a relay frame to forward.
 	frame := protocol.Frame{
@@ -2227,9 +2227,9 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 	})
 	defer pc.Close()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Start the pipe reader BEFORE triggering the send — net.Pipe() is
 	// unbuffered, so the writer goroutine will block until someone reads.
@@ -2277,14 +2277,14 @@ func TestRoutingCapablePeersUsesIdentityForInbound(t *testing.T) {
 	}
 
 	// NATed peer: address is a local listen addr, identity is the fingerprint.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"),
 		Identity: domain.PeerIdentity(idPeerB),
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	targets := svc.routingCapablePeers()
 	if len(targets) != 1 {
@@ -2301,14 +2301,14 @@ func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.52"), Port: 8080}}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
 		Identity: domain.PeerIdentity(idPeerB),          // real identity
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Resolve by identity — should find the inbound connection.
 	addr := svc.resolveRelayAddress(idPeerB)
@@ -2329,13 +2329,13 @@ func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.53"), Port: 7777}}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen
 		Identity: domain.PeerIdentity(idPeerB),          // fingerprint
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	id := svc.resolvePeerIdentity("10.0.0.53:7777")
 	if id != idPeerB {
@@ -2371,7 +2371,7 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 	// Set up peer-B with a relay-capable session so the router can find it.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
 	sendCh := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -2379,7 +2379,7 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Add a direct route to idTargetX via peer-B.
 	svc.onPeerSessionEstablished(idPeerB, true)
@@ -2408,20 +2408,20 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	key := pendingFrameKey(addrA, frame)
 	svc.pendingKeys[key] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Drain for idTargetX — the frame should be routed via peer-B.
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
 	// Verify the pending queue is empty.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
 	_, keyExists := svc.pendingKeys[key]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 0 {
 		t.Fatalf("expected pending queue to be drained, got %d frames", remaining)
@@ -2449,7 +2449,7 @@ func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 
 	// Set up peer-B with route to idTargetX.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -2457,7 +2457,7 @@ func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Queue a relay_message (someone else's traffic) on peer-A.
@@ -2472,17 +2472,17 @@ func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 		Body:      "relayed",
 		CreatedAt: now.Format(time.RFC3339),
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: relayFrame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, relayFrame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
 	// relay_message should NOT be drained — it stays in the queue.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 1 {
 		t.Fatalf("expected relay_message to remain in pending, got %d frames", remaining)
@@ -2504,17 +2504,17 @@ func TestDrainPendingForIdentities_SkipsNonMatchingRecipient(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Drain for idTargetX — but our frame is for idTargetY.
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 1 {
 		t.Fatalf("expected frame for non-matching recipient to stay, got %d", remaining)
@@ -2536,17 +2536,17 @@ func TestDrainPendingForIdentities_EmptyIdentitiesNoop(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Empty identities — should be a no-op.
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 1 {
 		t.Fatalf("expected frame to stay on empty identities, got %d", remaining)
@@ -2558,7 +2558,7 @@ func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
 
 	// Set up peer-B with route.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -2566,7 +2566,7 @@ func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
@@ -2593,17 +2593,17 @@ func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
 		CreatedAt:  expired.Format(time.RFC3339),
 		TTLSeconds: 60, // TTL = 60s, but CreatedAt is 10 min ago → expired
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: expired}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
 	// Expired frame should be removed from pending (marked terminal).
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 0 {
 		t.Fatalf("expected expired frame to be removed, got %d", remaining)
@@ -2626,22 +2626,22 @@ func TestDrainPendingForIdentities_NoRouteFrameStays(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
 	// No route available — frame should stay in pending with zero retries.
 	// No real delivery attempt was made, so the retry counter must not grow.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
 	var retries int
 	if remaining > 0 {
 		retries = svc.pending[addrA][0].Retries
 	}
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 1 {
 		t.Fatalf("expected frame to stay when no route exists, got %d", remaining)
@@ -2673,7 +2673,7 @@ func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
 	}
 
 	// Set initial outbound state to "queued" (as noteOutboundQueuedLocked would).
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
 	svc.outbound[frame.ID] = outboundDelivery{
@@ -2682,13 +2682,13 @@ func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
 		Status:    "queued",
 		QueuedAt:  now,
 	}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	state := svc.outbound[frame.ID]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if state.Status != "queued" {
 		t.Fatalf("expected outbound status to stay 'queued' after no-route drain, got %q", state.Status)
@@ -2739,24 +2739,24 @@ func TestDrainPendingForIdentities_SendFailureReturnsFrame(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Drain: Route() returns RelayNextHop (peer-B via fake inbound address),
 	// but sendRelayToAddress → writeFrameToInbound fails (no tracked conn).
 	// Frame must be returned to pending queue.
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
 	_, keyExists := svc.pendingKeys[pendingFrameKey(addrA, frame)]
 	var retries int
 	if remaining > 0 {
 		retries = svc.pending[addrA][0].Retries
 	}
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 1 {
 		t.Fatalf("expected frame to return to pending on send failure, got %d", remaining)
@@ -2790,10 +2790,10 @@ func TestDrainPendingForIdentities_NoRouteDrainDoesNotExhaustRetries(t *testing.
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Run drain cycles more times than maxPendingFrameRetries. Without the
 	// fix, each cycle would increment Retries and eventually mark the frame
@@ -2804,13 +2804,13 @@ func TestDrainPendingForIdentities_NoRouteDrainDoesNotExhaustRetries(t *testing.
 		svc.drainPendingForIdentities(ids)
 	}
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
 	var retries int
 	if remaining > 0 {
 		retries = svc.pending[addrA][0].Retries
 	}
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 1 {
 		t.Fatalf("expected frame to survive %d no-route drain cycles, got %d remaining", maxPendingFrameRetries+5, remaining)
@@ -2840,24 +2840,24 @@ func TestDrainPendingForIdentities_FailedFramesPreserveOrder(t *testing.T) {
 		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "third", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
 	}
 
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = append([]pendingFrame(nil), frames...)
 	for _, f := range frames {
 		svc.pendingKeys[pendingFrameKey(addrA, f.Frame)] = struct{}{}
 	}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Drain for idTargetX: extracts msg-1 and msg-3, keeps msg-2.
 	// Both fail (no route), so they return to pending.
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	result := svc.pending[addrA]
 	ids := make([]string, len(result))
 	for i, f := range result {
 		ids[i] = f.Frame.ID
 	}
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	// Expected: exact original order [msg-1, msg-2, msg-3].
 	// msg-1(X) and msg-3(X) were extracted and returned; msg-2(Y) was kept.
@@ -2916,22 +2916,22 @@ func TestDrainPendingForIdentities_PartialDeliveryPreservesOrder(t *testing.T) {
 		{Frame: protocol.Frame{Type: "send_message", ID: "msg-5", Address: idNodeA, Recipient: "other-Y", Topic: "dm", Body: "e", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
 	}
 
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = append([]pendingFrame(nil), frames...)
 	for _, f := range frames {
 		svc.pendingKeys[pendingFrameKey(addrA, f.Frame)] = struct{}{}
 	}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	result := svc.pending[addrA]
 	ids := make([]string, len(result))
 	for i, f := range result {
 		ids[i] = f.Frame.ID
 	}
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	expected := []string{"msg-1", "msg-2", "msg-3", "msg-4", "msg-5"}
 	if len(ids) != len(expected) {
@@ -2950,7 +2950,7 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 	// Set up peer-B with a session and route.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
 	sendCh := make(chan protocol.Frame, 20)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -2958,7 +2958,7 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
@@ -2985,10 +2985,10 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Run two drains concurrently for the same identity.
 	ids := map[domain.PeerIdentity]struct{}{idTargetX: {}}
@@ -3027,16 +3027,16 @@ func TestDrainPendingForIdentities_SkipsReceipt(t *testing.T) {
 		Status:      "delivered",
 		DeliveredAt: now.Format(time.RFC3339),
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 1 {
 		t.Fatalf("expected receipt to stay in pending (not route-recoverable), got %d", remaining)
@@ -3049,7 +3049,7 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
 	sendCh := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -3057,7 +3057,7 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Queue a send_message for idTargetX on offline peer-A.
@@ -3073,10 +3073,10 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Announce a route to idTargetX via peer-B.
 	announceFrame := protocol.Frame{
@@ -3095,9 +3095,9 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 	wg.Wait()
 
 	// Pending queue should be drained.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 0 {
 		t.Fatalf("expected pending to be drained after announce, got %d", remaining)
@@ -3114,7 +3114,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	// Set up peer-C with a relay session (the backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
 	sendChC := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrC] = &peerSession{
 		address:      addrC,
 		peerIdentity: idPeerC,
@@ -3122,7 +3122,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerC, true)
 
 	// Two routes to idTargetX from different origins:
@@ -3170,10 +3170,10 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// idOriginC withdraws its route (seqNo=2 > 1). Origin == sender.
 	// After withdrawal, only the backup route via peer-C remains.
@@ -3192,9 +3192,9 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	wg.Wait()
 
 	// Pending queue should be drained via the backup route through peer-C.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 0 {
 		t.Fatalf("expected pending to be drained via backup route after withdrawal, got %d remaining", remaining)
@@ -3253,7 +3253,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	// Set up peer-C with a relay session (backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
 	sendChC := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrC] = &peerSession{
 		address:      addrC,
 		peerIdentity: idPeerC,
@@ -3261,7 +3261,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerC, true)
 
 	// Two routes to idTargetX:
@@ -3324,10 +3324,10 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		CreatedAt:  realNow.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: realNow}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Advance clock past the primary's TTL.
 	current = now.Add(11 * time.Second)
@@ -3354,9 +3354,9 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	wg.Wait()
 
 	// Verify pending queue was drained.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 0 {
 		t.Fatalf("expected pending drained after TTL expiry, got %d remaining", remaining)
@@ -3419,9 +3419,9 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 		Recipient:  idTargetX,
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Advance past TTL.
 	current = now.Add(11 * time.Second)
@@ -3432,9 +3432,9 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 	}
 
 	// Pending should be untouched (no drain triggered).
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrA])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if remaining != 1 {
 		t.Fatalf("expected pending untouched (no drain), got %d", remaining)
 	}
@@ -3450,7 +3450,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	// Set up peer-B with a relay session (primary route goes through B).
 	addrB := domain.PeerAddress("10.0.0.2:9000")
 	sendChB := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -3458,13 +3458,13 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Set up peer-C with a relay session (backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
 	sendChC := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrC] = &peerSession{
 		address:      addrC,
 		peerIdentity: idPeerC,
@@ -3472,7 +3472,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerC, true)
 
 	// Transit route to idTargetX via peer-B (will be invalidated on disconnect).
@@ -3512,10 +3512,10 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 		CreatedAt:  realNow.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: realNow}}
 	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Disconnect peer-B (last relay session). This triggers RemoveDirectPeer
 	// which now returns ExposedBackups, and onPeerSessionClosed calls
@@ -3528,9 +3528,9 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	wg.Wait()
 
 	// Pending queue should be drained.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	pendingRemaining := len(svc.pending[addrStale])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if pendingRemaining != 0 {
 		t.Fatalf("expected pending drained after disconnect, got %d remaining", pendingRemaining)
 	}
@@ -3559,7 +3559,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 	// Set up peer-B with a relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
 	sendChB := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -3567,7 +3567,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// Only one route to idTargetX — through peer-B (no backup).
@@ -3592,19 +3592,19 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 		CreatedAt:  realNow.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: realNow}}
 	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Disconnect peer-B. No backup → no drain should fire.
 	// Don't set drainDone — if drain fires unexpectedly it won't block.
 	svc.onPeerSessionClosed(idPeerB, true)
 
 	// Pending should be untouched.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	pendingRemaining := len(svc.pending[addrStale])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if pendingRemaining != 1 {
 		t.Fatalf("expected pending untouched (no backup, no drain), got %d", pendingRemaining)
 	}
@@ -3621,7 +3621,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
 	sendChB := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -3629,7 +3629,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// First announce: route to idTargetX via peer-B — accepted.
@@ -3655,10 +3655,10 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Second announce: identical route (same SeqNo, same hops) — unchanged.
 	// Before the fix this would NOT trigger drain because UpdateRoute returned
@@ -3671,9 +3671,9 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 	wg.Wait()
 
 	// Pending queue should be drained.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	remaining := len(svc.pending[addrStale])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 
 	if remaining != 0 {
 		t.Fatalf("expected pending drained after unchanged re-announce, got %d", remaining)
@@ -3701,7 +3701,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
 	sendChB := make(chan protocol.Frame, 10)
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
@@ -3709,7 +3709,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	svc.onPeerSessionEstablished(idPeerB, true)
 
 	// First announce: route with SeqNo=5.
@@ -3733,10 +3733,10 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 		CreatedAt:  now.Format(time.RFC3339),
 		TTLSeconds: 300,
 	}
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[addrStale] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrStale, frame)] = struct{}{}
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Install a drainDone trap: if drain fires unexpectedly, fail the test.
 	// The drain goroutine is only launched when drainIdentities is non-empty,
@@ -3759,9 +3759,9 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	// drain/no-drain decision is already made. When all routes are rejected,
 	// drainIdentities is empty and the goroutine launch is skipped entirely.
 	// No sleep needed — just verify pending is untouched.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	pendingRemaining := len(svc.pending[addrStale])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if pendingRemaining != 1 {
 		t.Fatalf("expected pending untouched after rejected (stale) announce, got %d", pendingRemaining)
 	}
@@ -3920,9 +3920,9 @@ func TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess(t *testing.T) {
 		t.Fatalf("bootstrap handshake did not complete within 5s")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	pm := svc.persistedMeta[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if pm == nil {
 		t.Fatalf("persistedMeta row not created by bootstrap path")
 	}
@@ -4041,9 +4041,9 @@ func TestSendNoticeToPeer_SelfIdentityNotice_AppliesCooldown(t *testing.T) {
 		t.Fatalf("NoticeErrorFromFrame decode sanity: %v; want errors.Is(ErrSelfIdentity)", decoded)
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("applySelfIdentityCooldown was not reached: no peerHealth entry for %s", peerAddr)
 	}
@@ -4124,9 +4124,9 @@ func TestSendNoticeToPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 		t.Fatalf("self-identity welcome exchange did not complete within 5s")
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health, ok := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatalf("applySelfIdentityCooldown was not reached: no peerHealth entry for %s", peerAddr)
 	}

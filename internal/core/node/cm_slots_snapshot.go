@@ -37,7 +37,8 @@ type cmSlotRecord struct {
 // the peer_health and peers_exchange snapshots would be undermined by the
 // residual cm.mu.RLock that Slots() takes — Go's RWMutex is writer-
 // preferring, so a queued CM writer would block these RPC readers exactly
-// the way s.mu used to.  Moving the Slots() call onto the refresher
+// the way the pre-split Service lock used to on s.peerMu.  Moving the
+// Slots() call onto the refresher
 // goroutine pushes that coupling off the RPC path; under slot churn the
 // RPC keeps serving the previous snapshot while the refresher may stall on
 // cm.mu.RLock.
@@ -70,7 +71,7 @@ func (s *Service) loadCMSlotsSnapshot() *cmSlotsSnapshot {
 
 // rebuildCMSlotsSnapshot calls ConnectionManager.Slots() (which takes
 // cm.mu.RLock internally), copies the returned SlotInfo values into
-// cmSlotRecord, and publishes the result atomically.  Never acquires s.mu.
+// cmSlotRecord, and publishes the result atomically.  Never acquires s.peerMu.
 //
 // Copies the ConnectedAddress pointer through by dereferencing and re-
 // addressing the local so the cached snapshot does not alias SlotInfo's

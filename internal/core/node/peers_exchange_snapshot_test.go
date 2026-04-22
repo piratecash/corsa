@@ -11,18 +11,18 @@ import (
 
 // TestBuildPeerExchangeResponseDoesNotBlockOnSMu is the regression test for
 // the get_peers hang described in §B.6 of the bug postmortem.  Before the
-// atomic snapshot fix, buildPeerExchangeResponse() acquired s.mu.RLock() to
+// atomic snapshot fix, buildPeerExchangeResponse() acquired s.peerMu.RLock() to
 // iterate s.health looking for inbound-connected peers.  Go's RWMutex is
 // writer-preferring: any queued writer blocks subsequent RLock callers, so a
-// long-running writer on s.mu (sendAnnounceRoutesToInbound on a sync network
-// write, admission decisions, etc.) starved get_peers for the full writer
-// hold time regardless of how short the RLock section itself was.
+// long-running writer on s.peerMu (sendAnnounceRoutesToInbound on a sync
+// network write, admission decisions, etc.) starved get_peers for the full
+// writer hold time regardless of how short the RLock section itself was.
 //
 // The fix: buildPeerExchangeResponse() reads a precomputed peersExchangeSnapshot
 // via atomic load.  The snapshot is rebuilt by hotReadsRefreshLoop under a
-// short s.mu.RLock.  The RPC handler never acquires s.mu.
+// short s.peerMu.RLock.  The RPC handler never acquires s.peerMu.
 //
-// This test holds s.mu.Lock for 2 s from a helper goroutine and asserts that
+// This test holds s.peerMu.Lock for 2 s from a helper goroutine and asserts that
 // buildPeerExchangeResponse() completes within 100 ms.  With the old
 // implementation the call would block for the full 2 s.
 func TestBuildPeerExchangeResponseDoesNotBlockOnSMu(t *testing.T) {
@@ -35,7 +35,7 @@ func TestBuildPeerExchangeResponseDoesNotBlockOnSMu(t *testing.T) {
 	// handler picks up real data from the cache, not just that an empty
 	// snapshot loads quickly.
 	inboundAddr := domain.PeerAddress("198.51.100.7:5050")
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.health[inboundAddr] = &peerHealth{
 		Address:   inboundAddr,
 		Connected: true,
@@ -47,9 +47,9 @@ func TestBuildPeerExchangeResponseDoesNotBlockOnSMu(t *testing.T) {
 		AddedAt:       &now,
 		AnnounceState: announceStateAnnounceable,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
-	// Prime the snapshot BEFORE the writer grabs s.mu.  In production
+	// Prime the snapshot BEFORE the writer grabs s.peerMu.  In production
 	// hotReadsRefreshLoop does this every networkStatsSnapshotInterval; in
 	// this test we skip the Run() wiring and prime directly.
 	svc.rebuildPeersExchangeSnapshot()
@@ -65,15 +65,15 @@ func TestBuildPeerExchangeResponseDoesNotBlockOnSMu(t *testing.T) {
 		t.Fatalf("primed snapshot missing announceable entry for seeded peer %q", inboundAddr)
 	}
 
-	// Hold s.mu.Lock for 2 s from a helper goroutine — the same writer
+	// Hold s.peerMu.Lock for 2 s from a helper goroutine — the same writer
 	// storm shape that starved RLock callers in production.
 	writerStarted := make(chan struct{})
 	writerDone := make(chan struct{})
 	go func() {
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		close(writerStarted)
 		time.Sleep(2 * time.Second)
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 		close(writerDone)
 	}()
 	<-writerStarted
@@ -83,10 +83,10 @@ func TestBuildPeerExchangeResponseDoesNotBlockOnSMu(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// 100 ms leaves plenty of headroom for slow CI with GOMAXPROCS=1 while
-	// still catching any regression that pulls the handler back onto s.mu.
+	// still catching any regression that pulls the handler back onto s.peerMu.
 	const maxTolerated = 100 * time.Millisecond
 	if elapsed > maxTolerated {
-		t.Fatalf("buildPeerExchangeResponse took %s while writer held s.mu; expected < %s (RPC still coupled to s.mu)", elapsed, maxTolerated)
+		t.Fatalf("buildPeerExchangeResponse took %s while writer held s.peerMu; expected < %s (RPC still coupled to s.peerMu)", elapsed, maxTolerated)
 	}
 
 	// Content sanity: seeded inbound address is present in the response.
@@ -110,10 +110,10 @@ func TestBuildPeerExchangeResponseDoesNotBlockOnSMu(t *testing.T) {
 // contract: when no snapshot has been primed (e.g. a unit test that bypasses
 // Run() and therefore skips primeHotReadSnapshots), buildPeerExchangeResponse()
 // must NOT synchronously rebuild.  The synchronous rebuild was removed because
-// it acquired s.mu.RLock on the RPC goroutine and re-coupled the hot path to
-// s.mu — exactly the starvation shape the snapshot infrastructure was built
-// to eliminate.  The handler must still return without panicking on nil
-// snapshots (it degrades to an empty/default response).
+// it acquired s.peerMu.RLock on the RPC goroutine and re-coupled the hot path to
+// s.peerMu — exactly the starvation shape the snapshot infrastructure was
+// built to eliminate.  The handler must still return without panicking on
+// nil snapshots (it degrades to an empty/default response).
 //
 // In production, Run() calls primeHotReadSnapshots() before the listener
 // opens so this branch never fires on real traffic.
@@ -130,7 +130,7 @@ func TestPeersExchangeSnapshotMissDoesNotRebuild(t *testing.T) {
 	_ = svc.buildPeerExchangeResponse(nil)
 
 	// The handler must NOT silently populate the cache as a side effect.
-	// Doing so would mean the RPC path had reached s.mu.RLock, violating
+	// Doing so would mean the RPC path had reached s.peerMu.RLock, violating
 	// the lock-free contract.
 	if svc.loadPeersExchangeSnapshot() != nil {
 		t.Fatal("buildPeerExchangeResponse() must not synchronously rebuild on miss (lock-free contract)")
@@ -150,7 +150,7 @@ func TestPeersExchangeSnapshotRefreshReflectsMutations(t *testing.T) {
 	// First snapshot: peer is known in persistedMeta but NOT announceable.
 	// get_peers must treat it as suppressed.
 	now := time.Now()
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.persistedMeta[addr] = &peerEntry{
 		Address:       addr,
 		AddedAt:       &now,
@@ -161,7 +161,7 @@ func TestPeersExchangeSnapshotRefreshReflectsMutations(t *testing.T) {
 		Connected: true,
 		Direction: peerDirectionInbound,
 	}
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	svc.rebuildPeersExchangeSnapshot()
 	snap1 := svc.loadPeersExchangeSnapshot()
@@ -179,9 +179,9 @@ func TestPeersExchangeSnapshotRefreshReflectsMutations(t *testing.T) {
 	}
 
 	// Mutate persistedMeta: flip the announce state to announceable.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.persistedMeta[addr].AnnounceState = announceStateAnnounceable
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Until the refresher runs, the cached snapshot still reflects the old
 	// decision — bounded staleness, asserted here so it does not silently

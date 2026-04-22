@@ -493,9 +493,9 @@ func TestAggregateStatus_PendingCountUpdatedByPeriodicRefresh(t *testing.T) {
 	}
 
 	// Add pending messages without changing peer state.
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[domain.PeerAddress("10.0.0.1:1000")] = make([]pendingFrame, 7)
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Periodic refresh should pick up the new pending count.
 	svc.refreshAggregateStatus()

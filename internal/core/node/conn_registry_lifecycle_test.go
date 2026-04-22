@@ -52,9 +52,9 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Pre-condition: every accessor sees the seeded state.
 	id, ok := svc.connIDFor(conn)
@@ -70,9 +70,9 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 
 	// Act: single atomic delete — the registry contract is one call-site
 	// (deleteTestConn mirrors unregisterConnLocked in conn_registry.go).
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.deleteTestConn(conn)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Post-condition: every accessor reports "not registered" coherently.
 	// connIDFor is the boundary gate — once it says !ok, no downstream
@@ -98,10 +98,10 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 	// primary map (ConnID-keyed after PR 9.7) nor the secondary index
 	// (net.Conn → ConnID). Both are checked explicitly so a regression
 	// that leaves one half populated cannot silently pass.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	present := svc.testConnEntry(conn) != nil
 	_, secondary := svc.connIDByNetConn[conn]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if present {
 		t.Error("primary registry still resolves conn after delete — invalidation leaked")
 	}
@@ -129,14 +129,14 @@ func TestConnRegistry_RegisterSyncsSecondaryIndex(t *testing.T) {
 		LastActivity: time.Now().UTC(),
 	})
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.registerInboundConnLocked(conn, pc, nil)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	id, hasSecondary := svc.connIDByNetConn[conn]
 	entry := svc.conns[id]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !hasSecondary {
 		t.Fatal("secondary index missing after register — net.Conn-first helpers cannot resolve this conn")

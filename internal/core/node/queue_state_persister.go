@@ -36,7 +36,7 @@ type queueStatePersisterDeps struct {
 	DebounceInterval time.Duration
 	// Snapshot produces an immutable copy of the current queue state.
 	// Implementations must acquire any in-memory lock themselves (the
-	// Service wiring takes s.mu.RLock so UI-tickers and other readers
+	// Service wiring takes s.peerMu.RLock so UI-tickers and other readers
 	// continue to run in parallel with persistence).  The persister
 	// never holds a lock when it calls Snapshot.
 	Snapshot func() queueStateFile
@@ -55,7 +55,7 @@ type queueStatePersisterDeps struct {
 // queueStatePersister owns the background writer for the on-disk queue
 // state file.  Every mutation site in the Service must call MarkDirty
 // instead of taking a snapshot and calling saveQueueState inline so the
-// hot path never blocks on disk I/O or on competing writers of s.mu.
+// hot path never blocks on disk I/O or on competing writers of s.peerMu.
 //
 // Concurrency contract:
 //   - MarkDirty is safe from any goroutine and never blocks.
@@ -79,7 +79,7 @@ func newQueueStatePersister(deps queueStatePersisterDeps) *queueStatePersister {
 }
 
 // MarkDirty signals that in-memory queue state has changed and should be
-// persisted.  Callers may invoke it while holding s.mu.Lock — the call
+// persisted.  Callers may invoke it while holding s.peerMu.Lock — the call
 // neither allocates nor touches the lock.  Multiple calls between two Run
 // iterations coalesce into a single write.
 //

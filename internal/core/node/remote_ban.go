@@ -62,7 +62,10 @@ type remoteIPBanEntry struct {
 // for scheduling any follow-up work (queueing a save, emitting metrics,
 // cancelling outstanding dials) — this helper only mutates state.
 //
-// Must be called under s.mu write lock.
+// Mutates persistedMeta, which is peer-domain state — caller MUST hold
+// s.peerMu write lock.  This helper does NOT touch remoteBannedIPs
+// (ipStateMu-owned); it writes only to peerEntry.RemoteBannedUntil on
+// persistedMeta, so no ipStateMu acquisition is required here.
 func (s *Service) recordRemoteBanLocked(
 	address domain.PeerAddress,
 	reason protocol.PeerBannedReason,
@@ -105,7 +108,8 @@ func (s *Service) recordRemoteBanLocked(
 // this signal the clear would stay in memory until the next periodic
 // save and could be lost on restart, leaving a stale RemoteBannedUntil
 // to keep excluding a peer that is now willing to talk.
-// Must be called under s.mu write lock.
+// Mutates persistedMeta (peer-domain) only — caller MUST hold s.peerMu
+// write lock.
 func (s *Service) clearRemoteBanLocked(address domain.PeerAddress) bool {
 	if s.persistedMeta == nil {
 		return false
@@ -131,7 +135,14 @@ func (s *Service) clearRemoteBanLocked(address domain.PeerAddress) bool {
 // false when neither applies at `now`, when the per-peer entry is
 // unknown AND the IP is not blacklisted, or when both windows have
 // elapsed.
-// Must be called under s.mu read lock.
+//
+// Cross-domain read: persistedMeta is peer-domain (s.peerMu),
+// remoteBannedIPs is IP/advertise-domain (s.ipStateMu).  Caller MUST
+// hold s.peerMu (read or write) AND s.ipStateMu (read or write),
+// acquired in canonical peerMu → ipStateMu order — see docs/locking.md.
+// This helper sits on the gate exercised by PeerProvider.Candidates(),
+// so any caller that reverses the order reintroduces a reverse-order
+// deadlock risk on the dial path.
 func (s *Service) isPeerRemoteBannedLocked(address domain.PeerAddress, now time.Time) bool {
 	if s.isPeerAddressRemoteBannedLocked(address, now) {
 		return true
@@ -147,7 +158,8 @@ func (s *Service) isPeerRemoteBannedLocked(address domain.PeerAddress, now time.
 // isPeerAddressRemoteBannedLocked is the per-peer half of
 // isPeerRemoteBannedLocked. Kept as a separate helper so tests can
 // exercise the per-peer path in isolation from IP-wide resolution.
-// Must be called under s.mu read lock.
+// Reads persistedMeta (peer-domain) only — caller MUST hold s.peerMu
+// (read or write).
 func (s *Service) isPeerAddressRemoteBannedLocked(address domain.PeerAddress, now time.Time) bool {
 	entry, ok := s.persistedMeta[address]
 	if !ok {
@@ -166,8 +178,11 @@ func (s *Service) isPeerAddressRemoteBannedLocked(address domain.PeerAddress, no
 // the lifetime of the single peerEntry that carried the notice — a
 // fresh sibling discovered via peer exchange tomorrow must still be
 // suppressed. Returns the effective expiration actually recorded
-// (possibly normalised via normalizeRemoteBanUntil). Must be called
-// under s.mu write lock.
+// (possibly normalised via normalizeRemoteBanUntil).
+//
+// Pure IP-domain mutation: caller MUST hold ipStateMu write lock. The
+// *Locked suffix is retained for call-site symmetry with the other
+// remote-ban helpers; it now refers to ipStateMu, not s.peerMu.
 func (s *Service) recordRemoteIPBanLocked(
 	ip string,
 	reason protocol.PeerBannedReason,
@@ -203,7 +218,8 @@ func (s *Service) recordRemoteIPBanLocked(
 // IP-wide remote ban at `now`. Expired entries are treated as absent
 // but are NOT removed here — cleanup happens in flushPeerState /
 // periodic sweep so reads stay cheap and lock-free in the common case.
-// Must be called under s.mu read lock.
+//
+// Pure IP-domain read: caller MUST hold ipStateMu (read or write).
 func (s *Service) isRemoteIPBannedLocked(ip string, now time.Time) bool {
 	if ip == "" {
 		return false
@@ -218,7 +234,8 @@ func (s *Service) isRemoteIPBannedLocked(ip string, now time.Time) bool {
 // clearRemoteIPBanLocked drops the IP-wide remote ban for ip. Returns
 // true when a record was actually removed so the caller can decide
 // whether to flush to disk — mirrors the pattern in clearRemoteBanLocked.
-// Must be called under s.mu write lock.
+//
+// Pure IP-domain mutation: caller MUST hold ipStateMu write lock.
 func (s *Service) clearRemoteIPBanLocked(ip string) bool {
 	if ip == "" {
 		return false

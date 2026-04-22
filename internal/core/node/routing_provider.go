@@ -22,8 +22,8 @@ func (s *Service) RoutingSnapshot() routing.Snapshot {
 // disconnect paths do not clear them immediately.
 // Implements rpc.RoutingProvider.
 func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domain.PeerAddress, network domain.NetGroup) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 
 	var bestAddr domain.PeerAddress
 	for addr, id := range s.peerIDs {

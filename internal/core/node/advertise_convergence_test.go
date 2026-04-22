@@ -524,9 +524,9 @@ func TestDowngradeAnnounceableByObservedIPLocked_MatchesTrustedIP(t *testing.T) 
 		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.downgradeAnnounceableByObservedIPLocked("203.0.113.50")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if pm := svc.persistedMeta[addr]; pm.AnnounceState != announceStateDirectOnly {
 		t.Fatalf("TrustedAdvertiseIP match not demoted: got %q", pm.AnnounceState)
@@ -547,9 +547,9 @@ func TestDowngradeAnnounceableByObservedIPLocked_LeavesUnrelatedUntouched(t *tes
 		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.downgradeAnnounceableByObservedIPLocked("203.0.113.99")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if pm := svc.persistedMeta[other]; pm.AnnounceState != announceStateAnnounceable {
 		t.Fatalf("unrelated peer demoted by sweep: got %q", pm.AnnounceState)
@@ -569,9 +569,9 @@ func TestDowngradeAnnounceableByObservedIPLocked_EmptyHintIsNoop(t *testing.T) {
 		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.downgradeAnnounceableByObservedIPLocked("")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if pm := svc.persistedMeta[addr]; pm.AnnounceState != announceStateAnnounceable {
 		t.Fatalf("empty hint must be no-op, got %q", pm.AnnounceState)
@@ -657,9 +657,9 @@ func TestRepayMisadvertisePenaltyOnAuth_Caps(t *testing.T) {
 		ForgivableMisadvertisePoints: 2 * banIncrementAdvertiseMismatch,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	if repaid != banIncrementAdvertiseMismatch {
 		t.Fatalf("first repay: got %d want %d", repaid, banIncrementAdvertiseMismatch)
 	}
@@ -669,18 +669,18 @@ func TestRepayMisadvertisePenaltyOnAuth_Caps(t *testing.T) {
 	}
 
 	// Second repay drains the remaining bucket exactly.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	repaid = svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	if repaid != banIncrementAdvertiseMismatch {
 		t.Fatalf("second repay: got %d want %d", repaid, banIncrementAdvertiseMismatch)
 	}
 
 	// Third repay must be a no-op — the bucket is empty and the invariant
 	// forbids refunding more than was charged for misadvertise.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	repaid = svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	if repaid != 0 {
 		t.Fatalf("third repay must be zero, got %d", repaid)
 	}
@@ -713,18 +713,18 @@ func TestRepayMisadvertisePenaltyOnAuth_MirrorsBanScore(t *testing.T) {
 	}
 
 	// First successful auth refunds one increment in both places.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	if got := svc.bans["203.0.113.80"].Score; got != banIncrementAdvertiseMismatch {
 		t.Fatalf("ban score after first repay: got %d want %d",
 			got, banIncrementAdvertiseMismatch)
 	}
 
 	// Second successful auth drains the remaining balance exactly.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 	if got := svc.bans["203.0.113.80"].Score; got != 0 {
 		t.Fatalf("ban score after full repay: got %d want 0", got)
 	}
@@ -747,9 +747,9 @@ func TestRepayMisadvertisePenaltyOnAuth_BanScoreClampsAtZero(t *testing.T) {
 		ForgivableMisadvertisePoints: banIncrementAdvertiseMismatch,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := svc.bans["203.0.113.81"].Score; got != 0 {
 		t.Fatalf("ban score must clamp at zero, got %d", got)
@@ -769,9 +769,9 @@ func TestRepayMisadvertisePenaltyOnAuth_MissingBanEntryIsSafe(t *testing.T) {
 		ForgivableMisadvertisePoints: banIncrementAdvertiseMismatch,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if repaid != banIncrementAdvertiseMismatch {
 		t.Fatalf("repay must proceed when IP not in bans: got %d want %d",
@@ -813,9 +813,9 @@ func TestRepayMisadvertisePenaltyOnAuth_HostnamePeerRefundsRealIP(t *testing.T) 
 		ForgivableMisadvertisePoints: 2 * banIncrementAdvertiseMismatch,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, domain.PeerIP(realIP))
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if repaid != banIncrementAdvertiseMismatch {
 		t.Fatalf("hostname peer repay: got %d want %d",
@@ -850,9 +850,9 @@ func TestRepayMisadvertisePenaltyOnAuth_EmptyBanIPSkipsMirror(t *testing.T) {
 		ForgivableMisadvertisePoints: banIncrementAdvertiseMismatch,
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, "")
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if repaid != banIncrementAdvertiseMismatch {
 		t.Fatalf("peer-level repay must proceed with empty banIP: got %d want %d",
@@ -885,9 +885,9 @@ func TestHandleConnectionNotice_SetsOverride(t *testing.T) {
 		Status:  protocol.ConnectionStatusClosing,
 		Details: details,
 	})
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	got := svc.trustedSelfAdvertiseIP
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if got != "203.0.113.70" {
 		t.Fatalf("trustedSelfAdvertiseIP: got %q want %q", got, "203.0.113.70")
 	}
@@ -919,9 +919,9 @@ func TestHandleConnectionNotice_IgnoresNonRoutable(t *testing.T) {
 				Code:    protocol.ErrCodeObservedAddressMismatch,
 				Details: details,
 			})
-			svc.mu.RLock()
+			svc.peerMu.RLock()
 			got := svc.trustedSelfAdvertiseIP
-			svc.mu.RUnlock()
+			svc.peerMu.RUnlock()
 			if got != "" {
 				t.Fatalf("non-routable observation should be ignored, got override %q", got)
 			}
@@ -940,9 +940,9 @@ func TestHandleConnectionNotice_IgnoresWrongCode(t *testing.T) {
 		Code:    "unrelated-notice",
 		Details: details,
 	})
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	got := svc.trustedSelfAdvertiseIP
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if got != "" {
 		t.Fatalf("override set by unrelated code: got %q", got)
 	}
@@ -976,10 +976,10 @@ func TestHandlePeerBannedNotice_PeerBanRecordsPerPeer(t *testing.T) {
 		Details: details,
 	})
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	entry := svc.persistedMeta[peerAddr]
 	ipBanCount := len(svc.remoteBannedIPs)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if entry == nil || entry.RemoteBannedUntil == nil {
 		t.Fatalf("RemoteBannedUntil was not recorded on the peer entry")
 	}
@@ -1018,9 +1018,9 @@ func TestHandlePeerBannedNotice_UnknownPeerIgnored(t *testing.T) {
 		Details: details,
 	})
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, stillUnknown := svc.persistedMeta[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if stillUnknown {
 		t.Fatalf("unknown peer must not be inserted into persistedMeta by a peer-banned notice")
 	}
@@ -1046,9 +1046,9 @@ func TestHandlePeerBannedNotice_ParseFailureDoesNotRecord(t *testing.T) {
 		Details: bad,
 	})
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	entry := svc.persistedMeta[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if entry != nil && entry.RemoteBannedUntil != nil {
 		t.Fatalf("RemoteBannedUntil must remain unset when Details parsing fails, got %s",
 			entry.RemoteBannedUntil.Format(time.RFC3339))
@@ -1082,9 +1082,9 @@ func TestHandlePeerBannedNotice_BlacklistedPropagatesToSiblingIP(t *testing.T) {
 		Details: details,
 	})
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	ipEntry, ok := svc.remoteBannedIPs["203.0.113.90"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !ok {
 		t.Fatal("reason=blacklisted must populate remoteBannedIPs keyed on the IP")
 	}
@@ -1100,9 +1100,9 @@ func TestHandlePeerBannedNotice_BlacklistedPropagatesToSiblingIP(t *testing.T) {
 	// Sibling PeerAddress on the same IP — not even known yet — must be
 	// suppressed via the IP-wide record.
 	siblingUnknown := domain.PeerAddress("203.0.113.90:7070")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	sibBanned := svc.isPeerRemoteBannedLocked(siblingUnknown, time.Now().UTC())
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !sibBanned {
 		t.Fatal("unknown sibling on blacklisted IP must be suppressed by the dial gate")
 	}
@@ -1111,9 +1111,9 @@ func TestHandlePeerBannedNotice_BlacklistedPropagatesToSiblingIP(t *testing.T) {
 	// writes only the IP-wide record (the sender is still suppressed on
 	// read through the IP-wide gate). A per-peer mirror would duplicate
 	// state and force extra sync work on the recovery path.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	senderEntry := svc.persistedMeta[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if senderEntry != nil && senderEntry.RemoteBannedUntil != nil {
 		t.Fatalf("reason=blacklisted must not write a per-peer row on the sender, got RemoteBannedUntil=%s",
 			senderEntry.RemoteBannedUntil.Format(time.RFC3339))
@@ -1149,26 +1149,26 @@ func TestHandlePeerBannedNotice_PeerBanDoesNotPropagateToSiblings(t *testing.T) 
 	})
 
 	// No IP-wide record must have been written.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, hasIPRecord := svc.remoteBannedIPs["203.0.113.91"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if hasIPRecord {
 		t.Fatal("reason=peer-ban must NOT populate remoteBannedIPs")
 	}
 
 	// The original peer IS banned via the per-peer record.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	origBanned := svc.isPeerRemoteBannedLocked(peerAddr, time.Now().UTC())
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if !origBanned {
 		t.Fatal("original peer must be suppressed by per-peer remote ban")
 	}
 
 	// A sibling on the same IP must remain dialable.
 	sibling := domain.PeerAddress("203.0.113.91:7070")
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	sibBanned := svc.isPeerRemoteBannedLocked(sibling, time.Now().UTC())
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if sibBanned {
 		t.Fatal("sibling on same IP must stay dialable when reason was peer-ban")
 	}
@@ -1181,19 +1181,19 @@ func TestObservedConsensusIPLocked_Threshold(t *testing.T) {
 	svc := newAdvertiseTestService("198.51.100.10:64646")
 
 	// One reporter: no consensus (threshold is 2).
-	svc.mu.Lock()
+	svc.ipStateMu.Lock()
 	svc.observedAddrs[domain.PeerIdentity("peer-aaa")] = "203.0.113.80"
 	_, ok := svc.observedConsensusIPLocked()
-	svc.mu.Unlock()
+	svc.ipStateMu.Unlock()
 	if ok {
 		t.Fatalf("single reporter must not produce consensus")
 	}
 
 	// Two distinct reporters on the same IP: consensus.
-	svc.mu.Lock()
+	svc.ipStateMu.Lock()
 	svc.observedAddrs[domain.PeerIdentity("peer-bbb")] = "203.0.113.80"
 	ip, ok := svc.observedConsensusIPLocked()
-	svc.mu.Unlock()
+	svc.ipStateMu.Unlock()
 	if !ok {
 		t.Fatalf("expected consensus at threshold")
 	}
@@ -1203,13 +1203,13 @@ func TestObservedConsensusIPLocked_Threshold(t *testing.T) {
 
 	// Two reporters disagreeing: no single IP crosses threshold even
 	// though the aggregate count is >= threshold.
-	svc.mu.Lock()
+	svc.ipStateMu.Lock()
 	svc.observedAddrs = map[domain.PeerIdentity]string{
 		domain.PeerIdentity("peer-aaa"): "203.0.113.80",
 		domain.PeerIdentity("peer-bbb"): "203.0.113.81",
 	}
 	_, ok = svc.observedConsensusIPLocked()
-	svc.mu.Unlock()
+	svc.ipStateMu.Unlock()
 	if ok {
 		t.Fatalf("split-vote must not produce consensus")
 	}
@@ -1329,22 +1329,22 @@ func TestRecordObservedIPHistory_BoundAndDedup(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.100:64646"
 
 	// Adjacent duplicates fold to a single entry.
-	svc.mu.Lock()
+	svc.ipStateMu.Lock()
 	svc.recordObservedIPHintLocked(peerAddr, "203.0.113.200")
 	svc.recordObservedIPHintLocked(peerAddr, "203.0.113.200")
 	svc.recordObservedIPHintLocked(peerAddr, "203.0.113.200")
-	svc.mu.Unlock()
+	svc.ipStateMu.Unlock()
 	if history := svc.observedIPHistoryForPeer(peerAddr); len(history) != 1 {
 		t.Fatalf("adjacent duplicates must be deduplicated: %v", history)
 	}
 
 	// Overflow past the cap retains only the last observedIPHistoryMaxSize
 	// distinct entries.
-	svc.mu.Lock()
+	svc.ipStateMu.Lock()
 	for i := 0; i < observedIPHistoryMaxSize+3; i++ {
 		svc.recordObservedIPHintLocked(peerAddr, entryIP(i))
 	}
-	svc.mu.Unlock()
+	svc.ipStateMu.Unlock()
 	history := svc.observedIPHistoryForPeer(peerAddr)
 	if len(history) != observedIPHistoryMaxSize {
 		t.Fatalf("history capped length: got %d want %d",

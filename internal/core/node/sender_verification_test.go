@@ -50,9 +50,9 @@ func TestIsVerifiedSender_KnownPubKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.pubKeys[knownID.Address] = identity.PublicKeyBase64(knownID.PublicKey)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if !svc.isVerifiedSender(knownID.Address, "unrelated-peer") {
 		t.Fatal("sender with registered pubKey must be accepted")
@@ -90,13 +90,13 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("inbound-peer-1"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
@@ -117,10 +117,10 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 	})
 
 	// Verify: message must NOT be stored.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, seen := svc.seen["forged-msg-1"]
 	_, inKnown := svc.known["completely-fake-sender"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if seen {
 		t.Fatal("forged non-DM message should not be stored (seen set)")
@@ -142,9 +142,9 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	// Set up an authenticated inbound connection.
 	peerConn, _ := net.Pipe()
@@ -155,13 +155,13 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(2), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-2"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
@@ -180,9 +180,9 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	})
 
 	// Verify: message IS stored.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, seen := svc.seen["legit-msg-1"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !seen {
 		t.Fatal("message from verified sender should be stored")
@@ -204,13 +204,13 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(3), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-3"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
@@ -229,9 +229,9 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 		},
 	})
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, seen := svc.seen["peer-authored-msg-1"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !seen {
 		t.Fatal("message where sender matches relay peer identity should be stored")
@@ -254,13 +254,13 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(4), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-4"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
@@ -291,9 +291,9 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 	// would show "non-DM sender identity not verified" and the ban score
 	// would include banIncrementInvalidSig. The DM path should produce
 	// "unknown sender key" instead.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, seen := svc.seen["dm-msg-unknown-sender"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// Message should NOT be in seen because VerifyEnvelope will reject it —
 	// but that's the expected DM path, not the non-DM gate path.
@@ -326,9 +326,9 @@ func TestStoreIncomingMessage_NonDM_DoesNotPoisonKnown(t *testing.T) {
 
 	svc.storeIncomingMessage(msg, false)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, inKnown := svc.known["unregistered-sender-xyz"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if inKnown {
 		t.Fatal("non-DM sender without pubKey must not be added to s.known")
@@ -347,9 +347,9 @@ func TestStoreIncomingMessage_NonDM_VerifiedSenderAddedToKnown(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.pubKeys[knownSender.Address] = identity.PublicKeyBase64(knownSender.PublicKey)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	msg := incomingMessage{
 		ID:         protocol.MessageID("known-legit-test-1"),
@@ -364,9 +364,9 @@ func TestStoreIncomingMessage_NonDM_VerifiedSenderAddedToKnown(t *testing.T) {
 
 	svc.storeIncomingMessage(msg, false)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, inKnown := svc.known[knownSender.Address]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !inKnown {
 		t.Fatal("non-DM sender with registered pubKey should be added to s.known")
@@ -402,13 +402,13 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(5), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("ban-test-peer"),
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
@@ -433,9 +433,9 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 	if remoteAddr != nil {
 		addr = remoteAddr.String()
 	}
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	ban, exists := svc.bans[addr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	// net.Pipe returns connections where RemoteAddr may be nil or a special
 	// pipe address. The ban score may be stored under the conn key rather
@@ -443,9 +443,9 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 	_ = ban
 	_ = exists
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	_, seen := svc.seen["ban-test-msg-1"]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if seen {
 		t.Fatal("forged non-DM message must not be stored")
@@ -491,13 +491,13 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 	// The NetCore Address points at the mock listener so the recovery dial
 	// inside handleInboundPushMessage lands on our observable server.
 	relayAddr := domain.PeerAddress(ln.Addr().String())
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(17), peerConn, netcore.Inbound, netcore.Options{
 		Address:  relayAddr,
 		Identity: domain.PeerIdentity(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
@@ -546,9 +546,9 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 	// Even though the mock was primed with a peer address to return, the
 	// narrow recovery must not have requested peers — so nothing should have
 	// been imported into svc.peers on this path.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 0 {
 		t.Fatalf("narrow recovery must not import peers, got %d", peerCount)
 	}

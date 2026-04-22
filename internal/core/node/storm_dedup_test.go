@@ -77,9 +77,9 @@ func TestRecomputeVersionPolicyLocked_SuppressesNoOpPublish(t *testing.T) {
 
 	// First recompute — empty input, first-publish bootstrap fires once
 	// so subscribers can seed their initial view.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recomputeVersionPolicyLocked(now)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	baseline := count.Load()
 
@@ -87,11 +87,11 @@ func TestRecomputeVersionPolicyLocked_SuppressesNoOpPublish(t *testing.T) {
 	// same inputs within the heartbeat window. The snapshot is bit-identical
 	// on every pass, so no additional publish should occur.
 	for i := 0; i < 10; i++ {
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		// Advance well below versionPolicyHeartbeatInterval so the
 		// heartbeat path cannot accidentally mask a broken dedup.
 		svc.recomputeVersionPolicyLocked(now.Add(time.Duration(i+1) * time.Second))
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 	}
 
 	if got := count.Load(); got != baseline {
@@ -122,9 +122,9 @@ func TestRecomputeVersionPolicyLocked_HeartbeatRepublishesUnchangedSnapshot(t *t
 
 	base := time.Now().UTC()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recomputeVersionPolicyLocked(base)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := count.Load(); got != 1 {
 		t.Fatalf("expected 1 publish on first recompute, got %d", got)
@@ -133,9 +133,9 @@ func TestRecomputeVersionPolicyLocked_HeartbeatRepublishesUnchangedSnapshot(t *t
 	// Recompute one heartbeat interval later with identical inputs — the
 	// content has not changed but the heartbeat must fire so a dropped
 	// initial delivery cannot leave subscribers permanently stale.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recomputeVersionPolicyLocked(base.Add(versionPolicyHeartbeatInterval))
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := count.Load(); got != 2 {
 		t.Fatalf("expected heartbeat republish on unchanged snapshot, got %d publishes total", got)
@@ -164,18 +164,18 @@ func TestRecomputeVersionPolicyLocked_PublishesOnRealChange(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Prime the state — baseline empty snapshot.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recomputeVersionPolicyLocked(now)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	baseline := count.Load()
 
 	// Cross the threshold (3 distinct reporters) to flip UpdateAvailable.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, now)
 	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := count.Load(); got <= baseline {
 		t.Fatalf("expected at least one publish when threshold is crossed, got %d (baseline %d)", got, baseline)
@@ -220,9 +220,9 @@ func TestPublishAggregateStatusChangedLocked_SuppressesNoOpPublishOnSameContent(
 
 	// First publication via the guarded helper — content moves from offline
 	// to reconnecting, so exactly one publish is expected.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.publishAggregateStatusChangedLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := count.Load(); got != 1 {
 		t.Fatalf("expected 1 publish on initial content change, got %d", got)
@@ -233,9 +233,9 @@ func TestPublishAggregateStatusChangedLocked_SuppressesNoOpPublishOnSameContent(
 	// so the heartbeat cannot fire either — no extra publishes must hit
 	// subscribers.
 	for i := 0; i < 10; i++ {
-		svc.mu.Lock()
+		svc.peerMu.Lock()
 		svc.publishAggregateStatusChangedLocked()
-		svc.mu.Unlock()
+		svc.peerMu.Unlock()
 	}
 
 	if got := count.Load(); got != 1 {
@@ -248,9 +248,9 @@ func TestPublishAggregateStatusChangedLocked_SuppressesNoOpPublishOnSameContent(
 	svc.health["10.0.0.1:1000"].State = peerStateHealthy
 	svc.health["10.0.0.1:1000"].LastUsefulReceiveAt = time.Now().UTC()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.publishAggregateStatusChangedLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := count.Load(); got != 2 {
 		t.Fatalf("expected 2 publishes after real change, got %d", got)
@@ -295,9 +295,9 @@ func TestPublishAggregateStatusChangedLocked_HeartbeatRepublishesUnchangedSnapsh
 	svc.pending["10.0.0.1:1000"] = nil
 
 	// First publish — content moves to reconnecting.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.publishAggregateStatusChangedLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := count.Load(); got != 1 {
 		t.Fatalf("expected 1 publish on first call, got %d", got)
@@ -307,13 +307,13 @@ func TestPublishAggregateStatusChangedLocked_HeartbeatRepublishesUnchangedSnapsh
 	// an elapsed heartbeat interval. This simulates the real-world case
 	// where the previous publish was delivered (or dropped) aggregateStatusHeartbeatInterval ago
 	// and the content is still byte-identical.
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.lastAggregateStatusPublishAt = svc.lastAggregateStatusPublishAt.Add(-2 * aggregateStatusHeartbeatInterval)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.publishAggregateStatusChangedLocked()
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	if got := count.Load(); got != 2 {
 		t.Fatalf("expected heartbeat republish on unchanged snapshot, got %d publishes total", got)

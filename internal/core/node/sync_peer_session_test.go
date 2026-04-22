@@ -147,9 +147,9 @@ func TestSyncPeerSession_RequestPeersTrue(t *testing.T) {
 	}
 
 	// Verify peers were added via addPeerAddress.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 2 {
 		t.Errorf("expected 2 peers added, got %d", peerCount)
 	}
@@ -213,9 +213,9 @@ func TestSyncPeerSession_RequestPeersFalse(t *testing.T) {
 	}
 
 	// Verify no peers were added (addPeerAddress was not called).
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 0 {
 		t.Errorf("expected 0 peers (get_peers skipped), got %d", peerCount)
 	}
@@ -349,9 +349,9 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 	}
 
 	// Verify peers were added.
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != 1 {
 		t.Errorf("expected 1 peer added, got %d", peerCount)
 	}

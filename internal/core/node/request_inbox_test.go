@@ -120,9 +120,9 @@ func TestRespondToInboxRequestPushesMessages(t *testing.T) {
 		Payload:   []byte("encrypted-payload"),
 		CreatedAt: time.Now().UTC(),
 	}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], envelope)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -188,9 +188,9 @@ func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
 		Payload:   []byte("encrypted-payload"),
 		CreatedAt: time.Now().UTC(),
 	}
-	svc.mu.Lock()
+	svc.peerMu.Lock()
 	svc.topics["dm"] = append(svc.topics["dm"], envelope)
-	svc.mu.Unlock()
+	svc.peerMu.Unlock()
 
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -312,9 +312,9 @@ func TestPushDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
 		Receipt: &receiptFrame,
 	})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	count := len(svc.receipts["foreign-recipient"])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if count != 0 {
 		t.Fatalf("receipt with unrelated Recipient should not be stored, got %d", count)
 	}
@@ -350,9 +350,9 @@ func TestPushDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 		Receipt: &receiptFrame,
 	})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	count := len(svc.receipts[id.Address])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if count != 1 {
 		t.Fatalf("receipt for own identity should be stored, got %d", count)
 	}
@@ -398,9 +398,9 @@ func TestPushDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 		Receipt: &receiptFrame,
 	})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	count := len(svc.receipts[clientID])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if count != 1 {
 		t.Fatalf("receipt for active subscriber should be stored, got %d", count)
 	}
@@ -450,10 +450,14 @@ func TestRelayDeliveryReceiptGossipsFallbackForUnrelatedRecipient(t *testing.T) 
 	})
 
 	// Receipt must NOT be stored locally.
-	svc.mu.RLock()
+	// s.bans is under s.peerMu; s.receipts is under s.deliveryMu. Take
+	// s.peerMu OUTER and s.deliveryMu INNER per canonical lock order.
+	svc.peerMu.RLock()
+	svc.deliveryMu.RLock()
 	count := len(svc.receipts["foreign-recipient"])
 	banCount := len(svc.bans)
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 0 {
 		t.Fatalf("relay receipt with unrelated Recipient should not be stored, got %d", count)
 	}
@@ -527,10 +531,14 @@ func TestRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	})
 
 	// Receipt must NOT be stored locally — this node is only a transit hop.
-	svc.mu.RLock()
+	// s.bans is under s.peerMu; s.receipts is under s.deliveryMu. Take
+	// s.peerMu OUTER and s.deliveryMu INNER per canonical lock order.
+	svc.peerMu.RLock()
+	svc.deliveryMu.RLock()
 	localCount := len(svc.receipts["remote-recipient-ccc"])
 	transitBanCount := len(svc.bans)
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
+	svc.peerMu.RUnlock()
 	if localCount != 0 {
 		t.Fatalf("transit receipt should not be stored locally, got %d", localCount)
 	}
@@ -605,10 +613,14 @@ func TestSessionRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	})
 
 	// Receipt must NOT be stored locally.
-	svc.mu.RLock()
+	// s.bans is under s.peerMu; s.receipts is under s.deliveryMu. Take
+	// s.peerMu OUTER and s.deliveryMu INNER per canonical lock order.
+	svc.peerMu.RLock()
+	svc.deliveryMu.RLock()
 	localCount := len(svc.receipts["remote-recipient-ddd"])
 	sessBanCount := len(svc.bans)
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
+	svc.peerMu.RUnlock()
 	if localCount != 0 {
 		t.Fatalf("transit receipt via session should not be stored locally, got %d", localCount)
 	}
@@ -671,10 +683,14 @@ func TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown(t *testing.T) {
 	})
 
 	// Receipt must NOT be stored locally.
-	svc.mu.RLock()
+	// s.bans is under s.peerMu; s.receipts is under s.deliveryMu. Take
+	// s.peerMu OUTER and s.deliveryMu INNER per canonical lock order.
+	svc.peerMu.RLock()
+	svc.deliveryMu.RLock()
 	count := len(svc.receipts["foreign-recipient"])
 	sessGossipBanCount := len(svc.bans)
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
+	svc.peerMu.RUnlock()
 	if count != 0 {
 		t.Fatalf("unknown receipt via session should not be stored, got %d", count)
 	}
@@ -988,10 +1004,10 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 	svc.handleInboundRelayDeliveryReceipt(connID, frame)
 
 	// Verify: receipt not stored locally and not marked in seenReceipts.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	key := "foreign-recipient-recovery:msg-recovery-1:delivered"
 	_, markedAfterFirst := svc.seenReceipts[key]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if markedAfterFirst {
 		t.Fatal("receipt must NOT be marked as seen when no targets exist on first arrival")
 	}
@@ -1023,9 +1039,9 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 
 	// Verify: now marked as seen after successful gossip.
 	// gossipTransitReceipt is synchronous, so the mark is immediate.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	_, markedAfterSecond := svc.seenReceipts[key]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if !markedAfterSecond {
 		t.Fatal("receipt must be marked as seen after successful gossip delivery")
 	}
@@ -1067,17 +1083,17 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	key := "foreign-recipient-sess-recovery:msg-recovery-sess-1:delivered"
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		svc.mu.RLock()
+		svc.deliveryMu.RLock()
 		_, marked := svc.seenReceipts[key]
-		svc.mu.RUnlock()
+		svc.deliveryMu.RUnlock()
 		if !marked {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	_, markedAfterFirst := svc.seenReceipts[key]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if markedAfterFirst {
 		t.Fatal("receipt must NOT be marked as seen when no targets exist (session)")
 	}
@@ -1110,9 +1126,9 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	// Verify: marked as seen after success.
 	// The pre-mark in dispatchPeerSessionFrame marks the receipt before
 	// the goroutine runs; gossipTransitReceipt only unmarks on failure.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	_, markedAfterSecond := svc.seenReceipts[key]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if !markedAfterSecond {
 		t.Fatal("receipt must be marked as seen after successful gossip delivery (session)")
 	}
@@ -1177,10 +1193,10 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 	svc.markTransitReceiptSeen(receipt)
 	svc.gossipTransitReceipt(receipt)
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	key := "foreign-recipient-sendfail:msg-sendfail-1:delivered"
 	_, markedAfterFail := svc.seenReceipts[key]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if markedAfterFail {
 		t.Fatal("receipt must NOT be marked as seen when all sends failed")
 	}
@@ -1188,9 +1204,9 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 	// Simulate recovery: drain the filler frame to free sendCh capacity,
 	// and clear the pending queue so queuePeerFrame can also succeed.
 	<-svc.sessions[gossipTarget].sendCh
-	svc.mu.Lock()
+	svc.deliveryMu.Lock()
 	svc.pending[gossipTarget] = nil
-	svc.mu.Unlock()
+	svc.deliveryMu.Unlock()
 
 	// Retry — pre-mark again, capacity recovered. Must deliver and stay marked.
 	svc.markTransitReceiptSeen(receipt)
@@ -1206,9 +1222,9 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 	}
 
 	// Verify: now marked as seen after successful delivery.
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	_, markedAfterSuccess := svc.seenReceipts[key]
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if !markedAfterSuccess {
 		t.Fatal("receipt must be marked as seen after successful send")
 	}
@@ -1241,9 +1257,9 @@ func TestRelayDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	count := len(svc.receipts[id.Address])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if count != 1 {
 		t.Fatalf("relay receipt for own identity should be stored, got %d", count)
 	}
@@ -1282,9 +1298,9 @@ func TestRelayDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	svc.mu.RLock()
+	svc.deliveryMu.RLock()
 	count := len(svc.receipts[clientID])
-	svc.mu.RUnlock()
+	svc.deliveryMu.RUnlock()
 	if count != 1 {
 		t.Fatalf("relay receipt for active subscriber should be stored, got %d", count)
 	}

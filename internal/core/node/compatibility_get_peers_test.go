@@ -180,9 +180,9 @@ func TestCompatibility_NewInitiatorAgainstLegacyResponder(t *testing.T) {
 	// The new initiator must have imported the addresses that the legacy
 	// responder returned. This proves that the response path (which Step 7
 	// must not change) still feeds addPeerAddress().
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	peerCount := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if peerCount != len(advertised) {
 		t.Fatalf("new initiator failed to import peers from legacy responder: got %d, want %d",
 			peerCount, len(advertised))

@@ -30,9 +30,9 @@ func TestMarkPeerConnectedIncrementsScore(t *testing.T) {
 	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 	svc.markPeerConnected(peerAddr, "outbound")
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if health == nil {
 		t.Fatal("expected health entry")
@@ -60,9 +60,9 @@ func TestMarkPeerDisconnectedWithErrorDecrementsScore(t *testing.T) {
 	svc.markPeerConnected(peerAddr, "outbound")
 	svc.markPeerDisconnected(peerAddr, errors.New("connection reset"))
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	expectedScore := peerScoreConnect + peerScoreFailure
 	if health.Score != expectedScore {
@@ -88,9 +88,9 @@ func TestMarkPeerDisconnectedCleanDecrementsLess(t *testing.T) {
 	svc.markPeerConnected(peerAddr, "outbound")
 	svc.markPeerDisconnected(peerAddr, nil)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	expectedScore := peerScoreConnect + peerScoreDisconnect
 	if health.Score != expectedScore {
@@ -118,9 +118,9 @@ func TestScoreClampedOnRepeatedFailures(t *testing.T) {
 		svc.markPeerDisconnected(peerAddr, errors.New("timeout"))
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if health.Score < peerScoreMin {
 		t.Fatalf("score %d below minimum %d", health.Score, peerScoreMin)
@@ -167,8 +167,8 @@ func TestNewServiceMergesPersistedPeersWithBootstrap(t *testing.T) {
 	go func() { _ = svc.Run(ctx); close(runDone) }()
 	defer func() { cancel(); <-runDone }()
 
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
 
 	// Bootstrap peers come first.
 	if len(svc.peers) < 2 {
@@ -249,9 +249,9 @@ func TestNewServiceWithEmptyPeersFile(t *testing.T) {
 		close(done)
 	}()
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	count := len(svc.peers)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	cancel()
 	<-done
@@ -440,9 +440,9 @@ func TestCleanDisconnectResetsConsecutiveFailures(t *testing.T) {
 		svc.markPeerDisconnected(peerAddr, errors.New("timeout"))
 	}
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	failsBefore := svc.health[peerAddr].ConsecutiveFailures
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 	if failsBefore != 3 {
 		t.Fatalf("expected 3 failures before clean disconnect, got %d", failsBefore)
 	}
@@ -451,9 +451,9 @@ func TestCleanDisconnectResetsConsecutiveFailures(t *testing.T) {
 	svc.markPeerConnected(peerAddr, "outbound")
 	svc.markPeerDisconnected(peerAddr, nil)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if health.ConsecutiveFailures != 0 {
 		t.Fatalf("expected 0 consecutive failures after clean disconnect, got %d", health.ConsecutiveFailures)
@@ -484,9 +484,9 @@ func TestFlushPeerStateRetryOnWriteFailure(t *testing.T) {
 
 	svc.flushPeerState()
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	lastSave := svc.lastPeerSave
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if !lastSave.IsZero() {
 		t.Fatalf("expected lastPeerSave to remain zero after failed save, got %v", lastSave)
@@ -511,10 +511,10 @@ func TestMarkPeerConnectedSetsLastUsefulReceiveAt(t *testing.T) {
 	peerAddr := domain.PeerAddress("10.0.0.1:64646")
 	svc.markPeerConnected(peerAddr, peerDirectionInbound)
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
 	state := svc.computePeerStateLocked(health)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if health == nil {
 		t.Fatal("expected health entry")
@@ -582,10 +582,10 @@ func TestInboundPingUpdatesHealth(t *testing.T) {
 	// Simulate receiving a ping from the inbound peer.
 	svc.markPeerRead(peerAddr, protocol.Frame{Type: "ping"})
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
 	state := svc.computePeerStateLocked(health)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if state != peerStateHealthy {
 		t.Fatalf("expected %q after inbound ping, got %q", peerStateHealthy, state)
@@ -618,10 +618,10 @@ func TestInboundPongUpdatesHealth(t *testing.T) {
 	// Simulate receiving a pong response.
 	svc.markPeerRead(peerAddr, protocol.Frame{Type: "pong"})
 
-	svc.mu.RLock()
+	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
 	state := svc.computePeerStateLocked(health)
-	svc.mu.RUnlock()
+	svc.peerMu.RUnlock()
 
 	if health.LastPongAt.IsZero() {
 		t.Fatal("LastPongAt should be set after receiving pong")

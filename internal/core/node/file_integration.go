@@ -77,24 +77,33 @@ func (s *Service) initFileTransfer() {
 		},
 	})
 
-	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_held").Msg("s_mu_writer")
+	// fileMu instead of s.peerMu: the file subsystem handles are a standalone
+	// domain (see docs/locking.md). Writing them under s.peerMu would block
+	// every unrelated peer-domain reader (network_stats, peer_health) on
+	// every startup/teardown cycle.
+	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_wait").Msg("file_mu_writer")
+	s.fileMu.Lock()
+	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_held").Msg("file_mu_writer")
 	s.fileStore = store
 	s.fileTransfer = manager
 	s.fileRouter = router
-	s.mu.Unlock()
-	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_released").Msg("s_mu_writer")
+	s.fileMu.Unlock()
+	log.Trace().Str("site", "initFileTransfer").Str("phase", "lock_released").Msg("file_mu_writer")
 
 	manager.Start()
 	log.Info().Msg("file_transfer: subsystem initialized")
 }
 
 // stopFileTransfer shuts down the file transfer subsystem.
+//
+// Reads the manager handle under fileMu — the handle itself lives in the file
+// domain (see docs/locking.md).  Manager.Stop() runs outside the lock because
+// teardown may block on in-flight transfers and we do not want to hold fileMu
+// while waiting on the file subsystem's own internal synchronisation.
 func (s *Service) stopFileTransfer() {
-	s.mu.RLock()
+	s.fileMu.RLock()
 	manager := s.fileTransfer
-	s.mu.RUnlock()
+	s.fileMu.RUnlock()
 
 	if manager != nil {
 		manager.Stop()
@@ -110,9 +119,10 @@ func (s *Service) stopFileTransfer() {
 // empty identity disables split-horizon (used for locally-injected frames
 // and tests).
 func (s *Service) handleFileCommandFrame(raw json.RawMessage, incomingPeer domain.PeerIdentity) {
-	s.mu.RLock()
+	// fileMu, not s.peerMu: fileRouter lives in the file domain.
+	s.fileMu.RLock()
 	router := s.fileRouter
-	s.mu.RUnlock()
+	s.fileMu.RUnlock()
 
 	if router == nil {
 		log.Debug().Msg("file_transfer: received file_command but subsystem not initialized")
@@ -148,9 +158,10 @@ func (s *Service) sendFileCommandToPeer(dst domain.PeerIdentity, payload domain.
 		return errPeerBoxKeyNotFound
 	}
 
-	s.mu.RLock()
+	// fileMu, not s.peerMu: fileRouter lives in the file domain.
+	s.fileMu.RLock()
 	router := s.fileRouter
-	s.mu.RUnlock()
+	s.fileMu.RUnlock()
 	if router == nil {
 		return errFileTransferNotInitialized
 	}
@@ -193,8 +204,8 @@ func hasCapability(caps []domain.Capability, target domain.Capability) bool {
 // do not route into dead next-hops. When multiple live connections exist for
 // the same identity, the oldest connected one wins as the stability tie-break.
 func (s *Service) fileTransferPeerUsableAt(peer domain.PeerIdentity) (time.Time, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	return s.fileTransferPeerUsableAtLocked(peer, time.Now().UTC())
 }
 
@@ -275,8 +286,8 @@ func (s *Service) fileTransferPeerUsableAtLocked(peer domain.PeerIdentity, now t
 // file transfer support are ignored — they cannot carry file commands and
 // would cause pointless retries.
 func (s *Service) isPeerReachable(peer domain.PeerIdentity) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
 	now := time.Now().UTC()
 
 	// Reuse the same liveness rules as the actual file-router path so
@@ -516,10 +527,16 @@ func (s *Service) RetryFileChunk(fileID domain.FileID) error {
 
 // getFileTransferManager returns the FileTransferManager or
 // errFileTransferNotInitialized if the subsystem is not ready.
+//
+// Read from fileMu (not s.peerMu): the manager handle is a file-domain field.
+// Callers that combine this with peer-state reads (e.g. sendFileCommandToPeer)
+// release fileMu before acquiring s.peerMu so the two domains never nest —
+// the helper returns by value and the caller decides when to inspect peer
+// state.
 func (s *Service) getFileTransferManager() (*filetransfer.Manager, error) {
-	s.mu.RLock()
+	s.fileMu.RLock()
 	manager := s.fileTransfer
-	s.mu.RUnlock()
+	s.fileMu.RUnlock()
 
 	if manager == nil {
 		return nil, errFileTransferNotInitialized

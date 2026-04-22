@@ -63,13 +63,13 @@ func (s *Service) Network() netcore.Network {
 	return &networkBridge{svc: s}
 }
 
-// coreForID resolves id to the owning *netcore.NetCore under s.mu.RLock.
+// coreForID resolves id to the owning *netcore.NetCore under s.peerMu.RLock.
 // Returns nil if id is not registered. The method releases the lock
-// before returning; callers operate on NetCore outside of s.mu, which is
-// the existing convention across service.go send paths.
+// before returning; callers operate on NetCore outside of s.peerMu, which
+// is the existing convention across service.go send paths.
 func (b *networkBridge) coreForID(id domain.ConnID) *netcore.NetCore {
-	b.svc.mu.RLock()
-	defer b.svc.mu.RUnlock()
+	b.svc.peerMu.RLock()
+	defer b.svc.peerMu.RUnlock()
 	return b.svc.coreForIDLocked(id)
 }
 
@@ -108,17 +108,17 @@ func (b *networkBridge) SendFrameSync(ctx context.Context, id domain.ConnID, fra
 
 // Enumerate iterates registered connections matching dir. If ctx is
 // already cancelled on entry, no iteration starts. The walk acquires
-// s.mu.RLock for the full duration of the iteration — matching the
+// s.peerMu.RLock for the full duration of the iteration — matching the
 // existing forEach*Locked convention — so fn must not call back into
-// Service methods that take s.mu (deadlock). Callers that need to act
+// Service methods that take s.peerMu (deadlock). Callers that need to act
 // on a ConnID outside the lock should collect ConnIDs into a local
 // slice inside fn and process them after Enumerate returns.
 func (b *networkBridge) Enumerate(ctx context.Context, dir netcore.Direction, fn func(domain.ConnID) bool) {
 	if ctx.Err() != nil {
 		return
 	}
-	b.svc.mu.RLock()
-	defer b.svc.mu.RUnlock()
+	b.svc.peerMu.RLock()
+	defer b.svc.peerMu.RUnlock()
 	b.svc.forEachConnLocked(func(info connInfo) bool {
 		if info.dir != dir {
 			return true
@@ -147,7 +147,7 @@ func (b *networkBridge) Close(ctx context.Context, id domain.ConnID) error {
 }
 
 // RemoteAddr returns the peer address string for id, or "" if id is not
-// registered. The lookup holds s.mu.RLock briefly and then reads the
+// registered. The lookup holds s.peerMu.RLock briefly and then reads the
 // address from NetCore, whose own accessor is safe for concurrent use.
 func (b *networkBridge) RemoteAddr(id domain.ConnID) string {
 	core := b.coreForID(id)

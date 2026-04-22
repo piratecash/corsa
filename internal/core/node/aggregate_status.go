@@ -27,7 +27,13 @@ const aggregateStatusHeartbeatInterval = 5 * time.Second
 // duplicated in the Desktop layer (networkStatusSummary) and is now the
 // single source of truth.
 //
-// Must be called with s.mu held (at least read lock).
+// Caller MUST hold s.peerMu at least for read (peer domain owns s.health)
+// AND s.deliveryMu at least for read (delivery domain owns s.pending and
+// s.orphaned, both consumed here).  Canonical order is peerMu → deliveryMu.
+// Writer-preferring RWMutex semantics make a self-nested RLock unsafe if
+// another writer queues between acquisitions, so this helper never calls
+// RLock itself — the caller's lock scope must already cover both domains.
+// This helper reads no status-domain fields, so s.statusMu is NOT required.
 func (s *Service) computeAggregateStatusLocked(now time.Time) domain.AggregateStatusSnapshot {
 	var usable, stalled, reconnecting, pending int
 
@@ -102,7 +108,17 @@ func (s *Service) computeAggregateStatusLocked(now time.Time) domain.AggregateSt
 
 // refreshAggregateStatusLocked recomputes the aggregate network status and
 // stores it in s.aggregateStatus. If the status changed, it logs the
-// transition. Must be called with s.mu held (write lock).
+// transition.
+//
+// Caller MUST hold:
+//   - s.peerMu at least for read (peer-domain inputs for
+//     computeAggregateStatusLocked and maybeRecomputeVersionPolicyPeriodic)
+//   - s.deliveryMu at least for read (delivery-domain inputs for
+//     computeAggregateStatusLocked)
+//   - s.statusMu.Lock (status domain — s.aggregateStatus is written here,
+//     and maybeRecomputeVersionPolicyPeriodic may write s.versionPolicy)
+//
+// Canonical order: peerMu → deliveryMu → statusMu with statusMu INNERMOST.
 func (s *Service) refreshAggregateStatusLocked() {
 	now := time.Now().UTC()
 
@@ -133,7 +149,17 @@ func (s *Service) refreshAggregateStatusLocked() {
 // the cached aggregate snapshot without recomputing peer states or version
 // policy. Called from queue mutation paths (enqueue, flush, drop) where
 // only the pending total changes; peer health and connectivity remain the
-// same. Must be called with s.mu held (write lock).
+// same.
+//
+// Caller MUST hold:
+//   - s.peerMu at least for read (s.health is iterated to discover which
+//     addresses own pending frames)
+//   - s.deliveryMu at least for read (s.pending / s.orphaned live in the
+//     delivery domain)
+//   - s.statusMu.Lock (status domain — s.aggregateStatus.PendingMessages is
+//     written here)
+//
+// Canonical order: peerMu → deliveryMu → statusMu with statusMu INNERMOST.
 func (s *Service) refreshAggregatePendingLocked() {
 	var pending int
 	healthAddrs := make(map[domain.PeerAddress]struct{}, len(s.health))
@@ -152,22 +178,33 @@ func (s *Service) refreshAggregatePendingLocked() {
 	s.aggregateStatus.PendingMessages = pending
 }
 
-// refreshAggregateStatus acquires the write lock and recomputes the
-// materialized aggregate status, funnelling through the heartbeat-aware
-// publisher. Called periodically from bootstrapLoop to catch time-based
-// peer-state drift (e.g. peers silently aging from healthy → degraded →
-// stalled without explicit disconnect events) and to keep PendingMessages
-// current between peer-state transitions. Routing the ticker through the
+// refreshAggregateStatus acquires the full canonical lock stack
+// (peerMu → deliveryMu → statusMu) and recomputes the materialized
+// aggregate status, funnelling through the heartbeat-aware publisher.
+// Called periodically from bootstrapLoop to catch time-based peer-state
+// drift (e.g. peers silently aging from healthy → degraded → stalled
+// without explicit disconnect events) and to keep PendingMessages current
+// between peer-state transitions. Routing the ticker through the
 // publisher is deliberate: it is the heartbeat that protects subscribers
 // against a dropped initial publish during a storm, so the UI eventually
 // converges to the true snapshot even if the inbox was full earlier.
+//
+// peerMu is acquired as a writer because maybeRecomputeVersionPolicyPeriodic
+// (invoked transitively via refreshAggregateStatusLocked) may mutate
+// s.peerBuilds / s.peerIDs when an observation window expires.
+//
+// Canonical order: peerMu → deliveryMu → statusMu.
 func (s *Service) refreshAggregateStatus() {
-	log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_wait").Msg("s_mu_writer")
-	s.mu.Lock()
-	log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_held").Msg("s_mu_writer")
+	log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_wait").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_held").Msg("peer_mu_writer")
+	s.deliveryMu.RLock()
+	s.statusMu.Lock()
 	defer func() {
-		s.mu.Unlock()
-		log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_released").Msg("s_mu_writer")
+		s.statusMu.Unlock()
+		s.deliveryMu.RUnlock()
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "refreshAggregateStatus").Str("phase", "lock_released").Msg("peer_mu_writer")
 	}()
 	s.publishAggregateStatusChangedLocked()
 }
@@ -196,7 +233,16 @@ func (s *Service) refreshAggregateStatus() {
 // orphan eviction rechecks) may mutate s.aggregateStatus without notifying
 // subscribers. The anchor must reflect what the bus actually saw.
 //
-// Must be called under s.mu write lock.
+// Caller MUST hold:
+//   - s.peerMu at least for read (peer-domain inputs consumed by the
+//     underlying refreshAggregateStatusLocked chain)
+//   - s.deliveryMu at least for read (delivery-domain inputs consumed by
+//     the underlying refreshAggregateStatusLocked chain)
+//   - s.statusMu.Lock (status domain — s.aggregateStatus,
+//     s.lastPublishedAggregateStatus and s.lastAggregateStatusPublishAt
+//     are all written here)
+//
+// Canonical order: peerMu → deliveryMu → statusMu with statusMu INNERMOST.
 func (s *Service) publishAggregateStatusChangedLocked() {
 	s.refreshAggregateStatusLocked()
 	next := s.aggregateStatus
@@ -217,9 +263,15 @@ func (s *Service) publishAggregateStatusChangedLocked() {
 
 // AggregateStatus returns a point-in-time snapshot of the node's aggregate
 // network health. Safe to call from any goroutine.
+//
+// Uses s.statusMu.RLock alone — the snapshot was already materialised by
+// the most recent refreshAggregateStatusLocked under the full peerMu →
+// deliveryMu → statusMu stack, so pure readers do not need to take any
+// peer-domain or delivery-domain lock. This decouples Desktop UI readers
+// from peer-management writers during a reconnect storm.
 func (s *Service) AggregateStatus() domain.AggregateStatusSnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
 	return s.aggregateStatus
 }
 
@@ -228,14 +280,19 @@ func (s *Service) AggregateStatus() domain.AggregateStatusSnapshot {
 // a single RLock acquisition to avoid re-acquiring the lock twice — with
 // Go's writer-preferring RWMutex, each separate RLock is a window where
 // a queued writer can interleave and stall the caller.
+//
+// Uses s.statusMu.RLock alone — both s.aggregateStatus and s.versionPolicy
+// live in the status domain, so no peer/delivery lock is needed. The frame
+// is served entirely from materialised snapshots populated by earlier
+// recomputes.
 func (s *Service) aggregateStatusFrame() protocol.Frame {
-	s.mu.RLock()
+	s.statusMu.RLock()
 	snap := s.aggregateStatus
 	var vpSnap domain.VersionPolicySnapshot
 	if s.versionPolicy != nil {
 		vpSnap = s.versionPolicy.snapshot
 	}
-	s.mu.RUnlock()
+	s.statusMu.RUnlock()
 
 	return protocol.Frame{
 		Type: "aggregate_status",
