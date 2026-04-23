@@ -5,23 +5,6 @@ import (
 	"time"
 )
 
-// AnnounceMode describes the negotiated announce protocol variant for a peer.
-// In the first version only legacy mode is used; v2_incremental is defined
-// here to prepare the runtime model for the second version without activating
-// any new wire behavior.
-type AnnounceMode uint8
-
-const (
-	// AnnounceModeUnknown is the zero value — treated as legacy.
-	AnnounceModeUnknown AnnounceMode = iota
-	// AnnounceModeLegacy uses announce_routes for both full and delta sends.
-	AnnounceModeLegacy
-	// AnnounceModeV2Incremental uses announce_routes for initial full sync
-	// and routes_update for subsequent incremental sends. Not activated in
-	// the first version.
-	AnnounceModeV2Incremental
-)
-
 // AnnouncePeerState holds per-peer announce send state. Owned by the
 // announce state registry (which itself is owned by node.Service or the
 // announce loop orchestrator). The routing.Table does not own or mutate
@@ -38,7 +21,6 @@ type AnnouncePeerState struct {
 	mu sync.Mutex
 
 	peerIdentity PeerIdentity
-	mode         AnnounceMode
 
 	// lastSentSnapshot is the last successfully sent canonical snapshot.
 	// nil means no snapshot has been sent yet (empty state). Delta
@@ -185,7 +167,6 @@ func (r *AnnounceStateRegistry) GetOrCreate(peerID PeerIdentity) *AnnouncePeerSt
 
 	s := &AnnouncePeerState{
 		peerIdentity:    peerID,
-		mode:            AnnounceModeLegacy,
 		needsFullResync: true,
 		// All timestamps zero — see type doc.
 	}
@@ -231,7 +212,6 @@ func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity) {
 		// Create fresh state.
 		r.peers[peerID] = &AnnouncePeerState{
 			peerIdentity:    peerID,
-			mode:            AnnounceModeLegacy,
 			needsFullResync: true,
 		}
 		r.mu.Unlock()
@@ -273,8 +253,8 @@ func (r *AnnounceStateRegistry) EvictStale() int {
 }
 
 // MarkInvalid marks the peer state as requiring full resync due to
-// state loss, mode change, or any consistency concern. Fallback always
-// goes toward full sync.
+// state loss or any consistency concern. Fallback always goes toward
+// full sync.
 func (r *AnnounceStateRegistry) MarkInvalid(peerID PeerIdentity) {
 	r.mu.Lock()
 	s, ok := r.peers[peerID]

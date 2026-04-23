@@ -24,14 +24,6 @@ func TestAnnounceStateRegistry_GetOrCreate(t *testing.T) {
 		t.Fatal("expected nil LastSentSnapshot for new peer")
 	}
 
-	// Verify mode via mutex-protected read.
-	s.mu.Lock()
-	mode := s.mode
-	s.mu.Unlock()
-	if mode != AnnounceModeLegacy {
-		t.Fatal("expected legacy mode")
-	}
-
 	// Second call returns same object.
 	s2 := r.GetOrCreate("peer-A")
 	if s2 != s {
