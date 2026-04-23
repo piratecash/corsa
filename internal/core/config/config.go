@@ -80,9 +80,9 @@ type Config struct {
 }
 
 const (
-	CorsaVersion     = "0.39 alpha"
-	CorsaWireVersion = "0.39-alpha"
-	ClientBuild      = 39
+	CorsaVersion     = "0.40 alpha"
+	CorsaWireVersion = "0.40-alpha"
+	ClientBuild      = 40
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// Bumped to 11 for the advertise-address phase 1 deprecation rollout:
 	// observed-address-mismatch is no longer produced in the штатный runtime
