@@ -303,8 +303,12 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 		}
 		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			seen[info.identity] = struct{}{}
+			// MUST use inboundConnKeyFromInfo (snapshot field), not
+			// inboundConnKeyForID — the latter re-enters s.peerMu.RLock
+			// via Network().RemoteAddr and deadlocks as soon as any
+			// writer queues between the outer and inner acquisition.
 			targets = append(targets, routing.AnnounceTarget{
-				Address:  s.inboundConnKeyForID(info.id),
+				Address:  inboundConnKeyFromInfo(info),
 				Identity: info.identity,
 			})
 		}
@@ -321,10 +325,32 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 // handle. The "inbound:" prefix keeps these keys disjoint from outbound
 // session addresses. An empty RemoteAddr (registry miss) yields the literal
 // "inbound:" prefix; callers that care about a live connection must guard
-// separately — the only call sites today are walker callbacks where the
-// snapshot guarantees the entry is currently registered.
+// separately.
+//
+// WARNING: this helper goes through Network().RemoteAddr, which internally
+// acquires s.peerMu.RLock. Callers MUST NOT hold s.peerMu (read or write)
+// when calling this helper — the recursive RLock deadlocks under Go's
+// writer-preferring sync.RWMutex semantics as soon as any writer queues
+// between the outer and inner acquisition. For walker callbacks where
+// s.peerMu.RLock is already held (forEachTrackedInboundConnLocked et al.),
+// use inboundConnKeyFromInfo instead: it reads the snapshot's pre-captured
+// remoteAddr and touches no mutex.
 func (s *Service) inboundConnKeyForID(id domain.ConnID) domain.PeerAddress {
 	return domain.PeerAddress("inbound:" + s.Network().RemoteAddr(id))
+}
+
+// inboundConnKeyFromInfo is the lock-free counterpart of inboundConnKeyForID.
+// It builds the "inbound:<remoteAddr>" routing key from a connInfo snapshot
+// that was already populated under s.peerMu. Because the remoteAddr string
+// is copied into the snapshot at capture time, this helper acquires no lock
+// and is safe to call from walker callbacks that already hold s.peerMu.RLock.
+//
+// Prefer this helper in every call site that iterates s.conns under
+// s.peerMu — calling inboundConnKeyForID (which re-enters s.peerMu.RLock
+// via Network().RemoteAddr) from such a site is a recursive-RLock deadlock
+// waiting for the first concurrent writer.
+func inboundConnKeyFromInfo(info connInfo) domain.PeerAddress {
+	return domain.PeerAddress("inbound:" + info.remoteAddr)
 }
 
 // sendFullTableSyncToInbound sends the current routing table to a newly
@@ -1068,7 +1094,9 @@ func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domai
 			return true
 		}
 		if sessionHasBothCaps(info.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
-			result = s.inboundConnKeyForID(info.id)
+			// Snapshot-based derivation: must not re-enter s.peerMu.RLock
+			// via inboundConnKeyForID while the outer RLock is held.
+			result = inboundConnKeyFromInfo(info)
 			return false // Stop iteration
 		}
 		return true
@@ -1106,7 +1134,9 @@ func (s *Service) resolveRelayAddress(peerIdentity domain.PeerIdentity) domain.P
 			return true
 		}
 		if sessionHasCap(info.capabilities, domain.CapMeshRelayV1) {
-			result = s.inboundConnKeyForID(info.id)
+			// Snapshot-based derivation: must not re-enter s.peerMu.RLock
+			// via inboundConnKeyForID while the outer RLock is held.
+			result = inboundConnKeyFromInfo(info)
 			return false // Stop iteration
 		}
 		return true
