@@ -100,3 +100,66 @@ func (_c *MockPeerSender_SendAnnounceRoutes_Call) RunAndReturn(run func(ctx cont
 	_c.Call.Return(run)
 	return _c
 }
+
+// SendRoutesUpdate provides a mock function for the type MockPeerSender
+func (_mock *MockPeerSender) SendRoutesUpdate(ctx context.Context, peerAddress routing.PeerAddress, delta []routing.AnnounceEntry) bool {
+	ret := _mock.Called(ctx, peerAddress, delta)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SendRoutesUpdate")
+	}
+
+	var r0 bool
+	if returnFunc, ok := ret.Get(0).(func(context.Context, routing.PeerAddress, []routing.AnnounceEntry) bool); ok {
+		r0 = returnFunc(ctx, peerAddress, delta)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	return r0
+}
+
+// MockPeerSender_SendRoutesUpdate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SendRoutesUpdate'
+type MockPeerSender_SendRoutesUpdate_Call struct {
+	*mock.Call
+}
+
+// SendRoutesUpdate is a helper method to define mock.On call
+//   - ctx context.Context
+//   - peerAddress routing.PeerAddress
+//   - delta []routing.AnnounceEntry
+func (_e *MockPeerSender_Expecter) SendRoutesUpdate(ctx interface{}, peerAddress interface{}, delta interface{}) *MockPeerSender_SendRoutesUpdate_Call {
+	return &MockPeerSender_SendRoutesUpdate_Call{Call: _e.mock.On("SendRoutesUpdate", ctx, peerAddress, delta)}
+}
+
+func (_c *MockPeerSender_SendRoutesUpdate_Call) Run(run func(ctx context.Context, peerAddress routing.PeerAddress, delta []routing.AnnounceEntry)) *MockPeerSender_SendRoutesUpdate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 routing.PeerAddress
+		if args[1] != nil {
+			arg1 = args[1].(routing.PeerAddress)
+		}
+		var arg2 []routing.AnnounceEntry
+		if args[2] != nil {
+			arg2 = args[2].([]routing.AnnounceEntry)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockPeerSender_SendRoutesUpdate_Call) Return(b bool) *MockPeerSender_SendRoutesUpdate_Call {
+	_c.Call.Return(b)
+	return _c
+}
+
+func (_c *MockPeerSender_SendRoutesUpdate_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, delta []routing.AnnounceEntry) bool) *MockPeerSender_SendRoutesUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}

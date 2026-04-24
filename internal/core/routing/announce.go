@@ -28,12 +28,32 @@ const (
 	MinForcedFullSyncInterval = DefaultAnnounceInterval
 )
 
-// PeerSender abstracts the ability to send announce_routes frames to a
-// specific peer. node.Service implements this interface to decouple the
-// routing package from the network layer.
+// PeerSender abstracts the ability to send routing announcement frames
+// to a specific peer. node.Service implements this interface to decouple
+// the routing package from the network layer.
+//
+// Two wire frames are carried by two distinct methods so that the choice
+// of wire format lives on the call site and cannot silently flip inside
+// the implementation. The v1 loop uses only SendAnnounceRoutes;
+// SendRoutesUpdate is wired as a scaffold for a future capability-gated
+// v2 incremental path. Until that work lands, the invariant "connect-time
+// sync and forced full sync always use SendAnnounceRoutes" is enforced by
+// the call sites in this file (sendFullAnnounce / sendIncrementalAnnounce)
+// and by the node-side connect path; see docs/routing.md for the durable
+// announce-plane file map.
 type PeerSender interface {
-	// SendAnnounceRoutes sends a list of AnnounceEntry items as an
+	// SendAnnounceRoutes sends a list of AnnounceEntry items as a legacy
 	// announce_routes frame to the peer identified by peerAddress.
+	//
+	// This is the legacy v1 path. It is used for:
+	//   - connect-time full sync (always, regardless of any future v2
+	//     capability — initial sync after session establishment is always
+	//     the legacy frame so mixed-version networks never see an
+	//     unexpected routes_update);
+	//   - periodic forced full sync in the announce loop;
+	//   - delta updates for peers that have not negotiated the v2
+	//     mesh_routing capability.
+	//
 	// ctx is the caller's request/cycle context: a pre-cancelled ctx
 	// fails fast without touching the transport, and a mid-flight cancel
 	// during the inbound sync-flush wait aborts the send rather than
@@ -49,6 +69,29 @@ type PeerSender interface {
 	// into one negative outcome; the PeerSender implementation handles
 	// observability internally.
 	SendAnnounceRoutes(ctx context.Context, peerAddress PeerAddress, routes []AnnounceEntry) bool
+
+	// SendRoutesUpdate sends a v2 routes_update frame carrying an
+	// incremental delta to the peer identified by peerAddress.
+	//
+	// This method is scaffolding for the v2 capability-gated incremental
+	// path. In v1 it MUST NOT be called by the announce loop: the v1
+	// loop always uses SendAnnounceRoutes for both full sync and delta
+	// to preserve mixed-version compatibility on the wire.
+	//
+	// Contract for future v2 callers (not enforced in v1 code paths):
+	//   - only peers that negotiated the v2 mesh_routing capability
+	//     receive routes_update;
+	//   - SendRoutesUpdate MUST NOT be used for the first sync after
+	//     session establishment — initial sync is always legacy
+	//     announce_routes;
+	//   - SendRoutesUpdate MUST NOT be used for forced full resync —
+	//     forced full also goes through SendAnnounceRoutes.
+	//
+	// Until the v2 wire frame is implemented, implementations return
+	// false and log a single warn per peer session so accidental call
+	// sites are visible without flooding the log. Semantics of ctx,
+	// peerAddress, and the bool return value match SendAnnounceRoutes.
+	SendRoutesUpdate(ctx context.Context, peerAddress PeerAddress, delta []AnnounceEntry) bool
 }
 
 // AnnounceLoop runs periodic and triggered routing announcements. It

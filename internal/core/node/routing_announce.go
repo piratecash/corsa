@@ -103,6 +103,30 @@ func (s *Service) SendAnnounceRoutes(ctx context.Context, peerAddress domain.Pee
 	return s.enqueuePeerFrame(peerAddress, frame)
 }
 
+// SendRoutesUpdate implements routing.PeerSender as a v2 scaffolding stub.
+//
+// The v2 wire frame routes_update is not implemented yet — the v1 announce
+// loop sends both full sync and delta via SendAnnounceRoutes. This method
+// exists only to satisfy the two-method PeerSender interface that already
+// fixes the invariant "connect-time sync and forced full always go through
+// SendAnnounceRoutes, never through routes_update" at the signature level.
+//
+// Until the v2 frame lands, the stub returns false so callers count the
+// send as a drop and fall back to whatever retry path they already have.
+// A single warn per peerAddress is emitted via routesUpdateStubWarned to
+// make an accidental v2-path call site visible without flooding the log
+// if the mistake repeats every cycle. v1 code paths MUST NOT call this
+// method; the guard is a defence-in-depth net, not a normal code path.
+func (s *Service) SendRoutesUpdate(ctx context.Context, peerAddress domain.PeerAddress, delta []routing.AnnounceEntry) bool {
+	if _, alreadyWarned := s.routesUpdateStubWarned.LoadOrStore(peerAddress, struct{}{}); !alreadyWarned {
+		log.Warn().
+			Str("peer_address", string(peerAddress)).
+			Int("delta_routes", len(delta)).
+			Msg("routes_update_not_implemented_v2_pending")
+	}
+	return false
+}
+
 // sendAnnounceRoutesToInbound finds the inbound connection matching the
 // "inbound:remoteAddr" key and writes the frame synchronously. Returns
 // false if the connection is gone or the write fails, so the announce

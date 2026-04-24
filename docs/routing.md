@@ -471,7 +471,13 @@ sequenceDiagram
 internal/core/routing/
     types.go                    — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
     table.go                    — Table with all CRUD, query, disconnect, and wire-projection operations
-    announce.go                 — AnnounceLoop: periodic (30s) + triggered announce_routes sender
+    announce.go                 — AnnounceLoop: periodic (30s) + triggered announce_routes sender;
+                                  PeerSender interface with two wire-frame methods —
+                                  SendAnnounceRoutes (legacy announce_routes; always used for
+                                  connect-time / forced full sync and for v1 delta) and
+                                  SendRoutesUpdate (v2 routes_update scaffold; not called by the
+                                  v1 loop, wired only to preserve the "initial sync is always
+                                  legacy announce_routes" invariant at the interface signature level)
     announce_builder.go         — BuildAnnounceSnapshot: 3-stage aggregation, AnnounceSnapshot, ComputeDelta
     announce_state.go           — AnnouncePeerState, AnnounceStateRegistry: per-peer send state lifecycle
     types_test.go               — unit tests for type invariants, validation, wire projection
@@ -481,12 +487,19 @@ internal/core/routing/
     announce_state_test.go      — unit tests for per-peer state lifecycle, View/Record methods
     announce_loop_cache_test.go — integration tests for noop suppression, delta-only, failed send retry,
                                   rate limiting, reconnect forced full sync, withdrawal retry via delta
+    announce_wire_frame_test.go — guard tests for v1 wire-frame choice: assert that both the full
+                                  sync and the delta path go through SendAnnounceRoutes and never
+                                  invoke the v2 SendRoutesUpdate scaffold
 
 internal/core/node/
     table_router.go              — TableRouter: routing table lookup with gossip fallback
     routing_announce.go          — announce-plane wire path: TTL loop, SendAnnounceRoutes /
-                                   sendAnnounceRoutesToInbound, connect-time + periodic full sync,
-                                   handleAnnounceRoutes, writeFrameToInbound, fanoutAnnounceRoutes,
+                                   sendAnnounceRoutesToInbound, SendRoutesUpdate (v2 scaffolding
+                                   stub on node.Service — returns false and emits a single
+                                   "routes_update_not_implemented_v2_pending" warn per peer
+                                   address via routesUpdateStubWarned; v1 paths never call it),
+                                   connect-time + periodic full sync, handleAnnounceRoutes,
+                                   writeFrameToInbound, fanoutAnnounceRoutes,
                                    triggerDrainForExposed, routingCapablePeers discovery
     routing_relay.go             — relay-plane forwarding: table-directed relay, sendFrameToAddress,
                                    sendTableDirectedRelay / sendRelayToAddress, next-hop address
@@ -903,7 +916,13 @@ sequenceDiagram
 internal/core/routing/
     types.go                    — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
     table.go                    — Table со всеми CRUD, query, disconnect и wire-projection операциями
-    announce.go                 — AnnounceLoop: периодический (30с) + triggered отправитель announce_routes
+    announce.go                 — AnnounceLoop: периодический (30с) + triggered отправитель announce_routes;
+                                  интерфейс PeerSender с двумя wire-кадр методами —
+                                  SendAnnounceRoutes (legacy announce_routes; используется для
+                                  connect-time / forced full sync и для v1 delta) и
+                                  SendRoutesUpdate (v2 routes_update scaffold; v1-цикл его не
+                                  вызывает, сигнатура фиксирует инвариант «initial sync всегда
+                                  legacy announce_routes» на уровне интерфейса)
     announce_builder.go         — BuildAnnounceSnapshot: 3-ступенчатая агрегация, AnnounceSnapshot, ComputeDelta
     announce_state.go           — AnnouncePeerState, AnnounceStateRegistry: per-peer состояние отправки
     types_test.go               — юнит-тесты инвариантов типов, валидации, wire-проекции
@@ -913,12 +932,18 @@ internal/core/routing/
     announce_state_test.go      — юнит-тесты жизненного цикла per-peer state, методов View/Record
     announce_loop_cache_test.go — интеграционные тесты: noop suppression, delta-only, retry после ошибки,
                                   rate limiting, forced full sync после reconnect, retry withdrawal через delta
+    announce_wire_frame_test.go — guard-тесты выбора wire-кадра в v1: full sync и delta всегда идут
+                                  через SendAnnounceRoutes; v2-заглушка SendRoutesUpdate не вызывается
 
 internal/core/node/
     table_router.go              — TableRouter: lookup в routing table с gossip fallback
     routing_announce.go          — Announce-плоскость: TTL loop, SendAnnounceRoutes /
-                                   sendAnnounceRoutesToInbound, connect-time и периодический full
-                                   sync, handleAnnounceRoutes, writeFrameToInbound,
+                                   sendAnnounceRoutesToInbound, SendRoutesUpdate (v2-заглушка
+                                   на node.Service — возвращает false и пишет единичный warn
+                                   "routes_update_not_implemented_v2_pending" на каждый
+                                   peerAddress через routesUpdateStubWarned; v1-пути её не
+                                   вызывают), connect-time и периодический full sync,
+                                   handleAnnounceRoutes, writeFrameToInbound,
                                    fanoutAnnounceRoutes, triggerDrainForExposed, обнаружение
                                    routing-capable peer'ов (routingCapablePeers)
     routing_relay.go             — Relay-плоскость: table-directed relay, sendFrameToAddress,

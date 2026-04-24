@@ -310,6 +310,20 @@ type Service struct {
 	// Value: *atomic.Int64 (UnixNano of last recompute).
 	peerActivityNanos sync.Map
 
+	// routesUpdateStubWarned tracks which peerAddress values have already
+	// produced the "routes_update_not_implemented_v2_pending" warn from the
+	// SendRoutesUpdate scaffolding stub on Service. v1 code paths never call
+	// the stub (the announce loop uses only SendAnnounceRoutes), so in
+	// production this map stays empty; it exists only so that an accidental
+	// caller does not flood the log on every cycle. sync.Map provides its
+	// own synchronisation — this field is intentionally outside the domain
+	// locking scheme (see docs/locking.md, "Fields that remain outside this
+	// scheme" section).
+	//
+	// Key: domain.PeerAddress.
+	// Value: struct{}{} sentinel (the presence of a key is the whole signal).
+	routesUpdateStubWarned sync.Map
+
 	// trafficMu protects lastTrafficSnap. Separate from s.peerMu because
 	// emitTrafficDeltas already releases s.peerMu (RLock) before comparing
 	// with the previous snapshot. Using s.peerMu would require nesting or
