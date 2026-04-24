@@ -190,3 +190,84 @@ func TestAnnounceLoop_Delta_UsesLegacyFrame(t *testing.T) {
 			len(calls[0].Routes), len(calls[1].Routes))
 	}
 }
+
+// TestAnnounceLoop_DoesNotReadCapabilities_Yet is a regression guard:
+// AnnounceTarget.Capabilities is plumbed into the announce cycle for a
+// future routing-announce v2 mode-selection path, but v1 must NOT branch on
+// it. Two peers — one with no capabilities, one with a speculative v2
+// capability — must both receive the same wire frame (SendAnnounceRoutes)
+// with the same payload shape. If a well-meaning change starts picking
+// SendRoutesUpdate based on Capabilities before the v2 wire frame actually
+// lands, this test fails and points directly at the commit that broke the
+// "initial sync is always legacy announce_routes" invariant documented on
+// the PeerSender interface.
+func TestAnnounceLoop_DoesNotReadCapabilities_Yet(t *testing.T) {
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	sender, counter := newWireFramePeerSender(t)
+
+	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+
+	// Two peers with different capability snapshots. "mesh_routing_v2" is a
+	// deliberately speculative name — this test MUST stay v1-only, so the
+	// capability here is a sentinel that no v1 code path should recognise.
+	peers := func() []routing.AnnounceTarget {
+		return []routing.AnnounceTarget{
+			{
+				Address:      "addr-noCaps",
+				Identity:     "peer-noCaps",
+				Capabilities: nil,
+			},
+			{
+				Address:  "addr-withCaps",
+				Identity: "peer-withCaps",
+				Capabilities: []routing.PeerCapability{
+					routing.PeerCapability("mesh_routing_v2"),
+				},
+			},
+		}
+	}
+
+	loop := routing.NewAnnounceLoop(table, sender, peers,
+		routing.WithAnnounceInterval(10*time.Second))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		loop.Run(ctx)
+		close(done)
+	}()
+
+	loop.TriggerUpdate()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	if got := counter.updateCalls.Load(); got != 0 {
+		t.Fatalf("v1 announce loop must NOT call SendRoutesUpdate regardless of Capabilities, got %d calls", got)
+	}
+	if got := counter.announceCalls.Load(); got != 2 {
+		t.Fatalf("expected exactly 2 SendAnnounceRoutes calls (one per peer), got %d", got)
+	}
+
+	calls := counter.snapshotCalls()
+	byAddr := make(map[routing.PeerAddress]sendCall, len(calls))
+	for _, c := range calls {
+		byAddr[c.PeerAddress] = c
+	}
+	noCapsCall, ok := byAddr["addr-noCaps"]
+	if !ok {
+		t.Fatalf("missing call for peer without capabilities")
+	}
+	withCapsCall, ok := byAddr["addr-withCaps"]
+	if !ok {
+		t.Fatalf("missing call for peer with capabilities")
+	}
+	// Both peers see the same full-sync snapshot — the loop builds payload
+	// from the routing table, not from AnnounceTarget.Capabilities.
+	if len(noCapsCall.Routes) != len(withCapsCall.Routes) {
+		t.Fatalf("payload must not depend on Capabilities: noCaps=%d routes, withCaps=%d routes",
+			len(noCapsCall.Routes), len(withCapsCall.Routes))
+	}
+}

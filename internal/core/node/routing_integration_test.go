@@ -1928,6 +1928,125 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 	}
 }
 
+// TestRoutingCapablePeers_IncludesCapabilitiesSnapshot verifies that
+// routingCapablePeers attaches the peer's negotiated capability set to every
+// AnnounceTarget it returns — both for outbound peerSession entries and for
+// inbound connInfo entries. The snapshot must be an independent copy: mutating
+// the slice returned in AnnounceTarget must not reach back into session or
+// connInfo state, and appending to session/connInfo capabilities afterwards
+// must not change the snapshot already delivered to the announce cycle.
+//
+// This is the entry point that lets routing-announce v2 pick a wire format
+// per-peer without re-entering s.peerMu. Regressing this contract (sharing
+// backing arrays or forgetting to copy) would couple the announce loop to
+// session lifecycle mutations.
+func TestRoutingCapablePeers_IncludesCapabilitiesSnapshot(t *testing.T) {
+	svc := newTestServiceWithRouting(t, idNodeA)
+
+	// Outbound session: three-capability set. file_transfer_v1 is unrelated
+	// to the routing filter but must still propagate — AnnounceTarget carries
+	// the full negotiated set, not a filtered view.
+	outboundCaps := []domain.Capability{
+		domain.CapMeshRelayV1,
+		domain.CapMeshRoutingV1,
+		domain.CapFileTransferV1,
+	}
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		peerIdentity: idPeerB,
+		capabilities: outboundCaps,
+	}
+
+	// Inbound connection: two-capability minimum for routing.
+	pipeLocal, _ := net.Pipe()
+	defer func() { _ = pipeLocal.Close() }()
+
+	conn := &fakeConn{
+		Conn:       pipeLocal,
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.21"), Port: 22222},
+	}
+	inboundCaps := []domain.Capability{
+		domain.CapMeshRelayV1,
+		domain.CapMeshRoutingV1,
+	}
+	svc.peerMu.Lock()
+	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
+		Address:  domain.PeerAddress(idPeerC),
+		Identity: domain.PeerIdentity(idPeerC),
+		Caps:     inboundCaps,
+	})
+	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
+	svc.peerMu.Unlock()
+
+	targets := svc.routingCapablePeers()
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets (outbound + inbound), got %d", len(targets))
+	}
+
+	byIdentity := make(map[domain.PeerIdentity]routing.AnnounceTarget, len(targets))
+	for _, tg := range targets {
+		byIdentity[tg.Identity] = tg
+	}
+
+	outboundTarget, ok := byIdentity[idPeerB]
+	if !ok {
+		t.Fatalf("outbound peer %s missing from targets", idPeerB)
+	}
+	assertCapsEqualAsSet(t, "outbound", outboundTarget.Capabilities, outboundCaps)
+
+	inboundTarget, ok := byIdentity[idPeerC]
+	if !ok {
+		t.Fatalf("inbound peer %s missing from targets", idPeerC)
+	}
+	assertCapsEqualAsSet(t, "inbound", inboundTarget.Capabilities, inboundCaps)
+
+	// Mutating the returned snapshot must not reach back into the session.
+	if len(outboundTarget.Capabilities) > 0 {
+		outboundTarget.Capabilities[0] = domain.Capability("poisoned-by-test")
+	}
+	if got := svc.sessions[domain.PeerAddress("addr-B")].capabilities[0]; got == domain.Capability("poisoned-by-test") {
+		t.Fatalf("AnnounceTarget.Capabilities aliases session.capabilities — mutation leaked back")
+	}
+
+	// Extending session.capabilities after the snapshot must not change the
+	// snapshot already delivered. The announce cycle operates on a per-cycle
+	// immutable view; new capabilities show up only on the next peersFn call.
+	svc.sessions[domain.PeerAddress("addr-B")].capabilities = append(
+		svc.sessions[domain.PeerAddress("addr-B")].capabilities,
+		domain.Capability("added-after-snapshot"),
+	)
+	for _, haveCap := range outboundTarget.Capabilities {
+		if haveCap == domain.Capability("added-after-snapshot") {
+			t.Fatal("AnnounceTarget.Capabilities saw a mutation that happened after routingCapablePeers returned")
+		}
+	}
+}
+
+// assertCapsEqualAsSet fails the test if got does not contain exactly the
+// same elements as want (set equality, order-insensitive). Used by the
+// capability-snapshot tests because routingCapablePeers walks a Go map for
+// outbound sessions — slice order is not guaranteed.
+func assertCapsEqualAsSet(t *testing.T, label string, got []routing.PeerCapability, want []domain.Capability) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: capability count mismatch: got %v, want %v", label, got, want)
+	}
+	seen := make(map[domain.Capability]int, len(got))
+	for _, c := range got {
+		seen[c]++
+	}
+	for _, c := range want {
+		if seen[c] == 0 {
+			t.Fatalf("%s: capability %q missing from snapshot %v", label, c, got)
+		}
+		seen[c]--
+	}
+	for c, n := range seen {
+		if n != 0 {
+			t.Fatalf("%s: unexpected capability %q in snapshot %v", label, c, got)
+		}
+	}
+}
+
 // --- Retry re-resolution capability tests ---
 
 // TestRetryResolutionTransitRequiresBothCaps verifies that the retry path

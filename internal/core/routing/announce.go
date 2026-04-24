@@ -134,11 +134,32 @@ type AnnounceLoop struct {
 }
 
 // AnnounceTarget identifies a peer for announcement purposes.
+//
+// Capabilities is an immutable per-cycle snapshot of the peer's negotiated
+// capability set, captured by the peersFn implementation under the same
+// peer-state lock that produced Address and Identity. The snapshot is taken
+// at cycle start precisely so that per-peer goroutines inside
+// announceToAllPeers can decide on a wire format (legacy announce_routes vs
+// future v2 routes_update) without re-entering the Service's peer mutex per
+// peer — that re-entry pattern collides with writer-preferring sync.RWMutex
+// semantics and has been observed to starve reads under load.
+//
+// AnnounceLoop and any downstream consumer MUST treat Capabilities as
+// read-only; producers build a fresh slice per target so mutation here cannot
+// corrupt session state. Consumers that need a specific capability check
+// should range over the slice directly rather than re-fetching capabilities
+// from the Service. Until routing-announce v2 lands, the announce loop does
+// not branch on Capabilities at all: the field is plumbed so that v2 can be
+// added by a single call-site change in announceToAllPeers without touching
+// the peersFn contract again.
 type AnnounceTarget struct {
 	// Address is the transport address used to enqueue frames.
 	Address PeerAddress
 	// Identity is the peer's Ed25519 fingerprint — used for split horizon.
 	Identity PeerIdentity
+	// Capabilities is the peer's negotiated capability snapshot for this
+	// announce cycle. See the type doc for ownership and mutation rules.
+	Capabilities []PeerCapability
 }
 
 // AnnounceLoopOption configures the AnnounceLoop.

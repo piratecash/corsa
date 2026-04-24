@@ -216,6 +216,15 @@ func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAd
 // Both capabilities are required because a routing-only peer (mesh_routing_v1
 // without mesh_relay_v1) cannot carry data-plane relay traffic. Advertising
 // routes through such a peer would create non-deliverable paths.
+//
+// Capabilities plumbing: for every peer that passes the v1 filter, a full
+// immutable copy of the peer's negotiated capability slice is attached to
+// the AnnounceTarget. The copy is taken inside the same s.peerMu.RLock that
+// reads Address and Identity, giving the announce cycle a single consistent
+// per-peer snapshot. Callers (the announce loop and its per-peer goroutines)
+// can therefore pick a wire format without re-entering s.peerMu per peer —
+// that re-entry pattern collides with the writer-preferring RWMutex
+// semantics documented in CLAUDE.md and docs/locking.md.
 func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
@@ -235,8 +244,9 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 		if sessionHasBothCaps(session.capabilities, domain.CapMeshRoutingV1, domain.CapMeshRelayV1) {
 			seen[session.peerIdentity] = struct{}{}
 			targets = append(targets, routing.AnnounceTarget{
-				Address:  domain.PeerAddress(address),
-				Identity: session.peerIdentity,
+				Address:      domain.PeerAddress(address),
+				Identity:     session.peerIdentity,
+				Capabilities: copyCapabilitiesForAnnounce(session.capabilities),
 			})
 		}
 	}
@@ -256,15 +266,37 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 			// inboundConnKeyForID — the latter re-enters s.peerMu.RLock
 			// via Network().RemoteAddr and deadlocks as soon as any
 			// writer queues between the outer and inner acquisition.
+			//
+			// info.capabilities is already a fresh copy produced by
+			// snapshotEntryLocked, but an additional copy is taken here so
+			// that all AnnounceTarget slices come from the same producer
+			// and the contract "AnnounceTarget.Capabilities is private to
+			// the target" does not depend on connInfo internals.
 			targets = append(targets, routing.AnnounceTarget{
-				Address:  inboundConnKeyFromInfo(info),
-				Identity: info.identity,
+				Address:      inboundConnKeyFromInfo(info),
+				Identity:     info.identity,
+				Capabilities: copyCapabilitiesForAnnounce(info.capabilities),
 			})
 		}
 		return true
 	})
 
 	return targets
+}
+
+// copyCapabilitiesForAnnounce returns an immutable copy of caps typed as
+// []routing.PeerCapability for embedding into routing.AnnounceTarget. A nil
+// input yields a nil slice so "no capabilities" stays distinguishable from
+// "empty capability set" at the consumer side. Callers must hold s.peerMu
+// while the source slice is still backed by session/connInfo state — this
+// helper only guarantees that the returned slice no longer aliases it.
+func copyCapabilitiesForAnnounce(caps []domain.Capability) []routing.PeerCapability {
+	if len(caps) == 0 {
+		return nil
+	}
+	out := make([]routing.PeerCapability, len(caps))
+	copy(out, caps)
+	return out
 }
 
 // sendFullTableSyncToInbound sends the current routing table to a newly
