@@ -102,7 +102,9 @@ expect_count() {
 # Gate 1: direct socket write outside transport owner.
 # Expected baseline after PR 9.6 / 10.x:
 #   service.go → 0, peer_management.go → 0,
-#   routing_integration.go → 3 (hello/auth/ping sentinel edges),
+#   routing_relay.go → 3 (hello/auth/ping sentinel edges inside sendNoticeToPeer;
+#                         see the "internal/core/node/" file map in
+#                         docs/routing.md for the per-file scope table),
 #   socks5.go → 2 (SOCKS5 greeting + CONNECT).
 expect_count "direct socket write in service.go" 0 -- \
     rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
@@ -110,9 +112,9 @@ expect_count "direct socket write in service.go" 0 -- \
 expect_count "direct socket write in peer_management.go" 0 -- \
     rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/peer_management.go
-expect_count "direct socket write in routing_integration.go" 3 -- \
+expect_count "direct socket write in routing_relay.go" 3 -- \
     rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
-       internal/core/node/routing_integration.go
+       internal/core/node/routing_relay.go
 expect_count "direct socket write in socks5.go" 2 -- \
     rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/socks5.go
@@ -215,7 +217,8 @@ expect_count "legacy forEach…ConnLocked(func(…*netcore.NetCore…))" 0 -- \
 # Gate 15: scope (v) — legacy package-level inboundConnKey helper.
 # After PR 10.16 the only routing-key constructor is the ConnID-first method
 # inboundConnKeyForID. The bare-name helper accepted *netcore.NetCore and
-# was the last consumer of *NetCore inside routing_integration.go.
+# was the last consumer of *NetCore inside routing_integration.go (now split
+# into routing_announce.go / routing_relay.go / routing_resolver.go / …).
 expect_count "legacy inboundConnKey(*netcore.NetCore) helper" 0 -- \
     rg -n --glob '!**/*_test.go' \
        'inboundConnKey\(' \
@@ -227,7 +230,9 @@ expect_count "legacy inboundConnKey(*netcore.NetCore) helper" 0 -- \
 #   conn_registry.go     — frozen lifecycle binding (§2.6.26)
 #   service.go           — frozen entry/lifecycle surface (§2.6.26)
 #   peer_management.go   — enableTCPKeepAlive (socket-infra)
-#   routing_integration.go — §4.4 bootstrap handshake edges
+#   routing_relay.go     — §4.4 bootstrap handshake edges (sendNoticeToPeer);
+#                          see the "internal/core/node/" file map in
+#                          docs/routing.md for the per-file scope table
 #   socks5.go            — §5.3.2 sub-NetCore handshake
 #   peer_provider.go     — net.IP / net.ParseCIDR for peer-address policy
 #   netgroup.go          — net.IP grouping helpers for reachability
@@ -246,7 +251,7 @@ internal/core/node/conn_registry.go
 internal/core/node/netgroup.go
 internal/core/node/peer_management.go
 internal/core/node/peer_provider.go
-internal/core/node/routing_integration.go
+internal/core/node/routing_relay.go
 internal/core/node/service.go
 internal/core/node/socks5.go
 EOF

@@ -4,9 +4,10 @@
 // hello frame should be accepted, rejected with connection_notice, or
 // downgraded to direct-only — plus the Service-owned persistence
 // writers invoked from dispatchNetworkFrame / peerSessionRequest /
-// routing_integration. It keeps the decision tree out of
-// dispatchNetworkFrame so the inbound hello path stays readable and so
-// the matrix from the advertise convergence contract lives in one place.
+// routing_relay.go (sendNoticeToPeer). It keeps the decision tree out
+// of dispatchNetworkFrame so the inbound hello path stays readable
+// and so the matrix from the advertise convergence contract lives in
+// one place.
 //
 // See docs/protocol/handshake.md section "Advertise convergence" for
 // the wire/behavioural contract this file implements.
@@ -522,7 +523,7 @@ func (s *Service) applyAdvertiseOnInboundAccept(tcpAddr string, frame protocol.F
 }
 
 // recordOutboundConfirmed is the outbound success writer invoked by
-// peerSessionRequest and routing_integration after a completed
+// peerSessionRequest (peer_management.go) after a completed
 // hello → welcome → auth_ok handshake. dialedIP MUST be a canonical IP
 // — the caller is expected to derive it from the live TCP
 // connection's RemoteAddr, not from peerAddress (which may be a

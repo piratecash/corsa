@@ -461,7 +461,7 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 }
 
 // TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend asserts
-// that writeFrameToInbound (routing_integration.go) classifies sent vs
+// that writeFrameToInbound (routing_announce.go) classifies sent vs
 // unregistered through the injected backend seam. The inbound-direct path
 // routes through sendFrameBytesViaNetworkSync, which carries the full
 // outcome tree: nil → sent (returns true); ErrUnknownConn →

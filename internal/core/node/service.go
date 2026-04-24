@@ -2344,10 +2344,10 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 // nil return here on a steady-state ConnID is the hard fail-closed
 // signal consumed by the write wrappers (see ErrUnregisteredWrite).
 // The bootstrap/handshake edges — see the three sentinel call sites in
-// routing_integration.go (node-hello, auth challenge, challenge-response
-// writes that run before register / attach publish an entry) — never
-// reach this helper because they operate on a raw net.Conn before any
-// ConnID has been minted.
+// routing_relay.go inside sendNoticeToPeer (node-hello, auth challenge,
+// challenge-response writes that run before register / attach publish
+// an entry) — never reach this helper because they operate on a raw
+// net.Conn before any ConnID has been minted.
 func (s *Service) netCoreForID(id domain.ConnID) *netcore.NetCore {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
