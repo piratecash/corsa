@@ -387,6 +387,16 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 
 // sendFullAnnounce sends a complete announce snapshot to the peer and
 // updates cache state on success via thread-safe Record* methods.
+//
+// Forced-full / connect-time / periodic-forced-full MUST use the legacy
+// announce_routes wire frame. See the "First-sync wire-frame invariant"
+// section in docs/routing.md for the normative contract: the first
+// full-sync after session establishment — and every later forced full
+// resync — is always legacy regardless of peer capabilities, because the
+// peer has no baseline to diff a v2 routes_update against. Wire-send goes
+// through sendLegacyFull so the single helper is the only in-package call
+// site that invokes PeerSender.SendAnnounceRoutes for full sync; do NOT
+// add a branch on peer.Capabilities here that picks SendRoutesUpdate.
 func (a *AnnounceLoop) sendFullAnnounce(
 	ctx context.Context,
 	cycleID uint64,
@@ -400,12 +410,15 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	// Empty snapshot after split horizon / empty table: record a successful
 	// full-sync baseline without sending a wire frame. The peer learns
 	// nothing new, and the cache is primed so subsequent cycles use delta.
+	// This short-circuit predates the first-sync invariant and is orthogonal
+	// to the "First-sync wire-frame invariant" section in docs/routing.md:
+	// empty-baseline intentionally emits neither legacy nor v2 wire frame.
 	if len(snapshot.Entries) == 0 {
 		state.RecordFullSyncSuccess(snapshot, now)
 		return
 	}
 
-	if !a.sender.SendAnnounceRoutes(ctx, peer.Address, snapshot.Entries) {
+	if !a.sendLegacyFull(ctx, peer, snapshot) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
 			Str("peer_identity", string(peer.Identity)).
@@ -416,6 +429,32 @@ func (a *AnnounceLoop) sendFullAnnounce(
 		return
 	}
 	state.RecordFullSyncSuccess(snapshot, now)
+}
+
+// sendLegacyFull sends a full snapshot via the legacy announce_routes wire
+// frame. This is the only helper allowed for forced-full / connect-time /
+// periodic-forced-full paths inside the routing package; see the
+// "First-sync wire-frame invariant" section in docs/routing.md for the
+// full rationale.
+//
+// Naming is deliberate: any future change that wants a v2 routes_update
+// branch on full sync would have to either rename or bypass this helper,
+// and both options are a loud review tripwire. The helper does not inspect
+// peer.Capabilities — full sync is always legacy, by definition. The v2
+// delta path uses PeerSender.SendRoutesUpdate directly from
+// sendIncrementalAnnounce (once the v2 frame lands), never via this helper.
+//
+// ctx propagates the caller's cancellation/deadline down to the transport;
+// see PeerSender.SendAnnounceRoutes doc for the ctx contract. Returns the
+// same bool the sender returned — collapsing every transport-drop class to
+// a single negative outcome so the caller can keep the success/failure
+// path uniform with the delta-send helper.
+func (a *AnnounceLoop) sendLegacyFull(
+	ctx context.Context,
+	peer AnnounceTarget,
+	snapshot *AnnounceSnapshot,
+) bool {
+	return a.sender.SendAnnounceRoutes(ctx, peer.Address, snapshot.Entries)
 }
 
 // sendIncrementalAnnounce sends only changed entries to the peer and

@@ -350,6 +350,20 @@ func (s *Service) sendOutboundFullTableSync(ctx context.Context, peerIdentity do
 // without sending a wire frame — the protocol is additive so an empty
 // table needs no explicit announcement.
 //
+// First-sync wire-frame invariant: see the "First-sync wire-frame
+// invariant" section in docs/routing.md for the normative contract.
+// Connect-time sync MUST use SendAnnounceRoutes (legacy announce_routes
+// frame); the first sync after session establishment is always legacy
+// regardless of peer capabilities, because a v2 routes_update frame
+// carries an incremental delta against a baseline the peer does not yet
+// have. Any future change that inspects peer capabilities here and picks
+// SendRoutesUpdate breaks that contract — both because a fresh session
+// has no baseline and because the guard tests in
+// routing_integration_connect_sync_test.go will fail immediately. The
+// empty-baseline short-circuit below emits neither wire frame (legacy
+// nor v2) by design; see TestConnectTimeFullSync_EmptySnapshot_NoWireFrame
+// for the regression contract.
+//
 // ctx flows down into SendAnnounceRoutes → writeFrameToInbound →
 // sendFrameBytesViaNetworkSync; cancelling ctx aborts the inbound
 // sync-flush wait rather than waiting for the internal syncFlushTimeout.
@@ -367,7 +381,10 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 		// No routes to send, but register the empty baseline so that future
 		// announce cycles can compute meaningful deltas. No wire frame is
 		// needed — the protocol is additive (not a destructive snapshot), so
-		// an empty table is correctly represented by sending nothing.
+		// an empty table is correctly represented by sending nothing. This
+		// branch is orthogonal to the first-sync wire-frame invariant (see
+		// docs/routing.md): empty-baseline emits neither the legacy
+		// announce_routes frame nor the v2 routes_update frame.
 		peerState.RecordFullSyncSuccess(snapshot, now)
 		log.Debug().
 			Str("peer", string(peerIdentity)).
@@ -379,6 +396,9 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 	peerState.RecordFullSyncAttempt(now)
 
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Int("routes", len(snapshot.Entries)).Msg("connect_time_full_sync_before_send")
+	// First-sync legacy path (see docs/routing.md §"First-sync wire-frame
+	// invariant"): always SendAnnounceRoutes, never SendRoutesUpdate — the
+	// peer has no baseline to diff against on a freshly established session.
 	sendOk := s.SendAnnounceRoutes(ctx, address, snapshot.Entries)
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Bool("sent", sendOk).Msg("connect_time_full_sync_after_send")
 	if !sendOk {
