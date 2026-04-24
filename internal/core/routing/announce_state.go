@@ -45,6 +45,13 @@ type AnnouncePeerState struct {
 	// disconnectedAt records when the peer disconnected. Used for eviction
 	// timing. Zero means the peer is connected or state was just created.
 	disconnectedAt time.Time
+
+	// capabilities is the peer's negotiated capability set captured at the
+	// last MarkReconnected call. Stored as a defensive copy so that post-
+	// hook mutations of the session's capability slice cannot leak in.
+	// Write-only in the current PR — routing-announce v2 will add read
+	// paths for mode-decision logic.
+	capabilities []PeerCapability
 }
 
 // PeerIdentity returns the immutable identity of this peer state.
@@ -205,7 +212,16 @@ func (r *AnnounceStateRegistry) MarkDisconnected(peerID PeerIdentity) {
 
 // MarkReconnected resets a previously disconnected peer for a new announce
 // session. Always requires forced full sync. Rate limit timer is reset.
-func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity) {
+//
+// caps is the peer's negotiated capability set at the moment the session
+// was established. MarkReconnected stores a defensive copy so downstream
+// mutation of the caller's slice cannot leak into AnnouncePeerState — the
+// hook boundary passes a session-owned slice whose lifetime extends past
+// this call. An empty or nil caps slice is valid and means "peer advertised
+// no capabilities" (legacy node).
+func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity, caps []PeerCapability) {
+	capsCopy := copyCapabilities(caps)
+
 	r.mu.Lock()
 	s, ok := r.peers[peerID]
 	if !ok {
@@ -213,6 +229,7 @@ func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity) {
 		r.peers[peerID] = &AnnouncePeerState{
 			peerIdentity:    peerID,
 			needsFullResync: true,
+			capabilities:    capsCopy,
 		}
 		r.mu.Unlock()
 		return
@@ -224,6 +241,21 @@ func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity) {
 	s.needsFullResync = true
 	s.disconnectedAt = time.Time{}
 	s.lastFullSyncAttemptAt = time.Time{}
+	s.capabilities = capsCopy
+}
+
+// copyCapabilities returns an independent slice with the same contents so
+// that callers can keep mutating their own capability snapshot without
+// affecting stored AnnouncePeerState. Nil input maps to nil output to
+// preserve the "capabilities not advertised" signal documented on the
+// AnnouncePeerState.capabilities field.
+func copyCapabilities(caps []PeerCapability) []PeerCapability {
+	if caps == nil {
+		return nil
+	}
+	out := make([]PeerCapability, len(caps))
+	copy(out, caps)
+	return out
 }
 
 // EvictStale removes state for peers that have been disconnected longer

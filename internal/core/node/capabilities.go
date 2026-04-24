@@ -68,3 +68,18 @@ func (s *Service) connHasCapability(id domain.ConnID, capability domain.Capabili
 	}
 	return pc.HasCapability(capability)
 }
+
+// connCapabilitiesForID returns the peer's negotiated capability set for
+// the inbound connection id as a defensive copy. Returns nil when the
+// connection is not registered. Used by session-lifecycle hooks that need
+// the full capability list (not just a single relay-cap boolean) so
+// routing-announce state can record what the peer actually supports.
+func (s *Service) connCapabilitiesForID(id domain.ConnID) []domain.Capability {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	info, ok := s.connInfoByIDLocked(id)
+	if !ok {
+		return nil
+	}
+	return info.capabilities
+}

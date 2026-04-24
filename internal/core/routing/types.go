@@ -9,11 +9,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// PeerIdentity and PeerAddress are re-exported from domain so that
-// callers importing routing do not need a separate domain import.
+// PeerIdentity, PeerAddress and PeerCapability are re-exported from domain so
+// that callers importing routing do not need a separate domain import.
 type (
-	PeerIdentity = domain.PeerIdentity
-	PeerAddress  = domain.PeerAddress
+	PeerIdentity   = domain.PeerIdentity
+	PeerAddress    = domain.PeerAddress
+	PeerCapability = domain.Capability
 )
 
 var (

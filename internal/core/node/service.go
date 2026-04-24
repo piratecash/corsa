@@ -3179,10 +3179,12 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	}
 
 	// Routing table: register direct peer using the identity fingerprint,
-	// not the transport address. The relay capability flag ensures only
-	// peers that can accept relay_message become direct routes.
+	// not the transport address. The hook flattens caps to a relay-cap
+	// decision internally and forwards the full list to AnnouncePeerState
+	// so routing-announce v2 can record what the peer actually supports
+	// without a second s.peerMu RLock round-trip.
 	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", string(peerIdentity)).Msg("track_inbound_connect_before_on_peer_session")
-	s.onPeerSessionEstablished(peerIdentity, s.connHasCapability(id, domain.CapMeshRelayV1))
+	s.onPeerSessionEstablished(peerIdentity, s.connCapabilitiesForID(id))
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_after_on_peer_session")
 
 	// Send full table sync to the inbound peer (Phase 1.2: full sync on
@@ -3290,11 +3292,13 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 	// Routing table: deregister direct peer when the last relay-capable
 	// inbound session closes. Uses the identity fingerprint, not transport
 	// address, to match what was passed to onPeerSessionEstablished.
-	// connHasCapability is ConnID-first since PR 10.3a — the call falls back
-	// to false when NetCore is already gone (unregisterConnLocked raced
-	// ahead), which is the safe default for a torn-down connection.
+	// connCapabilitiesForID returns nil when NetCore is already gone
+	// (unregisterConnLocked raced ahead). A nil slice flows through
+	// sessionHasCap cleanly — the hook treats it as "no relay cap" and
+	// only decrements total session counts, which is the safe default for
+	// a torn-down connection.
 	if wasTracked {
-		s.onPeerSessionClosed(peerIdentity, s.connHasCapability(id, domain.CapMeshRelayV1))
+		s.onPeerSessionClosed(peerIdentity, s.connCapabilitiesForID(id))
 	}
 }
 

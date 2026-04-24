@@ -91,7 +91,7 @@ func TestAnnounceStateRegistry_MarkReconnected(t *testing.T) {
 	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, now)
 	s.RecordFullSyncAttempt(now)
 
-	r.MarkReconnected("peer-A")
+	r.MarkReconnected("peer-A", nil)
 
 	view := s.View()
 	if !view.NeedsFullResync {
@@ -113,7 +113,7 @@ func TestAnnounceStateRegistry_MarkReconnectedCreatesNew(t *testing.T) {
 	r := NewAnnounceStateRegistry()
 
 	// MarkReconnected for unknown peer should create new state.
-	r.MarkReconnected("peer-new")
+	r.MarkReconnected("peer-new", nil)
 
 	s := r.Get("peer-new")
 	if s == nil {
@@ -123,6 +123,126 @@ func TestAnnounceStateRegistry_MarkReconnectedCreatesNew(t *testing.T) {
 	view := s.View()
 	if !view.NeedsFullResync {
 		t.Fatal("expected NeedsFullResync=true")
+	}
+}
+
+// TestAnnounceStateRegistry_MarkReconnectedStoresCapabilitiesNewPeer verifies
+// that the caps slice passed to MarkReconnected is saved into
+// AnnouncePeerState.capabilities when the peer is not yet known to the
+// registry (the "create fresh state" branch). This is a write-only contract
+// in the current PR — routing-announce v2 will add the read path.
+func TestAnnounceStateRegistry_MarkReconnectedStoresCapabilitiesNewPeer(t *testing.T) {
+	r := NewAnnounceStateRegistry()
+
+	caps := []PeerCapability{
+		PeerCapability("mesh_relay_v1"),
+		PeerCapability("mesh_routing_v1"),
+	}
+	r.MarkReconnected("peer-new", caps)
+
+	s := r.Get("peer-new")
+	if s == nil {
+		t.Fatal("expected state to be created")
+	}
+
+	s.mu.Lock()
+	stored := s.capabilities
+	s.mu.Unlock()
+
+	if len(stored) != 2 {
+		t.Fatalf("expected 2 capabilities stored, got %d", len(stored))
+	}
+	if stored[0] != PeerCapability("mesh_relay_v1") || stored[1] != PeerCapability("mesh_routing_v1") {
+		t.Fatalf("unexpected stored capabilities: %v", stored)
+	}
+}
+
+// TestAnnounceStateRegistry_MarkReconnectedStoresCapabilitiesExistingPeer
+// verifies the "existing peer" branch of MarkReconnected: when the registry
+// already has state for the peer (created earlier by GetOrCreate or a prior
+// MarkReconnected call), the new caps slice must overwrite the stored
+// capabilities, not append. A reconnect with a different capability set is
+// legitimate — e.g. a peer upgraded to a newer protocol version between
+// sessions.
+func TestAnnounceStateRegistry_MarkReconnectedStoresCapabilitiesExistingPeer(t *testing.T) {
+	r := NewAnnounceStateRegistry()
+
+	// Prime state with one capability set.
+	r.MarkReconnected("peer-A", []PeerCapability{PeerCapability("mesh_relay_v1")})
+
+	// Reconnect with a different (smaller) set.
+	r.MarkReconnected("peer-A", []PeerCapability{PeerCapability("mesh_routing_v1")})
+
+	s := r.Get("peer-A")
+	if s == nil {
+		t.Fatal("expected state to exist")
+	}
+
+	s.mu.Lock()
+	stored := s.capabilities
+	s.mu.Unlock()
+
+	if len(stored) != 1 {
+		t.Fatalf("expected stored caps to be overwritten (len=1), got %d", len(stored))
+	}
+	if stored[0] != PeerCapability("mesh_routing_v1") {
+		t.Fatalf("expected mesh_routing_v1 after overwrite, got %q", stored[0])
+	}
+}
+
+// TestAnnounceStateRegistry_MarkReconnectedDefensiveCopy verifies that
+// mutating the caller's caps slice after MarkReconnected does NOT change the
+// stored capabilities. The contract lives inside MarkReconnected so that the
+// session-lifecycle hook can pass session-owned slices directly without
+// copying at the call site.
+func TestAnnounceStateRegistry_MarkReconnectedDefensiveCopy(t *testing.T) {
+	r := NewAnnounceStateRegistry()
+
+	caps := []PeerCapability{
+		PeerCapability("mesh_relay_v1"),
+		PeerCapability("mesh_routing_v1"),
+	}
+	r.MarkReconnected("peer-A", caps)
+
+	// Mutate the caller's slice after the call.
+	caps[0] = PeerCapability("corrupted")
+	caps[1] = PeerCapability("also_corrupted")
+
+	s := r.Get("peer-A")
+	if s == nil {
+		t.Fatal("expected state to exist")
+	}
+
+	s.mu.Lock()
+	stored := s.capabilities
+	s.mu.Unlock()
+
+	if stored[0] != PeerCapability("mesh_relay_v1") || stored[1] != PeerCapability("mesh_routing_v1") {
+		t.Fatalf("defensive copy failed — stored slice mutated: %v", stored)
+	}
+}
+
+// TestAnnounceStateRegistry_MarkReconnectedNilCapabilities verifies the
+// nil-means-nil contract documented on copyCapabilities: passing nil caps
+// results in a nil stored slice (not an empty non-nil slice). This preserves
+// the "capabilities not advertised" signal for callers that will later read
+// the field in routing-announce v2.
+func TestAnnounceStateRegistry_MarkReconnectedNilCapabilities(t *testing.T) {
+	r := NewAnnounceStateRegistry()
+
+	r.MarkReconnected("peer-A", nil)
+
+	s := r.Get("peer-A")
+	if s == nil {
+		t.Fatal("expected state to exist")
+	}
+
+	s.mu.Lock()
+	stored := s.capabilities
+	s.mu.Unlock()
+
+	if stored != nil {
+		t.Fatalf("expected nil stored capabilities for nil input, got %v", stored)
 	}
 }
 

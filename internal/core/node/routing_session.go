@@ -45,24 +45,29 @@ func (s *Service) inboundPeerIdentity(id domain.ConnID) domain.PeerIdentity {
 // connections (after hello exchange). It registers the peer as a direct
 // route in the routing table and triggers an immediate announcement cycle.
 //
-// The hasRelayCap flag indicates whether the peer negotiated mesh_relay_v1.
-// Only relay-capable peers become direct routes — a direct route advertises
-// that this node can deliver relay_message to the destination. Without
-// relay capability the route is non-deliverable; announcing it would cause
-// other routing-capable nodes to learn a path that fails at the last hop.
-// When hasRelayCap is false, session counting still occurs (so that
-// onPeerSessionClosed can safely decrement) but no routing table entry
-// is created and no announcement is triggered.
+// caps is the peer's full negotiated capability set captured at session
+// establishment. The hook flattens it to a relay-cap boolean for its own
+// direct-route decision, but also forwards the full list to the announce
+// state registry so routing-announce v2 can make mode decisions without a
+// second s.peerMu round-trip. Only relay-capable peers become direct routes
+// — a direct route advertises that this node can deliver relay_message to
+// the destination. Without relay capability the route is non-deliverable;
+// announcing it would cause other routing-capable nodes to learn a path
+// that fails at the last hop. When relay cap is absent, session counting
+// still occurs (so that onPeerSessionClosed can safely decrement) but no
+// routing table entry is created and no announcement is triggered.
 //
 // Multi-session awareness: AddDirectPeer is called only on the 0→1
 // transition (first session for this identity). Subsequent sessions for
 // the same identity increment the session count but do not touch the
 // routing table — AddDirectPeer is idempotent at the model level, but
 // the session-count gate here is the primary defense against churn.
-func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, hasRelayCap bool) {
+func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
 	if peerIdentity == "" {
 		return
 	}
+
+	hasRelayCap := sessionHasCap(caps, domain.CapMeshRelayV1)
 
 	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -109,7 +114,9 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 	})
 
 	// Register or reset per-peer announce state for this routing-capable peer.
-	s.announceLoop.StateRegistry().MarkReconnected(peerIdentity)
+	// The registry takes a defensive copy of caps so subsequent mutation of
+	// the session's capability slice cannot leak into AnnouncePeerState.
+	s.announceLoop.StateRegistry().MarkReconnected(peerIdentity, caps)
 
 	// When flap detection penalizes a peer, skip the triggered announce.
 	// The route will be picked up by the next periodic announce cycle,
@@ -125,8 +132,9 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 }
 
 // onPeerSessionClosed is called when a session for a peer identity closes.
-// The hasRelayCap flag must match the value passed to onPeerSessionEstablished
-// for this session so that the relay-capable session counter stays balanced.
+// caps must describe the same capability set that was passed to
+// onPeerSessionEstablished for this session so that the relay-capable
+// session counter stays balanced.
 //
 // Multi-session awareness: RemoveDirectPeer is called on the relay-session
 // 1→0 transition (last relay-capable session for this identity). Total
@@ -135,10 +143,12 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, has
 // On disconnect, own-origin direct routes are withdrawn on the wire
 // (returned as wire-ready AnnounceEntry items) and transit routes
 // learned through this peer are silently invalidated locally.
-func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelayCap bool) {
+func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
 	if peerIdentity == "" {
 		return
 	}
+
+	hadRelayCap := sessionHasCap(caps, domain.CapMeshRelayV1)
 
 	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -156,7 +166,7 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, hasRelay
 	}
 
 	lastRelay := false
-	if hasRelayCap {
+	if hadRelayCap {
 		relayCount := s.identityRelaySessions[peerIdentity]
 		if relayCount > 0 {
 			s.identityRelaySessions[peerIdentity]--

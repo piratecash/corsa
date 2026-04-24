@@ -124,7 +124,7 @@ func TestHandleAnnounceRoutesSkipsSelf(t *testing.T) {
 func TestMultiSessionAwareness_FirstConnect(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -138,11 +138,11 @@ func TestMultiSessionAwareness_FirstConnect(t *testing.T) {
 func TestMultiSessionAwareness_SecondSessionNoChurn(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	routes1 := svc.routingTable.Lookup(idPeerB)
 	seq1 := routes1[0].SeqNo
 
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	routes2 := svc.routingTable.Lookup(idPeerB)
 
 	if len(routes2) != 1 {
@@ -157,10 +157,10 @@ func TestMultiSessionAwareness_SecondSessionNoChurn(t *testing.T) {
 func TestMultiSessionAwareness_CloseOneSessionRouteRemains(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, true)
-	svc.onPeerSessionEstablished(idPeerB, true) // 2 sessions
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // 2 sessions
 
-	svc.onPeerSessionClosed(idPeerB, true) // close 1, 1 remains
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // close 1, 1 remains
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -174,8 +174,8 @@ func TestMultiSessionAwareness_CloseOneSessionRouteRemains(t *testing.T) {
 func TestMultiSessionAwareness_CloseLastSessionWithdrawsRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, true)
-	svc.onPeerSessionClosed(idPeerB, true) // last session
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // last session
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -256,17 +256,17 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 }
 
 // TestOnPeerSessionEstablishedSuppressesDirectRouteWithoutRelayCap verifies
-// that onPeerSessionEstablished with hasRelayCap=false does NOT create a
-// direct route in the routing table. The session counter is still
-// incremented so that onPeerSessionClosed can safely decrement.
+// that onPeerSessionEstablished without mesh_relay_v1 in the capability list
+// does NOT create a direct route in the routing table. The session counter
+// is still incremented so that onPeerSessionClosed can safely decrement.
 func TestOnPeerSessionEstablishedSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, false)
+	svc.onPeerSessionEstablished(idPeerB, nil)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
-		t.Fatalf("expected no direct route when hasRelayCap=false, got %d routes", len(routes))
+		t.Fatalf("expected no direct route without mesh_relay_v1 capability, got %d routes", len(routes))
 	}
 
 	// Verify session counter was incremented despite no route.
@@ -288,7 +288,7 @@ func TestMixedCap_LegacyFirstThenRelayCreatesRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// First session: legacy, no relay cap → no direct route.
-	svc.onPeerSessionEstablished(idPeerB, false)
+	svc.onPeerSessionEstablished(idPeerB, nil)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -296,7 +296,7 @@ func TestMixedCap_LegacyFirstThenRelayCreatesRoute(t *testing.T) {
 	}
 
 	// Second session: relay-capable → direct route should appear.
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -315,8 +315,8 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Two sessions: one relay-capable, one legacy.
-	svc.onPeerSessionEstablished(idPeerB, true)  // creates direct route
-	svc.onPeerSessionEstablished(idPeerB, false) // legacy, no route change
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})  // creates direct route
+	svc.onPeerSessionEstablished(idPeerB, nil) // legacy, no route change
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
@@ -324,7 +324,7 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 	}
 
 	// Close the relay-capable session — route should be withdrawn.
-	svc.onPeerSessionClosed(idPeerB, true)
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -350,10 +350,10 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, true)
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
-	svc.onPeerSessionClosed(idPeerB, true) // one relay remains
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // one relay remains
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -370,11 +370,11 @@ func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
 func TestMixedCap_LegacyCloseDoesNotWithdrawRelayRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, true)  // creates direct route
-	svc.onPeerSessionEstablished(idPeerB, false) // legacy session
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})  // creates direct route
+	svc.onPeerSessionEstablished(idPeerB, nil) // legacy session
 
 	// Close the legacy session.
-	svc.onPeerSessionClosed(idPeerB, false)
+	svc.onPeerSessionClosed(idPeerB, nil)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
@@ -393,7 +393,7 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Simulate a routing-only peer connecting (no relay cap).
-	svc.onPeerSessionEstablished(idPeerB, false)
+	svc.onPeerSessionEstablished(idPeerB, nil)
 
 	// Manually insert a transit route through peer-B (simulates a route
 	// that was accepted before the relay gate existed).
@@ -415,7 +415,7 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 	_ = svc.announceLoop.PendingTrigger()
 
 	// Close the routing-only peer's session.
-	svc.onPeerSessionClosed(idPeerB, false)
+	svc.onPeerSessionClosed(idPeerB, nil)
 
 	// Transit route should be invalidated. Lookup() filters withdrawn entries,
 	// so use Snapshot() to inspect the raw table state.
@@ -445,8 +445,8 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, false)
-	svc.onPeerSessionEstablished(idPeerB, false) // 2 sessions
+	svc.onPeerSessionEstablished(idPeerB, nil)
+	svc.onPeerSessionEstablished(idPeerB, nil) // 2 sessions
 
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerB,
@@ -460,7 +460,7 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	_ = svc.announceLoop.PendingTrigger()
 
 	// Close one session — transit route should remain, no trigger.
-	svc.onPeerSessionClosed(idPeerB, false)
+	svc.onPeerSessionClosed(idPeerB, nil)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 || routes[0].IsWithdrawn() {
@@ -471,7 +471,7 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	}
 
 	// Close last session — now transit route should be invalidated with trigger.
-	svc.onPeerSessionClosed(idPeerB, false)
+	svc.onPeerSessionClosed(idPeerB, nil)
 
 	// Lookup() filters withdrawn entries — use Snapshot() for raw state.
 	snap := svc.routingTable.Snapshot()
@@ -622,7 +622,7 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Direct route should not be touched by hop_ack confirmation.
-	svc.onPeerSessionEstablished(idTargetX, true)
+	svc.onPeerSessionEstablished(idTargetX, []domain.Capability{domain.CapMeshRelayV1})
 
 	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idTargetX), "")
 
@@ -814,14 +814,14 @@ func TestRouteSessionBinding_DirectRouteWithdrawnOnWire(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Connect peer-B → creates direct route.
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
 		t.Fatal("expected 1 direct route after connect")
 	}
 
 	// Disconnect peer-B → should produce wire withdrawal.
-	svc.onPeerSessionClosed(idPeerB, true)
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -843,7 +843,7 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Connect peer-B so we have a session.
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Announce transit route: target-X reachable via peer-B, originated by peer-C.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -860,7 +860,7 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 	}
 
 	// Disconnect peer-B → transit route should be locally invalidated.
-	svc.onPeerSessionClosed(idPeerB, true)
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Transit route should no longer be active.
 	routes := svc.routingTable.Lookup(idTargetX)
@@ -885,7 +885,7 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Connect peer-B.
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Add a transit route through peer-B.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
@@ -902,7 +902,7 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 	}
 
 	// Disconnect peer-B.
-	svc.onPeerSessionClosed(idPeerB, true)
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Both the direct route to peer-B and the transit route via peer-B
 	// should be gone from active lookups.
@@ -2382,7 +2382,7 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	// Add a direct route to idTargetX via peer-B.
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
@@ -2458,7 +2458,7 @@ func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Queue a relay_message (someone else's traffic) on peer-A.
 	addrA := domain.PeerAddress("10.0.0.1:9000")
@@ -2567,7 +2567,7 @@ func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
@@ -2959,7 +2959,7 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idTargetX,
@@ -3058,7 +3058,7 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Queue a send_message for idTargetX on offline peer-A.
 	addrA := domain.PeerAddress("10.0.0.1:9000")
@@ -3123,7 +3123,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	}
 	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerC, true)
+	svc.onPeerSessionEstablished(idPeerC, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Two routes to idTargetX from different origins:
 	//   primary: Origin=idOriginC, NextHop=idOriginC (hops=1, seqNo=1)
@@ -3262,7 +3262,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	}
 	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerC, true)
+	svc.onPeerSessionEstablished(idPeerC, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Two routes to idTargetX:
 	//   primary: via origin-A, short TTL (10s) — will expire
@@ -3459,7 +3459,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Set up peer-C with a relay session (backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
@@ -3473,7 +3473,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	}
 	svc.health[addrC] = &peerHealth{Address: addrC, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerC, true)
+	svc.onPeerSessionEstablished(idPeerC, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Transit route to idTargetX via peer-B (will be invalidated on disconnect).
 	primaryAnnounce := protocol.Frame{
@@ -3524,7 +3524,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	wg.Add(1)
 	svc.drainDone = wg.Done
 
-	svc.onPeerSessionClosed(idPeerB, true)
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	wg.Wait()
 
 	// Pending queue should be drained.
@@ -3568,7 +3568,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Only one route to idTargetX — through peer-B (no backup).
 	announce := protocol.Frame{
@@ -3599,7 +3599,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 
 	// Disconnect peer-B. No backup → no drain should fire.
 	// Don't set drainDone — if drain fires unexpectedly it won't block.
-	svc.onPeerSessionClosed(idPeerB, true)
+	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// Pending should be untouched.
 	svc.deliveryMu.RLock()
@@ -3630,7 +3630,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// First announce: route to idTargetX via peer-B — accepted.
 	firstAnnounce := protocol.Frame{
@@ -3710,7 +3710,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
 	svc.peerMu.Unlock()
-	svc.onPeerSessionEstablished(idPeerB, true)
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// First announce: route with SeqNo=5.
 	svc.handleAnnounceRoutes(idPeerB, protocol.Frame{

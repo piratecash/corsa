@@ -411,7 +411,7 @@ func TestAnnounceLoop_ReconnectedPeerGetsForcedFullSync(t *testing.T) {
 
 	// Simulate disconnect + reconnect.
 	registry.MarkDisconnected("peer-C")
-	registry.MarkReconnected("peer-C")
+	registry.MarkReconnected("peer-C", nil)
 
 	// Verify state requires full resync.
 	state := registry.Get("peer-C")

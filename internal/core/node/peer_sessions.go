@@ -91,11 +91,13 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
 			// Routing table: deregister direct peer on session close.
-			// The hasRelayCap flag must match what was passed to
-			// onPeerSessionEstablished for balanced accounting.
+			// The capability slice must match what was passed to
+			// onPeerSessionEstablished for balanced accounting — the session
+			// object still owns it here since we just removed it from
+			// s.sessions and no other goroutine mutates session.capabilities
+			// after applyWelcomeMetadata.
 			if closedSession != nil && closedSession.peerIdentity != "" {
-				hadRelay := sessionHasCap(closedSession.capabilities, domain.CapMeshRelayV1)
-				s.onPeerSessionClosed(closedSession.peerIdentity, hadRelay)
+				s.onPeerSessionClosed(closedSession.peerIdentity, closedSession.capabilities)
 			}
 			// Self-identity short-circuit — must run BEFORE the generic
 			// markPeerDisconnected penalty. openPeerSession surfaces the
@@ -284,10 +286,13 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 
 	s.flushPendingPeerFrames(address)
 
-	// Routing table: register direct peer. The relay capability flag
-	// ensures only peers that can accept relay_message become direct
-	// routes — see onPeerSessionEstablished for the full rationale.
-	s.onPeerSessionEstablished(session.peerIdentity, s.sessionHasCapability(address, domain.CapMeshRelayV1))
+	// Routing table: register direct peer. The hook itself decides which
+	// capabilities are actionable (relay-cap gates direct-route creation,
+	// the full list propagates into AnnouncePeerState for v2 mode
+	// decisions). session.capabilities is the authoritative set captured by
+	// applyWelcomeMetadata — passing it raw keeps CommandTable / RPC /
+	// wire semantics consistent across transport paths.
+	s.onPeerSessionEstablished(session.peerIdentity, session.capabilities)
 
 	// Send full table sync to the new peer (Phase 1.2: full sync on connect).
 	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
@@ -864,8 +869,12 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		s.markPeerConnected(dialAddress, peerDirectionOutbound)
 		s.flushPendingPeerFrames(dialAddress)
 
-		// Routing table: register direct peer.
-		s.onPeerSessionEstablished(session.peerIdentity, s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1))
+		// Routing table: register direct peer. session.capabilities is
+		// stable by this point (applyWelcomeMetadata ran in
+		// openPeerSessionForCM before the CM event loop validated the
+		// slot generation), so we pass the raw slice and let the hook
+		// flatten it for the relay-cap direct-route gate.
+		s.onPeerSessionEstablished(session.peerIdentity, session.capabilities)
 
 		// Send full table sync to the new peer (Phase 1.2).
 		if session.peerIdentity != "" && s.sessionHasCapability(dialAddress, domain.CapMeshRoutingV1) && s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1) {
@@ -912,8 +921,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		// Routing table: deregister direct peer only if this goroutine
 		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
 		if ownedCleanup && session.peerIdentity != "" {
-			hadRelay := sessionHasCap(session.capabilities, domain.CapMeshRelayV1)
-			s.onPeerSessionClosed(session.peerIdentity, hadRelay)
+			s.onPeerSessionClosed(session.peerIdentity, session.capabilities)
 		}
 
 		// Accumulate traffic metrics from the metered connection.
@@ -984,8 +992,7 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// a replacement session that was registered for the same address
 	// between deactivateSlotLocked and this callback.
 	if ownedCleanup && info.Identity != "" {
-		hadRelay := sessionHasCap(info.Capabilities, domain.CapMeshRelayV1)
-		s.onPeerSessionClosed(info.Identity, hadRelay)
+		s.onPeerSessionClosed(info.Identity, info.Capabilities)
 	}
 }
 
