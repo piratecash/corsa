@@ -151,15 +151,18 @@ type ConnectionManagerConfig struct {
 	OnSessionTeardown func(SessionInfo)
 
 	// OnStaleSession is called when handleDialSucceeded detects a
-	// generation mismatch and discards the session. The dial worker's
-	// openPeerSessionForCM registered the session in Service.sessions
-	// before returning; since onCMSessionEstablished never runs for
-	// the stale generation, Service must remove the orphaned entry.
+	// generation mismatch and discards the session. openPeerSessionForCM
+	// deliberately returns a transport-ready session without touching
+	// Service-level maps; the only Service-side bookkeeping registered
+	// before DialSucceeded is emitted is the fallback→primary entry in
+	// Service.dialOrigin (added by dialForCM when a non-primary address
+	// was used). Because onCMSessionEstablished never runs for a stale
+	// generation, Service still has to evict that dialOrigin entry so
+	// stale fallback mappings do not leak past slot replacement.
 	//
-	// The callback receives the raw *peerSession (not SessionInfo)
-	// so Service can compare by pointer — only deleting s.sessions[addr]
-	// when it still points to this exact session, avoiding accidental
-	// removal of a newer valid session for the same address.
+	// The callback receives the raw *peerSession so Service can key
+	// cleanup by session.address. CM itself closes the session after
+	// the callback returns — Service must not close it.
 	OnStaleSession func(session *peerSession)
 
 	// OnDialFailed is called synchronously in the event loop when a
@@ -851,10 +854,11 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 	if s == nil || s.Generation != ev.SlotGeneration {
 		cm.mu.Unlock()
 		// Stale: slot already replaced or transitioned.
-		// The dial worker's openPeerSessionForCM registered the session in
-		// Service.sessions before returning. Since onCMSessionEstablished
-		// will never run for a stale generation, call OnStaleSession so
-		// Service can remove the now-orphaned entry from s.sessions.
+		// openPeerSessionForCM left Service maps untouched, but dialForCM
+		// may have registered a fallback→primary entry in Service.dialOrigin
+		// before the dial succeeded. OnStaleSession lets Service drop that
+		// entry so it does not survive into the next slot generation. CM
+		// owns the close here — the callback must not close the session.
 		if ev.Session != nil {
 			if cm.config.OnStaleSession != nil {
 				cm.config.OnStaleSession(ev.Session)
