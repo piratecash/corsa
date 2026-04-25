@@ -65,7 +65,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `client_build` | integer | optional | Monotonic build number for version tracking. Incremented on each release |
 | `services` | array | optional | Capability list: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
 | `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against `listen` address |
-| `capabilities` | array | optional | Extended capability tokens for feature negotiation (e.g., `["mesh_relay_v1", "mesh_routing_v1"]`). Both peers advertise capabilities during handshake; the session uses the intersection. Nodes without this field are treated as having an empty capability set. See [Capability Negotiation](#capability-negotiation) |
+| `capabilities` | array | optional | Extended capability tokens for feature negotiation (e.g., `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "file_transfer_v1"]`). Both peers advertise capabilities during handshake; the session uses the intersection. Nodes without this field are treated as having an empty capability set. See [Capability Negotiation](#capability-negotiation) |
 | `address` | string | optional | Peer fingerprint (identity public key hash in hex). Required for mutual authentication on v2+ |
 | `pubkey` | string | optional | Ed25519 public key in base64. Used for message signature verification |
 | `boxkey` | string | optional | X25519 public key in base64. Used for message encryption |
@@ -465,7 +465,12 @@ The `capabilities` field enables additive feature negotiation without incrementi
 
 Capability tokens gate new frame types and behaviors. A peer must not send a capability-gated frame type unless the session has that capability in its negotiated set. This allows mixed-version networks: legacy nodes without the `capabilities` field are treated as having an empty set — they never receive unknown frame types.
 
-Currently defined tokens: none (the mechanism is introduced but no capabilities are active yet). Future iterations will add tokens such as `"mesh_relay_v1"` for hop-by-hop relay and `"mesh_routing_v1"` for routing table announcements.
+Currently defined tokens:
+
+- `"mesh_relay_v1"` — hop-by-hop relay via `relay_message` and `relay_delivery_receipt` frames.
+- `"mesh_routing_v1"` — distance-vector routing via the legacy `announce_routes` frame.
+- `"mesh_routing_v2"` — opt-in refinement of `mesh_routing_v1` that enables incremental delta updates as `routes_update` frames and the `request_resync` control frame. v2 is meaningful only alongside v1: a peer that advertises v2 without v1 is treated as v1-only, because the first sync (baseline) always travels as the legacy `announce_routes` frame and thus requires v1 on the receive side. Mode selection is driven by the per-cycle `AnnounceTarget.Capabilities` snapshot taken from the session selected by the announce loop; the persistent peer-state capability record is reconciled to that snapshot at the start of each per-peer goroutine, so the selection reads a single derived view of the chosen session's caps. See `docs/routing.md` "Persistent caps as a derived view of the chosen target" and "Announce delta mode selection" for the full contract.
+- `"file_transfer_v1"` — gates file transfer commands (`FileCommandFrame` traffic). The out-of-band `file_announce` DM is not gated.
 
 ---
 
@@ -613,7 +618,7 @@ stateDiagram-v2
 | `client_build` | integer | опционально | Монотонный номер сборки для отслеживания версий. Увеличивается при каждом релизе |
 | `services` | array | опционально | Список возможностей: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
 | `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против адреса `listen` |
-| `capabilities` | array | опционально | Расширенные capability-токены для согласования функций (например, `["mesh_relay_v1", "mesh_routing_v1"]`). Оба пира объявляют capabilities при handshake; сессия использует пересечение. Ноды без этого поля считаются с пустым набором. См. [Согласование capabilities](#согласование-capabilities) |
+| `capabilities` | array | опционально | Расширенные capability-токены для согласования функций (например, `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "file_transfer_v1"]`). Оба пира объявляют capabilities при handshake; сессия использует пересечение. Ноды без этого поля считаются с пустым набором. См. [Согласование capabilities](#согласование-capabilities) |
 | `address` | string | опционально | Fingerprint пира (хеш публичного ключа identity в hex). Требуется для взаимной аутентификации на v2+ |
 | `pubkey` | string | опционально | Ed25519 публичный ключ в base64. Используется для проверки подписей сообщений |
 | `boxkey` | string | опционально | X25519 публичный ключ в base64. Используется для шифрования сообщений |
@@ -1010,11 +1015,16 @@ observed-IP sweep выше молча не применялись бы к это
 
 ## Согласование capabilities
 
-Поле `capabilities` позволяет аддитивное согласование функций без повышения `ProtocolVersion`. Каждая capability — строковый токен (например, `"mesh_relay_v1"`, `"mesh_routing_v1"`). Оба пира объявляют поддерживаемые capabilities при handshake. Сессия использует только пересечение обоих наборов.
+Поле `capabilities` позволяет аддитивное согласование функций без повышения `ProtocolVersion`. Каждая capability — строковый токен (например, `"mesh_relay_v1"`, `"mesh_routing_v1"`, `"mesh_routing_v2"`, `"file_transfer_v1"`). Оба пира объявляют поддерживаемые capabilities при handshake. Сессия использует только пересечение обоих наборов.
 
 Capability-токены гейтят новые типы фреймов и поведения. Пир не должен отправлять capability-gated тип фрейма, если в согласованном наборе сессии нет соответствующей capability. Это позволяет работать сетям со смешанными версиями: legacy-ноды без поля `capabilities` считаются с пустым набором — они никогда не получат неизвестные типы фреймов.
 
-Текущие определённые токены: нет (механизм введён, но ни одна capability пока не активна). Будущие итерации добавят токены, такие как `"mesh_relay_v1"` для hop-by-hop relay и `"mesh_routing_v1"` для объявлений таблиц маршрутизации.
+Текущие определённые токены:
+
+- `"mesh_relay_v1"` — hop-by-hop relay через фреймы `relay_message` и `relay_delivery_receipt`.
+- `"mesh_routing_v1"` — distance-vector routing через legacy-фрейм `announce_routes`.
+- `"mesh_routing_v2"` — опциональное расширение `mesh_routing_v1`, включающее инкрементальные delta-обновления через фреймы `routes_update` и управляющий фрейм `request_resync`. v2 имеет смысл только вместе с v1: пир, который объявил v2 без v1, трактуется как v1-only, потому что первый sync (baseline) всегда идёт через legacy-фрейм `announce_routes` и, следовательно, требует v1 на приёмной стороне. Режим выбирается per-cycle снапшотом `AnnounceTarget.Capabilities`, взятым у сессии, которую выбрал announce loop; персистентная capability-запись peer-state реконсилируется к этому снапшоту в самом начале каждой per-peer goroutine, так что классификация читает единый derived-view caps выбранной сессии. Полный контракт см. в `docs/routing.md`: «Persistent caps как производная вьюха выбранного target-а» и «Выбор режима для announce delta».
+- `"file_transfer_v1"` — гейт команд file transfer (трафик `FileCommandFrame`). Out-of-band DM `file_announce` не гейтится.
 
 ---
 

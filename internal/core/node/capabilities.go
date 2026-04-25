@@ -10,9 +10,17 @@ import (
 //
 //   - mesh_relay_v1: hop-by-hop relay (relay_message frames)
 //   - mesh_routing_v1: distance-vector routing via announce_routes frames (Phase 1.2)
+//   - mesh_routing_v2: delta announces via routes_update frames; opt-in
+//     refinement over v1. Advertised only when v1 is also advertised so a
+//     mixed-version network never sees v2 without v1.
 //   - file_transfer_v1: file transfer commands (Iteration 21)
 func localCapabilities() []domain.Capability {
-	return []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1, domain.CapFileTransferV1}
+	return []domain.Capability{
+		domain.CapMeshRelayV1,
+		domain.CapMeshRoutingV1,
+		domain.CapMeshRoutingV2,
+		domain.CapFileTransferV1,
+	}
 }
 
 // localCapabilityStrings returns the wire-format string list for the hello/

@@ -27,13 +27,14 @@ import (
 //     explicitly marked NeedsFullResync (simulating reconnect or state
 //     invalidation), and has its rate-limit timer cleared so the cycle
 //     reaches the wire-send call instead of being coalesced;
-//  2. the mock SendRoutesUpdate stub calls t.Fatalf on any invocation.
+//  2. the mock SendRoutesUpdate hook calls t.Fatalf on any invocation.
 //     The wire-frame assertion happens the moment a regression routes
-//     forced-full through the v2 scaffold, not at the end of the test
-//     when a counter is compared to zero. Both checks are kept because
-//     the Fatalf path surfaces call-site context in goroutine stacks
-//     while the counter check catches the case where nothing at all was
-//     sent.
+//     forced-full through the live v2 delta sender (in production:
+//     PeerSender.SendRoutesUpdate → node.Service implementation that
+//     emits a routes_update frame), not at the end of the test when a
+//     counter is compared to zero. Both checks are kept because the
+//     Fatalf path surfaces call-site context in goroutine stacks while
+//     the counter check catches the case where nothing at all was sent.
 //
 // The routing table is seeded with a direct peer so BuildAnnounceSnapshot
 // returns a non-empty payload; the empty-baseline short-circuit at
@@ -67,8 +68,13 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 			return true
 		},
 	).Maybe()
-	// SendRoutesUpdate is the v2 scaffold — calling it from the
-	// forced-full path is the regression this test guards against.
+	// SendRoutesUpdate is the real v2 delta wire path — calling it
+	// from the forced-full branch is the regression this test guards
+	// against. The first-sync invariant requires forced-full to ride
+	// the legacy frame regardless of capabilities; routing it through
+	// the v2 sender would either (a) put a delta on a peer with no
+	// baseline, or (b) trigger the v2 send-time gate to drop the frame
+	// silently when the test fixture lacks the v1+v2+relay caps.
 	sender.EXPECT().SendRoutesUpdate(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
 		func(_ context.Context, addr routing.PeerAddress, delta []routing.AnnounceEntry) bool {
 			t.Fatalf("forced-full must not route through SendRoutesUpdate "+

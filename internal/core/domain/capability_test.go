@@ -6,6 +6,7 @@ func TestCapabilityString(t *testing.T) {
 	cases := map[Capability]string{
 		CapMeshRelayV1:    "mesh_relay_v1",
 		CapMeshRoutingV1:  "mesh_routing_v1",
+		CapMeshRoutingV2:  "mesh_routing_v2",
 		CapFileTransferV1: "file_transfer_v1",
 	}
 	for c, want := range cases {
@@ -22,9 +23,11 @@ func TestParseCapability(t *testing.T) {
 	}{
 		{"mesh_relay_v1", CapMeshRelayV1},
 		{"mesh_routing_v1", CapMeshRoutingV1},
+		{"mesh_routing_v2", CapMeshRoutingV2},
 		{"file_transfer_v1", CapFileTransferV1},
 		{"MESH_RELAY_V1", CapMeshRelayV1},
 		{"Mesh_Routing_V1", CapMeshRoutingV1},
+		{"MESH_ROUTING_V2", CapMeshRoutingV2},
 		{"FILE_TRANSFER_V1", CapFileTransferV1},
 	}
 	for _, tc := range valid {

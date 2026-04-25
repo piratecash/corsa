@@ -18,6 +18,19 @@ const (
 	// frames (Phase 1.2).
 	CapMeshRoutingV1 Capability = "mesh_routing_v1"
 
+	// CapMeshRoutingV2 gates the v2 routing announce path. Peers that
+	// negotiate this capability receive incremental delta updates as
+	// routes_update frames, while the first sync and any forced full
+	// resync still travel as legacy announce_routes. CapMeshRoutingV2
+	// is meaningful only when CapMeshRoutingV1 is also negotiated —
+	// v2 is an opt-in refinement of the v1 control plane, not a
+	// replacement; peers that advertise v2 without v1 are treated as
+	// legacy (v1-only) because the receive path for the first sync
+	// (announce_routes) is gated on v1. The request_resync frame is
+	// also gated on v2, since only v2 peers can receive routes_update
+	// and therefore need the escape hatch.
+	CapMeshRoutingV2 Capability = "mesh_routing_v2"
+
 	// CapFileTransferV1 gates file transfer commands (Iteration 21).
 	// Only peers advertising this capability receive or relay
 	// FileCommandFrame traffic. The file_announce DM is not gated
@@ -34,7 +47,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapMeshRelayV1, CapMeshRoutingV1, CapFileTransferV1:
+	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1:
 		return c, true
 	default:
 		return "", false

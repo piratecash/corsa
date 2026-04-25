@@ -518,6 +518,17 @@ func TestIsFireAndForgetFrame(t *testing.T) {
 		{"push_message", true},
 		{"push_notice", true},
 		{"relay_delivery_receipt", true},
+		// Announce plane: all three frame types are reply-less. The
+		// legacy frame was already covered implicitly via the switch;
+		// the v2 frames (routes_update, request_resync) MUST be listed
+		// here, otherwise the session dequeue loop falls through to
+		// peerSessionRequest with expectedReplyType("") and blocks
+		// reading an inbound frame as the "reply", stalling the session
+		// or consuming an unrelated frame. See doc-comment on
+		// isFireAndForgetFrame.
+		{"announce_routes", true},
+		{"routes_update", true},
+		{"request_resync", true},
 		{"send_delivery_receipt", false},
 		{"send_message", false},
 		{"publish_notice", false},

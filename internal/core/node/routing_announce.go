@@ -1,6 +1,7 @@
 // routing_announce.go hosts the outbound announce-send path
-// (SendAnnounceRoutes, connect-time full sync, fan-out for withdrawals),
-// the inbound announce-receive path (handleAnnounceRoutes), the
+// (SendAnnounceRoutes, SendRoutesUpdate, SendRequestResync, connect-time
+// full sync, fan-out for withdrawals), the inbound announce-receive path
+// (handleAnnounceRoutes, handleRoutesUpdate, handleRequestResync), the
 // routing-capable peer enumeration (routingCapablePeers), the inbound
 // sync write helper shared with other relay paths (writeFrameToInbound),
 // the periodic TTL tick (routingTableTTLLoop), and the drain trigger
@@ -79,9 +80,111 @@ func (s *Service) SendAnnounceRoutes(ctx context.Context, peerAddress domain.Pee
 	if len(routes) == 0 {
 		return true
 	}
+	frame := buildAnnounceFrame(announceWireLegacy, routes)
+	return s.sendAnnouncePlaneFrame(ctx, peerAddress, frame)
+}
 
-	wireRoutes := make([]protocol.AnnounceRouteFrame, len(routes))
-	for i, r := range routes {
+// SendRoutesUpdate implements routing.PeerSender for the v2 wire path.
+// Builds a routes_update frame carrying an incremental delta and dispatches
+// it through the same transport as SendAnnounceRoutes. The decision to pick
+// this method over SendAnnounceRoutes belongs to the announce loop; the
+// invariants are enforced upstream (first sync and forced full always go
+// through SendAnnounceRoutes — see docs/routing.md "First-sync wire-frame
+// invariant"). An empty delta short-circuits to "success" because the
+// protocol is additive and sending an empty routes_update would be noise.
+//
+// Send-time capability gate: the announce loop classifies the wire mode
+// against an AnnounceTarget snapshot taken at cycle start, but the
+// underlying session at peerAddress can close and be replaced by a
+// session that does NOT hold the full routing-target gate before this
+// method runs. The dispatch helper mirrors that gate exactly —
+// mesh_routing_v1 AND mesh_routing_v2 AND mesh_relay_v1, the same
+// predicate routingCapablePeers uses to pick AnnounceTarget candidates
+// (plus the v2 capability the announce loop additionally requires for
+// the v2 path). It captures the live transport handle (sendCh for
+// outbound sessions, ConnID for inbound conns) under the same peerMu
+// RLock as the cap validation, then writes to the captured handle —
+// closing the cap-check vs write race that would otherwise let a
+// narrower replacement session at the same address receive routes_update
+// bytes. Returning false leaves the caller's per-peer cache untouched
+// so the next cycle re-classifies and retries on the current session.
+func (s *Service) SendRoutesUpdate(ctx context.Context, peerAddress domain.PeerAddress, delta []routing.AnnounceEntry) bool {
+	if len(delta) == 0 {
+		return true
+	}
+	frame := buildAnnounceFrame(announceWireV2, delta)
+	if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame,
+		domain.CapMeshRoutingV1,
+		domain.CapMeshRoutingV2,
+		domain.CapMeshRelayV1,
+	) {
+		log.Debug().
+			Str("peer_address", string(peerAddress)).
+			Int("delta_routes", len(delta)).
+			Msg("routes_update_skipped_or_failed_at_send_time")
+		return false
+	}
+	return true
+}
+
+// SendRequestResync emits a request_resync wire frame to the peer so that
+// the peer clears its per-peer announce state and re-delivers a full
+// baseline via legacy announce_routes on its next cycle. Called by the
+// v2 receive path when routes_update arrives without a prior baseline in
+// this session — the forced-full path on the peer side honours the
+// first-sync invariant, so recovery walks back through legacy
+// announce_routes regardless of the peer's v2 status.
+//
+// The frame carries no payload: its mere arrival is the signal. This
+// matches the single-writer invariant enforced by
+// sendAnnouncePlaneFrame: there is no direct conn.Write bypass, every
+// request_resync flows through the same enqueue/sync path as the rest
+// of the announce plane.
+//
+// Send-time capability gate: request_resync is a v2-only control frame
+// per the receive-dispatcher contract — both the inbound and session
+// dispatchers gate this frame on mesh_routing_v2 alone, with no v1 or
+// relay requirement (it carries no payload, only signals "clear my
+// announce state"). The send-time gate must therefore stop at v2 too —
+// widening to v1+v2+relay would have the sender skip a recovery control
+// frame that the receiver would accept, leaving v2-only sessions
+// permanently desynced. Capture-and-write is still atomic via
+// dispatchAnnouncePlaneFrameWithCaps: a session-replacement at the same
+// address between cap check and write cannot route the frame to a
+// non-v2 transport.
+func (s *Service) SendRequestResync(ctx context.Context, peerAddress domain.PeerAddress) bool {
+	frame := protocol.Frame{Type: "request_resync"}
+	if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame,
+		domain.CapMeshRoutingV2,
+	) {
+		log.Debug().
+			Str("peer_address", string(peerAddress)).
+			Msg("request_resync_skipped_or_failed_at_send_time")
+		return false
+	}
+	return true
+}
+
+// announceWireType is the internal tag that picks which wire frame
+// buildAnnounceFrame emits. Keeping the decision in a typed enum avoids
+// a string literal dependency at every call site and makes the set of
+// announce-plane wire types auditable in one place.
+type announceWireType int
+
+const (
+	announceWireLegacy announceWireType = iota
+	announceWireV2
+)
+
+// buildAnnounceFrame produces the wire frame carrying the given entries.
+// Both wire types share the AnnounceRouteFrame payload shape — the only
+// difference is Frame.Type. The factory exists so that
+// SendAnnounceRoutes / SendRoutesUpdate cannot accidentally ship the
+// wrong frame.Type for the same payload: the mapping from wire-type enum
+// to the string lives here, not at the call site.
+func buildAnnounceFrame(kind announceWireType, entries []routing.AnnounceEntry) protocol.Frame {
+	wireRoutes := make([]protocol.AnnounceRouteFrame, len(entries))
+	for i, r := range entries {
 		wireRoutes[i] = protocol.AnnounceRouteFrame{
 			Identity: string(r.Identity),
 			Origin:   string(r.Origin),
@@ -90,49 +193,28 @@ func (s *Service) SendAnnounceRoutes(ctx context.Context, peerAddress domain.Pee
 			Extra:    r.Extra,
 		}
 	}
-
-	frame := protocol.Frame{
-		Type:           "announce_routes",
-		AnnounceRoutes: wireRoutes,
+	frame := protocol.Frame{AnnounceRoutes: wireRoutes}
+	switch kind {
+	case announceWireV2:
+		frame.Type = "routes_update"
+	default:
+		frame.Type = "announce_routes"
 	}
+	return frame
+}
 
-	// Inbound connections use synchronous write; outbound use enqueue.
+// sendAnnouncePlaneFrame dispatches a single announce-plane frame to the
+// correct transport path based on the peer-address shape. Inbound-key
+// addresses ("inbound:..." prefix) take the synchronous NetCore write;
+// outbound-session addresses take the per-session enqueue. Keeping the
+// prefix branch in one helper so that every new announce-plane wire frame
+// (announce_routes, routes_update, request_resync) routes through the
+// same single-writer invariant without a second copy of the switch.
+func (s *Service) sendAnnouncePlaneFrame(ctx context.Context, peerAddress domain.PeerAddress, frame protocol.Frame) bool {
 	if strings.HasPrefix(string(peerAddress), "inbound:") {
-		return s.sendAnnounceRoutesToInbound(ctx, string(peerAddress), frame)
+		return s.writeFrameToInbound(ctx, peerAddress, frame)
 	}
 	return s.enqueuePeerFrame(peerAddress, frame)
-}
-
-// SendRoutesUpdate implements routing.PeerSender as a v2 scaffolding stub.
-//
-// The v2 wire frame routes_update is not implemented yet — the v1 announce
-// loop sends both full sync and delta via SendAnnounceRoutes. This method
-// exists only to satisfy the two-method PeerSender interface that already
-// fixes the invariant "connect-time sync and forced full always go through
-// SendAnnounceRoutes, never through routes_update" at the signature level.
-//
-// Until the v2 frame lands, the stub returns false so callers count the
-// send as a drop and fall back to whatever retry path they already have.
-// A single warn per peerAddress is emitted via routesUpdateStubWarned to
-// make an accidental v2-path call site visible without flooding the log
-// if the mistake repeats every cycle. v1 code paths MUST NOT call this
-// method; the guard is a defence-in-depth net, not a normal code path.
-func (s *Service) SendRoutesUpdate(ctx context.Context, peerAddress domain.PeerAddress, delta []routing.AnnounceEntry) bool {
-	if _, alreadyWarned := s.routesUpdateStubWarned.LoadOrStore(peerAddress, struct{}{}); !alreadyWarned {
-		log.Warn().
-			Str("peer_address", string(peerAddress)).
-			Int("delta_routes", len(delta)).
-			Msg("routes_update_not_implemented_v2_pending")
-	}
-	return false
-}
-
-// sendAnnounceRoutesToInbound finds the inbound connection matching the
-// "inbound:remoteAddr" key and writes the frame synchronously. Returns
-// false if the connection is gone or the write fails, so the announce
-// loop can log the failure.
-func (s *Service) sendAnnounceRoutesToInbound(ctx context.Context, key string, frame protocol.Frame) bool {
-	return s.writeFrameToInbound(ctx, domain.PeerAddress(key), frame)
 }
 
 // writeFrameToInbound writes a marshaled frame to an inbound connection
@@ -171,6 +253,24 @@ func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAd
 		return false
 	}
 
+	return s.writeFrameToInboundConn(ctx, targetID, remoteAddr, frame)
+}
+
+// writeFrameToInboundConn marshals and writes a frame to a previously
+// resolved inbound connection identified by ConnID. The connID is
+// expected to come from a caller that has already located the target
+// inbound conn under peerMu (e.g. writeFrameToInbound's foreach above,
+// or the v2 dispatch helper that captures connID together with
+// capability validation). Splitting the marshal+write tail of
+// writeFrameToInbound into this helper lets the v2 path bind capability
+// validation to the EXACT same connID that the network-sync write
+// targets, closing the cap-check vs write race documented on
+// dispatchAnnouncePlaneFrameWithCaps.
+//
+// remoteAddr is purely a logging tag — sendFrameBytesViaNetworkSync
+// dispatches by connID, not address, so a churned replacement
+// connection at the same remoteAddr cannot pick up the bytes.
+func (s *Service) writeFrameToInboundConn(ctx context.Context, connID domain.ConnID, remoteAddr string, frame protocol.Frame) bool {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		// Caller-side marshal failure — distinct diagnostic from a
@@ -189,7 +289,7 @@ func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAd
 	// other non-nil (buffer-full / writer-done / chan-closed / sync-timeout
 	// / ctx-error) → transport drop. The legacy 3-state enqueueResult
 	// switch maps directly onto these classes.
-	sendErr := s.sendFrameBytesViaNetworkSync(ctx, targetID, []byte(line))
+	sendErr := s.sendFrameBytesViaNetworkSync(ctx, connID, []byte(line))
 	switch {
 	case sendErr == nil:
 		return true
@@ -204,6 +304,138 @@ func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAd
 		// canceled, or unknown sentinel — all collapse onto the legacy
 		// frame_inbound_dropped diagnostic.
 		log.Debug().Err(sendErr).Str("peer", remoteAddr).Msg("frame_inbound_dropped")
+		return false
+	}
+}
+
+// dispatchAnnouncePlaneFrameWithCaps captures the live transport at
+// peerAddress while validating requiredCaps under a single peerMu RLock,
+// then writes the frame to the captured handle (sendCh for outbound
+// sessions, ConnID for inbound conns) outside the lock. Coupling the
+// capability check to the actual write target closes the race between
+// validation and write: a session-replacement at the same address can no
+// longer slip a narrower transport into the dispatch, because the write
+// targets the captured handle directly rather than re-resolving by
+// address. peerMu is released BEFORE any blocking I/O, matching the
+// CLAUDE.md prohibition on holding domain mutexes across network I/O.
+//
+// Returns false when:
+//   - the address resolves to no live target,
+//   - the captured target lacks any of requiredCaps (the gate must be
+//     supplied by the caller — passing an empty slice is rejected as a
+//     likely caller bug; v2 senders always pass at least one cap),
+//   - the outbound session is unhealthy or stalled,
+//   - the final write fails (channel full or transport error).
+//
+// The function assumes the caller is sending an announce-plane frame
+// (announce_routes / routes_update / request_resync). Other planes
+// should keep using sendAnnouncePlaneFrame / enqueuePeerFrame, which do
+// not need the cap-validation coupling.
+func (s *Service) dispatchAnnouncePlaneFrameWithCaps(
+	ctx context.Context,
+	peerAddress domain.PeerAddress,
+	frame protocol.Frame,
+	requiredCaps ...domain.Capability,
+) bool {
+	if len(requiredCaps) == 0 {
+		return false
+	}
+	if strings.HasPrefix(string(peerAddress), "inbound:") {
+		return s.dispatchInboundAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame, requiredCaps)
+	}
+	return s.dispatchOutboundAnnouncePlaneFrameWithCaps(peerAddress, frame, requiredCaps)
+}
+
+// dispatchInboundAnnouncePlaneFrameWithCaps captures the inbound conn
+// matching the "inbound:remoteAddr" suffix and validates requiredCaps
+// against the same connInfo under one peerMu RLock. The captured ConnID
+// is then handed to writeFrameToInboundConn — sendFrameBytesViaNetworkSync
+// dispatches by ConnID (monotonic, never reused), so any replacement
+// inbound connection at the same remoteAddr that arrived after our
+// capture has its own fresh ConnID and never receives the bytes.
+func (s *Service) dispatchInboundAnnouncePlaneFrameWithCaps(
+	ctx context.Context,
+	address domain.PeerAddress,
+	frame protocol.Frame,
+	requiredCaps []domain.Capability,
+) bool {
+	remoteAddr := strings.TrimPrefix(string(address), "inbound:")
+	var (
+		targetID domain.ConnID
+		ok       bool
+	)
+	s.peerMu.RLock()
+	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
+		if info.remoteAddr != remoteAddr {
+			return true
+		}
+		for _, want := range requiredCaps {
+			if !info.HasCapability(want) {
+				return false // stop iteration; ok stays false
+			}
+		}
+		targetID = info.id
+		ok = true
+		return false // stop iteration
+	})
+	s.peerMu.RUnlock()
+	if !ok {
+		return false
+	}
+	return s.writeFrameToInboundConn(ctx, targetID, remoteAddr, frame)
+}
+
+// dispatchOutboundAnnouncePlaneFrameWithCaps captures the outbound
+// session sendCh under one peerMu RLock together with cap validation,
+// health, and stalled-state checks, then enqueues to the captured
+// channel outside the lock. peerSession.sendCh is owned by exactly one
+// session — even if a replacement session at the same address opens
+// after our capture, its sendCh is a different channel and does not
+// receive our frame. The non-blocking select with default mirrors the
+// existing enqueuePeerFrame contract.
+func (s *Service) dispatchOutboundAnnouncePlaneFrameWithCaps(
+	address domain.PeerAddress,
+	frame protocol.Frame,
+	requiredCaps []domain.Capability,
+) bool {
+	var (
+		sendCh chan protocol.Frame
+		ok     bool
+	)
+	s.peerMu.RLock()
+	session := s.resolveSessionLocked(address)
+	if session != nil {
+		allMatch := true
+		for _, want := range requiredCaps {
+			found := false
+			for _, c := range session.capabilities {
+				if c == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			health := s.health[s.resolveHealthAddress(address)]
+			if health != nil && health.Connected &&
+				s.computePeerStateAtLocked(health, time.Now().UTC()) != peerStateStalled {
+				sendCh = session.sendCh
+				ok = true
+			}
+		}
+	}
+	s.peerMu.RUnlock()
+	if !ok {
+		return false
+	}
+	select {
+	case sendCh <- frame:
+		return true
+	default:
 		return false
 	}
 }
@@ -410,6 +642,14 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 		return
 	}
 
+	// A non-empty connect-time announce_routes frame is the very first
+	// observable baseline on the wire for this session. Flip the send-side
+	// flag so AnnounceLoop's v2 mode selection knows the peer's v2 receive
+	// gate is open and subsequent deltas may use SendRoutesUpdate when caps
+	// agree. The empty-snapshot branch above intentionally does NOT flip
+	// this flag — it records a local baseline without emitting any wire
+	// frame, so the peer never observed one.
+	peerState.MarkWireBaselineSent()
 	peerState.RecordFullSyncSuccess(snapshot, now)
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Msg("connect_time_full_sync_end")
 }
@@ -420,13 +660,113 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 //
 // Withdrawals (hops=16) are applied directly via Table.WithdrawRoute.
 // Normal routes are inserted via Table.UpdateRoute with source=announcement.
+//
+// An announce_routes arrival is also the baseline signal for the v2
+// routes_update receive path: AnnouncePeerState.MarkBaselineReceived is
+// set so subsequent routes_update deltas from the peer are safe to apply
+// against the known-good first-sync snapshot. See docs/routing.md
+// "First-sync wire-frame invariant" for the protocol-level contract.
 func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame protocol.Frame) {
-	if senderIdentity == "" {
-		log.Warn().Msg("announce_routes_no_sender_identity")
-		return
-	}
 	if !identity.IsValidAddress(string(senderIdentity)) {
 		log.Warn().Str("sender", string(senderIdentity)).Msg("announce_routes_malformed_sender")
+		return
+	}
+	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, announceReceiveLegacy)
+}
+
+// handleRoutesUpdate processes an incoming routes_update frame (v2 wire
+// path). The entry-by-entry application is identical to handleAnnounceRoutes
+// — the delta frame carries the same AnnounceRouteFrame payload shape —
+// but the receive path gates delta application on the baseline: if the
+// current session has not received announce_routes yet,
+// AnnouncePeerState.HasReceivedBaseline is false and the receiver MUST
+// ask the peer for a forced full sync (via request_resync) instead of
+// silently accepting the delta against a stale or missing state.
+//
+// senderAddress is the peer's routing-key address (outbound session or
+// "inbound:" prefix) used to dispatch the request_resync reply.
+func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderAddress domain.PeerAddress, frame protocol.Frame) {
+	if !identity.IsValidAddress(string(senderIdentity)) {
+		log.Warn().Str("sender", string(senderIdentity)).Msg("routes_update_malformed_sender")
+		return
+	}
+
+	peerState := s.announceLoop.StateRegistry().GetOrCreate(senderIdentity)
+	if !peerState.HasReceivedBaseline() {
+		// Protocol desync: peer sent a delta before (or independently of)
+		// the first-sync baseline this session owes us. The safe recovery
+		// is to ask the peer to resync — do NOT attempt to apply the delta
+		// against whatever local state happens to exist, because that
+		// state is either empty (fresh session) or belongs to a prior
+		// session whose SeqNo space may have rolled over.
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("address", string(senderAddress)).
+			Int("delta_routes", len(frame.AnnounceRoutes)).
+			Msg("routes_update_before_baseline_request_resync")
+		if senderAddress == "" {
+			// No sendback path available (e.g. unit test path). Without a
+			// peer address the request_resync wire frame cannot be
+			// delivered. This is not a silent drop: MarkInvalid on the
+			// local side still has no effect because the peer is the one
+			// that must forget its per-peer send state; we return here
+			// and let the next MarkReconnected hook reset our state.
+			return
+		}
+		s.SendRequestResync(s.runCtx, senderAddress)
+		return
+	}
+
+	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, announceReceiveV2)
+}
+
+// handleRequestResync processes an incoming request_resync frame. The peer
+// has detected local state desync (e.g. it received a routes_update
+// without a baseline this session) and is asking us to re-deliver a full
+// baseline via legacy announce_routes. We fulfil the contract by marking
+// our per-peer announce state as NeedsFullResync and triggering an
+// immediate announce cycle — the forced-full branch of announceToAllPeers
+// takes over from there, and sendFullAnnounce honours the first-sync
+// invariant (legacy announce_routes wire frame) regardless of the peer's
+// negotiated capabilities.
+func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
+	if !identity.IsValidAddress(string(senderIdentity)) {
+		log.Warn().Str("sender", string(senderIdentity)).Msg("request_resync_malformed_sender")
+		return
+	}
+	log.Info().
+		Str("from", string(senderIdentity)).
+		Msg("request_resync_received_forcing_full_sync")
+	s.announceLoop.StateRegistry().MarkInvalid(senderIdentity)
+	s.announceLoop.TriggerUpdate()
+}
+
+// announceReceiveMode tags the wire path that delivered the announce-plane
+// entries. Used by applyAnnounceEntries to select the baseline-update side
+// effect (set only on legacy announce_routes — routes_update never
+// establishes a baseline by itself).
+type announceReceiveMode int
+
+const (
+	announceReceiveLegacy announceReceiveMode = iota
+	announceReceiveV2
+)
+
+// applyAnnounceEntries is the shared receive-side core for both the legacy
+// announce_routes and the v2 routes_update wire frames. The entry-by-entry
+// rules are identical — trust classification, own-origin forgery guard,
+// transit-withdrawal guard, Table.UpdateRoute / WithdrawRoute dispatch —
+// so the per-entry loop lives in one place to avoid the 3-copy duplication
+// CLAUDE.md forbids.
+//
+// The mode parameter controls one side effect: legacy wire frames set the
+// per-session "baseline received" flag so subsequent routes_update deltas
+// are safe to apply; the v2 path leaves the flag untouched because
+// routes_update never establishes a baseline by itself (see
+// handleRoutesUpdate for the gating contract).
+func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireRoutes []protocol.AnnounceRouteFrame, mode announceReceiveMode) {
+	if senderIdentity == "" {
+		log.Warn().Msg("announce_routes_no_sender_identity")
 		return
 	}
 
@@ -435,7 +775,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 	rejected := 0
 	drainIdentities := make(map[domain.PeerIdentity]struct{})
 
-	for _, wireRoute := range frame.AnnounceRoutes {
+	for _, wireRoute := range wireRoutes {
 		if wireRoute.Identity == "" || wireRoute.Origin == "" {
 			rejected++
 			continue
@@ -583,9 +923,14 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		}
 	}
 
+	wireType := "announce_routes"
+	if mode == announceReceiveV2 {
+		wireType = "routes_update"
+	}
 	log.Debug().
 		Str("from", string(senderIdentity)).
-		Int("total", len(frame.AnnounceRoutes)).
+		Str("wire_type", wireType).
+		Int("total", len(wireRoutes)).
 		Int("accepted", accepted).
 		Int("unchanged", unchanged).
 		Int("rejected", rejected).
@@ -597,6 +942,15 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 			PeerID:   senderIdentity,
 			Accepted: accepted,
 		})
+	}
+
+	// Baseline tracking: a legacy announce_routes arrival is the protocol
+	// signal that the peer has delivered the first-sync snapshot for this
+	// session. Subsequent routes_update deltas from the peer can now be
+	// applied safely. The routes_update wire path deliberately leaves the
+	// flag untouched — see handleRoutesUpdate for the gating contract.
+	if mode == announceReceiveLegacy {
+		s.announceLoop.StateRegistry().GetOrCreate(senderIdentity).MarkBaselineReceived()
 	}
 
 	// Event-driven pending queue drain: new or reconfirmed transit routes
@@ -670,6 +1024,17 @@ func (s *Service) fanoutAnnounceRoutes(
 			}
 			if s.SendAnnounceRoutes(ctx, peer.Address, withdrawals) {
 				sentCnt.Add(1)
+				// A real announce_routes frame went out to this recipient.
+				// From the recipient's perspective this is the wire baseline
+				// for its v2 receive gate, so flip the symmetric send-side
+				// flag for that peer's announce state. Without this, a peer
+				// that only received its baseline as part of a disconnect
+				// fan-out would later have its first delta downgraded to
+				// legacy because the announce loop still believed no
+				// baseline had been emitted to it.
+				if state := s.announceLoop.StateRegistry().Get(peer.Identity); state != nil {
+					state.MarkWireBaselineSent()
+				}
 			} else {
 				droppedCnt.Add(1)
 			}

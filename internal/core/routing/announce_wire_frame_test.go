@@ -14,11 +14,18 @@ import (
 )
 
 // wireFrameCounter tracks how many times each PeerSender method was
-// called. It is the v1-level guard that the announce loop never routes a
-// send through the v2 routes_update scaffold method (SendRoutesUpdate):
-// the legacy announce_routes frame carries both full sync and delta in v1,
-// and any silent regression that flipped the delta path to
-// SendRoutesUpdate would break mixed-version compatibility on the wire.
+// called. It is the guard that protects the first-sync / forced-full
+// wire-frame invariant: the announce loop must NOT route the v1
+// connect-time / forced-full / divergence-fallback paths through the
+// live v2 delta sender (PeerSender.SendRoutesUpdate). The legacy
+// announce_routes frame carries both full sync and v1 delta; any silent
+// regression that flipped one of those paths to the v2 wire frame would
+// break mixed-version compatibility (peers without v2 reject
+// routes_update) and violate the baseline contract (a fresh session has
+// no baseline to diff a delta against). SendRoutesUpdate IS the real v2
+// delta path now — this guard does not protect against a missing
+// implementation, it pins the routing of v1 paths AWAY from the live v2
+// implementation regardless of what capabilities the peer advertised.
 type wireFrameCounter struct {
 	announceCalls atomic.Int32
 	updateCalls   atomic.Int32

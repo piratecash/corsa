@@ -84,14 +84,28 @@ const (
 	CorsaWireVersion = "0.40-alpha"
 	ClientBuild      = 40
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
-	// Bumped to 11 for the advertise-address phase 1 deprecation rollout:
-	// observed-address-mismatch is no longer produced in the штатный runtime
-	// path, hello carries the new additive field advertise_port, and inbound
-	// mismatch between observed TCP IP and hello.listen.host no longer rejects
-	// the connection. The change is additive on the wire but alters runtime
-	// semantics of the handshake, which is why the bump is mandatory even
-	// though MinimumProtocolVersion stays at 8.
-	ProtocolVersion        = 11
+	//
+	// Current value 12 prepares the advertise-address legacy cleanup phase 2:
+	// raising the network-wide MinimumProtocolVersion floor to 12 lets the
+	// next release physically remove the deprecated advertise-address code
+	// paths (observed-address-mismatch reconnect, hello-carried external IP,
+	// CORSA_ADVERTISE_ADDRESS operator config) that were kept only for
+	// dual-stack compatibility with peers below this floor. Until the floor
+	// is raised, this build still ships those paths and accepts older peers;
+	// the bump itself is what signals downstream operators that the floor
+	// will move next. See docs/advertise-address-phase2-minproto12-cleanup.md
+	// for the cleanup plan and preconditions.
+	//
+	// History: v11 introduced the advertise-address phase 1 deprecation
+	// rollout (observed-address-mismatch no longer produced on the штатный
+	// runtime path, hello carries the new additive field advertise_port,
+	// inbound mismatch between observed TCP IP and hello.listen.host no
+	// longer rejects the connection). v12 builds on top of that to enable
+	// the floor raise; the wire change between v11 and v12 is additive
+	// (no payload differences) but the floor semantics differ. Bump is
+	// mandatory even though MinimumProtocolVersion stays at 8 in this build
+	// — the floor raise itself is the v12 contract.
+	ProtocolVersion        = 12
 	MinimumProtocolVersion = 8
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"

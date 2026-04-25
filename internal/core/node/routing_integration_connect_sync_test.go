@@ -17,11 +17,15 @@ import (
 //
 // sendConnectTimeFullSync — the shared core invoked from both
 // sendFullTableSyncToInbound and sendOutboundFullTableSync — MUST emit the
-// legacy announce_routes wire frame and MUST NOT route through the v2
-// routes_update scaffold, regardless of any capability the peer may have
-// advertised. A fresh session has no baseline to diff an incremental
-// routes_update against; sending one there would either be rejected by
-// the receiver or desynchronise mixed-version networks.
+// legacy announce_routes wire frame and MUST NOT route through the live
+// v2 routes_update delta path (Service.SendRoutesUpdate +
+// dispatchAnnouncePlaneFrameWithCaps), regardless of any capability the
+// peer may have advertised. A fresh session has no baseline to diff an
+// incremental routes_update against; sending one there would either be
+// rejected by the receiver dispatcher (which gates routes_update on
+// v1+v2+relay and on the per-peer baseline flag) or desynchronise
+// mixed-version networks where the peer expects an initial
+// announce_routes baseline.
 //
 // The guard exercises the non-empty-snapshot branch: the routing table is
 // seeded with a direct peer so BuildAnnounceSnapshot produces at least one
@@ -88,11 +92,13 @@ func TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot(t *testing.T) {
 
 		// First-sync wire-frame invariant guard (see docs/routing.md):
 		// the first sync after session establishment is always legacy.
-		// A regression that routed this through the v2 scaffold would
-		// either produce frame.Type == "routes_update" or — because
-		// Service.SendRoutesUpdate is still a warn-only stub — drop the
-		// frame entirely. Both regressions are caught here: the first by
-		// the type check, the second by the timeout arm below.
+		// A regression that routed this through the live v2 delta path
+		// (Service.SendRoutesUpdate + dispatchAnnouncePlaneFrameWithCaps)
+		// would either produce frame.Type == "routes_update" or — if the
+		// captured-handle gate dropped the send because the test fixture
+		// lacks the v2 cap on the conn — fail to emit any wire frame at
+		// all. Both regressions are caught here: the first by the type
+		// check, the second by the timeout arm below.
 		if frame.Type == "routes_update" {
 			t.Fatalf("connect-time sync must not emit routes_update " +
 				"(first-sync wire-frame invariant, docs/routing.md): got v2 wire frame")
@@ -118,8 +124,10 @@ func TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for connect-time full sync wire frame — " +
 			"no announce_routes frame reached the inbound pipe, which " +
-			"suggests sendConnectTimeFullSync silently dropped the send " +
-			"(e.g. routed through the SendRoutesUpdate warn-only stub)")
+			"suggests sendConnectTimeFullSync stopped emitting the legacy " +
+			"baseline (e.g. a regression that routed first sync through " +
+			"the live v2 routes_update delta path whose send-time gate " +
+			"requires v1+v2+relay caps not present on this fixture)")
 	}
 
 	// Peer-state side-effect: RecordFullSyncSuccess must have fired so

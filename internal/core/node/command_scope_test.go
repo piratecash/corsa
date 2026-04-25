@@ -81,6 +81,15 @@ var requiredP2PWireCommands = map[string]bool{
 	"relay_message":   true,
 	"relay_hop_ack":   true,
 	"announce_routes": true,
+	// v2 routing announce plane (mesh_routing_v2 capability gate). Both
+	// frames piggyback on the same dispatchNetworkFrame switch as the
+	// legacy announce_routes path: routes_update carries an incremental
+	// delta against the legacy baseline; request_resync is the no-payload
+	// control frame the receive side emits when a delta arrives before
+	// the baseline. See docs/routing.md "Wire format" and "Baseline gate
+	// on v2 receive" for the protocol contract.
+	"routes_update":  true,
+	"request_resync": true,
 
 	// File transfer
 	"file_command": true,

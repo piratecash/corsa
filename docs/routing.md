@@ -75,6 +75,8 @@ Runtime protection is anchored by guard tests: `TestAnnounceLoop_ForcedFull_Uses
 
 Empty-baseline note: when the peer-specific snapshot is empty after split-horizon filtering, both call sites record a full-sync baseline without sending any wire frame. This empty-baseline behaviour is orthogonal to the first-sync wire-frame invariant (which is about which frame to use when one IS sent) — guard tests for the invariant deliberately seed at least one route so the wire-level assertion has something to compare against; empty-baseline is its own contract and has a dedicated regression test.
 
+Empty-baseline + v2 receive-gate interaction. Empty-baseline records `RecordFullSyncSuccess` locally but emits no wire frame, so the peer never observes an `announce_routes` arrival in the new session and `AnnouncePeerState.hasReceivedBaseline` on the peer side stays false. To keep the symmetric receive gate honest, every `AnnouncePeerState` carries a per-peer `wireBaselineSentToPeer` flag that mirrors the receive-side `hasReceivedBaseline`: it stays false until a real `announce_routes` frame goes out (set by `MarkWireBaselineSent` after a successful `SendAnnounceRoutes` in `sendConnectTimeFullSync`, `sendLegacyFull`, `sendIncrementalAnnounce`, or `fanoutAnnounceRoutes`). While the flag is false, `AnnounceLoop.announceToAllPeers` overrides any `deltaModeV2` classification down to `deltaModeV1` — the very first observable wire frame in a session is therefore always the legacy `announce_routes` baseline, regardless of negotiated capabilities. The flag resets on every session boundary (`MarkDisconnected` / `MarkReconnected`). Without this override, an empty connect-time baseline followed by a non-empty cycle would emit `routes_update` against a peer whose receive gate is still closed; the peer drops the frame and emits `request_resync`, costing one wasted round-trip per session for every empty-then-non-empty progression. The downgrade is observable in the cycle log line as `announce_v2_downgraded_no_wire_baseline`.
+
 **Инвариант первого sync-кадра.** Первый full-sync после установления routing-capable session — для любого peer, независимо от объявленных им capabilities — ОБЯЗАН уходить от отправителя исключительно через legacy wire-frame `announce_routes` (метод `PeerSender.SendAnnounceRoutes`). V2-кадр `routes_update` (метод `PeerSender.SendRoutesUpdate`) допустим только для последующих incremental-циклов peer, который уже успешно получил первый `announce_routes`-sync И с которым согласован capability `mesh_routing_v2`. Причина: `routes_update` несёт incremental-дельту, рассчитанную относительно baseline, которого у fresh session ещё нет; в отсутствие baseline `routes_update` приходит «в воздух», получатель либо отбрасывает его, либо входит в расщеплённое состояние с отправителем. Mixed-version сеть в принципе не должна видеть `routes_update` на fresh session на проводе.
 
 Code call-sites, реализующие инвариант:
@@ -85,6 +87,8 @@ Code call-sites, реализующие инвариант:
 Runtime-защита опирается на guard-тесты: `TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot` (`internal/core/routing/announce_invariant_test.go`) валит тест сразу, если на forced-full пути когда-либо вызывается `SendRoutesUpdate`; `TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot` и `TestConnectTimeFullSync_EmptySnapshot_NoWireFrame` (`internal/core/node/routing_integration_connect_sync_test.go`) наблюдают реальный wire-кадр через `net.Pipe` и явно проверяют legacy vs v2. Регрессия, подменяющая wire-кадр первого sync-а, всплывает здесь раньше, чем доезжает до CI на живом peer-е.
 
 Про empty-baseline: когда peer-specific snapshot после split-horizon пустой, оба call-site записывают full-sync baseline без отправки wire-кадра. Это поведение ортогонально first-sync-инварианту (он — о том, какой кадр использовать, если кадр всё-таки отправляется) — guard-тесты для инварианта сознательно сажают в таблицу хотя бы один маршрут, чтобы wire-level assertion было с чем сравнивать; empty-baseline — отдельный контракт с собственным regression-тестом.
+
+Взаимодействие empty-baseline и v2 receive-gate. Empty-baseline пишет `RecordFullSyncSuccess` локально, но не отправляет ни одного wire-кадра, так что peer в новой сессии не видит ни одного `announce_routes`-кадра и `AnnouncePeerState.hasReceivedBaseline` на стороне peer-а остаётся false. Чтобы симметричный receive-gate работал честно, в каждом `AnnouncePeerState` хранится per-peer-флаг `wireBaselineSentToPeer` — зеркало receive-side `hasReceivedBaseline`: он остаётся false, пока реальный `announce_routes`-кадр не уйдёт (флаг ставит `MarkWireBaselineSent` после успешного `SendAnnounceRoutes` в `sendConnectTimeFullSync`, `sendLegacyFull`, `sendIncrementalAnnounce` и `fanoutAnnounceRoutes`). Пока флаг false, `AnnounceLoop.announceToAllPeers` принудительно понижает любой `deltaModeV2` до `deltaModeV1` — первый наблюдаемый wire-кадр в сессии всегда legacy `announce_routes`-baseline, независимо от согласованных capabilities. Флаг сбрасывается на каждой границе сессии (`MarkDisconnected` / `MarkReconnected`). Без этого override-а пустой connect-time baseline с последующим непустым циклом отправил бы `routes_update` peer-у с закрытым receive-gate; peer дропнет кадр и пришлёт `request_resync`, стоимость — один лишний round-trip на сессию для каждой комбинации «пусто → не пусто». Downgrade виден в cycle-лог-строке как `announce_v2_downgraded_no_wire_baseline`.
 
 **Self-route (local identity).** When `localOrigin` is configured, `Lookup()` and `Snapshot()` synthesize a local route entry for the node's own identity (`Hops=0`, `Source=RouteSourceLocal`). This route is not stored in the table — it is injected on read. It never expires, is never withdrawn, and is never included in announcements (`AnnounceTo`/`Announceable`). Peers discover this node via their own direct routes. The self-route ensures that a node can always resolve itself in the routing table without requiring an external peer session. `Snapshot().TotalEntries` and `Snapshot().ActiveEntries` do not count the synthetic self-route — these counters describe persisted table state and stay consistent with `ActiveSize()`. `reachableFromSnapshot`, `reachableIDsFrame`, and `fetch_route_summary` exclude `RouteSourceLocal` entries because reachability is about remote peers, not the node itself. `UpdateRoute` rejects `RouteSourceLocal` with `ErrLocalSourceReserved` — this source is purely synthetic and must never be persisted.
 
@@ -221,6 +225,10 @@ flowchart TD
 **Direct-route capability gate.** `onPeerSessionEstablished(peerIdentity, caps)` takes the peer's full negotiated capability set and flattens it internally to a `hasRelayCap := sessionHasCap(caps, domain.CapMeshRelayV1)` local decision that controls whether `AddDirectPeer` is called. A direct route in the distance-vector table advertises that this node can relay DMs to the destination. If the peer cannot accept `relay_message` frames (legacy or gossip-only node), the route would be non-deliverable — other routing-capable nodes would learn a path that silently fails at the last hop. The outbound call site passes the session's `capabilities` slice directly. The inbound call site resolves the per-connection capability snapshot via `connCapabilitiesForID(id)`. Peers without `mesh_relay_v1` still connect and exchange gossip normally but are never advertised as direct destinations in the routing table. The full capability list is also forwarded to `AnnounceStateRegistry.MarkReconnected` so the announce plane can make mode decisions without a second `peerMu` round-trip — the registry takes a defensive copy internally, so callers may pass session-owned slices unchanged.
 
 **Multi-session identity with dual counters.** `node.Service` maintains two per-identity counters: `identitySessions` (total active sessions) and `identityRelaySessions` (relay-capable sessions only). `AddDirectPeer()` is called on the `identityRelaySessions` 0→1 transition (first relay-capable session). `RemoveDirectPeer()` is called on the `identityRelaySessions` 1→0 transition (last relay-capable session closes). This means a non-relay first session does not block a later relay session from creating the direct route, and closing the last relay session withdraws the route even if legacy sessions remain. `onPeerSessionClosed(peerIdentity, caps)` receives the same capability set that was passed to the matching `onPeerSessionEstablished` call so both counters stay balanced on every transition. Total session count cleanup happens independently.
+
+**Persistent caps as a derived view of the chosen target.** `AnnouncePeerState.capabilities` is the persistent capability snapshot consulted by `classifyDeltaMode` at delta-mode selection. It is reconciled to the per-cycle `AnnounceTarget.Capabilities` at the very start of each per-peer goroutine in `AnnounceLoop.announceToAllPeers` via `AnnounceStateRegistry.UpdateCapabilities`. This is the single source of truth: the persistent snapshot is a derived view of the same session `routingCapablePeers` actually picked this cycle. No lifecycle-hook variant updates persistent caps on session establishment or close — `MarkReconnected` writes the initial snapshot for a fresh peer but additional routing-capable sessions, relay-only sessions, and non-relay sessions all leave the snapshot unchanged at the lifecycle-hook level. Why no hook variant works: `routingCapablePeers` dedupes overlapping sessions for one identity by map iteration order, so two cycles can pick different sessions when overlapping routing-capable sessions for the same peer have different negotiated caps; a partial close (the session that previously refreshed the snapshot disappears while an older routing-capable session remains) leaves the persistent caps describing a session that is no longer the target; a relay-only session (no `mesh_routing_v1`) is counted in `identityRelaySessions` but cannot be picked by `routingCapablePeers` as a target, so its caps must not poison the persistent snapshot — the older routing-capable session would still be selected and `classifyDeltaMode` would read mismatched sources. Cycle-time reconciliation sidesteps every one of these races: the cycle reads the same caps twice (once via target, once via persistent snapshot just synced from target), so `classifyDeltaMode` always sees agreeing inputs in production. The divergence path in `classifyDeltaMode` remains as a defensive net but is unreachable from the loop while the cycle-time sync stands; if a future call site introduces a second writer to `AnnouncePeerState.capabilities` or routes around the cycle sync, `MarkInvalid` + legacy delta on the current cycle is the safe fallback. `UpdateCapabilities` is intentionally narrow: it touches only the capability slice and never resets `hasReceivedBaseline`, `wireBaselineSentToPeer`, or `needsFullResync` — caps are an identity-level property reflected from active sessions; they must not influence baseline-gate state, which tracks wire-history with the peer identity in the current session window.
+
+**Persistent caps как производная вьюха выбранного target-а.** `AnnouncePeerState.capabilities` — persistent capability-снимок, который читает `classifyDeltaMode` при выборе delta-mode. Он реконсилируется с per-cycle `AnnounceTarget.Capabilities` в самом начале каждой per-peer goroutine в `AnnounceLoop.announceToAllPeers` через `AnnounceStateRegistry.UpdateCapabilities`. Это единственный источник истины: persistent-снимок — derived-view той же сессии, которую `routingCapablePeers` фактически выбрал в этом цикле. Никакой lifecycle-hook не обновляет persistent caps на установке/закрытии сессии — `MarkReconnected` пишет первоначальный снимок для нового peer-а, но дополнительные routing-capable сессии, relay-only сессии и не-relay сессии все оставляют снимок неизменным на уровне lifecycle-hook-ов. Почему ни один hook-вариант не работает: `routingCapablePeers` дедуплицирует overlapping-сессии одной identity по порядку итерации мапы, поэтому два цикла могут выбрать разные сессии, когда overlapping routing-capable сессии того же peer-а имеют разные согласованные caps; partial close (сессия, которая раньше обновила снимок, исчезает, а другая routing-capable остаётся) оставляет persistent caps описывающими сессию, которая больше не target; relay-only сессия (без `mesh_routing_v1`) учитывается в `identityRelaySessions`, но `routingCapablePeers` её не выбирает как target, поэтому её caps не должны отравлять persistent-снимок — иначе старая routing-capable сессия всё равно будет выбрана target-ом и `classifyDeltaMode` прочитает рассогласованные источники. Cycle-time реконсиляция обходит все эти гонки: цикл читает одни и те же caps дважды (один раз через target, второй — через persistent-снимок, только что синхронизированный из target-а), поэтому `classifyDeltaMode` в продакшене всегда видит согласованные входы. Divergence-путь в `classifyDeltaMode` остаётся как defensive net, но недостижим из цикла пока стоит cycle-time sync; если будущий call site введёт второго писателя в `AnnouncePeerState.capabilities` или обойдёт cycle sync, `MarkInvalid` + legacy delta в текущем цикле — безопасный fallback. `UpdateCapabilities` намеренно узкий: трогает только capability-slice и никогда не сбрасывает `hasReceivedBaseline`, `wireBaselineSentToPeer` или `needsFullResync` — caps это identity-level свойство, отражённое из активных сессий; они не должны влиять на baseline-gate-стейт, который трекает wire-историю с peer-identity в текущем session-окне.
 
 **Full-table sync on connect.** Both outbound and inbound connection paths send an immediate full-table sync (`routingTable.AnnounceTo(peerIdentity)`) to the newly connected peer. This ensures symmetric initial convergence regardless of connection direction. The sync is gated on both `mesh_routing_v1` and `mesh_relay_v1` capabilities — matching the steady-state announce loop contract. A routing-only peer (mesh_routing_v1 without mesh_relay_v1) would learn routes it cannot deliver on the data plane, so it is excluded from connect-time sync as well. The outbound path checks `sessionHasCapability(address, capMeshRoutingV1) && sessionHasCapability(address, capMeshRelayV1)` in `establishPeerSession`. The inbound path checks `connHasCapability(conn, capMeshRoutingV1) && connHasCapability(conn, capMeshRelayV1)` in `trackInboundConnect`. Both paths pass the peer's Ed25519 identity fingerprint (`peerIdentity`) to `AnnounceTo` — not the transport or listen address. This is critical for NATed inbound peers whose listen address (e.g. `127.0.0.1:64646`) differs from their identity fingerprint; passing the transport address would break split horizon filtering. Legacy peers without either capability are silently skipped. Split horizon is applied — routes learned from the connecting peer are excluded. If the resulting peer-specific snapshot is empty (e.g. the only route is the peer's own direct route, excluded by split horizon), the full-sync baseline is recorded without sending a wire frame (empty-baseline); subsequent announce cycles use the delta path normally. If the send fails (session queue full, connection lost between handshake and sync), a warning is logged (`routing_outbound_full_sync_failed` or `routing_inbound_full_sync_failed`). The peer will still receive the table on the next periodic announce cycle.
 
@@ -433,7 +441,7 @@ The `RoutingProvider` interface (`rpc/provider.go`) has two methods: `RoutingSna
 
 ### Wire format
 
-The `announce_routes` frame carries a list of route entries. Only fields needed for convergence are transmitted on the wire; TTL and Source are derived locally.
+The `announce_routes` frame is the legacy v1 announce-plane frame. It carries a list of route entries; only fields needed for convergence are transmitted on the wire. TTL and Source are derived locally.
 
 ```json
 {
@@ -447,9 +455,19 @@ The `announce_routes` frame carries a list of route entries. Only fields needed 
 
 A withdrawal is simply a route with `hops: 16` and an incremented `seq`.
 
+The `routes_update` frame is the v2 delta frame. Its payload shape is identical to `announce_routes` — same `routes` array, same entry fields — but its `type` is `routes_update`. Semantically the difference is strict: `routes_update` carries ONLY entries that have changed since the receiver's baseline, and it is NEVER sent as the first sync after session establishment. Each entry's rules (`hops=16` + new `seq` = withdrawal, origin-only wire withdrawal, etc.) match the legacy frame exactly. A receiver that applied the delta without a baseline would be unable to distinguish "peer has no other routes" from "peer has routes it didn't include this time", so the sender MUST establish the baseline with `announce_routes` first (see First-sync wire-frame invariant).
+
+The `request_resync` frame is a v2 control frame with no payload. It is emitted by a receiver when a `routes_update` arrives before the legacy `announce_routes` baseline for the current session — an unanchored delta. On arrival it triggers `AnnounceStateRegistry.MarkInvalid(peer)` plus `AnnounceLoop.TriggerUpdate()`, so the next cycle's forced-full branch re-delivers the baseline via `announce_routes` (forced-full always uses the legacy frame per the first-sync invariant). The frame has no `routes` field; its mere arrival is the signal.
+
+```json
+{"type": "request_resync"}
+```
+
 ### Capability gating
 
 The `mesh_routing_v1` capability is advertised during the handshake. Only peers with this capability in their negotiated set will receive `announce_routes` frames. Legacy peers continue to function via gossip without disruption.
+
+The `mesh_routing_v2` capability is an opt-in refinement on top of `mesh_routing_v1`. A peer negotiates v2 to declare that it understands `routes_update` (v2 delta) and `request_resync` (v2 control). v2 is meaningful only alongside v1: a peer that advertises `mesh_routing_v2` without `mesh_routing_v1` is treated as v1-only, because the first-sync invariant (`announce_routes` baseline) is gated on v1 and a peer that cannot receive a baseline cannot consume a delta. Mode selection for the delta path is driven by the per-cycle `AnnounceTarget.Capabilities` from the session selected by the announce loop; the persistent `AnnouncePeerState.capabilities` record is reconciled to that snapshot at cycle start (see "Announce delta mode selection" below). No persistent `Mode` field is stored on `AnnouncePeerState`.
 
 Capability requirements for a table-directed relay next-hop depend on the role of the next-hop peer:
 
@@ -457,6 +475,43 @@ Capability requirements for a table-directed relay next-hop depend on the role o
 - **Transit (hops>1):** The next-hop must forward the message onward using its own routing table. Both `mesh_relay_v1` (accept relay) and `mesh_routing_v1` (table-directed forwarding) are required.
 
 A directly connected relay-only peer (no `mesh_routing_v1`) is still usable as a destination via table-directed delivery. Requiring both capabilities for all next-hops would drop direct delivery to relay-only peers and unnecessarily degrade to blind gossip. `resolveRouteNextHopAddress` in `node/routing_relay.go` enforces this distinction.
+
+### Announce delta mode selection
+
+For each routing-capable peer, every announce cycle derives the delta wire frame at cycle start. The classifier reads two capability snapshots that are reconciled at cycle entry:
+
+- **`AnnounceTarget.Capabilities`** — per-cycle immutable snapshot captured by `routingCapablePeers` under the same `s.peerMu.RLock` that produced `Address` and `Identity`. This reflects what the session `routingCapablePeers` selected as the announce target reports at this cycle's tick.
+- **`AnnouncePeerState.capabilities`** — persistent per-peer record. Reconciled to the target snapshot at the start of every per-peer goroutine via `AnnounceStateRegistry.UpdateCapabilities`. After the sync the persistent record is a derived view of the same session selected as `AnnounceTarget`.
+
+Reconciling at cycle start makes `classifyDeltaMode` read two agreeing snapshots in production: by the time the function runs, the persistent record has just been overwritten with the target caps. The two-input shape is preserved as a defensive net — see "Persistent caps as a derived view of the chosen target" above for the divergence-path rationale.
+
+Classification rules (implemented in `classifyDeltaMode`, `internal/core/routing/announce.go`):
+
+- both inputs contain `mesh_routing_v1` AND `mesh_routing_v2` → **v2 delta** via `SendRoutesUpdate` (`routes_update` wire frame);
+- neither input contains `mesh_routing_v2` (or advertises v2 without v1) → **v1 delta** via `SendAnnounceRoutes` (`announce_routes` wire frame);
+- inputs disagree on v2 → **divergence**: `MarkInvalid(peer)` + legacy delta for this cycle; next cycle runs forced-full through `SendAnnounceRoutes`. With cycle-time reconciliation in place this branch is unreachable from the loop and serves only as a defensive fallback for any future code path that bypasses `UpdateCapabilities`.
+
+Forced-full and connect-time paths are NOT subject to this classification. They always use `SendAnnounceRoutes` regardless of capability — see the First-sync wire-frame invariant.
+
+**Send-time capability gate with captured-handle dispatch.** Mode classification runs against the per-cycle `AnnounceTarget` snapshot. Between that snapshot and the actual write inside `SendRoutesUpdate` / `SendRequestResync`, the underlying session at the announce address can close and be replaced by a session that does NOT hold the gate the receive dispatcher requires (or be torn down outright). Putting v2 wire bytes on such a narrower session is a protocol violation: the receiver rejects the frame and may ban the sender. The send path closes the race via `Service.dispatchAnnouncePlaneFrameWithCaps`, which captures the live transport handle (sendCh for outbound sessions, ConnID for inbound conns) under the same `peerMu` RLock as the cap validation, then writes to the captured handle outside the lock. Capturing the handle — not just the cap snapshot — is the load-bearing piece: ConnID is monotonic and never reused, so a replacement inbound conn at the same `remoteAddr` has its own fresh ConnID and never receives our bytes; outbound `peerSession.sendCh` is owned by exactly one session, so a replacement session at the same address has its own sendCh that we never touch. `peerMu` is released before any blocking I/O, matching the CLAUDE.md prohibition on holding domain mutexes across network I/O.
+
+The cap predicate each v2 sender enforces matches its receive-dispatcher contract:
+- `SendRoutesUpdate` requires `mesh_routing_v1` AND `mesh_routing_v2` AND `mesh_relay_v1` — the same gate `routingCapablePeers` uses to pick `AnnounceTarget` candidates (v1+relay) plus the v2 capability the announce loop additionally requires for the v2 path. Both inbound (`service.go`) and session (`peer_management.go`) dispatchers gate `routes_update` on the same triple, so a narrower replacement session — v2 alone, or v1+v2 without relay — would have its `routes_update` rejected on receive anyway, and the send gate stops it earlier.
+- `SendRequestResync` requires `mesh_routing_v2` only. The receive dispatchers gate `request_resync` on v2 alone (it carries no payload, just signals "clear my announce state"); widening the send gate to v1+v2+relay would have the sender skip a recovery control frame that the receiver would still accept, leaving v2-only sessions permanently desynced.
+
+On gate failure or capture miss the senders return false; the caller's per-peer announce cache stays untouched, so the next cycle re-classifies on the current session and either takes the v1 path or skips the peer entirely. Legacy `SendAnnounceRoutes` does NOT have a symmetric capture-write helper today: the same race exists in principle, but routing-capable peers always advertise `mesh_routing_v1` (the gate `routingCapablePeers` enforces), and the legacy frame is also what the first-sync invariant uses for forced-full / connect-time / divergence-fallback paths whose wider scope of mock test fixtures complicates a uniform check; if a regression triggers the v1-side race in production, the symmetric capture-and-write belongs next to the v2 senders.
+
+### Baseline gate on v2 receive
+
+A `routes_update` frame is a delta against the `announce_routes` baseline delivered for the current session. The receive-side `handleRoutesUpdate` enforces this explicitly via the per-peer flag `AnnouncePeerState.hasReceivedBaseline`:
+
+- on session establishment / reconnect, the flag is cleared by `MarkReconnected`;
+- a legacy `announce_routes` arrival sets the flag via `MarkBaselineReceived` inside `applyAnnounceEntries` (shared with the v1 receive path);
+- a `routes_update` arrival checks the flag: if unset, the receiver emits `request_resync` to the peer and drops the delta without touching the routing table; if set, the delta is applied entry-by-entry through the same `applyAnnounceEntries` core used by the legacy path.
+
+The baseline flag is an explicit `bool` rather than a derived "do we have any entries from this peer" check: the flag is set strictly by an actual `announce_routes` frame arrival, including an arrival with an empty entry payload — `applyAnnounceEntries` runs to completion regardless of `len(wireRoutes)`, so if an empty `announce_routes` frame is ever received it still flips `hasReceivedBaseline` via `MarkBaselineReceived` before returning. This matters for forward compatibility with peers that ship an empty baseline as an empty wire frame; without explicit flag tracking, deriving the baseline from "do we have entries" would force every subsequent `routes_update` from such a peer into a resync cycle. In this build the local send-side empty-baseline short-circuit emits NO wire frame at all (it records a local successful baseline via `RecordFullSyncSuccess` and returns without calling the wire sender), so a peer talking to this build never observes anything from us in that case and its `hasReceivedBaseline` stays false. That asymmetry is exactly why `wireBaselineSentToPeer` exists on the send side: it stays false through the no-wire empty-baseline path so the next non-empty cycle is forced onto legacy `announce_routes` to actually establish the baseline on the wire — see "Empty-baseline + v2 receive-gate interaction" above.
+
+Duplicate baseline arrivals are harmless: the flag is already set and is simply re-set on each legacy `announce_routes` frame.
 
 ### Queue-state persistence contract
 
@@ -493,13 +548,21 @@ sequenceDiagram
 internal/core/routing/
     types.go                    — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
     table.go                    — Table with all CRUD, query, disconnect, and wire-projection operations
-    announce.go                 — AnnounceLoop: periodic (30s) + triggered announce_routes sender;
-                                  PeerSender interface with two wire-frame methods —
+    announce.go                 — AnnounceLoop: periodic (30s) + triggered announce sender;
+                                  PeerSender interface with three wire-frame methods —
                                   SendAnnounceRoutes (legacy announce_routes; always used for
-                                  connect-time / forced full sync and for v1 delta) and
-                                  SendRoutesUpdate (v2 routes_update scaffold; not called by the
-                                  v1 loop, wired only to preserve the "initial sync is always
-                                  legacy announce_routes" invariant at the interface signature level)
+                                  connect-time / forced full sync and for v1 delta),
+                                  SendRoutesUpdate (v2 routes_update delta; used only when both
+                                  sides negotiated mesh_routing_v1 AND mesh_routing_v2 and the
+                                  per-cycle classification agrees — never for first sync),
+                                  SendRequestResync (v2 request_resync control frame emitted by
+                                  the receive side when a delta arrives before baseline);
+                                  AnnounceLoop reconciles AnnouncePeerState.capabilities to the
+                                  per-cycle AnnounceTarget caps via UpdateCapabilities at the start
+                                  of every per-peer goroutine so classifyDeltaMode reads two
+                                  agreeing snapshots in production; the divergence outcome stays
+                                  as a defensive fallback for any future caller that bypasses the
+                                  cycle-time sync
     announce_builder.go         — BuildAnnounceSnapshot: 3-stage aggregation, AnnounceSnapshot, ComputeDelta
     announce_state.go           — AnnouncePeerState, AnnounceStateRegistry: per-peer send state lifecycle
     types_test.go               — unit tests for type invariants, validation, wire projection
@@ -509,19 +572,33 @@ internal/core/routing/
     announce_state_test.go      — unit tests for per-peer state lifecycle, View/Record methods
     announce_loop_cache_test.go — integration tests for noop suppression, delta-only, failed send retry,
                                   rate limiting, reconnect forced full sync, withdrawal retry via delta
-    announce_wire_frame_test.go — guard tests for v1 wire-frame choice: assert that both the full
-                                  sync and the delta path go through SendAnnounceRoutes and never
-                                  invoke the v2 SendRoutesUpdate scaffold
+    announce_wire_frame_test.go — guard tests pinning the first-sync wire-frame invariant: full
+                                  sync and connect-time always go through SendAnnounceRoutes
+                                  regardless of capability; v2 delta path exercises SendRoutesUpdate
+                                  only when both sources agree on v1+v2; divergence falls back to
+                                  SendAnnounceRoutes and marks state invalid for next cycle
 
 internal/core/node/
     table_router.go              — TableRouter: routing table lookup with gossip fallback
-    routing_announce.go          — announce-plane wire path: TTL loop, SendAnnounceRoutes /
-                                   sendAnnounceRoutesToInbound, SendRoutesUpdate (v2 scaffolding
-                                   stub on node.Service — returns false and emits a single
-                                   "routes_update_not_implemented_v2_pending" warn per peer
-                                   address via routesUpdateStubWarned; v1 paths never call it),
-                                   connect-time + periodic full sync, handleAnnounceRoutes,
-                                   writeFrameToInbound, fanoutAnnounceRoutes,
+    routing_announce.go          — announce-plane wire path: TTL loop; sender implementations on
+                                   node.Service for all three wire frames (SendAnnounceRoutes,
+                                   SendRoutesUpdate, SendRequestResync) built via buildAnnounceFrame
+                                   and dispatched through two complementary helpers — legacy
+                                   sendAnnouncePlaneFrame (for SendAnnounceRoutes; honours the
+                                   "inbound:" prefix via writeFrameToInbound vs enqueuePeerFrame)
+                                   and dispatchAnnouncePlaneFrameWithCaps (for SendRoutesUpdate
+                                   and SendRequestResync; captures sendCh / ConnID together with
+                                   capability validation under one peerMu RLock so a session-
+                                   replacement race between cap check and write cannot route the
+                                   frame to a narrower transport at the same address); the
+                                   captured ConnID path reuses writeFrameToInboundConn extracted
+                                   from writeFrameToInbound;
+                                   connect-time + periodic full sync via sendConnectTimeFullSync;
+                                   handleAnnounceRoutes and handleRoutesUpdate both funnel into the
+                                   shared applyAnnounceEntries receive core (announceReceiveLegacy
+                                   sets baseline, announceReceiveV2 requires baseline);
+                                   handleRequestResync does MarkInvalid + TriggerUpdate so next
+                                   cycle re-delivers baseline; fanoutAnnounceRoutes,
                                    triggerDrainForExposed, routingCapablePeers discovery
     routing_relay.go             — relay-plane forwarding: table-directed relay, sendFrameToAddress,
                                    sendTableDirectedRelay / sendRelayToAddress, next-hop address
@@ -878,7 +955,7 @@ sequenceDiagram
 
 ### Формат на проводе
 
-Фрейм `announce_routes` содержит список записей маршрутов. На проводе передаются только поля, необходимые для конвергенции; TTL и Source определяются локально.
+Фрейм `announce_routes` — legacy v1 фрейм announce-плоскости. Он содержит список записей маршрутов; на проводе передаются только поля, необходимые для конвергенции, TTL и Source определяются локально.
 
 ```json
 {
@@ -892,9 +969,19 @@ sequenceDiagram
 
 Withdrawal — это просто маршрут с `hops: 16` и увеличенным `seq`.
 
+Фрейм `routes_update` — v2 delta-фрейм. Форма payload идентична `announce_routes` (тот же массив `routes`, те же поля записей), но `type` равен `routes_update`. Семантическое отличие строгое: `routes_update` несёт ТОЛЬКО те записи, которые изменились относительно baseline получателя, и НИКОГДА не отправляется как первый sync после установления сессии. Правила для каждой записи (`hops=16` + новый `seq` = withdrawal, origin-only wire withdrawal и т.д.) в точности совпадают с legacy фреймом. Получатель, применивший delta без baseline, не смог бы отличить «у peer'а больше нет маршрутов» от «у peer'а есть маршруты, которые он в этот раз не включил», поэтому отправитель ОБЯЗАН сначала установить baseline через `announce_routes` (см. инвариант «First-sync wire-frame»).
+
+Фрейм `request_resync` — v2 управляющий фрейм без payload. Он отправляется получателем, когда `routes_update` прибывает до установления legacy `announce_routes` baseline для текущей сессии — то есть delta, у которой нет якоря. При получении он запускает `AnnounceStateRegistry.MarkInvalid(peer)` плюс `AnnounceLoop.TriggerUpdate()`, поэтому ветка forced-full следующего цикла повторно доставит baseline через `announce_routes` (forced-full всегда использует legacy фрейм согласно инварианту first-sync). У фрейма нет поля `routes`; сам факт его получения — сигнал.
+
+```json
+{"type": "request_resync"}
+```
+
 ### Гейтинг по capability
 
 Capability `mesh_routing_v1` рекламируется при handshake. Только peer'ы с этой capability в согласованном наборе будут получать фреймы `announce_routes`. Устаревшие peer'ы продолжают работать через gossip без нарушений.
+
+Capability `mesh_routing_v2` — опциональное расширение поверх `mesh_routing_v1`. Peer договаривается о v2, чтобы заявить, что понимает `routes_update` (v2 delta) и `request_resync` (v2 control). v2 имеет смысл только вместе с v1: peer, который объявил `mesh_routing_v2` без `mesh_routing_v1`, трактуется как v1-only, потому что инвариант first-sync (`announce_routes` baseline) зависит от v1, а peer, который не может принять baseline, не может применить delta. Mode-селекция для delta-пути управляется per-cycle снапшотом `AnnounceTarget.Capabilities` сессии, выбранной announce loop'ом; персистентная запись `AnnouncePeerState.capabilities` реконсилируется к этому снапшоту на старте цикла (см. «Выбор режима для announce delta» ниже). Никакого персистентного поля `Mode` в `AnnouncePeerState` не хранится.
 
 Требования к capability для table-directed relay next-hop зависят от роли peer'а:
 
@@ -902,6 +989,43 @@ Capability `mesh_routing_v1` рекламируется при handshake. Тол
 - **Transit (hops>1):** Next-hop должен переслать сообщение дальше по своей routing table. Нужны обе capability: `mesh_relay_v1` (принять relay) и `mesh_routing_v1` (переслать по таблице).
 
 Непосредственно подключённый relay-only peer (без `mesh_routing_v1`) остаётся пригодным как destination через table-directed delivery. Требование обеих capability для всех next-hop привело бы к потере direct-delivery path для relay-only peer'ов и ненужной деградации в blind gossip. `resolveRouteNextHopAddress` в `node/routing_relay.go` обеспечивает это различие.
+
+### Выбор режима для announce delta
+
+Для каждого routing-capable peer'а каждый announce-цикл выводит wire-фрейм delta на старте цикла. Классификатор читает два capability-снапшота, реконсилируемых на входе в цикл:
+
+- **`AnnounceTarget.Capabilities`** — per-cycle иммутабельный снапшот, сделанный `routingCapablePeers` под тем же `s.peerMu.RLock`, который произвёл `Address` и `Identity`. Отражает то, что сессия, выбранная `routingCapablePeers` как announce target, сообщает на тике текущего цикла.
+- **`AnnouncePeerState.capabilities`** — персистентная per-peer запись. Реконсилируется с target-снапшотом в самом начале каждой per-peer goroutine через `AnnounceStateRegistry.UpdateCapabilities`. После синхронизации persistent-запись — derived-view той же сессии, которая выбрана `AnnounceTarget`.
+
+Реконсиляция на старте цикла делает так, что `classifyDeltaMode` в продакшене читает два согласованных снапшота: к моменту вызова функции persistent-запись только что перезаписана target-caps. Two-input shape сохранена как defensive net — см. «Persistent caps как производная вьюха выбранного target-а» выше для рационала divergence-пути.
+
+Правила классификации (реализованы в `classifyDeltaMode`, `internal/core/routing/announce.go`):
+
+- оба входа содержат `mesh_routing_v1` И `mesh_routing_v2` → **v2 delta** через `SendRoutesUpdate` (wire-фрейм `routes_update`);
+- ни один вход не содержит `mesh_routing_v2` (или объявляет v2 без v1) → **v1 delta** через `SendAnnounceRoutes` (wire-фрейм `announce_routes`);
+- входы расходятся по v2 → **divergence**: `MarkInvalid(peer)` + legacy delta в этом цикле; следующий цикл делает forced-full через `SendAnnounceRoutes`. С cycle-time реконсиляцией эта ветка недостижима из цикла и служит только defensive fallback-ом для любого будущего call site, обходящего `UpdateCapabilities`.
+
+Пути forced-full и connect-time НЕ подвержены этой классификации. Они всегда идут через `SendAnnounceRoutes` вне зависимости от capability — см. инвариант first-sync wire-frame.
+
+**Send-time capability-гейт с захватом handle.** Mode-классификация работает на per-cycle `AnnounceTarget`-снапшоте. Между этим снапшотом и фактической записью внутри `SendRoutesUpdate` / `SendRequestResync` сессия на announce-адресе может закрыться и быть заменена сессией, которая НЕ держит гейт, требуемый receive-диспатчером (или вовсе быть снесена). Положить v2 wire-байты на такую более узкую сессию — нарушение протокола: получатель отвергает кадр и может банить отправителя. Send-путь закрывает гонку через `Service.dispatchAnnouncePlaneFrameWithCaps`: helper захватывает live-transport handle (sendCh для outbound сессий, ConnID для inbound conn-ов) под тем же `peerMu` RLock, что и валидация caps, и затем пишет в захваченный handle вне lock-а. Захват handle — не только cap-снапшота — несущий элемент: ConnID монотонен и не переиспользуется, поэтому замещающий inbound conn по тому же `remoteAddr` имеет свой свежий ConnID и наши байты не получит; outbound `peerSession.sendCh` принадлежит ровно одной сессии, поэтому замещающая сессия по тому же адресу имеет свой sendCh, к которому мы не прикасаемся. `peerMu` освобождается до любого блокирующего I/O, в соответствии с запретом CLAUDE.md удерживать доменные мьютексы поверх сетевого I/O.
+
+Cap-предикат, который каждый v2-сендер enforce-ит, соответствует его receive-диспатчер-контракту:
+- `SendRoutesUpdate` требует `mesh_routing_v1` И `mesh_routing_v2` И `mesh_relay_v1` — тот же гейт, по которому `routingCapablePeers` выбирает `AnnounceTarget`-кандидатов (v1+relay), плюс v2-cap, которого announce loop дополнительно требует для v2-пути. И inbound (`service.go`), и session (`peer_management.go`) диспатчеры гейтят `routes_update` по той же тройке, так что более узкая замещающая сессия — v2 alone, или v1+v2 без relay — всё равно получит reject от receive, и send-гейт останавливает кадр раньше.
+- `SendRequestResync` требует только `mesh_routing_v2`. Receive-диспатчеры гейтят `request_resync` только по v2 (фрейм без payload, лишь сигнал «очисти announce state»); расширение send-гейта до v1+v2+relay заставило бы сендера пропускать recovery control frame, который receiver всё равно бы принял, оставляя v2-only сессии в постоянной рассинхронизации.
+
+При неудаче гейта или промахе захвата сендеры возвращают false; per-peer announce-кэш caller-а остаётся нетронутым, и следующий цикл переклассифицирует на текущей сессии — либо v1-путь, либо peer вообще пропускается. Legacy `SendAnnounceRoutes` симметричного capture-write helper-а сегодня НЕ имеет: та же гонка в принципе существует, но routing-capable peer-ы всегда рекламируют `mesh_routing_v1` (тот гейт, что enforce-ит `routingCapablePeers`), а legacy-кадр — это и то, что first-sync инвариант использует для forced-full / connect-time / divergence-fallback путей, чей более широкий охват mock-test-фикстур усложняет однородную проверку; если регрессия триггерит v1-side гонку в продакшене, симметричный capture-and-write должен жить рядом с v2-сендерами.
+
+### Baseline-гейт на v2 receive
+
+Фрейм `routes_update` — delta относительно `announce_routes` baseline, доставленного для текущей сессии. Приёмная сторона `handleRoutesUpdate` проверяет это явно через per-peer флаг `AnnouncePeerState.hasReceivedBaseline`:
+
+- при установлении сессии / reconnect флаг сбрасывается в `MarkReconnected`;
+- прибытие legacy `announce_routes` выставляет флаг через `MarkBaselineReceived` внутри `applyAnnounceEntries` (общий код с v1 receive-путём);
+- прибытие `routes_update` проверяет флаг: если не выставлен — получатель шлёт `request_resync` peer'у и отбрасывает delta, не трогая routing table; если выставлен — delta применяется запись-за-записью через тот же `applyAnnounceEntries`-ядро, что и legacy путь.
+
+Флаг baseline — явный `bool`, а не производная проверка «есть ли у нас хоть одна запись от этого peer'а»: флаг выставляется строго при фактическом прибытии кадра `announce_routes`, включая прибытие с пустым payload — `applyAnnounceEntries` отрабатывает до конца независимо от `len(wireRoutes)`, поэтому если пустой `announce_routes` всё-таки приходит, он флипает `hasReceivedBaseline` через `MarkBaselineReceived` перед return. Это важно для forward-совместимости с peer'ами, которые шлют пустой baseline как пустой wire-кадр; без явного отслеживания флага вывод baseline из «есть ли у нас записи» загнал бы каждый последующий `routes_update` от такого peer'а в resync-цикл. В этой сборке локальный send-side empty-baseline short-circuit НЕ отправляет никакого wire-кадра вообще (просто записывает локальный успешный baseline через `RecordFullSyncSuccess` и возвращается, не вызывая wire-сендер), поэтому peer, говорящий с этой сборкой, в этом случае от нас ничего не наблюдает, и его `hasReceivedBaseline` остаётся false. Именно из-за этой асимметрии на send-стороне существует `wireBaselineSentToPeer`: он остаётся false через no-wire empty-baseline путь, и следующий непустой цикл принудительно идёт через legacy `announce_routes`, чтобы фактически установить baseline на проводе — см. «Взаимодействие empty-baseline и v2 receive-gate» выше.
+
+Повторные приходы baseline безвредны: флаг уже выставлен и просто переустанавливается на каждом legacy `announce_routes` фрейме.
 
 ### Контракт персистентности queue-state
 
@@ -938,13 +1062,21 @@ sequenceDiagram
 internal/core/routing/
     types.go                    — RouteEntry, AnnounceEntry, RouteTriple, Snapshot, RouteSource
     table.go                    — Table со всеми CRUD, query, disconnect и wire-projection операциями
-    announce.go                 — AnnounceLoop: периодический (30с) + triggered отправитель announce_routes;
-                                  интерфейс PeerSender с двумя wire-кадр методами —
-                                  SendAnnounceRoutes (legacy announce_routes; используется для
-                                  connect-time / forced full sync и для v1 delta) и
-                                  SendRoutesUpdate (v2 routes_update scaffold; v1-цикл его не
-                                  вызывает, сигнатура фиксирует инвариант «initial sync всегда
-                                  legacy announce_routes» на уровне интерфейса)
+    announce.go                 — AnnounceLoop: периодический (30с) + triggered announce-отправитель;
+                                  интерфейс PeerSender с тремя wire-кадр методами —
+                                  SendAnnounceRoutes (legacy announce_routes; всегда используется
+                                  для connect-time / forced full sync и для v1 delta),
+                                  SendRoutesUpdate (v2 routes_update delta; используется только
+                                  когда обе стороны договорились о mesh_routing_v1 И
+                                  mesh_routing_v2 и per-cycle классификация согласна — никогда
+                                  для first sync) и SendRequestResync (v2 request_resync control
+                                  frame, отправляемый приёмной стороной, когда delta приходит
+                                  до baseline); AnnounceLoop реконсилирует
+                                  AnnouncePeerState.capabilities с per-cycle AnnounceTarget caps
+                                  через UpdateCapabilities в начале каждой per-peer goroutine,
+                                  чтобы classifyDeltaMode в продакшене читала два согласованных
+                                  снапшота; ветка divergence остаётся как defensive fallback
+                                  для будущих caller-ов, обходящих cycle-time sync
     announce_builder.go         — BuildAnnounceSnapshot: 3-ступенчатая агрегация, AnnounceSnapshot, ComputeDelta
     announce_state.go           — AnnouncePeerState, AnnounceStateRegistry: per-peer состояние отправки
     types_test.go               — юнит-тесты инвариантов типов, валидации, wire-проекции
@@ -954,18 +1086,36 @@ internal/core/routing/
     announce_state_test.go      — юнит-тесты жизненного цикла per-peer state, методов View/Record
     announce_loop_cache_test.go — интеграционные тесты: noop suppression, delta-only, retry после ошибки,
                                   rate limiting, forced full sync после reconnect, retry withdrawal через delta
-    announce_wire_frame_test.go — guard-тесты выбора wire-кадра в v1: full sync и delta всегда идут
-                                  через SendAnnounceRoutes; v2-заглушка SendRoutesUpdate не вызывается
+    announce_wire_frame_test.go — guard-тесты, фиксирующие инвариант first-sync: full sync и
+                                  connect-time всегда идут через SendAnnounceRoutes вне
+                                  зависимости от capability; v2 delta путь вызывает
+                                  SendRoutesUpdate только когда оба источника согласны по v1+v2;
+                                  divergence откатывается на SendAnnounceRoutes и помечает state
+                                  invalid для следующего цикла
 
 internal/core/node/
     table_router.go              — TableRouter: lookup в routing table с gossip fallback
-    routing_announce.go          — Announce-плоскость: TTL loop, SendAnnounceRoutes /
-                                   sendAnnounceRoutesToInbound, SendRoutesUpdate (v2-заглушка
-                                   на node.Service — возвращает false и пишет единичный warn
-                                   "routes_update_not_implemented_v2_pending" на каждый
-                                   peerAddress через routesUpdateStubWarned; v1-пути её не
-                                   вызывают), connect-time и периодический full sync,
-                                   handleAnnounceRoutes, writeFrameToInbound,
+    routing_announce.go          — Announce-плоскость: TTL loop; реализации всех трёх
+                                   wire-кадров на node.Service (SendAnnounceRoutes,
+                                   SendRoutesUpdate, SendRequestResync) собираются через
+                                   buildAnnounceFrame и диспатчатся двумя комплементарными
+                                   helper-ами — legacy sendAnnouncePlaneFrame (для
+                                   SendAnnounceRoutes; уважает префикс "inbound:" через
+                                   writeFrameToInbound vs enqueuePeerFrame) и
+                                   dispatchAnnouncePlaneFrameWithCaps (для SendRoutesUpdate и
+                                   SendRequestResync; захватывает sendCh / ConnID вместе с
+                                   валидацией capability под одним peerMu RLock, так что гонка
+                                   замещения сессии между cap-check и записью не может
+                                   подменить транспорт на более узкий по тому же address);
+                                   captured-ConnID путь переиспользует writeFrameToInboundConn,
+                                   вытащенный из writeFrameToInbound;
+                                   connect-time + периодический full sync через
+                                   sendConnectTimeFullSync; handleAnnounceRoutes и
+                                   handleRoutesUpdate оба сходятся в общее ядро приёма
+                                   applyAnnounceEntries (announceReceiveLegacy выставляет
+                                   baseline, announceReceiveV2 требует baseline);
+                                   handleRequestResync делает MarkInvalid + TriggerUpdate,
+                                   так что следующий цикл повторно доставит baseline;
                                    fanoutAnnounceRoutes, triggerDrainForExposed, обнаружение
                                    routing-capable peer'ов (routingCapablePeers)
     routing_relay.go             — Relay-плоскость: table-directed relay, sendFrameToAddress,

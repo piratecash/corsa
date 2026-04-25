@@ -27,7 +27,7 @@ Every previously-`s.mu`-protected field moves to exactly one of the following mu
 Fields that remain outside this scheme:
 
 - `listener` — written exactly once inside `Run` before `Accept`. Keeps its existing single writer discipline; readers observe it via `loadListener` if needed.
-- `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `routesUpdateStubWarned`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers, `queuePersist` — already have their own synchronisation (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Not covered by the domain split. `routesUpdateStubWarned` is a sync.Map used by the `SendRoutesUpdate` scaffolding stub to emit one warn per peer address; v1 code paths never call the stub.
+- `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers, `queuePersist` — already have their own synchronisation (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Not covered by the domain split.
 - `lastPeerSave`, `lastPeerEvict`, `lastSync` — peer-lifetime timestamps; move with `peerMu`.
 - `reachableGroups` — populated exactly once by `computeReachableGroups` during `New` and treated as immutable for the runtime lifetime of the `Service`. Concurrent reads of the unmutated map are safe without a lock, so no mutex is assigned. If a future change makes it runtime-mutable, it must gain a mutex (either by moving into `ipStateMu` with every reader taking the lock, or its own dedicated synchronisation) in the same commit that adds the writer.
 
@@ -170,7 +170,7 @@ Every migration step must keep the existing node test suite green. Targeted regr
 Вне схемы остаются:
 
 - `listener` — пишется один раз в `Run` до `Accept`. Существующая дисциплина «один writer» сохраняется.
-- `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `routesUpdateStubWarned`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers, `queuePersist` — уже имеют собственную синхронизацию (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Не входят в доменное разделение. `routesUpdateStubWarned` — это sync.Map, используемая заглушкой `SendRoutesUpdate` для одноразового warn-а на каждый peer address; v1-пути никогда не зовут заглушку.
+- `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers, `queuePersist` — уже имеют собственную синхронизацию (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Не входят в доменное разделение.
 - `lastPeerSave`, `lastPeerEvict`, `lastSync` — peer-lifetime timestamps; едут с `peerMu`.
 - `reachableGroups` — заполняется ровно один раз функцией `computeReachableGroups` при `New` и считается иммутабельным на весь runtime `Service`. Конкурентные чтения немутировавшейся карты безопасны без lock-а, поэтому мьютекс не назначается. Если в будущем появится runtime-запись, в том же коммите необходимо добавить синхронизацию (либо перевести поле под `ipStateMu` с захватом на каждом читателе, либо дать собственную синхронизацию) — иначе writer гонится со всеми нынешними читателями.
 

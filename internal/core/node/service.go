@@ -310,20 +310,6 @@ type Service struct {
 	// Value: *atomic.Int64 (UnixNano of last recompute).
 	peerActivityNanos sync.Map
 
-	// routesUpdateStubWarned tracks which peerAddress values have already
-	// produced the "routes_update_not_implemented_v2_pending" warn from the
-	// SendRoutesUpdate scaffolding stub on Service. v1 code paths never call
-	// the stub (the announce loop uses only SendAnnounceRoutes), so in
-	// production this map stays empty; it exists only so that an accidental
-	// caller does not flood the log on every cycle. sync.Map provides its
-	// own synchronisation — this field is intentionally outside the domain
-	// locking scheme (see docs/locking.md, "Fields that remain outside this
-	// scheme" section).
-	//
-	// Key: domain.PeerAddress.
-	// Value: struct{}{} sentinel (the presence of a key is the whole signal).
-	routesUpdateStubWarned sync.Map
-
 	// trafficMu protects lastTrafficSnap. Separate from s.peerMu because
 	// emitTrafficDeltas already releases s.peerMu (RLock) before comparing
 	// with the previous snapshot. Using s.peerMu would require nesting or
@@ -2206,6 +2192,46 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		senderIdentity := s.inboundPeerIdentity(connID)
 		s.handleAnnounceRoutes(senderIdentity, frame)
 		return true
+	case "routes_update":
+		// Auth gate enforced above. v2 delta frame requires BOTH routing
+		// capabilities: v1 is the wire-protocol baseline (every routing-
+		// capable peer has it), v2 is the opt-in refinement that enables
+		// the delta path. A peer advertising only v1 must continue to
+		// receive legacy announce_routes frames; a peer advertising v2
+		// without v1 is treated as non-routing per docs/routing.md.
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV1) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV2) {
+			accepted = false
+			return true
+		}
+		// Relay gate mirrors announce_routes: routes through a non-relay
+		// neighbor would be data-plane unusable, so accepting the delta
+		// would only populate dead NextHop entries.
+		if !s.connHasCapability(connID, domain.CapMeshRelayV1) {
+			accepted = false
+			return true
+		}
+		senderIdentity := s.inboundPeerIdentity(connID)
+		senderAddress := s.inboundConnKeyForID(connID)
+		s.handleRoutesUpdate(senderIdentity, senderAddress, frame)
+		return true
+	case "request_resync":
+		// Auth gate enforced above. request_resync is a v2-only control
+		// frame: only v2 peers know to emit it, so gating on
+		// CapMeshRoutingV2 keeps legacy peers from ever hitting this path.
+		// No payload — arrival alone triggers MarkInvalid + TriggerUpdate
+		// on the peer's announce state, forcing the next cycle to take the
+		// full-sync branch via legacy announce_routes.
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV2) {
+			accepted = false
+			return true
+		}
+		senderIdentity := s.inboundPeerIdentity(connID)
+		s.handleRequestResync(senderIdentity)
+		return true
 	case "file_command":
 		// Auth gate enforced above. Capability check: file_transfer_v1 must
 		// be negotiated.
@@ -2243,6 +2269,8 @@ var p2pWireCommands = map[string]bool{
 	"relay_message":          true,
 	"relay_hop_ack":          true,
 	"announce_routes":        true,
+	"routes_update":          true,
+	"request_resync":         true,
 	"file_command":           true,
 }
 
@@ -5702,9 +5730,22 @@ func expectedReplyType(requestType string) string {
 // because the gossip path writes them via enqueuePeerFrame → sendCh, and
 // the remote dispatcher stores the payload without writing a response frame.
 // Blocking the session on a reply that never comes would stall gossip delivery.
+//
+// announce_routes / routes_update / request_resync are the announce-plane
+// trio: announce_routes is the legacy v1 baseline / forced-full / delta
+// frame, routes_update is the v2 incremental delta, request_resync is the
+// v2 control frame asking the peer to clear its announce state. None of
+// the three has a response frame — receivers update local state and stay
+// silent on the wire — so all three must skip the peerSessionRequest
+// reply-wait. Without classifying routes_update and request_resync here,
+// the session dequeue loop falls through to expectedReplyType("") and
+// blocks reading the next inbound frame as the "reply", which either
+// stalls the session for the read deadline or consumes an unrelated
+// inbound frame meant for the dispatcher.
 func isFireAndForgetFrame(frameType string) bool {
 	switch frameType {
-	case "announce_routes", "push_message", "push_notice", "relay_delivery_receipt":
+	case "announce_routes", "routes_update", "request_resync",
+		"push_message", "push_notice", "relay_delivery_receipt":
 		return true
 	default:
 		return isRelayFrame(frameType) || frameType == protocol.FileCommandFrameType

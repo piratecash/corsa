@@ -2296,6 +2296,42 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if session != nil {
 			s.handleAnnounceRoutes(session.peerIdentity, frame)
 		}
+	case "routes_update":
+		// v2 wire path on the outbound session. Capability gates mirror the
+		// inbound dispatcher: v1 is the baseline, v2 the opt-in refinement,
+		// relay is the data-plane requirement. Missing any of the three
+		// collapses the delta into silent drop — the peer MUST NOT have
+		// sent this frame in the first place (v2 is per-session opt-in),
+		// so arriving here means the peer misread its own capability set.
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+			return
+		}
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV2) {
+			return
+		}
+		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+			return
+		}
+		s.peerMu.RLock()
+		session := s.sessions[address]
+		s.peerMu.RUnlock()
+		if session != nil {
+			s.handleRoutesUpdate(session.peerIdentity, address, frame)
+		}
+	case "request_resync":
+		// v2-only control frame — see inbound dispatcher for contract.
+		// No payload, no capability beyond v2 required: the arrival is
+		// the signal to clear per-peer announce state and let the next
+		// cycle re-issue a legacy baseline.
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV2) {
+			return
+		}
+		s.peerMu.RLock()
+		session := s.sessions[address]
+		s.peerMu.RUnlock()
+		if session != nil {
+			s.handleRequestResync(session.peerIdentity)
+		}
 	case "error":
 		// Remote sent an explicit error frame before closing the connection.
 		// Log at Warn so it stands out from the subsequent EOF line that

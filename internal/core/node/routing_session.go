@@ -89,6 +89,21 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	}
 
 	if !firstRelay {
+		// Routing table is unchanged (the direct route already exists for
+		// this identity), no announce trigger fires, and the persistent
+		// capability snapshot in AnnouncePeerState is intentionally NOT
+		// touched here. Caps are reconciled at cycle start in
+		// AnnounceLoop.announceToAllPeers, where the registry snapshot is
+		// synced to the per-cycle AnnounceTarget caps (i.e. the same
+		// session routingCapablePeers actually picked). Updating caps in
+		// this hook from caps unrelated to that target — e.g. a relay-only
+		// session that routingCapablePeers cannot pick, or an overlapping
+		// session with different v2 support than the older one that ends
+		// up being chosen — only adds a window of inconsistency between
+		// state.capabilities and the cycle-time target. The cycle-time
+		// sync is the single point of truth for persistent caps; no
+		// lifecycle-hook variant can match it without re-implementing the
+		// same selection rule routingCapablePeers uses.
 		log.Debug().
 			Str("peer", string(peerIdentity)).
 			Msg("routing_additional_session_no_table_update")

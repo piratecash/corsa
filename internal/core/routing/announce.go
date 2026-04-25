@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 const (
@@ -34,25 +35,30 @@ const (
 //
 // Two wire frames are carried by two distinct methods so that the choice
 // of wire format lives on the call site and cannot silently flip inside
-// the implementation. The v1 loop uses only SendAnnounceRoutes;
-// SendRoutesUpdate is wired as a scaffold for a future capability-gated
-// v2 incremental path. Until that work lands, the invariant "connect-time
-// sync and forced full sync always use SendAnnounceRoutes" is enforced by
-// the call sites in this file (sendFullAnnounce / sendIncrementalAnnounce)
-// and by the node-side connect path; see docs/routing.md for the durable
-// announce-plane file map.
+// the implementation. The call-site contract is:
+//   - connect-time and forced-full paths always use SendAnnounceRoutes
+//     (legacy announce_routes wire frame) — this is the "First-sync
+//     wire-frame invariant" documented in docs/routing.md;
+//   - the delta path chooses between SendAnnounceRoutes (peer on v1 only)
+//     and SendRoutesUpdate (peer on v2) based on the peer's capability
+//     snapshot captured at cycle start — see AnnounceLoop.announceToAllPeers.
+//
+// The invariant "the implementation never silently flips the wire format"
+// is preserved: each call site decides once, and the interface provides no
+// method that could accept the wrong frame. See docs/routing.md for the
+// durable announce-plane file map.
 type PeerSender interface {
 	// SendAnnounceRoutes sends a list of AnnounceEntry items as a legacy
 	// announce_routes frame to the peer identified by peerAddress.
 	//
-	// This is the legacy v1 path. It is used for:
-	//   - connect-time full sync (always, regardless of any future v2
-	//     capability — initial sync after session establishment is always
-	//     the legacy frame so mixed-version networks never see an
-	//     unexpected routes_update);
+	// This is the legacy v1 wire path. It is used for:
+	//   - connect-time full sync (always, regardless of v2 capability —
+	//     initial sync after session establishment is always the legacy
+	//     frame so mixed-version networks never see an unexpected
+	//     routes_update);
 	//   - periodic forced full sync in the announce loop;
-	//   - delta updates for peers that have not negotiated the v2
-	//     mesh_routing capability.
+	//   - delta updates for peers that have NOT negotiated the
+	//     CapMeshRoutingV2 capability.
 	//
 	// ctx is the caller's request/cycle context: a pre-cancelled ctx
 	// fails fast without touching the transport, and a mid-flight cancel
@@ -73,24 +79,24 @@ type PeerSender interface {
 	// SendRoutesUpdate sends a v2 routes_update frame carrying an
 	// incremental delta to the peer identified by peerAddress.
 	//
-	// This method is scaffolding for the v2 capability-gated incremental
-	// path. In v1 it MUST NOT be called by the announce loop: the v1
-	// loop always uses SendAnnounceRoutes for both full sync and delta
-	// to preserve mixed-version compatibility on the wire.
+	// This method is the v2 capability-gated incremental path. The
+	// announce loop picks SendRoutesUpdate only when all of the following
+	// hold at cycle start:
+	//   - the peer's negotiated capability snapshot contains both
+	//     CapMeshRoutingV1 and CapMeshRoutingV2;
+	//   - the cycle is a delta send (the peer already has a baseline);
+	//   - the crosscheck between AnnouncePeerState.Capabilities and
+	//     AnnounceTarget.Capabilities agrees (divergence forces a full
+	//     resync via MarkInvalid — see announceToAllPeers).
 	//
-	// Contract for future v2 callers (not enforced in v1 code paths):
-	//   - only peers that negotiated the v2 mesh_routing capability
-	//     receive routes_update;
-	//   - SendRoutesUpdate MUST NOT be used for the first sync after
-	//     session establishment — initial sync is always legacy
-	//     announce_routes;
-	//   - SendRoutesUpdate MUST NOT be used for forced full resync —
-	//     forced full also goes through SendAnnounceRoutes.
+	// SendRoutesUpdate MUST NOT be used for:
+	//   - the first sync after session establishment (initial sync is
+	//     always legacy announce_routes — the peer has no baseline to
+	//     diff against);
+	//   - forced full resync (forced full is always legacy).
 	//
-	// Until the v2 wire frame is implemented, implementations return
-	// false and log a single warn per peer session so accidental call
-	// sites are visible without flooding the log. Semantics of ctx,
-	// peerAddress, and the bool return value match SendAnnounceRoutes.
+	// Semantics of ctx, peerAddress, and the bool return value match
+	// SendAnnounceRoutes.
 	SendRoutesUpdate(ctx context.Context, peerAddress PeerAddress, delta []AnnounceEntry) bool
 }
 
@@ -279,6 +285,27 @@ func (a *AnnounceLoop) PendingTrigger() bool {
 // is thread-safe (embedded mutex) and each goroutine operates on its own
 // peer's state, so there is no cross-peer contention. Cycle-level counters
 // become atomic; the summary log waits for every goroutine to finish.
+//
+// Mode selection (v1 vs v2) is derived at the start of each per-peer step
+// from the per-cycle AnnounceTarget.Capabilities (captured by peersFn at
+// cycle start under the peer-state lock that produced Address and Identity).
+// AnnouncePeerState.capabilities is the persistent mirror used by the
+// classification, but it is reconciled to the same target caps at the very
+// start of each per-peer goroutine via UpdateCapabilities. Without that
+// reconciliation the persistent snapshot can drift away from the chosen
+// session: peersFn dedupes overlapping sessions for one identity by map
+// iteration order, so successive cycles can pick different sessions; a
+// partial close (a routing-capable session that previously refreshed the
+// snapshot disappears while an older routing-capable session remains) leaves
+// the persistent caps describing a session that is no longer the target.
+// Reconciling at cycle start makes classifyDeltaMode read two agreeing
+// snapshots in production. The divergence path remains as a defensive net:
+// if a future caller introduces a second writer to AnnouncePeerState.capabilities
+// or routes around the cycle-time sync, MarkInvalid + legacy delta on the
+// current cycle is the safe fallback. Forced-full and connect-time paths
+// are unaffected — they always use SendAnnounceRoutes regardless of
+// capability (see sendFullAnnounce / sendLegacyFull / docs/routing.md
+// "First-sync wire-frame invariant").
 func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	cycleID := a.cycleCounter.Add(1)
 
@@ -294,12 +321,16 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	a.stateRegistry.EvictStale()
 
 	var (
-		totalRaw         atomic.Int32
-		totalAggregated  atomic.Int32
-		totalDelta       atomic.Int32
-		skippedNoop      atomic.Int32
-		forcedFull       atomic.Int32
-		coalescedTrigger atomic.Int32
+		totalRaw               atomic.Int32
+		totalAggregated        atomic.Int32
+		totalDelta             atomic.Int32
+		skippedNoop            atomic.Int32
+		forcedFull             atomic.Int32
+		coalescedTrigger       atomic.Int32
+		deltaV2                atomic.Int32
+		deltaV1                atomic.Int32
+		modeDivergence         atomic.Int32
+		v2DowngradedNoBaseline atomic.Int32
 	)
 
 	now := a.stateRegistry.clock()
@@ -320,6 +351,24 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			}
 
 			peerState := a.stateRegistry.GetOrCreate(peer.Identity)
+
+			// Reconcile persistent capability snapshot with the per-cycle
+			// AnnounceTarget caps. peersFn (in production: node.routingCapablePeers)
+			// dedupes overlapping sessions for one identity by map iteration
+			// order, so two cycles can pick different sessions when several
+			// routing-capable sessions for the same peer have different
+			// negotiated caps. A partial close (the last cap-refreshing
+			// session disappears while an older routing-capable session
+			// remains) can also leave AnnouncePeerState.capabilities
+			// describing a session that is no longer the chosen target.
+			// Syncing here makes the persistent snapshot a derived view of
+			// the same session this cycle picked: classifyDeltaMode below
+			// reads two agreeing capability lists and the divergence path
+			// stays purely defensive. Without this sync, classifyDeltaMode
+			// would keep firing divergence; MarkInvalid only flips
+			// needsFullResync and never refreshes caps, so the peer would
+			// be stuck in legacy/forced-full forever.
+			a.stateRegistry.UpdateCapabilities(peer.Identity, peer.Capabilities)
 
 			// Build peer-specific raw entries from table.
 			rawRoutes := a.table.AnnounceTo(peer.Identity)
@@ -368,7 +417,54 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				return
 			}
 
-			a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
+			// Mode selection. Both sources of the peer's capability set must
+			// agree on CapMeshRoutingV2 before the cycle may pick the v2 wire
+			// path. Disagreement is treated as "state changed underneath us":
+			// MarkInvalid forces the next cycle to take the forced-full path,
+			// and this cycle falls back to legacy delta so the peer still
+			// learns the change under whichever wire format it actually
+			// understands. CapMeshRoutingV2 is opt-in on top of v1; a peer
+			// that advertises v2 without v1 is treated as v1-only because the
+			// first-sync invariant (legacy announce_routes) is gated on v1.
+			mode := classifyDeltaMode(view.CapabilitiesSnapshot, peer.Capabilities)
+			// Wire-baseline gate: v2 routes_update may be sent only after a
+			// legacy announce_routes frame has actually gone out to this peer
+			// in the current session. The empty-snapshot short-circuit in
+			// connect-time and forced-full paths records a successful baseline
+			// locally without emitting any wire frame, so HasSentWireBaseline
+			// stays false and the peer's v2 receive gate would drop the first
+			// routes_update and emit request_resync. Force the legacy delta
+			// path here so the very first observable wire frame is the
+			// baseline, exactly as required by the symmetric receive-side
+			// invariant. After the legacy send succeeds, MarkWireBaselineSent
+			// in sendIncrementalAnnounce flips the flag and subsequent cycles
+			// take the v2 path normally.
+			if mode == deltaModeV2 && !view.HasSentWireBaseline {
+				v2DowngradedNoBaseline.Add(1)
+				log.Debug().
+					Uint64("announce_cycle_id", cycleID).
+					Str("peer_identity", string(peer.Identity)).
+					Str("peer_address", string(peer.Address)).
+					Msg("announce_v2_downgraded_no_wire_baseline")
+				mode = deltaModeV1
+			}
+			switch mode {
+			case deltaModeV2:
+				deltaV2.Add(1)
+				a.sendIncrementalAnnounceV2(ctx, cycleID, peer, peerState, snapshot, delta, now)
+			case deltaModeV1:
+				deltaV1.Add(1)
+				a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
+			case deltaModeDivergence:
+				modeDivergence.Add(1)
+				a.stateRegistry.MarkInvalid(peer.Identity)
+				log.Warn().
+					Uint64("announce_cycle_id", cycleID).
+					Str("peer_identity", string(peer.Identity)).
+					Str("peer_address", string(peer.Address)).
+					Msg("announce_mode_divergence_fallback_to_legacy_delta")
+				a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
+			}
 		}(peer)
 	}
 	wg.Wait()
@@ -382,7 +478,71 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 		Int("announce_skipped_noop", int(skippedNoop.Load())).
 		Int("announce_forced_full", int(forcedFull.Load())).
 		Int("announce_trigger_coalesced", int(coalescedTrigger.Load())).
+		Int("announce_delta_v1", int(deltaV1.Load())).
+		Int("announce_delta_v2", int(deltaV2.Load())).
+		Int("announce_mode_divergence", int(modeDivergence.Load())).
+		Int("announce_v2_downgraded_no_wire_baseline", int(v2DowngradedNoBaseline.Load())).
 		Msg("announce_cycle_complete")
+}
+
+// deltaMode enumerates the wire-format outcomes of mode selection on a
+// delta send. Kept internal to the routing package because the tri-state
+// (v1, v2, divergence) is an implementation detail of announceToAllPeers.
+type deltaMode int
+
+const (
+	// deltaModeV1 means legacy announce_routes is used — either because
+	// the peer did not advertise CapMeshRoutingV2 or because v2 was not
+	// advertised alongside v1 (see type doc on CapMeshRoutingV2).
+	deltaModeV1 deltaMode = iota
+	// deltaModeV2 means both sources agree on CapMeshRoutingV2 and the
+	// cycle takes the v2 routes_update wire path.
+	deltaModeV2
+	// deltaModeDivergence means the two capability sources disagree. The
+	// peer is marked NeedsFullResync and the cycle falls back to legacy
+	// delta so the convergence signal still lands.
+	deltaModeDivergence
+)
+
+// classifyDeltaMode derives the wire-format mode for a v1+ delta send.
+// Both inputs must contain CapMeshRoutingV2 for v2 to be picked, and v2
+// is meaningful only when CapMeshRoutingV1 is also advertised in that
+// same input. In production both inputs are equal: the announce loop
+// reconciles AnnouncePeerState.capabilities to the per-cycle
+// AnnounceTarget.Capabilities via UpdateCapabilities at the start of
+// each per-peer goroutine, so by the time this function runs both
+// arguments come from the same chosen target. The two-input shape and
+// the deltaModeDivergence outcome are kept as a defensive net for any
+// future caller that bypasses the cycle-time sync — see the doc comment
+// on AnnounceLoop.announceToAllPeers for the reconciliation contract.
+func classifyDeltaMode(stateCaps []PeerCapability, targetCaps []PeerCapability) deltaMode {
+	stateV2 := hasCapV2Both(stateCaps)
+	targetV2 := hasCapV2Both(targetCaps)
+	switch {
+	case stateV2 && targetV2:
+		return deltaModeV2
+	case !stateV2 && !targetV2:
+		return deltaModeV1
+	default:
+		return deltaModeDivergence
+	}
+}
+
+// hasCapV2Both reports whether the capability slice contains both
+// CapMeshRoutingV1 and CapMeshRoutingV2. v2 without v1 is treated as
+// v1-only because the first-sync invariant (legacy announce_routes)
+// is gated on v1.
+func hasCapV2Both(caps []PeerCapability) bool {
+	var v1, v2 bool
+	for _, c := range caps {
+		switch c {
+		case domain.CapMeshRoutingV1:
+			v1 = true
+		case domain.CapMeshRoutingV2:
+			v2 = true
+		}
+	}
+	return v1 && v2
 }
 
 // sendFullAnnounce sends a complete announce snapshot to the peer and
@@ -428,6 +588,10 @@ func (a *AnnounceLoop) sendFullAnnounce(
 		// Cache remains in previous state; next cycle will retry.
 		return
 	}
+	// A non-empty legacy announce_routes frame went out — the peer has now
+	// observed a wire baseline in this session, so the v2 receive gate is
+	// open. Subsequent deltas may pick the v2 wire frame when caps agree.
+	state.MarkWireBaselineSent()
 	state.RecordFullSyncSuccess(snapshot, now)
 }
 
@@ -457,9 +621,12 @@ func (a *AnnounceLoop) sendLegacyFull(
 	return a.sender.SendAnnounceRoutes(ctx, peer.Address, snapshot.Entries)
 }
 
-// sendIncrementalAnnounce sends only changed entries to the peer and
-// updates cache to the full new snapshot on success via thread-safe
-// Record* methods.
+// sendIncrementalAnnounce sends only changed entries to the peer via the
+// legacy announce_routes wire frame and updates cache to the full new
+// snapshot on success via thread-safe Record* methods. Used when the
+// peer has not negotiated CapMeshRoutingV2 (v1-only delta path) and as
+// the mode-divergence fallback — see announceToAllPeers for the
+// classification rules.
 func (a *AnnounceLoop) sendIncrementalAnnounce(
 	ctx context.Context,
 	cycleID uint64,
@@ -475,10 +642,47 @@ func (a *AnnounceLoop) sendIncrementalAnnounce(
 			Str("peer_identity", string(peer.Identity)).
 			Str("peer_address", string(peer.Address)).
 			Int("delta_routes", len(delta)).
-			Msg("announce_delta_send_failed")
+			Msg("announce_delta_send_failed_v1")
 		// Cache remains in previous state; next cycle will retry.
 		return
 	}
+	// A legacy announce_routes frame went out — even on the v1 delta path,
+	// the peer's v2 receive gate (if any) treats this arrival as the wire
+	// baseline. Flip the flag so future cycles may pick the v2 frame when
+	// both capability sources agree.
+	state.MarkWireBaselineSent()
 	// Cache stores the full snapshot, not just the delta payload.
+	state.RecordDeltaSendSuccess(fullSnapshot, now)
+}
+
+// sendIncrementalAnnounceV2 sends the delta via the v2 routes_update wire
+// frame. Only picked by announceToAllPeers when both capability sources
+// agree on CapMeshRoutingV2 and a baseline exists on the peer side — the
+// first-sync invariant guarantees the baseline is always delivered via
+// the legacy announce_routes frame first (see sendFullAnnounce /
+// sendLegacyFull).
+//
+// On success the cache is updated exactly like the v1 delta path: the
+// full new snapshot is stored so the next cycle can compute a fresh
+// diff. A send failure leaves the cache untouched; the next cycle
+// retries with a fresh delta recomputation.
+func (a *AnnounceLoop) sendIncrementalAnnounceV2(
+	ctx context.Context,
+	cycleID uint64,
+	peer AnnounceTarget,
+	state *AnnouncePeerState,
+	fullSnapshot *AnnounceSnapshot,
+	delta []AnnounceEntry,
+	now time.Time,
+) {
+	if !a.sender.SendRoutesUpdate(ctx, peer.Address, delta) {
+		log.Debug().
+			Uint64("announce_cycle_id", cycleID).
+			Str("peer_identity", string(peer.Identity)).
+			Str("peer_address", string(peer.Address)).
+			Int("delta_routes", len(delta)).
+			Msg("announce_delta_send_failed_v2")
+		return
+	}
 	state.RecordDeltaSendSuccess(fullSnapshot, now)
 }

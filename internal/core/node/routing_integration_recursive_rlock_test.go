@@ -229,11 +229,23 @@ func TestRoutingReadPaths_CompleteWithConcurrentWriter(t *testing.T) {
 	seedTrackedInboundPeer(t, svc, domain.ConnID(200), idPeerB, remoteAddr)
 
 	stop := make(chan struct{})
+	writerStarted := make(chan struct{})
 	var writerHits atomic.Uint64
 	var writerWG sync.WaitGroup
 	writerWG.Add(1)
 	go func() {
 		defer writerWG.Done()
+		// Run the first critical section before the reads start so the
+		// test deterministically exercises concurrent writer traffic
+		// even on machines fast enough to drain the read goroutine
+		// before the writer is scheduled. Production code does not have
+		// this barrier; the test only needs ONE pre-flight hit to
+		// guarantee the writer queue interacts with the reads at least
+		// once. The unbounded loop below carries the regular churn.
+		svc.peerMu.Lock()
+		writerHits.Add(uint64(len(svc.conns)))
+		svc.peerMu.Unlock()
+		close(writerStarted)
 		for {
 			select {
 			case <-stop:
@@ -250,6 +262,10 @@ func TestRoutingReadPaths_CompleteWithConcurrentWriter(t *testing.T) {
 			svc.peerMu.Unlock()
 		}
 	}()
+
+	// Wait for the writer's first hit so the reads goroutine starts in a
+	// state where the writer goroutine is provably alive and contending.
+	<-writerStarted
 
 	deadline := time.Now().Add(2 * time.Second)
 	readsDone := make(chan struct{})
