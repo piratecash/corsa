@@ -183,7 +183,24 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	defer t.mu.Unlock()
 
 	now := t.clock()
-	if entry.ExpiresAt.IsZero() {
+	// Direct routes are socket-bound, not TTL-managed (see docs/routing.md
+	// "Direct route lifecycle"): ExpiresAt is intentionally zero so that
+	// IsExpired never triggers and TickTTL never evicts an entry whose
+	// underlying socket is still alive. Any UpdateRoute call that lands a
+	// RouteSourceDirect entry — whether through state restore, defensive
+	// re-application, or the explicit Direct-via-UpdateRoute test paths —
+	// must therefore land with ExpiresAt=zero, regardless of what the
+	// caller supplied. Forcing zero here closes the gap that the
+	// "if ExpiresAt.IsZero { now+defaultTTL }" default leaves below for
+	// learned routes; without this, a Direct entry reaches the table with
+	// a finite TTL and gets silently evicted on the next TickTTL pass.
+	// Validate() already enforces Hops=1 for RouteSourceDirect, so this
+	// branch never sees a withdrawn-direct (Hops=HopsInfinity) tombstone —
+	// withdrawal of direct routes goes through RemoveDirectPeer / WithdrawRoute,
+	// which write ExpiresAt directly without going through UpdateRoute.
+	if entry.Source == RouteSourceDirect {
+		entry.ExpiresAt = time.Time{}
+	} else if entry.ExpiresAt.IsZero() {
 		entry.ExpiresAt = now.Add(t.defaultTTL)
 	}
 
@@ -226,7 +243,39 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 		}
 		// Same SeqNo, same or worse trust/hops. The existing route is
 		// alive and unchanged — this is a reconfirmation, not a rejection.
+		// Refresh ExpiresAt only on a TRUE reconfirmation (same source AND
+		// same hops): a re-application of the identical lineage on the
+		// wire is the origin's signal that the route is still valid,
+		// which is what AnnounceLoop's forced full sync delivers between
+		// delta cycles. Without this the learned copy on a neighbor ages
+		// out at its original deadline even though the origin keeps
+		// confirming it, leaving a dead window from when ExpiresAt elapses
+		// until the next sync that actually changes a field. See
+		// docs/routing.md "Refresh interval invariant" for the full
+		// contract; the cadence half is enforced by
+		// ForcedFullSyncMultiplier*DefaultAnnounceInterval <= DefaultTTL/2.
+		//
+		// A weaker incoming entry — worse hops or lower trust on the same
+		// SeqNo — must NOT extend the old entry's lifetime. Doing so would
+		// freeze an optimistic earlier hops=N entry indefinitely and
+		// prevent natural TTL-driven reconvergence onto the actually-current
+		// hops=N+1 path when the origin does not bump SeqNo (e.g. a
+		// transit's local path to the origin lengthened without an origin
+		// SeqNo update).
+		//
+		// Direct routes are also exempt: they use ExpiresAt=zero by design
+		// (lifecycle is tied to AddDirectPeer/RemoveDirectPeer, see
+		// docs/routing.md "Direct route lifecycle"), and IsExpired returns
+		// false for a zero ExpiresAt — so an alive direct entry would
+		// reach this branch alongside learned routes. Overwriting zero
+		// with now+defaultTTL here would convert a never-expiring direct
+		// route into a 120s-ageing one and let TickTTL evict it while the
+		// underlying socket is still connected.
 		if !old.IsExpired(now) {
+			isExactReconfirmation := entry.Source == old.Source && entry.Hops == old.Hops
+			if isExactReconfirmation && old.Source != RouteSourceDirect {
+				existing[idx].ExpiresAt = now.Add(t.defaultTTL)
+			}
 			return RouteUnchanged, nil
 		}
 

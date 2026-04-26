@@ -145,3 +145,29 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 		t.Fatalf("expected peer-B in the forced-full snapshot, got entries=%+v", lastRoutes)
 	}
 }
+
+// TestRoutingConstants_RefreshIntervalInvariant is a compile-time-style guard
+// for the refresh-interval invariant. AnnounceLoop suppresses the wire send
+// when the per-peer delta is empty (announce.go: skippedNoop branch), so
+// learned routes on neighbors are renewed only by the forced-full sync
+// cadence ForcedFullSyncMultiplier*DefaultAnnounceInterval. If that cadence
+// is not strictly tighter than half the route TTL, a single dropped or
+// late-arriving full sync lets the neighbor's copy expire before the next
+// refresh — the route silently disappears for up to one full cycle even
+// though the origin keeps confirming it. The "<= TTL/2" bound is the safety
+// margin: at the boundary case the next refresh arrives exactly when the
+// previous lifetime ends, and one missed cycle still keeps the route alive
+// until the cycle after that.
+//
+// Production receive-side fix is in Table.UpdateRoute on the RouteUnchanged
+// branch: an alive same-SeqNo same-source same-hops re-application extends
+// ExpiresAt to now+defaultTTL. Without that fix this invariant alone is not
+// sufficient; with it, this invariant is the second half of the contract.
+func TestRoutingConstants_RefreshIntervalInvariant(t *testing.T) {
+	refresh := time.Duration(routing.ForcedFullSyncMultiplier) * routing.DefaultAnnounceInterval
+	half := routing.DefaultTTL / 2
+	if refresh > half {
+		t.Fatalf("refresh-interval invariant violated: ForcedFullSyncMultiplier*DefaultAnnounceInterval=%s must be <= DefaultTTL/2=%s (TTL=%s); learned routes will silently expire on neighbors between forced full syncs",
+			refresh, half, routing.DefaultTTL)
+	}
+}

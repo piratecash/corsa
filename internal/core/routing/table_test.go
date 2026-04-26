@@ -401,6 +401,229 @@ func TestUpdateRouteUnchangedNotReturnedForExpired(t *testing.T) {
 	}
 }
 
+// TestUpdateRouteRefreshesTTLOnUnchangedLiveRoute is a regression guard for the
+// "learned routes silently expire between forced full syncs" bug. A periodic
+// re-announcement of an unchanged route (same SeqNo, source, hops) that
+// arrives BEFORE the existing entry expires must extend ExpiresAt to
+// now+defaultTTL — otherwise the route ages out at its original deadline even
+// though the origin keeps confirming it. The status remains RouteUnchanged
+// because no field that callers use for delta/comparison has changed; only
+// the lifetime is renewed.
+func TestUpdateRouteRefreshesTTLOnUnchangedLiveRoute(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithClock(func() time.Time { return current }),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	key := RouteTriple{Identity: "alice", Origin: "bob", NextHop: "charlie"}
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	}); status != RouteAccepted {
+		t.Fatalf("initial insert: expected RouteAccepted, got %d", status)
+	}
+
+	initial := tbl.InspectTriple(key)
+	if initial == nil {
+		t.Fatalf("inserted route not found")
+	}
+	initialExpiry := initial.ExpiresAt
+
+	// Advance clock by half the TTL — well within the alive window.
+	current = current.Add(60 * time.Second)
+
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	}); status != RouteUnchanged {
+		t.Fatalf("re-announce of alive route: expected RouteUnchanged, got %d", status)
+	}
+
+	refreshed := tbl.InspectTriple(key)
+	if refreshed == nil {
+		t.Fatalf("route disappeared after RouteUnchanged refresh")
+	}
+	expectedExpiry := current.Add(120 * time.Second)
+	if !refreshed.ExpiresAt.Equal(expectedExpiry) {
+		t.Fatalf("RouteUnchanged must refresh TTL: got ExpiresAt=%s, want %s (initial=%s, advanced 60s)",
+			refreshed.ExpiresAt, expectedExpiry, initialExpiry)
+	}
+}
+
+// TestUpdateRouteDirectInsertPreservesZeroExpiry guards the direct route
+// lifecycle invariant at the UpdateRoute primary-normalization step: any
+// caller (state restore, defensive write, the existing Direct-via-UpdateRoute
+// tests) that supplies a RouteSourceDirect entry with ExpiresAt=zero must
+// land in the table with ExpiresAt still zero. The default TTL bump that
+// applies to learned routes (now+defaultTTL when ExpiresAt.IsZero()) would
+// otherwise convert the entry into a 120s-ageing one and TickTTL would
+// evict it while the underlying socket is still alive — exactly the class
+// of races the AddDirectPeer/RemoveDirectPeer event-driven design avoids.
+// A non-zero ExpiresAt supplied by a caller is also forced back to zero:
+// the invariant is hard, not advisory, so no caller can accidentally pin
+// a finite TTL onto a direct entry.
+func TestUpdateRouteDirectInsertPreservesZeroExpiry(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithClock(func() time.Time { return current }),
+		WithLocalOrigin("me"),
+	)
+
+	// Caller supplies the canonical zero ExpiresAt. Normalization must
+	// leave it zero — anything else lets TickTTL evict an alive direct.
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: "alice", Origin: "me", NextHop: "alice",
+		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+	}); status != RouteAccepted {
+		t.Fatalf("initial direct insert: expected RouteAccepted, got %d", status)
+	}
+	zeroIn := tbl.InspectTriple(RouteTriple{Identity: "alice", Origin: "me", NextHop: "alice"})
+	if zeroIn == nil {
+		t.Fatalf("direct route not found after insert")
+	}
+	if !zeroIn.ExpiresAt.IsZero() {
+		t.Fatalf("zero-ExpiresAt direct insert must remain zero, got %s", zeroIn.ExpiresAt)
+	}
+
+	// Caller supplies a non-zero ExpiresAt. The invariant is hard — direct
+	// routes are never TTL-managed — so the table must force ExpiresAt
+	// back to zero rather than honour whatever the caller passed.
+	current = current.Add(time.Hour)
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: "bob", Origin: "me", NextHop: "bob",
+		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+		ExpiresAt: current.Add(time.Hour),
+	}); status != RouteAccepted {
+		t.Fatalf("direct insert with non-zero ExpiresAt: expected RouteAccepted, got %d", status)
+	}
+	nonZeroIn := tbl.InspectTriple(RouteTriple{Identity: "bob", Origin: "me", NextHop: "bob"})
+	if nonZeroIn == nil {
+		t.Fatalf("direct route 'bob' not found after insert")
+	}
+	if !nonZeroIn.ExpiresAt.IsZero() {
+		t.Fatalf("caller-supplied non-zero ExpiresAt must be forced to zero on direct insert, got %s",
+			nonZeroIn.ExpiresAt)
+	}
+
+	// TickTTL must not evict an active direct route no matter how far the
+	// clock has advanced — that is the whole point of ExpiresAt=zero.
+	current = current.Add(10 * time.Hour)
+	tbl.TickTTL()
+	if got := tbl.InspectTriple(RouteTriple{Identity: "alice", Origin: "me", NextHop: "alice"}); got == nil {
+		t.Fatalf("TickTTL evicted active direct route — invariant ExpiresAt=zero failed")
+	}
+}
+
+// TestUpdateRouteUnchangedDirectRoutePreservesZeroExpiry guards the direct
+// route lifecycle invariant from docs/routing.md "Direct route lifecycle":
+// own-origin direct routes use ExpiresAt=zero (never expire by time) and
+// their lifetime is managed entirely by AddDirectPeer / RemoveDirectPeer.
+// IsExpired returns false for ExpiresAt.IsZero(), so an alive direct route
+// reaches the RouteUnchanged refresh branch alongside learned routes; the
+// branch must NOT overwrite the zero ExpiresAt with now+defaultTTL, because
+// that would convert the never-expiring direct entry into a 120s-ageing one
+// and let TickTTL evict it while the underlying socket is still connected.
+func TestUpdateRouteUnchangedDirectRoutePreservesZeroExpiry(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithClock(func() time.Time { return current }),
+		WithLocalOrigin("hub"),
+	)
+
+	direct := mustAddDirect(t, tbl, "peer-A")
+	if !direct.ExpiresAt.IsZero() {
+		t.Fatalf("AddDirectPeer must seed ExpiresAt=zero, got %s", direct.ExpiresAt)
+	}
+
+	// Advance the clock and re-apply the identical direct route via
+	// UpdateRoute. This is the wire-shape of a forced full sync re-import
+	// or a future state-restore path; the existing route is alive and
+	// unchanged so the call lands on the RouteUnchanged branch.
+	current = current.Add(60 * time.Second)
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: "peer-A", Origin: "hub", NextHop: "peer-A",
+		Hops: 1, SeqNo: direct.SeqNo, Source: RouteSourceDirect,
+	}); status != RouteUnchanged {
+		t.Fatalf("re-apply of alive direct route: expected RouteUnchanged, got %d", status)
+	}
+
+	after := tbl.InspectTriple(RouteTriple{
+		Identity: "peer-A", Origin: "hub", NextHop: "peer-A",
+	})
+	if after == nil {
+		t.Fatalf("direct route disappeared after RouteUnchanged refresh")
+	}
+	if !after.ExpiresAt.IsZero() {
+		t.Fatalf("RouteUnchanged refresh must preserve ExpiresAt=zero for direct routes, got %s",
+			after.ExpiresAt)
+	}
+}
+
+// TestUpdateRouteUnchangedWorseHopsDoesNotRefreshTTL guards against the
+// "frozen optimistic route" regression: when an incoming announcement
+// carries the same SeqNo as the existing entry but a strictly worse Hops
+// (e.g. a transit's local path to the origin lengthened while the origin
+// itself did not bump SeqNo), the call lands on the RouteUnchanged branch
+// because nothing improves. Refreshing ExpiresAt in that case would let
+// the optimistic earlier hops=N entry live indefinitely, blocking natural
+// TTL-driven reconvergence onto the now-actual hops=N+1 path. Only an
+// *exact* reconfirmation (same source AND same hops) qualifies as a
+// liveness signal that warrants a TTL extension.
+func TestUpdateRouteUnchangedWorseHopsDoesNotRefreshTTL(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := now
+	tbl := NewTable(
+		WithClock(func() time.Time { return current }),
+		WithDefaultTTL(120*time.Second),
+	)
+
+	key := RouteTriple{Identity: "alice", Origin: "bob", NextHop: "charlie"}
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	}); status != RouteAccepted {
+		t.Fatalf("initial insert: expected RouteAccepted, got %d", status)
+	}
+	initial := tbl.InspectTriple(key)
+	if initial == nil {
+		t.Fatalf("inserted route not found")
+	}
+	initialExpiry := initial.ExpiresAt
+
+	// Advance the clock and apply a WORSE-hops entry with the same SeqNo.
+	// Same triple, same source, Hops=3 instead of 2. The trust check above
+	// does not fire (same source), the strict-hops-less check does not
+	// fire (Hops did not improve), so the call lands on the alive
+	// RouteUnchanged branch. It must NOT refresh ExpiresAt — otherwise the
+	// older hops=2 entry never ages out and reconvergence onto the
+	// actually-current hops=3 path is impossible without a SeqNo bump
+	// from the origin.
+	current = current.Add(60 * time.Second)
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
+	}); status != RouteUnchanged {
+		t.Fatalf("worse-hops same-SeqNo: expected RouteUnchanged, got %d", status)
+	}
+
+	after := tbl.InspectTriple(key)
+	if after == nil {
+		t.Fatalf("route disappeared after RouteUnchanged on worse-hops re-apply")
+	}
+	if !after.ExpiresAt.Equal(initialExpiry) {
+		t.Fatalf("worse-hops re-application must NOT extend ExpiresAt: initial=%s after=%s",
+			initialExpiry, after.ExpiresAt)
+	}
+	if after.Hops != 2 {
+		t.Fatalf("worse-hops re-application must keep the better existing Hops=2, got %d",
+			after.Hops)
+	}
+}
+
 // --- Split horizon ---
 
 func TestSplitHorizonOmitsRoutesFromPeer(t *testing.T) {
@@ -1436,6 +1659,11 @@ func TestTickTTLRemovesWithdrawnRoutes(t *testing.T) {
 }
 
 func TestDefaultTTLAppliedOnInsert(t *testing.T) {
+	// Direct routes are excluded by design — UpdateRoute forces ExpiresAt=zero
+	// for RouteSourceDirect regardless of caller intent (see "Direct route
+	// lifecycle" in docs/routing.md and TestUpdateRouteDirectInsertPreservesZeroExpiry).
+	// The defaultTTL contract this test exercises applies only to learned
+	// (announcement / hop_ack) entries, so the fixture uses RouteSourceAnnouncement.
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
@@ -1443,8 +1671,8 @@ func TestDefaultTTLAppliedOnInsert(t *testing.T) {
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
-		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	snap := tbl.Snapshot()
@@ -1456,13 +1684,17 @@ func TestDefaultTTLAppliedOnInsert(t *testing.T) {
 }
 
 func TestExplicitExpiresAtPreserved(t *testing.T) {
+	// Same lifecycle constraint as TestDefaultTTLAppliedOnInsert: an
+	// explicitly supplied ExpiresAt is preserved for learned routes only;
+	// direct entries are forced to zero so this contract uses an
+	// announcement entry.
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	custom := now.Add(999 * time.Second)
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
-		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: custom,
 	})
 
@@ -1579,15 +1811,25 @@ func TestLookupExcludesWithdrawnAndExpired(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(WithClock(fixedClock(now)))
 
+	// Withdrawn announcement (hops=infinity) — Lookup must exclude.
 	mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "x", NextHop: "n1",
 		Hops: HopsInfinity, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
+	// Already-expired learned route (caller-supplied ExpiresAt in the past) —
+	// Lookup must exclude. Uses RouteSourceAnnouncement, not Direct: direct
+	// routes are not TTL-managed and UpdateRoute forces ExpiresAt=zero on
+	// them (see "Direct route lifecycle" in docs/routing.md and
+	// TestUpdateRouteDirectInsertPreservesZeroExpiry), so a "caller-passed
+	// expired direct" scenario is not representable. The invariant under
+	// test here — Lookup excludes expired entries — is independent of the
+	// source enum, the announcement entry exercises it just as faithfully.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
-		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
+		Identity: "alice", Origin: "y", NextHop: "n2",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(-time.Second),
 	})
+	// Alive hop_ack route — Lookup must include.
 	mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "z", NextHop: "n3",
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,

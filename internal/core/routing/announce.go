@@ -20,8 +20,19 @@ const (
 
 	// ForcedFullSyncMultiplier controls how often a forced full sync is
 	// sent to each peer: every ForcedFullSyncMultiplier * DefaultAnnounceInterval.
-	// At 30s interval this means a full sync roughly every 5 minutes.
-	ForcedFullSyncMultiplier = 10
+	// At 30s interval this means a full sync every 60 seconds, which is
+	// exactly DefaultTTL/2 — the upper bound that keeps learned routes on
+	// neighbors alive between cycles even on a single dropped sync. The
+	// invariant
+	//
+	//   ForcedFullSyncMultiplier * DefaultAnnounceInterval <= DefaultTTL / 2
+	//
+	// is enforced by TestRoutingConstants_RefreshIntervalInvariant; raising
+	// this multiplier (or shortening DefaultTTL) without rechecking the
+	// invariant reintroduces the silent-expiry window that suppress-on-empty
+	// delta creates between forced full syncs. See
+	// docs/routing.md "Refresh interval invariant" for the full contract.
+	ForcedFullSyncMultiplier = 2
 
 	// MinForcedFullSyncInterval is the minimum time between forced full
 	// sync attempts for a single peer. Prevents flood when a peer is
@@ -382,9 +393,15 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			view := peerState.View()
 			needsFull := view.NeedsFullResync || view.LastSentSnapshot == nil
 
-			// Check if periodic forced full sync is due.
+			// Check if periodic forced full sync is due. Inclusive (>=) so
+			// the cycle that lands exactly at multiplier*interval triggers
+			// the full sync — matching the cadence the
+			// "Refresh interval invariant" promises (docs/routing.md). With
+			// strict `>` the first eligible cycle would be one tick later,
+			// turning the effective cadence into (multiplier+1)*interval
+			// and pushing the next refresh past DefaultTTL/2.
 			if !needsFull && !view.LastSuccessfulFullSyncAt.IsZero() {
-				if now.Sub(view.LastSuccessfulFullSyncAt) > forcedFullSyncInterval {
+				if now.Sub(view.LastSuccessfulFullSyncAt) >= forcedFullSyncInterval {
 					needsFull = true
 				}
 			}
