@@ -38,6 +38,11 @@ const (
 	defaultConsoleWindowWidth  = unit.Dp(1140)
 	defaultConsoleWindowHeight = unit.Dp(1020)
 	maxVisibleSuggestions      = 5
+	// maxConsoleCommandHistory bounds the in-memory ring of submitted commands
+	// reachable via Up/Down arrows in the console input. Older entries are
+	// dropped from the front when the cap is exceeded — this is per-window
+	// state, not persisted across console reopens.
+	maxConsoleCommandHistory = 200
 )
 
 type consoleTab int32
@@ -123,6 +128,22 @@ type ConsoleWindow struct {
 	suggestBaseQuery    string
 	suggestSnapshot     []consoleSuggestion
 	cachedCommands      []consoleSuggestion // loaded from CommandTable at init
+	// commandHistory is the chronological ring of submitted commands;
+	// commandHistory[0] is the oldest, commandHistory[len-1] the most recent.
+	// Up/Down arrows in the editor walk this ring when no completion
+	// suggestions are visible.
+	commandHistory []string
+	// historyCursor is the index in commandHistory currently shown in the
+	// editor. When the user is not navigating history it equals
+	// len(commandHistory) (one past the end), and historyDraft is empty.
+	historyCursor int
+	// historyDraft preserves the text the user had typed at the moment they
+	// began history navigation, so Down past the most recent entry restores it.
+	historyDraft string
+	// historyText is the value last written into the editor by history
+	// navigation. Used to detect manual edits — once the editor text diverges
+	// from this, navigation state is reset on the next frame.
+	historyText string
 	donateEntries       []consoleDonateEntry
 	donateLink          widget.Selectable
 	donateLinkButton    widget.Clickable
@@ -242,6 +263,7 @@ func colorBackground() color.NRGBA {
 
 func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 	c.syncSuggestionVisibility()
+	c.syncHistoryNavigation()
 	suggestions := c.consoleSuggestions()
 
 	for c.consoleTabButton.Clicked(gtx) {
@@ -294,10 +316,18 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 		}
 		switch ke.Name {
 		case key.NameDownArrow:
-			c.moveSuggestionSelection(1, suggestions)
+			if len(suggestions) > 0 {
+				c.moveSuggestionSelection(1, suggestions)
+			} else {
+				c.navigateHistory(1)
+			}
 			continue
 		case key.NameUpArrow:
-			c.moveSuggestionSelection(-1, suggestions)
+			if len(suggestions) > 0 {
+				c.moveSuggestionSelection(-1, suggestions)
+			} else {
+				c.navigateHistory(-1)
+			}
 			continue
 		case key.NameRightArrow:
 			if c.commitSuggestionForArguments(gtx, suggestions) {
@@ -691,6 +721,9 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 		return
 	}
 
+	c.appendCommandHistory(command)
+	c.resetHistoryNavigation()
+
 	c.setConsoleBusy(true)
 	c.consoleEditor.SetText("")
 	c.hideSuggestions = false
@@ -795,6 +828,97 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 			}
 		}
 	}(command)
+}
+
+// appendCommandHistory records cmd as the most recent history entry.
+// Consecutive duplicates collapse into a single entry — re-running the same
+// command should not push the previous distinct command out of arrow-reach.
+// The ring is capped at maxConsoleCommandHistory; older entries are dropped
+// from the front.
+func (c *ConsoleWindow) appendCommandHistory(cmd string) {
+	if cmd == "" {
+		return
+	}
+	if n := len(c.commandHistory); n > 0 && c.commandHistory[n-1] == cmd {
+		return
+	}
+	c.commandHistory = append(c.commandHistory, cmd)
+	if over := len(c.commandHistory) - maxConsoleCommandHistory; over > 0 {
+		c.commandHistory = append(c.commandHistory[:0:0], c.commandHistory[over:]...)
+	}
+}
+
+// resetHistoryNavigation parks the cursor one past the most recent entry, so
+// the next Up arrow starts a fresh walk from the latest command. Called after
+// a successful submit and whenever syncHistoryNavigation detects manual edits.
+func (c *ConsoleWindow) resetHistoryNavigation() {
+	c.historyCursor = len(c.commandHistory)
+	c.historyDraft = ""
+	c.historyText = ""
+}
+
+// navigateHistory walks the command-history ring in response to Up/Down
+// arrows in the console input. delta == -1 selects an older entry, +1 a newer
+// one. The first arrow press from a non-navigating state snapshots the
+// current editor contents into historyDraft so Down past the most recent
+// entry restores what the user was typing.
+//
+// While history is being browsed, suggestion completions are suppressed —
+// otherwise the next frame would treat the inserted command as fresh user
+// input and re-open the suggestion list, which would hijack the next arrow
+// press into completion-navigation instead of continuing through history.
+func (c *ConsoleWindow) navigateHistory(delta int) {
+	end := len(c.commandHistory)
+	if end == 0 {
+		return
+	}
+
+	// First step away from the live input — capture the in-progress draft so
+	// Down past the most recent entry can restore it verbatim.
+	if c.historyCursor >= end {
+		c.historyCursor = end
+		c.historyDraft = c.consoleEditor.Text()
+	}
+
+	next := c.historyCursor + delta
+	switch {
+	case next < 0:
+		next = 0
+	case next > end:
+		next = end
+	}
+	c.historyCursor = next
+
+	text := c.historyDraft
+	if next < end {
+		text = c.commandHistory[next]
+	}
+
+	c.consoleEditor.SetText(text)
+	pos := len([]rune(text))
+	c.consoleEditor.SetCaret(pos, pos)
+	c.historyText = text
+
+	c.hideSuggestions = true
+	c.lastSuggestQuery = strings.TrimSpace(text)
+	c.selectedSuggest = -1
+	c.suggestBaseQuery = ""
+	c.suggestSnapshot = nil
+}
+
+// syncHistoryNavigation drops the history-navigation state when the editor
+// text no longer matches what navigateHistory last wrote. The only way the
+// two can diverge is the user typing into the editor mid-browse, which means
+// they have committed to that text as their new draft and the next Up should
+// snapshot it fresh.
+func (c *ConsoleWindow) syncHistoryNavigation() {
+	if c.historyCursor >= len(c.commandHistory) {
+		return
+	}
+	if c.consoleEditor.Text() == c.historyText {
+		return
+	}
+	c.resetHistoryNavigation()
 }
 
 // scheduleUptimeInvalidate coalesces per-second redraw requests for the Peers

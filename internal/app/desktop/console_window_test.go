@@ -791,3 +791,231 @@ func TestActivePeerSummary_Fallback(t *testing.T) {
 		t.Errorf("expected 'Stalled: 0' in summary, got: %s", summary)
 	}
 }
+
+// TestAppendCommandHistoryDeduplicatesConsecutive ensures the same command
+// submitted twice in a row collapses into a single history entry — otherwise
+// pressing Up after a re-run would replay the duplicate before reaching the
+// previous distinct command.
+func TestAppendCommandHistoryDeduplicatesConsecutive(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+
+	cw.appendCommandHistory("ping")
+	cw.appendCommandHistory("ping")
+	cw.appendCommandHistory("help")
+	cw.appendCommandHistory("help")
+	cw.appendCommandHistory("ping")
+
+	want := []string{"ping", "help", "ping"}
+	if len(cw.commandHistory) != len(want) {
+		t.Fatalf("expected history length %d, got %d (%v)", len(want), len(cw.commandHistory), cw.commandHistory)
+	}
+	for i, v := range want {
+		if cw.commandHistory[i] != v {
+			t.Errorf("history[%d] = %q, want %q", i, cw.commandHistory[i], v)
+		}
+	}
+}
+
+// TestAppendCommandHistoryIgnoresEmpty makes sure whitespace-only or empty
+// submits never enter the ring. submitConsoleCommand already trims and
+// short-circuits empty input, but the helper enforces the same contract on
+// its own so future callers cannot accidentally pollute history.
+func TestAppendCommandHistoryIgnoresEmpty(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+
+	cw.appendCommandHistory("")
+	if len(cw.commandHistory) != 0 {
+		t.Fatalf("empty command must not be recorded, got %v", cw.commandHistory)
+	}
+}
+
+// TestAppendCommandHistoryCapsAtMax verifies the ring drops the oldest
+// entries once it grows past maxConsoleCommandHistory, so long-running
+// console sessions cannot accumulate unbounded memory.
+func TestAppendCommandHistoryCapsAtMax(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+
+	// Use a synthetic alphabet that produces non-consecutive duplicates.
+	for i := 0; i < maxConsoleCommandHistory+5; i++ {
+		cw.appendCommandHistory(string(rune('a'+(i%26))) + "_" + string(rune('0'+(i%10))) + "_" + string(rune('A'+(i/26)%26)))
+	}
+
+	if len(cw.commandHistory) != maxConsoleCommandHistory {
+		t.Fatalf("expected history capped at %d, got %d", maxConsoleCommandHistory, len(cw.commandHistory))
+	}
+}
+
+// TestNavigateHistoryUpReplaysLatest covers the most common interaction —
+// pressing Up on an empty input restores the most recently submitted command.
+func TestNavigateHistoryUpReplaysLatest(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+	cw.appendCommandHistory("ping")
+	cw.appendCommandHistory("help")
+	cw.resetHistoryNavigation()
+
+	cw.navigateHistory(-1)
+
+	if got := cw.consoleEditor.Text(); got != "help" {
+		t.Errorf("expected editor text 'help', got %q", got)
+	}
+	if cw.historyCursor != 1 {
+		t.Errorf("expected cursor at index 1, got %d", cw.historyCursor)
+	}
+}
+
+// TestNavigateHistoryWalksOlderToNewer exercises the full ring traversal:
+// repeated Up reaches the oldest entry and clamps there; Down walks back
+// toward the most recent entry and finally restores the original draft.
+func TestNavigateHistoryWalksOlderToNewer(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+	cw.appendCommandHistory("a")
+	cw.appendCommandHistory("b")
+	cw.appendCommandHistory("c")
+	cw.resetHistoryNavigation()
+
+	cw.consoleEditor.SetText("draft")
+
+	// Up walks toward older entries.
+	cw.navigateHistory(-1)
+	if got := cw.consoleEditor.Text(); got != "c" {
+		t.Errorf("after 1st Up: got %q, want %q", got, "c")
+	}
+	cw.navigateHistory(-1)
+	if got := cw.consoleEditor.Text(); got != "b" {
+		t.Errorf("after 2nd Up: got %q, want %q", got, "b")
+	}
+	cw.navigateHistory(-1)
+	if got := cw.consoleEditor.Text(); got != "a" {
+		t.Errorf("after 3rd Up: got %q, want %q", got, "a")
+	}
+	// Past the oldest — clamp.
+	cw.navigateHistory(-1)
+	if got := cw.consoleEditor.Text(); got != "a" {
+		t.Errorf("after Up at oldest: got %q, want clamped %q", got, "a")
+	}
+
+	// Down walks back toward the newest, then restores the draft.
+	cw.navigateHistory(1)
+	if got := cw.consoleEditor.Text(); got != "b" {
+		t.Errorf("after 1st Down: got %q, want %q", got, "b")
+	}
+	cw.navigateHistory(1)
+	if got := cw.consoleEditor.Text(); got != "c" {
+		t.Errorf("after 2nd Down: got %q, want %q", got, "c")
+	}
+	cw.navigateHistory(1)
+	if got := cw.consoleEditor.Text(); got != "draft" {
+		t.Errorf("after Down past newest: got %q, want draft %q", got, "draft")
+	}
+	// Past the draft — clamp at draft.
+	cw.navigateHistory(1)
+	if got := cw.consoleEditor.Text(); got != "draft" {
+		t.Errorf("after Down at draft: got %q, want clamped %q", got, "draft")
+	}
+}
+
+// TestNavigateHistoryEmptyIsNoop guards against panics or stray writes when
+// the user presses Up before submitting any commands.
+func TestNavigateHistoryEmptyIsNoop(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+	cw.consoleEditor.SetText("typing")
+
+	cw.navigateHistory(-1)
+
+	if got := cw.consoleEditor.Text(); got != "typing" {
+		t.Errorf("editor text must not change on empty history, got %q", got)
+	}
+	if cw.historyCursor != 0 {
+		t.Errorf("cursor must stay at 0 on empty history, got %d", cw.historyCursor)
+	}
+}
+
+// TestSyncHistoryNavigationResetsOnUserEdit verifies that mid-browse manual
+// editing of the editor text drops navigation state, so the next Up press
+// snapshots the new draft instead of the stale one.
+func TestSyncHistoryNavigationResetsOnUserEdit(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+	cw.appendCommandHistory("alpha")
+	cw.appendCommandHistory("beta")
+	cw.resetHistoryNavigation()
+
+	cw.consoleEditor.SetText("draft")
+	cw.navigateHistory(-1) // editor = "beta", cursor = 1
+
+	if cw.historyCursor != 1 {
+		t.Fatalf("precondition: cursor must be at 1, got %d", cw.historyCursor)
+	}
+
+	// Simulate the user typing — text now diverges from historyText.
+	cw.consoleEditor.SetText("beta-extra")
+
+	cw.syncHistoryNavigation()
+
+	if cw.historyCursor != len(cw.commandHistory) {
+		t.Errorf("cursor must reset to len(history)=%d after manual edit, got %d", len(cw.commandHistory), cw.historyCursor)
+	}
+	if cw.historyDraft != "" {
+		t.Errorf("draft must clear after manual edit, got %q", cw.historyDraft)
+	}
+
+	// Next Up snapshots the new text as the draft, then jumps to the latest
+	// history entry.
+	cw.navigateHistory(-1)
+	if cw.historyDraft != "beta-extra" {
+		t.Errorf("expected new draft 'beta-extra' after edit + Up, got %q", cw.historyDraft)
+	}
+	if got := cw.consoleEditor.Text(); got != "beta" {
+		t.Errorf("expected editor 'beta' after Up, got %q", got)
+	}
+}
+
+// TestNavigateHistorySuppressesSuggestions ensures that walking history does
+// not leave the suggestion popup primed to hijack the next arrow press —
+// every navigation step must mark suggestions as hidden and snap the
+// completion cursor back to a clean state.
+func TestNavigateHistorySuppressesSuggestions(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+	cw.appendCommandHistory("ping")
+	cw.resetHistoryNavigation()
+
+	cw.hideSuggestions = false
+	cw.selectedSuggest = 2
+	cw.suggestSnapshot = []consoleSuggestion{{Label: "ping", Insert: "ping"}}
+
+	cw.navigateHistory(-1)
+
+	if !cw.hideSuggestions {
+		t.Error("hideSuggestions must be true while browsing history")
+	}
+	if cw.selectedSuggest != -1 {
+		t.Errorf("selectedSuggest must reset to -1, got %d", cw.selectedSuggest)
+	}
+	if cw.suggestSnapshot != nil {
+		t.Errorf("suggestSnapshot must clear, got %v", cw.suggestSnapshot)
+	}
+}
+
+// TestSubmitConsoleCommandRecordsHistory drives the full submit path on a
+// quick command and asserts the command lands in history with the cursor
+// parked one past the end. Uses the registered "ping" command so executeCommand
+// completes synchronously without touching network or RPC client.
+func TestSubmitConsoleCommandRecordsHistory(t *testing.T) {
+	cw := newTestConsoleWindow(testTable())
+	cw.consoleEditor.SetText("ping")
+
+	cw.submitConsoleCommand()
+
+	// submitConsoleCommand spawns a goroutine for the actual command — wait
+	// for the busy flag to clear before asserting on the late-mutated state.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && cw.isConsoleBusy() {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if len(cw.commandHistory) != 1 || cw.commandHistory[0] != "ping" {
+		t.Fatalf("expected history=[ping], got %v", cw.commandHistory)
+	}
+	if cw.historyCursor != len(cw.commandHistory) {
+		t.Errorf("cursor must reset to len(history)=%d after submit, got %d", len(cw.commandHistory), cw.historyCursor)
+	}
+}
