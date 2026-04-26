@@ -383,13 +383,15 @@ corsa-cli --host 192.168.1.100 --port 46464 getPeers
 
 #### Flags
 
-| Flag | Default | Description |
-|---|---|---|
-| `--host` | `127.0.0.1` | RPC server host |
-| `--port` | `46464` | RPC server port |
-| `--username` | _(empty)_ | Username |
-| `--password` | _(empty)_ | Password |
-| `--named` | `false` | Interpret arguments as key=value pairs |
+| Flag | Env fallback | Default | Description |
+|---|---|---|---|
+| `--host` | `CORSA_RPC_HOST` | `127.0.0.1` | RPC server host |
+| `--port` | `CORSA_RPC_PORT` | `46464` | RPC server port |
+| `--username` | `CORSA_RPC_USERNAME` | _(empty)_ | Username |
+| `--password` | `CORSA_RPC_PASSWORD` | _(empty)_ | Password |
+| `--named` | _(none)_ | `false` | Interpret arguments as key=value pairs |
+
+Each connection flag falls back to the matching `CORSA_RPC_*` environment variable — the same variables the node reads in `internal/core/config`. This is what makes `corsa-cli` work out of the box inside the docker image: the node container exports `CORSA_RPC_USERNAME`/`CORSA_RPC_PASSWORD` for the server, and `corsa-cli` invocations from inside the same container inherit them automatically. Explicit flags always win over the environment.
 
 ### Integration
 
@@ -858,13 +860,15 @@ corsa-cli --host 192.168.1.100 --port 46464 getPeers
 
 #### Флаги
 
-| Флаг | По умолчанию | Описание |
-|---|---|---|
-| `--host` | `127.0.0.1` | Хост RPC сервера |
-| `--port` | `46464` | Порт RPC сервера |
-| `--username` | _(пусто)_ | Имя пользователя |
-| `--password` | _(пусто)_ | Пароль |
-| `--named` | `false` | Интерпретировать аргументы как key=value пары |
+| Флаг | Env fallback | По умолчанию | Описание |
+|---|---|---|---|
+| `--host` | `CORSA_RPC_HOST` | `127.0.0.1` | Хост RPC сервера |
+| `--port` | `CORSA_RPC_PORT` | `46464` | Порт RPC сервера |
+| `--username` | `CORSA_RPC_USERNAME` | _(пусто)_ | Имя пользователя |
+| `--password` | `CORSA_RPC_PASSWORD` | _(пусто)_ | Пароль |
+| `--named` | _(нет)_ | `false` | Интерпретировать аргументы как key=value пары |
+
+Каждый флаг подключения подхватывает значение из соответствующей переменной окружения `CORSA_RPC_*` — той же, что читает нода в `internal/core/config`. Это позволяет `corsa-cli` работать «из коробки» внутри docker-образа: контейнер ноды экспортирует `CORSA_RPC_USERNAME`/`CORSA_RPC_PASSWORD` для сервера, и вызовы `corsa-cli` из того же контейнера автоматически их наследуют. Явный флаг всегда побеждает значение из окружения.
 
 ### Интеграция
 

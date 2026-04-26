@@ -16,10 +16,15 @@ import (
 )
 
 func main() {
-	host := flag.String("host", "127.0.0.1", "RPC server host")
-	port := flag.String("port", "46464", "RPC server port")
-	username := flag.String("username", "", "RPC username")
-	password := flag.String("password", "", "RPC password")
+	// Flag defaults fall back to the same CORSA_RPC_* environment variables
+	// the node reads (see internal/core/config.LoadFromEnv). Running
+	// corsa-cli inside the docker image — where these vars are exported for
+	// the node — must work without re-passing credentials on the command
+	// line. Explicit flags still win over the environment.
+	host := flag.String("host", envOrDefault("CORSA_RPC_HOST", "127.0.0.1"), "RPC server host (env: CORSA_RPC_HOST)")
+	port := flag.String("port", envOrDefault("CORSA_RPC_PORT", "46464"), "RPC server port (env: CORSA_RPC_PORT)")
+	username := flag.String("username", envOrDefault("CORSA_RPC_USERNAME", ""), "RPC username (env: CORSA_RPC_USERNAME)")
+	password := flag.String("password", envOrDefault("CORSA_RPC_PASSWORD", ""), "RPC password (env: CORSA_RPC_PASSWORD)")
 	named := flag.Bool("named", false, "Interpret arguments as key=value named parameters")
 	flag.Parse()
 
@@ -63,6 +68,17 @@ func main() {
 	if statusCode >= 400 {
 		os.Exit(1)
 	}
+}
+
+// envOrDefault returns os.Getenv(key) if it is non-empty, otherwise fallback.
+// An empty env value is treated as unset — same semantics as the node-side
+// helper in internal/core/config, so CLI flag defaults and node config stay
+// symmetric for the shared CORSA_RPC_* variables.
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // parseArgs converts CLI arguments into a named args map.

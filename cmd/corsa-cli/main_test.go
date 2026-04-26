@@ -7,6 +7,56 @@ import (
 	"testing"
 )
 
+// --- envOrDefault tests ---
+
+func TestEnvOrDefaultUsesEnvWhenSet(t *testing.T) {
+	t.Setenv("CORSA_RPC_USERNAME", "admin")
+	if got := envOrDefault("CORSA_RPC_USERNAME", "fallback"); got != "admin" {
+		t.Errorf("expected 'admin', got %q", got)
+	}
+}
+
+func TestEnvOrDefaultFallsBackWhenUnset(t *testing.T) {
+	// Ensure no leakage from the host environment.
+	t.Setenv("CORSA_CLI_TEST_UNSET_VAR", "")
+	if got := envOrDefault("CORSA_CLI_TEST_UNSET_VAR", "fallback"); got != "fallback" {
+		t.Errorf("expected 'fallback', got %q", got)
+	}
+}
+
+func TestEnvOrDefaultFallsBackWhenEmpty(t *testing.T) {
+	// Empty env value is treated as unset — same semantics as the node-side
+	// envOrDefault in internal/core/config; keeps behavior symmetric.
+	t.Setenv("CORSA_RPC_PASSWORD", "")
+	if got := envOrDefault("CORSA_RPC_PASSWORD", "default"); got != "default" {
+		t.Errorf("expected 'default', got %q", got)
+	}
+}
+
+func TestEnvOrDefaultRPCDefaults(t *testing.T) {
+	// All four RPC env vars must be inherited from the environment so that
+	// running corsa-cli inside the same container/host as the node works
+	// without re-passing credentials and connection info on the command line.
+	t.Setenv("CORSA_RPC_HOST", "10.0.0.5")
+	t.Setenv("CORSA_RPC_PORT", "12345")
+	t.Setenv("CORSA_RPC_USERNAME", "u")
+	t.Setenv("CORSA_RPC_PASSWORD", "p")
+
+	cases := []struct {
+		key, fallback, want string
+	}{
+		{"CORSA_RPC_HOST", "127.0.0.1", "10.0.0.5"},
+		{"CORSA_RPC_PORT", "46464", "12345"},
+		{"CORSA_RPC_USERNAME", "", "u"},
+		{"CORSA_RPC_PASSWORD", "", "p"},
+	}
+	for _, tc := range cases {
+		if got := envOrDefault(tc.key, tc.fallback); got != tc.want {
+			t.Errorf("envOrDefault(%q, %q): got %q, want %q", tc.key, tc.fallback, got, tc.want)
+		}
+	}
+}
+
 // --- parseArgs tests ---
 
 func TestParseArgsEmpty(t *testing.T) {
