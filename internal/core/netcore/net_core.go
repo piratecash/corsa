@@ -46,6 +46,26 @@ type NetCore struct {
 	caps     []domain.Capability
 	networks map[domain.NetGroup]struct{}
 
+	// protocolVersion is the negotiated protocol version reported by
+	// the peer during handshake. The exact frame depends on direction:
+	//
+	//   - Inbound conns receive it from hello.Version, applied by
+	//     rememberConnPeerAddr in the node layer through ApplyOpts.
+	//     The hello frame is the first frame an inbound peer sends, so
+	//     this value is populated immediately on hello receipt.
+	//   - Outbound sessions receive it from welcome.Version, mirrored
+	//     onto the NetCore by applyWelcomeMetadata for symmetry with
+	//     the rest of the welcome-derived peer state. Zero before the
+	//     welcome frame is processed on this direction.
+	//
+	// The file router's inbound carve-out
+	// (fileTransferPeerRouteMetaLocked) reads this field through
+	// snapshotEntryLocked → connInfo.protocolVersion, so without the
+	// inbound population path the carve-out collapsed to version 0 and
+	// any peer with an outbound link would unfairly win the
+	// protocolVersion DESC primary key.
+	protocolVersion domain.ProtocolVersion
+
 	// Auth state (inbound only, nil for outbound).
 	// The pointer is swapped atomically via SetAuth/ClearAuth;
 	// connauth.State is never mutated in place after creation.
@@ -132,11 +152,12 @@ const sendChBuffer = 128
 // single struct instead of scattered Set* calls ensures that the peer
 // state is configured atomically and nothing is forgotten.
 type Options struct {
-	Address      domain.PeerAddress
-	Identity     domain.PeerIdentity
-	Caps         []domain.Capability
-	Networks     map[domain.NetGroup]struct{}
-	LastActivity time.Time
+	Address         domain.PeerAddress
+	Identity        domain.PeerIdentity
+	Caps            []domain.Capability
+	Networks        map[domain.NetGroup]struct{}
+	LastActivity    time.Time
+	ProtocolVersion domain.ProtocolVersion
 }
 
 // New creates a NetCore, applies opts, and starts the writer
@@ -148,19 +169,20 @@ func New(id ConnID, rawConn net.Conn, dir Direction, opts Options) *NetCore {
 	metered, _ := rawConn.(*MeteredConn)
 
 	pc := &NetCore{
-		id:            id,
-		direction:     dir,
-		address:       opts.Address,
-		identity:      opts.Identity,
-		caps:          cloneCaps(opts.Caps),
-		networks:      cloneNetworks(opts.Networks),
-		lastActivity:  opts.LastActivity,
-		sendCh:        make(chan sendItem, sendChBuffer),
-		writerDone:    make(chan struct{}),
-		rawConn:       rawConn,
-		metered:       metered,
-		connIDNum:     uint64(id),
-		writeDeadline: writeDeadlineFor(dir),
+		id:              id,
+		direction:       dir,
+		address:         opts.Address,
+		identity:        opts.Identity,
+		caps:            cloneCaps(opts.Caps),
+		networks:        cloneNetworks(opts.Networks),
+		lastActivity:    opts.LastActivity,
+		protocolVersion: opts.ProtocolVersion,
+		sendCh:          make(chan sendItem, sendChBuffer),
+		writerDone:      make(chan struct{}),
+		rawConn:         rawConn,
+		metered:         metered,
+		connIDNum:       uint64(id),
+		writeDeadline:   writeDeadlineFor(dir),
 	}
 	go pc.writerLoop()
 	return pc
@@ -509,6 +531,34 @@ func (pc *NetCore) SetNetworks(nets map[domain.NetGroup]struct{}) {
 	pc.networks = cloneNetworks(nets)
 }
 
+// ProtocolVersion returns the negotiated protocol version reported by
+// the peer during handshake. The source frame depends on direction:
+// hello.Version for inbound conns (populated by rememberConnPeerAddr),
+// welcome.Version for outbound sessions (populated by
+// applyWelcomeMetadata). See the protocolVersion field comment for the
+// full handshake mapping.
+//
+// Returns zero before the relevant handshake frame has been processed.
+// Callers that need to distinguish "not yet handshaken" from "peer
+// reports version 0" must consult Identity() / Address() first — those
+// are populated by the same handshake frame.
+func (pc *NetCore) ProtocolVersion() domain.ProtocolVersion {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.protocolVersion
+}
+
+// SetProtocolVersion records the negotiated protocol version once the
+// handshake frame carrying it has been parsed (hello on inbound,
+// welcome on outbound). Idempotent in practice: peers do not
+// renegotiate their protocol version mid-session, so a second call
+// with the same value is a no-op.
+func (pc *NetCore) SetProtocolVersion(v domain.ProtocolVersion) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.protocolVersion = v
+}
+
 // Address returns the overlay address declared during the hello handshake.
 // Empty before the hello frame is processed.
 func (pc *NetCore) Address() domain.PeerAddress {
@@ -624,6 +674,9 @@ func (pc *NetCore) ApplyOpts(opts Options) {
 	}
 	if !opts.LastActivity.IsZero() {
 		pc.lastActivity = opts.LastActivity
+	}
+	if opts.ProtocolVersion != 0 {
+		pc.protocolVersion = opts.ProtocolVersion
 	}
 }
 

@@ -69,6 +69,22 @@ func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame) {
 	session.netCore.SetAddress(advertised)
 	session.netCore.SetIdentity(session.peerIdentity)
 	session.netCore.SetCapabilities(session.capabilities)
+	// Mirror the negotiated protocol version onto the outbound NetCore
+	// for symmetry with the rest of the welcome-derived metadata
+	// (Address / Identity / Capabilities). The file router does NOT
+	// read this value on the outbound path — fileTransferPeerRouteMetaLocked
+	// reads sess.version directly for outbound entries. The inbound
+	// ranking fix lives in rememberConnPeerAddr (service.go), where
+	// hello.Version is folded into the inbound NetCore via ApplyOpts;
+	// that NetCore is the one snapshotEntryLocked reads when populating
+	// connInfo.protocolVersion for the inbound carve-out.
+	//
+	// We still set it here so any future code that introspects an
+	// outbound NetCore through the same accessor (logs, diagnostics,
+	// future iterators) sees a consistent value instead of zero.
+	// Removing this call without also reworking those consumers would
+	// silently regress them.
+	session.netCore.SetProtocolVersion(domain.ProtocolVersion(welcome.Version))
 }
 
 func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -63,8 +64,8 @@ func (s *Service) initFileTransfer() {
 			}
 			return s.routingTable.Snapshot()
 		},
-		PeerUsableAt: func(id domain.PeerIdentity) (time.Time, bool) {
-			return s.fileTransferPeerUsableAt(id)
+		PeerRouteMeta: func(id domain.PeerIdentity) (filerouter.PeerRouteMeta, bool) {
+			return s.fileTransferPeerRouteMeta(id)
 		},
 		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
 			return peerPubKeyFromTrust(s, id)
@@ -198,15 +199,23 @@ func hasCapability(caps []domain.Capability, target domain.Capability) bool {
 	return false
 }
 
-// fileTransferPeerUsableAt reports whether peer currently has at least one
-// usable file-capable connection and, when known, when that peer most
-// recently connected. Stalled peers are treated as unusable so file datagrams
-// do not route into dead next-hops. When multiple live connections exist for
-// the same identity, the oldest connected one wins as the stability tie-break.
-func (s *Service) fileTransferPeerUsableAt(peer domain.PeerIdentity) (time.Time, bool) {
+// fileTransferPeerRouteMeta reports whether peer currently has at least one
+// usable file-capable connection and, when usable, returns the route-meta
+// snapshot the file router needs to rank candidates.
+//
+// The returned ConnectedAt and ProtocolVersion describe a *single*
+// connection — the one sendFrameToIdentity would actually try first
+// (outbound preferred, inbound as fall-back, both filtered through the
+// shared peerSendableConnectionsLocked policy). Aggregating across all
+// eligible sessions (max version, oldest connectedAt) would let the file
+// router prefer this peer based on a version no packet would ever
+// traverse, because the live send path does not pick by version. Stalled
+// peers are treated as unusable so file datagrams do not route into dead
+// next-hops.
+func (s *Service) fileTransferPeerRouteMeta(peer domain.PeerIdentity) (filerouter.PeerRouteMeta, bool) {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
-	return s.fileTransferPeerUsableAtLocked(peer, time.Now().UTC())
+	return s.fileTransferPeerRouteMetaLocked(peer, time.Now().UTC())
 }
 
 func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(domain.PeerIdentity, time.Time)) {
@@ -244,40 +253,58 @@ func (s *Service) usableFileTransferPeersLocked(now time.Time) map[domain.PeerId
 	return fileCapable
 }
 
-func (s *Service) fileTransferPeerUsableAtLocked(peer domain.PeerIdentity, now time.Time) (time.Time, bool) {
-	var oldest time.Time
-	found := false
-
-	consider := func(address domain.PeerAddress) {
-		health := s.health[s.resolveHealthAddress(address)]
-		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
-			return
-		}
-		if !health.LastConnectedAt.IsZero() && (oldest.IsZero() || health.LastConnectedAt.Before(oldest)) {
-			oldest = health.LastConnectedAt
-		}
-		found = true
+func (s *Service) fileTransferPeerRouteMetaLocked(peer domain.PeerIdentity, now time.Time) (filerouter.PeerRouteMeta, bool) {
+	// Single source of truth: ask the same helper that backs
+	// sendFrameToIdentity for the ordered candidate list. Picking the
+	// head of that list guarantees the meta describes the connection
+	// the live send path would actually try first — the previous
+	// implementation aggregated max(version) and oldest(connectedAt)
+	// across *all* candidates and could promise an inbound v9 path
+	// while bytes were going out over an outbound v5 session.
+	//
+	// The slice is sorted outbound-first by the helper, so the head
+	// is the outbound session when one exists, falling back to an
+	// inbound conn otherwise — exactly the live send-path policy.
+	candidates := s.peerSendableConnectionsLocked(peer, domain.CapFileTransferV1, now)
+	if len(candidates) == 0 {
+		return filerouter.PeerRouteMeta{}, false
 	}
+	picked := candidates[0]
+	return filerouter.PeerRouteMeta{
+		ConnectedAt:     picked.connectedAt,
+		ProtocolVersion: trustedFileRouteVersion(peer, picked.protocolVersion),
+	}, true
+}
 
-	for _, sess := range s.sessions {
-		if sess == nil || sess.peerIdentity != peer || !hasCapability(sess.capabilities, domain.CapFileTransferV1) {
-			continue
-		}
-		consider(sess.address)
+// trustedFileRouteVersion returns the protocol version the file router
+// should use for ranking decisions, applying the inflated-version
+// defence: a peer claiming a higher protocol version than this build
+// implements cannot actually be speaking the protocol we just
+// enumerated, so the claim is either a misconfig or a deliberate
+// traffic-capture attack — lie about being "newer" to win the
+// protocolVersion DESC primary key and pull all file routes through
+// the attacker's next-hop.
+//
+// The defence is a soft demote, not a hard reject: ranking version is
+// clamped to zero, which sorts below every legit (peer ≤ local)
+// version under DESC ordering and pushes the candidate to the bottom
+// of the plan. The peer remains usable as a last-resort hop — we want
+// the option to deliver bytes when no trusted peer is reachable, just
+// not to *prefer* the suspicious one.
+//
+// Logging is at Warn level so operators can correlate ranking
+// surprises in the diagnostic with security signal in the journal.
+func trustedFileRouteVersion(peer domain.PeerIdentity, reported domain.ProtocolVersion) domain.ProtocolVersion {
+	const localVersion = domain.ProtocolVersion(config.ProtocolVersion)
+	if reported <= localVersion {
+		return reported
 	}
-
-	// Same visibility boundary as forEachUsableFileTransferPeerLocked:
-	// outbound NetCores are reachable via s.sessions above, so skip
-	// them here to keep pre-activation outbound entries hidden.
-	s.forEachInboundConnLocked(func(info connInfo) bool {
-		if info.identity != peer || !info.HasCapability(domain.CapFileTransferV1) {
-			return true
-		}
-		consider(info.address)
-		return true
-	})
-
-	return oldest, found
+	log.Warn().
+		Str("peer", string(peer)).
+		Int("reported_version", int(reported)).
+		Int("local_version", int(localVersion)).
+		Msg("file_router: peer reports inflated protocol version, demoted in ranking")
+	return 0
 }
 
 // isPeerReachable returns true if the peer has a direct session (outbound
@@ -295,7 +322,9 @@ func (s *Service) isPeerReachable(peer domain.PeerIdentity) bool {
 	// for peers that are connected on paper but already stalled. The same
 	// now timestamp is used for both the direct-peer and routed-peer checks
 	// to avoid threshold drift around the healthy/degraded/stalled boundary.
-	if _, ok := s.fileTransferPeerUsableAtLocked(peer, now); ok {
+	// Reachability only cares about the boolean result; the meta payload
+	// is discarded here on purpose.
+	if _, ok := s.fileTransferPeerRouteMetaLocked(peer, now); ok {
 		return true
 	}
 
@@ -472,6 +501,83 @@ func (s *Service) RemoveSenderMapping(fileID domain.FileID) bool {
 		return false
 	}
 	return manager.RemoveSenderMapping(fileID)
+}
+
+// ExplainFileRoute is the diagnostic counterpart of sendFileCommandToPeer:
+// it returns the ranked list of next-hops the file router would try
+// when sending a file command to dst, marking the first one as best.
+// excludeVia is intentionally empty — callers are asking "which peer
+// would I actually use?", not "which peer would I use as a transit
+// node for an inbound frame", so split-horizon does not apply here.
+//
+// Returns errFileTransferNotInitialized when the file subsystem has
+// not been wired yet (matches the rest of the file-domain API). An
+// empty array is returned when the subsystem is up but no usable
+// next-hop currently exists for dst — that is a valid state, not an
+// error.
+//
+// Wire schema (one entry per next-hop, in selection order):
+//
+//	[
+//	  {
+//	    "next_hop": "<peer identity>",
+//	    "hops": 1,
+//	    "protocol_version": 7,
+//	    "connected_at": "2025-01-01T12:34:56Z",  // omitted when unknown
+//	    "uptime_seconds": 3600.5,                // 0 when connected_at omitted
+//	    "best": true                             // true only for index 0
+//	  },
+//	  ...
+//	]
+func (s *Service) ExplainFileRoute(dst domain.PeerIdentity) (json.RawMessage, error) {
+	s.fileMu.RLock()
+	router := s.fileRouter
+	s.fileMu.RUnlock()
+	if router == nil {
+		return nil, errFileTransferNotInitialized
+	}
+
+	plan := router.ExplainRoute(dst)
+	now := time.Now().UTC()
+
+	type wireEntry struct {
+		NextHop         string  `json:"next_hop"`
+		Hops            int     `json:"hops"`
+		ProtocolVersion int     `json:"protocol_version"`
+		ConnectedAt     string  `json:"connected_at,omitempty"`
+		UptimeSeconds   float64 `json:"uptime_seconds"`
+		Best            bool    `json:"best"`
+	}
+
+	out := make([]wireEntry, len(plan))
+	for i, e := range plan {
+		entry := wireEntry{
+			NextHop:         string(e.NextHop),
+			Hops:            e.Hops,
+			ProtocolVersion: int(e.ProtocolVersion),
+			Best:            i == 0,
+		}
+		if !e.ConnectedAt.IsZero() {
+			// connected_at is rendered in RFC3339 UTC so it round-trips
+			// through any JSON consumer (CLI table, desktop console, SDK).
+			// uptime_seconds is the derived view used by the peers console:
+			// (now - connected_at) clamped at zero so a future-dated
+			// connectedAt (clock-skew bug) never produces negative uptime.
+			entry.ConnectedAt = e.ConnectedAt.UTC().Format(time.RFC3339)
+			uptime := now.Sub(e.ConnectedAt).Seconds()
+			if uptime < 0 {
+				uptime = 0
+			}
+			entry.UptimeSeconds = uptime
+		}
+		out[i] = entry
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal file route plan: %w", err)
+	}
+	return data, nil
 }
 
 // FetchFileTransfers returns a JSON-encoded list of active and pending

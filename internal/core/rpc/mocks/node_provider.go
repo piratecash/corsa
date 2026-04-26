@@ -178,6 +178,68 @@ func (_c *MockNodeProvider_ClientVersion_Call) RunAndReturn(run func() string) *
 	return _c
 }
 
+// ExplainFileRoute provides a mock function for the type MockNodeProvider
+func (_mock *MockNodeProvider) ExplainFileRoute(dst domain.PeerIdentity) (json.RawMessage, error) {
+	ret := _mock.Called(dst)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ExplainFileRoute")
+	}
+
+	var r0 json.RawMessage
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(domain.PeerIdentity) (json.RawMessage, error)); ok {
+		return returnFunc(dst)
+	}
+	if returnFunc, ok := ret.Get(0).(func(domain.PeerIdentity) json.RawMessage); ok {
+		r0 = returnFunc(dst)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(json.RawMessage)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(domain.PeerIdentity) error); ok {
+		r1 = returnFunc(dst)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockNodeProvider_ExplainFileRoute_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ExplainFileRoute'
+type MockNodeProvider_ExplainFileRoute_Call struct {
+	*mock.Call
+}
+
+// ExplainFileRoute is a helper method to define mock.On call
+//   - dst domain.PeerIdentity
+func (_e *MockNodeProvider_Expecter) ExplainFileRoute(dst interface{}) *MockNodeProvider_ExplainFileRoute_Call {
+	return &MockNodeProvider_ExplainFileRoute_Call{Call: _e.mock.On("ExplainFileRoute", dst)}
+}
+
+func (_c *MockNodeProvider_ExplainFileRoute_Call) Run(run func(dst domain.PeerIdentity)) *MockNodeProvider_ExplainFileRoute_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 domain.PeerIdentity
+		if args[0] != nil {
+			arg0 = args[0].(domain.PeerIdentity)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockNodeProvider_ExplainFileRoute_Call) Return(rawMessage json.RawMessage, err error) *MockNodeProvider_ExplainFileRoute_Call {
+	_c.Call.Return(rawMessage, err)
+	return _c
+}
+
+func (_c *MockNodeProvider_ExplainFileRoute_Call) RunAndReturn(run func(dst domain.PeerIdentity) (json.RawMessage, error)) *MockNodeProvider_ExplainFileRoute_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // FetchFileMappings provides a mock function for the type MockNodeProvider
 func (_mock *MockNodeProvider) FetchFileMappings() (json.RawMessage, error) {
 	ret := _mock.Called()

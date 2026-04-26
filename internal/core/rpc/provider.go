@@ -38,6 +38,13 @@ type NodeProvider interface {
 	// RestartFileDownload resets a failed download back to available state
 	// so the user can re-initiate the download.
 	RestartFileDownload(fileID domain.FileID) error
+
+	// ExplainFileRoute returns a JSON-encoded ranked plan describing where
+	// a file command for dst would actually be sent. The first entry is
+	// marked best=true; subsequent entries are the fall-back order. Empty
+	// array means no usable next-hop. Powers the diagnostic command of the
+	// same name in console / CLI / SDK.
+	ExplainFileRoute(dst domain.PeerIdentity) (json.RawMessage, error)
 }
 
 // ChatlogProvider abstracts access to chatlog operations.

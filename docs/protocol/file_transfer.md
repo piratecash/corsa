@@ -370,15 +370,20 @@ first for DDoS resistance):
 8. **Relay restriction**: Only full nodes forward; client nodes drop
    DST ≠ self.
 9. **Multi-route forwarding (split-horizon)**: Collect all active
-   routes to DST sorted by hop count (ascending), skip self-routes,
-   expired/withdrawn entries, **and the incoming neighbor** (the peer
-   that just delivered the frame to this transit node). Excluding the
-   incoming neighbor prevents the transit node from reflecting the
-   frame straight back to the previous hop — without this
-   split-horizon, a symmetric route would cause the two nodes to
-   ping-pong the same frame until TTL expires, wasting bandwidth and
-   adding latency. Try each remaining next-hop in order until one
+   routes to DST, skip self-routes, expired/withdrawn entries, **and
+   the incoming neighbor** (the peer that just delivered the frame to
+   this transit node). Excluding the incoming neighbor prevents the
+   transit node from reflecting the frame straight back to the
+   previous hop — without this split-horizon, a symmetric route would
+   cause the two nodes to ping-pong the same frame until TTL expires,
+   wasting bandwidth and adding latency. The remaining candidates are
+   sorted by the keys listed under
+   [Next-hop ranking](#next-hop-ranking) and tried in order until one
    succeeds. If all routes are excluded or fail, silently drop.
+
+   The split-horizon filter is applied **before** the ranking — a
+   higher-version or shorter-hop route still loses to exclusion if its
+   next-hop is the peer that just delivered the frame.
 
 If no active route exists, the frame is silently dropped. No retry
 queue, no gossip fallback.
@@ -413,15 +418,81 @@ follows a strict fallback chain:
 1. **Direct session**: Try to send to the destination peer directly.
    The session must have `file_transfer_v1` capability negotiated
    during handshake. Both outbound and inbound sessions are searched.
-2. **Route table fallback**: If no direct session exists, look up
-   routes to the destination in the routing table. For each active
-   route sorted by hop count (ascending), try sending to the next-hop.
-   Self-routes (where `next_hop == local_identity`) are skipped — they
-   represent own direct-connection announcements and would cause a
-   send-to-self loop.
+2. **Route table fallback**: If the direct attempt failed, look up
+   routes to the destination in the routing table. Routes are sorted
+   by the keys listed under [Next-hop ranking](#next-hop-ranking) and
+   the candidates are tried in order. Self-routes (where
+   `next_hop == local_identity`) are skipped — they represent own
+   direct-connection announcements and would cause a send-to-self
+   loop. Routes whose `next_hop == dst` are also skipped — that exact
+   socket was just attempted in step 1 and re-trying it through the
+   fallback would be a wasted call. Routes whose next-hop has no
+   usable file-capable session, or whose health probe reports the
+   peer as stalled, are filtered out before ranking.
 3. **No route**: If the peer is not in the route table or all routes
    are expired/self/failed — log a warning and return an error.
    No silent drops on the send path.
+
+### Next-hop ranking
+
+Once the candidate set has been filtered (split-horizon for transit,
+self-route and unusable-peer skips for both transit and origin sends),
+the file router orders the remaining next-hops by the keys below. Both
+the transit forwarding path and the origin send path share this exact
+ordering — there is one comparator and one source of truth.
+
+| Priority | Key                | Direction | Why                                                                                                                                          |
+| -------- | ------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1        | `protocol_version` | DESC      | A peer that speaks a higher version unlocks features the older path may silently drop, so prefer it even at the cost of an additional hop.   |
+| 2        | `hops`             | ASC       | Among equal-version peers, fewer hops means fewer relays handling the bytes and a smaller blast radius if any single relay misbehaves.       |
+| 3        | `connected_at`     | ASC       | Older `connected_at` means longer uptime; a session that has held up longer is empirically more stable than one we just dialed seconds ago.  |
+| 4        | `next_hop`         | LEX       | Final deterministic tie-break so the selection is reproducible across reads of the same routing snapshot and across nodes with the same view. |
+
+`protocol_version` and `connected_at` are derived from the same
+per-peer snapshot inside the node layer. Both are read under a single
+`peerMu` acquisition so the keys describe a consistent session
+generation — they cannot disagree about which session they reference.
+
+When multiple routes collapse to the same `next_hop` (the routing
+table can carry several paths sharing a final hop), they are
+deduplicated by `next_hop` and the best candidate per `next_hop` wins
+under the same comparator. This guarantees that dedup and the final
+sort always agree on which route is best.
+
+Unknown timestamps (`connected_at == 0`) are sorted **after** known
+ones at the same version and hop count, so a peer with a real uptime
+always beats one without health data. A `protocol_version == 0` value
+loses the primary key under DESC ordering but still keeps the
+candidate eligible — sending the file over an unfavoured peer is
+always better than dropping the frame. The `0` value carries two
+distinct meanings (genuinely unknown / legacy peer, *or* clamped by
+the inflated-version defence below) — both sort identically here, but
+operators must use the WARN log to disambiguate; see
+[Inflated-version defence](#inflated-version-defence).
+
+#### Inflated-version defence
+
+A peer is allowed to advertise any `protocol_version` it likes during
+handshake, but a value **higher than this build's
+`config.ProtocolVersion`** cannot describe a protocol we actually run.
+Such a claim is either a misconfig or a deliberate traffic-capture
+attack (advertise an impossibly-new version to win the
+`protocol_version` DESC primary key and pull all file routes through
+the attacker's next-hop).
+
+The defence runs at the meta layer: when the node-side helper picks
+the connection that backs a candidate, it clamps the reported version
+down to `0` whenever `peer_version > local_version`. The clamped value
+shares the same sort effect as a genuinely unknown version under
+`protocol_version` DESC — both lose to every legit (peer ≤ local)
+report — but the *meaning* is different: this `0` is **ranking-untrusted**
+(deliberately demoted by the defence), not "peer hasn't reported yet"
+or "legacy peer that never negotiated". Operators reading
+`explainFileRoute` should not collapse the two semantics; the WARN
+log emitted whenever the clamp fires is what disambiguates them, and
+the original reported value is recoverable from the journal. The
+candidate stays eligible — we want to deliver bytes when no trusted
+peer is reachable, just not to *prefer* the suspicious one.
 
 ### Response semantics: always OK, never error
 
@@ -430,6 +501,68 @@ the response is always an acknowledgment — there are no error frames.
 If the FileID is unknown or the node is overloaded, the command is
 silently ignored. All error handling is application-level
 (`FileTransferManager` uses timeouts and retries).
+
+### Diagnostic command: `explainFileRoute`
+
+`explainFileRoute <identity>` returns the ranked next-hop plan the file
+router would use when sending a file command to `<identity>`. It is a
+read-only diagnostic — it never enqueues, dials, or mutates state — and
+it is wired through the standard RPC table, so it shows up
+automatically in the desktop console, `corsa-cli`, and any SDK that
+walks the command list.
+
+Split-horizon is **not** applied here: the question the command
+answers is "where would my origin send actually go?", not "where would
+I forward an inbound transit frame?". Pre-filtering still runs — self-
+routes, withdrawn / expired entries and stalled next-hops are dropped
+before ranking.
+
+The output mirrors `SendFileCommand`'s **two-step** delivery strategy,
+not just the route-table ranking:
+
+1. **Direct-first.** If `dst` itself is reachable as a file-capable peer,
+   it is promoted to the head of the plan as a synthetic candidate
+   (`next_hop == dst`, `hops == 1`) and marked `best: true` —
+   *unconditionally*, even when a relay route advertises a higher
+   `protocol_version`. This matches the live send path: `SendFileCommand`
+   tries the direct session first and never consults the routing table
+   when that succeeds. The `protocol_version` and `connected_at` reported
+   on the synthetic entry come from the same per-peer snapshot the
+   router would see at send time.
+2. **Route-table fall-back.** The remaining candidates are the ones
+   `collectRouteCandidates` would surface, sorted by the keys documented
+   under [Next-hop ranking](#next-hop-ranking) (protocol_version DESC →
+   hops ASC → connected_at ASC → next_hop). If the routing table also
+   carries an entry with `next_hop == dst`, it is deduplicated against
+   the synthetic direct candidate so the same path is never listed
+   twice.
+
+In other words: `best: true` reflects what `SendFileCommand` would
+actually do, not what the route-table ranking alone would suggest.
+A higher-version relay only wins `best` when there is no usable direct
+session.
+
+Wire response (one entry per next-hop, in selection order):
+
+```jsonc
+[
+  {
+    "next_hop": "<peer identity>",
+    "hops": 1,
+    "protocol_version": 7,
+    "connected_at": "2025-01-01T12:34:56Z",  // omitted when unknown
+    "uptime_seconds": 3600.5,                // 0 when connected_at omitted
+    "best": true                             // true only on the first entry
+  }
+]
+```
+
+Empty array means no usable next-hop. `best: true` is set on the entry
+the router would actually try first; subsequent entries are the fall-
+back order. The flag is a convenience — the same information is
+already encoded in array position, but having it explicit lets thin
+renderers (one-line console summaries) avoid re-implementing the
+ranking.
 
 ### Relay capability design
 
@@ -1858,16 +1991,22 @@ file_downloaded (позволяет получателю прекратить п
 8. **Ограничение ретрансляции**: только full-ноды пересылают; клиентские
    ноды отбрасывают фреймы с DST ≠ self.
 9. **Мульти-маршрутная пересылка (split-horizon)**: собираем все
-   активные маршруты до DST, сортируем по количеству хопов (по
-   возрастанию), пропускаем self-маршруты, expired/withdrawn записи
-   **и входящего соседа** — пир, от которого транзитный узел только
-   что получил этот фрейм. Исключение входящего соседа предотвращает
-   отражение фрейма обратно к предыдущему хопу: без такого
-   split-horizon симметричный маршрут заставил бы две ноды
+   активные маршруты до DST, пропускаем self-маршруты,
+   expired/withdrawn записи **и входящего соседа** — пир, от которого
+   транзитный узел только что получил этот фрейм. Исключение входящего
+   соседа предотвращает отражение фрейма обратно к предыдущему хопу:
+   без такого split-horizon симметричный маршрут заставил бы две ноды
    перекидывать один и тот же фрейм пока TTL не истечёт, расходуя
-   полосу и увеличивая задержку. Пробуем каждый оставшийся next-hop
-   по порядку, пока один не успешен. Если все маршруты исключены или
-   исчерпаны — фрейм молча отбрасывается.
+   полосу и увеличивая задержку. Оставшиеся кандидаты сортируются по
+   ключам из раздела
+   [Ранжирование next-hop](#ранжирование-next-hop)
+   и пробуются по порядку, пока один не успешен. Если все маршруты
+   исключены или исчерпаны — фрейм молча отбрасывается.
+
+   Фильтр split-horizon применяется **до** ранжирования: даже маршрут с
+   более новой версией протокола или меньшим числом хопов проигрывает
+   исключению, если его next-hop — это пир, от которого только что
+   пришёл фрейм.
 
 Если активных маршрутов нет, фрейм молча отбрасывается. Нет retry
 queue, нет gossip fallback.
@@ -1902,15 +2041,84 @@ sequenceDiagram
 1. **Прямая сессия**: попытка отправки напрямую адресату. Сессия должна
    иметь `file_transfer_v1` capability, согласованную при handshake.
    Проверяются как исходящие, так и входящие сессии.
-2. **Fallback на таблицу маршрутов**: если прямой сессии нет — поиск
-   маршрутов к адресату. Для каждого активного маршрута, отсортированного
-   по числу хопов (по возрастанию), попытка отправки на next-hop.
-   Self-маршруты (`next_hop == local_identity`) пропускаются — они
-   представляют собственные объявления прямого подключения и вызвали бы
-   цикл отправки самому себе.
+2. **Fallback на таблицу маршрутов**: если прямая попытка провалилась —
+   поиск маршрутов к адресату. Активные маршруты сортируются по ключам
+   из раздела
+   [Ранжирование next-hop](#ранжирование-next-hop),
+   кандидаты пробуются по порядку. Self-маршруты
+   (`next_hop == local_identity`) пропускаются — они представляют
+   собственные объявления прямого подключения и вызвали бы цикл
+   отправки самому себе. Маршруты с `next_hop == dst` тоже
+   пропускаются — этот сокет уже пробовался в шаге 1, повторная
+   попытка через fallback была бы потерянной операцией. Маршруты,
+   у которых next-hop не имеет используемой file-capable сессии или
+   health-проверка считает пир stalled, отфильтровываются ещё до
+   ранжирования.
 3. **Нет маршрута**: если пир отсутствует в таблице маршрутов или все
    маршруты истекли/self/failed — логирование warning и возврат ошибки.
    Никаких молчаливых потерь на пути отправки.
+
+### Ранжирование next-hop
+
+После того как множество кандидатов отфильтровано (split-horizon при
+транзите, пропуск self-маршрутов и непригодных пиров и при транзите, и
+при отправке от себя), file router сортирует оставшиеся next-hop по
+ключам ниже. Транзитный путь и путь отправки от себя используют ровно
+один и тот же компаратор — единый источник истины.
+
+| Приоритет | Ключ               | Направление | Почему                                                                                                                                                  |
+| --------- | ------------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1         | `protocol_version` | DESC        | Пир, говорящий на более новой версии, открывает фичи, которые более старый путь может молча уронить, поэтому предпочитаем его даже за счёт лишнего хопа. |
+| 2         | `hops`             | ASC         | Среди пиров с равной версией меньше хопов означает меньше реле в обработке байтов и меньший blast-radius при некорректном поведении любого из них.        |
+| 3         | `connected_at`     | ASC         | Более ранний `connected_at` означает больший uptime; сессия, продержавшаяся дольше, эмпирически стабильнее, чем только что поднятая.                    |
+| 4         | `next_hop`         | LEX         | Финальный детерминированный тай-брейк, чтобы выбор был воспроизводим между чтениями одного и того же snapshot и между нодами с одной и той же view.       |
+
+`protocol_version` и `connected_at` извлекаются из одного и того же
+snapshot пира внутри node-слоя. Оба читаются под единым захватом
+`peerMu`, поэтому ключи описывают одно и то же поколение сессий — они
+не могут разъехаться в том, к какой сессии относятся.
+
+Когда несколько маршрутов схлопываются в один и тот же `next_hop`
+(таблица маршрутов может хранить несколько путей с общим финальным
+хопом), они дедуплицируются по `next_hop`, и лучший кандидат на
+`next_hop` побеждает по тому же компаратору. Это гарантирует, что
+дедупликация и финальная сортировка всегда сходятся в выборе лучшего
+маршрута.
+
+Неизвестные временные метки (`connected_at == 0`) сортируются **после**
+известных при равной версии и количестве хопов, чтобы пир с реальным
+uptime всегда выигрывал у пира без health-данных. Значение
+`protocol_version == 0` проигрывает первому ключу при DESC, но
+кандидат остаётся пригодным — отправить файл через нежеланного пира
+всегда лучше, чем уронить фрейм. У значения `0` есть две разные
+семантики (действительно неизвестная / legacy-версия *или* клампнутая
+защитой ниже) — обе сортируются здесь одинаково, но различить их
+оператору позволяет WARN-лог; см.
+[Защита от завышенной версии](#защита-от-завышенной-версии).
+
+#### Защита от завышенной версии
+
+Пир имеет право заявить любой `protocol_version` в handshake, но
+значение **выше нашей `config.ProtocolVersion`** не может описывать
+протокол, на котором мы реально говорим. Такая заявка — это либо
+мисконфиг, либо умышленный traffic-capture: «смотрите, я новее всех,
+гоните все файлы через меня», и `protocol_version` DESC сразу выводит
+такого пира на верх ранжирования.
+
+Защита работает на meta-слое: когда node-side helper выбирает
+соединение, лежащее под кандидатом, он клампит заявленную версию в
+`0`, если `peer_version > local_version`. Эффект сортировки у
+клампнутого значения такой же, как у действительно неизвестной версии
+под `protocol_version` DESC — оба проигрывают любому легитимному
+(`peer ≤ local`) репорту — но *смысл* у них разный: этот `0` —
+**ranking-untrusted** (умышленно демотирован защитой), а не «пир ещё
+не репортил» или «legacy-пир, который никогда не торговался по версии».
+Операторы, читающие `explainFileRoute`, не должны схлопывать эти две
+семантики в одну; различить их позволяет WARN-лог, который
+выписывается на каждый кламп, и оригинальное значение восстанавливается
+из журнала. Кандидат остаётся пригодным — мы хотим иметь возможность
+доставить байты, когда других пиров нет, просто не предпочитать
+подозрительного.
 
 ### Семантика ответов: всегда OK, никогда error
 
@@ -1919,6 +2127,69 @@ sequenceDiagram
 Если FileID неизвестен или нода перегружена, команда молча игнорируется.
 Вся обработка ошибок на уровне приложения (`FileTransferManager`
 использует тайм-ауты и retry).
+
+### Диагностическая команда: `explainFileRoute`
+
+`explainFileRoute <identity>` возвращает отранжированный план
+next-hop, который file router использовал бы при отправке файловой
+команды на `<identity>`. Это read-only диагностика — она ничего не
+ставит в очередь, не дозванивается и не меняет состояние — и
+прокинута через стандартный RPC-стек, поэтому автоматически появляется
+в desktop-консоли, `corsa-cli` и любом SDK, который перебирает список
+команд.
+
+Split-horizon **не** применяется: команда отвечает на вопрос «куда
+ушла бы моя отправка от себя?», а не «куда я бы переслал входящий
+транзитный фрейм?». Предварительная фильтрация работает по-обычному —
+self-маршруты, withdrawn/expired записи и stalled next-hop-ы
+выкидываются до ранжирования.
+
+Вывод зеркалит **двухшаговую** стратегию доставки `SendFileCommand`,
+а не только ранжирование таблицы маршрутов:
+
+1. **Direct-first.** Если сам `dst` пригоден как file-capable пир, он
+   попадает в head плана как синтетический кандидат
+   (`next_hop == dst`, `hops == 1`) и помечается `best: true` —
+   *безусловно*, даже если у relay-маршрута объявлена более высокая
+   `protocol_version`. Это совпадает с реальным путём отправки:
+   `SendFileCommand` сначала пробует direct-сессию и не лезет в
+   таблицу маршрутов, если она успешна. `protocol_version` и
+   `connected_at` у синтетической записи берутся из того же
+   per-peer snapshot, что увидел бы router в момент отправки.
+2. **Fallback на таблицу маршрутов.** Оставшиеся кандидаты — те,
+   которых вернул бы `collectRouteCandidates`, отсортированные по
+   ключам из раздела
+   [Ранжирование next-hop](#ранжирование-next-hop)
+   (protocol_version DESC → hops ASC → connected_at ASC → next_hop).
+   Если в таблице тоже есть запись с `next_hop == dst`, она
+   дедуплицируется относительно синтетического direct-кандидата —
+   один и тот же путь не показывается дважды.
+
+Иначе говоря: `best: true` отражает то, что реально сделает
+`SendFileCommand`, а не то, что подсказало бы только ранжирование
+таблицы. Relay с более высокой версией становится `best` только
+тогда, когда нет пригодной direct-сессии.
+
+Ответ wire-формата (одна запись на next-hop, в порядке выбора):
+
+```jsonc
+[
+  {
+    "next_hop": "<peer identity>",
+    "hops": 1,
+    "protocol_version": 7,
+    "connected_at": "2025-01-01T12:34:56Z",  // отсутствует, если неизвестен
+    "uptime_seconds": 3600.5,                // 0, если connected_at отсутствует
+    "best": true                             // true только у первой записи
+  }
+]
+```
+
+Пустой массив — нет пригодного next-hop. `best: true` стоит на той
+записи, которую router попробовал бы первой; следующие записи — порядок
+fallback. Флаг — это удобство: та же информация уже закодирована
+позицией в массиве, но явный флаг позволяет тонким рендерам
+(однострочные сводки в консоли) не дублировать логику ранжирования.
 
 ### Дизайн relay capability
 

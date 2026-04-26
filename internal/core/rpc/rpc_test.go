@@ -36,6 +36,7 @@ func newDefaultNodeProvider(t *testing.T) *rpcmocks.MockNodeProvider {
 	m.On("StartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
 	return m
 }
 
@@ -54,6 +55,7 @@ func newNodeProviderWithHandler(t *testing.T, fn func(protocol.Frame) protocol.F
 	m.On("StartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
 	return m
 }
 
@@ -72,6 +74,7 @@ func newNodeProviderWithMeta(t *testing.T, address, version string) *rpcmocks.Mo
 	m.On("StartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
+	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
 	return m
 }
 

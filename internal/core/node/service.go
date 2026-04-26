@@ -347,7 +347,7 @@ type Service struct {
 	//
 	// Guarded by fileMu, not s.peerMu.  The file subsystem interacts with peer
 	// state only through the callbacks it is handed at construction time
-	// (sendFileCommandToPeer, isPeerReachable, fileTransferPeerUsableAt —
+	// (sendFileCommandToPeer, isPeerReachable, fileTransferPeerRouteMeta —
 	// each re-acquires s.peerMu on its own path), so there is no cross-domain
 	// section that needs to see fileStore/fileTransfer/fileRouter atomically
 	// with sessions/health.  The file domain owns a dedicated mutex to keep
@@ -2536,28 +2536,77 @@ func (s *Service) enqueueFrameSyncByID(id domain.ConnID, data []byte) enqueueRes
 	}
 }
 
-// sendFrameToIdentity sends a protocol frame to the peer identified by its
-// Ed25519 identity fingerprint. It searches outbound sessions first, then
-// inbound connections, checking that the matched connection has the required
-// capability. This is the identity-based counterpart of sendFrameToAddress.
-//
-// Returns true if the frame was accepted into the peer's write queue.
-func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Frame, requiredCap domain.Capability) bool {
-	s.peerMu.RLock()
-	now := time.Now().UTC()
-	var outbound []*peerSession
-	var inbound []domain.ConnID
+// peerSendableConnection is one connection the send path would attempt
+// when targeting a peer identity. Exactly one of {outbound, inboundID}
+// is set: outbound entries point at the corresponding peerSession,
+// inbound entries carry the registry ConnID — that field is the
+// discriminator (outbound != nil ⇒ outbound tier). The connectedAt
+// and protocolVersion fields describe the chosen connection itself —
+// they always belong together to the same socket, so callers reading
+// both keys never see a mixed snapshot stitched from two sessions.
+type peerSendableConnection struct {
+	connectedAt     time.Time
+	protocolVersion domain.ProtocolVersion
+	outbound        *peerSession
+	inboundID       domain.ConnID
+}
 
-	// 1. Outbound sessions — preferred path, one writer per session (servePeerSession).
+// peerSendableConnectionsLocked returns the ordered list of connections
+// the send path would try for (peer, requiredCap) at instant `now`.
+//
+// This slice is the canonical attempt order: every consumer (live send
+// path in sendFrameToIdentity, the file router's diagnostic
+// fileTransferPeerRouteMeta, future explainers) walks it in the same
+// direction, so they cannot disagree about "which connection bytes
+// will use first".
+//
+// Order:
+//  1. Outbound sessions (preferred tier), sorted by:
+//     a. oldest LastConnectedAt first — empirically the most stable
+//        socket carries the least retry risk;
+//     b. tiebreak by sess.address (lexicographic).
+//  2. Inbound conns (fall-back tier), sorted by:
+//     a. oldest LastConnectedAt first — same stability bias;
+//     b. tiebreak by ConnID (monotonic).
+//
+// Sorting is required because s.sessions and the inbound registry are
+// Go maps, whose iteration order is randomised between traversals. A
+// raw map walk would let two sequential calls return different "first"
+// candidates, and that drift is exactly what made the diagnostic
+// rank a peer by an outbound session the next sendFrameToIdentity
+// call would never even reach. Within a tier we sort by oldest
+// connectedAt (matches the file router's stability tie-break — see
+// routeCandidateLess), then by an immutable per-connection key so the
+// total order is stable.
+//
+// Filters: identity match, capability present, health entry that is
+// connected and not stalled. The "activation gate" comments inside
+// sendFrameToIdentity describe why health is required even for
+// just-handshaken outbound and inbound entries; the same rules apply
+// here so the file router's diagnostic and the live send path never
+// disagree on which connections are eligible.
+//
+// Caller must hold s.peerMu (R or W). The returned slice is safe to
+// retain after the lock is released — connectedAt and protocolVersion
+// are values, peerSession pointers are immutable for the lifetime of
+// the session, and ConnID is an opaque integer.
+func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requiredCap domain.Capability, now time.Time) []peerSendableConnection {
+	var outbound, inbound []peerSendableConnection
+
+	// Outbound tier collection. Activation gate: outbound bring-up
+	// inserts into s.sessions BEFORE markPeerConnected, so during that
+	// window health == nil and the session is not authoritative for
+	// outbound sends.
 	//
-	// Activation gate: outbound bring-up inserts into s.sessions BEFORE
-	// calling markPeerConnected (see openPeerSession / openPeerSessionForCM).
-	// During that window health == nil for this address, and the session is
-	// not yet authoritative for outbound sends. Require a present and
-	// Connected health entry — missing health means "not yet activated" and
-	// must be treated as a reject, not as an accept.
+	// We deliberately do NOT filter by sess.conn != nil here — that is
+	// a runtime invariant of the send path (a fully-constructed session
+	// always carries a conn, the check in sendFrameToIdentity is purely
+	// defensive). Keeping the helper's selection policy at the level of
+	// "identity + capability + health" keeps the shared contract narrow
+	// and lets diagnostic surfaces reuse it without inheriting the
+	// runtime-only nil-guard.
 	for _, sess := range s.sessions {
-		if sess.peerIdentity != dst || sess.conn == nil {
+		if sess == nil || sess.peerIdentity != peer {
 			continue
 		}
 		if !hasCapability(sess.capabilities, requiredCap) {
@@ -2567,49 +2616,122 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
 			continue
 		}
-		outbound = append(outbound, sess)
+		outbound = append(outbound, peerSendableConnection{
+			connectedAt:     health.LastConnectedAt,
+			protocolVersion: domain.ProtocolVersion(sess.version),
+			outbound:        sess,
+		})
 	}
 
-	// 2. Inbound connections — fallback, one writer per NetCore.
-	//
-	// The registry (s.conns) now holds both directions after
-	// PR 2, but outbound entries must stay invisible on this identity
-	// fallback path until they are promoted through s.sessions + health
-	// (visibility boundary enforced by step 1 above and by
-	// markPeerConnected). An outbound NetCore that has completed handshake
-	// but is not yet in s.sessions would otherwise be reachable here with
-	// health == nil and bypass the activation gate — so skip Outbound and
-	// only consider Inbound NetCores on the fallback path.
-	//
-	// Same activation gate applies for inbound: registerInboundConn creates
-	// the NetCore before hello/auth, and identity/capabilities land before
-	// markPeerConnected. Require health != nil && Connected here too so a
-	// partially-handshaken inbound NetCore cannot receive identity-routed
-	// frames ahead of activation.
+	// Inbound tier collection from the registry carve-out. Outbound
+	// NetCores surface through s.sessions above; an outbound NetCore
+	// that has completed handshake but is not yet in s.sessions would
+	// otherwise be reachable here with health == nil and bypass the
+	// activation gate — so skip Outbound and only consider Inbound
+	// here. Same activation gate applies: registerInboundConn creates
+	// the NetCore before hello/auth, identity/capabilities land before
+	// markPeerConnected, so require Connected health to keep
+	// partially-handshaken inbound conns out of the send-path view.
 	s.forEachInboundConnLocked(func(info connInfo) bool {
-		if info.identity != dst {
-			return true
-		}
-		if !info.HasCapability(requiredCap) {
+		if info.identity != peer || !info.HasCapability(requiredCap) {
 			return true
 		}
 		health := s.health[s.resolveHealthAddress(info.address)]
 		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
 			return true
 		}
-		inbound = append(inbound, info.id)
+		inbound = append(inbound, peerSendableConnection{
+			connectedAt:     health.LastConnectedAt,
+			protocolVersion: info.protocolVersion,
+			inboundID:       info.id,
+		})
 		return true
 	})
 
+	// Stable total order within each tier — see godoc above for why
+	// this matters. SliceStable preserves the caller-visible
+	// declaration order for inputs that compare equal under our keys,
+	// although our tiebreakers (address / ConnID) are themselves
+	// total, so equal-comparing inputs are exotic.
+	sort.SliceStable(outbound, func(i, j int) bool {
+		return peerSendableConnectionLess(outbound[i], outbound[j])
+	})
+	sort.SliceStable(inbound, func(i, j int) bool {
+		return peerSendableConnectionLess(inbound[i], inbound[j])
+	})
+
+	if len(outbound) == 0 {
+		return inbound
+	}
+	if len(inbound) == 0 {
+		return outbound
+	}
+	return append(outbound, inbound...)
+}
+
+// peerSendableConnectionLess is the within-tier comparator. Outbound
+// and inbound entries are NOT compared against each other through this
+// function — tier ordering is enforced by the slice concatenation in
+// peerSendableConnectionsLocked. Both arms of the conditional treat
+// outbound and inbound symmetrically (oldest connectedAt first), but
+// the secondary tiebreak differs because outbound entries carry an
+// address while inbound entries carry a ConnID.
+func peerSendableConnectionLess(a, b peerSendableConnection) bool {
+	// Primary key: oldest LastConnectedAt first. Treat zero timestamps
+	// as "unknown" and sort them after known ones, matching
+	// routeCandidateLess on the filerouter side so the two layers
+	// reason about uptime the same way.
+	if a.connectedAt.IsZero() != b.connectedAt.IsZero() {
+		return !a.connectedAt.IsZero()
+	}
+	if !a.connectedAt.Equal(b.connectedAt) {
+		return a.connectedAt.Before(b.connectedAt)
+	}
+	// Secondary tiebreak: outbound by address, inbound by ConnID.
+	// Mixed arms cannot occur because callers split the tiers before
+	// sorting, but the discriminator is preserved here for safety.
+	if a.outbound != nil && b.outbound != nil {
+		return a.outbound.address < b.outbound.address
+	}
+	return a.inboundID < b.inboundID
+}
+
+// sendFrameToIdentity sends a protocol frame to the peer identified by its
+// Ed25519 identity fingerprint. It searches outbound sessions first, then
+// inbound connections, checking that the matched connection has the required
+// capability. This is the identity-based counterpart of sendFrameToAddress.
+//
+// Returns true if the frame was accepted into the peer's write queue.
+func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Frame, requiredCap domain.Capability) bool {
+	s.peerMu.RLock()
+	candidates := s.peerSendableConnectionsLocked(dst, requiredCap, time.Now().UTC())
 	s.peerMu.RUnlock()
 
-	for _, sess := range outbound {
-		if tryEnqueuePeerSessionFrame(sess, frame) {
-			return true
+	// Tier 1 — outbound sessions. peerSendableConnectionsLocked guarantees
+	// outbound entries come before inbound, so iterating in order honours
+	// the "outbound first, inbound fall-back" send-path policy without a
+	// separate sort.
+	//
+	// The helper does not filter by sess.conn != nil — that is a runtime
+	// invariant only the actual write path needs. We re-check here so a
+	// half-constructed session (should never happen in production, but
+	// the original code defended against it) is skipped before the
+	// non-blocking enqueue.
+	hasInbound := false
+	for _, c := range candidates {
+		if c.outbound != nil {
+			if c.outbound.conn == nil {
+				continue
+			}
+			if tryEnqueuePeerSessionFrame(c.outbound, frame) {
+				return true
+			}
+			continue
 		}
+		hasInbound = true
 	}
 
-	if len(inbound) == 0 {
+	if !hasInbound {
 		return false
 	}
 
@@ -2624,14 +2746,17 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 
 	data := []byte(line)
 	network := s.Network()
-	for _, id := range inbound {
+	for _, c := range candidates {
+		if c.outbound != nil {
+			continue
+		}
 		// NetCore writer loop retains the slice after enqueue, so each
 		// candidate gets its own immutable copy. Send via the Network
 		// surface so the call path no longer threads *netcore.NetCore
 		// through identity-based dispatch — registry resolution and
 		// SendStatus → error mapping live behind the bridge.
 		payload := append([]byte(nil), data...)
-		if network.SendFrame(s.runCtx, id, payload) == nil {
+		if network.SendFrame(s.runCtx, c.inboundID, payload) == nil {
 			return true
 		}
 	}
@@ -3107,8 +3232,12 @@ func sanitizeInboundAddress(tcpAddr, claimed string) string {
 	return net.JoinHostPort(tcpIP, claimedPort)
 }
 
-// rememberConnPeerAddr stores the remote peer's overlay address on the
-// NetCore for later health tracking and relay lookups.
+// rememberConnPeerAddr folds the inbound peer's hello-derived state
+// onto the NetCore for later health tracking, relay lookups and
+// file-router ranking. Despite the legacy name this populates more
+// than the address: identity, capabilities, networks, last activity,
+// and the negotiated protocol version (hello.Version) all flow through
+// the same ApplyOpts call so they land atomically on the NetCore.
 //
 // For inbound connections the address is sanitised: the IP is taken from
 // the real TCP RemoteAddr (verified by the TCP stack, cannot be spoofed)
@@ -3116,6 +3245,12 @@ func sanitizeInboundAddress(tcpAddr, claimed string) string {
 // malicious peer from injecting a health entry under an arbitrary address
 // while still consolidating multiple connections from the same peer under
 // a single health key.
+//
+// The ProtocolVersion fold-in is the inbound counterpart of
+// applyWelcomeMetadata's outbound mirror — it is the value the file
+// router's inbound carve-out reads through snapshotEntryLocked when
+// ranking next-hops, so dropping it here would silently re-introduce
+// the "inbound peers always rank as version 0" bug.
 //
 // tcpAddr is the real TCP RemoteAddr string (host:port) from the
 // connection. For outbound sessions the caller may pass "" to skip
@@ -3131,11 +3266,12 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, t
 		return
 	}
 	pc.ApplyOpts(netcore.Options{
-		Address:      domain.PeerAddress(addr),
-		Identity:     domain.PeerIdentity(strings.TrimSpace(hello.Address)),
-		LastActivity: time.Now().UTC(),
-		Networks:     domain.ParseNetGroups(hello.Networks),
-		Caps:         intersectCapabilities(localCapabilities(), hello.Capabilities),
+		Address:         domain.PeerAddress(addr),
+		Identity:        domain.PeerIdentity(strings.TrimSpace(hello.Address)),
+		LastActivity:    time.Now().UTC(),
+		Networks:        domain.ParseNetGroups(hello.Networks),
+		Caps:            intersectCapabilities(localCapabilities(), hello.Capabilities),
+		ProtocolVersion: domain.ProtocolVersion(hello.Version),
 	})
 }
 

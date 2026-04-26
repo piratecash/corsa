@@ -268,6 +268,7 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	rpc.Post("/file/retry_chunk", s.legacyArgHandler("retryFileChunk"))
 	rpc.Post("/file/start_download", s.legacyArgHandler("startFileDownload"))
 	rpc.Post("/file/cancel_download", s.legacyArgHandler("cancelFileDownload"))
+	rpc.Post("/file/explain_route", s.legacyArgHandler("explainFileRoute"))
 }
 
 // legacyHandler creates a Fiber handler for a no-args command.

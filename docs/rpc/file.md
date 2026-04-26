@@ -142,6 +142,50 @@ corsa-cli cancelFileDownload file_id=<uuid>
 cancelFileDownload <file_id>
 ```
 
+### POST /rpc/v1/file/explain_route
+
+Diagnostic command. Reports the ranked next-hop plan the file router would actually use when sending a file command to `<identity>`. Read-only — never enqueues, dials, or mutates state. Shape and ranking semantics are documented in [`docs/protocol/file_transfer.md`](../protocol/file_transfer.md#diagnostic-command-explainfileroute); the wire schema is duplicated below for quick reference.
+
+The output mirrors `SendFileCommand`'s two-step strategy: a direct session to `<identity>`, when usable, is promoted to the head of the plan as a synthetic `next_hop == <identity>`, `hops == 1` entry and marked `best: true` unconditionally — even when a relay route advertises a higher `protocol_version`. Subsequent entries are the route-table candidates sorted by `protocol_version` DESC → `hops` ASC → `connected_at` ASC → `next_hop`. Self-routes, withdrawn / expired entries and stalled next-hops are dropped before ranking.
+
+`protocol_version` in the response is the **normalized ranking value**, not the raw handshake-reported field. The wire source depends on direction — outbound-backed candidates carry `welcome.Version`, inbound-backed candidates carry `hello.Version` — but in either case a peer reporting a version higher than this build's `config.ProtocolVersion` is demoted by the inflated-version defence: its entry shows `protocol_version: 0` and falls to the bottom of the plan even though its real claim was higher. Treat `0` here as "ranking-untrusted" rather than "unknown"; the node-side meta logs at WARN level whenever the clamp fires, so the actual reported value is recoverable from the journal. See [Inflated-version defence](../protocol/file_transfer.md#inflated-version-defence) for the full rationale.
+
+Request:
+```json
+{"identity": "peer-identity-hex"}
+```
+
+Required: `identity` (40-hex-character peer identity).
+
+Response: a JSON array, one entry per next-hop in selection order. Empty array means no usable next-hop.
+
+```jsonc
+[
+  {
+    "next_hop": "<peer identity>",
+    "hops": 1,
+    "protocol_version": 7,
+    "connected_at": "2025-01-01T12:34:56Z",  // omitted when unknown
+    "uptime_seconds": 3600.5,                // 0 when connected_at omitted
+    "best": true                             // true only on the first entry
+  }
+]
+```
+
+Error responses: HTTP 400 for missing or malformed `identity`, HTTP 500 if the file subsystem returns an error (e.g. not initialized).
+
+#### CLI
+
+```bash
+corsa-cli explainFileRoute <identity>
+```
+
+#### Console
+
+```
+explainFileRoute <identity>
+```
+
 ---
 
 ## Русский
@@ -284,4 +328,48 @@ corsa-cli cancelFileDownload file_id=<uuid>
 
 ```
 cancelFileDownload <file_id>
+```
+
+### POST /rpc/v1/file/explain_route
+
+Диагностическая команда. Возвращает ранжированный план next-hop, который file router реально использовал бы при отправке файловой команды на `<identity>`. Read-only — ничего не ставит в очередь, не дозванивается и не меняет состояние. Семантика и формат описаны в [`docs/protocol/file_transfer.md`](../protocol/file_transfer.md#диагностическая-команда-explainfileroute); wire-схема продублирована ниже для быстрой справки.
+
+Вывод зеркалит двухшаговую стратегию `SendFileCommand`: direct-сессия к `<identity>`, если пригодна, попадает в head плана как синтетическая запись `next_hop == <identity>`, `hops == 1` и помечается `best: true` безусловно — даже если у relay-маршрута объявлена более высокая `protocol_version`. Следующие записи — кандидаты из таблицы маршрутов, отсортированные по `protocol_version` DESC → `hops` ASC → `connected_at` ASC → `next_hop`. Self-маршруты, withdrawn/expired записи и stalled next-hop-ы выкидываются до ранжирования.
+
+`protocol_version` в ответе — это **нормализованный ranking-key**, а не сырое значение из handshake-фрейма. Источник зависит от направления — outbound-кандидаты несут `welcome.Version`, inbound-кандидаты несут `hello.Version` — но в любом случае пир, заявивший версию выше нашей `config.ProtocolVersion`, демотируется защитой от inflated-version: его запись показывает `protocol_version: 0` и уезжает в самый низ плана, даже если реальное заявленное значение было больше. Считай `0` здесь «ranking-untrusted», а не «неизвестно»; meta на node-стороне пишет WARN-лог при каждом срабатывании клампа, так что оригинальное значение восстанавливается из журнала. Подробности см. [Защита от завышенной версии](../protocol/file_transfer.md#защита-от-завышенной-версии).
+
+Запрос:
+```json
+{"identity": "peer-identity-hex"}
+```
+
+Обязательные: `identity` (40-символьный hex peer identity).
+
+Ответ: JSON-массив, по одной записи на next-hop в порядке выбора. Пустой массив — нет пригодного next-hop.
+
+```jsonc
+[
+  {
+    "next_hop": "<peer identity>",
+    "hops": 1,
+    "protocol_version": 7,
+    "connected_at": "2025-01-01T12:34:56Z",  // отсутствует, если неизвестен
+    "uptime_seconds": 3600.5,                // 0, если connected_at отсутствует
+    "best": true                             // true только у первой записи
+  }
+]
+```
+
+Ответы об ошибках: HTTP 400 при отсутствующем или некорректном `identity`, HTTP 500 если файловая подсистема вернула ошибку (например, не инициализирована).
+
+#### CLI
+
+```bash
+corsa-cli explainFileRoute <identity>
+```
+
+#### Консоль
+
+```
+explainFileRoute <identity>
 ```

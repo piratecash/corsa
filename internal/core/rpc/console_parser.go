@@ -42,6 +42,7 @@ var canonicalNames = map[string]string{
 	"startfiledownload":    "startFileDownload",
 	"cancelfiledownload":   "cancelFileDownload",
 	"restartfiledownload":  "restartFileDownload",
+	"explainfileroute":     "explainFileRoute",
 	"fetchchatlog":         "fetchChatlog",
 	"fetchchatlogpreviews": "fetchChatlogPreviews",
 	"fetchconversations":   "fetchConversations",
@@ -81,6 +82,7 @@ var canonicalNames = map[string]string{
 	"start_file_download":    "startFileDownload",
 	"cancel_file_download":   "cancelFileDownload",
 	"restart_file_download":  "restartFileDownload",
+	"explain_file_route":     "explainFileRoute",
 	"fetch_chatlog":          "fetchChatlog",
 	"fetch_chatlog_previews": "fetchChatlogPreviews",
 	"fetch_conversations":    "fetchConversations",
@@ -435,6 +437,15 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		}
 		if len(args) > 1 {
 			return nil, fmt.Errorf("fetchRouteLookup takes exactly one argument")
+		}
+		return map[string]interface{}{"identity": args[0]}, nil
+
+	case "explainfileroute", "explain_file_route":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("explainFileRoute requires identity argument")
+		}
+		if len(args) > 1 {
+			return nil, fmt.Errorf("explainFileRoute takes exactly one argument")
 		}
 		return map[string]interface{}{"identity": args[0]}, nil
 	}

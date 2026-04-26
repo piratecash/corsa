@@ -12,6 +12,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -327,6 +328,7 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"start_file_download":            "startFileDownload",
 		"cancel_file_download":           "cancelFileDownload",
 		"restart_file_download":          "restartFileDownload",
+		"explain_file_route":             "explainFileRoute",
 		"fetch_chatlog":                  "fetchChatlog",
 		"fetch_chatlog_previews":         "fetchChatlogPreviews",
 		"fetch_conversations":            "fetchConversations",
@@ -1120,6 +1122,7 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 	startInfo := CommandInfo{Name: "startFileDownload", Description: "Start downloading a previously announced file", Category: "file", Usage: "<file_id>"}
 	cancelInfo := CommandInfo{Name: "cancelFileDownload", Description: "Cancel an active download and delete partial data", Category: "file", Usage: "<file_id>"}
 	restartInfo := CommandInfo{Name: "restartFileDownload", Description: "Reset a failed download back to available for re-download", Category: "file", Usage: "<file_id>"}
+	explainInfo := CommandInfo{Name: "explainFileRoute", Description: "Explain ranked next-hop plan a file command would use for the given destination identity (best, hops, protocol_version, connected_at, uptime_seconds)", Category: "file", Usage: "<identity>"}
 
 	if node == nil {
 		t.RegisterUnavailable(transfersInfo)
@@ -1128,6 +1131,7 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 		t.RegisterUnavailable(startInfo)
 		t.RegisterUnavailable(cancelInfo)
 		t.RegisterUnavailable(restartInfo)
+		t.RegisterUnavailable(explainInfo)
 		return
 	}
 
@@ -1218,6 +1222,31 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 				return internalError(fmt.Errorf("restart file download: %w", err))
 			}
 			return jsonResponse(map[string]interface{}{"status": "restarted", "file_id": fileID})
+		},
+	)
+
+	t.Register(explainInfo,
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			identityArg, _ := req.Args["identity"].(string)
+			identityArg = strings.TrimSpace(identityArg)
+			if identityArg == "" {
+				return validationError(fmt.Errorf("identity is required"))
+			}
+			// Validate the destination address up-front so a typo from the
+			// console does not leak into the file router as an empty/garbled
+			// PeerIdentity. ValidateAddress is the same gate fetchRouteLookup
+			// uses, keeping the two diagnostic surfaces consistent.
+			if err := identity.ValidateAddress(identityArg); err != nil {
+				return validationError(fmt.Errorf("invalid identity format: %w", err))
+			}
+			data, err := node.ExplainFileRoute(domain.PeerIdentity(identityArg))
+			if err != nil {
+				return internalError(fmt.Errorf("explain file route: %w", err))
+			}
+			return CommandResponse{Data: data}
 		},
 	)
 }

@@ -27,16 +27,17 @@ import (
 // registry is the only way to enforce the §2.9 net-import whitelist: the
 // raw socket lives here, and only here.
 type connInfo struct {
-	id           domain.ConnID
-	remoteAddr   string
-	remoteIP     netip.Addr
-	address      domain.PeerAddress
-	identity     domain.PeerIdentity
-	capabilities []domain.Capability
-	dir          netcore.Direction
-	peerDir      domain.PeerDirection
-	lastActivity time.Time
-	tracked      bool
+	id              domain.ConnID
+	remoteAddr      string
+	remoteIP        netip.Addr
+	address         domain.PeerAddress
+	identity        domain.PeerIdentity
+	capabilities    []domain.Capability
+	dir             netcore.Direction
+	peerDir         domain.PeerDirection
+	lastActivity    time.Time
+	protocolVersion domain.ProtocolVersion
+	tracked         bool
 }
 
 // HasCapability reports whether the snapshot lists cap. The lookup is linear
@@ -68,16 +69,17 @@ func snapshotEntryLocked(id domain.ConnID, entry *connEntry) (connInfo, bool) {
 		copy(capsCopy, caps)
 	}
 	return connInfo{
-		id:           id,
-		remoteAddr:   core.RemoteAddr(),
-		remoteIP:     coreRemoteIP(core),
-		address:      core.Address(),
-		identity:     core.Identity(),
-		capabilities: capsCopy,
-		dir:          core.Dir(),
-		peerDir:      coreToPeerDirection(core.Dir()),
-		lastActivity: core.LastActivity(),
-		tracked:      entry.tracked,
+		id:              id,
+		remoteAddr:      core.RemoteAddr(),
+		remoteIP:        coreRemoteIP(core),
+		address:         core.Address(),
+		identity:        core.Identity(),
+		capabilities:    capsCopy,
+		dir:             core.Dir(),
+		peerDir:         coreToPeerDirection(core.Dir()),
+		lastActivity:    core.LastActivity(),
+		protocolVersion: core.ProtocolVersion(),
+		tracked:         entry.tracked,
 	}, true
 }
 

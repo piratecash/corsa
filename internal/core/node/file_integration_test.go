@@ -2,14 +2,18 @@ package node
 
 import (
 	"bufio"
+	"crypto/ed25519"
+	"encoding/json"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/service/filerouter"
 )
 
 // TestIsPeerReachable_DirectSessionWithCapability verifies that a peer with
@@ -296,45 +300,46 @@ func TestIsPeerReachable_RouteViaStalledNextHop(t *testing.T) {
 	}
 }
 
-func TestFileTransferPeerUsableAtPrefersOldestHealthyConnection(t *testing.T) {
+// TestFileTransferPeerRouteMetaDescribesOneSession pins the new contract:
+// fileTransferPeerRouteMeta must describe a single connection — both
+// connectedAt and protocolVersion belong to the same session — instead
+// of aggregating across all eligible sessions for the peer. The previous
+// "max version, oldest connectedAt" aggregate let the file router rank
+// peers by a version that the live send path would never actually use.
+//
+// Single-outbound case: the meta describes the only candidate and
+// returns its own version + connectedAt.
+func TestFileTransferPeerRouteMetaDescribesOneSession(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
-	svc.sessions[domain.PeerAddress("addr-old")] = &peerSession{
-		address:      domain.PeerAddress("addr-old"),
+	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
+		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
+		version:      6,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
-	svc.sessions[domain.PeerAddress("addr-new")] = &peerSession{
-		address:      domain.PeerAddress("addr-new"),
-		peerIdentity: idPeerB,
-		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-	}
-
-	svc.health[domain.PeerAddress("addr-old")] = &peerHealth{
+	svc.health[domain.PeerAddress("addr-out")] = &peerHealth{
 		Connected:           true,
 		LastConnectedAt:     now.Add(-10 * time.Minute),
-		LastUsefulReceiveAt: now.Add(-10 * time.Second),
-	}
-	svc.health[domain.PeerAddress("addr-new")] = &peerHealth{
-		Connected:           true,
-		LastConnectedAt:     now.Add(-1 * time.Minute),
-		LastUsefulReceiveAt: now.Add(-5 * time.Second),
+		LastUsefulReceiveAt: now,
 	}
 
-	got, ok := svc.fileTransferPeerUsableAt(idPeerB)
+	meta, ok := svc.fileTransferPeerRouteMeta(idPeerB)
 	if !ok {
 		t.Fatal("expected peer to be usable")
 	}
-	want := now.Add(-10 * time.Minute)
-	if !got.Equal(want) {
-		t.Fatalf("connectedAt = %v, want %v", got, want)
+	if !meta.ConnectedAt.Equal(now.Add(-10 * time.Minute)) {
+		t.Fatalf("connectedAt = %v, want session's own LastConnectedAt", meta.ConnectedAt)
+	}
+	if meta.ProtocolVersion != domain.ProtocolVersion(6) {
+		t.Fatalf("protocolVersion = %d, want 6 (the session's own negotiated version)", meta.ProtocolVersion)
 	}
 }
 
-func TestFileTransferPeerUsableAtRejectsStalledPeer(t *testing.T) {
+func TestFileTransferPeerRouteMetaRejectsStalledPeer(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
@@ -351,12 +356,12 @@ func TestFileTransferPeerUsableAtRejectsStalledPeer(t *testing.T) {
 		LastUsefulReceiveAt: now.Add(-heartbeatInterval - pongStallTimeout - time.Second),
 	}
 
-	if got, ok := svc.fileTransferPeerUsableAt(idPeerB); ok {
-		t.Fatalf("stalled peer must be unusable, got connectedAt=%v", got)
+	if meta, ok := svc.fileTransferPeerRouteMeta(idPeerB); ok {
+		t.Fatalf("stalled peer must be unusable, got meta=%+v", meta)
 	}
 }
 
-func TestFileTransferPeerUsableAtRejectsPeerWithoutHealth(t *testing.T) {
+func TestFileTransferPeerRouteMetaRejectsPeerWithoutHealth(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
@@ -366,8 +371,557 @@ func TestFileTransferPeerUsableAtRejectsPeerWithoutHealth(t *testing.T) {
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 
-	if got, ok := svc.fileTransferPeerUsableAt(idPeerB); ok {
-		t.Fatalf("peer without health must be unusable, got connectedAt=%v", got)
+	if meta, ok := svc.fileTransferPeerRouteMeta(idPeerB); ok {
+		t.Fatalf("peer without health must be unusable, got meta=%+v", meta)
+	}
+}
+
+// installTestFileRouter wires a minimal filerouter.Router into svc so the
+// diagnostic surface (Service.ExplainFileRoute) can be exercised without
+// pulling in the full initFileTransfer disk path. SessionSend / LocalDeliver
+// are stubs because ExplainFileRoute never sends a frame — it only ranks
+// candidates.
+func installTestFileRouter(svc *Service) {
+	svc.fileMu.Lock()
+	defer svc.fileMu.Unlock()
+	svc.fileRouter = filerouter.NewRouter(filerouter.RouterConfig{
+		NonceCache: newDefaultNonceCache(),
+		LocalID:    domain.PeerIdentity(svc.identity.Address),
+		IsFullNode: func() bool { return true },
+		RouteSnap: func() routing.Snapshot {
+			if svc.routingTable == nil {
+				return routing.Snapshot{}
+			}
+			return svc.routingTable.Snapshot()
+		},
+		PeerRouteMeta: func(id domain.PeerIdentity) (filerouter.PeerRouteMeta, bool) {
+			return svc.fileTransferPeerRouteMeta(id)
+		},
+		PeerPubKey:   func(domain.PeerIdentity) (ed25519.PublicKey, bool) { return nil, false },
+		SessionSend:  func(domain.PeerIdentity, []byte) bool { return true },
+		LocalDeliver: func(protocol.FileCommandFrame) {},
+	})
+}
+
+// TestExplainFileRouteReturnsRankedJSON pins the wire format of the
+// diagnostic command end-to-end: the ranked plan must come back as a
+// JSON array, the first entry must be marked best, and each entry
+// must carry next_hop, hops, protocol_version, connected_at and
+// uptime_seconds. The behavioural ranking itself is covered by
+// filerouter tests; this test owns the JSON contract.
+func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	// Two next-hops to the same target. relayB has the higher protocol
+	// version, so even though relayC is closer (1 vs 2 hops) the file
+	// router prefers relayB. relayB therefore must be best=true.
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
+		peerIdentity: idPeerB,
+		version:      7,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
+		address:      domain.PeerAddress("addr-C"),
+		peerIdentity: idPeerC,
+		version:      6,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-30 * time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+	svc.health[domain.PeerAddress("addr-C")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	// announceRouteVia uses the wire-side hop count; the receiver adds +1
+	// when inserting into its own table (see docs/routing.md). So the
+	// resulting local table has:
+	//   via idPeerB: hops=3 (announced 2 + 1)
+	//   via idPeerC: hops=2 (announced 1 + 1)
+	// idPeerB still wins despite the extra hop because its protocol_version
+	// (7) outranks idPeerC's (6) — that is the whole point of this fixture.
+	announceRouteVia(svc, idPeerB, idTargetX, 2)
+	announceRouteVia(svc, idPeerC, idTargetX, 1)
+	const (
+		hopsViaB = 3
+		hopsViaC = 2
+	)
+
+	installTestFileRouter(svc)
+
+	raw, err := svc.ExplainFileRoute(idTargetX)
+	if err != nil {
+		t.Fatalf("ExplainFileRoute returned error: %v", err)
+	}
+
+	var entries []map[string]interface{}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("unmarshal plan: %v\npayload=%s", err, string(raw))
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries in plan, got %d (payload=%s)", len(entries), string(raw))
+	}
+
+	first := entries[0]
+	if first["next_hop"] != string(idPeerB) {
+		t.Fatalf("expected best entry next_hop=%s, got %v", idPeerB, first["next_hop"])
+	}
+	if first["best"] != true {
+		t.Fatalf("expected first entry to be marked best=true, got %v", first["best"])
+	}
+	if v, _ := first["protocol_version"].(float64); int(v) != 7 {
+		t.Fatalf("expected best entry protocol_version=7, got %v", first["protocol_version"])
+	}
+	if v, _ := first["hops"].(float64); int(v) != hopsViaB {
+		t.Fatalf("expected best entry hops=%d, got %v", hopsViaB, first["hops"])
+	}
+	if _, ok := first["connected_at"].(string); !ok {
+		t.Fatalf("expected best entry to carry connected_at as RFC3339 string, got %v", first["connected_at"])
+	}
+	if uptime, _ := first["uptime_seconds"].(float64); uptime <= 0 {
+		t.Fatalf("expected best entry uptime_seconds > 0, got %v", uptime)
+	}
+
+	second := entries[1]
+	if second["next_hop"] != string(idPeerC) {
+		t.Fatalf("expected fall-back entry next_hop=%s, got %v", idPeerC, second["next_hop"])
+	}
+	if second["best"] == true {
+		t.Fatal("expected only the first entry to be marked best, got best=true on entry[1]")
+	}
+	if v, _ := second["hops"].(float64); int(v) != hopsViaC {
+		t.Fatalf("expected fall-back entry hops=%d, got %v", hopsViaC, second["hops"])
+	}
+}
+
+// TestExplainFileRouteEmptyArrayWhenNoRoute confirms that ExplainFileRoute
+// returns the JSON array [] (not null, not an error) when no route exists.
+// CLI / console renderers can then loop over the response without
+// branching on a missing-key special case.
+func TestExplainFileRouteEmptyArrayWhenNoRoute(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	installTestFileRouter(svc)
+
+	raw, err := svc.ExplainFileRoute(idTargetX)
+	if err != nil {
+		t.Fatalf("ExplainFileRoute returned error: %v", err)
+	}
+	if string(raw) != "[]" {
+		t.Fatalf("expected empty JSON array for unknown destination, got %s", string(raw))
+	}
+}
+
+// TestFileTransferPeerRouteMetaDemotesInflatedVersion is the security
+// regression for the inflated-version defence: a peer that claims a
+// protocol version higher than this build's config.ProtocolVersion
+// cannot actually be speaking the protocol we run, so its version is
+// either a misconfig or a deliberate traffic-capture attack ("look at
+// me, I'm newer, route everything through me"). The meta layer must
+// demote such a peer in the ranking by clamping the reported version
+// to zero, which sorts it below every legit candidate under
+// protocolVersion DESC.
+//
+// Without this defence the file router would happily prefer a peer
+// claiming version 99 over a real peer at the local version, and an
+// attacker who can complete handshake could siphon all file traffic.
+func TestFileTransferPeerRouteMetaDemotesInflatedVersion(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	// Outbound session reporting an impossibly-high version. The
+	// constant config.ProtocolVersion is whatever this build ships;
+	// adding a large fixed offset keeps the test future-proof against
+	// version bumps without re-tuning the literal.
+	inflated := domain.ProtocolVersion(config.ProtocolVersion) + 100
+
+	svc.sessions[domain.PeerAddress("addr-attacker")] = &peerSession{
+		address:      domain.PeerAddress("addr-attacker"),
+		peerIdentity: idPeerB,
+		version:      int(inflated),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-attacker")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Hour),
+		LastUsefulReceiveAt: now,
+	}
+
+	meta, ok := svc.fileTransferPeerRouteMeta(idPeerB)
+	if !ok {
+		t.Fatal("expected peer to remain usable — defence is a soft demote, not a hard reject")
+	}
+	if meta.ProtocolVersion != 0 {
+		t.Fatalf("expected inflated version (%d) to be clamped to 0 for ranking, got %d", inflated, meta.ProtocolVersion)
+	}
+	// connected_at MUST still describe the chosen connection — the
+	// defence only touches the ranking key, not the audit trail.
+	if !meta.ConnectedAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("connected_at = %v, want it to come from the chosen session unchanged", meta.ConnectedAt)
+	}
+}
+
+// TestExplainFileRouteRanksInflatedVersionPeerLast is the end-to-end
+// counterpart: with one legit peer at the local version and one
+// inflated-version peer (would-be attacker), the explain plan must
+// list the legit peer first (best=true) and the inflated peer last.
+//
+// Without the meta-level clamp the inflated peer would win the primary
+// key (version DESC) and become best, capturing all file routes.
+func TestExplainFileRouteRanksInflatedVersionPeerLast(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	legitVersion := domain.ProtocolVersion(config.ProtocolVersion)
+	inflatedVersion := legitVersion + 100
+
+	// Two distinct relays to the same target.
+	svc.sessions[domain.PeerAddress("addr-legit")] = &peerSession{
+		address:      domain.PeerAddress("addr-legit"),
+		peerIdentity: idPeerB,
+		version:      int(legitVersion),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.sessions[domain.PeerAddress("addr-attacker")] = &peerSession{
+		address:      domain.PeerAddress("addr-attacker"),
+		peerIdentity: idPeerC,
+		version:      int(inflatedVersion),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-legit")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-30 * time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+	svc.health[domain.PeerAddress("addr-attacker")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	// Both relays announce equal hops to the target so the only key
+	// that decides the head of the plan is protocol_version. With the
+	// defence in place the legit peer wins; without it the attacker
+	// (advertising inflated version) would.
+	announceRouteVia(svc, idPeerB, idTargetX, 1)
+	announceRouteVia(svc, idPeerC, idTargetX, 1)
+
+	installTestFileRouter(svc)
+
+	raw, err := svc.ExplainFileRoute(idTargetX)
+	if err != nil {
+		t.Fatalf("ExplainFileRoute: %v", err)
+	}
+	var entries []map[string]interface{}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("unmarshal plan: %v\npayload=%s", err, string(raw))
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d (payload=%s)", len(entries), string(raw))
+	}
+	if entries[0]["next_hop"] != string(idPeerB) {
+		t.Fatalf("expected legit peer at head of plan, got %v", entries[0]["next_hop"])
+	}
+	if entries[0]["best"] != true {
+		t.Fatalf("expected legit peer to be best=true, got %v", entries[0]["best"])
+	}
+	if v, _ := entries[0]["protocol_version"].(float64); int(v) != int(legitVersion) {
+		t.Fatalf("legit entry: expected protocol_version=%d, got %v", legitVersion, entries[0]["protocol_version"])
+	}
+	// Inflated peer must be in the plan but demoted, with version 0
+	// (the clamped ranking value, mirrors what the meta returned).
+	if entries[1]["next_hop"] != string(idPeerC) {
+		t.Fatalf("expected inflated peer at fall-back position, got %v", entries[1]["next_hop"])
+	}
+	if v, _ := entries[1]["protocol_version"].(float64); int(v) != 0 {
+		t.Fatalf("inflated entry: expected protocol_version=0 (clamped), got %v", entries[1]["protocol_version"])
+	}
+}
+
+// TestFileTransferPeerRouteMetaInboundConnContributesNegotiatedVersion
+// pins the regression that motivated wiring the negotiated version
+// onto NetCore for the inbound direction. Before this fix, an inbound
+// carve-out conn (in s.conns but not in s.sessions) collapsed to
+// protocol_version 0 in the route-meta snapshot, so any peer with
+// even a single outbound link automatically won the new
+// protocolVersion DESC primary key. With the fix, an inbound conn
+// whose hello.Version was folded onto the NetCore (via
+// rememberConnPeerAddr's ApplyOpts) reports its real negotiated
+// version to the file router.
+//
+// The meta now describes the *single* connection the live send path
+// would try first (head of peerSendableConnectionsLocked), so this
+// test asserts the protocol_version of THAT connection — not an
+// aggregate / max across multiple sessions; the older "highestVersion"
+// contract was removed when the meta switched to a single-connection
+// snapshot.
+func TestFileTransferPeerRouteMetaInboundConnContributesNegotiatedVersion(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	inLocal, inRemote := net.Pipe()
+	defer func() { _ = inLocal.Close() }()
+	defer func() { _ = inRemote.Close() }()
+
+	const inboundVersion = domain.ProtocolVersion(11)
+	pc := netcore.New(netcore.ConnID(42), inLocal, netcore.Inbound, netcore.Options{
+		Address:         domain.PeerAddress("addr-inbound"),
+		Identity:        idPeerB,
+		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		ProtocolVersion: inboundVersion,
+	})
+	defer pc.Close()
+	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc, tracked: true})
+	svc.health[domain.PeerAddress("addr-inbound")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-5 * time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	meta, ok := svc.fileTransferPeerRouteMeta(idPeerB)
+	if !ok {
+		t.Fatal("expected inbound peer to be reported as usable")
+	}
+	if meta.ProtocolVersion != inboundVersion {
+		t.Fatalf("expected ProtocolVersion=%d (from inbound NetCore), got %d", inboundVersion, meta.ProtocolVersion)
+	}
+}
+
+// TestFileTransferPeerRouteMetaDeterministicAcrossMapIteration pins
+// the within-tier ordering: when a peer has two healthy outbound
+// sessions, the meta and the live send path must pick the SAME first
+// candidate every time, regardless of Go map iteration randomisation.
+//
+// The previous implementation read sessions straight out of s.sessions
+// (a map) and could surface a different first candidate on every call,
+// so two sequential queries — one from the file router's diagnostic,
+// one from sendFrameToIdentity — could disagree about which session
+// "owns" the next-hop slot. The fix sorts both tiers by oldest
+// connectedAt with an immutable tiebreak; we exercise that contract
+// across many calls so a regression that re-introduced map order would
+// be flagged probabilistically.
+func TestFileTransferPeerRouteMetaDeterministicAcrossMapIteration(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	// Two outbound sessions to the same peer with different connectedAt.
+	// addr-old has the longer uptime and must win the head slot in
+	// every call, regardless of map iteration order.
+	svc.sessions[domain.PeerAddress("addr-old")] = &peerSession{
+		address:      domain.PeerAddress("addr-old"),
+		peerIdentity: idPeerB,
+		version:      4,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.sessions[domain.PeerAddress("addr-new")] = &peerSession{
+		address:      domain.PeerAddress("addr-new"),
+		peerIdentity: idPeerB,
+		version:      7,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-old")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-30 * time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+	svc.health[domain.PeerAddress("addr-new")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	// 64 iterations is comfortably above the typical Go map-iteration
+	// shuffle period; if ordering depended on map order we would see at
+	// least one mismatched call within this many tries.
+	const iterations = 64
+	for i := 0; i < iterations; i++ {
+		meta, ok := svc.fileTransferPeerRouteMeta(idPeerB)
+		if !ok {
+			t.Fatalf("iter %d: expected peer to be usable", i)
+		}
+		if !meta.ConnectedAt.Equal(now.Add(-30 * time.Minute)) {
+			t.Fatalf("iter %d: expected ConnectedAt=oldest, got %v", i, meta.ConnectedAt)
+		}
+		// version 4 belongs to addr-old (the oldest), so meta MUST
+		// report it — not version 7 from the newer session.
+		if meta.ProtocolVersion != domain.ProtocolVersion(4) {
+			t.Fatalf("iter %d: expected ProtocolVersion=4 (addr-old's own), got %d", i, meta.ProtocolVersion)
+		}
+	}
+}
+
+// TestPeerSendableConnectionsDeterministicAcrossMapIteration covers the
+// same invariant directly on the shared helper, including the inbound
+// tiebreak path (ConnID) that the meta-only test above does not reach.
+// Two outbound (different addresses, same connectedAt → tiebreak by
+// address) and two inbound (different ConnIDs, same connectedAt →
+// tiebreak by ConnID) — order must be stable across repeated calls.
+func TestPeerSendableConnectionsDeterministicAcrossMapIteration(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	svc.sessions[domain.PeerAddress("addr-bb")] = &peerSession{
+		address:      domain.PeerAddress("addr-bb"),
+		peerIdentity: idPeerB,
+		version:      6,
+		capabilities: []domain.Capability{domain.CapFileTransferV1},
+	}
+	svc.sessions[domain.PeerAddress("addr-aa")] = &peerSession{
+		address:      domain.PeerAddress("addr-aa"),
+		peerIdentity: idPeerB,
+		version:      6,
+		capabilities: []domain.Capability{domain.CapFileTransferV1},
+	}
+	commonHealth := func() *peerHealth {
+		return &peerHealth{
+			Connected:           true,
+			LastConnectedAt:     now.Add(-5 * time.Minute),
+			LastUsefulReceiveAt: now,
+		}
+	}
+	svc.health[domain.PeerAddress("addr-aa")] = commonHealth()
+	svc.health[domain.PeerAddress("addr-bb")] = commonHealth()
+
+	// Two inbound conns with identical connectedAt; tiebreak is by
+	// ConnID (lower first). ConnID 13 must consistently win over 99.
+	makeInbound := func(id netcore.ConnID, addr string) {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = local.Close() })
+		t.Cleanup(func() { _ = remote.Close() })
+		pc := netcore.New(id, local, netcore.Inbound, netcore.Options{
+			Address:         domain.PeerAddress(addr),
+			Identity:        idPeerB,
+			Caps:            []domain.Capability{domain.CapFileTransferV1},
+			ProtocolVersion: 6,
+		})
+		t.Cleanup(func() { pc.Close() })
+		svc.setTestConnEntryLocked(local, &connEntry{core: pc, tracked: true})
+		svc.health[domain.PeerAddress(addr)] = commonHealth()
+	}
+	makeInbound(99, "addr-in-99")
+	makeInbound(13, "addr-in-13")
+
+	const iterations = 64
+	for i := 0; i < iterations; i++ {
+		svc.peerMu.RLock()
+		got := svc.peerSendableConnectionsLocked(idPeerB, domain.CapFileTransferV1, now)
+		svc.peerMu.RUnlock()
+
+		if len(got) != 4 {
+			t.Fatalf("iter %d: expected 4 candidates (2 outbound + 2 inbound), got %d", i, len(got))
+		}
+		// Outbound block: addr-aa < addr-bb lexicographically.
+		if got[0].outbound == nil || got[0].outbound.address != "addr-aa" {
+			t.Fatalf("iter %d: candidates[0] expected outbound addr-aa, got %+v", i, got[0])
+		}
+		if got[1].outbound == nil || got[1].outbound.address != "addr-bb" {
+			t.Fatalf("iter %d: candidates[1] expected outbound addr-bb, got %+v", i, got[1])
+		}
+		// Inbound block: ConnID 13 < 99.
+		if got[2].outbound != nil || got[2].inboundID != 13 {
+			t.Fatalf("iter %d: candidates[2] expected inbound ConnID=13, got %+v", i, got[2])
+		}
+		if got[3].outbound != nil || got[3].inboundID != 99 {
+			t.Fatalf("iter %d: candidates[3] expected inbound ConnID=99, got %+v", i, got[3])
+		}
+	}
+}
+
+// TestFileTransferPeerRouteMetaPrefersOutboundOverInbound is the
+// regression test for the meta-vs-send-path drift bug: when peer X has
+// BOTH an outbound session (lower version) and an inbound conn (higher
+// version), the meta MUST report the outbound's version because that
+// is the connection sendFrameToIdentity will actually try first.
+//
+// Before the fix, fileTransferPeerRouteMetaLocked aggregated max
+// version across all eligible sessions, so it would say "v9" while the
+// real send path would route bytes through the outbound v5 session.
+// The diagnostic and the file router's protocol_version DESC ranking
+// would then prefer this peer based on a version no packet would
+// actually traverse.
+func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	// Outbound session with version 5 — this is the connection
+	// sendFrameToIdentity tries first.
+	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
+		address:      domain.PeerAddress("addr-out"),
+		peerIdentity: idPeerB,
+		version:      5,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-out")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-2 * time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	// Inbound conn for the same identity with version 9 — only the
+	// fall-back tier; meta must NOT pretend bytes will go through it.
+	inLocal, inRemote := net.Pipe()
+	defer func() { _ = inLocal.Close() }()
+	defer func() { _ = inRemote.Close() }()
+
+	pc := netcore.New(netcore.ConnID(7), inLocal, netcore.Inbound, netcore.Options{
+		Address:         domain.PeerAddress("addr-inbound-mix"),
+		Identity:        idPeerB,
+		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		ProtocolVersion: 9,
+	})
+	defer pc.Close()
+	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc, tracked: true})
+	svc.health[domain.PeerAddress("addr-inbound-mix")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	meta, ok := svc.fileTransferPeerRouteMeta(idPeerB)
+	if !ok {
+		t.Fatal("expected peer to be usable")
+	}
+	if meta.ProtocolVersion != 5 {
+		t.Fatalf("expected outbound version=5 (live send tries outbound first), got %d", meta.ProtocolVersion)
+	}
+	// connected_at must come from the SAME session as protocol_version,
+	// not stitched together from a different inbound conn.
+	if !meta.ConnectedAt.Equal(now.Add(-2 * time.Minute)) {
+		t.Fatalf("connected_at = %v, want %v (the outbound session's own LastConnectedAt)", meta.ConnectedAt, now.Add(-2*time.Minute))
+	}
+}
+
+// TestExplainFileRouteUninitializedSubsystem confirms that ExplainFileRoute
+// returns errFileTransferNotInitialized when the file subsystem has not
+// been wired yet — same contract as the rest of the file-domain API.
+func TestExplainFileRouteUninitializedSubsystem(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+
+	if _, err := svc.ExplainFileRoute(idTargetX); err != errFileTransferNotInitialized {
+		t.Fatalf("expected errFileTransferNotInitialized, got %v", err)
 	}
 }
 

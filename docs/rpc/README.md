@@ -12,7 +12,7 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | [Network](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds`, `getActiveConnections` | [network.md](network.md) |
 | [Identity](identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts`, `deleteTrustedContact`, `importContacts` | [identity.md](identity.md) |
 | [Message](message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm`, `sendMessage`, `importMessage`, `sendDeliveryReceipt` | [message.md](message.md) |
-| [File Transfer](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload` | [file.md](file.md) |
+| [File Transfer](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload`, `explainFileRoute` | [file.md](file.md) |
 | [Chatlog](chatlog.md) | `fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations` | [chatlog.md](chatlog.md) |
 | [Notice](notice.md) | `fetchNotices`, `publishNotice` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetchRelayStatus` | [mesh.md](mesh.md) |
@@ -64,7 +64,7 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | [Сеть](network.md) | `getPeers`, `fetchPeerHealth`, `fetchNetworkStats`, `addPeer`, `fetchReachableIds`, `getActiveConnections` | [network.md](network.md) |
 | [Идентификация](identity.md) | `fetchIdentities`, `fetchContacts`, `fetchTrustedContacts`, `deleteTrustedContact`, `importContacts` | [identity.md](identity.md) |
 | [Сообщения](message.md) | `fetchMessages`, `fetchMessageIds`, `fetchMessage`, `fetchInbox`, `fetchPendingMessages`, `fetchDeliveryReceipts`, `fetchDmHeaders`, `sendDm`, `sendMessage`, `importMessage`, `sendDeliveryReceipt` | [message.md](message.md) |
-| [Файловый трансфер](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload` | [file.md](file.md) |
+| [Файловый трансфер](file.md) | `sendFileAnnounce`, `fetchFileTransfers`, `fetchFileMapping`, `retryFileChunk`, `startFileDownload`, `cancelFileDownload`, `explainFileRoute` | [file.md](file.md) |
 | [История чатов](chatlog.md) | `fetchChatlog`, `fetchChatlogPreviews`, `fetchConversations` | [chatlog.md](chatlog.md) |
 | [Уведомления](notice.md) | `fetchNotices`, `publishNotice` | [notice.md](notice.md) |
 | [Mesh](mesh.md) | `fetchRelayStatus` | [mesh.md](mesh.md) |
