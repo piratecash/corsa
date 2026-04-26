@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -66,11 +67,33 @@ func newTestFileRouter(
 		IsFullNode: func() bool { return isFullNode },
 		RouteSnap:  func() routing.Snapshot { return snap },
 		PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
-			return PeerRouteMeta{ConnectedAt: time.Now()}, true
+			// Default to a protocolVersion at the file-transfer
+			// cutover (domain.FileCommandMinPeerProtocolVersion) so
+			// existing tests that don't care about version still pass
+			// the ranking gate. Tests that exercise the cutover (e.g.
+			// TestRouter_RelaySkipsBelowMinProtocolVersionPeer) wire
+			// their own PeerRouteMeta callback returning a lower
+			// version explicitly.
+			return PeerRouteMeta{
+				ConnectedAt:        time.Now(),
+				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+			}, true
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			k, ok := senderPubKeys[id]
-			return k, ok
+		// Authenticity is now self-contained in the wire frame
+		// (FileCommandFrame.SrcPubKey + identity fingerprint check),
+		// so the helper no longer wires a pubkey resolver. The
+		// senderPubKeys map serves as the trust-store stand-in for
+		// IsAuthorizedForLocalDelivery: presence of an identity in
+		// the map means the local node is willing to accept files
+		// from that SRC. Boundary tests below
+		// (TestRouter_LocalDeliveryRejectsUntrustedSRC,
+		// TestRouter_RelayForwardsUntrustedAuthenticatedSRC) drive
+		// the resolver explicitly to pin the authenticity-vs-
+		// authorization split.
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := senderPubKeys[id]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			tr.mu.Lock()
@@ -119,9 +142,8 @@ func TestFileRouterLocalDelivery(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
-
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 
@@ -146,9 +168,8 @@ func TestFileRouterReplayRejection(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
-
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -170,13 +191,13 @@ func TestFileRouterForwardMultipleRoutes(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
 	relay2 := domain.PeerIdentity("relay2-node-identity-1234567890a")
 	relay3 := domain.PeerIdentity("relay3-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -226,12 +247,12 @@ func TestFileRouterForwardAllRoutesFail(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
 	relay2 := domain.PeerIdentity("relay2-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -274,11 +295,11 @@ func TestFileRouterClientNodeNoRelay(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("client-node-identity-123456789a")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -290,11 +311,42 @@ func TestFileRouterClientNodeNoRelay(t *testing.T) {
 		},
 	}
 
-	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
-	reachable := map[domain.PeerIdentity]bool{relay1: true}
-
-	// isFullNode = false → client node, should not relay.
-	tr := newTestFileRouter(localID, false, snap, keys, reachable)
+	// Hold a reference to the nonce cache so we can assert what was
+	// (or, in this case, was NOT) committed. After the SrcPubKey change
+	// any peer can produce an authentic transit frame at near-zero CPU
+	// cost; without the isFullNode gate sitting BEFORE TryAdd, every
+	// such frame would burn a slot in the bounded LRU on a client that
+	// will never forward — partial replay of the same denial-of-service
+	// vector that the local-delivery auth-before-TryAdd fix neutralised.
+	cache := newTestNonceCache()
+	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: cache,
+		LocalID:    localID,
+		// isFullNode = false → client node, should not relay AND must
+		// not consume replay-cache slots for the dropped frame.
+		IsFullNode: func() bool { return false },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerRouteMeta: func(domain.PeerIdentity) (PeerRouteMeta, bool) {
+			return PeerRouteMeta{
+				ConnectedAt:        time.Now(),
+				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+			}, true
+		},
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+			return true
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.deliveredLocal = append(tr.deliveredLocal, frame)
+		},
+	})
 
 	frame := makeSignedFrame(senderID, dstID, 5, "client-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
@@ -304,17 +356,24 @@ func TestFileRouterClientNodeNoRelay(t *testing.T) {
 	if len(tr.sentTo(relay1)) != 0 {
 		t.Error("client node should not relay file commands")
 	}
+	// Core invariant: a transit frame the client cannot forward MUST NOT
+	// consume a slot in the bounded LRU. Otherwise an attacker producing
+	// authentic-but-undeliverable frames at near-zero CPU cost can evict
+	// legitimate nonces and re-open the replay window.
+	if cache.Has(frame.Nonce) {
+		t.Fatal("client node committed a nonce for a transit frame it cannot forward; replay-cache LRU is consumable by drive-by transit traffic")
+	}
 }
 
 func TestFileRouterSkipsSelfRoutes(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -354,9 +413,8 @@ func TestFileRouterConcurrentDuplicateDelivery(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
-
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -367,9 +425,9 @@ func TestFileRouterConcurrentDuplicateDelivery(t *testing.T) {
 		LocalID:    localID,
 		IsFullNode: func() bool { return true },
 		RouteSnap:  func() routing.Snapshot { return snap },
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			k, ok := keys[id]
-			return k, ok
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := keys[id]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			return true
@@ -414,12 +472,12 @@ func TestFileRouterSplitHorizonExcludesIncomingPeer(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	neighborA := domain.PeerIdentity("neighbor-a-identity-1234567890a")
 	neighborB := domain.PeerIdentity("neighbor-b-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -463,11 +521,11 @@ func TestFileRouterSplitHorizonAllRoutesExcluded(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	onlyNeighbor := domain.PeerIdentity("only-neighbor-identity-12345678")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -505,11 +563,11 @@ func TestFileRouterEmptyIncomingPeerDisablesSplitHorizon(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	neighborA := domain.PeerIdentity("neighbor-a-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -541,12 +599,12 @@ func TestFileRouterEqualHopsPrefersLongestConnectedPeer(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relayOld := domain.PeerIdentity("relay-old-identity-1234567890ab")
 	relayNew := domain.PeerIdentity("relay-new-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -578,11 +636,15 @@ func TestFileRouterEqualHopsPrefersLongestConnectedPeer(t *testing.T) {
 			if !ok {
 				return PeerRouteMeta{}, false
 			}
-			return PeerRouteMeta{ConnectedAt: ts}, true
+			return PeerRouteMeta{
+				ConnectedAt:        ts,
+				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+			}, true
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			k, ok := keys[id]
-			return k, ok
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := keys[id]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			tr.mu.Lock()
@@ -610,12 +672,12 @@ func TestFileRouterSkipsUnusablePeerFromPeerRouteMeta(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	stalledRelay := domain.PeerIdentity("relay-stalled-identity-123456789")
 	healthyRelay := domain.PeerIdentity("relay-healthy-identity-123456789")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -643,13 +705,17 @@ func TestFileRouterSkipsUnusablePeerFromPeerRouteMeta(t *testing.T) {
 				return PeerRouteMeta{}, false
 			}
 			if id == healthyRelay {
-				return PeerRouteMeta{ConnectedAt: now.Add(-5 * time.Minute)}, true
+				return PeerRouteMeta{
+					ConnectedAt:        now.Add(-5 * time.Minute),
+					ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+					RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				}, true
 			}
 			return PeerRouteMeta{}, false
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			k, ok := keys[id]
-			return k, ok
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := keys[id]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			tr.mu.Lock()
@@ -712,10 +778,14 @@ func TestSendFileCommandRouteTableFallbackPrefersLongestConnectedEqualHop(t *tes
 			if !ok {
 				return PeerRouteMeta{}, false
 			}
-			return PeerRouteMeta{ConnectedAt: ts}, true
+			return PeerRouteMeta{
+				ConnectedAt:        ts,
+				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+			}, true
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			return nil, false
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			return false
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			tr.mu.Lock()
@@ -757,12 +827,12 @@ func TestFileRouterDeduplicatesCandidatesByNextHop(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relayA := domain.PeerIdentity("relay-a-identity-1234567890ab")
 	relayB := domain.PeerIdentity("relay-b-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -787,11 +857,15 @@ func TestFileRouterDeduplicatesCandidatesByNextHop(t *testing.T) {
 		IsFullNode: func() bool { return true },
 		RouteSnap:  func() routing.Snapshot { return snap },
 		PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
-			return PeerRouteMeta{ConnectedAt: now.Add(-time.Minute)}, true
+			return PeerRouteMeta{
+				ConnectedAt:        now.Add(-time.Minute),
+				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+			}, true
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			k, ok := keys[id]
-			return k, ok
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := keys[id]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			tr.mu.Lock()
@@ -882,35 +956,54 @@ func TestRouteCandidateLessOrdering(t *testing.T) {
 	}
 }
 
-// TestFileRouterPrefersHigherProtocolVersionOverFewerHops verifies the new
-// primary key end-to-end through collectRouteCandidates: a 2-hop next-hop
-// running protocol v7 must win over a 1-hop next-hop running v6.
-func TestFileRouterPrefersHigherProtocolVersionOverFewerHops(t *testing.T) {
+// TestFileRouterPrefersLegitOverInflatedVersion exercises the primary
+// ranking key end-to-end through collectRouteCandidates: an eligible
+// peer reporting the legit cutover version (RawProtocolVersion=12,
+// ProtocolVersion=12) must win over an inflated-version peer
+// (RawProtocolVersion>12, ProtocolVersion clamped to 0 by the node-side
+// trustedFileRouteVersion helper) even when the inflated peer has
+// fewer hops. Inflated peers stay eligible (Raw>=12 passes the cutover
+// filter — see routeCandidate godoc) but the clamped ranking value
+// pushes them to the bottom of the protocolVersion-DESC sort.
+//
+// This is the production-realistic shape of the legacy
+// "higher-version-wins" test: with config.ProtocolVersion = 12, no
+// peer can legitimately advertise a higher version, so the only way
+// 13/14/etc. surface in PeerRouteMeta is the inflated-and-clamped
+// case. ProtocolVersion=12 + RawProtocolVersion=12 represents a
+// healthy peer at the cutover; ProtocolVersion=0 + RawProtocolVersion=13
+// represents an inflated peer kept as last-resort.
+func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relayClose := domain.PeerIdentity("relay-close-identity-12345678901")
 	relayFar := domain.PeerIdentity("relay-far-identity-1234567890123")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
 		TakenAt: now,
 		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
 			dstID: {
-				{Identity: dstID, NextHop: relayClose, Hops: 1, ExpiresAt: now.Add(time.Minute)},
-				{Identity: dstID, NextHop: relayFar, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, NextHop: relayClose, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, NextHop: relayFar, Hops: 1, ExpiresAt: now.Add(time.Minute)},
 			},
 		},
 	}
 
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 6},
-		relayFar:   {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 7},
+		// Legit: ProtocolVersion mirrors RawProtocolVersion at the cutover.
+		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
+		// Inflated: peer claimed v13, clamped to ranking 0 by node-side
+		// trustedFileRouteVersion. Eligible (Raw>=12) but ranked last.
+		// Note: even though relayFar has fewer hops, the protocolVersion
+		// DESC primary key wins (12 > 0).
+		relayFar: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 0, RawProtocolVersion: 13},
 	}
 
 	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
@@ -923,9 +1016,9 @@ func TestFileRouterPrefersHigherProtocolVersionOverFewerHops(t *testing.T) {
 			m, ok := meta[id]
 			return m, ok
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			k, ok := keys[id]
-			return k, ok
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := keys[id]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			tr.mu.Lock()
@@ -936,15 +1029,15 @@ func TestFileRouterPrefersHigherProtocolVersionOverFewerHops(t *testing.T) {
 		LocalDeliver: func(frame protocol.FileCommandFrame) {},
 	})
 
-	frame := makeSignedFrame(senderID, dstID, 5, "version-over-hops-payload", priv)
+	frame := makeSignedFrame(senderID, dstID, 5, "legit-over-inflated-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 	tr.router.HandleInbound(json.RawMessage(raw), "")
 
-	if len(tr.sentTo(relayFar)) != 1 {
-		t.Fatalf("expected file router to choose higher-version relayFar even at 2 hops, got %d sends", len(tr.sentTo(relayFar)))
+	if len(tr.sentTo(relayClose)) != 1 {
+		t.Fatalf("expected file router to choose legit-version relayClose (PV=12) over inflated relayFar (PV=0 clamped, Raw=13), got %d sends", len(tr.sentTo(relayClose)))
 	}
-	if len(tr.sentTo(relayClose)) != 0 {
-		t.Fatalf("expected lower-version relayClose to be skipped, got %d sends", len(tr.sentTo(relayClose)))
+	if len(tr.sentTo(relayFar)) != 0 {
+		t.Fatalf("expected inflated relayFar to be the last-resort candidate, not picked first; got %d sends", len(tr.sentTo(relayFar)))
 	}
 }
 
@@ -954,12 +1047,12 @@ func TestFileRouterEqualVersionFallsBackToHopsThenUptime(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relayClose := domain.PeerIdentity("relay-close-identity-12345678901")
 	relayFar := domain.PeerIdentity("relay-far-identity-1234567890123")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -974,8 +1067,8 @@ func TestFileRouterEqualVersionFallsBackToHopsThenUptime(t *testing.T) {
 
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		relayClose: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 6},
-		relayFar:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 6},
+		relayClose: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
+		relayFar:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
 	}
 
 	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
@@ -988,9 +1081,9 @@ func TestFileRouterEqualVersionFallsBackToHopsThenUptime(t *testing.T) {
 			m, ok := meta[id]
 			return m, ok
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			k, ok := keys[id]
-			return k, ok
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := keys[id]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			tr.mu.Lock()
@@ -1040,12 +1133,19 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 	}
 
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		// relayFar wins on protocol_version even though it costs an extra hop;
-		// expectation is that ExplainRoute reports it first, with best=true at
-		// index 0 by convention (Service.ExplainFileRoute marks best from
-		// position).
-		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 6},
-		relayFar:   {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 7},
+		// relayClose is a healthy peer at the cutover (RawProtocolVersion=12,
+		// ProtocolVersion=12). relayFar represents an inflated peer:
+		// it claimed a version higher than config.ProtocolVersion=12, the
+		// node-side trustedFileRouteVersion clamped its ranking value to 0
+		// while keeping RawProtocolVersion at the actually-reported value
+		// (13 here). The clamp pushes relayFar to the bottom of the
+		// protocolVersion-DESC sort even though it is one hop closer; the
+		// raw value (>= cutover) keeps relayFar eligible as last-resort.
+		// This is the only production-realistic shape where
+		// ProtocolVersion=0 and the candidate is still in the plan — see
+		// PeerRouteMeta godoc and routeCandidate godoc.
+		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
+		relayFar:   {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 0, RawProtocolVersion: 13},
 	}
 
 	router := NewRouter(RouterConfig{
@@ -1057,26 +1157,29 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 			m, ok := meta[id]
 			return m, ok
 		},
-		PeerPubKey:   func(domain.PeerIdentity) (ed25519.PublicKey, bool) { return nil, false },
-		SessionSend:  func(domain.PeerIdentity, []byte) bool { return true },
-		LocalDeliver: func(protocol.FileCommandFrame) {},
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend:                  func(domain.PeerIdentity, []byte) bool { return true },
+		LocalDeliver:                 func(protocol.FileCommandFrame) {},
 	})
 
 	plan := router.ExplainRoute(dstID)
 	if len(plan) != 2 {
 		t.Fatalf("expected 2 entries in plan, got %d", len(plan))
 	}
-	if plan[0].NextHop != relayFar {
-		t.Fatalf("expected best entry to be relayFar (higher protocol version), got %s", plan[0].NextHop)
+	if plan[0].NextHop != relayClose {
+		t.Fatalf("expected best entry to be relayClose (legit cutover version PV=12), got %s", plan[0].NextHop)
 	}
-	if plan[0].ProtocolVersion != 7 {
-		t.Fatalf("expected best entry version=7, got %d", plan[0].ProtocolVersion)
+	if plan[0].ProtocolVersion != 12 {
+		t.Fatalf("expected best entry version=12, got %d", plan[0].ProtocolVersion)
 	}
-	if plan[0].Hops != 2 {
-		t.Fatalf("expected best entry hops=2, got %d", plan[0].Hops)
+	if plan[0].Hops != 1 {
+		t.Fatalf("expected best entry hops=1, got %d", plan[0].Hops)
 	}
-	if plan[1].NextHop != relayClose {
-		t.Fatalf("expected fall-back entry to be relayClose, got %s", plan[1].NextHop)
+	if plan[1].NextHop != relayFar {
+		t.Fatalf("expected fall-back entry to be relayFar (inflated, ranking-clamped), got %s", plan[1].NextHop)
+	}
+	if plan[1].ProtocolVersion != 0 {
+		t.Fatalf("expected fall-back entry to have ProtocolVersion=0 (clamped), got %d", plan[1].ProtocolVersion)
 	}
 	if plan[1].ConnectedAt.IsZero() {
 		t.Fatal("expected fall-back entry to carry a connectedAt timestamp")
@@ -1086,13 +1189,20 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 // TestRouterExplainRoutePromotesDirectSession mirrors SendFileCommand's
 // step-1 invariant: the direct session to dst is tried first,
 // unconditionally, before any route-table ranking. ExplainRoute therefore
-// MUST report the direct path as best=true even when a relay route with
-// a higher protocol version exists — otherwise the diagnostic would lie
-// about where the next byte is actually going.
+// MUST report the direct path as best=true even when the route-table
+// candidate carries an exotic ranking key — otherwise the diagnostic
+// would lie about where the next byte is actually going.
 //
-// Setup: dst has a usable direct session at version 6. A relay also has
-// a route to dst, hop-distance 2, version 99. Live SendFileCommand would
-// hit the direct session first; ExplainRoute must agree.
+// Setup: dst has a usable direct session at the file-transfer cutover
+// (ProtocolVersion=12, RawProtocolVersion=12). A relay also has a route
+// to dst, hop-distance 2, with the inflated-version shape produced by
+// the production node-side helper: ProtocolVersion=0 (ranking key
+// clamped because the peer reported v > config.ProtocolVersion) but
+// RawProtocolVersion=99 (eligibility passes the cutover filter as
+// last-resort). Live SendFileCommand would hit the direct session first;
+// ExplainRoute must agree, and the clamped relay must show up at the
+// bottom of the plan with ProtocolVersion=0 as documented in
+// docs/protocol/file_transfer.md "Inflated-version defence".
 func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 	t.Parallel()
 
@@ -1112,10 +1222,15 @@ func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
 		// dst has a direct session — that is the live send target.
-		dst: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 6},
-		// relay advertises a higher version, but live send never asks
-		// the routing table when the direct attempt succeeds.
-		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 99},
+		dst: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
+		// relay reports an inflated version (Raw=99 > config=12). The
+		// production node-side helper would clamp the ranking key to 0
+		// while keeping RawProtocolVersion at 99 so the candidate stays
+		// eligible (Raw>=12) but ranks at the bottom. Here the test
+		// covers the direct-session promotion contract; relay's ranking
+		// is therefore deliberately worst-case to make the promotion
+		// outcome unambiguous.
+		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 0, RawProtocolVersion: 99},
 	}
 
 	router := NewRouter(RouterConfig{
@@ -1127,9 +1242,9 @@ func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 			m, ok := meta[id]
 			return m, ok
 		},
-		PeerPubKey:   func(domain.PeerIdentity) (ed25519.PublicKey, bool) { return nil, false },
-		SessionSend:  func(domain.PeerIdentity, []byte) bool { return true },
-		LocalDeliver: func(protocol.FileCommandFrame) {},
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend:                  func(domain.PeerIdentity, []byte) bool { return true },
+		LocalDeliver:                 func(protocol.FileCommandFrame) {},
 	})
 
 	plan := router.ExplainRoute(dst)
@@ -1142,8 +1257,8 @@ func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 	if plan[0].Hops != 1 {
 		t.Fatalf("direct entry must report hops=1, got %d", plan[0].Hops)
 	}
-	if plan[0].ProtocolVersion != 6 {
-		t.Fatalf("direct entry version=6 expected, got %d", plan[0].ProtocolVersion)
+	if plan[0].ProtocolVersion != 12 {
+		t.Fatalf("direct entry version=12 expected, got %d", plan[0].ProtocolVersion)
 	}
 	if plan[1].NextHop != relay {
 		t.Fatalf("expected relay as fall-back, got %s", plan[1].NextHop)
@@ -1176,8 +1291,8 @@ func TestRouterExplainRouteDeduplicatesDirectAndRoutingTable(t *testing.T) {
 	}
 
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 6},
-		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 6},
+		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
+		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
 	}
 
 	router := NewRouter(RouterConfig{
@@ -1189,9 +1304,9 @@ func TestRouterExplainRouteDeduplicatesDirectAndRoutingTable(t *testing.T) {
 			m, ok := meta[id]
 			return m, ok
 		},
-		PeerPubKey:   func(domain.PeerIdentity) (ed25519.PublicKey, bool) { return nil, false },
-		SessionSend:  func(domain.PeerIdentity, []byte) bool { return true },
-		LocalDeliver: func(protocol.FileCommandFrame) {},
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend:                  func(domain.PeerIdentity, []byte) bool { return true },
+		LocalDeliver:                 func(protocol.FileCommandFrame) {},
 	})
 
 	plan := router.ExplainRoute(dst)
@@ -1240,8 +1355,8 @@ func TestSendFileCommandSkipsRoutingTableDirectAfterFailedDirectAttempt(t *testi
 	}
 
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 6},
-		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 6},
+		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
+		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
 	}
 
 	_, priv, _ := ed25519.GenerateKey(nil)
@@ -1258,7 +1373,7 @@ func TestSendFileCommandSkipsRoutingTableDirectAfterFailedDirectAttempt(t *testi
 			m, ok := meta[id]
 			return m, ok
 		},
-		PeerPubKey: func(domain.PeerIdentity) (ed25519.PublicKey, bool) { return nil, false },
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
 		SessionSend: func(target domain.PeerIdentity, _ []byte) bool {
 			mu.Lock()
 			defer mu.Unlock()
@@ -1311,14 +1426,14 @@ func TestRouterExplainRouteEmptyWhenNoRoute(t *testing.T) {
 	}
 
 	router := NewRouter(RouterConfig{
-		NonceCache:    newTestNonceCache(),
-		LocalID:       localID,
-		IsFullNode:    func() bool { return true },
-		RouteSnap:     func() routing.Snapshot { return snap },
-		PeerRouteMeta: func(domain.PeerIdentity) (PeerRouteMeta, bool) { return PeerRouteMeta{}, false },
-		PeerPubKey:    func(domain.PeerIdentity) (ed25519.PublicKey, bool) { return nil, false },
-		SessionSend:   func(domain.PeerIdentity, []byte) bool { return true },
-		LocalDeliver:  func(protocol.FileCommandFrame) {},
+		NonceCache:                   newTestNonceCache(),
+		LocalID:                      localID,
+		IsFullNode:                   func() bool { return true },
+		RouteSnap:                    func() routing.Snapshot { return snap },
+		PeerRouteMeta:                func(domain.PeerIdentity) (PeerRouteMeta, bool) { return PeerRouteMeta{}, false },
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend:                  func(domain.PeerIdentity, []byte) bool { return true },
+		LocalDeliver:                 func(protocol.FileCommandFrame) {},
 	})
 
 	if plan := router.ExplainRoute(unknown); len(plan) != 0 {
@@ -1356,10 +1471,15 @@ func TestFileRouterExcludeViaWinsOverHigherVersion(t *testing.T) {
 	}
 
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		// via has the higher version AND fewer hops — but split-horizon must
-		// still drop it because the frame just arrived from there.
-		via:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 99},
-		other: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 6},
+		// via reports an inflated version (Raw=99, ranking clamped to 0)
+		// AND has fewer hops — both keys would normally compete with
+		// split-horizon. The test pins that split-horizon excludes via
+		// regardless of how the rest of routeCandidateLess would score
+		// it; choosing the inflated last-resort shape makes the outcome
+		// independent of the ranking comparator and exercises the
+		// production-realistic clamped state for high reported versions.
+		via:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 0, RawProtocolVersion: 99},
+		other: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
 	}
 
 	router := NewRouter(RouterConfig{
@@ -1371,8 +1491,8 @@ func TestFileRouterExcludeViaWinsOverHigherVersion(t *testing.T) {
 			m, ok := meta[id]
 			return m, ok
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			return nil, false
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			return false
 		},
 		SessionSend:  func(domain.PeerIdentity, []byte) bool { return true },
 		LocalDeliver: func(protocol.FileCommandFrame) {},
@@ -1385,5 +1505,360 @@ func TestFileRouterExcludeViaWinsOverHigherVersion(t *testing.T) {
 	}
 	if candidates[0].nextHop != other {
 		t.Fatalf("expected only candidate to be %s, got %s", other, candidates[0].nextHop)
+	}
+}
+
+// --- Authenticity vs authorization boundary ---
+//
+// The tests below pin the split between data-integrity authenticity
+// (self-contained in the wire frame via SrcPubKey + signature) and
+// destination-side authorization (IsAuthorizedForLocalDelivery). They
+// cover the four cases that matter:
+//
+//                                 │ frame authenticity │ frame authenticity
+//                                 │       valid        │      invalid
+//   ──────────────────────────────┼────────────────────┼─────────────────────
+//   DST != self (forward path)    │ Forward regardless │ Drop
+//                                 │ of trust store     │
+//   ──────────────────────────────┼────────────────────┼─────────────────────
+//   DST == self (local delivery)  │ Authorize via      │ Drop
+//                                 │ trust store; drop  │
+//                                 │ if untrusted       │
+//
+// The "forward regardless of trust" property is the one that lets two
+// NAT-ed peers exchange files through any public relay — earlier
+// versions sourced pubkeys from the relay's own trust store, which is
+// why relay forwarded only between trusted contacts.
+
+func newTestFileRouterAuthorize(
+	localID domain.PeerIdentity,
+	isFullNode bool,
+	snap routing.Snapshot,
+	authorized map[domain.PeerIdentity]bool,
+	reachableHops map[domain.PeerIdentity]bool,
+) *testFileRouter {
+	tr := &testFileRouter{
+		sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+	}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: newTestNonceCache(),
+		LocalID:    localID,
+		IsFullNode: func() bool { return isFullNode },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
+			return PeerRouteMeta{
+				ConnectedAt:        time.Now(),
+				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+			}, true
+		},
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			return authorized != nil && authorized[id]
+		},
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			if reachableHops != nil && !reachableHops[dst] {
+				return false
+			}
+			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+			return true
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.deliveredLocal = append(tr.deliveredLocal, frame)
+		},
+	})
+	return tr
+}
+
+// TestRouter_RelayForwardsAuthenticatedFrameUntrustedSRC is the
+// regression guard for the production symptom: two NAT-ed peers could
+// not exchange files through any public relay because no public node
+// had either of them in its trust store. With self-contained
+// authenticity (SrcPubKey + fingerprint check on the frame itself), a
+// relay can verify the signature without any peer state at all and
+// MUST forward the frame even when SRC is not authorized for local
+// delivery (i.e. not in the relay's trust store).
+func TestRouter_RelayForwardsAuthenticatedFrameUntrustedSRC(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	hop := domain.PeerIdentity("nexthop-identity-1234567890abcde")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, NextHop: hop, Hops: 1, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	// Authorization map is empty — relay does NOT trust SRC for local
+	// delivery. Forwarding must still succeed because authenticity is
+	// self-contained.
+	tr := newTestFileRouterAuthorize(localID, true, snap, nil, map[domain.PeerIdentity]bool{hop: true})
+
+	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.sentTo(hop); len(got) != 1 {
+		t.Fatalf("relay must forward an authenticated frame regardless of local trust; sent=%d", len(got))
+	}
+	if got := tr.localDeliveries(); len(got) != 0 {
+		t.Fatalf("relay must NOT locally deliver a frame whose DST is not self, got %d deliveries", len(got))
+	}
+}
+
+// TestRouter_DropsFrameWhenSrcPubKeyFingerprintMismatch pins that
+// authenticity check rejects frames where SrcPubKey does not hash to
+// SRC. Without this an attacker could lift a stranger's SRC and stamp
+// their own pubkey to bypass any sender-binding.
+func TestRouter_DropsFrameWhenSrcPubKeyFingerprintMismatch(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	// Use a SRC that is NOT the fingerprint of this pubkey.
+	wrongSRC := domain.PeerIdentity("not-the-fingerprint-of-pub-1234")
+
+	snap := routing.Snapshot{TakenAt: time.Now()}
+	authorized := map[domain.PeerIdentity]bool{wrongSRC: true} // even if "trusted"
+	tr := newTestFileRouterAuthorize(localID, true, snap, authorized, nil)
+
+	frame := makeSignedFrame(wrongSRC, localID, 5, "payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.localDeliveries(); len(got) != 0 {
+		t.Fatalf("frame with mismatched SrcPubKey/SRC must be dropped, got %d deliveries", len(got))
+	}
+}
+
+// TestRouter_DropsFrameWhenSignatureInvalid pins that the signature is
+// verified against the embedded SrcPubKey. A tampered signature must
+// be dropped even when fingerprint matches.
+func TestRouter_DropsFrameWhenSignatureInvalid(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+
+	snap := routing.Snapshot{TakenAt: time.Now()}
+	authorized := map[domain.PeerIdentity]bool{senderID: true}
+	tr := newTestFileRouterAuthorize(localID, true, snap, authorized, nil)
+
+	frame := makeSignedFrame(senderID, localID, 5, "payload", priv)
+	// Tamper with signature — flip last hex char.
+	if len(frame.Signature) > 0 {
+		last := frame.Signature[len(frame.Signature)-1]
+		var rep byte = 'a'
+		if last == 'a' {
+			rep = 'b'
+		}
+		frame.Signature = frame.Signature[:len(frame.Signature)-1] + string(rep)
+	}
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.localDeliveries(); len(got) != 0 {
+		t.Fatalf("frame with tampered signature must be dropped, got %d deliveries", len(got))
+	}
+}
+
+// TestRouter_LocalDeliveryRejectsUntrustedSRC is the authorization
+// guard: even with a perfectly authentic frame, an untrusted SRC must
+// not deposit files into the local inbox.
+func TestRouter_LocalDeliveryRejectsUntrustedSRC(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+
+	snap := routing.Snapshot{TakenAt: time.Now()}
+	// Authorization map empty — SRC is authenticated but NOT trusted.
+	tr := newTestFileRouterAuthorize(localID, true, snap, nil, nil)
+
+	frame := makeSignedFrame(senderID, localID, 5, "payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.localDeliveries(); len(got) != 0 {
+		t.Fatalf("local delivery must drop an authenticated-but-untrusted SRC, got %d deliveries", len(got))
+	}
+}
+
+// TestRouter_LocalDeliveryUntrustedSRCDoesNotConsumeNonceSlot pins the
+// replay-cache poisoning fix: with self-contained authenticity, any
+// peer can produce a perfectly signed frame addressed to us using its
+// own identity. If the local-delivery branch committed the nonce
+// before the trust-store check, an untrusted-but-authentic SRC could
+// burn slots in the bounded LRU and evict legitimate nonces, opening
+// a cheap denial-of-service path on a node's anti-replay budget.
+//
+// The fix is order-of-operations: IsAuthorizedForLocalDelivery runs
+// FIRST, and only authorized local frames reach TryAdd. We assert
+// that contract directly by inspecting the nonce cache after the call.
+// The relay path keeps the original authenticity-before-TryAdd order,
+// covered by TestRouter_RelayForwardsAuthenticatedFrameUntrustedSRC.
+func TestRouter_LocalDeliveryUntrustedSRCDoesNotConsumeNonceSlot(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+
+	snap := routing.Snapshot{TakenAt: time.Now()}
+
+	// Hold a reference to the nonce cache so we can assert what got
+	// committed; the helpers wrap one inline and there is no public
+	// accessor on Router.
+	cache := newTestNonceCache()
+	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: cache,
+		LocalID:    localID,
+		IsFullNode: func() bool { return true },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerRouteMeta: func(domain.PeerIdentity) (PeerRouteMeta, bool) {
+			return PeerRouteMeta{
+				ConnectedAt:        time.Now(),
+				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+			}, true
+		},
+		// SRC is authentic but NOT in the trust store — the exact
+		// shape of an "any peer can sign a frame addressed to me"
+		// attack the fix exists to neutralise.
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+			return true
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.deliveredLocal = append(tr.deliveredLocal, frame)
+		},
+	})
+
+	frame := makeSignedFrame(senderID, localID, 5, "payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.localDeliveries(); len(got) != 0 {
+		t.Fatalf("untrusted SRC must NOT be delivered locally, got %d deliveries", len(got))
+	}
+	// Core invariant: the rejected frame's nonce MUST NOT be in the
+	// cache. If it were, an attacker could exhaust the LRU at near-zero
+	// CPU cost (single signature per nonce) and evict legitimate
+	// in-flight nonces from trusted peers.
+	if cache.Has(frame.Nonce) {
+		t.Fatal("untrusted local frame committed its nonce; replay-cache LRU is consumable by an authentic-but-untrusted SRC")
+	}
+}
+
+// TestRouter_RelaySkipsBelowMinProtocolVersionPeer pins the protocol-
+// version cutover (domain.FileCommandMinPeerProtocolVersion). A v11
+// next-hop advertising file_transfer_v1 would receive a v2-formatted
+// frame and drop it at its missing-SrcPubKey gate, so the file router
+// must NOT pick that next-hop in the first place. The frame must also
+// not silently disappear: when the only candidate route is below the
+// minimum, forwardToNextHop reports "no active route".
+func TestRouter_RelaySkipsBelowMinProtocolVersionPeer(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	hop := domain.PeerIdentity("nexthop-identity-1234567890abcde")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{Identity: dstID, NextHop: hop, Hops: 1, ExpiresAt: now.Add(time.Minute)},
+			},
+		},
+	}
+
+	// peerRouteMeta reports v11 for the only candidate — below the cutover.
+	belowMinVersion := domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion - 1)
+
+	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
+	tr.router = NewRouter(RouterConfig{
+		NonceCache: newTestNonceCache(),
+		LocalID:    localID,
+		IsFullNode: func() bool { return true },
+		RouteSnap:  func() routing.Snapshot { return snap },
+		PeerRouteMeta: func(domain.PeerIdentity) (PeerRouteMeta, bool) {
+			return PeerRouteMeta{
+				ConnectedAt:        time.Now(),
+				ProtocolVersion:    belowMinVersion,
+				RawProtocolVersion: belowMinVersion,
+			}, true
+		},
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+			return true
+		},
+		LocalDeliver: func(frame protocol.FileCommandFrame) {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			tr.deliveredLocal = append(tr.deliveredLocal, frame)
+		},
+	})
+
+	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.sentTo(hop); len(got) != 0 {
+		t.Fatalf("relay must NOT pick a next-hop with protocolVersion < FileCommandMinPeerProtocolVersion; sent=%d", len(got))
+	}
+}
+
+// TestRouter_LocalDeliveryAcceptsTrustedSRC is the happy-path: an
+// authentic frame from a trusted SRC reaches the local inbox.
+func TestRouter_LocalDeliveryAcceptsTrustedSRC(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+
+	snap := routing.Snapshot{TakenAt: time.Now()}
+	authorized := map[domain.PeerIdentity]bool{senderID: true}
+	tr := newTestFileRouterAuthorize(localID, true, snap, authorized, nil)
+
+	frame := makeSignedFrame(senderID, localID, 5, "payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.localDeliveries(); len(got) != 1 {
+		t.Fatalf("authenticated trusted SRC must be delivered locally, got %d deliveries", len(got))
 	}
 }

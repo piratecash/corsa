@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -31,9 +32,9 @@ func deliverLocalFrame(t *testing.T, payload string) (tr *testFileRouter, sender
 	t.Helper()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID = domain.PeerIdentity("sender-node-identity-1234567890")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID = domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -64,8 +65,9 @@ func TestFileCommandNotStoredInChatlog(t *testing.T) {
 	// The Router struct has no chatlog reference, no message store,
 	// no database handle. There is no code path from HandleInbound to
 	// chatlog storage. This is verified by inspection of Router fields:
-	// nonceCache, localID, isFullNode, routeSnap, peerPubKey, sessionSend,
-	// localDeliver — none of which interact with chatlog.
+	// nonceCache, localID, isFullNode, routeSnap, peerRouteMeta,
+	// isAuthorizedForLocalDeliver, sessionSend, localDeliver — none of
+	// which interact with chatlog.
 }
 
 // TestFileCommandNotInDMRouterPipeline verifies that file commands go through
@@ -94,10 +96,10 @@ func TestFileCommandNoPendingQueue(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	unknownDST := domain.PeerIdentity("unknown-destination-identity12")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	// No route to unknownDST.
 	snap := routing.Snapshot{TakenAt: time.Now()}
@@ -130,10 +132,10 @@ func TestFileCommandNoGossipFallback(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	remoteDST := domain.PeerIdentity("remote-destination-identity123")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	// One route to remoteDST via nextHop, but the send will fail.
 	nextHop := domain.PeerIdentity("next-hop-identity-123456789012")

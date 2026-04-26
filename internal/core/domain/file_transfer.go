@@ -37,6 +37,44 @@ const (
 	// outside this window are dropped as stale or future-dated.
 	FileCommandMaxClockDrift = 300 // 5 minutes
 
+	// FileCommandMinPeerProtocolVersion is the lowest protocol_version a
+	// peer must advertise for this node to participate in file_command
+	// traffic with it on either side. The wire frame carries SrcPubKey
+	// for self-contained authenticity (see docs/protocol/file_transfer.md
+	// "Authenticity vs authorization"); a peer reporting below this floor
+	// predates the SrcPubKey field and either emits a frame the v2 router
+	// drops on missing-pubkey, or — if it is the relay between two v2
+	// endpoints — drops the v2 frame on its own trust-store-only pubkey
+	// lookup, which is the original production failure that motivated the
+	// cutover.
+	//
+	// Both directions are gated:
+	//   - send: peerSendableConnectionsLocked filters direct sessions on
+	//     the raw peerSession.version, and Router.collectRouteCandidates
+	//     filters route-table next-hops on PeerRouteMeta.RawProtocolVersion;
+	//   - receive: dispatchNetworkFrame rejects file_command from inbound
+	//     connections whose negotiated protocol_version is below the floor.
+	//
+	// Both sides reject a raw/unknown version of 0 — there is no positive
+	// evidence the peer speaks the v2 SrcPubKey wire format, and admitting
+	// such a frame re-opens the same v11-relay attack surface the cutover
+	// exists to close.
+	//
+	// The only soft-demote case is "peer reported v > config.ProtocolVersion
+	// (inflated, clamped for ranking defence)": the route-meta helper sets
+	// PeerRouteMeta.ProtocolVersion = 0 (clamped) but keeps
+	// RawProtocolVersion at the actual reported value. Eligibility is then
+	// decided by RawProtocolVersion (>= 12 → admit as last-resort), and
+	// ranking is decided by ProtocolVersion (0 sorts to the bottom under
+	// DESC). The split is what lets the inflated peer survive without
+	// confusing it with the unknown case.
+	//
+	// This value is the temporary bridge until MinimumProtocolVersion is
+	// officially raised to 12 globally; see
+	// docs/file-transfer-pubkey-gate-minproto12-cleanup.md for the removal
+	// plan.
+	FileCommandMinPeerProtocolVersion = 12
+
 	// FileCommandNonceCacheSize is the capacity of the anti-replay nonce
 	// cache. When full, the oldest entries are evicted (LRU).
 	FileCommandNonceCacheSize = 10_000

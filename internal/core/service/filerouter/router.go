@@ -2,6 +2,7 @@ package filerouter
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -53,9 +55,28 @@ type NonceCache interface {
 // Together the two fields describe a single coherent socket — never
 // an aggregate stitched across two — but the version key is a
 // post-defence projection, not the wire-level reported value.
+//
+// RawProtocolVersion is the version the peer actually reported on the
+// chosen connection BEFORE the inflated-version clamp is applied. It is
+// used for eligibility checks that must distinguish "known v12+ peer
+// whose version was clamped to 0 for ranking defence" from "version
+// not observed yet / pre-handshake / capability-only peer". Both look
+// identical on ProtocolVersion (both = 0), but only the former is a
+// safe last-resort candidate for file-transfer traffic — the latter
+// has no positive evidence the peer speaks the v2 SrcPubKey wire
+// format, so admitting it would re-open the v11-relay black hole the
+// FileCommandMinPeerProtocolVersion cutover exists to close.
+//
+// The node-side helper sets RawProtocolVersion from welcome.Version /
+// hello.Version directly without the clamp; ProtocolVersion is the
+// post-clamp version. Callers that need eligibility check against the
+// cutover MUST read RawProtocolVersion. Callers that need ranking key
+// MUST read ProtocolVersion. They are equal in the common case
+// (peer reports a version this build understands).
 type PeerRouteMeta struct {
-	ConnectedAt     time.Time
-	ProtocolVersion domain.ProtocolVersion
+	ConnectedAt        time.Time
+	ProtocolVersion    domain.ProtocolVersion
+	RawProtocolVersion domain.ProtocolVersion
 }
 
 // Router handles inbound FileCommandFrame processing at the node level.
@@ -70,39 +91,73 @@ type PeerRouteMeta struct {
 //   - File commands have no chatlog, no delivery receipts, no gossip fallback,
 //     no pending queue. If no route exists, the frame is silently dropped.
 type Router struct {
-	nonceCache    NonceCache
-	localID       domain.PeerIdentity
-	isFullNode    func() bool
-	routeSnap     func() routing.Snapshot
-	peerRouteMeta func(domain.PeerIdentity) (PeerRouteMeta, bool)
-	peerPubKey    func(domain.PeerIdentity) (ed25519.PublicKey, bool)
-	sessionSend   func(dst domain.PeerIdentity, data []byte) bool
-	localDeliver  func(frame protocol.FileCommandFrame)
+	nonceCache                  NonceCache
+	localID                     domain.PeerIdentity
+	isFullNode                  func() bool
+	routeSnap                   func() routing.Snapshot
+	peerRouteMeta               func(domain.PeerIdentity) (PeerRouteMeta, bool)
+	isAuthorizedForLocalDeliver func(domain.PeerIdentity) bool
+	sessionSend                 func(dst domain.PeerIdentity, data []byte) bool
+	localDeliver                func(frame protocol.FileCommandFrame)
 }
 
 // RouterConfig holds dependencies injected from Service into Router.
+//
+// Authenticity vs authorization is deliberately separated:
+//
+//   - Authenticity (data integrity) is self-contained in the wire frame.
+//     Every FileCommandFrame carries SrcPubKey alongside SRC, and the
+//     router checks identity.Fingerprint(SrcPubKey) == SRC plus the
+//     Ed25519 signature against SrcPubKey. Any node — including a
+//     transit relay that has never seen SRC before — can decide whether
+//     a frame is forged without consulting any peer state.
+//
+//   - Authorization (whether to accept a frame for local delivery) is
+//     a destination-side trust decision expressed by
+//     IsAuthorizedForLocalDelivery. A frame with a perfectly valid
+//     signature from an untrusted SRC must not deposit files into the
+//     local inbox — that is policy, not data integrity.
+//
+// This is what lets two NAT-ed peers exchange files through any public
+// relay: the relay verifies authenticity from the frame alone and
+// forwards. Earlier versions conflated authenticity with authorization
+// by sourcing pubkeys from the relay's own trust store, which made
+// relay-through-stranger impossible.
 type RouterConfig struct {
 	NonceCache    NonceCache
 	LocalID       domain.PeerIdentity
 	IsFullNode    func() bool
 	RouteSnap     func() routing.Snapshot
 	PeerRouteMeta func(domain.PeerIdentity) (PeerRouteMeta, bool)
-	PeerPubKey    func(domain.PeerIdentity) (ed25519.PublicKey, bool)
-	SessionSend   func(dst domain.PeerIdentity, data []byte) bool
-	LocalDeliver  func(frame protocol.FileCommandFrame)
+
+	// IsAuthorizedForLocalDelivery is consulted only when DST == self.
+	// It expresses the local trust-store policy: returning false means
+	// "we do not accept files from this source", and the router silently
+	// drops the frame even when authenticity (SrcPubKey + signature) is
+	// fully verified. Implementations typically check the trust store.
+	//
+	// Authenticity is checked by the router itself from the wire frame —
+	// callers do NOT supply a pubkey here. Keeping the authorization
+	// boundary as a pure boolean prevents a future widening of authenticity
+	// (e.g. accepting peers via mesh announcements) from accidentally
+	// widening the local-delivery acceptance set.
+	IsAuthorizedForLocalDelivery func(domain.PeerIdentity) bool
+
+	SessionSend  func(dst domain.PeerIdentity, data []byte) bool
+	LocalDeliver func(frame protocol.FileCommandFrame)
 }
 
 // NewRouter creates a Router with the provided dependencies.
 func NewRouter(cfg RouterConfig) *Router {
 	return &Router{
-		nonceCache:    cfg.NonceCache,
-		localID:       cfg.LocalID,
-		isFullNode:    cfg.IsFullNode,
-		routeSnap:     cfg.RouteSnap,
-		peerRouteMeta: cfg.PeerRouteMeta,
-		peerPubKey:    cfg.PeerPubKey,
-		sessionSend:   cfg.SessionSend,
-		localDeliver:  cfg.LocalDeliver,
+		nonceCache:                  cfg.NonceCache,
+		localID:                     cfg.LocalID,
+		isFullNode:                  cfg.IsFullNode,
+		routeSnap:                   cfg.RouteSnap,
+		peerRouteMeta:               cfg.PeerRouteMeta,
+		isAuthorizedForLocalDeliver: cfg.IsAuthorizedForLocalDelivery,
+		sessionSend:                 cfg.SessionSend,
+		localDeliver:                cfg.LocalDeliver,
 	}
 }
 
@@ -120,21 +175,36 @@ func NewRouter(cfg RouterConfig) *Router {
 // locally-originated / test-injected frames.
 //
 // Processing pipeline (cheapest checks first for DDoS resistance):
-//  1. Anti-replay: nonce cache lookup — O(1).
+//  1. Anti-replay: nonce cache lookup (Has only, no commit yet) — O(1).
 //  2. Deliverability check: DST == self OR route to DST exists — O(1).
-//  3. TTL check: decrement TTL by 1, then drop if TTL == 0 (loop
-//     prevention). The frame has exhausted its hop budget.
-//  4. Freshness: |now − Time| ≤ 5 min.
-//  5. Nonce binding: SHA256(SRC||DST||Time||Payload) must match Nonce.
-//  6. Signature: ed25519_verify(SRC_pubkey, Nonce, Signature).
-//  7. Atomic nonce commit (TryAdd): exactly one goroutine proceeds.
-//  8. Local delivery (DST == self): decrypt payload, dispatch to
-//     FileTransferManager.
-//  9. Relay restriction: only full nodes forward; client nodes drop
-//     DST ≠ self.
-//  10. Capability-aware forwarding: select best route whose next-hop
+//  3. Pre-mutation validation: TTL ≤ MaxTTL on the raw incoming value,
+//     freshness |now − Time| ≤ 5 min, and nonce binding
+//     SHA256(SRC||DST||MaxTTL||Time||Payload) == Nonce. MaxTTL is
+//     bound into the nonce so a malicious relay cannot inflate the hop
+//     budget without invalidating the signature chain. All three checks
+//     live in ValidateFileCommandFrame and run before any field is
+//     mutated, so a malicious relay cannot bypass them by inflating
+//     TTL past the ceiling and counting on a later decrement to slip
+//     it back under.
+//  4. TTL decrement: apply hop budget after validation, drop on
+//     exhaustion (loop prevention).
+//  5. Authenticity: decode SrcPubKey, recompute identity fingerprint
+//     against SRC, and ed25519_verify(SrcPubKey, Nonce, Signature).
+//     Self-contained — independent of any peer state on this node.
+//  6. Local delivery (DST == self): IsAuthorizedForLocalDelivery first,
+//     then atomic nonce commit (TryAdd), then dispatch to
+//     FileTransferManager. Authorization gates the commit so an
+//     authentic-but-untrusted SRC cannot evict bounded-LRU entries.
+//  7. Relay restriction: only full nodes forward; client nodes drop
+//     DST ≠ self. Runs BEFORE the relay TryAdd so a client node does
+//     not consume bounded-LRU slots for transit frames it would never
+//     forward — the symmetric defence to the auth-before-commit gate
+//     in the local-delivery branch.
+//  8. Relay path: atomic nonce commit (TryAdd) — exactly one goroutine
+//     proceeds for an authentic transit frame regardless of trust.
+//  9. Capability-aware forwarding: select best route whose next-hop
 //     has file_transfer_v1 AND is not incomingPeer. TTL already
-//     decremented at step 3.
+//     decremented at step 4.
 func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIdentity) {
 	var frame protocol.FileCommandFrame
 	if err := json.Unmarshal(raw, &frame); err != nil {
@@ -182,42 +252,112 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	}
 	frame = decremented
 
-	// 5. Signature verification: need sender's public key.
-	senderPubKey, ok := r.peerPubKey(frame.SRC)
-	if !ok {
-		log.Debug().Str("src", string(frame.SRC)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: unknown sender public key")
+	// 5. Self-contained authenticity check. The frame carries SrcPubKey
+	// alongside SRC; we verify identity↔pubkey binding by recomputing the
+	// fingerprint, then verify the Ed25519 signature against the embedded
+	// pubkey. This makes authenticity independent of any peer state on
+	// this node — a transit relay that has never seen SRC before can
+	// still decide whether the frame is forged.
+	//
+	// No legacy v1 fallback for frames without SrcPubKey: file_transfer is
+	// already gated at protocol-version 12 (peers reporting <12 do not
+	// negotiate file_transfer_v1 in a way that exchanges files
+	// successfully — see docs/protocol/file_transfer.md "Capability
+	// Gating") and the next-hop selection in collectRouteCandidates
+	// already prefers higher-version peers, so by the time a v2 router
+	// receives a file_command, the sender is already a v2-or-newer node
+	// that emits SrcPubKey. A frame arriving without SrcPubKey is either
+	// a malformed/forged frame or a misconfigured peer; dropping is the
+	// correct outcome in both cases.
+	if frame.SrcPubKey == "" {
+		log.Debug().
+			Str("src", string(frame.SRC)).
+			Str("nonce", noncePrefix(frame.Nonce)).
+			Msg("file_router: missing src_pubkey")
 		return
 	}
-	if err := protocol.VerifyFileCommandSignature(frame.Nonce, frame.Signature, senderPubKey); err != nil {
+	srcPubKey, err := base64.StdEncoding.DecodeString(frame.SrcPubKey)
+	if err != nil || len(srcPubKey) != ed25519.PublicKeySize {
+		log.Debug().
+			Err(err).
+			Str("src", string(frame.SRC)).
+			Str("nonce", noncePrefix(frame.Nonce)).
+			Int("src_pubkey_len", len(srcPubKey)).
+			Msg("file_router: invalid src_pubkey encoding")
+		return
+	}
+	if expected := identity.Fingerprint(ed25519.PublicKey(srcPubKey)); expected != string(frame.SRC) {
+		log.Debug().
+			Str("src", string(frame.SRC)).
+			Str("expected_fingerprint", expected).
+			Str("nonce", noncePrefix(frame.Nonce)).
+			Msg("file_router: src_pubkey fingerprint does not match SRC")
+		return
+	}
+	if err := protocol.VerifyFileCommandSignature(frame.Nonce, frame.Signature, ed25519.PublicKey(srcPubKey)); err != nil {
 		log.Debug().Err(err).Str("src", string(frame.SRC)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: signature verification failed")
 		return
 	}
 
-	// 6. Atomic anti-replay commit — only after all authenticity checks
-	// have passed. TryAdd returns true if this goroutine is the first to
-	// insert the nonce; concurrent deliveries of the same valid frame
-	// (via multiple peers/transports) lose the race and are dropped here.
-	// Using TryAdd instead of separate Has+Add closes the TOCTOU window
-	// while still preventing cache poisoning (forged frames never reach
-	// this point).
-	if !r.nonceCache.TryAdd(frame.Nonce) {
-		log.Debug().Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: concurrent duplicate, nonce already committed")
-		return
-	}
-
-	// 7. Local delivery: DST == self.
+	// 6. Local delivery (DST == self): authorization MUST gate the
+	// replay-cache commit. Authenticity by itself is cheap to produce
+	// after the SrcPubKey change — any peer can sign a frame addressed
+	// to us using its own identity — so committing the nonce before the
+	// trust-store check would let an authentic-but-untrusted SRC burn
+	// slots in the bounded LRU and evict legitimate nonces. The order
+	// is therefore: authorization first, then TryAdd, then deliver.
+	//
+	// Concurrent deliveries of the same authorized frame still collapse
+	// to a single localDeliver via TryAdd. The relay branch below keeps
+	// the original authenticity-before-TryAdd order: an authenticated
+	// frame in flight is part of the network's deduplication set
+	// regardless of our local trust policy, and we must commit its
+	// nonce so concurrent transit copies fold into one forward.
 	if isLocal {
+		if !r.isAuthorizedForLocalDeliver(frame.SRC) {
+			log.Debug().
+				Str("src", string(frame.SRC)).
+				Str("nonce", noncePrefix(frame.Nonce)).
+				Msg("file_router: SRC not authorized for local delivery")
+			return
+		}
+		if !r.nonceCache.TryAdd(frame.Nonce) {
+			log.Debug().Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: concurrent duplicate, nonce already committed")
+			return
+		}
 		r.localDeliver(frame)
 		return
 	}
 
-	// 8. Relay restriction: only full nodes forward.
+	// 7. Relay restriction: only full nodes forward. The check is here,
+	// BEFORE the relay TryAdd, so that a client node holding a route
+	// for DST cannot have its bounded LRU evicted by an attacker who
+	// produces authentic transit frames at near-zero CPU cost. After
+	// SrcPubKey self-contained authenticity, signing a valid frame is
+	// cheap; without this gate every authenticated DST≠self frame
+	// would commit a nonce on the client even though the client will
+	// never forward it. The earlier Has check at step 1 still catches
+	// genuine replays without committing anything, which is enough
+	// dedupe for a non-forwarder.
 	if !r.isFullNode() {
 		log.Debug().Str("dst", string(frame.DST)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: client node, dropping non-local file command")
 		return
 	}
 
-	// 10. Capability-aware forwarding (TTL already decremented at step 3).
+	// 8. Relay path: atomic anti-replay commit — only after all
+	// authenticity and policy checks have passed. TryAdd returns true
+	// if this goroutine is the first to insert the nonce; concurrent
+	// transit deliveries of the same valid frame (via multiple
+	// peers/transports) lose the race and are dropped here. Using
+	// TryAdd instead of separate Has+Add closes the TOCTOU window
+	// while still preventing cache poisoning (forged frames never
+	// reach this point).
+	if !r.nonceCache.TryAdd(frame.Nonce) {
+		log.Debug().Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: concurrent duplicate, nonce already committed")
+		return
+	}
+
+	// 9. Capability-aware forwarding (TTL already decremented at step 4).
 	// Pass incomingPeer so forwardToNextHop applies split-horizon and
 	// never reflects the frame back to the neighbor that just delivered it.
 	r.forwardToNextHop(frame, incomingPeer)
@@ -227,27 +367,34 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 // collectRouteCandidates to deduplicate the route-selection logic shared
 // between inbound forwarding and outbound sending.
 //
-// protocolVersion and connectedAt are filled from the same PeerRouteMeta
-// snapshot so the two sort keys describe the same session generation.
-// They are zero-value friendly: protocolVersion == 0 loses to any
-// reported version under DESC ordering but does not disqualify the
-// candidate — we still prefer to ship the file over an unfavoured peer
-// rather than drop the frame.
+// protocolVersion, rawProtocolVersion and connectedAt are filled from
+// the same PeerRouteMeta snapshot so the sort keys describe a single
+// session generation.
 //
-// Note that protocolVersion == 0 carries two distinct semantics that
-// the sort comparator treats identically but operators must read
-// differently: (a) the peer truly has not negotiated a version yet
-// (pre-handshake conn, or peer reports zero), or (b) the node-side
-// inflated-version defence clamped a higher reported value to 0
-// because it exceeded `config.ProtocolVersion` (see
-// PeerRouteMeta.ProtocolVersion godoc). Future ranking changes that
-// want to act on "unknown legacy peer" must consult the node-side
-// WARN logs to disambiguate, not reuse the zero check here.
+// rawProtocolVersion is the eligibility key (the version the peer
+// actually negotiated, before any clamp). Candidates with
+// rawProtocolVersion < FileCommandMinPeerProtocolVersion never reach
+// this struct — the cutover filter in collectRouteCandidates drops
+// them before the candidate is built. Pre-handshake conns, peers that
+// report zero, capability-only peers, and known-pre-cutover peers all
+// fall in that bucket and are not eligible for the file route at all.
+//
+// protocolVersion is the ranking key. After the cutover filter, the
+// only way protocolVersion == 0 reaches this struct is the inflated-
+// version case: the peer reported v > config.ProtocolVersion, the
+// node-side inflated-version defence
+// (trustedFileRouteVersion) clamped the ranking value to 0 to push
+// the candidate to the bottom of the protocolVersion-DESC sort, and
+// rawProtocolVersion >= FileCommandMinPeerProtocolVersion lets the
+// candidate survive eligibility as a deliberate last-resort hop. The
+// node-side helper logs at WARN when it clamps, so the original
+// reported value is recoverable from the journal.
 type routeCandidate struct {
-	nextHop         domain.PeerIdentity
-	hops            int
-	protocolVersion domain.ProtocolVersion
-	connectedAt     time.Time
+	nextHop            domain.PeerIdentity
+	hops               int
+	protocolVersion    domain.ProtocolVersion
+	rawProtocolVersion domain.ProtocolVersion
+	connectedAt        time.Time
 }
 
 type peerRouteMetaResult struct {
@@ -307,11 +454,47 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 			}
 			meta = result.meta
 		}
+		// Cutover: skip next-hops whose raw negotiated protocol version
+		// is below FileCommandMinPeerProtocolVersion. We check
+		// RawProtocolVersion (not ProtocolVersion) on purpose so the
+		// inflated-version defence does not collide with the cutover:
+		//
+		//   - peer reports a known v < 12 → RawProtocolVersion < 12,
+		//     candidate dropped here (predates SrcPubKey field; would
+		//     drop our frame on missing-pubkey lookup);
+		//   - peer reports v > config.ProtocolVersion (inflated) →
+		//     RawProtocolVersion >= 12, ProtocolVersion clamped to 0
+		//     by the node-side helper, candidate kept and ranked at
+		//     the bottom by the protocolVersion DESC sort below;
+		//   - version not observed yet / capability-only / pre-
+		//     handshake → RawProtocolVersion == 0, candidate dropped
+		//     here (no positive evidence the peer speaks v2). Without
+		//     this drop, an unknown-version peer would silently re-
+		//     open the v11 black hole — there is no signal it will
+		//     accept a v2 SrcPubKey frame.
+		//
+		// Hard invariant: every PeerRouteMeta consumer must populate
+		// RawProtocolVersion explicitly. There is intentionally no
+		// fallback to ProtocolVersion — a clamped inflated peer
+		// reports ProtocolVersion=0 but RawProtocolVersion>=12, and
+		// silently substituting one for the other would mistake the
+		// inflated case for the unknown case (and vice versa). Test
+		// fixtures that ignore the field land in the strict-drop
+		// branch on purpose, which surfaces missing migration as a
+		// failing test rather than a fail-open.
+		//
+		// Comparing on domain.ProtocolVersion (the underlying int)
+		// avoids the uint8-narrow wrap (e.g. version 268 truncating to
+		// 12 and silently passing).
+		if meta.RawProtocolVersion < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
+			continue
+		}
 		candidate := routeCandidate{
-			nextHop:         re.NextHop,
-			hops:            re.Hops,
-			protocolVersion: meta.ProtocolVersion,
-			connectedAt:     meta.ConnectedAt,
+			nextHop:            re.NextHop,
+			hops:               re.Hops,
+			protocolVersion:    meta.ProtocolVersion,
+			rawProtocolVersion: meta.RawProtocolVersion,
+			connectedAt:        meta.ConnectedAt,
 		}
 		if idx, exists := byNextHop[re.NextHop]; exists {
 			if routeCandidateLess(candidate, candidates[idx]) {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -19,10 +20,10 @@ func TestFileRouterUndeliverableDSTDropped(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	unknownDST := domain.PeerIdentity("unknown-dst-identity-1234567890")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	// Empty routing snapshot — no routes to anyone.
 	snap := routing.Snapshot{TakenAt: time.Now()}
@@ -53,11 +54,11 @@ func TestFileRouterTTLZeroAtRouterDropped(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -115,9 +116,9 @@ func TestFileRouterStaleFrameDropped(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -158,10 +159,10 @@ func TestFileRouterInvalidSignatureDropped(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 
 	pub, _, _ := ed25519.GenerateKey(nil)
 	_, wrongPriv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -169,6 +170,11 @@ func TestFileRouterInvalidSignatureDropped(t *testing.T) {
 	tr := newTestFileRouter(localID, true, snap, keys, nil)
 
 	// Sign with wrong key — should fail at signature verification.
+	// Wire-frame's SrcPubKey will reflect wrongPriv's pubkey (constructor
+	// derives it from privateKey), so fingerprint(SrcPubKey) won't match
+	// senderID — the frame is now dropped at the fingerprint check before
+	// reaching signature verify. The test contract still holds: an
+	// improperly signed frame is rejected and not delivered locally.
 	frame := makeSignedFrame(senderID, localID, 5, "bad-sig-payload", wrongPriv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
@@ -185,11 +191,11 @@ func TestFileRouterFullNodeRelays(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 	dstID := domain.PeerIdentity("destination-identity-1234567890a")
 	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -256,9 +262,9 @@ func TestFileRouterRejectsTTLInflation(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -285,9 +291,9 @@ func TestFileRouterAcceptsValidTTLBelowMaxTTL(t *testing.T) {
 	t.Parallel()
 
 	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("sender-node-identity-1234567890")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}

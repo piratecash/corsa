@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -25,23 +26,35 @@ const FileCommandFrameType = "file_command"
 // Wire layout (JSON):
 //
 //	{
-//	  "type":      "file_command",
-//	  "src":       "<sender PeerIdentity>",
-//	  "dst":       "<recipient PeerIdentity>",
-//	  "ttl":       10,
-//	  "max_ttl":   10,
-//	  "time":      1712345678,
-//	  "nonce":     "<hex SHA-256 digest>",
-//	  "signature": "<hex ed25519 signature over nonce>",
-//	  "payload":   "<base64 encrypted JSON>"
+//	  "type":        "file_command",
+//	  "src":         "<sender PeerIdentity>",
+//	  "src_pubkey":  "<base64 ed25519 pubkey of sender>",
+//	  "dst":         "<recipient PeerIdentity>",
+//	  "ttl":         10,
+//	  "max_ttl":     10,
+//	  "time":        1712345678,
+//	  "nonce":       "<hex SHA-256 digest>",
+//	  "signature":   "<hex ed25519 signature over nonce>",
+//	  "payload":     "<base64 encrypted JSON>"
 //	}
 //
 // MaxTTL is set equal to TTL by the sender and included in the nonce hash.
 // Relays decrement TTL but cannot change MaxTTL without invalidating the
 // nonce → signature chain. Each processing node enforces TTL <= MaxTTL.
+//
+// SrcPubKey is the sender's Ed25519 public key, base64-encoded. It makes
+// the frame self-contained for authenticity: any node — including a
+// transit relay that has never seen the sender before — can verify the
+// signature without consulting any out-of-band peer state. The receiver
+// must independently verify identity.Fingerprint(SrcPubKey) == SRC,
+// which prevents an attacker from substituting their own pubkey while
+// keeping a stranger's SRC. This separates authenticity (data integrity,
+// can be checked by any relay) from authorization (whether to deliver
+// locally — still gated by trust store on the destination).
 type FileCommandFrame struct {
 	Type      string              `json:"type"`
 	SRC       domain.PeerIdentity `json:"src"`
+	SrcPubKey string              `json:"src_pubkey"` // base64 ed25519 public key of SRC
 	DST       domain.PeerIdentity `json:"dst"`
 	TTL       uint8               `json:"ttl"`
 	MaxTTL    uint8               `json:"max_ttl"`
@@ -163,14 +176,17 @@ func UnmarshalFileCommandFrame(data []byte) (FileCommandFrame, error) {
 }
 
 // NewFileCommandFrame constructs a complete FileCommandFrame ready for
-// transmission. It computes the nonce and signs it with the sender's key.
+// transmission. It computes the nonce, signs it with the sender's key,
+// and embeds the sender's public key so any relay can verify the
+// signature without out-of-band peer state.
 //
 // Parameters:
 //   - src: sender's identity
 //   - dst: recipient's identity
 //   - ttl: initial hop count (clamped to FileCommandMaxTTL)
 //   - payload: base64-encoded encrypted command payload
-//   - privateKey: sender's Ed25519 private key for signing
+//   - privateKey: sender's Ed25519 private key for signing; the matching
+//     public key is derived from it and embedded as SrcPubKey
 func NewFileCommandFrame(
 	src, dst domain.PeerIdentity,
 	ttl uint8,
@@ -187,10 +203,13 @@ func NewFileCommandFrame(
 	now := time.Now().Unix()
 	nonce := ComputeNonce(src, dst, ttl, now, payload)
 	sig := SignFileCommand(nonce, privateKey)
+	pub := privateKey.Public().(ed25519.PublicKey)
+	srcPubKey := base64.StdEncoding.EncodeToString(pub)
 
 	return FileCommandFrame{
 		Type:      FileCommandFrameType,
 		SRC:       src,
+		SrcPubKey: srcPubKey,
 		DST:       dst,
 		TTL:       ttl,
 		MaxTTL:    ttl,

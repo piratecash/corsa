@@ -1,8 +1,6 @@
 package node
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -67,8 +65,14 @@ func (s *Service) initFileTransfer() {
 		PeerRouteMeta: func(id domain.PeerIdentity) (filerouter.PeerRouteMeta, bool) {
 			return s.fileTransferPeerRouteMeta(id)
 		},
-		PeerPubKey: func(id domain.PeerIdentity) (ed25519.PublicKey, bool) {
-			return peerPubKeyFromTrust(s, id)
+		// Authorization boundary for local delivery: only sources the
+		// user has explicitly trusted may deposit files into the local
+		// inbox. Authenticity is checked by the router itself from the
+		// self-contained SrcPubKey field on the wire frame, so the
+		// node only needs to express the trust policy here.
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
+			_, ok := s.trust.trustedContacts()[string(id)]
+			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
 			return s.sendFileRawToPeer(dst, data)
@@ -218,6 +222,24 @@ func (s *Service) fileTransferPeerRouteMeta(peer domain.PeerIdentity) (fileroute
 	return s.fileTransferPeerRouteMetaLocked(peer, time.Now().UTC())
 }
 
+// forEachUsableFileTransferPeerLocked walks every peer that this node
+// could legitimately use for file-transfer traffic and invokes visit for
+// each one. Eligibility mirrors the live send path
+// (peerSendableConnectionsLocked / fileTransferPeerRouteMetaLocked):
+//
+//   - file_transfer_v1 capability is negotiated;
+//   - health entry is Connected and not stalled;
+//   - raw negotiated protocol_version is at or above
+//     domain.FileCommandMinPeerProtocolVersion.
+//
+// The version gate is the critical part. Without it,
+// isPeerReachable / file-transfer scheduling would happily promise a
+// route through a v11 next-hop that Router.collectRouteCandidates and
+// peerSendableConnectionsLocked later reject — reachability lying, with
+// downloads waking up onto a route the actual file router is forbidden
+// to use. The cutover regression for that lie lives in the
+// TestIsPeerReachable_RouteVia(BelowCutover|UnknownVersion)NextHop pair
+// in file_integration_test.go.
 func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(domain.PeerIdentity, time.Time)) {
 	consider := func(id domain.PeerIdentity, address domain.PeerAddress) {
 		health := s.health[s.resolveHealthAddress(address)]
@@ -231,6 +253,15 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 		if sess == nil || !hasCapability(sess.capabilities, domain.CapFileTransferV1) {
 			continue
 		}
+		// Cutover gate, raw negotiated version. peerSession.version is
+		// pre-clamp (the route-meta layer is where inflated-version
+		// clamp lives), so a value below the cutover here is always a
+		// genuinely-pre-cutover or unknown peer; admitting it would
+		// re-open the v11 black hole. Comparing on
+		// domain.ProtocolVersion avoids the uint8-narrow wrap.
+		if domain.ProtocolVersion(sess.version) < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
+			continue
+		}
 		consider(sess.peerIdentity, sess.address)
 	}
 
@@ -238,9 +269,16 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 	// here so pre-activation outbound entries do not leak into the
 	// file-transfer peer set before the session is established.
 	s.forEachInboundConnLocked(func(info connInfo) bool {
-		if info.HasCapability(domain.CapFileTransferV1) {
-			consider(info.identity, info.address)
+		if !info.HasCapability(domain.CapFileTransferV1) {
+			return true
 		}
+		// Same cutover gate on the inbound tier; info.protocolVersion
+		// is the raw negotiated value captured from the inbound
+		// NetCore.
+		if info.protocolVersion < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
+			return true
+		}
+		consider(info.identity, info.address)
 		return true
 	})
 }
@@ -271,8 +309,9 @@ func (s *Service) fileTransferPeerRouteMetaLocked(peer domain.PeerIdentity, now 
 	}
 	picked := candidates[0]
 	return filerouter.PeerRouteMeta{
-		ConnectedAt:     picked.connectedAt,
-		ProtocolVersion: trustedFileRouteVersion(peer, picked.protocolVersion),
+		ConnectedAt:        picked.connectedAt,
+		ProtocolVersion:    trustedFileRouteVersion(peer, picked.protocolVersion),
+		RawProtocolVersion: picked.protocolVersion,
 	}, true
 }
 
@@ -522,7 +561,17 @@ func (s *Service) RemoveSenderMapping(fileID domain.FileID) bool {
 //	  {
 //	    "next_hop": "<peer identity>",
 //	    "hops": 1,
-//	    "protocol_version": 7,
+//	    "protocol_version": 12,                  // normalized ranking key for this next-hop —
+//	                                             // equal to the raw negotiated version for legit
+//	                                             // peers, but clamped to 0 by the inflated-version
+//	                                             // defence (trustedFileRouteVersion) when the peer
+//	                                             // reported v > config.ProtocolVersion. The raw
+//	                                             // negotiated value is not serialized; it lives in
+//	                                             // PeerRouteMeta.RawProtocolVersion as the
+//	                                             // eligibility key only. Pre-cutover and unknown
+//	                                             // peers are filtered out before the plan, so the
+//	                                             // only way 0 appears here is the clamped-inflated
+//	                                             // case.
 //	    "connected_at": "2025-01-01T12:34:56Z",  // omitted when unknown
 //	    "uptime_seconds": 3600.5,                // 0 when connected_at omitted
 //	    "best": true                             // true only for index 0
@@ -664,19 +713,10 @@ func (e *fileTransferError) Error() string {
 	return "file_transfer: " + e.msg
 }
 
-// peerPubKeyFromTrust resolves a PeerIdentity to an Ed25519 public key
-// using the trust store. This is a helper for filerouter.RouterConfig.PeerPubKey.
-func peerPubKeyFromTrust(s *Service, identity domain.PeerIdentity) (ed25519.PublicKey, bool) {
-	trusted := s.trust.trustedContacts()
-	contact, ok := trusted[string(identity)]
-	if !ok {
-		return nil, false
-	}
-
-	pubBytes, err := base64.StdEncoding.DecodeString(contact.PubKey)
-	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
-		return nil, false
-	}
-
-	return pubBytes, true
-}
+// (peerPubKeyFromTrust / peerPubKeyFromKnowledge removed: the file
+// router now verifies authenticity self-contained from the wire frame
+// via FileCommandFrame.SrcPubKey + identity fingerprint check. Local-
+// delivery authorization is expressed directly via the trust-store
+// lookup inlined into the IsAuthorizedForLocalDelivery callback in
+// initFileTransfer. See docs/protocol/file_transfer.md for the
+// authenticity-vs-authorization split.)

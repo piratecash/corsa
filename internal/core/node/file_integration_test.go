@@ -2,7 +2,6 @@ package node
 
 import (
 	"bufio"
-	"crypto/ed25519"
 	"encoding/json"
 	"net"
 	"testing"
@@ -26,6 +25,13 @@ func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
+		// v12 — at the file-transfer cutover. file_transfer_v1
+		// capability alone is no longer sufficient (see
+		// FileCommandMinPeerProtocolVersion); the negative coverage
+		// for v11 / unknown-version sessions lives in
+		// TestIsPeerReachable_DirectSessionBelowMinProtocolVersion
+		// and TestIsPeerReachable_DirectSessionUnknownProtocolVersion.
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -35,7 +41,64 @@ func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 	}
 
 	if !svc.isPeerReachable(idPeerB) {
-		t.Fatal("peer with direct file_transfer_v1 session should be reachable")
+		t.Fatal("peer with direct v12 file_transfer_v1 session should be reachable")
+	}
+}
+
+// TestIsPeerReachable_DirectSessionBelowMinProtocolVersion is the negative
+// regression for the FileCommandMinPeerProtocolVersion cutover: a peer
+// that has file_transfer_v1 capability but reports a known protocol
+// version below the cutover MUST NOT be reachable. Otherwise we fall
+// straight back into the v11 black hole — the peer would receive a
+// v2-formatted frame and drop it on its trust-store-only pubkey lookup.
+func TestIsPeerReachable_DirectSessionBelowMinProtocolVersion(t *testing.T) {
+	t.Parallel()
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
+		peerIdentity: idPeerB,
+		version:      domain.FileCommandMinPeerProtocolVersion - 1, // 11 — known pre-cutover
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	if svc.isPeerReachable(idPeerB) {
+		t.Fatal("peer with file_transfer_v1 but version below FileCommandMinPeerProtocolVersion must NOT be reachable")
+	}
+}
+
+// TestIsPeerReachable_DirectSessionUnknownProtocolVersion is the second
+// negative regression: a peer with file_transfer_v1 capability but with
+// no observed protocol version (the default-zero value of peerSession.version)
+// MUST NOT be reachable for file transfer. Capability alone is no longer
+// proof that the peer speaks the v2 SrcPubKey wire format.
+func TestIsPeerReachable_DirectSessionUnknownProtocolVersion(t *testing.T) {
+	t.Parallel()
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
+		peerIdentity: idPeerB,
+		// version intentionally left zero — capability-only / pre-handshake
+		// / not observed yet. Capability alone is insufficient evidence the
+		// peer speaks the v2 wire format.
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	if svc.isPeerReachable(idPeerB) {
+		t.Fatal("peer with file_transfer_v1 but unknown protocol version must NOT be reachable")
 	}
 }
 
@@ -85,6 +148,7 @@ func TestIsPeerReachable_RouteViaFileCapableNextHop(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -129,6 +193,84 @@ func TestIsPeerReachable_RouteViaNextHopWithoutFileCapability(t *testing.T) {
 	}
 }
 
+// TestIsPeerReachable_RouteViaBelowCutoverNextHop is the routed counterpart
+// of TestIsPeerReachable_DirectSessionBelowMinProtocolVersion: a routed
+// target whose only next-hop reports a protocol version below
+// FileCommandMinPeerProtocolVersion MUST NOT be reachable. Otherwise
+// isPeerReachable lies — it promises a path that the file router's own
+// cutover gate (Router.collectRouteCandidates filtering on
+// PeerRouteMeta.RawProtocolVersion) will reject, so FileTransferManager
+// schedules a download that never actually leaves the node. The
+// reachability layer and the send-path version gate must agree on
+// eligibility, otherwise we're back to the original v11 black hole that
+// motivated the cutover.
+func TestIsPeerReachable_RouteViaBelowCutoverNextHop(t *testing.T) {
+	t.Parallel()
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	// Relay peer-B advertises file_transfer_v1 capability but reports
+	// version 11 — below the cutover. Capability alone is not proof that
+	// the peer speaks the v2 SrcPubKey wire format; the version gate is
+	// the actual contract.
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
+		peerIdentity: idPeerB,
+		version:      domain.FileCommandMinPeerProtocolVersion - 1,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	// Target X is reachable via peer-B at the announce layer, but the
+	// next-hop is below the file-transfer cutover.
+	announceRouteVia(svc, idPeerB, idTargetX, 1)
+
+	if svc.isPeerReachable(idTargetX) {
+		t.Fatal("target via below-cutover next-hop must NOT be reachable; reachability would lie about a path the file router will reject")
+	}
+}
+
+// TestIsPeerReachable_RouteViaUnknownVersionNextHop is the second routed
+// negative regression: a next-hop with file_transfer_v1 capability but
+// no observed protocol version (default-zero peerSession.version) MUST
+// NOT make the routed target reachable. The pre-handshake / capability-
+// only window is exactly the case the cutover refuses to admit on
+// either tier — admitting it on the routed reachability path would
+// reopen the same hole through the back door.
+func TestIsPeerReachable_RouteViaUnknownVersionNextHop(t *testing.T) {
+	t.Parallel()
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	// Relay peer-B advertises file_transfer_v1 capability with version
+	// intentionally left at zero (capability-only / pre-handshake / not
+	// observed yet). peerSession.version is the raw negotiated value,
+	// not the clamped-inflated ranking key, so 0 here always means
+	// "unknown", never "demoted attacker".
+	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
+		address:      domain.PeerAddress("addr-B"),
+		peerIdentity: idPeerB,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	// Target X is reachable via peer-B at the announce layer, but the
+	// next-hop has no observed protocol version.
+	announceRouteVia(svc, idPeerB, idTargetX, 1)
+
+	if svc.isPeerReachable(idTargetX) {
+		t.Fatal("target via unknown-version next-hop must NOT be reachable; capability alone is not enough to clear the file-transfer cutover")
+	}
+}
+
 // TestIsPeerReachable_MultipleRoutesOneCapable verifies that when multiple
 // routes exist, the peer is reachable if at least one next-hop has file_transfer_v1.
 func TestIsPeerReachable_MultipleRoutesOneCapable(t *testing.T) {
@@ -152,6 +294,7 @@ func TestIsPeerReachable_MultipleRoutesOneCapable(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
 		address:      domain.PeerAddress("addr-C"),
 		peerIdentity: idPeerC,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-C")] = &peerHealth{
@@ -192,6 +335,7 @@ func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		address:      domain.PeerAddress("addr-A"),
 		peerIdentity: domain.PeerIdentity(idNodeA),
+		version:      12,
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-A")] = &peerHealth{
@@ -241,9 +385,10 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 	defer func() { _ = pipeRemote.Close() }()
 
 	pc := netcore.New(netcore.ConnID(1), pipeLocal, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress("addr-B"),
-		Identity: domain.PeerIdentity(idPeerB),
-		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		Address:         domain.PeerAddress("addr-B"),
+		Identity:        domain.PeerIdentity(idPeerB),
+		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		ProtocolVersion: 12,
 	})
 	svc.setTestConnEntryLocked(pipeLocal, &connEntry{core: pc})
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -265,6 +410,7 @@ func TestIsPeerReachable_DirectSessionStalled(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -286,6 +432,7 @@ func TestIsPeerReachable_RouteViaStalledNextHop(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -318,7 +465,7 @@ func TestFileTransferPeerRouteMetaDescribesOneSession(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
 		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
-		version:      6,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-out")] = &peerHealth{
@@ -334,8 +481,8 @@ func TestFileTransferPeerRouteMetaDescribesOneSession(t *testing.T) {
 	if !meta.ConnectedAt.Equal(now.Add(-10 * time.Minute)) {
 		t.Fatalf("connectedAt = %v, want session's own LastConnectedAt", meta.ConnectedAt)
 	}
-	if meta.ProtocolVersion != domain.ProtocolVersion(6) {
-		t.Fatalf("protocolVersion = %d, want 6 (the session's own negotiated version)", meta.ProtocolVersion)
+	if meta.ProtocolVersion != domain.ProtocolVersion(12) {
+		t.Fatalf("protocolVersion = %d, want 12 (the session's own negotiated version)", meta.ProtocolVersion)
 	}
 }
 
@@ -348,6 +495,7 @@ func TestFileTransferPeerRouteMetaRejectsStalledPeer(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-stalled")] = &peerSession{
 		address:      domain.PeerAddress("addr-stalled"),
 		peerIdentity: idPeerB,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-stalled")] = &peerHealth{
@@ -368,6 +516,7 @@ func TestFileTransferPeerRouteMetaRejectsPeerWithoutHealth(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-no-health")] = &peerSession{
 		address:      domain.PeerAddress("addr-no-health"),
 		peerIdentity: idPeerB,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 
@@ -397,9 +546,9 @@ func installTestFileRouter(svc *Service) {
 		PeerRouteMeta: func(id domain.PeerIdentity) (filerouter.PeerRouteMeta, bool) {
 			return svc.fileTransferPeerRouteMeta(id)
 		},
-		PeerPubKey:   func(domain.PeerIdentity) (ed25519.PublicKey, bool) { return nil, false },
-		SessionSend:  func(domain.PeerIdentity, []byte) bool { return true },
-		LocalDeliver: func(protocol.FileCommandFrame) {},
+		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
+		SessionSend:                  func(domain.PeerIdentity, []byte) bool { return true },
+		LocalDeliver:                 func(protocol.FileCommandFrame) {},
 	})
 }
 
@@ -415,19 +564,28 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
-	// Two next-hops to the same target. relayB has the higher protocol
-	// version, so even though relayC is closer (1 vs 2 hops) the file
-	// router prefers relayB. relayB therefore must be best=true.
+	// Two next-hops to the same target. Both peers run the current
+	// protocol version (config.ProtocolVersion == FileCommandMinPeerProtocolVersion
+	// == 12) — the previous "higher protocol version wins" fixture using
+	// versions 6/7 became impossible after the file-transfer cutover:
+	// versions below 12 are filtered out, and versions above 12 trip
+	// trustedFileRouteVersion's inflated-version clamp to 0 (defence
+	// against the traffic-capture attack). We therefore exercise the
+	// secondary tiebreaker — equal version, equal hops, longer uptime
+	// (older LastConnectedAt) wins. relayB wins because it has held its
+	// session for ~30 minutes while relayC just connected a minute ago.
+	// The behavioural ranking itself is covered exhaustively by
+	// filerouter tests; this test owns the JSON wire contract.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
-		version:      7,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
 		address:      domain.PeerAddress("addr-C"),
 		peerIdentity: idPeerC,
-		version:      6,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -442,16 +600,14 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	}
 
 	// announceRouteVia uses the wire-side hop count; the receiver adds +1
-	// when inserting into its own table (see docs/routing.md). So the
-	// resulting local table has:
-	//   via idPeerB: hops=3 (announced 2 + 1)
-	//   via idPeerC: hops=2 (announced 1 + 1)
-	// idPeerB still wins despite the extra hop because its protocol_version
-	// (7) outranks idPeerC's (6) — that is the whole point of this fixture.
-	announceRouteVia(svc, idPeerB, idTargetX, 2)
+	// when inserting into its own table (see docs/routing.md). Both
+	// announces carry hops=1, so the local table has hops=2 via either
+	// next-hop and the version DESC + hops ASC keys collapse to a tie —
+	// uptime ASC (older LastConnectedAt above) decides the winner.
+	announceRouteVia(svc, idPeerB, idTargetX, 1)
 	announceRouteVia(svc, idPeerC, idTargetX, 1)
 	const (
-		hopsViaB = 3
+		hopsViaB = 2
 		hopsViaC = 2
 	)
 
@@ -477,8 +633,8 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	if first["best"] != true {
 		t.Fatalf("expected first entry to be marked best=true, got %v", first["best"])
 	}
-	if v, _ := first["protocol_version"].(float64); int(v) != 7 {
-		t.Fatalf("expected best entry protocol_version=7, got %v", first["protocol_version"])
+	if v, _ := first["protocol_version"].(float64); int(v) != 12 {
+		t.Fatalf("expected best entry protocol_version=12, got %v", first["protocol_version"])
 	}
 	if v, _ := first["hops"].(float64); int(v) != hopsViaB {
 		t.Fatalf("expected best entry hops=%d, got %v", hopsViaB, first["hops"])
@@ -678,7 +834,7 @@ func TestFileTransferPeerRouteMetaInboundConnContributesNegotiatedVersion(t *tes
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	const inboundVersion = domain.ProtocolVersion(11)
+	const inboundVersion = domain.ProtocolVersion(12)
 	pc := netcore.New(netcore.ConnID(42), inLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-inbound"),
 		Identity:        idPeerB,
@@ -727,13 +883,13 @@ func TestFileTransferPeerRouteMetaDeterministicAcrossMapIteration(t *testing.T) 
 	svc.sessions[domain.PeerAddress("addr-old")] = &peerSession{
 		address:      domain.PeerAddress("addr-old"),
 		peerIdentity: idPeerB,
-		version:      4,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.sessions[domain.PeerAddress("addr-new")] = &peerSession{
 		address:      domain.PeerAddress("addr-new"),
 		peerIdentity: idPeerB,
-		version:      7,
+		version:      13,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-old")] = &peerHealth{
@@ -759,10 +915,10 @@ func TestFileTransferPeerRouteMetaDeterministicAcrossMapIteration(t *testing.T) 
 		if !meta.ConnectedAt.Equal(now.Add(-30 * time.Minute)) {
 			t.Fatalf("iter %d: expected ConnectedAt=oldest, got %v", i, meta.ConnectedAt)
 		}
-		// version 4 belongs to addr-old (the oldest), so meta MUST
-		// report it — not version 7 from the newer session.
-		if meta.ProtocolVersion != domain.ProtocolVersion(4) {
-			t.Fatalf("iter %d: expected ProtocolVersion=4 (addr-old's own), got %d", i, meta.ProtocolVersion)
+		// version 12 belongs to addr-old (the oldest), so meta MUST
+		// report it — not version 13 from the newer session.
+		if meta.ProtocolVersion != domain.ProtocolVersion(12) {
+			t.Fatalf("iter %d: expected ProtocolVersion=12 (addr-old's own), got %d", i, meta.ProtocolVersion)
 		}
 	}
 }
@@ -782,13 +938,13 @@ func TestPeerSendableConnectionsDeterministicAcrossMapIteration(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-bb")] = &peerSession{
 		address:      domain.PeerAddress("addr-bb"),
 		peerIdentity: idPeerB,
-		version:      6,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
 	}
 	svc.sessions[domain.PeerAddress("addr-aa")] = &peerSession{
 		address:      domain.PeerAddress("addr-aa"),
 		peerIdentity: idPeerB,
-		version:      6,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
 	}
 	commonHealth := func() *peerHealth {
@@ -811,7 +967,7 @@ func TestPeerSendableConnectionsDeterministicAcrossMapIteration(t *testing.T) {
 			Address:         domain.PeerAddress(addr),
 			Identity:        idPeerB,
 			Caps:            []domain.Capability{domain.CapFileTransferV1},
-			ProtocolVersion: 6,
+			ProtocolVersion: 12,
 		})
 		t.Cleanup(func() { pc.Close() })
 		svc.setTestConnEntryLocked(local, &connEntry{core: pc, tracked: true})
@@ -864,12 +1020,12 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
-	// Outbound session with version 5 — this is the connection
+	// Outbound session with version 12 — this is the connection
 	// sendFrameToIdentity tries first.
 	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
 		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
-		version:      5,
+		version:      12,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-out")] = &peerHealth{
@@ -878,7 +1034,7 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 		LastUsefulReceiveAt: now,
 	}
 
-	// Inbound conn for the same identity with version 9 — only the
+	// Inbound conn for the same identity with version 13 — only the
 	// fall-back tier; meta must NOT pretend bytes will go through it.
 	inLocal, inRemote := net.Pipe()
 	defer func() { _ = inLocal.Close() }()
@@ -888,7 +1044,7 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 		Address:         domain.PeerAddress("addr-inbound-mix"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-		ProtocolVersion: 9,
+		ProtocolVersion: 13,
 	})
 	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc, tracked: true})
@@ -902,8 +1058,8 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 	if !ok {
 		t.Fatal("expected peer to be usable")
 	}
-	if meta.ProtocolVersion != 5 {
-		t.Fatalf("expected outbound version=5 (live send tries outbound first), got %d", meta.ProtocolVersion)
+	if meta.ProtocolVersion != 12 {
+		t.Fatalf("expected outbound version=12 (live send tries outbound first), got %d", meta.ProtocolVersion)
 	}
 	// connected_at must come from the SAME session as protocol_version,
 	// not stitched together from a different inbound conn.
@@ -940,6 +1096,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
 		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
+		version:      12,
 		conn:         outLocal,
 		sendCh:       outboundSendCh,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -955,9 +1112,10 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 	defer func() { _ = inRemote.Close() }()
 
 	pc := netcore.New(netcore.ConnID(1), inLocal, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress("addr-in"),
-		Identity: idPeerB,
-		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		Address:         domain.PeerAddress("addr-in"),
+		Identity:        idPeerB,
+		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		ProtocolVersion: 12,
 	})
 	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
@@ -1001,6 +1159,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 	svc.sessions[domain.PeerAddress("addr-out-closed")] = &peerSession{
 		address:      domain.PeerAddress("addr-out-closed"),
 		peerIdentity: idPeerB,
+		version:      12,
 		conn:         outLocal,
 		sendCh:       outboundSendCh,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -1016,9 +1175,10 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 	defer func() { _ = inRemote.Close() }()
 
 	pc := netcore.New(netcore.ConnID(2), inLocal, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress("addr-in-fallback"),
-		Identity: idPeerB,
-		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		Address:         domain.PeerAddress("addr-in-fallback"),
+		Identity:        idPeerB,
+		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		ProtocolVersion: 12,
 	})
 	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
@@ -1068,6 +1228,7 @@ func TestSendFrameToIdentityRejectsOutboundBeforeActivation(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-out-preactivation")] = &peerSession{
 		address:      domain.PeerAddress("addr-out-preactivation"),
 		peerIdentity: idPeerB,
+		version:      12,
 		conn:         outLocal,
 		sendCh:       make(chan protocol.Frame, 4),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -1094,9 +1255,10 @@ func TestSendFrameToIdentityRejectsInboundBeforeActivation(t *testing.T) {
 	defer func() { _ = inRemote.Close() }()
 
 	pc := netcore.New(netcore.ConnID(7), inLocal, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress("addr-in-preactivation"),
-		Identity: idPeerB,
-		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		Address:         domain.PeerAddress("addr-in-preactivation"),
+		Identity:        idPeerB,
+		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+		ProtocolVersion: 12,
 	})
 	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
