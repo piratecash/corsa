@@ -8,6 +8,7 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/corsa-node ./cmd/corsa-node
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/corsa-cli ./cmd/corsa-cli
 
 FROM debian:bookworm-slim
 
@@ -16,6 +17,7 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin corsa
 WORKDIR /home/corsa
 
 COPY --from=builder /out/corsa-node /usr/local/bin/corsa-node
+COPY --from=builder /out/corsa-cli /usr/local/bin/corsa-cli
 
 RUN mkdir -p /home/corsa/.corsacore && chown -R corsa:corsa /home/corsa
 
