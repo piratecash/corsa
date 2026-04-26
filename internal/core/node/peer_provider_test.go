@@ -255,6 +255,56 @@ func TestCandidates_RuntimePrivateIPv4NotFilteredByPersistedRule(t *testing.T) {
 	}
 }
 
+// TestCandidates_PersistedManualPrivateFiltered is the regression for the
+// "addpeer 127.0.0.1 resurrects after restart" bug. add_peer is a runtime-only
+// dial intent: the immediate dial flows through ManualPeerRequested (which
+// bypasses Candidates), but a persisted Source=Manual entry on a private /
+// loopback IP must NOT auto-dial after restart. Otherwise the operator's
+// one-shot intent silently turns into a permanent reconnect loop on every
+// boot, and the private-IP guard documented in docs/connection-manager.md §6a.1
+// becomes a no-op for any peer that was ever added by hand.
+func TestCandidates_PersistedManualPrivateFiltered(t *testing.T) {
+	cfg := testProviderConfig()
+	cfg.AllowPrivateCandidates = false
+	pp := NewPeerProvider(cfg)
+
+	// Simulate the post-restart state: peers.json had Source=manual entries
+	// for loopback / RFC1918 addresses (operator ran addpeer 127.0.0.1 on a
+	// previous run), plus a public peer that should remain a candidate.
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("127.0.0.1:64646"),
+		Source:  domain.PeerSourceManual,
+		AddedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("10.1.2.3:64646"),
+		Source:  domain.PeerSourceManual,
+		AddedAt: time.Date(2025, 1, 1, 0, 1, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("192.168.1.10:64646"),
+		Source:  domain.PeerSourceManual,
+		AddedAt: time.Date(2025, 1, 1, 0, 2, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("8.8.8.8:64646"),
+		Source:  domain.PeerSourceManual,
+		AddedAt: time.Date(2025, 1, 1, 0, 4, 0, 0, time.UTC),
+		Network: domain.NetGroupIPv4,
+	})
+
+	candidates := pp.Candidates()
+	if len(candidates) != 1 {
+		t.Fatalf("expected only the public manual peer to survive, got %d: %+v", len(candidates), candidates)
+	}
+	if candidates[0].Address != mustAddr("8.8.8.8:64646") {
+		t.Fatalf("unexpected candidate %v", candidates[0].Address)
+	}
+}
+
 func TestCandidates_BannedIPFiltered(t *testing.T) {
 	cfg := testProviderConfig()
 	now := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
@@ -1419,7 +1469,11 @@ func TestV3RoundTrip_PartialExpiry(t *testing.T) {
 }
 
 // TestShouldSkipPrivateAutoDialPeer verifies that private/loopback addresses
-// from all non-manual sources are excluded from CM auto-dial candidates.
+// are excluded from CM auto-dial candidates regardless of Source. Manual
+// addpeer is a runtime-only intent — it grants an immediate dial through
+// EmitSlot(ManualPeerRequested) which bypasses Candidates(); it must not
+// grant a permanent override to the private-IP filter that survives across
+// restarts. Public addresses are unaffected by this guard.
 func TestShouldSkipPrivateAutoDialPeer(t *testing.T) {
 	t.Parallel()
 
@@ -1432,13 +1486,16 @@ func TestShouldSkipPrivateAutoDialPeer(t *testing.T) {
 		{"loopback announce", "127.0.0.1", domain.PeerSourceAnnounce, true},
 		{"loopback bootstrap", "127.0.0.1", domain.PeerSourceBootstrap, true},
 		{"loopback persisted", "127.0.0.1", domain.PeerSourcePersisted, true},
-		{"loopback manual", "127.0.0.1", domain.PeerSourceManual, false},
+		{"loopback manual", "127.0.0.1", domain.PeerSourceManual, true},
 		{"10.x announce", "10.0.0.5", domain.PeerSourceAnnounce, true},
-		{"10.x manual", "10.0.0.5", domain.PeerSourceManual, false},
+		{"10.x manual", "10.0.0.5", domain.PeerSourceManual, true},
 		{"192.168.x announce", "192.168.1.1", domain.PeerSourceAnnounce, true},
+		{"192.168.x manual", "192.168.1.1", domain.PeerSourceManual, true},
 		{"172.24.x announce", "172.24.0.1", domain.PeerSourceAnnounce, true},
+		{"172.24.x manual", "172.24.0.1", domain.PeerSourceManual, true},
 		{"public announce", "198.51.100.1", domain.PeerSourceAnnounce, false},
 		{"public persisted", "198.51.100.1", domain.PeerSourcePersisted, false},
+		{"public manual", "198.51.100.1", domain.PeerSourceManual, false},
 	}
 
 	for _, tc := range tests {

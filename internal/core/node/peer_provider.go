@@ -336,10 +336,16 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		}
 
 		// 6a.1: never auto-dial loopback / RFC1918 IPv4 peers. Private
-		// addresses are only reachable through the manual addpeer command
-		// for dev/test within a home network. Without this guard, inbound
-		// connections from localhost teach the node ephemeral 127.0.0.1:*
-		// addresses, and CM enters a connect→EOF→re-dial storm.
+		// addresses are reachable only as a runtime-only dial intent
+		// driven by the operator: `addpeer` enqueues a slot directly via
+		// ConnectionManager.EmitSlot(ManualPeerRequested), which bypasses
+		// this filter entirely. Persisted Source=Manual entries do NOT
+		// get a free pass here — granting one would turn the operator's
+		// one-shot "connect to my LAN node" into a permanent reconnect
+		// loop on every boot. Without this guard, inbound connections
+		// from localhost would also teach the node ephemeral 127.0.0.1:*
+		// addresses (Source=Announce) and drive CM into a
+		// connect→EOF→re-dial storm.
 		if !cfg.AllowPrivateCandidates && shouldSkipPersistedPrivatePeer(kp) {
 			continue
 		}
@@ -867,12 +873,20 @@ func (pp *PeerProvider) buildDialAddresses(kp *knownPeer) []domain.PeerAddress {
 	return pp.BuildDialAddresses(kp.Address)
 }
 
-// shouldSkipPrivateAutoDialPeer returns true for loopback / RFC1918 peers
-// that were NOT added via explicit manual `addpeer`. Auto-discovered and
-// persisted private addresses are never valid CM dial candidates —
-// private addresses are only dialable through the manual addpeer path.
+// shouldSkipPersistedPrivatePeer returns true for loopback / RFC1918 IPv4
+// addresses regardless of Source. Private addresses are never valid CM
+// auto-dial candidates: the operator's `addpeer` command is a runtime-only
+// dial intent (the immediate connect flows through
+// ConnectionManager.EmitSlot(ManualPeerRequested), which bypasses
+// Candidates() entirely — see connection_manager.go handleManualPeer), so a
+// persisted Source=Manual entry on a private IP must not silently resurrect
+// after restart. Granting Manual a permanent override would turn a one-shot
+// "connect to my LAN node" into a permanent reconnect loop on every boot,
+// and would also let inbound learning from a localhost peer (which records
+// Source=Announce, not Manual) accumulate stale candidates that the guard
+// is supposed to suppress. Public addresses are unaffected.
 func shouldSkipPersistedPrivatePeer(kp *knownPeer) bool {
-	if kp == nil || kp.Source == domain.PeerSourceManual {
+	if kp == nil {
 		return false
 	}
 	return isLoopbackOrPrivateIPv4(net.ParseIP(kp.IP))
