@@ -2080,14 +2080,15 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		}
 
 		// Non-DM sender verification: reject messages whose sender is not
-		// a known identity. DM messages have cryptographic verification in
-		// storeIncomingMessage (VerifyEnvelope); this gate targets non-DM
-		// topics where no per-message signature exists.
+		// a known identity. DM-class messages — both data DMs ("dm") and
+		// control DMs (TopicControlDM) — have cryptographic verification
+		// in storeIncomingMessage (VerifyEnvelope); this gate targets
+		// only topics where no per-message signature exists.
 		peerID := domain.PeerIdentity("")
 		if session != nil {
 			peerID = session.peerIdentity
 		}
-		if msg.Topic != "dm" && !s.isVerifiedSender(msg.Sender, peerID) {
+		if !protocol.IsDMTopic(msg.Topic) && !s.isVerifiedSender(msg.Sender, peerID) {
 			log.Warn().
 				Str("node", s.identity.Address).
 				Str("peer", string(address)).

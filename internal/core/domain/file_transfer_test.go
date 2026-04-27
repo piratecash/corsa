@@ -9,7 +9,6 @@ func TestFileActionValid(t *testing.T) {
 	t.Parallel()
 
 	validActions := []FileAction{
-		FileActionAnnounce,
 		FileActionChunkReq,
 		FileActionChunkResp,
 		FileActionDownloaded,
@@ -21,7 +20,11 @@ func TestFileActionValid(t *testing.T) {
 		}
 	}
 
-	invalidActions := []FileAction{"", "unknown", "file_cancel", "CHUNK_REQUEST"}
+	// file_announce is no longer a FileAction — it migrated to
+	// DMCommandFileAnnounce because it uses the DM pipeline, not
+	// FileCommandFrame. A wire string of "file_announce" must therefore
+	// be rejected by FileAction.Valid().
+	invalidActions := []FileAction{"", "unknown", "file_cancel", "CHUNK_REQUEST", "file_announce"}
 	for _, a := range invalidActions {
 		if a.Valid() {
 			t.Errorf("FileAction(%q).Valid() = true, want false", a)
@@ -44,14 +47,16 @@ func TestFileActionIsProtocolCommand(t *testing.T) {
 		}
 	}
 
-	// file_announce is NOT a protocol command — it uses the DM pipeline.
-	if FileActionAnnounce.IsProtocolCommand() {
-		t.Error("FileActionAnnounce.IsProtocolCommand() = true, want false")
-	}
-
 	// Unknown actions are not protocol commands.
 	if FileAction("unknown").IsProtocolCommand() {
 		t.Error("unknown action should not be a protocol command")
+	}
+
+	// "file_announce" used to live in this enum but migrated to
+	// DMCommandFileAnnounce. The string must not be recognised as a
+	// FileAction protocol command anymore.
+	if FileAction("file_announce").IsProtocolCommand() {
+		t.Error("FileAction(\"file_announce\") should not be a protocol command — it migrated to DMCommandFileAnnounce")
 	}
 }
 

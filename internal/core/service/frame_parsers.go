@@ -520,7 +520,7 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			Recipient:     domain.PeerIdentity(recipient),
 			Body:          message.Body,
 			ReplyTo:       replyTo,
-			Command:       domain.FileAction(message.Command),
+			Command:       domain.DMCommand(message.Command),
 			CommandData:   message.CommandData,
 			Timestamp:     item.Timestamp,
 			ReceiptStatus: receiptStatus,

@@ -531,6 +531,19 @@ func (s *Service) CleanupPeerTransfers(peer domain.PeerIdentity) {
 	manager.CleanupPeerTransfers(peer)
 }
 
+// CleanupTransferByMessageID releases sender/receiver mappings,
+// transmit-blob refs, and partial/completed downloaded files attached
+// to a single DM. Called by the DM-router delete hook after a chatlog
+// row has been removed (locally or via inbound message_delete). No-op
+// when no file-transfer state is associated with the message ID.
+func (s *Service) CleanupTransferByMessageID(fileID domain.FileID) {
+	manager, _ := s.getFileTransferManager()
+	if manager == nil {
+		return
+	}
+	manager.CleanupTransferByMessageID(fileID)
+}
+
 // RemoveSenderMapping removes a single sender mapping by fileID, releasing
 // the transmit file ref if the mapping is not in a terminal state. Returns
 // true if the mapping existed and was removed.

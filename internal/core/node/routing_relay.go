@@ -264,7 +264,15 @@ func (s *Service) routingTargets() []domain.PeerAddress {
 }
 
 func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerAddress {
-	if msg.Topic != "dm" || msg.Recipient == "*" {
+	// Both data DMs ("dm") and control DMs (TopicControlDM) are
+	// recipient-specific: their target set must include the recipient
+	// even when the recipient is registered as a client peer (clients
+	// are otherwise excluded from gossip targets to prevent them from
+	// becoming relay hops). Without protocol.IsDMTopic here, control
+	// DMs would silently fall back to s.routingTargets() (the
+	// non-DM/broadcast set) and never reach a directly-connected
+	// recipient client.
+	if !protocol.IsDMTopic(msg.Topic) || msg.Recipient == "*" {
 		return s.routingTargets()
 	}
 	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool {

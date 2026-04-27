@@ -399,11 +399,12 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		maxHops = defaultMaxHops
 	}
 
-	// Relay is a DM-only mechanism. The origin path
-	// (tryRelayToCapableFullNodes) only fires for topic "dm"; reject
-	// anything else to prevent non-DM payloads from being stored via
-	// a code path with different lifecycle semantics.
-	if frame.Topic != "dm" {
+	// Relay is a DM-class-only mechanism. Both data DMs ("dm") and
+	// control DMs (TopicControlDM) follow point-to-point semantics and
+	// share this transport; non-DM payloads are rejected to prevent
+	// them from being stored via a code path with different lifecycle
+	// semantics.
+	if !protocol.IsDMTopic(frame.Topic) {
 		log.Debug().
 			Str("id", messageID).
 			Str("topic", frame.Topic).
@@ -527,6 +528,29 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	}
 
 	if forwardedTo == "" {
+		// Control DMs (TopicControlDM) intentionally have no node-level
+		// store-and-forward fallback — they are not persisted in
+		// chatlog, not appended to s.topics, and not tracked in
+		// relayRetry (see docs/dm-commands.md "Storage rules for
+		// control DMs"). Calling deliverRelayedMessage here would
+		// pass through storeIncomingMessage which returns stored=true
+		// for the wire-dedup `seen` set yet leaves no recoverable
+		// envelope behind, and we would falsely ack "stored" upstream
+		// — the previous hop would consider relay successful while
+		// the control envelope is in fact lost. The application-level
+		// retry on the sender (DMRouter.pendingDelete in slice B) is
+		// the canonical recovery for this case; signalling failure
+		// upstream lets the sender's retry budget treat this attempt
+		// as a miss and try again.
+		if frame.Topic == protocol.TopicControlDM {
+			s.relayStates.release(messageID)
+			log.Info().
+				Str("id", messageID).
+				Str("recipient", recipient).
+				Msg("relay_control_dropped_no_next_hop")
+			return ""
+		}
+
 		// No capable relay next hop available. deliverRelayedMessage
 		// calls storeIncomingMessage, which stores the message AND
 		// runs the normal routing path (gossip + push). This is
@@ -1272,6 +1296,17 @@ func (s *Service) noteRelayAttempt(key string, now time.Time) int {
 }
 
 func (s *Service) trackRelayMessage(msg protocol.Envelope) {
+	// Control DMs (TopicControlDM) intentionally bypass the node-level
+	// relayRetry tracker: their retry policy lives at the application
+	// layer (DMRouter.pendingDelete with exponential backoff). That
+	// retry queue is in-memory only in the current implementation —
+	// see docs/dm-commands.md §"Acknowledgement and retry"; restart
+	// abandons in-flight retries, and JSON persistence is a tracked
+	// follow-up. Tracking control DMs here would create dead state
+	// either way — retryableRelayMessages and queueStateSnapshotLocked
+	// only consult topics["dm"], so a control envelope put into
+	// relayRetry would never get retried and would only burn the
+	// maxRelayRetryEntries quota until tombstone TTL.
 	if msg.Topic != "dm" || msg.Recipient == "" || msg.Recipient == "*" {
 		return
 	}

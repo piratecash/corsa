@@ -46,7 +46,7 @@ func TestFileAnnounceDMRoundTrip(t *testing.T) {
 		},
 		domain.OutgoingDM{
 			Body:        domain.FileDMBodySentinel,
-			Command:     domain.FileActionAnnounce,
+			Command:     domain.DMCommandFileAnnounce,
 			CommandData: string(commandData),
 		},
 	)
@@ -72,8 +72,8 @@ func TestFileAnnounceDMRoundTrip(t *testing.T) {
 	}
 
 	// Command must be "file_announce".
-	if got.Command != string(domain.FileActionAnnounce) {
-		t.Errorf("Command = %q, want %q", got.Command, domain.FileActionAnnounce)
+	if got.Command != string(domain.DMCommandFileAnnounce) {
+		t.Errorf("Command = %q, want %q", got.Command, domain.DMCommandFileAnnounce)
 	}
 
 	// CommandData must round-trip to the original payload.
@@ -123,7 +123,7 @@ func TestFileAnnounceDMBothPartiesCanDecrypt(t *testing.T) {
 		},
 		domain.OutgoingDM{
 			Body:        domain.FileDMBodySentinel,
-			Command:     domain.FileActionAnnounce,
+			Command:     domain.DMCommandFileAnnounce,
 			CommandData: `{"file_name":"test.txt","file_size":100,"content_type":"text/plain","file_hash":"deadbeef"}`,
 		},
 	)
@@ -142,7 +142,7 @@ func TestFileAnnounceDMBothPartiesCanDecrypt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recipient decrypt: %v", err)
 	}
-	if gotRecipient.Command != string(domain.FileActionAnnounce) {
+	if gotRecipient.Command != string(domain.DMCommandFileAnnounce) {
 		t.Errorf("recipient Command = %q, want file_announce", gotRecipient.Command)
 	}
 
@@ -157,7 +157,7 @@ func TestFileAnnounceDMBothPartiesCanDecrypt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sender decrypt: %v", err)
 	}
-	if gotSender.Command != string(domain.FileActionAnnounce) {
+	if gotSender.Command != string(domain.DMCommandFileAnnounce) {
 		t.Errorf("sender Command = %q, want file_announce", gotSender.Command)
 	}
 	if gotSender.Body != domain.FileDMBodySentinel {

@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"encoding/json"
 	"image"
 	"image/color"
@@ -95,6 +96,7 @@ type Window struct {
 	msgContextPos image.Point
 	msgCtxReply   widget.Clickable
 	msgCtxCopy    widget.Clickable
+	msgCtxDelete  widget.Clickable
 	msgRightClick map[string]*rightClickState // keyed by message ID
 
 	// Reply state: when the user replies to a message, we remember the
@@ -310,6 +312,19 @@ const uiHeartbeatInterval = 2 * time.Second
 
 func (w *Window) startPolling(window *app.Window) {
 	w.router.Start()
+
+	// Subscribe to terminal message_delete outcomes so the UI can
+	// surface peer rejection (denied / immutable) and retry-budget
+	// abandonment, instead of always showing the optimistic
+	// "Deleting…" / "Deleted." pair from handleMsgContextMenuActions.
+	// The synchronous SendMessageDelete return only reports local
+	// errors; the wire-side outcome arrives asynchronously through
+	// this event.
+	if w.eventBus != nil {
+		w.eventBus.Subscribe(ebus.TopicMessageDeleteCompleted, func(outcome ebus.MessageDeleteOutcome) {
+			w.handleMessageDeleteOutcome(outcome)
+		})
+	}
 
 	go func() {
 		heartbeat := time.NewTicker(uiHeartbeatInterval)
@@ -2580,7 +2595,7 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					// Render file card for file_announce messages instead of plain text.
-					if message.Command == domain.FileActionAnnounce && message.CommandData != "" {
+					if message.Command == domain.DMCommandFileAnnounce && message.CommandData != "" {
 						return w.layoutFileCard(gtx, message, isMine)
 					}
 
@@ -3316,6 +3331,91 @@ func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
 		}
 		return
 	}
+
+	if w.msgCtxDelete.Clicked(gtx) {
+		// Determine the conversation peer relative to this user. For an
+		// outgoing message Sender == self, so peer = Recipient. For an
+		// incoming message Sender != self, so peer = Sender. Either way
+		// the peer is the "other party" we will tell to mirror the
+		// deletion (the recipient may reject if the message Flag does
+		// not authorize them — that's the wire-side concern, not ours).
+		msg := *w.msgContextMsg
+		me := w.router.MyAddress()
+		peer := msg.Recipient
+		if msg.Sender != me {
+			peer = msg.Sender
+		}
+		targetID := domain.MessageID(msg.ID)
+
+		w.msgContextMsg = nil
+		w.router.SetSendStatus(w.t("status.message_deleting"))
+
+		go func(peer domain.PeerIdentity, target domain.MessageID) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := w.router.SendMessageDelete(ctx, peer, target); err != nil {
+				w.router.SetSendStatus(w.t("status.message_delete_failed", err.Error()))
+				return
+			}
+			// Do NOT mark this as "deleted" yet. For an outgoing DM
+			// the local row stays alive until the peer's
+			// message_delete_ack confirms a success status — see
+			// SendMessageDelete + handleInboundMessageDeleteAck for
+			// the pessimistic ordering. The terminal UI status
+			// (deleted / not_found / denied / immutable / abandoned)
+			// arrives via TopicMessageDeleteCompleted;
+			// handleMessageDeleteOutcome owns the final update.
+			//
+			// Incoming local-only deletes mutate immediately inside
+			// SendMessageDelete and publish the deleted outcome
+			// synchronously, so this status will be replaced on the
+			// same UI tick.
+			w.router.SetSendStatus(w.t("status.message_delete_dispatched"))
+		}(peer, targetID)
+
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+		return
+	}
+}
+
+// handleMessageDeleteOutcome is the ebus subscriber invoked when an
+// in-flight message_delete reaches a terminal state. The synchronous
+// SendMessageDelete return cannot tell us whether the peer accepted,
+// rejected, or never replied — this callback is the only place where
+// the UI learns the wire-side outcome.
+//
+// Status messages are intentionally short and non-modal: they go
+// through the same status bar the chat send path uses, so they get
+// replaced naturally when the next user action takes place.
+func (w *Window) handleMessageDeleteOutcome(outcome ebus.MessageDeleteOutcome) {
+	if w.router == nil {
+		return
+	}
+	var msg string
+	switch {
+	case outcome.Abandoned:
+		msg = w.t("status.message_delete_abandoned")
+	case outcome.Status == domain.MessageDeleteStatusDeleted:
+		msg = w.t("status.message_deleted")
+	case outcome.Status == domain.MessageDeleteStatusNotFound:
+		// Idempotent success: the peer never had the message or had
+		// already deleted it on a previous attempt.
+		msg = w.t("status.message_deleted")
+	case outcome.Status == domain.MessageDeleteStatusDenied:
+		msg = w.t("status.message_delete_denied")
+	case outcome.Status == domain.MessageDeleteStatusImmutable:
+		msg = w.t("status.message_delete_immutable")
+	default:
+		// Unknown wire-level status — fall back to a neutral abandoned
+		// message rather than silently lying that delivery succeeded.
+		msg = w.t("status.message_delete_abandoned")
+	}
+	w.router.SetSendStatus(msg)
+	if w.window != nil {
+		w.window.Invalidate()
+	}
 }
 
 // handleReplyCancel clears the reply state when the cancel button is clicked.
@@ -3431,6 +3531,21 @@ func (w *Window) layoutMsgContextMenuItems(gtx layout.Context) layout.Dimensions
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.msgCtxCopy, w.t("context.copy_message"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			// Delete uses a warning-tinted label so the destructive
+			// nature is visible. The handler in
+			// handleMsgContextMenuActions invokes router.SendMessageDelete
+			// asynchronously. For an outgoing DM the local chatlog
+			// row is kept until the peer's message_delete_ack
+			// confirms the deletion; for an incoming DM the local
+			// row is removed immediately. In both cases a
+			// message_delete control DM is dispatched to the peer
+			// (with retry for outgoing) and the terminal UI status
+			// arrives via TopicMessageDeleteCompleted.
+			return w.contextMenuItem(gtx, &w.msgCtxDelete, w.t("context.delete_message"),
+				color.NRGBA{R: 240, G: 158, B: 158, A: 255})
 		}),
 	)
 }

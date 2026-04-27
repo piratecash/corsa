@@ -1855,8 +1855,17 @@ func TestOnDownloadCompleteProceedsOnPersistFailure(t *testing.T) {
 		BytesReceived: uint64(len(content)),
 	}
 
+	// onDownloadComplete now requires the caller to hold the
+	// per-mapping writePartialMu (see its doc comment). Take it here
+	// to satisfy the contract; in this single-goroutine test there is
+	// no actual contention to protect against.
+	m.mu.Lock()
+	rmForLock := m.receiverMaps[fileID]
+	m.mu.Unlock()
+	rmForLock.writePartialMu.Lock()
 	// Call onDownloadComplete — persist will fail but transfer must proceed.
 	m.onDownloadComplete(fileID, partialPath, expectedHash, sender)
+	rmForLock.writePartialMu.Unlock()
 
 	// Mapping must be receiverWaitingAck — persist failure is non-fatal
 	// after the completed file is durably renamed.

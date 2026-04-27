@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -42,6 +43,21 @@ var validReceiverStates = map[receiverState]struct{}{
 	receiverFailed:       {},
 	receiverWaitingRoute: {},
 }
+
+// postValidatePreWriteMuHook is a test-only synchronization point fired
+// inside HandleChunkResponse after validateChunkResponseLocked has
+// captured its NextOffset/generation snapshot and released m.mu, but
+// strictly BEFORE the per-mapping writeMu is acquired.
+//
+// In production it is nil and the call site is a single nil-check.
+// The post-validation duplicate-race regression test
+// (TestPostValidationDuplicateRaceDropsLoserWithoutWriting) installs a
+// barrier here so it can deterministically prove that both concurrent
+// handlers reached the post-validate / pre-writeMu point with the same
+// NextOffset snapshot before either could win writeMu — without it,
+// the test would silently degrade into the already-covered sequential
+// stale-offset path if the second goroutine were scheduled late.
+var postValidatePreWriteMuHook func()
 
 // ---------------------------------------------------------------------------
 // Receiver file mapping
@@ -91,6 +107,23 @@ type receiverFileMapping struct {
 	// registered / reset); in that case file_downloaded carries Epoch=0
 	// and the sender falls back to the legacy (un-gated) accept path.
 	ServingEpoch uint64
+
+	// writePartialMu serialises writers and the verifier against the
+	// partial-download file owned by this mapping. HandleChunkResponse
+	// holds it across writeChunkToFile so the verifier in
+	// onDownloadComplete cannot read half-written bytes; symmetrically
+	// the verifier holds it across the verify→rename window so a
+	// concurrent duplicate chunk cannot poison the file between
+	// integrity check and os.Rename.
+	//
+	// Captured-by-pointer in chunkReceivePrep at validation time so the
+	// lock survives mapping replacement: even if the mapping pointer is
+	// removed from receiverMaps and a new mapping is added under the
+	// same FileID, the old sync.Mutex is still alive (Go GC keeps it
+	// while at least one chunkReceivePrep references it). The
+	// post-write commit then catches the generation mismatch and the
+	// orphan path is cleaned up the usual way.
+	writePartialMu sync.Mutex
 }
 
 // newReceiverMapping creates a receiverFileMapping with all domain invariants
@@ -275,19 +308,174 @@ func (m *Manager) HandleChunkResponse(
 		return // validateChunkResponseLocked already unlocked and logged
 	}
 
-	// Write chunk to partial file (outside lock). If the write fails, the
-	// state machine stays at the previous offset and stall recovery retries.
+	// Test-only synchronization point. Fires after the validate snapshot
+	// is captured (NextOffset, generation) and m.mu is released, but
+	// strictly BEFORE writeMu is acquired. Production callers leave this
+	// nil and the hot path is a single nil-check; the post-validation
+	// duplicate-race regression test installs a barrier here so both
+	// concurrent handlers are proven to hold the same NextOffset
+	// snapshot before either can win writeMu.
+	if hook := postValidatePreWriteMuHook; hook != nil {
+		hook()
+	}
+
+	// Hold the per-mapping writePartialMu across BOTH writeChunkToFile
+	// AND (for the final chunk) the verifier path inside
+	// onDownloadComplete. The lock is grabbed once here and released
+	// at function exit via defer.
+	//
+	// Why "across both": releasing writeMu between write and the
+	// state→verifying transition would let a duplicate final chunk
+	// acquire writeMu in the gap, overwrite the just-written bytes,
+	// then fail commit with chunkCommitStaleOffset. The verifier
+	// (which now also locks writeMu) would see the corrupted partial
+	// and fail the integrity check on an otherwise healthy download.
+	// Keeping the lock held from write through the transition closes
+	// that window.
+	//
+	// onDownloadComplete is documented to require writeMu held by the
+	// caller and does NOT lock it itself — see its doc comment.
+	prep.writeMu.Lock()
+	defer prep.writeMu.Unlock()
+
+	// Pre-write revalidation. validateChunkResponseLocked snapshotted
+	// the mapping (state, generation, NextOffset) under m.mu, but
+	// released the lock before we serialised on writeMu. A concurrent
+	// duplicate of the same chunk_response that lost the writeMu race
+	// is still holding a snapshot saying "offset == NextOffset" — even
+	// though the winner has already committed bytes and advanced
+	// NextOffset. If we let that duplicate call writeChunkToFile, it
+	// would WriteAt(offset) into the canonical .part with possibly
+	// different payload (corrupted retry, malicious retransmit), then
+	// fail the post-write commit with chunkCommitStaleOffset and leave
+	// poisoned bytes behind. Re-check ownership with the lock held;
+	// only proceed to write when the mapping still considers us the
+	// canonical owner of the next-byte slot. The same classifier runs
+	// post-write inside commitChunkProgressLocked, so cleanup of an
+	// orphaned write (mapping removed during the disk I/O window) is
+	// still handled by the existing branches below.
+	m.mu.Lock()
+	preStatus := m.classifyChunkOwnershipLocked(resp.FileID, prep.offset, prep.generation)
+	m.mu.Unlock()
+
+	switch preStatus {
+	case chunkCommitOK:
+		// fall through to writeChunkToFile.
+	case chunkCommitMappingRemoved:
+		// Mapping vanished between validate and the writeMu acquisition.
+		// Nothing was written yet, so there is no orphan partial to
+		// unlink — just drop the chunk silently.
+		log.Debug().
+			Str("file_id", string(resp.FileID)).
+			Uint64("offset", prep.offset).
+			Msg("file_transfer: pre-write check found mapping removed; dropping chunk")
+		return
+	case chunkCommitGenerationMismatch:
+		// A fresh mapping for the same FileID exists at a different
+		// generation. The new mapping owns the partial path; we are a
+		// straggler from the previous attempt. Drop silently — DO NOT
+		// touch the .part on disk.
+		log.Debug().
+			Str("file_id", string(resp.FileID)).
+			Uint64("offset", prep.offset).
+			Msg("file_transfer: pre-write check found generation mismatch; dropping chunk")
+		return
+	case chunkCommitStaleOffset:
+		// The winning concurrent writer already committed at this
+		// offset and advanced NextOffset. Our duplicate would clobber
+		// the freshly-written bytes if we proceeded. Drop silently —
+		// the mapping owns the partial and the canonical bytes belong
+		// to the winner.
+		log.Debug().
+			Str("file_id", string(resp.FileID)).
+			Uint64("offset", prep.offset).
+			Msg("file_transfer: pre-write check found stale offset; dropping duplicate chunk")
+		return
+	case chunkCommitNonDownloading:
+		// Mapping moved out of receiverDownloading (typically into
+		// receiverVerifying after the first copy of the final chunk).
+		// The verifier is reading the partial right now; writing into
+		// it would race the SHA-256 check and could fail an otherwise
+		// healthy download. Drop silently.
+		log.Debug().
+			Str("file_id", string(resp.FileID)).
+			Uint64("offset", prep.offset).
+			Msg("file_transfer: pre-write check found non-downloading state; dropping chunk")
+		return
+	default:
+		log.Warn().
+			Int("status", int(preStatus)).
+			Str("file_id", string(resp.FileID)).
+			Msg("file_transfer: unknown pre-write classifyChunkOwnership status; dropping chunk")
+		return
+	}
+
 	if err := writeChunkToFile(prep.partialPath, prep.offset, prep.chunkData, prep.fileSize); err != nil {
 		log.Error().Err(err).Str("file_id", string(resp.FileID)).Msg("file_transfer: write chunk failed")
 		return
 	}
 
-	// Commit progress under lock with re-validation.
+	// Commit progress under lock with re-validation. The generation
+	// captured at validation time is passed back so the commit can
+	// distinguish "same mapping moved to verifying" (no unlink) from
+	// "concurrent cancel+restart recycled the FileID" (unlink — our
+	// write is orphan w.r.t. that snapshot).
 	m.mu.Lock()
-	nextOffset, ok := m.commitChunkProgressLocked(resp.FileID, prep.offset, len(prep.chunkData))
+	nextOffset, status := m.commitChunkProgressLocked(resp.FileID, prep.offset, len(prep.chunkData), prep.generation)
 	m.mu.Unlock()
 
-	if !ok {
+	switch status {
+	case chunkCommitOK:
+		// fall through to next-chunk request below.
+	case chunkCommitMappingRemoved:
+		// No receiver mapping exists for this FileID anymore (cleanup
+		// or peer wipe). Our write is unowned; unlink the partial to
+		// avoid a silent disk leak.
+		//
+		// safeRemoveInDownloadDir validates the path stays under
+		// downloadDir and ignores ErrNotExist, so the call is safe
+		// when the cleanup path already removed our file.
+		m.safeRemoveInDownloadDir(prep.partialPath, "chunk-response post-cleanup orphan")
+		return
+	case chunkCommitGenerationMismatch:
+		// A fresh mapping for the same FileID exists at a different
+		// generation. It owns the partial path. DO NOT unlink — the
+		// new mapping's own lifecycle (verifier, cleanup, retry)
+		// handles the file. Our chunk is silently dropped.
+		log.Debug().
+			Str("file_id", string(resp.FileID)).
+			Uint64("offset", prep.offset).
+			Msg("file_transfer: stale chunk for replaced mapping dropped without unlinking partial")
+		return
+	case chunkCommitStaleOffset:
+		// A concurrent chunk_response (typically a duplicate from the
+		// sender's retry) already committed at this offset and
+		// advanced NextOffset; the mapping is alive at our generation
+		// and owns the partial. Drop our chunk silently — DO NOT
+		// unlink the partial, it belongs to the healthy attempt.
+		log.Debug().
+			Str("file_id", string(resp.FileID)).
+			Uint64("offset", prep.offset).
+			Msg("file_transfer: stale duplicate chunk dropped without unlinking partial")
+		return
+	case chunkCommitNonDownloading:
+		// The mapping completed the active download phase between our
+		// validate and commit (typically: the first copy of the final
+		// chunk drove it to receiverVerifying, our duplicate copy
+		// arrives a moment later). The verifier owns the partial
+		// file and is reading it for the SHA-256 check / rename to
+		// the completed path. DO NOT unlink — that would corrupt
+		// the verifier's view and abort a healthy download.
+		log.Debug().
+			Str("file_id", string(resp.FileID)).
+			Uint64("offset", prep.offset).
+			Msg("file_transfer: duplicate chunk for already-verifying mapping dropped without unlinking partial")
+		return
+	default:
+		log.Warn().
+			Int("status", int(status)).
+			Str("file_id", string(resp.FileID)).
+			Msg("file_transfer: unknown commitChunkProgressLocked status; dropping chunk")
 		return
 	}
 
@@ -661,6 +849,29 @@ type chunkReceivePrep struct {
 	chunkSize   uint32
 	sender      domain.PeerIdentity
 	offset      uint64
+	// generation is captured at validation time so commit can tell a
+	// "concurrent cancel + restart created a fresh mapping with the
+	// same FileID" case (where our chunk write is genuinely orphan)
+	// apart from the "same mapping, just transitioned to verifying"
+	// case (where the partial we wrote belongs to a healthy attempt
+	// that has moved on). See chunkCommitStatus.
+	generation uint64
+	// writeMu is the per-mapping write lock captured at validation
+	// time. The HandleChunkResponse path locks it across
+	// writeChunkToFile to serialise concurrent chunk writers AND to
+	// block while the verifier in onDownloadComplete is reading the
+	// partial. Without this, a duplicate final chunk could write
+	// bytes between the verifier's integrity hash and the atomic
+	// rename, producing a corrupted completed file that still passes
+	// the inode-only verifyFileIdentity check.
+	//
+	// Captured by pointer so the lock object outlives its mapping in
+	// the map: even after a cancel+restart replaces the mapping under
+	// the same FileID, the old sync.Mutex remains alive (Go GC keeps
+	// it while at least one chunkReceivePrep references it). The
+	// post-write commit's generation guard catches that case and the
+	// orphan-cleanup path runs as usual.
+	writeMu *sync.Mutex
 }
 
 // validateChunkResponseLocked performs all pre-I/O validation for an incoming
@@ -775,38 +986,216 @@ func (m *Manager) validateChunkResponseLocked(
 		chunkSize:   mapping.ChunkSize,
 		sender:      mapping.Sender,
 		offset:      resp.Offset,
+		generation:  mapping.Generation,
+		writeMu:     &mapping.writePartialMu,
 	}
 
 	m.mu.Unlock()
 	return prep, nil
 }
 
-// commitChunkProgressLocked re-validates the mapping after a disk write
-// (cancel or restart could have occurred during the unlock window), advances
-// BytesReceived/NextOffset, and persists. Returns the new NextOffset and
-// true on success, or 0 and false if the mapping was concurrently modified.
+// receiverOwnsPartial reports whether a receiver mapping actively
+// owns the partial download file at
+// partialDownloadPath(downloadDir, fileID).
+//
+// Three cases own the partial path:
+//   - receiverDownloading: chunk writers are appending to it.
+//   - receiverVerifying:   the SHA-256 verifier is reading it and
+//     about to atomic-rename to the completed path.
+//   - receiverWaitingRoute with on-disk progress (NextOffset > 0):
+//     a paused-but-resumable download. The mapping kept the partial
+//     so that a future StartDownload picks up where it stopped
+//     instead of restarting from offset 0. Treating this case as
+//     unowned would let a late stale chunk unlink the resumable
+//     blob, throwing away accumulated bytes (the mapping itself
+//     would survive but its on-disk progress would be lost — see
+//     the regression scenario in the receiver test suite).
+//
+// Every other state (Available, WaitingRoute with NextOffset == 0,
+// WaitingAck, Completed, Failed) does NOT own the partial: idle states
+// have not started writing or had their progress dropped, post-verify
+// states have either renamed or deleted it, and failure/cancel paths
+// must remove it as part of the transition.
+//
+// The post-commit cleanup decision in HandleChunkResponse uses this
+// predicate: a stale chunk write into a path whose mapping no longer
+// owns it is an orphan that the writer must remove itself.
+func receiverOwnsPartial(rm *receiverFileMapping) bool {
+	if rm == nil {
+		return false
+	}
+	switch rm.State {
+	case receiverDownloading, receiverVerifying:
+		return true
+	case receiverWaitingRoute:
+		// Resumable pause: ownership iff on-disk progress exists.
+		// A waiting_route mapping with NextOffset == 0 has nothing
+		// on disk to protect; a stale write into a fresh empty
+		// path is a true orphan.
+		return rm.NextOffset > 0
+	default:
+		return false
+	}
+}
+
+// chunkCommitStatus distinguishes the five terminal outcomes of a
+// commit attempt. Only chunkCommitMappingRemoved is the situation
+// where the partial file is unowned — every other status means some
+// receiver mapping still owns the partial path (current download,
+// previous duplicate, post-completion verifier, or a fresh mapping
+// from cancel+restart) and the caller MUST NOT unlink.
+type chunkCommitStatus int
+
+const (
+	// chunkCommitOK — write was committed, NextOffset advanced.
+	chunkCommitOK chunkCommitStatus = iota
+
+	// chunkCommitMappingRemoved — there is no receiver mapping for
+	// FileID at all. The partial file we wrote is unowned and the
+	// caller should unlink it.
+	chunkCommitMappingRemoved
+
+	// chunkCommitGenerationMismatch — a receiver mapping for FileID
+	// exists but at a different Generation than we captured at
+	// validation (concurrent cancel + restart minted a fresh
+	// mapping). That fresh mapping now owns the partial path; even
+	// though our write is logically orphan with respect to the
+	// snapshot we took, the file on disk belongs to the new
+	// mapping's lifecycle. DO NOT unlink — the new mapping's own
+	// failure / cleanup paths will handle it. The caller drops our
+	// chunk silently.
+	chunkCommitGenerationMismatch
+
+	// chunkCommitStaleOffset — the mapping is alive at our generation
+	// AND in receiverDownloading, but its NextOffset has already
+	// advanced past our offset (duplicate chunk_response within the
+	// same active download). The partial belongs to the healthy
+	// commit that already advanced; do not unlink.
+	chunkCommitStaleOffset
+
+	// chunkCommitNonDownloading — the mapping is alive at our
+	// generation but has transitioned out of receiverDownloading
+	// (e.g. into receiverVerifying after the first final chunk
+	// finished, or into receiverWaitingAck after verification, or
+	// into receiverFailed/receiverCompleted). The partial file is
+	// owned by the post-download phase and MUST NOT be unlinked.
+	// The caller drops the duplicate chunk silently.
+	chunkCommitNonDownloading
+)
+
+// classifyChunkOwnershipLocked is the pure ownership/match decision
+// shared by the pre-write revalidation and the post-write commit. It
+// re-checks the mapping (presence, generation, state, NextOffset)
+// against the snapshot the writer captured at validation time and
+// returns the corresponding chunkCommitStatus.
+//
+// chunkCommitOK means the writer is still the canonical owner of the
+// next-byte slot at `offset`; every other status means the writer
+// must NOT mutate the partial file (or, on the post-write side, must
+// unlink an orphan).
+//
+// Used both BEFORE writeChunkToFile (to avoid clobbering bytes a
+// concurrent winner already accepted) and AFTER (to commit progress
+// only when nothing changed during the disk I/O window). Must be
+// called with m.mu held.
+func (m *Manager) classifyChunkOwnershipLocked(fileID domain.FileID, offset, expectedGen uint64) chunkCommitStatus {
+	mapping, ok := m.receiverMaps[fileID]
+	if !ok {
+		// Mapping removed (cleanup, peer history wipe, etc.) — no one
+		// owns the partial anymore. Caller unlinks (post-write) or
+		// drops without writing (pre-write).
+		return chunkCommitMappingRemoved
+	}
+	if mapping.Generation != expectedGen {
+		// A concurrent cancel + restart replaced the mapping (or just
+		// reset the same mapping to receiverAvailable on a plain
+		// CancelDownload). The decision splits on whether the new
+		// generation actually owns the partial right now — see
+		// receiverOwnsPartial:
+		//
+		//   - downloading / verifying / waiting_route with progress →
+		//     active or resumable attempt is using the partial path.
+		//     DO NOT unlink — it would corrupt the new mapping's
+		//     data or strip resumable progress.
+		//
+		//   - available / waiting_route with no progress / waiting_ack
+		//     / completed / failed → the new state does NOT own the
+		//     partial. CancelDownload typically resets to available
+		//     and unlinks the old partial; if our write landed AFTER
+		//     that unlink, the resulting partial is a fresh orphan
+		//     with no active mapping to clean it up. Caller unlinks.
+		if receiverOwnsPartial(mapping) {
+			return chunkCommitGenerationMismatch
+		}
+		return chunkCommitMappingRemoved
+	}
+	if mapping.State != receiverDownloading {
+		// Same generation, but the mapping has moved out of
+		// receiverDownloading. The decision splits on whether the
+		// new state owns the partial path (see receiverOwnsPartial):
+		//
+		//   - receiverVerifying → SHA-256 verifier is reading the
+		//     partial right now. DO NOT unlink — that would corrupt
+		//     a healthy verification.
+		//
+		//   - receiverWaitingRoute with NextOffset > 0 → paused
+		//     resumable download. The partial holds accumulated
+		//     bytes a future StartDownload will resume from. DO NOT
+		//     unlink — that would silently throw away progress.
+		//
+		//   - receiverWaitingAck / receiverCompleted → verifier
+		//     already atomic-renamed the partial to the completed
+		//     path. There is no partial under our path anymore;
+		//     unlinking is a safe no-op (ErrNotExist tolerated by
+		//     safeRemoveInDownloadDir), and if our write somehow
+		//     re-created it, that recreation IS an orphan.
+		//
+		//   - receiverFailed / receiverAvailable / receiverWaitingRoute
+		//     with NextOffset == 0 → cancellation/failure/idle with
+		//     no on-disk progress. None owns the partial; if our
+		//     write landed after the cleanup unlink, the file is a
+		//     fresh orphan.
+		if receiverOwnsPartial(mapping) {
+			return chunkCommitNonDownloading
+		}
+		return chunkCommitMappingRemoved
+	}
+	// Same generation and still downloading. A duplicate chunk_response
+	// could have advanced past our offset, or our offset could be older
+	// than NextOffset for some other reason — either way the mapping
+	// is alive and owns the partial file. The duplicate is silently
+	// dropped without unlinking (and, on the pre-write side, without
+	// writing — that's what defends accepted bytes from being
+	// overwritten by a duplicate that wins the writeMu race).
+	if offset != mapping.NextOffset {
+		return chunkCommitStaleOffset
+	}
+	return chunkCommitOK
+}
+
+// commitChunkProgressLocked re-validates the mapping after a disk
+// write and advances BytesReceived/NextOffset on success. The same
+// classification helper is used for the pre-write check; here we
+// additionally mutate state when classification returns OK.
 //
 // Must be called with m.mu held. Does NOT release the lock.
 func (m *Manager) commitChunkProgressLocked(
 	fileID domain.FileID,
 	offset uint64,
 	bytesWritten int,
-) (uint64, bool) {
-	mapping, ok := m.receiverMaps[fileID]
-	if !ok || mapping.State != receiverDownloading {
-		return 0, false
+	expectedGen uint64,
+) (uint64, chunkCommitStatus) {
+	status := m.classifyChunkOwnershipLocked(fileID, offset, expectedGen)
+	if status != chunkCommitOK {
+		return 0, status
 	}
-	// A concurrent cancel+restart could have reset NextOffset to 0.
-	if offset != mapping.NextOffset {
-		return 0, false
-	}
-
+	mapping := m.receiverMaps[fileID]
 	mapping.BytesReceived += uint64(bytesWritten)
 	mapping.NextOffset = offset + uint64(bytesWritten)
 	mapping.LastChunkAt = time.Now()
 	mapping.ChunkRetries = 0
 	m.saveMappingsLocked()
-	return mapping.NextOffset, true
+	return mapping.NextOffset, chunkCommitOK
 }
 
 // receiverStateIs briefly acquires the mutex and checks whether the receiver
@@ -918,6 +1307,13 @@ func (m *Manager) onDownloadComplete(
 	partialPath, expectedHash string,
 	sender domain.PeerIdentity,
 ) {
+	// Caller contract: the per-mapping writePartialMu must be held by
+	// the caller across this entire function. HandleChunkResponse
+	// grabs it before writeChunkToFile and keeps it through the
+	// commit + state transition + verify + rename sequence so a
+	// duplicate final chunk cannot poison the partial in any gap.
+	// Tests that invoke onDownloadComplete directly must lock
+	// mapping.writePartialMu themselves before the call.
 	m.mu.Lock()
 	mapping, ok := m.receiverMaps[fileID]
 	if !ok {

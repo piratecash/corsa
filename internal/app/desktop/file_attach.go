@@ -108,7 +108,7 @@ func buildFileAnnounceOutgoing(result *fileAttachResult, caption string) (domain
 
 	return domain.OutgoingDM{
 		Body:        body,
-		Command:     domain.FileActionAnnounce,
+		Command:     domain.DMCommandFileAnnounce,
 		CommandData: string(data),
 	}, nil
 }

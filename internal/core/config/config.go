@@ -105,7 +105,7 @@ const (
 	// (no payload differences) but the floor semantics differ. Bump is
 	// mandatory even though MinimumProtocolVersion stays at 8 in this build
 	// — the floor raise itself is the v12 contract.
-	ProtocolVersion        = 12
+	ProtocolVersion        = 13
 	MinimumProtocolVersion = 9
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"

@@ -99,7 +99,7 @@ func (b *FileTransferBridge) RollbackMapping(fileID domain.FileID) {
 // Parses the announce payload from the message and delegates to the
 // FileTransferManager. Malformed metadata is rejected and logged.
 func (b *FileTransferBridge) RegisterIncoming(msg DirectMessage) {
-	if msg.Command != domain.FileActionAnnounce || msg.CommandData == "" {
+	if msg.Command != domain.DMCommandFileAnnounce || msg.CommandData == "" {
 		return
 	}
 
@@ -153,6 +153,28 @@ func (b *FileTransferBridge) FilePath(fileID domain.FileID, isSender bool) strin
 // Called when a peer is removed from the sidebar.
 func (b *FileTransferBridge) CleanupPeer(peer domain.PeerIdentity) {
 	b.client.CleanupPeerTransfers(peer)
+}
+
+// OnMessageDeleted is the cleanup hook invoked by DMRouter when a DM
+// row has been removed from chatlog (locally on the sender side via
+// SendMessageDelete, or remotely on the recipient side via
+// handleInboundMessageDelete). For file_announce messages this drops
+// the matching sender or receiver mapping, releases the transmit-blob
+// ref count (sender side), and deletes partial / completed files in
+// the download directory (receiver side).
+//
+// Idempotency contract: a MessageID with no associated mapping is a
+// silent no-op inside FileTransferManager. The hook is safe to call
+// for every deleted message regardless of whether it was a
+// file_announce.
+//
+// FileID == MessageID by construction (see domain/file_transfer.go).
+// The conversion is a typed-string alias change; no runtime cost.
+func (b *FileTransferBridge) OnMessageDeleted(messageID domain.MessageID) {
+	if b.client == nil {
+		return
+	}
+	b.client.CleanupTransferByMessageID(domain.FileID(messageID))
 }
 
 // sendTimeout is the default timeout for sending a file announce DM.

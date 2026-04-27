@@ -141,6 +141,26 @@ type FileSendFailedResult struct {
 	Err    error
 }
 
+// MessageDeleteOutcome is the payload for TopicMessageDeleteCompleted.
+// Emitted by DMRouter when an in-flight message_delete reaches a
+// terminal state — either the recipient's message_delete_ack arrived
+// (Status carries one of the four ack statuses), or the sender's
+// retry budget was exhausted (Abandoned == true). Subscribers
+// (UI / RPC tooling) use this to differentiate a successful peer-side
+// deletion from a denied / immutable rejection or a transport
+// abandonment, all of which look identical at the wire level.
+//
+// Status is one of domain.MessageDeleteStatus values when Abandoned is
+// false, and the empty string when Abandoned is true (no ack was ever
+// received).
+type MessageDeleteOutcome struct {
+	Target    domain.MessageID
+	Peer      domain.PeerIdentity
+	Status    domain.MessageDeleteStatus
+	Abandoned bool
+	Attempts  int
+}
+
 // RouteTableChange is the payload for TopicRouteTableChanged.
 // Carries a lightweight summary of what changed. Subscribers needing the
 // full table state should call RoutingSnapshot().

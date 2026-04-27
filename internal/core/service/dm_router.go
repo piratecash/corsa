@@ -101,6 +101,20 @@ type DMRouter struct {
 	uiOverflowCount atomic.Int64  // number of active retry goroutines in notify()
 	startupDone     chan struct{} // closed after runStartup completes; used by external waiters
 
+	// deleteRetry holds the sender-side pendingDelete map for in-flight
+	// message_delete control DMs. Populated by SendMessageDelete, drained
+	// by handleInboundMessageDeleteAck (any terminal status) or by the
+	// retry loop (attempt budget exhausted). See dm_router_delete.go.
+	deleteRetry *deleteRetryState
+
+	// dispatchControlDeleteFn is a test-only override for the
+	// dispatchMessageDelete wire path. When non-nil, dispatchMessageDelete
+	// invokes this function instead of building a payload and calling
+	// r.client.SendControlMessage. Production code leaves this nil and
+	// runs the real dispatch. Tests that need to count dispatches or
+	// avoid the rpc/identity stack assign a counter here.
+	dispatchControlDeleteFn func(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) error
+
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
 	pendingScrollToEnd   bool
 	pendingClearEditor   bool
@@ -138,6 +152,7 @@ func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    make(chan struct{}),
+		deleteRetry:    newDeleteRetryState(),
 	}
 	// Seed snapCache so Snapshot() returns a valid (though minimal) state
 	// immediately. Without this, the first frames after Start() render an
@@ -465,7 +480,7 @@ func (r *DMRouter) tryRegisterFileReceive(msg *DirectMessage) {
 	if msg == nil || r.fileBridge == nil {
 		return
 	}
-	if msg.Command != domain.FileActionAnnounce || msg.CommandData == "" {
+	if msg.Command != domain.DMCommandFileAnnounce || msg.CommandData == "" {
 		return
 	}
 	// Only register for incoming messages (sender is not us).
@@ -577,6 +592,13 @@ func (r *DMRouter) Start() {
 
 	// 2. Startup: load previews, auto-select first peer, seed the monitor.
 	go r.runStartup()
+
+	// 3. Background retry sweeper for pending message_delete control
+	// DMs. Runs for the process lifetime — pending state is in-memory
+	// only, so a process restart starts from a clean slate (see the
+	// note in dm_router_delete.go about JSON persistence as a planned
+	// follow-up).
+	go r.deleteRetryLoop(context.Background())
 }
 
 // runStartup loads initial data from the database and then replays any
@@ -673,6 +695,13 @@ func (r *DMRouter) subscribeEvents() {
 	r.eventBus.Subscribe(ebus.TopicReceiptUpdated, func(event protocol.LocalChangeEvent) {
 		r.onEbusLocalChange(event)
 	})
+
+	// Inbound control DM (message_delete, message_delete_ack, ...).
+	// Routed through onEbusLocalChange so the buffered-during-startup
+	// pipeline applies uniformly. handleEvent dispatches by event.Type.
+	r.eventBus.Subscribe(ebus.TopicMessageControl, func(event protocol.LocalChangeEvent) {
+		r.onEbusLocalChange(event)
+	})
 }
 
 func (r *DMRouter) handleEvent(event protocol.LocalChangeEvent) {
@@ -684,8 +713,15 @@ func (r *DMRouter) handleEvent(event protocol.LocalChangeEvent) {
 		r.onNewMessage(event)
 	case protocol.LocalChangeReceiptUpdate:
 		r.onReceiptUpdate(event)
+	case protocol.LocalChangeNewControlMessage:
+		r.onControlMessage(event)
 	}
 }
+
+// onControlMessage is implemented in dm_router_delete.go. Keeping the
+// dispatch in a sibling file isolates the message_delete /
+// message_delete_ack code path so the high-traffic data-DM logic in
+// this file is not contaminated by control-flow concerns.
 
 // normalizePeer trims whitespace so that raw strings from events or headers
 // never create duplicate keys in peers map or peerOrder.
@@ -1066,7 +1102,7 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity) bool {
 	// from the database — ensures transfer state is restored after restart.
 	myAddr := r.client.Address()
 	for i := range messages {
-		if messages[i].Command == domain.FileActionAnnounce && messages[i].Sender != myAddr {
+		if messages[i].Command == domain.DMCommandFileAnnounce && messages[i].Sender != myAddr {
 			r.tryRegisterFileReceive(&messages[i])
 		}
 	}

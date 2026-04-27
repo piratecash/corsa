@@ -335,8 +335,11 @@ type FileID = MessageID
 
 type FileAction string
 
+// FileAction identifies file-transfer protocol frames carried inside
+// FileCommandFrame. The file announcement that opens a transfer is
+// *not* a FileAction — it is a DM and uses DMCommandFileAnnounce
+// (see docs/dm-commands.md).
 const (
-    FileActionAnnounce      FileAction = "file_announce"
     FileActionDownloaded    FileAction = "file_downloaded"
     FileActionDownloadedAck FileAction = "file_downloaded_ack"
     FileActionChunkReq      FileAction = "chunk_request"

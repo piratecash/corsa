@@ -1020,6 +1020,77 @@ func (m *Manager) RemoveSenderMapping(fileID domain.FileID) bool {
 	return true
 }
 
+// CleanupTransferByMessageID releases all file-transfer state attached
+// to a single DM (sender mapping, receiver mapping, transmit-blob ref,
+// partial/completed downloaded files). Called by the DM-router delete
+// hook (FileTransferBridge.OnMessageDeleted) after a chatlog row has
+// been removed locally — either via SendMessageDelete on this side or
+// via handleInboundMessageDelete on the other.
+//
+// Idempotent: a fileID with no mapping is a silent no-op. Safe to call
+// for every deleted DM regardless of whether it was a file_announce.
+func (m *Manager) CleanupTransferByMessageID(fileID domain.FileID) {
+	m.mu.Lock()
+
+	// Sender side. Tracked by senderFound (any sender state, including
+	// tombstone) AND releaseHash (only states that hold a transmit-blob
+	// ref). The two are independent: a tombstone removal still mutates
+	// the in-memory map and so MUST be persisted, even though no ref
+	// drop is needed. Without senderFound the previous code only saved
+	// when releaseHash was non-empty and silently lost the tombstone
+	// removal across restart.
+	var releaseHash string
+	var senderFound bool
+	if mapping, ok := m.senderMaps[fileID]; ok {
+		senderFound = true
+		if mapping.State != senderTombstone {
+			releaseHash = mapping.FileHash
+		}
+		delete(m.senderMaps, fileID)
+	}
+
+	// Receiver side. Capture the on-disk paths to clean up before
+	// dropping the map entry; the actual file unlinks happen outside
+	// the mutex (file I/O must never run under m.mu).
+	var receiverCompletedPath string
+	var receiverFound bool
+	if mapping, ok := m.receiverMaps[fileID]; ok {
+		receiverCompletedPath = m.backfillCompletedPath(mapping)
+		receiverFound = true
+		delete(m.receiverMaps, fileID)
+	}
+
+	if senderFound || receiverFound {
+		m.saveMappingsLocked()
+	}
+	m.mu.Unlock()
+
+	// Release transmit blob ref (may delete the file if last ref).
+	if releaseHash != "" && m.store != nil {
+		m.store.Release(releaseHash)
+	}
+
+	// Delete completed and partial download files for the receiver
+	// mapping. partialDownloadPath always returns a path; os.Remove
+	// returning ErrNotExist is fine — no partial existed.
+	if receiverFound {
+		m.safeRemoveInDownloadDir(receiverCompletedPath, "message-delete cleanup")
+		partial := partialDownloadPath(m.downloadDir, fileID)
+		if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
+			log.Warn().Err(err).Str("path", partial).Msg("file_transfer: cleanup partial download failed (message-delete)")
+		}
+	}
+
+	if senderFound || receiverFound {
+		log.Info().
+			Str("file_id", string(fileID)).
+			Bool("sender_removed", senderFound).
+			Bool("sender_ref_released", releaseHash != "").
+			Bool("receiver_removed", receiverFound).
+			Msg("file_transfer: transfer cleaned up by message id")
+	}
+}
+
 // CleanupPeerTransfers removes all sender and receiver mappings associated
 // with the given peer identity. For sender mappings where the peer is the
 // recipient, the transmit file ref count is released (and the file deleted

@@ -116,6 +116,36 @@ func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt d
 	return true
 }
 
+// RemoveMessage drops the message with the given ID from the cache,
+// keeping the index for the remaining messages contiguous. Returns
+// true when the cache held the message and it was removed; false when
+// the ID was not present (idempotent caller path).
+//
+// Used by the message_delete handlers in DMRouter — after chatlog has
+// already removed the row, the live conversation cache must drop it
+// too so the deleted bubble disappears from the UI without waiting
+// for a conversation reload.
+func (c *ConversationCache) RemoveMessage(messageID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	idx, exists := c.index[messageID]
+	if !exists {
+		return false
+	}
+
+	c.messages = append(c.messages[:idx], c.messages[idx+1:]...)
+	delete(c.index, messageID)
+	// Compact the index — every entry whose stored offset was beyond
+	// the removed slot must shift down by one.
+	for id, offset := range c.index {
+		if offset > idx {
+			c.index[id] = offset - 1
+		}
+	}
+	return true
+}
+
 // Evict clears the cache if it currently holds the given identity's conversation.
 func (c *ConversationCache) Evict(identity domain.PeerIdentity) {
 	c.mu.Lock()

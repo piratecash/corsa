@@ -43,12 +43,18 @@ type DMRecipient struct {
 // New fields (reactions, forwarding, etc.) are added here without changing
 // function signatures across the call chain.
 //
-// For file_announce DMs: Command is set to FileActionAnnounce and
+// For file_announce DMs: Command is set to DMCommandFileAnnounce and
 // CommandData holds the JSON-encoded FileAnnouncePayload. Body contains
 // either a user-provided caption or FileDMBodySentinel.
+//
+// For control DMs (DMCommand.IsControl() == true): Body is empty and
+// the message travels on a dedicated wire topic that bypasses chatlog
+// persistence. Use the dedicated send path (see service.DMCrypto.
+// SendControlMessage) — submitting a control DM through the regular
+// SendDirectMessage path would persist it like a data DM.
 type OutgoingDM struct {
 	Body        string
 	ReplyTo     MessageID
-	Command     FileAction // e.g. FileActionAnnounce for file_announce DMs; empty for regular DMs
-	CommandData string     // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
+	Command     DMCommand // e.g. DMCommandFileAnnounce; empty for regular DMs
+	CommandData string    // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
 }

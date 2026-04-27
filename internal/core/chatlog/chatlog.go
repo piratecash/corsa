@@ -561,6 +561,74 @@ func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
 	return n, nil
 }
 
+// UnreadCountFor returns the number of unread messages in the
+// conversation with peerAddress. Mirrors the unread_count column
+// computed by ListConversationsCtx for a single conversation, used by
+// the DM-router delete path to refresh the in-memory sidebar badge
+// after a row is removed (otherwise the badge would stay at the
+// stale pre-delete count).
+//
+// Returns (0, nil) when the conversation has no unread messages or
+// when the database is not available; the latter mirrors the contract
+// of the surrounding chatlog Read* helpers (transient unavailability
+// is not an error).
+func (s *Store) UnreadCountFor(peerAddress domain.PeerIdentity) (int, error) {
+	if s.db == nil || peerAddress == "" {
+		return 0, nil
+	}
+	selfAddr := s.identityAddr
+	var n int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM messages
+		WHERE topic = 'dm'
+		  AND sender = ?
+		  AND recipient = ?
+		  AND delivery_status != 'seen'`,
+		string(peerAddress), selfAddr,
+	).Scan(&n)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("chatlog: unread count for %s: %w", peerAddress, err)
+	}
+	return n, nil
+}
+
+// EntryByID fetches a single chatlog entry by message ID across all
+// conversations. Returns (entry, true, nil) when found,
+// (zero, false, nil) when the row does not exist (idempotent caller
+// path), and (zero, false, err) on database failure.
+//
+// Used by the message_delete handlers in DMRouter to look up the
+// target message's Sender and Flag before authorizing a remote
+// delete: the envelope sender of the inbound message_delete must
+// match either the original Sender or the Recipient (depending on
+// MessageFlag), and an immutable target is rejected outright.
+func (s *Store) EntryByID(messageID domain.MessageID) (Entry, bool, error) {
+	if s.db == nil {
+		return Entry{}, false, fmt.Errorf("chatlog: database not available")
+	}
+
+	row := s.db.QueryRow(
+		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
+		 FROM messages WHERE id = ? LIMIT 1`,
+		messageID,
+	)
+
+	var e Entry
+	err := row.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata)
+	switch {
+	case err == sql.ErrNoRows:
+		return Entry{}, false, nil
+	case err != nil:
+		return Entry{}, false, fmt.Errorf("chatlog: entry by id %s: %w", messageID, err)
+	default:
+		return e, true, nil
+	}
+}
+
 // Returns true if a row was deleted.
 func (s *Store) DeleteByID(messageID domain.MessageID) (bool, error) {
 	if s.db == nil {

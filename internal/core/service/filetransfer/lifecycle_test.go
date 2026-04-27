@@ -526,7 +526,13 @@ func TestCancelDuringVerifyDoesNotResurrectTransfer(t *testing.T) {
 
 	// Now simulate onDownloadComplete being called on the cancelled mapping.
 	// It must detect the state is no longer downloading and exit early.
+	// onDownloadComplete now requires the caller to hold the
+	// per-mapping writePartialMu (see its doc comment). Acquire it
+	// here to honour the contract; the early-return branch makes the
+	// lock functionally inert in this case.
+	rm.writePartialMu.Lock()
 	m.onDownloadComplete(fileID, partialPath, hash, sender)
+	rm.writePartialMu.Unlock()
 
 	m.mu.Lock()
 	finalState := m.receiverMaps[fileID].State

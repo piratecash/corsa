@@ -76,7 +76,13 @@ func NewGossipRouter(svc *Service) *GossipRouter {
 
 func (r *GossipRouter) Route(msg protocol.Envelope) RoutingDecision {
 	var pushSubs []*subscriber
-	if msg.Topic == "dm" && msg.Recipient != "*" {
+	// Both data DMs ("dm") and control DMs (TopicControlDM) are
+	// recipient-specific point-to-point traffic — push subscribers must
+	// resolve identically for them. Without protocol.IsDMTopic, control
+	// DMs would skip push delivery entirely and only reach the
+	// recipient via gossip/relay (or, in our retry-driven design, never
+	// at all if the recipient is directly connected).
+	if protocol.IsDMTopic(msg.Topic) && msg.Recipient != "*" {
 		pushSubs = r.svc.subscribersForRecipient(msg.Recipient)
 	}
 

@@ -45,6 +45,19 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 	to = domain.PeerIdentity(strings.TrimSpace(string(to)))
 	msg.Body = strings.TrimSpace(msg.Body)
 	msg.ReplyTo = domain.MessageID(strings.TrimSpace(string(msg.ReplyTo)))
+
+	// Control DMs (message_delete, message_delete_ack) must travel on the
+	// dedicated control wire path that bypasses chatlog persistence and
+	// the LocalChangeNewMessage event — the regular send_message path
+	// would surface them as visible "[delete]" rows in the sender's chat
+	// (the exact failure mode docs/dm-commands.md is designed to avoid).
+	// This guard is the canonical chokepoint: every higher-level entry
+	// point (DesktopClient.SendDirectMessage, DMRouter.SendMessage)
+	// funnels through here, so a single check covers all of them.
+	if msg.Command.IsControl() {
+		return nil, fmt.Errorf("control DM (command=%s) must be sent through SendControlMessage, not SendDirectMessage", msg.Command)
+	}
+
 	if to == "" || msg.Body == "" {
 		return nil, fmt.Errorf("recipient and message are required")
 	}
@@ -123,33 +136,9 @@ func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *Dire
 		return nil
 	}
 
-	var senderPubKey string
-	if event.Sender == d.id.Address {
-		senderPubKey = identity.PublicKeyBase64(d.id.PublicKey)
-	} else {
-		contactsReply, err := d.rpc.LocalRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
-		if err != nil {
-			return nil
-		}
-		contacts := contactsFromFrame(contactsReply)
-		contact, ok := contacts[event.Sender]
-		if ok && contact.PubKey != "" {
-			senderPubKey = contact.PubKey
-		} else {
-			// Fall back to all known contacts (includes keys recovered via
-			// on-demand sync for relayed messages whose sender is not yet
-			// in the local trust store).
-			allReply, err := d.rpc.LocalRequestFrame(protocol.Frame{Type: "fetch_contacts"})
-			if err != nil {
-				return nil
-			}
-			allContacts := contactsFromFrame(allReply)
-			allContact, ok := allContacts[event.Sender]
-			if !ok || allContact.PubKey == "" {
-				return nil
-			}
-			senderPubKey = allContact.PubKey
-		}
+	senderPubKey, ok := d.resolveSenderPubKey(event.Sender)
+	if !ok {
+		return nil
 	}
 
 	msg, err := directmsg.DecryptForIdentity(d.id, event.Sender, senderPubKey, event.Recipient, event.Body)
@@ -188,7 +177,7 @@ func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *Dire
 		Recipient:     domain.PeerIdentity(event.Recipient),
 		Body:          msg.Body,
 		ReplyTo:       replyTo,
-		Command:       domain.FileAction(msg.Command),
+		Command:       domain.DMCommand(msg.Command),
 		CommandData:   msg.CommandData,
 		Timestamp:     ts,
 		ReceiptStatus: status,

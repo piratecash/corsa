@@ -87,6 +87,16 @@ Touches `knowledgeMu` (write `known` for sender / recipient, read `pubKeys` for 
 
 The DM branch earlier in `storeIncomingMessage` reads `pubKeys`/`boxKeys`/`boxSigs` for signature verification under `knowledgeMu.RLock` as a standalone snapshot — no cross-domain hold, verification proceeds outside the lock.
 
+Control DMs (`msg.Topic == protocol.TopicControlDM` — see `docs/dm-commands.md`) reuse this exact code path with three storage-side divergences:
+
+1. The chatlog `messageStore.StoreMessage` call inside the gossip section is gated on `msg.Topic != protocol.TopicControlDM`.
+2. The `s.topics[msg.Topic]` append is gated on `msg.Topic != protocol.TopicControlDM`. Control envelopes therefore never accumulate in `s.topics`. This avoids a memory leak — `retryableRelayMessages` and `queueStateSnapshotLocked` both read only `s.topics["dm"]`, so any control envelope put into `s.topics["dm-control"]` would be unread by every retry/snapshot consumer and grow unbounded. Routing/push fan-out remains unaffected because `executeGossipTargets` and `sendTableDirectedRelay` send frames on the wire on the fly without consulting `s.topics` as a backing store.
+3. The LocalChange event branch publishes `LocalChangeNewControlMessage` on `ebus.TopicMessageControl` (instead of `LocalChangeNewMessage` on `ebus.TopicMessageNew`) and only does so when `msg.Recipient == s.identity.Address`. The sender side never receives its own outbound control DM as if it were inbound — sender-side state is updated synchronously inside `DMCrypto.SendControlMessage` / `DMRouter.SendMessageDelete` (the latter ships in slice B).
+
+The locking discipline is identical to the data-DM path: `knowledgeMu` → `gossipMu` sequentially, with the same brief unlock around store I/O (now skipped entirely for control DMs, so the `gossipMu` section runs uninterrupted for them). No new mutex is taken and no new cross-domain edge is introduced; the only behavioural difference is which external side-effects run after the gossip section closes.
+
+The relay-retry tracker (`trackRelayMessage` in `relay.go`) likewise rejects control DMs at its entry gate — the application-level retry on the sender side (`pendingDelete` in `DMRouter`, slice B) is the canonical retry mechanism for control DMs and the only one with a complete delivery contract (ack-driven termination, JSON persistence across restart).
+
 #### `retryableRelayMessages` / `deleteBacklogMessageForRecipient` (delivery + gossip)
 Touches `deliveryMu` (`relayRetry`) and `gossipMu` (`topics["dm"]`). Canonical order `deliveryMu → gossipMu`: `deliveryMu` OUTER, `gossipMu` INNER. In `retryableRelayMessages` the gossip side is a read-only snapshot (`gossipMu.RLock`) scoped tightly around the `topics["dm"]` copy; in `deleteBacklogMessageForRecipient` the gossip side is a write (`gossipMu.Lock`) that spans the entire filter loop because each matched envelope invalidates its `relayRetry` entry in the same iteration — the two mutations must stay atomic together.
 

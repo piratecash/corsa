@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -71,6 +72,13 @@ type DMRouterProvider interface {
 	// when the async delivery fails, giving the caller a chance to
 	// restore UI state (e.g. re-attach the file for retry).
 	SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func()) error
+	// SendMessageDelete deletes the target message locally (chatlog +
+	// file-transfer cleanup hook) and asks the peer to mirror the
+	// deletion via the message_delete control DM. Application-level
+	// retry on the sender side carries the request until the peer's
+	// message_delete_ack arrives or the retry budget is exhausted.
+	// See docs/dm-commands.md.
+	SendMessageDelete(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) error
 }
 
 // MetricsProvider abstracts access to the metrics collector.

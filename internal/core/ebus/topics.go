@@ -62,6 +62,31 @@ const (
 	//   func(event protocol.LocalChangeEvent)
 	TopicReceiptUpdated = "receipt.updated"
 
+	// TopicMessageControl is emitted when a control DM
+	// (message_delete, message_delete_ack, ...) arrives on the dedicated
+	// control wire topic (protocol.TopicControlDM). Unlike TopicMessageNew,
+	// the event carries no chatlog row — the wire-encrypted Body is delivered
+	// straight to subscribers, who decrypt it via
+	// DMCrypto.DecryptIncomingControlMessage and dispatch on the inner
+	// DMCommand. See docs/dm-commands.md.
+	//
+	// Handler signature:
+	//   func(event protocol.LocalChangeEvent)
+	TopicMessageControl = "message.control"
+
+	// TopicMessageDeleteCompleted is emitted by DMRouter when an
+	// in-flight message_delete reaches a terminal state — either the
+	// peer's message_delete_ack arrived with one of the four
+	// MessageDeleteStatus values, or the sender's retry budget was
+	// exhausted (Abandoned). Subscribers use this to differentiate a
+	// successful deletion (deleted / not_found) from a peer rejection
+	// (denied / immutable) or transport abandonment, all of which look
+	// identical to the synchronous SendMessageDelete return.
+	//
+	// Handler signature:
+	//   func(outcome ebus.MessageDeleteOutcome)
+	TopicMessageDeleteCompleted = "message.delete.completed"
+
 	// TopicIdentityAdded is emitted when a new identity is discovered and
 	// added to the node's known set. Carries the peer identity so the
 	// receiver can append it locally without an RPC round-trip.

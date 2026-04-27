@@ -177,8 +177,8 @@ type DirectMessage struct {
 	Recipient     domain.PeerIdentity
 	Body          string
 	ReplyTo       domain.MessageID
-	Command       domain.FileAction // e.g. FileActionAnnounce for file transfers; empty for regular DMs
-	CommandData   string            // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
+	Command       domain.DMCommand // e.g. DMCommandFileAnnounce for file transfers; empty for regular DMs
+	CommandData   string           // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
 	Timestamp     time.Time
 	ReceiptStatus string
 	DeliveredAt   domain.OptionalTime
@@ -501,6 +501,22 @@ func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) 
 	return c.dm.DecryptIncomingMessage(event)
 }
 
+// SendControlMessage submits a control DM (message_delete,
+// message_delete_ack, ...) on the dedicated control wire path. Unlike
+// SendDirectMessage, the message is not persisted and does not surface
+// in the chat thread on either side. See docs/dm-commands.md.
+func (c *DesktopClient) SendControlMessage(ctx context.Context, to domain.PeerIdentity, cmd domain.DMCommand, payload string) (domain.MessageID, error) {
+	return c.dm.SendControlMessage(ctx, to, cmd, payload)
+}
+
+// DecryptIncomingControlMessage decrypts a LocalChangeNewControlMessage
+// event into a DMCommand and its JSON payload. ok=false signals an
+// envelope that failed verification or carries a non-control inner
+// command.
+func (c *DesktopClient) DecryptIncomingControlMessage(event protocol.LocalChangeEvent) (domain.DMCommand, string, domain.PeerIdentity, bool) {
+	return c.dm.DecryptIncomingControlMessage(event)
+}
+
 // SyncDirectMessagesFromPeers pulls DM IDs from remote peers and imports
 // any that the local store does not have yet.
 func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresses []string, counterparty string) (int, error) {
@@ -625,6 +641,18 @@ func (c *DesktopClient) CleanupPeerTransfers(peer domain.PeerIdentity) {
 	c.localNode.CleanupPeerTransfers(peer)
 }
 
+// CleanupTransferByMessageID releases all file-transfer state attached
+// to a single DM (sender/receiver mappings, transmit-blob ref,
+// partial/completed downloaded files). Called from the DM-router
+// delete hook (FileTransferBridge.OnMessageDeleted). Idempotent — a
+// message ID with no associated file-transfer state is a silent no-op.
+func (c *DesktopClient) CleanupTransferByMessageID(fileID domain.FileID) {
+	if c.localNode == nil {
+		return
+	}
+	c.localNode.CleanupTransferByMessageID(fileID)
+}
+
 // RemoveSenderMapping removes a single sender mapping by fileID.
 func (c *DesktopClient) RemoveSenderMapping(fileID domain.FileID) bool {
 	if c.localNode == nil {
@@ -632,4 +660,3 @@ func (c *DesktopClient) RemoveSenderMapping(fileID domain.FileID) bool {
 	}
 	return c.localNode.RemoveSenderMapping(fileID)
 }
-

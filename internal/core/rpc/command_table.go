@@ -318,6 +318,7 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_delivery_receipts":        "fetchDeliveryReceipts",
 		"fetch_dm_headers":               "fetchDmHeaders",
 		"send_dm":                        "sendDm",
+		"delete_dm":                      "deleteDm",
 		"send_message":                   "sendMessage",
 		"import_message":                 "importMessage",
 		"send_delivery_receipt":          "sendDeliveryReceipt",
@@ -902,6 +903,40 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 		},
 	)
 
+	deleteDMInfo := CommandInfo{Name: "deleteDm", Description: "Delete a previously sent or received DM (locally and on the peer if the message flag allows)", Category: "message", Usage: "<peer> <message_id>"}
+	if dmRouter != nil {
+		t.Register(deleteDMInfo,
+			func(req CommandRequest) CommandResponse {
+				if r, done := ctxDone(req); done {
+					return r
+				}
+				peer, _ := req.Args["peer"].(string)
+				if strings.TrimSpace(peer) == "" {
+					return validationError(fmt.Errorf("peer is required"))
+				}
+				messageID, _ := req.Args["message_id"].(string)
+				if strings.TrimSpace(messageID) == "" {
+					return validationError(fmt.Errorf("message_id is required"))
+				}
+				targetID := domain.MessageID(messageID)
+				if !targetID.IsValid() {
+					return validationError(fmt.Errorf("message_id must be a valid UUID v4"))
+				}
+				if err := dmRouter.SendMessageDelete(req.Ctx, domain.PeerIdentity(peer), targetID); err != nil {
+					return internalError(fmt.Errorf("delete dm: %w", err))
+				}
+				return jsonResponse(map[string]interface{}{
+					"status":     "pending",
+					"message":    "delete request dispatched; local row is kept for an outgoing DM until the peer's ack confirms a successful deletion (incoming local-only deletes complete synchronously)",
+					"peer":       peer,
+					"message_id": messageID,
+				})
+			},
+		)
+	} else {
+		t.RegisterUnavailable(deleteDMInfo)
+	}
+
 	sendDMInfo := CommandInfo{Name: "sendDm", Description: "Send a direct message", Category: "message", Usage: "<to> <body>"}
 	if dmRouter != nil {
 		t.Register(sendDMInfo,
@@ -1073,7 +1108,7 @@ func registerFileAnnounceCommand(t *CommandTable, node NodeProvider, dmRouter DM
 		// the response reflects only pre-send validation, not delivery.
 		if err := dmRouter.SendFileAnnounce(domain.PeerIdentity(to), domain.OutgoingDM{
 			Body:        body,
-			Command:     domain.FileActionAnnounce,
+			Command:     domain.DMCommandFileAnnounce,
 			CommandData: string(commandData),
 		}, domain.FileAnnouncePayload{
 			FileHash:    fileHash,

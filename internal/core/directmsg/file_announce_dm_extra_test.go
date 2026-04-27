@@ -45,7 +45,7 @@ func TestFileAnnounceDMWithUserDescription(t *testing.T) {
 		},
 		domain.OutgoingDM{
 			Body:        userDescription,
-			Command:     domain.FileActionAnnounce,
+			Command:     domain.DMCommandFileAnnounce,
 			CommandData: string(commandData),
 		},
 	)
@@ -69,8 +69,8 @@ func TestFileAnnounceDMWithUserDescription(t *testing.T) {
 		t.Errorf("Body = %q, want %q", got.Body, userDescription)
 	}
 
-	if got.Command != string(domain.FileActionAnnounce) {
-		t.Errorf("Command = %q, want %q", got.Command, domain.FileActionAnnounce)
+	if got.Command != string(domain.DMCommandFileAnnounce) {
+		t.Errorf("Command = %q, want %q", got.Command, domain.DMCommandFileAnnounce)
 	}
 
 	if got.CommandData == "" {

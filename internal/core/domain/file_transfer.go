@@ -95,13 +95,14 @@ const (
 // FileAction identifies the command type inside the encrypted payload of a
 // FileCommandFrame. Transit nodes never see this value — only cleartext
 // SRC/DST/TTL/Time/Nonce/Signature are visible.
+//
+// FileAction now narrowly identifies file-transfer protocol frames that
+// travel inside FileCommandFrame. The file announcement that opens a
+// transfer is *not* a FileAction — it is a DM and uses
+// DMCommandFileAnnounce. See docs/dm-commands.md.
 type FileAction string
 
 const (
-	// FileActionAnnounce is sent as a DM (not a FileCommandFrame).
-	// Listed here for reference completeness; it uses the DM wire format.
-	FileActionAnnounce FileAction = "file_announce"
-
 	// FileActionChunkReq is sent by the receiver to request a chunk.
 	FileActionChunkReq FileAction = "chunk_request"
 
@@ -120,7 +121,7 @@ const (
 // Valid returns true if the action is a recognised file command.
 func (a FileAction) Valid() bool {
 	switch a {
-	case FileActionAnnounce, FileActionChunkReq, FileActionChunkResp,
+	case FileActionChunkReq, FileActionChunkResp,
 		FileActionDownloaded, FileActionDownloadedAck:
 		return true
 	default:
@@ -129,16 +130,11 @@ func (a FileAction) Valid() bool {
 }
 
 // IsProtocolCommand returns true if the action uses the FileCommandFrame
-// wire format (not the DM pipeline). file_announce is a DM, everything
-// else is a protocol command.
+// wire format. Every FileAction now identifies a protocol command — the
+// historical file_announce action lived in this enum and was *not* a
+// protocol command, but it has migrated to DMCommandFileAnnounce.
 func (a FileAction) IsProtocolCommand() bool {
-	switch a {
-	case FileActionChunkReq, FileActionChunkResp,
-		FileActionDownloaded, FileActionDownloadedAck:
-		return true
-	default:
-		return false
-	}
+	return a.Valid()
 }
 
 // ---------------------------------------------------------------------------

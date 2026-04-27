@@ -2371,7 +2371,14 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.pendingMessagesFrame(frame.Topic)
 	case "import_contacts":
 		return s.importContactsFrame(frame.Contacts)
-	case "send_message":
+	case "send_message", "send_control_message":
+		// Both Frame types funnel through storeMessageFrame /
+		// storeIncomingMessage. The control-DM divergence (skip chatlog,
+		// emit LocalChangeNewControlMessage) is handled inside
+		// storeIncomingMessage based on the frame's Topic field.
+		// send_control_message is the canonical chokepoint for control
+		// DMs (see docs/dm-commands.md); accepting it here prevents
+		// ErrCodeUnknownCommand from rejecting DMCrypto.SendControlMessage.
 		return s.storeMessageFrame(frame)
 	case "import_message":
 		return s.importMessageFrame(frame)
@@ -4323,6 +4330,32 @@ func (s *Service) refreshKnowledgeFromPeers() {
 }
 
 func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
+	// Type ↔ Topic invariant. The two Frame.Type values that funnel
+	// through this handler imply different chatlog/event behaviour
+	// inside storeIncomingMessage, and that decision is keyed off the
+	// Topic field. A mismatched (Type, Topic) pair would let a caller
+	// pick the "wrong" behaviour:
+	//   - send_message + TopicControlDM  → outbound row would skip
+	//     chatlog and the regular UI event, leaking control-DM
+	//     storage semantics into a callsite that asked for a data DM.
+	//   - send_control_message + non-control topic → outbound row
+	//     WOULD enter chatlog and emit LocalChangeNewMessage, surfacing
+	//     a "[delete]"-shaped row in the sender's chat thread — the
+	//     exact failure mode docs/dm-commands.md is designed to avoid.
+	// Reject the mismatch synchronously with ErrCodeInvalidSendMessage
+	// so neither branch of storeIncomingMessage ever sees an
+	// inconsistent frame.
+	switch frame.Type {
+	case "send_control_message":
+		if frame.Topic != protocol.TopicControlDM {
+			return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendMessage}
+		}
+	case "send_message":
+		if frame.Topic == protocol.TopicControlDM {
+			return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendMessage}
+		}
+	}
+
 	msg, err := incomingMessageFromFrame(frame)
 	if err != nil {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendMessage}
@@ -4409,7 +4442,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		}
 	}
 
-	if msg.Topic == "dm" {
+	// Control DMs (topic == TopicControlDM) share the DM envelope shape
+	// and must satisfy the same signature/boxkey-binding contract as
+	// regular DMs. See docs/dm-commands.md.
+	if msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM {
 		s.knowledgeMu.RLock()
 		senderPubKey := s.pubKeys[msg.Sender]
 		senderBoxKey := s.boxKeys[msg.Sender]
@@ -4444,7 +4480,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait").Str("msg_id", string(msg.ID)).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held").Str("msg_id", string(msg.ID)).Msg("knowledgeMu_writer")
-	if msg.Topic == "dm" {
+	if msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM {
+		// DM-class senders are cryptographically verified above
+		// (VerifyEnvelope) — register them in s.known regardless of
+		// pre-existing pubkey snapshot, identical to the data-DM path.
 		s.known[msg.Sender] = struct{}{}
 	} else if _, hasPK := s.pubKeys[msg.Sender]; hasPK {
 		s.known[msg.Sender] = struct{}{}
@@ -4508,7 +4547,12 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// When no store is registered (relay-only node) or for transit messages,
 	// the message always enters s.topics.
 	storeResult := StoreInserted
-	if isLocal && s.messageStore != nil {
+	// Control DMs (TopicControlDM) bypass chatlog persistence by contract
+	// — see docs/dm-commands.md "Storage rules for control DMs". They
+	// reach the application via LocalChangeNewControlMessage on the
+	// dedicated ebus.TopicMessageControl below; the chat thread never
+	// learns of them.
+	if isLocal && s.messageStore != nil && msg.Topic != protocol.TopicControlDM {
 		isOutgoing := msg.Sender == s.identity.Address
 		// Unlock before calling into the store — it may do SQLite I/O.
 		s.gossipMu.Unlock()
@@ -4523,8 +4567,21 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// already persisted in chatlog, and adding it here would cause
 	// fetchDMHeadersFrame() to include it in DMHeaders, which lets
 	// repairUnreadFromHeaders() re-increment unread counts on the UI.
+	//
+	// Control DMs (TopicControlDM) ALSO never enter s.topics: their
+	// retry/persistence story lives at the application layer
+	// (DMRouter.pendingDelete in slice B), not at the node level.
+	// Putting them in topics["dm-control"] would (a) be unread by any
+	// retry/snapshot path — retryableRelayMessages and
+	// queueStateSnapshotLocked both read only topics["dm"] — so the
+	// envelopes accumulate forever, and (b) blur the design boundary
+	// between data DMs (node-level store-and-forward) and control DMs
+	// (sender-driven application retry). Routing/push-fanout still
+	// works because executeGossipTargets and the table-directed relay
+	// path send frames on the wire on the fly without depending on
+	// s.topics as a backing store.
 	beforeCount := len(s.topics[msg.Topic])
-	if storeResult != StoreDuplicate {
+	if storeResult != StoreDuplicate && msg.Topic != protocol.TopicControlDM {
 		s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
 	}
 	count := len(s.topics[msg.Topic])
@@ -4543,7 +4600,6 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// Emit event only for genuinely new messages (StoreInserted).
 	if isLocal && storeResult == StoreInserted {
 		event := protocol.LocalChangeEvent{
-			Type:       protocol.LocalChangeNewMessage,
 			Topic:      msg.Topic,
 			MessageID:  string(msg.ID),
 			Sender:     msg.Sender,
@@ -4553,8 +4609,35 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			CreatedAt:  msg.CreatedAt.Format(time.RFC3339Nano),
 			TTLSeconds: msg.TTLSeconds,
 		}
-		s.emitLocalChange(event)
-		s.eventBus.Publish(ebus.TopicMessageNew, event)
+		if msg.Topic == protocol.TopicControlDM {
+			// Control DMs publish onto the dedicated ebus topic only
+			// for the FINAL RECIPIENT — the side that will execute the
+			// inner command (delete a message, clear pendingDelete on
+			// ack, etc.). The sender side has already done all the
+			// local bookkeeping it needs synchronously inside
+			// SendControlMessage / DeleteDM and must NOT receive its
+			// own control DM as if it were inbound: DMRouter would
+			// otherwise try to dispatch handleInboundMessageDelete
+			// against its own outgoing message_delete and corrupt
+			// state. The wire-level ack arriving from the recipient is
+			// a separate inbound event that follows this same recipient
+			// gate naturally.
+			//
+			// Note: sender-side push subscribers (other UI clients on
+			// the same node listening to the chatlog gateway) are NOT
+			// served by this branch by design — control DMs do not
+			// surface in any chat thread, and the gateway has its own
+			// fanout mechanism for chatlog updates that we are
+			// deliberately bypassing.
+			if msg.Recipient == s.identity.Address {
+				event.Type = protocol.LocalChangeNewControlMessage
+				s.eventBus.Publish(ebus.TopicMessageControl, event)
+			}
+		} else {
+			event.Type = protocol.LocalChangeNewMessage
+			s.emitLocalChange(event)
+			s.eventBus.Publish(ebus.TopicMessageNew, event)
+		}
 	}
 
 	_, callerFile, callerLine, _ := runtime.Caller(1)
@@ -4601,7 +4684,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// peer. This is the primary directed delivery path that replaces
 		// blind gossip relay for known routes. Gossip still runs above as
 		// fallback — receivers dedupe via seen[messageID].
-		if msg.Topic == "dm" && msg.Recipient != "" && msg.Recipient != "*" {
+		if (msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM) && msg.Recipient != "" && msg.Recipient != "*" {
 			if decision.RelayNextHop != nil {
 				s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
 			} else {
@@ -4632,8 +4715,13 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 // Broadcast messages (recipient="*") and global topics are always local.
 // Transit DMs — where this node is merely relaying between two other parties —
 // return false; their persistence is handled by queue-<port>.json / relayRetry.
+//
+// Control DMs (TopicControlDM) follow the same point-to-point semantics
+// as data DMs: only the sender or the recipient should treat them as
+// "local" for ebus-event purposes. Transit nodes carry them through
+// gossip/relay without emitting LocalChange events.
 func (s *Service) isLocalMessage(msg incomingMessage) bool {
-	if msg.Topic != "dm" {
+	if msg.Topic != "dm" && msg.Topic != protocol.TopicControlDM {
 		return true // global/broadcast messages are always local
 	}
 	if msg.Recipient == "*" || msg.Recipient == "" {
@@ -4643,13 +4731,18 @@ func (s *Service) isLocalMessage(msg incomingMessage) bool {
 }
 
 func (s *Service) shouldRouteStoredMessage(msg incomingMessage) bool {
-	if msg.Topic == "dm" && msg.Recipient == s.identity.Address {
+	// Control DMs (TopicControlDM) are point-to-point on the wire and
+	// reuse the same routing primitives as data DMs. The condition tree
+	// below treats both topics identically — recipient gating, forward
+	// capability, and origin checks all apply.
+	isDMClass := msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM
+	if isDMClass && msg.Recipient == s.identity.Address {
 		return false
 	}
 	if s.CanForward() {
 		return true
 	}
-	if msg.Topic != "dm" {
+	if !isDMClass {
 		return false
 	}
 	if msg.Sender != s.identity.Address {
@@ -5678,10 +5771,11 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 	peerIdentity := s.inboundPeerIdentity(connID)
 
 	// Non-DM sender verification: reject messages whose sender is not a
-	// known identity. DM messages have their own cryptographic verification
-	// in storeIncomingMessage (VerifyEnvelope), so this gate targets only
-	// non-DM topics where no per-message signature exists.
-	if msg.Topic != "dm" && !s.isVerifiedSender(msg.Sender, peerIdentity) {
+	// known identity. DM messages — both data DM ("dm") and control DM
+	// (TopicControlDM) — have their own cryptographic verification in
+	// storeIncomingMessage (VerifyEnvelope), so this gate targets only
+	// topics where no per-message signature exists.
+	if msg.Topic != "dm" && msg.Topic != protocol.TopicControlDM && !s.isVerifiedSender(msg.Sender, peerIdentity) {
 		log.Warn().
 			Str("node", s.identity.Address).
 			Str("peer", string(peerAddr)).
@@ -6203,7 +6297,7 @@ func (s *Service) validateMessageTiming(msg incomingMessage) error {
 		return fmt.Errorf("message timestamp %s outside allowed future drift %s", msg.CreatedAt.Format(time.RFC3339), drift)
 	}
 
-	if msg.Topic == "dm" && msg.Recipient != "" && msg.Recipient != "*" {
+	if (msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM) && msg.Recipient != "" && msg.Recipient != "*" {
 		if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
 			return fmt.Errorf("message timestamp %s expired for delivery", msg.CreatedAt.Format(time.RFC3339))
 		}

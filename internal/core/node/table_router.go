@@ -55,8 +55,14 @@ func NewTableRouter(svc *Service, table *routing.Table) *TableRouter {
 // gossip delivery remains available as fallback.
 func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 	// Always compute gossip targets — they serve as fallback.
+	// Push subscribers apply to all DM-class topics: a control DM
+	// (TopicControlDM) addressed to a directly-connected recipient
+	// must still surface here, otherwise the directed-relay path is
+	// bypassed and the message can only reach the recipient through
+	// gossip — which is overkill for a point-to-point control frame
+	// and breaks delivery to client peers entirely.
 	var pushSubs []*subscriber
-	if msg.Topic == "dm" && msg.Recipient != "*" {
+	if protocol.IsDMTopic(msg.Topic) && msg.Recipient != "*" {
 		pushSubs = r.svc.subscribersForRecipient(msg.Recipient)
 	}
 	gossipTargets := r.svc.routingTargetsForMessage(msg)
