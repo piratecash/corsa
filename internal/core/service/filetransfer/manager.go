@@ -92,8 +92,6 @@ type senderFileMapping struct {
 
 const (
 	maxPartialDownloadStorage uint64 = 1 << 30 // 1 GB
-	maxConcurrentDownloads    int    = 1
-	maxConcurrentServing      int    = 16
 	maxFileMappings           int    = 256
 	tombstoneTTL                     = 30 * 24 * time.Hour // 30 days
 	initialRetryTimeout              = 60 * time.Second
@@ -101,7 +99,7 @@ const (
 	retryBackoffMultiplier           = 2
 	chunkRequestStallTimeout         = 30 * time.Second
 	maxChunkRequestRetries           = 10
-	senderServingStallTimeout        = 10 * time.Minute // release abandoned serving slots
+	senderServingStallTimeout        = 10 * time.Minute // release abandoned serving runs
 )
 
 // ---------------------------------------------------------------------------
@@ -423,6 +421,22 @@ func (m *Manager) validateChunkRequest(
 		return chunkServePrep{}, fmt.Errorf("unauthorized: expected %s, got %s", mapping.Recipient, senderIdentity)
 	}
 
+	// Gate revivals of terminal mappings on the file mapping quota.
+	// Terminal states (completed, tombstone) are kept on disk for
+	// tombstoneTTL (30 days) and excluded from activeSenderCountLocked,
+	// so without this gate an authorised peer could batch-revive an
+	// unbounded number of old transfers and exceed maxFileMappings
+	// simultaneously. The check runs before tombstone resurrection so a
+	// rejected request does not Acquire a transmit-blob ref it never
+	// gets to use. Continuation (serving → serving) and first-time
+	// download (announced → serving) skip the gate: the active count
+	// does not increase on those transitions.
+	if mapping.State == senderCompleted || mapping.State == senderTombstone {
+		if active := m.activeSenderCountLocked(); active+m.pendingSenderSlots >= maxFileMappings {
+			return chunkServePrep{}, fmt.Errorf("file mapping quota reached (%d), refusing re-download", maxFileMappings)
+		}
+	}
+
 	// The filesystem is the source of truth for serveability, not the
 	// state field. A tombstoned mapping whose blob reappeared on disk
 	// (re-send of same content, manual restore, etc.) is resurrected
@@ -450,14 +464,6 @@ func (m *Manager) validateChunkRequest(
 	// The mapping transitions back to senderServing for the duration of
 	// the re-download and will return to senderCompleted on the next
 	// file_downloaded.
-
-	// Gate new transitions (announced/completed → serving) on the concurrency
-	// limit. Mappings already serving hold their slot.
-	if mapping.State != senderServing {
-		if serving := m.activeServingCountLocked(); serving >= maxConcurrentServing {
-			return chunkServePrep{}, fmt.Errorf("serving limit reached (%d/%d)", serving, maxConcurrentServing)
-		}
-	}
 
 	if req.Offset >= mapping.FileSize {
 		return chunkServePrep{}, fmt.Errorf("offset %d out of range (file size %d)", req.Offset, mapping.FileSize)

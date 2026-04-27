@@ -1520,10 +1520,75 @@ func TestForceRetryChunkWaitingRouteSenderStillOffline(t *testing.T) {
 	}
 }
 
-// TestForceRetryChunkWaitingRouteRespectsDownloadLimit verifies that
-// ForceRetryChunk refuses to resume from waiting_route when the concurrent
-// download limit is already reached, consistent with tickReceiverMappings.
-func TestForceRetryChunkWaitingRouteRespectsDownloadLimit(t *testing.T) {
+// TestStartDownloadIgnoresOtherActiveDownloads verifies that StartDownload
+// proceeds even when several other receiver mappings are already in the
+// downloading state. The receiver no longer enforces a concurrent download
+// cap — parallelism is the user's choice.
+func TestStartDownloadIgnoresOtherActiveDownloads(t *testing.T) {
+	dir := t.TempDir()
+
+	var chunkRequested bool
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		downloadDir:  dir,
+		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+			if payload.Command == domain.FileActionChunkReq {
+				chunkRequested = true
+			}
+			return nil
+		},
+		peerReachable: func(peer domain.PeerIdentity) bool {
+			return true
+		},
+		stopCh: make(chan struct{}),
+	}
+
+	// Several already-active downloads must NOT block a fresh start.
+	for i := 0; i < 4; i++ {
+		fid := domain.FileID(fmt.Sprintf("active-download-%d", i))
+		m.receiverMaps[fid] = &receiverFileMapping{
+			FileID:     fid,
+			Sender:     domain.PeerIdentity(fmt.Sprintf("sender-%d", i)),
+			State:      receiverDownloading,
+			NextOffset: 0,
+			ChunkSize:  domain.DefaultChunkSize,
+		}
+	}
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("fresh-start-with-others-active")
+	validHash := "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8"
+
+	m.receiverMaps[fileID] = &receiverFileMapping{
+		FileID:    fileID,
+		FileHash:  validHash,
+		FileName:  "fresh.bin",
+		FileSize:  100000,
+		Sender:    sender,
+		State:     receiverAvailable,
+		ChunkSize: domain.DefaultChunkSize,
+		CreatedAt: time.Now(),
+	}
+
+	if err := m.StartDownload(fileID); err != nil {
+		t.Fatalf("StartDownload: %v", err)
+	}
+
+	if !chunkRequested {
+		t.Error("StartDownload should send chunk_request even when other downloads are active")
+	}
+
+	if m.receiverMaps[fileID].State != receiverDownloading {
+		t.Errorf("state = %s, want downloading", m.receiverMaps[fileID].State)
+	}
+}
+
+// TestForceRetryChunkWaitingRouteIgnoresOtherActiveDownloads verifies that
+// ForceRetryChunk resumes a waiting_route transfer regardless of how many
+// other downloads are already active. The receiver no longer enforces a
+// concurrent download cap — parallelism is the user's choice.
+func TestForceRetryChunkWaitingRouteIgnoresOtherActiveDownloads(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
 		senderMaps:   make(map[domain.FileID]*senderFileMapping),
@@ -1542,8 +1607,8 @@ func TestForceRetryChunkWaitingRouteRespectsDownloadLimit(t *testing.T) {
 
 	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
 
-	// Occupy all download slots.
-	for i := 0; i < maxConcurrentDownloads; i++ {
+	// Several already-active downloads must NOT block resume.
+	for i := 0; i < 4; i++ {
 		fid := domain.FileID(fmt.Sprintf("active-download-%d", i))
 		m.receiverMaps[fid] = &receiverFileMapping{
 			FileID:     fid,
@@ -1554,8 +1619,7 @@ func TestForceRetryChunkWaitingRouteRespectsDownloadLimit(t *testing.T) {
 		}
 	}
 
-	// This transfer is paused — resuming it would exceed the limit.
-	fileID := domain.FileID("waiting-route-no-slot")
+	fileID := domain.FileID("waiting-route-resume")
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:     fileID,
 		Sender:     sender,
@@ -1564,17 +1628,16 @@ func TestForceRetryChunkWaitingRouteRespectsDownloadLimit(t *testing.T) {
 		ChunkSize:  domain.DefaultChunkSize,
 	}
 
-	err := m.ForceRetryChunk(fileID)
-	if err == nil {
-		t.Fatal("ForceRetryChunk should fail when download limit is reached")
+	if err := m.ForceRetryChunk(fileID); err != nil {
+		t.Fatalf("ForceRetryChunk: %v", err)
 	}
 
-	if chunkRequested {
-		t.Error("no chunk_request should be sent when download limit is reached")
+	if !chunkRequested {
+		t.Error("force retry should send chunk_request even when other downloads are active")
 	}
 
-	if m.receiverMaps[fileID].State != receiverWaitingRoute {
-		t.Errorf("state = %s, want waiting_route (unchanged)", m.receiverMaps[fileID].State)
+	if m.receiverMaps[fileID].State != receiverDownloading {
+		t.Errorf("state = %s, want downloading", m.receiverMaps[fileID].State)
 	}
 }
 

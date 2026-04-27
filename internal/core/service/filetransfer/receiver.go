@@ -213,12 +213,6 @@ func (m *Manager) StartDownload(fileID domain.FileID) error {
 		return fmt.Errorf("cannot start download in state %s", mapping.State)
 	}
 
-	// Check concurrent download limit.
-	if m.activeDownloadCountLocked() >= maxConcurrentDownloads {
-		m.mu.Unlock()
-		return fmt.Errorf("concurrent download limit reached (%d)", maxConcurrentDownloads)
-	}
-
 	// Verify the sender is reachable before starting — no point in
 	// transitioning to downloading and burning retry budget if the
 	// peer is offline.
@@ -464,8 +458,7 @@ func (m *Manager) RestartDownload(fileID domain.FileID) error {
 // and the sender is reachable again, the mapping is transitioned back to
 // downloading and the next chunk is requested — mirroring the auto-resume
 // logic in tickReceiverMappings. Returns an error if the sender is still
-// unreachable, the download slot limit is reached, or the transfer is in
-// an incompatible state.
+// unreachable or the transfer is in an incompatible state.
 func (m *Manager) ForceRetryChunk(fileID domain.FileID) error {
 	m.mu.Lock()
 	rm, ok := m.receiverMaps[fileID]
@@ -478,12 +471,7 @@ func (m *Manager) ForceRetryChunk(fileID domain.FileID) error {
 	case receiverDownloading:
 		// Already active — proceed to reachability check below.
 	case receiverWaitingRoute:
-		// Paused after route loss. Check download slot availability before
-		// attempting to resume, consistent with tickReceiverMappings.
-		if m.activeDownloadCountLocked() >= maxConcurrentDownloads {
-			m.mu.Unlock()
-			return fmt.Errorf("file %s: concurrent download limit reached (%d)", fileID, maxConcurrentDownloads)
-		}
+		// Paused after route loss — proceed to reachability check below.
 	default:
 		m.mu.Unlock()
 		return fmt.Errorf("file %s: cannot retry in state %s", fileID, rm.State)
@@ -1253,7 +1241,6 @@ func (m *Manager) tickReceiverMappings() {
 
 	var actions []receiverTickAction
 	changed := false
-	activeDownloads := m.activeDownloadCountLocked()
 
 	for id, rm := range m.receiverMaps {
 		switch rm.State {
@@ -1264,8 +1251,8 @@ func (m *Manager) tickReceiverMappings() {
 				continue
 			}
 
-			// Sender unreachable → park in waitingRoute (frees the download
-			// slot). The transfer auto-resumes when routes recover.
+			// Sender unreachable → park in waitingRoute. The transfer
+			// auto-resumes when routes recover.
 			if m.peerReachable != nil && !m.peerReachable(rm.Sender) {
 				rm.State = receiverWaitingRoute
 				changed = true
@@ -1344,18 +1331,14 @@ func (m *Manager) tickReceiverMappings() {
 				sender:        rm.Sender,
 			})
 
-		// --- Auto-resume: sender reappeared + download slot available ---
+		// --- Auto-resume: sender reappeared ---
 		case receiverWaitingRoute:
-			if activeDownloads >= maxConcurrentDownloads {
-				continue
-			}
 			if m.peerReachable != nil && !m.peerReachable(rm.Sender) {
 				continue
 			}
 
 			snap := m.prepareResumeLocked(rm.FileID, rm)
 			changed = true
-			activeDownloads++
 			actions = append(actions, receiverTickAction{
 				kind:          actionResume,
 				requiredState: receiverDownloading,

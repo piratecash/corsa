@@ -69,7 +69,7 @@ fetchFileMapping
 
 ### POST /rpc/v1/file/retry_chunk
 
-Force retry of the current pending chunk request for a stalled or paused download. Accepts transfers in `downloading` or `waiting_route` state. When the transfer is paused in `waiting_route` and the sender is reachable again, the mapping transitions back to `downloading` and the next chunk is requested immediately — mirroring the automatic resume logic. If the sender is unreachable, the transfer transitions to (or stays in) `waiting_route` and the call returns an error. Also respects the concurrent download limit when resuming from `waiting_route`.
+Force retry of the current pending chunk request for a stalled or paused download. Accepts transfers in `downloading` or `waiting_route` state. When the transfer is paused in `waiting_route` and the sender is reachable again, the mapping transitions back to `downloading` and the next chunk is requested immediately — mirroring the automatic resume logic. If the sender is unreachable, the transfer transitions to (or stays in) `waiting_route` and the call returns an error.
 
 Request:
 ```json
@@ -257,7 +257,7 @@ fetchFileMapping
 
 ### POST /rpc/v1/file/retry_chunk
 
-Принудительный retry текущего ожидающего chunk-запроса для зависшей или приостановленной загрузки. Принимает трансферы в состоянии `downloading` или `waiting_route`. Когда трансфер приостановлен в `waiting_route` и отправитель снова доступен, маппинг переходит обратно в `downloading` и следующий chunk запрашивается немедленно — аналогично автоматической логике возобновления. Если отправитель недоступен, трансфер переходит в (или остаётся в) `waiting_route` и вызов возвращает ошибку. Также учитывает лимит одновременных загрузок при возобновлении из `waiting_route`.
+Принудительный retry текущего ожидающего chunk-запроса для зависшей или приостановленной загрузки. Принимает трансферы в состоянии `downloading` или `waiting_route`. Когда трансфер приостановлен в `waiting_route` и отправитель снова доступен, маппинг переходит обратно в `downloading` и следующий chunk запрашивается немедленно — аналогично автоматической логике возобновления. Если отправитель недоступен, трансфер переходит в (или остаётся в) `waiting_route` и вызов возвращает ошибку.
 
 Запрос:
 ```json

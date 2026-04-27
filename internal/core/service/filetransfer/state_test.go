@@ -1729,11 +1729,13 @@ func TestMarkReceiverFailedRejectsStaleGeneration(t *testing.T) {
 	}
 }
 
-// TestRetryPendingDownloads_RollbackDoesNotAffectOtherWaitingRoute verifies
-// that when one waitingRoute transfer is resumed and fails, other
-// waitingRoute transfers remain untouched (they weren't picked up due to
-// the concurrent download limit of 1).
-func TestRetryPendingDownloads_RollbackDoesNotAffectOtherWaitingRoute(t *testing.T) {
+// TestRetryPendingDownloads_RollbackRestoresAllWaitingRouteOnSendFailure
+// verifies that when multiple waitingRoute transfers are resumed in the
+// same tick and the chunk_request send fails, every transfer rolls back
+// to waitingRoute. The receiver no longer enforces a concurrent download
+// cap, so all eligible transfers are picked up together — rollback must
+// stay correct in that broader scenario.
+func TestRetryPendingDownloads_RollbackRestoresAllWaitingRouteOnSendFailure(t *testing.T) {
 	t.Parallel()
 
 	downloadDir := createPartialDir(t)
@@ -1761,8 +1763,9 @@ func TestRetryPendingDownloads_RollbackDoesNotAffectOtherWaitingRoute(t *testing
 
 	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
 
-	// Two waitingRoute transfers. With maxConcurrentDownloads=1, only
-	// one should be picked. After rollback, both should be waitingRoute.
+	// Two waitingRoute transfers — both are picked up in the same tick
+	// (no concurrency cap). The send fails for each, and the rollback
+	// path must restore both back to waitingRoute.
 	for _, fid := range []domain.FileID{"wr-file-a", "wr-file-b"} {
 		m.receiverMaps[fid] = &receiverFileMapping{
 			FileID:        fid,
