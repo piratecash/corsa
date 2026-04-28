@@ -644,6 +644,176 @@ func TestFinalizeVerifiedDownloadStaleGenerationDoesNotResurrect(t *testing.T) {
 	}
 }
 
+// TestFinalizeVerifiedDownloadAfterCleanupAborts is the regression
+// pin for the delete-during-verify race flagged by the reviewer:
+//
+//  1. A receiver is in receiverVerifying after the final
+//     chunk_response triggered onDownloadComplete.
+//  2. A user-driven CleanupTransferByMessageID (e.g. delete from
+//     the chat thread or file tab) removes receiverMaps[fileID]
+//     while the verifier is still hashing / renaming outside
+//     m.mu.
+//  3. The verifier's pre-cleanup pointer still has State ==
+//     receiverVerifying and Generation == G (those fields are
+//     on the orphaned struct).
+//
+// Without the map-ownership check in finalizeVerifiedDownload the
+// stale state/generation comparison passes and the verifier:
+//   - mutates State on the dead pointer (harmless),
+//   - persists (harmless — the entry is gone),
+//   - DISPATCHES file_downloaded to the sender (the bug — peer
+//     thinks transfer succeeded for a transfer the user deleted).
+//
+// With the check, finalize sees receiverMaps[fileID] is missing
+// (or no longer points at the captured mapping), aborts, and
+// cleans up the renamed completedPath via removeOwnedFileInDownloadDir.
+func TestFinalizeVerifiedDownloadAfterCleanupAborts(t *testing.T) {
+	downloadDir := testDownloadDir(t)
+	cc := &commandCollector{}
+	m := newTestTransferManager(t, downloadDir, cc)
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("finalize-after-cleanup")
+
+	content := []byte("verified bytes ready for finalize")
+	hash := hashContent(content)
+
+	generation := uint64(11)
+	rm := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm.Generation = generation
+	m.receiverMaps[fileID] = rm
+
+	completedPath := completedDownloadPath(downloadDir, "file.bin", hash)
+	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
+		t.Fatalf("mkdir completed dir: %v", err)
+	}
+	if err := os.WriteFile(completedPath, content, 0o600); err != nil {
+		t.Fatalf("write completed blob: %v", err)
+	}
+	completedInfo, err := os.Lstat(completedPath)
+	if err != nil {
+		t.Fatalf("lstat completed blob: %v", err)
+	}
+
+	// Simulate the user-driven cleanup running between the verifier's
+	// rename and finalize. CleanupTransferByMessageID drops
+	// receiverMaps[fileID] under m.mu and queues the on-disk file
+	// removal — but the verifier's `mapping` pointer is still
+	// receiverVerifying / generation 11.
+	m.CleanupTransferByMessageID(fileID)
+
+	// Sanity: the cleanup actually deleted the on-disk file we just
+	// wrote, since CleanupTransferByMessageID's path-cleanup branch
+	// runs synchronously via safeRemoveInDownloadDir.
+	if _, err := os.Stat(completedPath); !os.IsNotExist(err) {
+		// Recreate the file so the test can verify the verifier's
+		// own cleanup branch behaves correctly. In production the
+		// race window has the verifier's renamed file briefly
+		// present after cleanup ran (the rename happens before
+		// finalize's lock); the test mimics that ordering by
+		// putting the file back here.
+		if err := os.WriteFile(completedPath, content, 0o600); err != nil {
+			t.Fatalf("recreate completed blob: %v", err)
+		}
+		completedInfo, err = os.Lstat(completedPath)
+		if err != nil {
+			t.Fatalf("re-lstat completed blob: %v", err)
+		}
+	}
+
+	// Finalize with the captured (now-stale) pointer + generation.
+	// MUST return false: the entry is gone from receiverMaps so the
+	// map-ownership check fires regardless of state/generation.
+	if m.finalizeVerifiedDownload(fileID, rm, generation, completedPath, completedInfo, sender) {
+		t.Fatal("finalizeVerifiedDownload must return false when receiverMaps entry was deleted by cleanup")
+	}
+
+	// MUST NOT have sent file_downloaded — the user's delete
+	// intent would otherwise be undermined by a wire-side ack from
+	// our verifier saying "transfer succeeded".
+	if cc.hasSent(domain.FileActionDownloaded) {
+		t.Fatal("file_downloaded must NOT be dispatched after cleanup removed the mapping")
+	}
+
+	// MUST have unlinked the renamed completed file (verifier's
+	// own cleanup branch using the captured Fstat identity).
+	if _, err := os.Stat(completedPath); !os.IsNotExist(err) {
+		t.Errorf("verifier did not clean up its renamed file after aborting; stat err = %v", err)
+	}
+}
+
+// TestFinalizeVerifiedDownloadAfterReplaceMappingAborts covers the
+// pointer-mismatch case: cleanup deleted the old mapping AND a
+// fresh receive registered a NEW mapping for the same FileID
+// before the stale verifier ran finalize. State and Generation on
+// the new mapping might match the stale verifier's captured values
+// by coincidence (especially generation: a fresh manager always
+// starts at low generations), so without the pointer check
+// finalize would happily transition the NEW mapping's state and
+// dispatch file_downloaded for an unrelated re-registration.
+func TestFinalizeVerifiedDownloadAfterReplaceMappingAborts(t *testing.T) {
+	downloadDir := testDownloadDir(t)
+	cc := &commandCollector{}
+	m := newTestTransferManager(t, downloadDir, cc)
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("finalize-after-replace")
+	content := []byte("verified bytes ready")
+	hash := hashContent(content)
+
+	// Old mapping — verifier captures this pointer.
+	staleGeneration := uint64(7)
+	staleMapping := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	staleMapping.Generation = staleGeneration
+	m.receiverMaps[fileID] = staleMapping
+
+	completedPath := completedDownloadPath(downloadDir, "file.bin", hash)
+	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
+		t.Fatalf("mkdir completed dir: %v", err)
+	}
+	if err := os.WriteFile(completedPath, content, 0o600); err != nil {
+		t.Fatalf("write completed blob: %v", err)
+	}
+	completedInfo, err := os.Lstat(completedPath)
+	if err != nil {
+		t.Fatalf("lstat completed blob: %v", err)
+	}
+
+	// Cleanup removes the old mapping...
+	m.CleanupTransferByMessageID(fileID)
+	// ...and a fresh register-receive for the same FileID populates
+	// a NEW mapping pointer with the SAME Generation by coincidence.
+	freshMapping := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	freshMapping.Generation = staleGeneration
+	m.receiverMaps[fileID] = freshMapping
+
+	// Recreate the renamed file so the verifier's cleanup branch
+	// has something to consider unlinking.
+	if err := os.WriteFile(completedPath, content, 0o600); err != nil {
+		t.Fatalf("recreate completed blob: %v", err)
+	}
+
+	// Finalize with the OLD pointer + matching state/generation.
+	// MUST return false because receiverMaps[fileID] != staleMapping.
+	if m.finalizeVerifiedDownload(fileID, staleMapping, staleGeneration, completedPath, completedInfo, sender) {
+		t.Fatal("finalizeVerifiedDownload must return false when receiverMaps[fileID] points at a different (replaced) mapping")
+	}
+
+	// The fresh mapping must NOT have been moved to waiting_ack
+	// by the stale verifier.
+	m.mu.Lock()
+	current := m.receiverMaps[fileID]
+	freshState := current.State
+	m.mu.Unlock()
+	if freshState != receiverVerifying {
+		t.Errorf("fresh mapping state = %s, want %s — stale verifier mutated a foreign mapping",
+			freshState, receiverVerifying)
+	}
+	if cc.hasSent(domain.FileActionDownloaded) {
+		t.Fatal("file_downloaded must NOT be dispatched when finalize aborts on pointer mismatch")
+	}
+}
+
 // TestFinalizeVerifiedDownloadHappyPath verifies that finalizeVerifiedDownload
 // completes normally when state and generation still match the verifier's
 // captured values — the common case after a successful hash verify + rename.

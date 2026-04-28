@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/service/filetransfer"
 )
 
 // FileTransferBridge owns file transfer orchestration: preparing sender
@@ -17,11 +18,31 @@ import (
 // all file-transfer concerns here so it can remain a pure message router.
 type FileTransferBridge struct {
 	client *DesktopClient
+	// registerIncomingFn is the receiver-side registration call. In
+	// production it points at client.RegisterIncomingFileTransfer
+	// (which delegates through the embedded node.Service to
+	// FileTransferManager.RegisterFileReceive). Tests can override
+	// via setRegisterIncomingForTest to drive RegisterIncoming
+	// against an in-process Manager without standing up a full
+	// node.Service.
+	registerIncomingFn func(fileID domain.FileID, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error
 }
 
 // NewFileTransferBridge creates a bridge backed by the given client.
+// The default registrar dispatches through client.RegisterIncomingFileTransfer
+// (errNoLocalNode in standalone-RPC mode).
 func NewFileTransferBridge(client *DesktopClient) *FileTransferBridge {
-	return &FileTransferBridge{client: client}
+	b := &FileTransferBridge{client: client}
+	b.registerIncomingFn = b.defaultRegisterIncoming
+	return b
+}
+
+// defaultRegisterIncoming routes the registration through the embedded
+// DesktopClient — extracted as a method so the constructor's bound
+// method value remains valid even after tests override
+// registerIncomingFn (the override does not modify the default).
+func (b *FileTransferBridge) defaultRegisterIncoming(fileID domain.FileID, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error {
+	return b.client.RegisterIncomingFileTransfer(fileID, fileHash, fileName, contentType, fileSize, sender)
 }
 
 // AnnounceResult is returned by PrepareAndSend on success. It contains
@@ -97,21 +118,38 @@ func (b *FileTransferBridge) RollbackMapping(fileID domain.FileID) {
 
 // RegisterIncoming registers a receiver-side mapping for a file_announce DM.
 // Parses the announce payload from the message and delegates to the
-// FileTransferManager. Malformed metadata is rejected and logged.
-func (b *FileTransferBridge) RegisterIncoming(msg DirectMessage) {
+// FileTransferManager.
+//
+// Returns nil on successful (or idempotent) registration, a non-nil
+// error on every failure path so the caller can decide whether to
+// publish downstream events. Failure modes:
+//
+//   - msg is not a file_announce or has empty CommandData → ignored
+//     and returns nil; this is the legitimate non-file-announce
+//     pass-through, not an error.
+//   - JSON parse failure → returns the unmarshal error; no mapping
+//     was created.
+//   - DesktopClient.RegisterIncomingFileTransfer error (errNoLocalNode
+//     in standalone-RPC mode, manager-side validation rejection,
+//     etc.) → returns the underlying error verbatim.
+//
+// The caller (DMRouter.tryRegisterFileReceive) gates TopicFileReceived
+// publication on a nil return so subscribers never see "registered"
+// events for transfers that AllTransfersSnapshot will never list.
+func (b *FileTransferBridge) RegisterIncoming(msg DirectMessage) error {
 	if msg.Command != domain.DMCommandFileAnnounce || msg.CommandData == "" {
-		return
+		return nil
 	}
 
 	var payload domain.FileAnnouncePayload
 	if err := json.Unmarshal([]byte(msg.CommandData), &payload); err != nil {
 		log.Warn().Err(err).Str("msg_id", msg.ID).
 			Msg("file_transfer_bridge: failed to parse file_announce payload")
-		return
+		return fmt.Errorf("parse file_announce payload: %w", err)
 	}
 
 	fileID := domain.FileID(msg.ID)
-	if err := b.client.RegisterIncomingFileTransfer(
+	if err := b.registerIncomingFn(
 		fileID, payload.FileHash, payload.FileName, payload.ContentType,
 		payload.FileSize, msg.Sender,
 	); err != nil {
@@ -119,7 +157,9 @@ func (b *FileTransferBridge) RegisterIncoming(msg DirectMessage) {
 			Str("file_id", string(fileID)).
 			Str("sender", string(msg.Sender)).
 			Msg("file_transfer_bridge: rejected file_announce with invalid metadata")
+		return fmt.Errorf("register receiver mapping: %w", err)
 	}
+	return nil
 }
 
 // StartDownload begins downloading a previously announced file.
@@ -140,6 +180,20 @@ func (b *FileTransferBridge) RestartDownload(fileID domain.FileID) error {
 // Progress returns the transfer progress for a file.
 func (b *FileTransferBridge) Progress(fileID domain.FileID, isSender bool) (bytesTransferred, totalSize uint64, state string, found bool) {
 	return b.client.FileTransferProgress(fileID, isSender)
+}
+
+// AllTransfers returns every sender/receiver mapping (active and
+// terminal) as typed snapshots. The desktop file tab uses this to
+// render the full transfer history. Order is undefined — callers are
+// expected to sort by created_at or any other field they need.
+//
+// Returns an empty non-nil slice when the file-transfer subsystem is
+// not available (standalone-RPC desktop, embedded node not started).
+func (b *FileTransferBridge) AllTransfers() []filetransfer.TransferSnapshot {
+	if b.client == nil {
+		return []filetransfer.TransferSnapshot{}
+	}
+	return b.client.AllFileTransfers()
 }
 
 // FilePath returns the on-disk path for a transferred file. For the sender

@@ -141,6 +141,16 @@ type FileSendFailedResult struct {
 	Err    error
 }
 
+// FileReceivedResult is the payload for TopicFileReceived. Emitted
+// when a receiver-side mapping is registered (or re-registered, since
+// RegisterFileReceive is idempotent) for an incoming file_announce
+// DM. From is the identity of the sender; FileID is the announced
+// file's ID, equal to the originating DM's MessageID by construction.
+type FileReceivedResult struct {
+	From   domain.PeerIdentity
+	FileID domain.FileID
+}
+
 // MessageDeleteOutcome is the payload for TopicMessageDeleteCompleted.
 // Emitted by DMRouter when an in-flight message_delete reaches a
 // terminal state — either the recipient's message_delete_ack arrived

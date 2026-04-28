@@ -1440,21 +1440,38 @@ func (m *Manager) finalizeVerifiedDownload(
 	sender domain.PeerIdentity,
 ) bool {
 	m.mu.Lock()
-	if mapping.State != receiverVerifying || mapping.Generation != generation {
+	// Map-ownership check: the verifier captured `mapping` under the
+	// mutex at the start of onDownloadComplete; while it ran outside
+	// the lock (hash + rename), CleanupTransferByMessageID could have
+	// removed receiverMaps[fileID] entirely. The State / Generation
+	// fields on the stale pointer would still satisfy the equality
+	// checks below — the verifier would happily transition state on
+	// a dead pointer and dispatch file_downloaded for a transfer the
+	// user already deleted.
+	//
+	// Guard against that by requiring receiverMaps[fileID] to still
+	// hold the SAME pointer the verifier started with. If it does
+	// not (entry deleted, or the entry has been replaced by a newer
+	// register-receive for the same FileID), abort and clean the
+	// file we already renamed.
+	current, ok := m.receiverMaps[fileID]
+	if !ok || current != mapping || mapping.State != receiverVerifying || mapping.Generation != generation {
 		currentState := mapping.State
 		currentGeneration := mapping.Generation
 		m.mu.Unlock()
 		log.Info().
 			Str("file_id", string(fileID)).
+			Bool("entry_present", ok).
+			Bool("same_pointer", ok && current == mapping).
 			Str("state", string(currentState)).
 			Uint64("verifier_generation", generation).
 			Uint64("current_generation", currentGeneration).
-			Msg("file_transfer: verification completed but transfer was cancelled or restarted, aborting")
+			Msg("file_transfer: verification completed but transfer was cancelled, deleted, or restarted, aborting")
 		// The completed file was already renamed to completedPath. Clean it
 		// up only if our inode is still there: a newer attempt may have
 		// atomically overwritten completedPath with its own legitimately
 		// verified file, in which case we must not delete it.
-		m.removeOwnedFileInDownloadDir(completedPath, verifiedInfo, "post-verify cancel cleanup")
+		m.removeOwnedFileInDownloadDir(completedPath, verifiedInfo, "post-verify cancel/delete cleanup")
 		return false
 	}
 	mapping.State = receiverWaitingAck

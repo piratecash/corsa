@@ -6,13 +6,21 @@ The messaging system supports two topics: direct messages (`dm`) and global broa
 
 ### PlainMessage extensions
 
-The encrypted DM body (`PlainMessage`) may carry optional `command` and `command_data` fields (`json:",omitempty"`). When `command` is set, the message is a protocol command rather than a regular text message. Currently one command is defined: `file_announce` (see [file_transfer.md](file_transfer.md) for details). The `body` field remains required for all DMs; for `file_announce` it contains either the user's description text or the sentinel `"[file]"` when no description is provided.
+The encrypted DM body (`PlainMessage`) may carry optional `command` and `command_data` fields (`json:",omitempty"`). When `command` is set, the message is a protocol command rather than a regular text message. Two command families are defined:
+
+- **Data DMs** — `file_announce`. These persist in chatlog and surface as visible chat rows. See [file_transfer.md](file_transfer.md). The `body` field remains required; for `file_announce` it contains either the user's description text or the sentinel `"[file]"` when no description is provided.
+
+- **Control DMs** — `message_delete`, `message_delete_ack`. These do NOT persist in chatlog and never surface as a visible row; they're routed through a dedicated control wire path (`dm-control` topic) so a deletion request never appears as a "[delete]" message in the sender's own chat. The `body` field is empty for control DMs. See [`docs/dm-commands.md`](../dm-commands.md) for the full pessimistic-delete contract: outgoing-delete senders keep their local row alive until the recipient's `message_delete_ack` confirms, while incoming-delete recipients run the local-only synchronous removal without dispatching anything over the wire.
 
 File transfer operations other than the announce use a separate protocol frame (`FileCommandFrame`) routed through `file_router`. See [file_transfer.md](file_transfer.md) for the full specification.
 
 ### Расширения PlainMessage
 
-Зашифрованное тело DM (`PlainMessage`) может содержать необязательные поля `command` и `command_data` (`json:",omitempty"`). Когда `command` установлен, сообщение является протокольной командой, а не обычным текстом. Сейчас определена одна команда: `file_announce` (подробности в [file_transfer.md](file_transfer.md)). Поле `body` остаётся обязательным для всех DM; для `file_announce` оно содержит текст описания от пользователя или сентинел `"[file]"`, когда описание не предоставлено.
+Зашифрованное тело DM (`PlainMessage`) может содержать необязательные поля `command` и `command_data` (`json:",omitempty"`). Когда `command` установлен, сообщение является протокольной командой, а не обычным текстом. Определены два класса команд:
+
+- **Data-DM** — `file_announce`. Сохраняются в chatlog и появляются как видимая строка чата. Подробности в [file_transfer.md](file_transfer.md). Поле `body` остаётся обязательным; для `file_announce` оно содержит текст описания от пользователя или сентинел `"[file]"`, когда описание не предоставлено.
+
+- **Control-DM** — `message_delete`, `message_delete_ack`. НЕ сохраняются в chatlog и никогда не появляются в виде видимой строки; маршрутизируются через отдельный control-канал (топик `dm-control`), чтобы запрос на удаление не показывался как сообщение «[delete]» в собственном чате отправителя. Поле `body` пустое для control-DM. Полный пессимистичный контракт удаления — в [`docs/dm-commands.md`](../dm-commands.md): отправитель исходящего удаления держит локальную строку живой до прихода `message_delete_ack` от получателя, а получатель входящего удаления выполняет локальную синхронную очистку без отправки чего-либо в сеть.
 
 Все файловые операции, кроме анонса, используют отдельный протокольный фрейм (`FileCommandFrame`), маршрутизируемый через `file_router`. Полная спецификация — в [file_transfer.md](file_transfer.md).
 

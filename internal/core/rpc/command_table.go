@@ -324,6 +324,7 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"send_delivery_receipt":          "sendDeliveryReceipt",
 		"send_file_announce":             "sendFileAnnounce",
 		"fetch_file_transfers":           "fetchFileTransfers",
+		"fetch_all_file_transfers":       "fetchAllFileTransfers",
 		"fetch_file_mapping":             "fetchFileMapping",
 		"retry_file_chunk":               "retryFileChunk",
 		"start_file_download":            "startFileDownload",
@@ -1152,6 +1153,7 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 	registerFileAnnounceCommand(t, node, dmRouter)
 
 	transfersInfo := CommandInfo{Name: "fetchFileTransfers", Description: "List all active/pending file transfers", Category: "file"}
+	allTransfersInfo := CommandInfo{Name: "fetchAllFileTransfers", Description: "List ALL file transfers including terminal states (completed, failed, tombstone) — powers the desktop file tab history", Category: "file"}
 	mappingInfo := CommandInfo{Name: "fetchFileMapping", Description: "Show sender FileMapping table (no TransmitPath)", Category: "file"}
 	retryInfo := CommandInfo{Name: "retryFileChunk", Description: "Force retry current pending chunk request", Category: "file", Usage: "<file_id>"}
 	startInfo := CommandInfo{Name: "startFileDownload", Description: "Start downloading a previously announced file", Category: "file", Usage: "<file_id>"}
@@ -1161,6 +1163,7 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 
 	if node == nil {
 		t.RegisterUnavailable(transfersInfo)
+		t.RegisterUnavailable(allTransfersInfo)
 		t.RegisterUnavailable(mappingInfo)
 		t.RegisterUnavailable(retryInfo)
 		t.RegisterUnavailable(startInfo)
@@ -1178,6 +1181,19 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 			data, err := node.FetchFileTransfers()
 			if err != nil {
 				return internalError(fmt.Errorf("fetch file transfers: %w", err))
+			}
+			return CommandResponse{Data: data}
+		},
+	)
+
+	t.Register(allTransfersInfo,
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			data, err := node.FetchAllFileTransfers()
+			if err != nil {
+				return internalError(fmt.Errorf("fetch all file transfers: %w", err))
 			}
 			return CommandResponse{Data: data}
 		},

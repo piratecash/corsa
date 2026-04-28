@@ -1226,8 +1226,17 @@ func (m *Manager) SenderFilePath(fileID domain.FileID) string {
 }
 
 // ReceiverFilePath returns the on-disk path of a completed download (receiver
-// side). Returns empty string if the file ID is unknown, the download is not
-// completed, or the CompletedPath is not set.
+// side). Returns empty string if the file ID is unknown OR the download is
+// not in a state that has a resolvable on-disk file (anything other than
+// receiverCompleted / receiverWaitingAck).
+//
+// Falls back to backfillCompletedPath when the in-memory CompletedPath is
+// empty but the mapping is in a state where a file SHOULD be on disk —
+// that covers legacy entries persisted before the field was added and
+// any post-restart window where the verifier ran but the path didn't
+// round-trip through saveMappingsLocked. Without this, the chat-thread
+// "Show in Folder / Open / Delete" action row would silently disappear
+// for users whose downloads completed under an older build.
 func (m *Manager) ReceiverFilePath(fileID domain.FileID) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1236,5 +1245,10 @@ func (m *Manager) ReceiverFilePath(fileID domain.FileID) string {
 	if !ok {
 		return ""
 	}
-	return mapping.CompletedPath
+	if mapping.CompletedPath != "" {
+		return mapping.CompletedPath
+	}
+	// Defensive backfill — only meaningful for completed / waiting_ack
+	// states; backfillCompletedPath returns "" for everything else.
+	return m.backfillCompletedPath(mapping)
 }

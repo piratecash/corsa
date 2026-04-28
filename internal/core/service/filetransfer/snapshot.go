@@ -155,6 +155,31 @@ func (m *Manager) TransfersSnapshot() []TransferSnapshot {
 	return entries
 }
 
+// AllTransfersSnapshot returns ALL sender/receiver mappings as
+// JSON-serializable entries, INCLUDING terminal states (completed,
+// failed, tombstone). The UI file tab needs full history — completed
+// transfers shown with size/date and the option to delete the
+// originating chat message; failed receiver transfers shown so the
+// user can decide to restart or remove them. Use TransfersSnapshot
+// when only active/pending transfers should appear (e.g. the existing
+// fetchFileTransfers RPC for observability).
+//
+// State remains the discriminator the UI filters on (downloading vs
+// completed vs failed). TransmitPath is never exposed for senders.
+func (m *Manager) AllTransfersSnapshot() []TransferSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entries := make([]TransferSnapshot, 0, len(m.senderMaps)+len(m.receiverMaps))
+	for _, sm := range m.senderMaps {
+		entries = append(entries, senderToTransferEntry(sm))
+	}
+	for _, rm := range m.receiverMaps {
+		entries = append(entries, receiverToTransferEntry(rm))
+	}
+	return entries
+}
+
 // MappingsSnapshot returns active and pending sender file mappings as
 // JSON-serializable entries. Terminal states (completed, tombstone) are
 // excluded to match the active/pending contract. TransmitPath is never

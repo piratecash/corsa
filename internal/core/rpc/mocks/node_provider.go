@@ -17,7 +17,8 @@ import (
 func NewMockNodeProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *MockNodeProvider {
+},
+) *MockNodeProvider {
 	mock := &MockNodeProvider{}
 	mock.Mock.Test(t)
 
@@ -236,6 +237,61 @@ func (_c *MockNodeProvider_ExplainFileRoute_Call) Return(rawMessage json.RawMess
 }
 
 func (_c *MockNodeProvider_ExplainFileRoute_Call) RunAndReturn(run func(dst domain.PeerIdentity) (json.RawMessage, error)) *MockNodeProvider_ExplainFileRoute_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// FetchAllFileTransfers provides a mock function for the type MockNodeProvider
+func (_mock *MockNodeProvider) FetchAllFileTransfers() (json.RawMessage, error) {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for FetchAllFileTransfers")
+	}
+
+	var r0 json.RawMessage
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() (json.RawMessage, error)); ok {
+		return returnFunc()
+	}
+	if returnFunc, ok := ret.Get(0).(func() json.RawMessage); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(json.RawMessage)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockNodeProvider_FetchAllFileTransfers_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FetchAllFileTransfers'
+type MockNodeProvider_FetchAllFileTransfers_Call struct {
+	*mock.Call
+}
+
+// FetchAllFileTransfers is a helper method to define mock.On call
+func (_e *MockNodeProvider_Expecter) FetchAllFileTransfers() *MockNodeProvider_FetchAllFileTransfers_Call {
+	return &MockNodeProvider_FetchAllFileTransfers_Call{Call: _e.mock.On("FetchAllFileTransfers")}
+}
+
+func (_c *MockNodeProvider_FetchAllFileTransfers_Call) Run(run func()) *MockNodeProvider_FetchAllFileTransfers_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockNodeProvider_FetchAllFileTransfers_Call) Return(rawMessage json.RawMessage, err error) *MockNodeProvider_FetchAllFileTransfers_Call {
+	_c.Call.Return(rawMessage, err)
+	return _c
+}
+
+func (_c *MockNodeProvider_FetchAllFileTransfers_Call) RunAndReturn(run func() (json.RawMessage, error)) *MockNodeProvider_FetchAllFileTransfers_Call {
 	_c.Call.Return(run)
 	return _c
 }

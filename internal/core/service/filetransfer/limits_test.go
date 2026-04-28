@@ -1093,12 +1093,12 @@ func TestTickSenderMappingsStallReclaimEmptyPreServeStateDefaultsToAnnounced(t *
 
 	fileID := domain.FileID("legacy-stalled")
 	m.senderMaps[fileID] = &senderFileMapping{
-		FileID:       fileID,
-		FileHash:     "cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333dddd4444",
-		FileName:     "legacy.bin",
-		FileSize:     1024,
-		Recipient:    domain.PeerIdentity("bob"),
-		State:        senderServing,
+		FileID:    fileID,
+		FileHash:  "cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333dddd4444",
+		FileName:  "legacy.bin",
+		FileSize:  1024,
+		Recipient: domain.PeerIdentity("bob"),
+		State:     senderServing,
 		// PreServeState intentionally empty (simulates legacy JSON)
 		LastServedAt: time.Now().Add(-2 * senderServingStallTimeout),
 	}
@@ -2263,6 +2263,130 @@ func TestTransfersSnapshotEmptyWhenAllTerminal(t *testing.T) {
 	entries := m.TransfersSnapshot()
 	if len(entries) != 0 {
 		t.Fatalf("TransfersSnapshot: got %d entries, want 0 (all terminal)", len(entries))
+	}
+}
+
+// TestAllTransfersSnapshotIncludesTerminal verifies that AllTransfersSnapshot
+// returns every sender and receiver mapping regardless of state — the
+// contract that powers the desktop file tab's history view. Terminal
+// entries (completed, failed, tombstone) MUST appear with their actual
+// state so the UI can render history rows alongside active transfers.
+func TestAllTransfersSnapshotIncludesTerminal(t *testing.T) {
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: "",
+		stopCh:       make(chan struct{}),
+	}
+
+	now := time.Now()
+	peer := domain.PeerIdentity("peer-history-1234567890abcdef12")
+
+	// Senders covering every state class: announced (active),
+	// serving (active), completed (terminal), tombstone (terminal).
+	m.senderMaps[domain.FileID("s-announced")] = &senderFileMapping{
+		FileID: "s-announced", State: senderAnnounced, Recipient: peer, CreatedAt: now,
+	}
+	m.senderMaps[domain.FileID("s-serving")] = &senderFileMapping{
+		FileID: "s-serving", State: senderServing, Recipient: peer, CreatedAt: now,
+	}
+	m.senderMaps[domain.FileID("s-completed")] = &senderFileMapping{
+		FileID: "s-completed", State: senderCompleted, Recipient: peer, CreatedAt: now, CompletedAt: now,
+	}
+	m.senderMaps[domain.FileID("s-tombstone")] = &senderFileMapping{
+		FileID: "s-tombstone", State: senderTombstone, Recipient: peer, CreatedAt: now, CompletedAt: now,
+	}
+
+	// Receivers covering every state class: available (active),
+	// downloading (active), verifying (active), waitingAck (active),
+	// waitingRoute (active), completed (terminal), failed (terminal).
+	m.receiverMaps[domain.FileID("r-available")] = &receiverFileMapping{
+		FileID: "r-available", State: receiverAvailable, Sender: peer, CreatedAt: now,
+	}
+	m.receiverMaps[domain.FileID("r-downloading")] = &receiverFileMapping{
+		FileID: "r-downloading", State: receiverDownloading, Sender: peer, CreatedAt: now,
+	}
+	m.receiverMaps[domain.FileID("r-verifying")] = &receiverFileMapping{
+		FileID: "r-verifying", State: receiverVerifying, Sender: peer, CreatedAt: now,
+	}
+	m.receiverMaps[domain.FileID("r-waitingAck")] = &receiverFileMapping{
+		FileID: "r-waitingAck", State: receiverWaitingAck, Sender: peer, CreatedAt: now,
+	}
+	m.receiverMaps[domain.FileID("r-waitingRoute")] = &receiverFileMapping{
+		FileID: "r-waitingRoute", State: receiverWaitingRoute, Sender: peer, CreatedAt: now,
+	}
+	m.receiverMaps[domain.FileID("r-completed")] = &receiverFileMapping{
+		FileID: "r-completed", State: receiverCompleted, Sender: peer, CreatedAt: now, CompletedAt: now,
+	}
+	m.receiverMaps[domain.FileID("r-failed")] = &receiverFileMapping{
+		FileID: "r-failed", State: receiverFailed, Sender: peer, CreatedAt: now, CompletedAt: now,
+	}
+
+	all := m.AllTransfersSnapshot()
+	want := len(m.senderMaps) + len(m.receiverMaps)
+	if len(all) != want {
+		t.Fatalf("AllTransfersSnapshot: got %d entries, want %d (every mapping)", len(all), want)
+	}
+
+	// Every FileID must appear exactly once with its actual state.
+	seen := make(map[domain.FileID]string, len(all))
+	for _, e := range all {
+		if prev, ok := seen[e.FileID]; ok {
+			t.Errorf("AllTransfersSnapshot returned %s twice (states %q and %q)",
+				e.FileID, prev, e.State)
+		}
+		seen[e.FileID] = e.State
+	}
+	expectations := map[domain.FileID]string{
+		"s-announced":    string(senderAnnounced),
+		"s-serving":      string(senderServing),
+		"s-completed":    string(senderCompleted),
+		"s-tombstone":    string(senderTombstone),
+		"r-available":    string(receiverAvailable),
+		"r-downloading":  string(receiverDownloading),
+		"r-verifying":    string(receiverVerifying),
+		"r-waitingAck":   string(receiverWaitingAck),
+		"r-waitingRoute": string(receiverWaitingRoute),
+		"r-completed":    string(receiverCompleted),
+		"r-failed":       string(receiverFailed),
+	}
+	for id, wantState := range expectations {
+		gotState, ok := seen[id]
+		if !ok {
+			t.Errorf("AllTransfersSnapshot missing %s", id)
+			continue
+		}
+		if gotState != wantState {
+			t.Errorf("AllTransfersSnapshot %s: state = %q, want %q", id, gotState, wantState)
+		}
+	}
+
+	// Cross-check: TransfersSnapshot on the SAME data must drop the
+	// terminal entries. This pins the contract divergence — if a future
+	// refactor accidentally aligns the two methods, this test catches it.
+	active := m.TransfersSnapshot()
+	if len(active) >= len(all) {
+		t.Fatalf("TransfersSnapshot returned %d entries, AllTransfersSnapshot returned %d — terminal filtering broke",
+			len(active), len(all))
+	}
+}
+
+// TestAllTransfersSnapshotEmptyWhenNoMappings verifies the empty-map case
+// returns an empty slice (not nil) — the JSON encoder relies on this for
+// "[]" output, and the UI relies on a stable list type.
+func TestAllTransfersSnapshotEmptyWhenNoMappings(t *testing.T) {
+	m := &Manager{
+		senderMaps:   make(map[domain.FileID]*senderFileMapping),
+		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		mappingsPath: "",
+		stopCh:       make(chan struct{}),
+	}
+	entries := m.AllTransfersSnapshot()
+	if entries == nil {
+		t.Fatal("AllTransfersSnapshot returned nil, want empty non-nil slice")
+	}
+	if len(entries) != 0 {
+		t.Fatalf("AllTransfersSnapshot: got %d entries, want 0", len(entries))
 	}
 }
 

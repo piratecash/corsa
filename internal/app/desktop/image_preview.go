@@ -62,6 +62,57 @@ type thumbnailCache struct {
 	entries map[string]*thumbnailEntry
 }
 
+// thumbnailLookup is the atomic result of resolving a cache entry
+// (or kicking off a fresh decode). Combining the get/isPending pair
+// into a single struct returned under one cache lock closes the
+// reviewer race: with two separate calls, a thumbnail that
+// transitions Pending→Ready BETWEEN them returns (nil, !pending)
+// — i.e. "not ready and won't poll", which can leave the file tab
+// stuck on a stale placeholder until an unrelated repaint.
+//
+// Exactly one of Entry / Pending is meaningful at a time:
+//   - Entry != nil → ready, render it.
+//   - Pending      → decode in flight; caller should schedule a
+//     fallback redraw because the decode goroutine's
+//     Invalidate is pinned to the FIRST requesting
+//     window and may miss this window.
+//   - both zero    → permanent failure (decode failed earlier; the
+//     cache will not retry). Caller must not poll.
+type thumbnailLookup struct {
+	Entry   *thumbnailEntry
+	Pending bool
+}
+
+// lookup atomically fetches the cache entry for path under a single
+// lock acquisition, kicking off a background decode on first
+// request. Use this instead of get()+isPending() when both pieces
+// of state matter — the two-call form has a nil→ready race window
+// that drops the polling gate prematurely.
+func (tc *thumbnailCache) lookup(path string, window *app.Window) thumbnailLookup {
+	if path == "" || window == nil {
+		return thumbnailLookup{}
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	if tc.entries == nil {
+		tc.entries = make(map[string]*thumbnailEntry)
+	}
+	if entry, ok := tc.entries[path]; ok {
+		switch entry.state {
+		case thumbReady:
+			return thumbnailLookup{Entry: entry}
+		case thumbPending:
+			return thumbnailLookup{Pending: true}
+		default: // thumbFailed
+			return thumbnailLookup{}
+		}
+	}
+	entry := &thumbnailEntry{state: thumbPending}
+	tc.entries[path] = entry
+	go tc.decodeInBackground(path, window)
+	return thumbnailLookup{Pending: true}
+}
+
 // get returns the cached thumbnail for the given path.
 //
 // Three possible outcomes:
@@ -71,6 +122,16 @@ type thumbnailCache struct {
 //   - path not seen before: spawns a background decode goroutine and
 //     returns nil. The goroutine calls window.Invalidate() on completion.
 //   - entry failed (thumbFailed): returns nil — will not retry.
+//
+// get() collapses pending and failed into the same nil return,
+// which is fine for the chat thread because each chat-bubble
+// repaint re-runs get() and picks up the eventual ready state.
+// Callers that need to DISTINGUISH pending from failed (e.g. the
+// file tab's polled redraw gate, which must stop polling once a
+// decode permanently fails) MUST use lookup() instead — it
+// resolves both pieces of state under a single lock and avoids
+// the get() + isPending() race that lookup() was introduced to
+// fix.
 //
 // The window parameter is used solely to call Invalidate() from the
 // background goroutine; it is safe to call from any goroutine.

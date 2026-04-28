@@ -162,8 +162,9 @@ type Window struct {
 	thumbClickBtns map[string]*widget.Clickable // keyed by message ID — click to open image
 
 	// File action buttons for completed transfers (keyed by message ID).
-	fileRevealBtns map[string]*widget.Clickable // "Show in Folder"
-	fileOpenBtns   map[string]*widget.Clickable // "Open" with system viewer
+	fileRevealBtns    map[string]*widget.Clickable // "Show in Folder"
+	fileOpenBtns      map[string]*widget.Clickable // "Open" with system viewer
+	fileRowDeleteBtns map[string]*widget.Clickable // "Delete" inline with Reveal/Open (per-row, separate from msgCtxDelete which is the context-menu single)
 
 	// Native file dialog via gioui.org/x/explorer. Initialized once in Run()
 	// together with the app.Window. ChooseFile is blocking and must be called
@@ -1834,6 +1835,15 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 				children = append(children,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return thumbBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							// Hand cursor on hover so the click
+							// affordance is discoverable — same UX
+							// the file-tab thumbnail and the donate
+							// link already provide. CursorPointer
+							// must be added INSIDE the clickable's
+							// layout callback so the cursor area
+							// matches the clickable's hit area.
+							pointer.CursorPointer.Add(gtx.Ops)
+
 							dispW, dispH := thumbnailDisplaySize(
 								imgBounds.X, imgBounds.Y,
 								gtx.Dp(unit.Dp(thumbnailMaxWidth)),
@@ -1973,15 +1983,16 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 			)
 		}
 
-		// "Show in Folder" + "Open" action buttons for completed transfers
-		// where the file is available on disk.
+		// "Show in Folder" + "Open" + "Delete" action buttons for
+		// completed transfers where the file is available on disk.
 		fileOnDisk := w.router.FileBridge().FilePath(fileID, isMine)
 		if fileOnDisk != "" {
 			revealPath := fileOnDisk
+			msgCopy := message
 			children = append(children,
 				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return w.layoutFileActionButtons(gtx, message.ID, revealPath)
+					return w.layoutFileActionButtons(gtx, msgCopy, isMine, revealPath)
 				}),
 			)
 		}
@@ -2187,10 +2198,27 @@ func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) l
 	)
 }
 
-// layoutFileActionButtons renders "Show in Folder" and "Open" buttons for
-// completed file transfers where the file exists on disk. Both buttons are
-// displayed in a horizontal row.
-func (w *Window) layoutFileActionButtons(gtx layout.Context, messageID, filePath string) layout.Dimensions {
+// layoutFileActionButtons renders "Show in Folder" and "Open" for
+// every completed transfer that has a file on disk, plus a
+// "Delete message" button that appears ONLY on outgoing rows
+// ("кнопка delete должна быть только на моем файле, который я
+// отправляю" — the user wants the inline Delete only on the file
+// they own as the sender).
+//
+// Why outgoing-only: the destructive action propagates over the
+// wire (message_delete) and asks the recipient to mirror the
+// deletion. The user only wants that round-trip-bearing button
+// surfaced on files they originated. Incoming rows keep the row
+// clean; users who want to remove an inbound file row still have
+// the right-click context-menu Delete, which dispatches the
+// local-only path inside DMRouter.SendMessageDelete.
+//
+// Outgoing Delete is offline-gated: when the recipient is offline
+// the wire-side delete cannot land and would burn the entire retry
+// budget, so the button renders as a static neutral-gray "disabled"
+// pill (no Clickable, no hover ripple) — see
+// layoutFileCardDeleteButton + layoutFileCardDeleteDisabled.
+func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectMessage, isMine bool, filePath string) layout.Dimensions {
 	// Ensure button maps are initialised.
 	if w.fileRevealBtns == nil {
 		w.fileRevealBtns = make(map[string]*widget.Clickable)
@@ -2198,16 +2226,19 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, messageID, filePath
 	if w.fileOpenBtns == nil {
 		w.fileOpenBtns = make(map[string]*widget.Clickable)
 	}
+	if w.fileRowDeleteBtns == nil {
+		w.fileRowDeleteBtns = make(map[string]*widget.Clickable)
+	}
 
-	revealBtn, ok := w.fileRevealBtns[messageID]
+	revealBtn, ok := w.fileRevealBtns[msg.ID]
 	if !ok {
 		revealBtn = new(widget.Clickable)
-		w.fileRevealBtns[messageID] = revealBtn
+		w.fileRevealBtns[msg.ID] = revealBtn
 	}
-	openBtn, ok := w.fileOpenBtns[messageID]
+	openBtn, ok := w.fileOpenBtns[msg.ID]
 	if !ok {
 		openBtn = new(widget.Clickable)
-		w.fileOpenBtns[messageID] = openBtn
+		w.fileOpenBtns[msg.ID] = openBtn
 	}
 
 	revealPath := filePath
@@ -2221,7 +2252,12 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, messageID, filePath
 	btnBg := color.NRGBA{R: 50, G: 60, B: 80, A: 255}
 	btnFg := color.NRGBA{R: 180, G: 200, B: 230, A: 255}
 
-	return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceStart}.Layout(gtx,
+	// Layout: [Show in Folder] [Open] left-aligned, plus [Delete]
+	// only on outgoing rows. Default Spacing (SpaceEnd) packs items
+	// to the start so the row width grows naturally with the
+	// number of children — outgoing rows have three buttons,
+	// incoming rows have two.
+	children := []layout.FlexChild{
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			matBtn := material.Button(w.theme, revealBtn, w.t("file.show_in_folder"))
 			matBtn.Background = btnBg
@@ -2247,7 +2283,137 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, messageID, filePath
 			matBtn.TextSize = unit.Sp(11)
 			return matBtn.Layout(gtx)
 		}),
-	)
+	}
+	if isMine {
+		children = append(children,
+			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return w.layoutFileCardDeleteButton(gtx, msg, isMine)
+			}),
+		)
+	}
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
+}
+
+// layoutFileCardDeleteButton renders the per-row Delete button for
+// a chat-thread file card. Currently called only for outgoing
+// rows (the layoutFileActionButtons caller gates on isMine), but
+// the function keeps the direction-aware branching so future
+// callers — e.g. an "always-on per-row Delete" mode toggled in
+// preferences — get the right enable rule:
+//
+//   - Outgoing (isMine == true): gate on peerOnline. Wire-side
+//     delete needs an ack; render as a static gray box without
+//     a Clickable when offline so there's no hover ripple, no
+//     hit area, no click ripple — visually unmistakably inert.
+//
+//   - Incoming (isMine == false): always enabled (local-only
+//     delete path inside SendMessageDelete). No peer check.
+func (w *Window) layoutFileCardDeleteButton(gtx layout.Context, msg service.DirectMessage, isMine bool) layout.Dimensions {
+	// Determine the conversation peer relative to self — same
+	// rule as the chat context-menu Delete handler.
+	me := w.router.MyAddress()
+	peer := msg.Recipient
+	if msg.Sender != me {
+		peer = msg.Sender
+	}
+
+	// Receive-direction deletes are local-only; ignore peerOnline.
+	enabled := !isMine || w.peerOnline(peer)
+	if !enabled {
+		return w.layoutFileCardDeleteDisabled(gtx)
+	}
+
+	btn, ok := w.fileRowDeleteBtns[msg.ID]
+	if !ok {
+		btn = new(widget.Clickable)
+		w.fileRowDeleteBtns[msg.ID] = btn
+	}
+
+	target := domain.MessageID(msg.ID)
+	for btn.Clicked(gtx) {
+		w.dispatchMessageDeleteAsync(peer, target)
+	}
+
+	matBtn := material.Button(w.theme, btn, w.t("context.delete_message"))
+	matBtn.Background = color.NRGBA{R: 120, G: 50, B: 60, A: 255}
+	matBtn.Color = color.NRGBA{R: 250, G: 240, B: 240, A: 255}
+	matBtn.Inset = layout.Inset{
+		Top: unit.Dp(3), Bottom: unit.Dp(3),
+		Left: unit.Dp(8), Right: unit.Dp(8),
+	}
+	matBtn.CornerRadius = unit.Dp(5)
+	matBtn.TextSize = unit.Sp(11)
+	return matBtn.Layout(gtx)
+}
+
+// layoutFileCardDeleteDisabled renders the offline-state Delete
+// pill via the shared layoutDisabledDeletePill helper. See that
+// helper's doc for the design rationale.
+func (w *Window) layoutFileCardDeleteDisabled(gtx layout.Context) layout.Dimensions {
+	return layoutDisabledDeletePill(gtx, w.theme, w.t("context.delete_message"))
+}
+
+// layoutDisabledDeletePill renders a Delete-pill visual that is
+// unmistakably disabled: neutral medium-gray box, lighter gray
+// label, no Clickable, no hit area, no hover ripple. Shared
+// between the chat-thread file card (Window.layoutFileCardDeleteDisabled)
+// and the file tab (ConsoleWindow.layoutFileRowDeleteDisabled) so
+// the visual is identical across surfaces.
+//
+// Why no Clickable: material.Button always wires hover-highlight
+// ops via its internal Clickable, so the user would see a colour
+// ripple on hover even when we semantically refuse the click —
+// visually misleading. With no Clickable the region has no hit
+// area, so the cursor stays as the surrounding default (not the
+// hand pointer that the active red Delete button advertises) and
+// there is no hover feedback at all.
+//
+// Colours are deliberately neutral medium gray (no red tint, no
+// blue tint) so the user reads "disabled" rather than "tombstone"
+// (gray-blue) or "ready to click" (red).
+func layoutDisabledDeletePill(gtx layout.Context, theme *material.Theme, labelText string) layout.Dimensions {
+	bg := color.NRGBA{R: 60, G: 60, B: 64, A: 255}
+	fg := color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+	inset := layout.Inset{
+		Top: unit.Dp(3), Bottom: unit.Dp(3),
+		Left: unit.Dp(8), Right: unit.Dp(8),
+	}
+	macro := op.Record(gtx.Ops)
+	dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		lbl := material.Caption(theme, labelText)
+		lbl.Color = fg
+		lbl.Font.Weight = 600
+		lbl.TextSize = unit.Sp(11)
+		return lbl.Layout(gtx)
+	})
+	call := macro.Stop()
+	defer clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(unit.Dp(5))).Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: bg}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	call.Add(gtx.Ops)
+	return dims
+}
+
+// dispatchMessageDeleteAsync runs SendMessageDelete on a background
+// goroutine with the standard 10s timeout and surfaces success /
+// failure on the router status line. Shared between the chat
+// context-menu Delete handler and the per-row Delete button on a
+// file card. Pessimistic ordering: for outgoing the local row stays
+// alive until the peer's message_delete_ack confirms — terminal
+// status is then surfaced via TopicMessageDeleteCompleted, which
+// the existing handleMessageDeleteOutcome subscriber picks up.
+func (w *Window) dispatchMessageDeleteAsync(peer domain.PeerIdentity, target domain.MessageID) {
+	w.router.SetSendStatus(w.t("status.message_deleting"))
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := w.router.SendMessageDelete(ctx, peer, target); err != nil {
+			w.router.SetSendStatus(w.t("status.message_delete_failed", err.Error()))
+			return
+		}
+		w.router.SetSendStatus(w.t("status.message_delete_dispatched"))
+	}()
 }
 
 func (w *Window) localNodeErrorRow() string {
@@ -2771,6 +2937,61 @@ func (w *Window) t(key string, args ...any) string {
 	return translate(w.language, key, args...)
 }
 
+// peerOnline reports whether the peer with the given identity has at
+// least one usable next-hop right now (direct session OR live route).
+// Used to gate destructive UI actions (Delete, Download, Restart)
+// that require the peer to be reachable on the wire — issuing them
+// when the peer is offline would either fail immediately (RPC) or
+// queue indefinitely (DM router retry budget).
+//
+// Source of truth is NodeStatus.ReachableIDs, which is rebuilt every
+// status poll from the routing table. A nil ReachableIDs map means
+// "unknown" (status not yet polled); we treat unknown as offline so
+// the UI errs on the safe side.
+func (w *Window) peerOnline(identity domain.PeerIdentity) bool {
+	if w == nil || w.router == nil {
+		return false
+	}
+	snap := w.router.Snapshot()
+	if snap.NodeStatus.ReachableIDs == nil {
+		return false
+	}
+	return snap.NodeStatus.ReachableIDs[identity]
+}
+
+// contextMenuDeleteEnabled reports whether the Delete item in the
+// open message context menu is actionable. Direction-aware:
+//
+//   - Outgoing (Sender == self): gate on peerOnline(Recipient).
+//     The wire-side delete dispatches a message_delete control
+//     DM and waits for the peer's ack (pessimistic ordering);
+//     burning the retry budget on an offline recipient is the
+//     visible failure mode this guard prevents.
+//
+//   - Incoming (Sender != self): always enabled. The router
+//     path for inbound messages (DMRouter.SendMessageDelete with
+//     direction == receive) is local-only — it removes the local
+//     chatlog row + any backing file synchronously and never
+//     dispatches a control DM. Gating on peerOnline at the UI
+//     layer would block users from cleaning up incoming rows
+//     from an offline peer for no underlying reason.
+//
+// Returns false when no menu is open (msgContextMsg is nil) so
+// callers laying out the disabled visual style fall back to the
+// safe default.
+func (w *Window) contextMenuDeleteEnabled() bool {
+	if w == nil || w.msgContextMsg == nil {
+		return false
+	}
+	msg := *w.msgContextMsg
+	me := w.router.MyAddress()
+	if msg.Sender != me {
+		// Incoming: local-only delete, no peer round-trip.
+		return true
+	}
+	return w.peerOnline(msg.Recipient)
+}
+
 func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
 	btn := material.Button(w.theme, &w.consoleButton, w.t("header.console"))
 	btn.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
@@ -3206,6 +3427,38 @@ func (w *Window) contextMenuItem(gtx layout.Context, btn *widget.Clickable, labe
 	})
 }
 
+// contextMenuItemDisabled renders a context-menu entry as a
+// neutral-gray label with no Clickable wrapping — no hover ripple,
+// no item-selected highlight, no event consumption.
+//
+// Earlier iterations passed the active-item colour through and dimmed
+// it (the idea being that a faint-red Delete entry would read as
+// "this is the Delete row, just disabled"). User feedback was that
+// faint red still looks active, especially against the menu's dark
+// background — gray reads more decisively as "this option is not
+// available right now".
+//
+// Why this and not contextMenuItem with a dimmed colour: the
+// material.Clickable wrapping in contextMenuItem still draws a
+// hover background and consumes pointer events even with reduced
+// label alpha — so the user sees a hover ripple on what should be
+// an unactionable item. The static path here drops the wrapping
+// entirely, leaving just an inset Body2 label with no event
+// handling. The dims, padding, and shape match contextMenuItem's
+// so the menu doesn't reflow when an item flips between enabled
+// and disabled.
+func (w *Window) contextMenuItemDisabled(gtx layout.Context, label string) layout.Dimensions {
+	fg := color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+	return layout.Inset{
+		Top: unit.Dp(8), Bottom: unit.Dp(8),
+		Left: unit.Dp(12), Right: unit.Dp(12),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		lbl := material.Body2(w.theme, label)
+		lbl.Color = fg
+		return lbl.Layout(gtx)
+	})
+}
+
 func (w *Window) languageMenuCard(gtx layout.Context) layout.Dimensions {
 	fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 
@@ -3345,33 +3598,61 @@ func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
 		if msg.Sender != me {
 			peer = msg.Sender
 		}
+
+		// Offline-peer guard, OUTGOING only. Incoming messages take
+		// the local-only delete path inside DMRouter.SendMessageDelete:
+		// the local row + any backing file are removed synchronously
+		// without a wire round-trip, so peer reachability is
+		// irrelevant for incoming. Outgoing messages need the peer
+		// to ack the deletion (pessimistic ordering — see
+		// docs/dm-commands.md), so we refuse the click when the
+		// peer is offline rather than burning the retry budget.
+		isOutgoing := msg.Sender == me
+		if isOutgoing && !w.peerOnline(peer) {
+			w.msgContextMsg = nil
+			w.router.SetSendStatus(w.t("status.message_delete_peer_offline"))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+
 		targetID := domain.MessageID(msg.ID)
 
 		w.msgContextMsg = nil
 		w.router.SetSendStatus(w.t("status.message_deleting"))
 
-		go func(peer domain.PeerIdentity, target domain.MessageID) {
+		go func(peer domain.PeerIdentity, target domain.MessageID, outgoing bool) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := w.router.SendMessageDelete(ctx, peer, target); err != nil {
 				w.router.SetSendStatus(w.t("status.message_delete_failed", err.Error()))
 				return
 			}
-			// Do NOT mark this as "deleted" yet. For an outgoing DM
-			// the local row stays alive until the peer's
-			// message_delete_ack confirms a success status — see
-			// SendMessageDelete + handleInboundMessageDeleteAck for
-			// the pessimistic ordering. The terminal UI status
-			// (deleted / not_found / denied / immutable / abandoned)
-			// arrives via TopicMessageDeleteCompleted;
-			// handleMessageDeleteOutcome owns the final update.
-			//
-			// Incoming local-only deletes mutate immediately inside
-			// SendMessageDelete and publish the deleted outcome
-			// synchronously, so this status will be replaced on the
-			// same UI tick.
+			if !outgoing {
+				// Incoming = local-only path. SendMessageDelete has
+				// already removed the chatlog row, cleaned up file
+				// state, and published TopicMessageDeleteCompleted
+				// with the terminal "deleted" outcome. The Window's
+				// async handleMessageDeleteOutcome subscriber may
+				// have already written the final status before this
+				// goroutine resumes; setting "Delete request sent;
+				// waiting for peer…" here would race-overwrite that
+				// terminal status with a misleading wire-progress
+				// caption (no peer ack is coming because no peer
+				// round-trip happened). Skip the dispatched status.
+				return
+			}
+			// Outgoing: do NOT mark this as "deleted" yet. The local
+			// row stays alive until the peer's message_delete_ack
+			// confirms a success status — see SendMessageDelete +
+			// handleInboundMessageDeleteAck for pessimistic ordering.
+			// The terminal UI status (deleted / not_found / denied /
+			// immutable / abandoned) arrives via
+			// TopicMessageDeleteCompleted; handleMessageDeleteOutcome
+			// owns the final update.
 			w.router.SetSendStatus(w.t("status.message_delete_dispatched"))
-		}(peer, targetID)
+		}(peer, targetID, isOutgoing)
 
 		if w.window != nil {
 			w.window.Invalidate()
@@ -3537,15 +3818,48 @@ func (w *Window) layoutMsgContextMenuItems(gtx layout.Context) layout.Dimensions
 			// Delete uses a warning-tinted label so the destructive
 			// nature is visible. The handler in
 			// handleMsgContextMenuActions invokes router.SendMessageDelete
-			// asynchronously. For an outgoing DM the local chatlog
-			// row is kept until the peer's message_delete_ack
-			// confirms the deletion; for an incoming DM the local
-			// row is removed immediately. In both cases a
-			// message_delete control DM is dispatched to the peer
-			// (with retry for outgoing) and the terminal UI status
-			// arrives via TopicMessageDeleteCompleted.
-			return w.contextMenuItem(gtx, &w.msgCtxDelete, w.t("context.delete_message"),
-				color.NRGBA{R: 240, G: 158, B: 158, A: 255})
+			// asynchronously, and the path differs by message
+			// direction:
+			//
+			//   - Outgoing DM (Sender == self): a message_delete
+			//     control DM is dispatched to the recipient with
+			//     retry budget; the local chatlog row is kept
+			//     until the peer's message_delete_ack confirms
+			//     deletion (pessimistic ordering). The terminal
+			//     UI status (deleted / not_found / denied /
+			//     immutable / abandoned) arrives via
+			//     TopicMessageDeleteCompleted.
+			//
+			//   - Incoming DM (Sender != self): the local row +
+			//     any backing file are removed synchronously
+			//     inside SendMessageDelete. No control DM is
+			//     dispatched and no peer ack is required —
+			//     incoming deletes are local-only.
+			//
+			// Offline guard: only outgoing rows need the peer
+			// online (the incoming local-only path doesn't talk
+			// to the peer). When the recipient is offline AND the
+			// message is outgoing, the wire-level delete cannot
+			// reach the recipient and would burn the entire retry
+			// budget waiting for an ack that will never come;
+			// contextMenuDeleteEnabled returns false and we render
+			// the item dimmed. Incoming rows always render fully
+			// enabled regardless of peer reachability. The click
+			// handler in handleMsgContextMenuActions enforces the
+			// same direction-aware rule as a defence-in-depth
+			// check against a click racing a just-now-disconnected
+			// peer.
+			if !w.contextMenuDeleteEnabled() {
+				// Inert disabled item: no Clickable, no hover
+				// ripple, neutral gray label. The user
+				// indicated faint red still reads as active
+				// against the dark menu background; gray
+				// reads more decisively as "not available
+				// right now".
+				return w.contextMenuItemDisabled(gtx, w.t("context.delete_message"))
+			}
+			fg := color.NRGBA{R: 240, G: 158, B: 158, A: 255}
+			return w.contextMenuItem(gtx, &w.msgCtxDelete, w.t("context.delete_message"), fg)
 		}),
 	)
 }

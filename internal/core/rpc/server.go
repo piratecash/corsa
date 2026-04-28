@@ -264,6 +264,7 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	// File Transfer
 	rpc.Post("/file/send_file_announce", s.legacyArgHandler("sendFileAnnounce"))
 	rpc.Post("/file/transfers", s.legacyHandler("fetchFileTransfers"))
+	rpc.Post("/file/transfers_all", s.legacyHandler("fetchAllFileTransfers"))
 	rpc.Post("/file/mapping", s.legacyHandler("fetchFileMapping"))
 	rpc.Post("/file/retry_chunk", s.legacyArgHandler("retryFileChunk"))
 	rpc.Post("/file/start_download", s.legacyArgHandler("startFileDownload"))

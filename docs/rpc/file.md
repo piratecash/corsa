@@ -39,6 +39,8 @@ sendFileAnnounce <to> <file_name> <file_size> <file_hash> [content_type] [body]
 
 List active and pending file transfers (both sender and receiver sides). Terminal states (completed, tombstone, failed) are excluded. No arguments.
 
+Use `fetchAllFileTransfers` (below) when terminal entries (history) are needed — for example to render the desktop file tab. The two endpoints share the same response schema; the only difference is whether terminal mappings are filtered.
+
 #### CLI
 
 ```bash
@@ -49,6 +51,26 @@ corsa-cli fetchFileTransfers
 
 ```
 fetchFileTransfers
+```
+
+### POST /rpc/v1/file/transfers_all
+
+List **all** file transfers (both sender and receiver sides), **including** terminal states (`completed`, `tombstone`, `failed`). Powers the desktop file tab's history view and any client that needs to display past transfers alongside active ones. No arguments.
+
+The `state` field on each entry is the discriminator clients filter on (`downloading`, `verifying`, `waiting_ack`, `completed`, `failed`, etc.). The `file_id` field equals the originating DM `MessageID`, so clients can correlate a transfer entry with its chat message and use `delete_dm` to remove the announce on both sides — see [`docs/dm-commands.md`](../dm-commands.md). `TransmitPath` is never exposed.
+
+Use `fetchFileTransfers` (above) when only active/pending transfers are required.
+
+#### CLI
+
+```bash
+corsa-cli fetchAllFileTransfers
+```
+
+#### Console
+
+```
+fetchAllFileTransfers
 ```
 
 ### POST /rpc/v1/file/mapping
@@ -227,6 +249,8 @@ sendFileAnnounce <to> <file_name> <file_size> <file_hash> [content_type] [body]
 
 Список активных и ожидающих файловых трансферов (стороны отправителя и получателя). Терминальные состояния (completed, tombstone, failed) исключаются. Без аргументов.
 
+Используйте `fetchAllFileTransfers` (ниже), когда нужны терминальные записи (история) — например, для отрисовки file-вкладки в десктопе. Обе ручки используют одинаковую схему ответа; разница только в том, фильтруются ли терминальные маппинги.
+
 #### CLI
 
 ```bash
@@ -237,6 +261,26 @@ corsa-cli fetchFileTransfers
 
 ```
 fetchFileTransfers
+```
+
+### POST /rpc/v1/file/transfers_all
+
+Список **всех** файловых трансферов (стороны отправителя и получателя), **включая** терминальные состояния (`completed`, `tombstone`, `failed`). Используется file-вкладкой десктопа для истории и любым клиентом, которому нужно показывать завершённые трансферы рядом с активными. Без аргументов.
+
+Поле `state` каждой записи — дискриминатор, по которому клиент фильтрует (`downloading`, `verifying`, `waiting_ack`, `completed`, `failed` и т.д.). Поле `file_id` равно `MessageID` исходного DM, поэтому клиенты могут связать запись трансфера с её чат-сообщением и удалить announce у обеих сторон через `delete_dm` — см. [`docs/dm-commands.md`](../dm-commands.md). `TransmitPath` никогда не раскрывается.
+
+Используйте `fetchFileTransfers` (выше), если нужны только активные/ожидающие трансферы.
+
+#### CLI
+
+```bash
+corsa-cli fetchAllFileTransfers
+```
+
+#### Консоль
+
+```
+fetchAllFileTransfers
 ```
 
 ### POST /rpc/v1/file/mapping

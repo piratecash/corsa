@@ -397,14 +397,20 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 
 		result, err := r.fileBridge.PrepareAndSend(ctx, to, msg, meta)
 		if err != nil {
-			if onAsyncFailure != nil {
-				onAsyncFailure()
-			}
+			// Order matters: status + ebus event MUST be published
+			// before the callback unblocks the caller. Tests (and any
+			// real consumer) treat the callback as the "async failure
+			// is settled" signal and immediately read r.sendStatus —
+			// firing the callback first would race the status write
+			// and surface a stale "sending…" snapshot.
 			r.setSendStatusNotify("file announce failed: " + err.Error())
 			ebus.PublishFileSendFailed(r.eventBus, ebus.FileSendFailedResult{
 				To:  to,
 				Err: err,
 			})
+			if onAsyncFailure != nil {
+				onAsyncFailure()
+			}
 			return
 		}
 
@@ -416,15 +422,19 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 			// same peer in a newer generation.
 			r.mu.Unlock()
 			r.fileBridge.RollbackMapping(result.FileID)
-			if onAsyncFailure != nil {
-				onAsyncFailure()
-			}
+			// Same ordering invariant as the err != nil branch above:
+			// status + ebus event publish before the callback so a
+			// caller waiting on the callback sees the final visible
+			// state.
 			r.setSendStatusNotify("file announce cancelled: peer removed")
 			ebus.PublishFileSendFailed(r.eventBus, ebus.FileSendFailedResult{
 				To:     to,
 				FileID: result.FileID,
 				Err:    fmt.Errorf("peer removed during in-flight file announce"),
 			})
+			if onAsyncFailure != nil {
+				onAsyncFailure()
+			}
 			log.Info().
 				Str("peer", string(to)).
 				Str("file_id", string(result.FileID)).
@@ -472,6 +482,14 @@ func (r *DMRouter) FileBridge() *FileTransferBridge {
 // from a remote peer and registers the receiver-side mapping if so. Safe to
 // call multiple times for the same message — RegisterFileReceive is idempotent.
 //
+// TopicFileReceived is published ONLY when the receiver-side
+// registration succeeded. The contract on subscribers is "a new (or
+// re-registered) row appears in AllTransfersSnapshot"; emitting on
+// registration failure (malformed payload, no localNode in
+// standalone-RPC mode, manager-side validation reject) would
+// announce a mapping that never exists and the file tab would
+// invalidate for nothing.
+//
 // Thread safety: called only from the DMRouter event loop (single goroutine)
 // or from loadConversation (under router lifecycle). The underlying
 // RegisterIncomingFileTransfer → FileTransferManager.RegisterFileReceive is
@@ -487,7 +505,15 @@ func (r *DMRouter) tryRegisterFileReceive(msg *DirectMessage) {
 	if msg.Sender == r.client.Address() {
 		return
 	}
-	r.fileBridge.RegisterIncoming(*msg)
+	if err := r.fileBridge.RegisterIncoming(*msg); err != nil {
+		// Bridge has already logged the cause; nothing to publish.
+		// AllTransfersSnapshot has no new row to surface.
+		return
+	}
+	ebus.PublishFileReceived(r.eventBus, ebus.FileReceivedResult{
+		From:   msg.Sender,
+		FileID: domain.FileID(msg.ID),
+	})
 }
 
 func (r *DMRouter) ActivePeer() domain.PeerIdentity {
@@ -1291,11 +1317,44 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 // peers[].Preview + Unread. Returns true when the preview was updated
 // successfully, false when decryption failed and the caller must fall back to
 // updatePreviewFromStore.
+//
+// The decrypt step is isolated from the apply step (see
+// applyDecryptedMessageToSidebar) so tests can drive the apply
+// branch with synthetic DirectMessages — notably, the regression
+// test that verifies inbound file_announce messages registered for
+// non-active conversations actually appear in
+// FileTransferManager.AllTransfersSnapshot.
 func (r *DMRouter) updateSidebarFromEvent(event protocol.LocalChangeEvent, peerID domain.PeerIdentity) bool {
 	msg := r.client.DecryptIncomingMessage(event)
 	if msg == nil {
 		return false
 	}
+	r.applyDecryptedMessageToSidebar(msg, peerID)
+	return true
+}
+
+// applyDecryptedMessageToSidebar updates peers[].Preview + Unread
+// for an already-decrypted DirectMessage, runs the receiver-side
+// file_announce registration, and is the entry point used by both
+// the production inline-decrypt path and the regression test that
+// drives non-active inbound announces with a synthetic message.
+//
+// Must be called outside r.mu — the function acquires it itself.
+func (r *DMRouter) applyDecryptedMessageToSidebar(msg *DirectMessage, peerID domain.PeerIdentity) {
+	if msg == nil {
+		return
+	}
+
+	// Register receiver-side mapping for inbound file_announce messages
+	// here as well as on the active-chat path. Without this branch a
+	// file_announce arriving for a non-active conversation never
+	// creates a receiver mapping until the user opens that chat —
+	// AllTransfersSnapshot would omit the transfer and the file tab
+	// would silently miss background-conversation arrivals. Idempotent
+	// (RegisterFileReceive is idempotent and the function gates on
+	// Sender/Command/CommandData) so calling it on every successful
+	// inline decrypt is safe.
+	r.tryRegisterFileReceive(msg)
 
 	isIncoming := msg.Sender != r.client.Address()
 
@@ -1316,7 +1375,6 @@ func (r *DMRouter) updateSidebarFromEvent(event protocol.LocalChangeEvent, peerI
 	}
 	r.promotePeerLocked(peerID)
 	r.mu.Unlock()
-	return true
 }
 
 // updatePreviewFromStore fetches the last message for peer from the local

@@ -140,6 +140,23 @@ const (
 	//   func(result ebus.FileSendFailedResult)
 	TopicFileSendFailed = "file.send.failed"
 
+	// TopicFileReceived is emitted by DMRouter.tryRegisterFileReceive
+	// after a receiver-side mapping has been registered for an
+	// incoming file_announce DM. This fires for EVERY inbound file
+	// announce regardless of whether the recipient's chat is the
+	// active conversation — the desktop file tab subscribes to keep
+	// its history view current for background-conversation arrivals.
+	//
+	// The publisher de-duplicates by relying on
+	// FileTransferManager.RegisterFileReceive's idempotency: a
+	// re-registration of the same FileID still publishes the event,
+	// so subscribers must treat it as "snapshot may have changed"
+	// rather than "this is a brand-new transfer".
+	//
+	// Handler signature:
+	//   func(result ebus.FileReceivedResult)
+	TopicFileReceived = "file.received"
+
 	// TopicSlotStateChanged is emitted by ConnectionManager when a peer
 	// slot transitions between states (queued → dialing → active →
 	// reconnecting → retry_wait). Carries the overlay address and new

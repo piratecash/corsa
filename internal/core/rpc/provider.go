@@ -20,6 +20,13 @@ type NodeProvider interface {
 	// sender/receiver file transfers. Terminal states are excluded.
 	FetchFileTransfers() (json.RawMessage, error)
 
+	// FetchAllFileTransfers returns a JSON-encoded list of ALL
+	// sender/receiver file transfers, including terminal states
+	// (completed, failed, tombstone). Used by the desktop UI's file
+	// tab to display transfer history. Use FetchFileTransfers when
+	// only active/pending entries are needed (existing observability).
+	FetchAllFileTransfers() (json.RawMessage, error)
+
 	// FetchFileMappings returns a JSON-encoded list of active and pending
 	// sender file mappings (TransmitPath is excluded from the output).
 	FetchFileMappings() (json.RawMessage, error)

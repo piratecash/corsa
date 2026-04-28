@@ -624,6 +624,18 @@ func (c *DesktopClient) FileTransferProgress(fileID domain.FileID, isSender bool
 	return c.localNode.FileTransferProgress(fileID, isSender)
 }
 
+// AllFileTransfers returns every sender/receiver mapping (active and
+// terminal) as typed snapshots, used by the desktop UI's file tab to
+// render history alongside in-flight transfers. Returns an empty
+// non-nil slice in standalone-RPC mode (no embedded node) so the UI
+// doesn't have to special-case nil.
+func (c *DesktopClient) AllFileTransfers() []filetransfer.TransferSnapshot {
+	if c.localNode == nil {
+		return []filetransfer.TransferSnapshot{}
+	}
+	return c.localNode.AllFileTransfersSnapshot()
+}
+
 // FileTransferFilePath returns the on-disk path for a transferred file.
 func (c *DesktopClient) FileTransferFilePath(fileID domain.FileID, isSender bool) string {
 	if c.localNode == nil {

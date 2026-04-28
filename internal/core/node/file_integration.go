@@ -469,6 +469,22 @@ func (s *Service) FileTransferProgress(fileID domain.FileID, isSender bool) (byt
 	return manager.ReceiverProgress(fileID)
 }
 
+// AllFileTransfersSnapshot returns a typed list of every sender/receiver
+// mapping (active AND terminal) for in-process callers — primarily the
+// desktop UI's file tab. The JSON-encoded variant is FetchAllFileTransfers
+// (used by the RPC layer); this method skips the marshal/unmarshal round
+// trip when the consumer is in the same process.
+//
+// Returns an empty (non-nil) slice when the file-transfer subsystem is
+// not initialized. Mirrors the contract of FetchAllFileTransfers.
+func (s *Service) AllFileTransfersSnapshot() []filetransfer.TransferSnapshot {
+	manager, _ := s.getFileTransferManager()
+	if manager == nil {
+		return []filetransfer.TransferSnapshot{}
+	}
+	return manager.AllTransfersSnapshot()
+}
+
 // FileTransferFilePath returns the on-disk path for a transferred file.
 // For the sender it resolves to the content-addressed blob in the transmit
 // directory; for the receiver it returns the CompletedPath of the download.
@@ -655,6 +671,27 @@ func (s *Service) FetchFileTransfers() (json.RawMessage, error) {
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return nil, fmt.Errorf("marshal file transfers: %w", err)
+	}
+	return data, nil
+}
+
+// FetchAllFileTransfers returns a JSON-encoded list of ALL
+// sender/receiver transfers, including terminal states (completed,
+// failed, tombstone). Used by the desktop UI's file tab to show
+// transfer history. Use FetchFileTransfers when only active/pending
+// entries should be returned (existing observability RPC).
+//
+// Returns empty array when the subsystem is not initialized rather
+// than an error — no transfers is a valid state.
+func (s *Service) FetchAllFileTransfers() (json.RawMessage, error) {
+	manager, _ := s.getFileTransferManager()
+	if manager == nil {
+		return json.RawMessage("[]"), nil
+	}
+	entries := manager.AllTransfersSnapshot()
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return nil, fmt.Errorf("marshal all file transfers: %w", err)
 	}
 	return data, nil
 }

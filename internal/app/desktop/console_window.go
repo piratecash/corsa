@@ -55,6 +55,7 @@ const (
 	consoleTabConsole consoleTab = iota
 	consoleTabPeers
 	consoleTabTraffic
+	consoleTabFile
 	consoleTabInfo
 	consoleTabDonate
 )
@@ -92,42 +93,73 @@ type consoleDonateEntry struct {
 }
 
 type ConsoleWindow struct {
-	parent              *Window
-	theme               *material.Theme
-	ops                 op.Ops
-	onClose             func()
-	window              *app.Window
-	closed              chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
-	peerList            widget.List
-	peerSectionList     widget.List
-	peerSelectables     map[string]*peerCardSelectables // keyed by peer address; lazily created
-	historyList         widget.List
-	suggestList         widget.List
-	donateList          widget.List
-	consoleEditor       widget.Editor
-	runButton           widget.Clickable
-	consoleTabButton    widget.Clickable
-	peersTabButton      widget.Clickable
-	trafficTabButton    widget.Clickable
-	infoTabButton       widget.Clickable
-	donateTabButton     widget.Clickable
-	activeTab           int32     // consoleTab value; accessed atomically (UI writes, ticker reads)
-	trafficSamplesIn    []float32 // per-second received bytes/s (newest last)
-	trafficSamplesOut   []float32 // per-second sent bytes/s (newest last)
-	trafficTotalSent    int64     // cumulative sent (for totals display)
-	trafficTotalRecv    int64     // cumulative received (for totals display)
-	trafficLoaded       bool      // true after initial history load
-	trafficTicker       *time.Ticker
-	mu                  sync.RWMutex
-	consoleEntries      []consoleEntry
-	consoleBusy         bool
-	suggestButtons      map[string]*widget.Clickable
-	lastSuggestQuery    string
-	hideSuggestions     bool
-	selectedSuggest     int
-	suggestBaseQuery    string
-	suggestSnapshot     []consoleSuggestion
-	cachedCommands      []consoleSuggestion // loaded from CommandTable at init
+	parent          *Window
+	theme           *material.Theme
+	ops             op.Ops
+	onClose         func()
+	window          *app.Window
+	closed          chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
+	peerList        widget.List
+	peerSectionList widget.List
+	peerSelectables map[string]*peerCardSelectables // keyed by peer address; lazily created
+	historyList     widget.List
+	suggestList     widget.List
+	donateList      widget.List
+	fileList        widget.List
+
+	// File-tab per-row Clickables, keyed by FileID. Created lazily
+	// on layout and garbage-collected by pruneFileTabButtons when
+	// the FileID disappears from the snapshot.
+	//
+	// We own dedicated maps for Delete / Download / Restart / Thumb
+	// (instead of reusing the chat-thread *Window's maps) so the
+	// click handlers can `defer c.invalidateWindow()` after the
+	// async StartDownload / RestartDownload settles. Without that
+	// guarantee, clicking Restart on a terminal "failed" row leaves
+	// the file tab showing the old state until an unrelated event
+	// triggers a redraw — the polled timer is gated on
+	// hasActiveFileTransfer, which the click hasn't yet flipped on.
+	//
+	// Cancel and Show-in-folder/Open are routed through the
+	// chat-thread *Window methods because their post-click state is
+	// always polled-active or terminal-with-disk-actions-only, so
+	// the missing invalidate doesn't manifest.
+	fileDeleteButtons   map[domain.FileID]*widget.Clickable
+	fileDownloadButtons map[domain.FileID]*widget.Clickable
+	fileRestartButtons  map[domain.FileID]*widget.Clickable
+	fileThumbButtons    map[domain.FileID]*widget.Clickable
+
+	// fileRowSelectables holds widget.Selectable instances per file
+	// row so the user can click-drag to highlight and Cmd/Ctrl-C
+	// the filename, peer identity, and meta line (size + timestamp).
+	// Same lazy-allocate / prune pattern as the Clickable maps.
+	fileRowSelectables map[domain.FileID]*fileRowSelectables
+
+	consoleEditor     widget.Editor
+	runButton         widget.Clickable
+	consoleTabButton  widget.Clickable
+	peersTabButton    widget.Clickable
+	trafficTabButton  widget.Clickable
+	fileTabButton     widget.Clickable
+	infoTabButton     widget.Clickable
+	donateTabButton   widget.Clickable
+	activeTab         int32     // consoleTab value; accessed atomically (UI writes, ticker reads)
+	trafficSamplesIn  []float32 // per-second received bytes/s (newest last)
+	trafficSamplesOut []float32 // per-second sent bytes/s (newest last)
+	trafficTotalSent  int64     // cumulative sent (for totals display)
+	trafficTotalRecv  int64     // cumulative received (for totals display)
+	trafficLoaded     bool      // true after initial history load
+	trafficTicker     *time.Ticker
+	mu                sync.RWMutex
+	consoleEntries    []consoleEntry
+	consoleBusy       bool
+	suggestButtons    map[string]*widget.Clickable
+	lastSuggestQuery  string
+	hideSuggestions   bool
+	selectedSuggest   int
+	suggestBaseQuery  string
+	suggestSnapshot   []consoleSuggestion
+	cachedCommands    []consoleSuggestion // loaded from CommandTable at init
 	// commandHistory is the chronological ring of submitted commands;
 	// commandHistory[0] is the oldest, commandHistory[len-1] the most recent.
 	// Up/Down arrows in the editor walk this ring when no completion
@@ -143,13 +175,14 @@ type ConsoleWindow struct {
 	// historyText is the value last written into the editor by history
 	// navigation. Used to detect manual edits — once the editor text diverges
 	// from this, navigation state is reset on the next frame.
-	historyText string
+	historyText         string
 	donateEntries       []consoleDonateEntry
 	donateLink          widget.Selectable
 	donateLinkButton    widget.Clickable
 	stopRecordingButton widget.Clickable
 	ebusSubscriptions   []ebus.SubscriptionID // cleaned up on close to prevent handler leak
 	uptimeInvalidating  int32                 // atomic flag; coalesces uptime redraw requests
+	fileTabInvalidating int32                 // atomic flag; coalesces file-tab redraw requests during active transfers
 }
 
 func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
@@ -173,10 +206,18 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 		donateList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
-		peerSelectables: make(map[string]*peerCardSelectables),
-		suggestButtons:  make(map[string]*widget.Clickable),
-		selectedSuggest: -1,
-		donateEntries:   newConsoleDonateEntries(),
+		fileList: widget.List{
+			List: layout.List{Axis: layout.Vertical},
+		},
+		fileDeleteButtons:   make(map[domain.FileID]*widget.Clickable),
+		fileDownloadButtons: make(map[domain.FileID]*widget.Clickable),
+		fileRestartButtons:  make(map[domain.FileID]*widget.Clickable),
+		fileThumbButtons:    make(map[domain.FileID]*widget.Clickable),
+		fileRowSelectables:  make(map[domain.FileID]*fileRowSelectables),
+		peerSelectables:     make(map[string]*peerCardSelectables),
+		suggestButtons:      make(map[string]*widget.Clickable),
+		selectedSuggest:     -1,
+		donateEntries:       newConsoleDonateEntries(),
 	}
 	window.consoleEditor.SingleLine = true
 	window.donateLink.SetText(consoleDonateURL)
@@ -276,6 +317,9 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 		atomic.StoreInt32(&c.activeTab, int32(consoleTabTraffic))
 		c.startTrafficTicker()
 	}
+	for c.fileTabButton.Clicked(gtx) {
+		atomic.StoreInt32(&c.activeTab, int32(consoleTabFile))
+	}
 	for c.infoTabButton.Clicked(gtx) {
 		atomic.StoreInt32(&c.activeTab, int32(consoleTabInfo))
 	}
@@ -369,6 +413,10 @@ func (c *ConsoleWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutTabButton(gtx, &c.fileTabButton, c.currentTab() == consoleTabFile, c.parent.t("console.tab.file"))
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return c.layoutTabButton(gtx, &c.infoTabButton, c.currentTab() == consoleTabInfo, c.parent.t("console.tab.info"))
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
@@ -403,6 +451,8 @@ func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
 		return c.layoutPeersTab(gtx, status)
 	case consoleTabTraffic:
 		return c.layoutTrafficTab(gtx)
+	case consoleTabFile:
+		return c.layoutFileTab(gtx)
 	case consoleTabInfo:
 		return c.layoutInfoTab(gtx, status)
 	case consoleTabDonate:
@@ -997,6 +1047,19 @@ func (c *ConsoleWindow) subscribeConsoleEvents() {
 		bus.Subscribe(ebus.TopicContactAdded, func(ebus.ContactAddedEvent) { invalidate() }),
 		bus.Subscribe(ebus.TopicContactRemoved, func(domain.PeerIdentity) { invalidate() }),
 		bus.Subscribe(ebus.TopicIdentityAdded, func(domain.PeerIdentity) { invalidate() }),
+
+		// File-transfer lifecycle — affects File tab. Sender lifecycle
+		// (sent, send-failed), receiver registration on every inbound
+		// file_announce regardless of which chat is active, and
+		// delete-completed events all change the snapshot the tab
+		// renders. Chunk-progress events are intentionally NOT
+		// subscribed here (they fire at high frequency); the file tab
+		// schedules its own coalesced redraw via fileTabInvalidating
+		// while any transfer is mid-flight.
+		bus.Subscribe(ebus.TopicFileSent, func(ebus.FileSentResult) { invalidate() }),
+		bus.Subscribe(ebus.TopicFileSendFailed, func(ebus.FileSendFailedResult) { invalidate() }),
+		bus.Subscribe(ebus.TopicFileReceived, func(ebus.FileReceivedResult) { invalidate() }),
+		bus.Subscribe(ebus.TopicMessageDeleteCompleted, func(ebus.MessageDeleteOutcome) { invalidate() }),
 	}
 	c.ebusSubscriptions = ids
 }

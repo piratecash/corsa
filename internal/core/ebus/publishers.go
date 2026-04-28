@@ -109,3 +109,14 @@ func PublishFileSendFailed(bus *Bus, result FileSendFailedResult) {
 	}
 	bus.Publish(TopicFileSendFailed, result)
 }
+
+// PublishFileReceived emits TopicFileReceived with a typed
+// FileReceivedResult. Called by DMRouter.tryRegisterFileReceive after
+// a receiver-side mapping has been registered for an inbound
+// file_announce DM, regardless of which conversation is active.
+func PublishFileReceived(bus *Bus, result FileReceivedResult) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicFileReceived, result)
+}
