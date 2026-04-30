@@ -80,9 +80,9 @@ type Config struct {
 }
 
 const (
-	CorsaVersion     = "0.41 alpha"
-	CorsaWireVersion = "0.41-alpha"
-	ClientBuild      = 41
+	CorsaVersion     = "0.42 alpha"
+	CorsaWireVersion = "0.42-alpha"
+	ClientBuild      = 42
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	//
 	// Current value 12 prepares the advertise-address legacy cleanup phase 2:
@@ -106,7 +106,7 @@ const (
 	// mandatory even though MinimumProtocolVersion stays at 8 in this build
 	// — the floor raise itself is the v12 contract.
 	ProtocolVersion        = 13
-	MinimumProtocolVersion = 9
+	MinimumProtocolVersion = 10
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
 )
