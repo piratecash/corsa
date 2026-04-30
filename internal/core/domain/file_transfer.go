@@ -61,13 +61,16 @@ const (
 	// exists to close.
 	//
 	// The only soft-demote case is "peer reported v > config.ProtocolVersion
-	// (inflated, clamped for ranking defence)": the route-meta helper sets
-	// PeerRouteMeta.ProtocolVersion = 0 (clamped) but keeps
-	// RawProtocolVersion at the actual reported value. Eligibility is then
-	// decided by RawProtocolVersion (>= 12 → admit as last-resort), and
-	// ranking is decided by ProtocolVersion (0 sorts to the bottom under
-	// DESC). The split is what lets the inflated peer survive without
-	// confusing it with the unknown case.
+	// (newer than this build — either a staged-rollout upgrade or an
+	// inflation attack)": the route-meta helper caps
+	// PeerRouteMeta.ProtocolVersion at config.ProtocolVersion but keeps
+	// RawProtocolVersion at the actual reported value. Eligibility is
+	// then decided by RawProtocolVersion (>= 12 → admit), and ranking
+	// is decided by ProtocolVersion (capped at local, so the inflation
+	// lie cannot WIN the primary key over a legitimate v=local peer).
+	// The cap leaves the upgraded peer in the equal-version tier where
+	// hops/uptime decide — earlier behaviour clamped to 0 instead and
+	// starved every legitimate upgraded peer of file traffic.
 	//
 	// This value is the temporary bridge until MinimumProtocolVersion is
 	// officially raised to 12 globally; see

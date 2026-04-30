@@ -249,7 +249,7 @@ func TestIsPeerReachable_RouteViaUnknownVersionNextHop(t *testing.T) {
 	// Relay peer-B advertises file_transfer_v1 capability with version
 	// intentionally left at zero (capability-only / pre-handshake / not
 	// observed yet). peerSession.version is the raw negotiated value,
-	// not the clamped-inflated ranking key, so 0 here always means
+	// not the capped-inflated ranking key, so 0 here always means
 	// "unknown", never "demoted attacker".
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
@@ -564,18 +564,20 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
-	// Two next-hops to the same target. Both peers run the current
-	// protocol version (config.ProtocolVersion == FileCommandMinPeerProtocolVersion
-	// == 12) — the previous "higher protocol version wins" fixture using
-	// versions 6/7 became impossible after the file-transfer cutover:
-	// versions below 12 are filtered out, and versions above 12 trip
-	// trustedFileRouteVersion's inflated-version clamp to 0 (defence
-	// against the traffic-capture attack). We therefore exercise the
-	// secondary tiebreaker — equal version, equal hops, longer uptime
-	// (older LastConnectedAt) wins. relayB wins because it has held its
-	// session for ~30 minutes while relayC just connected a minute ago.
-	// The behavioural ranking itself is covered exhaustively by
-	// filerouter tests; this test owns the JSON wire contract.
+	// Two next-hops to the same target. Both peers run the cutover /
+	// minimum file-command version (FileCommandMinPeerProtocolVersion
+	// == 12). The previous "higher protocol version wins" fixture
+	// using versions 6/7 became impossible after the file-transfer
+	// cutover: versions below 12 are filtered out, and versions above
+	// config.ProtocolVersion are capped at the local version by
+	// trustedFileRouteVersion (defence against the traffic-capture
+	// attack — the cap collapses the lie to the v=local tier instead
+	// of zeroing it). We therefore exercise the secondary tiebreaker —
+	// equal version, equal hops, longer uptime (older LastConnectedAt)
+	// wins. relayB wins because it has held its session for ~30
+	// minutes while relayC just connected a minute ago. The
+	// behavioural ranking itself is covered exhaustively by filerouter
+	// tests; this test owns the JSON wire contract.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
@@ -677,20 +679,29 @@ func TestExplainFileRouteEmptyArrayWhenNoRoute(t *testing.T) {
 	}
 }
 
-// TestFileTransferPeerRouteMetaDemotesInflatedVersion is the security
-// regression for the inflated-version defence: a peer that claims a
-// protocol version higher than this build's config.ProtocolVersion
-// cannot actually be speaking the protocol we run, so its version is
-// either a misconfig or a deliberate traffic-capture attack ("look at
-// me, I'm newer, route everything through me"). The meta layer must
-// demote such a peer in the ranking by clamping the reported version
-// to zero, which sorts it below every legit candidate under
-// protocolVersion DESC.
+// TestFileTransferPeerRouteMetaCapsInflatedVersionAtLocal is the
+// security regression for the inflated-version defence: a peer that
+// claims a protocol version higher than this build's
+// config.ProtocolVersion cannot actually be speaking the protocol we
+// run, so its version is either a benign staged-rollout case (operator
+// upgraded the peer ahead of this node) or a deliberate traffic-capture
+// attack ("look at me, I'm newer, route everything through me").
+//
+// The meta layer demotes such a peer in the ranking by capping the
+// reported version at the local protocol version. The cap collapses
+// the inflated peer to the same primary-key tier as every legitimate
+// v=local peer — neither wins the primary key on the lie. Earlier
+// behaviour clamped the reported version to zero, which solved the
+// inflation-attack ranking problem but ALSO pushed every legitimate
+// upgraded peer (v=local+1) to the bottom of the plan, breaking
+// staged rollouts. The cap fixes that without re-opening the attack:
+// the attacker's claim of "newer" still cannot WIN against a legit
+// v=local peer.
 //
 // Without this defence the file router would happily prefer a peer
 // claiming version 99 over a real peer at the local version, and an
 // attacker who can complete handshake could siphon all file traffic.
-func TestFileTransferPeerRouteMetaDemotesInflatedVersion(t *testing.T) {
+func TestFileTransferPeerRouteMetaCapsInflatedVersionAtLocal(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
@@ -700,7 +711,8 @@ func TestFileTransferPeerRouteMetaDemotesInflatedVersion(t *testing.T) {
 	// constant config.ProtocolVersion is whatever this build ships;
 	// adding a large fixed offset keeps the test future-proof against
 	// version bumps without re-tuning the literal.
-	inflated := domain.ProtocolVersion(config.ProtocolVersion) + 100
+	localVersion := domain.ProtocolVersion(config.ProtocolVersion)
+	inflated := localVersion + 100
 
 	svc.sessions[domain.PeerAddress("addr-attacker")] = &peerSession{
 		address:      domain.PeerAddress("addr-attacker"),
@@ -718,8 +730,14 @@ func TestFileTransferPeerRouteMetaDemotesInflatedVersion(t *testing.T) {
 	if !ok {
 		t.Fatal("expected peer to remain usable — defence is a soft demote, not a hard reject")
 	}
-	if meta.ProtocolVersion != 0 {
-		t.Fatalf("expected inflated version (%d) to be clamped to 0 for ranking, got %d", inflated, meta.ProtocolVersion)
+	if meta.ProtocolVersion != localVersion {
+		t.Fatalf("expected inflated version (%d) to be capped at local (%d) for ranking, got %d", inflated, localVersion, meta.ProtocolVersion)
+	}
+	// RawProtocolVersion still mirrors the actually-reported value —
+	// only the ranking projection is capped, the audit/eligibility
+	// surface keeps the truth.
+	if meta.RawProtocolVersion != inflated {
+		t.Fatalf("RawProtocolVersion must report the actually-reported value, got %d (want %d)", meta.RawProtocolVersion, inflated)
 	}
 	// connected_at MUST still describe the chosen connection — the
 	// defence only touches the ranking key, not the audit trail.
@@ -728,14 +746,23 @@ func TestFileTransferPeerRouteMetaDemotesInflatedVersion(t *testing.T) {
 	}
 }
 
-// TestExplainFileRouteRanksInflatedVersionPeerLast is the end-to-end
+// TestExplainFileRouteCapsInflatedVersionAtLocal is the end-to-end
 // counterpart: with one legit peer at the local version and one
 // inflated-version peer (would-be attacker), the explain plan must
-// list the legit peer first (best=true) and the inflated peer last.
+// list the legit peer first (best=true) and the inflated peer second.
+// After the cap fix both entries report protocol_version equal to the
+// local version (the inflated value is capped, not zeroed), so the
+// primary key is tied between them and the secondary key (older
+// connectedAt — longer uptime) decides. The legit peer is set up with
+// the longer uptime so it wins on the tiebreak, exactly as the
+// inflation defence intends: a peer claiming "newer" cannot win the
+// ranking on the lie alone.
 //
-// Without the meta-level clamp the inflated peer would win the primary
-// key (version DESC) and become best, capturing all file routes.
-func TestExplainFileRouteRanksInflatedVersionPeerLast(t *testing.T) {
+// Without ANY defence (cap or clamp) the inflated peer would win the
+// primary key (version DESC) outright and become best, capturing all
+// file routes. The earlier clamp-to-zero behaviour solved that but
+// also broke staged rollouts; the cap-at-local behaviour solves both.
+func TestExplainFileRouteCapsInflatedVersionAtLocal(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
@@ -757,6 +784,11 @@ func TestExplainFileRouteRanksInflatedVersionPeerLast(t *testing.T) {
 		version:      int(inflatedVersion),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
+	// Legit peer has the longer uptime — under the cap, the primary
+	// key is tied at v=local for both peers and the secondary key
+	// (connectedAt ASC) decides. The attacker cannot fake a longer
+	// local-clock uptime, so this is the realistic shape of the
+	// defence in production.
 	svc.health[domain.PeerAddress("addr-legit")] = &peerHealth{
 		Connected:           true,
 		LastConnectedAt:     now.Add(-30 * time.Minute),
@@ -768,10 +800,8 @@ func TestExplainFileRouteRanksInflatedVersionPeerLast(t *testing.T) {
 		LastUsefulReceiveAt: now,
 	}
 
-	// Both relays announce equal hops to the target so the only key
-	// that decides the head of the plan is protocol_version. With the
-	// defence in place the legit peer wins; without it the attacker
-	// (advertising inflated version) would.
+	// Both relays announce equal hops to the target so the primary
+	// key tie under the cap is honest — only uptime decides.
 	announceRouteVia(svc, idPeerB, idTargetX, 1)
 	announceRouteVia(svc, idPeerC, idTargetX, 1)
 
@@ -797,13 +827,155 @@ func TestExplainFileRouteRanksInflatedVersionPeerLast(t *testing.T) {
 	if v, _ := entries[0]["protocol_version"].(float64); int(v) != int(legitVersion) {
 		t.Fatalf("legit entry: expected protocol_version=%d, got %v", legitVersion, entries[0]["protocol_version"])
 	}
-	// Inflated peer must be in the plan but demoted, with version 0
-	// (the clamped ranking value, mirrors what the meta returned).
+	// Inflated peer is in the plan at fall-back position, with the
+	// CAPPED ranking value (== legitVersion) — the wire surface
+	// reports the cap, never the raw inflated value.
 	if entries[1]["next_hop"] != string(idPeerC) {
 		t.Fatalf("expected inflated peer at fall-back position, got %v", entries[1]["next_hop"])
 	}
-	if v, _ := entries[1]["protocol_version"].(float64); int(v) != 0 {
-		t.Fatalf("inflated entry: expected protocol_version=0 (clamped), got %v", entries[1]["protocol_version"])
+	if v, _ := entries[1]["protocol_version"].(float64); int(v) != int(legitVersion) {
+		t.Fatalf("inflated entry: expected protocol_version=%d (capped at local), got %v", legitVersion, entries[1]["protocol_version"])
+	}
+}
+
+// TestFileTransferPeerRouteMetaCapsNewerVersionAtLocal is the regression
+// for the legitimate-newer-peer ranking inversion reported by the
+// staged-rollout case (operator upgrades a single node ahead of the
+// rest of the fleet). Before the fix, trustedFileRouteVersion clamped
+// any peer reporting protocol_version > config.ProtocolVersion down to
+// ranking value 0, which under protocolVersion DESC sorted the upgraded
+// peer to the bottom of the candidate list — below every legacy v=local
+// candidate. The user-visible symptom is "files never route through the
+// upgraded node", because the file router prefers any v=local relay over
+// the demoted v=local+1 one regardless of hops/uptime.
+//
+// The fix caps the ranking value at config.ProtocolVersion instead of
+// zeroing. The inflation defence still holds — an attacker reporting
+// v=local+100 cannot WIN the primary key over a legitimate v=local
+// peer because the cap collapses both to the same ranking — but the
+// upgraded peer keeps its place in the equal-version tier, where the
+// secondary keys (hops ASC, connectedAt ASC) decide.
+//
+// RawProtocolVersion still mirrors the actually-reported value so the
+// receive-side cutover gate and any future audit/diagnostic surfaces
+// can distinguish "legitimately-newer peer" from "v=local peer".
+func TestFileTransferPeerRouteMetaCapsNewerVersionAtLocal(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	localVersion := domain.ProtocolVersion(config.ProtocolVersion)
+	upgradedVersion := localVersion + 1 // one release ahead — staged rollout
+
+	svc.sessions[domain.PeerAddress("addr-upgraded")] = &peerSession{
+		address:      domain.PeerAddress("addr-upgraded"),
+		peerIdentity: idPeerB,
+		version:      int(upgradedVersion),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-upgraded")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Hour),
+		LastUsefulReceiveAt: now,
+	}
+
+	meta, ok := svc.fileTransferPeerRouteMeta(idPeerB)
+	if !ok {
+		t.Fatal("expected upgraded peer to remain usable — staged rollout must not break file transfer")
+	}
+	// Cap at local — NOT clamp to zero. Zero collapses the upgraded peer
+	// to last-resort under protocolVersion DESC and re-creates the
+	// production failure: master picks every v=local relay first, no
+	// matter how many hops, and the upgraded next-hop is permanently
+	// starved of file traffic.
+	if meta.ProtocolVersion != localVersion {
+		t.Fatalf("expected ProtocolVersion to be capped at local (%d), got %d", localVersion, meta.ProtocolVersion)
+	}
+	// RawProtocolVersion is the eligibility key and the audit trail —
+	// it must report the actually-negotiated value, not the cap.
+	if meta.RawProtocolVersion != upgradedVersion {
+		t.Fatalf("RawProtocolVersion must report the actual reported value, got %d (want %d)", meta.RawProtocolVersion, upgradedVersion)
+	}
+}
+
+// TestExplainFileRouteRanksUpgradedPeerByTiebreak is the end-to-end
+// counterpart of the cap regression: when one next-hop is at the local
+// version and another is one release ahead with FEWER hops, the
+// upgraded peer must win the plan on the secondary key (hops ASC),
+// because the cap brings both to the same primary key. Under the old
+// clamp-to-zero behaviour the legacy v=local peer would have won
+// regardless of hops — exactly the production failure mode the user
+// reported as "newer protocol gets displaced".
+func TestExplainFileRouteRanksUpgradedPeerByTiebreak(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+	now := time.Now().UTC()
+
+	localVersion := domain.ProtocolVersion(config.ProtocolVersion)
+	upgradedVersion := localVersion + 1
+
+	// Legit peer: same version as local, but two hops to target.
+	svc.sessions[domain.PeerAddress("addr-legit")] = &peerSession{
+		address:      domain.PeerAddress("addr-legit"),
+		peerIdentity: idPeerB,
+		version:      int(localVersion),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	// Upgraded peer: one release ahead, one hop to target.
+	svc.sessions[domain.PeerAddress("addr-upgraded")] = &peerSession{
+		address:      domain.PeerAddress("addr-upgraded"),
+		peerIdentity: idPeerC,
+		version:      int(upgradedVersion),
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
+	}
+	svc.health[domain.PeerAddress("addr-legit")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Hour),
+		LastUsefulReceiveAt: now,
+	}
+	svc.health[domain.PeerAddress("addr-upgraded")] = &peerHealth{
+		Connected:           true,
+		LastConnectedAt:     now.Add(-time.Minute),
+		LastUsefulReceiveAt: now,
+	}
+
+	announceRouteVia(svc, idPeerB, idTargetX, 2)
+	announceRouteVia(svc, idPeerC, idTargetX, 1)
+
+	installTestFileRouter(svc)
+
+	raw, err := svc.ExplainFileRoute(idTargetX)
+	if err != nil {
+		t.Fatalf("ExplainFileRoute: %v", err)
+	}
+	var entries []map[string]interface{}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("unmarshal: %v\npayload=%s", err, string(raw))
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d (payload=%s)", len(entries), string(raw))
+	}
+	// After the cap fix both peers tie at protocol_version = localVersion,
+	// so hops ASC decides — upgraded peer (1 hop) wins over legit peer
+	// (2 hops). Under the old clamp-to-0 behaviour the upgraded peer
+	// would have ProtocolVersion=0 and would lose the primary key, so
+	// the legit peer would incorrectly take the head of the plan.
+	if entries[0]["next_hop"] != string(idPeerC) {
+		t.Fatalf("expected upgraded peer (%s, 1 hop) to win the plan, got %v at head", idPeerC, entries[0]["next_hop"])
+	}
+	if entries[0]["best"] != true {
+		t.Fatalf("expected upgraded peer to be best=true, got %v", entries[0]["best"])
+	}
+	// The protocol_version reported in the plan reflects the cap, not
+	// the raw negotiated value — that is the contract of the ranking
+	// surface (RawProtocolVersion is internal-only).
+	if v, _ := entries[0]["protocol_version"].(float64); int(v) != int(localVersion) {
+		t.Fatalf("upgraded entry: expected protocol_version=%d (capped), got %v", localVersion, entries[0]["protocol_version"])
+	}
+	if entries[1]["next_hop"] != string(idPeerB) {
+		t.Fatalf("expected legit v=local peer at fall-back position, got %v", entries[1]["next_hop"])
 	}
 }
 

@@ -958,21 +958,29 @@ func TestRouteCandidateLessOrdering(t *testing.T) {
 
 // TestFileRouterPrefersLegitOverInflatedVersion exercises the primary
 // ranking key end-to-end through collectRouteCandidates: an eligible
-// peer reporting the legit cutover version (RawProtocolVersion=12,
-// ProtocolVersion=12) must win over an inflated-version peer
-// (RawProtocolVersion>12, ProtocolVersion clamped to 0 by the node-side
-// trustedFileRouteVersion helper) even when the inflated peer has
-// fewer hops. Inflated peers stay eligible (Raw>=12 passes the cutover
-// filter — see routeCandidate godoc) but the clamped ranking value
-// pushes them to the bottom of the protocolVersion-DESC sort.
+// peer reporting the fixture-local version must NOT lose to an
+// inflated-version peer (RawProtocolVersion > fixtureLocal,
+// ProtocolVersion CAPPED at fixtureLocal by the node-side
+// trustedFileRouteVersion helper) on the inflation lie alone. After
+// the cap fix both peers tie on the primary key — neither wins via
+// the lie — and the secondary keys (hops, uptime) decide. The test
+// pins the legit peer's longer uptime as the tiebreaker so the
+// assertion still reads as "legit wins over inflated"; the security
+// guarantee is unchanged: an attacker cannot use a fake inflated
+// version to capture file traffic.
 //
-// This is the production-realistic shape of the legacy
-// "higher-version-wins" test: with config.ProtocolVersion = 12, no
-// peer can legitimately advertise a higher version, so the only way
-// 13/14/etc. surface in PeerRouteMeta is the inflated-and-clamped
-// case. ProtocolVersion=12 + RawProtocolVersion=12 represents a
-// healthy peer at the cutover; ProtocolVersion=0 + RawProtocolVersion=13
-// represents an inflated peer kept as last-resort.
+// Earlier behaviour clamped ProtocolVersion to 0 instead of capping,
+// which solved the inflation-attack ranking but ALSO sorted every
+// legitimate upgraded peer to the bottom of the plan, breaking
+// staged rollouts. The cap path is the production shape after that
+// fix; see
+// internal/core/node/file_integration_test.go's
+// TestFileTransferPeerRouteMetaCapsInflatedVersionAtLocal for the
+// node-layer regression that pins the cap behaviour where
+// trustedFileRouteVersion lives — that test reads
+// config.ProtocolVersion at runtime, the present test pins a
+// fixture-local stand-in because the filerouter package has no
+// access to that constant.
 func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 	t.Parallel()
 
@@ -985,25 +993,35 @@ func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
 
 	now := time.Now()
+	// Equal hops so the inflation lie cannot win via the hops
+	// tie-break — uptime alone decides between two equal-version peers,
+	// and the cap collapses both peers' primary keys to v=local.
 	snap := routing.Snapshot{
 		TakenAt: now,
 		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
 			dstID: {
-				{Identity: dstID, NextHop: relayClose, Hops: 2, ExpiresAt: now.Add(time.Minute)},
+				{Identity: dstID, NextHop: relayClose, Hops: 1, ExpiresAt: now.Add(time.Minute)},
 				{Identity: dstID, NextHop: relayFar, Hops: 1, ExpiresAt: now.Add(time.Minute)},
 			},
 		},
 	}
 
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	// fixtureLocal is the local-version stand-in for this fixture
+	// (filerouter has no access to config.ProtocolVersion, so we pin
+	// a value here and treat it as the cap ceiling; production
+	// config.ProtocolVersion may differ — what matters for the
+	// comparator is only that both candidates' ProtocolVersion values
+	// are equal so the primary key ties).
+	const fixtureLocal = domain.ProtocolVersion(12)
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		// Legit: ProtocolVersion mirrors RawProtocolVersion at the cutover.
-		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
-		// Inflated: peer claimed v13, clamped to ranking 0 by node-side
-		// trustedFileRouteVersion. Eligible (Raw>=12) but ranked last.
-		// Note: even though relayFar has fewer hops, the protocolVersion
-		// DESC primary key wins (12 > 0).
-		relayFar: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 0, RawProtocolVersion: 13},
+		// Legit: ProtocolVersion mirrors RawProtocolVersion at fixtureLocal.
+		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal},
+		// Inflated: peer claimed v=fixtureLocal+1, capped at ranking
+		// fixtureLocal by node-side trustedFileRouteVersion. Eligible
+		// (Raw>=cutover) and tied with relayClose on the primary key —
+		// uptime decides, and relayClose has the longer one.
+		relayFar: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal + 1},
 	}
 
 	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
@@ -1034,10 +1052,10 @@ func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 	tr.router.HandleInbound(json.RawMessage(raw), "")
 
 	if len(tr.sentTo(relayClose)) != 1 {
-		t.Fatalf("expected file router to choose legit-version relayClose (PV=12) over inflated relayFar (PV=0 clamped, Raw=13), got %d sends", len(tr.sentTo(relayClose)))
+		t.Fatalf("expected file router to choose legit-uptime relayClose (PV=Raw=fixtureLocal) over inflated relayFar (PV=fixtureLocal capped, Raw=fixtureLocal+1) on uptime tie-break, got %d sends", len(tr.sentTo(relayClose)))
 	}
 	if len(tr.sentTo(relayFar)) != 0 {
-		t.Fatalf("expected inflated relayFar to be the last-resort candidate, not picked first; got %d sends", len(tr.sentTo(relayFar)))
+		t.Fatalf("expected inflated relayFar to lose on uptime tie-break, not picked first; got %d sends", len(tr.sentTo(relayFar)))
 	}
 }
 
@@ -1132,20 +1150,29 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 		},
 	}
 
+	// fixtureLocal is the ranking ceiling this test models. The
+	// filerouter package has no access to config.ProtocolVersion (the
+	// node layer is where the cap is applied); we hard-code a single
+	// value here and treat it as "the local version" for the
+	// purposes of this fixture. The actual config.ProtocolVersion in
+	// the production build can be higher than 12 — what matters for
+	// the comparator is only that both candidates' ProtocolVersion
+	// values are equal so the primary key ties. RawProtocolVersion
+	// is then free to differ on the inflated side.
+	const fixtureLocal = domain.ProtocolVersion(12)
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		// relayClose is a healthy peer at the cutover (RawProtocolVersion=12,
-		// ProtocolVersion=12). relayFar represents an inflated peer:
-		// it claimed a version higher than config.ProtocolVersion=12, the
-		// node-side trustedFileRouteVersion clamped its ranking value to 0
-		// while keeping RawProtocolVersion at the actually-reported value
-		// (13 here). The clamp pushes relayFar to the bottom of the
-		// protocolVersion-DESC sort even though it is one hop closer; the
-		// raw value (>= cutover) keeps relayFar eligible as last-resort.
-		// This is the only production-realistic shape where
-		// ProtocolVersion=0 and the candidate is still in the plan — see
-		// PeerRouteMeta godoc and routeCandidate godoc.
-		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
-		relayFar:   {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 0, RawProtocolVersion: 13},
+		// relayClose is a healthy peer at fixtureLocal
+		// (Raw == PV == fixtureLocal). relayFar represents an
+		// inflated peer: it claimed a higher version, and the
+		// production node-side trustedFileRouteVersion CAPPED its
+		// ranking value at fixtureLocal while keeping
+		// RawProtocolVersion at the actually-reported value (here
+		// fixtureLocal+1). Under the cap both peers tie on the
+		// primary key; the secondary key (hops ASC) decides —
+		// relayClose wins because it has fewer hops. ExplainRoute
+		// mirrors that decision.
+		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal},
+		relayFar:   {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal + 1},
 	}
 
 	router := NewRouter(RouterConfig{
@@ -1167,19 +1194,19 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 		t.Fatalf("expected 2 entries in plan, got %d", len(plan))
 	}
 	if plan[0].NextHop != relayClose {
-		t.Fatalf("expected best entry to be relayClose (legit cutover version PV=12), got %s", plan[0].NextHop)
+		t.Fatalf("expected best entry to be relayClose (legit fixtureLocal version), got %s", plan[0].NextHop)
 	}
-	if plan[0].ProtocolVersion != 12 {
-		t.Fatalf("expected best entry version=12, got %d", plan[0].ProtocolVersion)
+	if plan[0].ProtocolVersion != fixtureLocal {
+		t.Fatalf("expected best entry version=%d (fixtureLocal), got %d", fixtureLocal, plan[0].ProtocolVersion)
 	}
 	if plan[0].Hops != 1 {
 		t.Fatalf("expected best entry hops=1, got %d", plan[0].Hops)
 	}
 	if plan[1].NextHop != relayFar {
-		t.Fatalf("expected fall-back entry to be relayFar (inflated, ranking-clamped), got %s", plan[1].NextHop)
+		t.Fatalf("expected fall-back entry to be relayFar (inflated, ranking-capped), got %s", plan[1].NextHop)
 	}
-	if plan[1].ProtocolVersion != 0 {
-		t.Fatalf("expected fall-back entry to have ProtocolVersion=0 (clamped), got %d", plan[1].ProtocolVersion)
+	if plan[1].ProtocolVersion != fixtureLocal {
+		t.Fatalf("expected fall-back entry to have ProtocolVersion=%d (capped at fixtureLocal), got %d", fixtureLocal, plan[1].ProtocolVersion)
 	}
 	if plan[1].ConnectedAt.IsZero() {
 		t.Fatal("expected fall-back entry to carry a connectedAt timestamp")
@@ -1193,16 +1220,19 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 // candidate carries an exotic ranking key — otherwise the diagnostic
 // would lie about where the next byte is actually going.
 //
-// Setup: dst has a usable direct session at the file-transfer cutover
-// (ProtocolVersion=12, RawProtocolVersion=12). A relay also has a route
-// to dst, hop-distance 2, with the inflated-version shape produced by
-// the production node-side helper: ProtocolVersion=0 (ranking key
-// clamped because the peer reported v > config.ProtocolVersion) but
-// RawProtocolVersion=99 (eligibility passes the cutover filter as
-// last-resort). Live SendFileCommand would hit the direct session first;
-// ExplainRoute must agree, and the clamped relay must show up at the
-// bottom of the plan with ProtocolVersion=0 as documented in
-// docs/protocol/file_transfer.md "Inflated-version defence".
+// Setup uses a fixture-local stand-in (`fixtureLocal`, declared inside
+// the function body) for the cap ceiling, since the filerouter package
+// has no access to config.ProtocolVersion. dst has a usable direct
+// session at fixtureLocal (Raw == PV == fixtureLocal). A relay also has
+// a route to dst, hop-distance 2, with the inflated-version shape
+// produced by the production node-side helper after the cap fix —
+// ProtocolVersion mirrors fixtureLocal (the cap ceiling for this
+// fixture) while RawProtocolVersion stays at the actually-reported
+// value (intentionally large to model an attacker / strongly inflated
+// claim). Live SendFileCommand would hit the direct session first
+// regardless of how the relay ranks; ExplainRoute must agree. See
+// docs/protocol/file_transfer.md "Inflated-version defence" for the
+// cap semantics.
 func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 	t.Parallel()
 
@@ -1220,17 +1250,28 @@ func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 		},
 	}
 
+	// fixtureLocal is the local-version stand-in for this fixture;
+	// the filerouter package has no access to config.ProtocolVersion,
+	// so the test pins a single value and treats it as the cap
+	// ceiling. The actual production config.ProtocolVersion may be
+	// higher — the only invariants this test exercises are the
+	// cutover floor (Raw >= FileCommandMinPeerProtocolVersion) and
+	// the direct-session promotion contract, both of which are
+	// independent of the absolute ranking value.
+	const fixtureLocal = domain.ProtocolVersion(12)
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
 		// dst has a direct session — that is the live send target.
-		dst: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
-		// relay reports an inflated version (Raw=99 > config=12). The
-		// production node-side helper would clamp the ranking key to 0
-		// while keeping RawProtocolVersion at 99 so the candidate stays
-		// eligible (Raw>=12) but ranks at the bottom. Here the test
-		// covers the direct-session promotion contract; relay's ranking
-		// is therefore deliberately worst-case to make the promotion
-		// outcome unambiguous.
-		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 0, RawProtocolVersion: 99},
+		dst: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal},
+		// relay reports an inflated version (Raw=99 > fixtureLocal).
+		// The production node-side helper caps the ranking key at the
+		// local version while keeping RawProtocolVersion at 99, so
+		// the candidate stays eligible (Raw >= cutover) and ranks
+		// tied with v=local peers on the primary key. Here the test
+		// covers the direct-session promotion contract; the direct
+		// entry wins independent of the relay's ranking because
+		// step 1 of the send path (direct sessionSend to dst) is
+		// unconditional.
+		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: fixtureLocal, RawProtocolVersion: 99},
 	}
 
 	router := NewRouter(RouterConfig{
@@ -1470,16 +1511,21 @@ func TestFileRouterExcludeViaWinsOverHigherVersion(t *testing.T) {
 		},
 	}
 
+	// fixtureLocal is the local-version stand-in for this fixture
+	// (filerouter has no access to config.ProtocolVersion, so we pin
+	// a value here and treat it as the cap ceiling; production
+	// config.ProtocolVersion may be higher).
+	const fixtureLocal = domain.ProtocolVersion(12)
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		// via reports an inflated version (Raw=99, ranking clamped to 0)
-		// AND has fewer hops — both keys would normally compete with
-		// split-horizon. The test pins that split-horizon excludes via
-		// regardless of how the rest of routeCandidateLess would score
-		// it; choosing the inflated last-resort shape makes the outcome
-		// independent of the ranking comparator and exercises the
-		// production-realistic clamped state for high reported versions.
-		via:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 0, RawProtocolVersion: 99},
-		other: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
+		// via reports an inflated version (Raw=99, ranking capped at
+		// fixtureLocal) AND has fewer hops — both keys would normally
+		// compete with split-horizon. The test pins that split-horizon
+		// excludes via regardless of how the rest of routeCandidateLess
+		// would score it; the production-realistic shape after the
+		// inflation-version cap fix is PV=local with Raw>local — the
+		// cap collapses the lie on the primary key without zeroing it.
+		via:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: fixtureLocal, RawProtocolVersion: 99},
+		other: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal},
 	}
 
 	router := NewRouter(RouterConfig{

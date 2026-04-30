@@ -254,8 +254,8 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 			continue
 		}
 		// Cutover gate, raw negotiated version. peerSession.version is
-		// pre-clamp (the route-meta layer is where inflated-version
-		// clamp lives), so a value below the cutover here is always a
+		// pre-cap (the route-meta layer is where the inflated-version
+		// cap lives), so a value below the cutover here is always a
 		// genuinely-pre-cutover or unknown peer; admitting it would
 		// re-open the v11 black hole. Comparing on
 		// domain.ProtocolVersion avoids the uint8-narrow wrap.
@@ -315,35 +315,70 @@ func (s *Service) fileTransferPeerRouteMetaLocked(peer domain.PeerIdentity, now 
 	}, true
 }
 
+// inflationWarnGap is the cutoff above which trustedFileRouteVersion
+// raises the cap log to WARN. A reported version up to local+gap is
+// treated as a normal staged rollout (one node a few releases ahead
+// of the fleet, possibly skipping versions) and logged at DEBUG to
+// avoid swamping the journal: trustedFileRouteVersion is invoked from
+// every PeerRouteMeta lookup — once per route candidate per file
+// command — so a single v=local+1 neighbour would otherwise emit a
+// WARN on every chunk request through it. A reported version above
+// local+gap is more likely a misconfig or an inflation attack
+// (claiming an impossibly-new build to win the protocolVersion DESC
+// primary key) and stays at WARN so operators can correlate the
+// ranking surprise in explainFileRoute with a security signal in the
+// journal.
+//
+// 4 is chosen empirically: alpha releases bump ProtocolVersion every
+// few weeks, so a 4-version gap covers ~half a year of staged
+// rollout drift. Anything beyond that is far enough out of band to
+// warrant operator attention regardless of whether it is benign or
+// hostile.
+const inflationWarnGap = 4
+
 // trustedFileRouteVersion returns the protocol version the file router
 // should use for ranking decisions, applying the inflated-version
 // defence: a peer claiming a higher protocol version than this build
-// implements cannot actually be speaking the protocol we just
-// enumerated, so the claim is either a misconfig or a deliberate
-// traffic-capture attack — lie about being "newer" to win the
-// protocolVersion DESC primary key and pull all file routes through
-// the attacker's next-hop.
+// implements is either a benign staged-rollout case (operator upgraded
+// the peer ahead of this node) or a deliberate traffic-capture attack
+// — lie about being "newer" to win the protocolVersion DESC primary
+// key and pull all file routes through the attacker's next-hop.
 //
-// The defence is a soft demote, not a hard reject: ranking version is
-// clamped to zero, which sorts below every legit (peer ≤ local)
-// version under DESC ordering and pushes the candidate to the bottom
-// of the plan. The peer remains usable as a last-resort hop — we want
-// the option to deliver bytes when no trusted peer is reachable, just
-// not to *prefer* the suspicious one.
+// The defence caps the ranking value at the local protocol version
+// instead of zeroing it. The cap neutralises the inflation attack on
+// the primary key (an attacker reporting v=local+100 cannot WIN over
+// a legitimate v=local peer because both collapse to the same ranking
+// value), but it does NOT push the upgraded peer to last-resort —
+// that earlier "clamp to 0" behaviour broke staged rollouts: a single
+// node ahead of the fleet was permanently starved of file traffic
+// because every legacy v=local peer outranked it on the primary key
+// regardless of hops or uptime. The cap leaves both peers in the same
+// equal-version tier, where the secondary keys (hops ASC,
+// connectedAt ASC) decide.
 //
-// Logging is at Warn level so operators can correlate ranking
-// surprises in the diagnostic with security signal in the journal.
+// RawProtocolVersion (set separately by the caller) keeps the
+// actually-reported value for eligibility checks and audit logging —
+// only the ranking projection is capped here.
+//
+// Logging level is gated by inflationWarnGap (see above): a small
+// gap is the normal staged-rollout shape and lands at DEBUG; a large
+// gap is suspicious and stays at WARN. The cap itself fires
+// regardless of log level — the log is purely informational.
 func trustedFileRouteVersion(peer domain.PeerIdentity, reported domain.ProtocolVersion) domain.ProtocolVersion {
 	const localVersion = domain.ProtocolVersion(config.ProtocolVersion)
 	if reported <= localVersion {
 		return reported
 	}
-	log.Warn().
+	event := log.Debug()
+	if int(reported)-int(localVersion) > inflationWarnGap {
+		event = log.Warn()
+	}
+	event.
 		Str("peer", string(peer)).
 		Int("reported_version", int(reported)).
 		Int("local_version", int(localVersion)).
-		Msg("file_router: peer reports inflated protocol version, demoted in ranking")
-	return 0
+		Msg("file_router: peer reports newer protocol version, capping at local for ranking")
+	return localVersion
 }
 
 // isPeerReachable returns true if the peer has a direct session (outbound
@@ -591,16 +626,17 @@ func (s *Service) RemoveSenderMapping(fileID domain.FileID) bool {
 //	    "next_hop": "<peer identity>",
 //	    "hops": 1,
 //	    "protocol_version": 12,                  // normalized ranking key for this next-hop —
-//	                                             // equal to the raw negotiated version for legit
-//	                                             // peers, but clamped to 0 by the inflated-version
-//	                                             // defence (trustedFileRouteVersion) when the peer
-//	                                             // reported v > config.ProtocolVersion. The raw
-//	                                             // negotiated value is not serialized; it lives in
-//	                                             // PeerRouteMeta.RawProtocolVersion as the
-//	                                             // eligibility key only. Pre-cutover and unknown
-//	                                             // peers are filtered out before the plan, so the
-//	                                             // only way 0 appears here is the clamped-inflated
-//	                                             // case.
+//	                                             // equal to the raw negotiated version for peers
+//	                                             // at or below local; capped at config.ProtocolVersion
+//	                                             // by the inflated-version defence (trustedFileRouteVersion)
+//	                                             // when the peer reported v > config.ProtocolVersion.
+//	                                             // The raw negotiated value is not serialized;
+//	                                             // it lives in PeerRouteMeta.RawProtocolVersion
+//	                                             // as the eligibility key only. Pre-cutover and
+//	                                             // unknown peers are filtered out before the plan,
+//	                                             // so this field is bounded above by
+//	                                             // config.ProtocolVersion and below by
+//	                                             // FileCommandMinPeerProtocolVersion.
 //	    "connected_at": "2025-01-01T12:34:56Z",  // omitted when unknown
 //	    "uptime_seconds": 3600.5,                // 0 when connected_at omitted
 //	    "best": true                             // true only for index 0

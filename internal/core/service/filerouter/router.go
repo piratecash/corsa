@@ -43,36 +43,34 @@ type NonceCache interface {
 // the node layer) — but in either case the node layer applies an
 // inflated-version defence before populating this field: a peer
 // reporting a version higher than the local build's
-// `config.ProtocolVersion` cannot be speaking the protocol we run, so
-// its claim is clamped to 0 here to push the candidate to the bottom
-// of the protocolVersion DESC sort. Treating this field as raw
-// handshake metadata would re-open the traffic-capture attack the
-// clamp was added to mitigate. Use 0 as "ranking-untrusted" rather
-// than "version unknown" — the node-side helper logs at WARN level
-// when it clamps, so the original reported value is recoverable from
-// the journal if you actually need it.
+// `config.ProtocolVersion` is either a benign staged-rollout case
+// (operator upgraded the peer ahead of this node) or a deliberate
+// traffic-capture attack, and the node-side helper caps the ranking
+// value at the local protocol version. The cap collapses the inflated
+// peer to the same primary-key tier as a legitimate v=local peer —
+// neither wins the protocolVersion DESC sort on the inflation lie —
+// while keeping the upgraded peer in the equal-version tier where the
+// secondary keys (hops, uptime) decide. Earlier behaviour clamped to
+// 0 instead, which solved the attack but starved every legitimate
+// upgraded next-hop of file traffic.
 //
 // Together the two fields describe a single coherent socket — never
 // an aggregate stitched across two — but the version key is a
 // post-defence projection, not the wire-level reported value.
 //
 // RawProtocolVersion is the version the peer actually reported on the
-// chosen connection BEFORE the inflated-version clamp is applied. It is
-// used for eligibility checks that must distinguish "known v12+ peer
-// whose version was clamped to 0 for ranking defence" from "version
-// not observed yet / pre-handshake / capability-only peer". Both look
-// identical on ProtocolVersion (both = 0), but only the former is a
-// safe last-resort candidate for file-transfer traffic — the latter
-// has no positive evidence the peer speaks the v2 SrcPubKey wire
-// format, so admitting it would re-open the v11-relay black hole the
-// FileCommandMinPeerProtocolVersion cutover exists to close.
-//
-// The node-side helper sets RawProtocolVersion from welcome.Version /
-// hello.Version directly without the clamp; ProtocolVersion is the
-// post-clamp version. Callers that need eligibility check against the
-// cutover MUST read RawProtocolVersion. Callers that need ranking key
-// MUST read ProtocolVersion. They are equal in the common case
+// chosen connection BEFORE the inflated-version cap is applied. It is
+// used for eligibility checks (cutover gate, audit logging, future
+// protocol-aware diagnostics) that must see the truth, not the
+// ranking projection. After the cap fix the two fields differ ONLY
+// when the peer reported v > config.ProtocolVersion — in which case
+// ProtocolVersion = config.ProtocolVersion and RawProtocolVersion is
+// the actually-reported value. They are equal in the common case
 // (peer reports a version this build understands).
+//
+// Callers that need eligibility check against the cutover MUST read
+// RawProtocolVersion. Callers that need ranking key MUST read
+// ProtocolVersion.
 type PeerRouteMeta struct {
 	ConnectedAt        time.Time
 	ProtocolVersion    domain.ProtocolVersion
@@ -372,23 +370,26 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 // session generation.
 //
 // rawProtocolVersion is the eligibility key (the version the peer
-// actually negotiated, before any clamp). Candidates with
+// actually negotiated, before any cap). Candidates with
 // rawProtocolVersion < FileCommandMinPeerProtocolVersion never reach
 // this struct — the cutover filter in collectRouteCandidates drops
 // them before the candidate is built. Pre-handshake conns, peers that
 // report zero, capability-only peers, and known-pre-cutover peers all
 // fall in that bucket and are not eligible for the file route at all.
 //
-// protocolVersion is the ranking key. After the cutover filter, the
-// only way protocolVersion == 0 reaches this struct is the inflated-
-// version case: the peer reported v > config.ProtocolVersion, the
-// node-side inflated-version defence
-// (trustedFileRouteVersion) clamped the ranking value to 0 to push
-// the candidate to the bottom of the protocolVersion-DESC sort, and
-// rawProtocolVersion >= FileCommandMinPeerProtocolVersion lets the
-// candidate survive eligibility as a deliberate last-resort hop. The
-// node-side helper logs at WARN when it clamps, so the original
-// reported value is recoverable from the journal.
+// protocolVersion is the ranking key. After the cutover filter,
+// protocolVersion is bounded above by config.ProtocolVersion: the
+// node-side inflated-version defence (trustedFileRouteVersion) caps
+// any reported value above local at config.ProtocolVersion so that a
+// peer claiming "newer" cannot WIN the protocolVersion-DESC primary
+// key on the lie alone. rawProtocolVersion still mirrors the actually-
+// reported value so callers that need to distinguish "legitimately
+// newer (cap applied)" from "v=local" can do so via the eligibility
+// surface. The node-side helper logs the cap event whenever it
+// fires (DEBUG for small gaps that look like normal staged rollouts,
+// WARN for gaps large enough to be suspicious — see
+// inflationWarnGap), so the original reported value is recoverable
+// from the journal regardless of suspicion level.
 type routeCandidate struct {
 	nextHop            domain.PeerIdentity
 	hops               int
@@ -462,10 +463,14 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 		//   - peer reports a known v < 12 → RawProtocolVersion < 12,
 		//     candidate dropped here (predates SrcPubKey field; would
 		//     drop our frame on missing-pubkey lookup);
-		//   - peer reports v > config.ProtocolVersion (inflated) →
-		//     RawProtocolVersion >= 12, ProtocolVersion clamped to 0
-		//     by the node-side helper, candidate kept and ranked at
-		//     the bottom by the protocolVersion DESC sort below;
+		//   - peer reports v > config.ProtocolVersion (newer than this
+		//     build, either a staged-rollout upgrade or an inflation
+		//     attack) → RawProtocolVersion >= 12, ProtocolVersion
+		//     CAPPED at config.ProtocolVersion by the node-side helper
+		//     (trustedFileRouteVersion) so the lie cannot WIN the
+		//     primary key over a legitimate v=local peer; the candidate
+		//     stays in the equal-version tier and is ranked by the
+		//     secondary keys (hops, uptime);
 		//   - version not observed yet / capability-only / pre-
 		//     handshake → RawProtocolVersion == 0, candidate dropped
 		//     here (no positive evidence the peer speaks v2). Without
@@ -475,13 +480,12 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 		//
 		// Hard invariant: every PeerRouteMeta consumer must populate
 		// RawProtocolVersion explicitly. There is intentionally no
-		// fallback to ProtocolVersion — a clamped inflated peer
-		// reports ProtocolVersion=0 but RawProtocolVersion>=12, and
-		// silently substituting one for the other would mistake the
-		// inflated case for the unknown case (and vice versa). Test
-		// fixtures that ignore the field land in the strict-drop
-		// branch on purpose, which surfaces missing migration as a
-		// failing test rather than a fail-open.
+		// fallback to ProtocolVersion — they only differ above the
+		// cap (Raw > local, PV == local), and silently substituting
+		// one for the other would mistake the capped-newer case for
+		// the v=local case. Test fixtures that ignore the field land
+		// in the strict-drop branch on purpose, which surfaces missing
+		// migration as a failing test rather than a fail-open.
 		//
 		// Comparing on domain.ProtocolVersion (the underlying int)
 		// avoids the uint8-narrow wrap (e.g. version 268 truncating to

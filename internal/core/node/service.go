@@ -2253,13 +2253,14 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// same reason send-side rejects it (peerSendableConnectionsLocked
 		// and forEachUsableFileTransferPeerLocked both compare on the
 		// raw negotiated value, so a peer with version 0 never appears as
-		// a sender either). The only place ProtocolVersion == 0 is
-		// admitted anywhere in the file pipeline is the route-meta layer's
-		// clamped-inflated case (RawProtocolVersion >= 12, ranking value
-		// clamped to 0); even there route-candidate filtering gates
-		// eligibility on the raw value, so a 0 on the wire never wins.
-		// Direct comparison on domain.ProtocolVersion avoids uint8-narrow
-		// wrap.
+		// a sender either). After the inflated-version cap fix the
+		// ranking key in the route-meta layer is bounded above by
+		// config.ProtocolVersion (newer peers are capped, not zeroed),
+		// so PV == 0 in the file pipeline only happens transiently for
+		// pre-handshake / unobserved peers and route-candidate filtering
+		// gates eligibility on the raw value anyway — a 0 on the wire
+		// never wins. Direct comparison on domain.ProtocolVersion avoids
+		// uint8-narrow wrap.
 		pc := s.netCoreForID(connID)
 		if pc == nil || pc.ProtocolVersion() < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
 			accepted = false
@@ -2648,7 +2649,7 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 		// File-transfer protocol-version cutover, strict on the
 		// session's RAW negotiated version. peerSession.version is the
 		// version field carried by hello/welcome before any inflated-
-		// version clamp (the clamp lives one layer above, in the route-
+		// version cap (the cap lives one layer above, in the route-
 		// meta helper, and only affects ranking — see
 		// filerouter.PeerRouteMeta.RawProtocolVersion). Here we are
 		// deciding eligibility, not ranking, so we MUST reject every
