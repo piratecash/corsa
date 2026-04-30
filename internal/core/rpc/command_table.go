@@ -350,6 +350,19 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"record_peer_traffic_by_ip":      "recordPeerTrafficByIP",
 		"record_all_peer_traffic":        "recordAllPeerTraffic",
 		"stop_peer_traffic_recording":    "stopPeerTrafficRecording",
+		// PIP-0001 integration: alternative spellings for callers that
+		// follow the older or compact convention. The canonical
+		// camelCase form is getNodeStatus.
+		//
+		// "nodestatus" must be a real alias (not just a case-insensitive
+		// fallback): strings.ToLower("getNodeStatus") yields
+		// "getnodestatus", so a caller posting {"command":"nodestatus"}
+		// would otherwise miss every resolveHandler branch and get a
+		// 404. The PIP doc and the snake-case-alias test both promise
+		// this spelling works, so an explicit alias is the only fix.
+		"nodestatus":      "getNodeStatus",
+		"node_status":     "getNodeStatus",
+		"get_node_status": "getNodeStatus",
 	}
 	for old, canonical := range aliases {
 		t.RegisterAlias(old, canonical)
@@ -469,7 +482,7 @@ func frameFromArgs(commandType string, args map[string]interface{}) (protocol.Fr
 // are returned by the separate "version" command.
 const helpSchemaVersion = "1.0"
 
-// RegisterSystemCommands registers help, ping, hello, version.
+// RegisterSystemCommands registers help, ping, hello, version, and getNodeStatus.
 func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{Name: "help", Description: "List all available RPC commands", Category: "system"},
@@ -518,6 +531,28 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 				"protocol_version": config.ProtocolVersion,
 				"node_address":     node.Address(),
 			})
+		},
+	)
+
+	// getNodeStatus is the PIP-0001 integration point for PirateCash
+	// Core: a single authenticated RPC call that returns identity,
+	// public-key material, protocol/version, peer count, and uptime.
+	// Stages 1 and 2 of PIP-0001 use it as a liveness probe; stage 3
+	// (v21 PoSe) will derive proof-of-service signatures from the
+	// public_key reported here. See docs/rpc/system.md.
+	//
+	// Snake_case alias `node_status` is registered alongside the
+	// canonical camelCase name; case-insensitive resolution
+	// additionally accepts `nodestatus`, `nodeStatus`, and any other
+	// case combination so PirateCash Core implementations can pick
+	// whichever spelling matches their conventions.
+	t.Register(
+		CommandInfo{Name: "getNodeStatus", Description: "Get node identity, public keys, protocol/version, peer count, and uptime — PIP-0001 integration surface", Category: "system"},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			return jsonResponse(node.NodeStatus())
 		},
 	)
 }

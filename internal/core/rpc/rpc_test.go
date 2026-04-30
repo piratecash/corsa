@@ -7,15 +7,38 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 	"github.com/piratecash/corsa/internal/core/service"
 )
+
+// defaultTestNodeStatus is the NodeStatus value returned by the shared
+// MockNodeProvider helpers when no test overrides it. Centralised so a
+// new field on domain.NodeStatus only needs to be defaulted once.
+func defaultTestNodeStatus() domain.NodeStatus {
+	started := time.Date(2026, time.April, 30, 0, 0, 0, 0, time.UTC)
+	return domain.NodeStatus{
+		Identity:               "test-address-abc123",
+		Address:                "test-address-abc123",
+		PublicKey:              "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		BoxPublicKey:           "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=",
+		ProtocolVersion:        config.ProtocolVersion,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
+		ClientVersion:          "0.16-alpha",
+		ClientBuild:            config.ClientBuild,
+		ConnectedPeers:         3,
+		StartedAt:              started,
+		UptimeSeconds:          42,
+		CurrentTime:            started.Add(42 * time.Second),
+	}
+}
 
 // ---------------------------------------------------------------------------
 // MockNodeProvider helpers
@@ -37,6 +60,7 @@ func newDefaultNodeProvider(t *testing.T) *rpcmocks.MockNodeProvider {
 	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("NodeStatus").Return(defaultTestNodeStatus()).Maybe()
 	return m
 }
 
@@ -56,6 +80,7 @@ func newNodeProviderWithHandler(t *testing.T, fn func(protocol.Frame) protocol.F
 	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("NodeStatus").Return(defaultTestNodeStatus()).Maybe()
 	return m
 }
 
@@ -75,6 +100,7 @@ func newNodeProviderWithMeta(t *testing.T, address, version string) *rpcmocks.Mo
 	m.On("CancelFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
+	m.On("NodeStatus").Return(defaultTestNodeStatus()).Maybe()
 	return m
 }
 

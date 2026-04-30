@@ -1,12 +1,15 @@
 package rpc_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
@@ -41,6 +44,152 @@ func TestSystemVersionDefaultValues(t *testing.T) {
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "client_version", "0.16-alpha")
 	expectField(t, result, "node_address", "test-address-abc123")
+}
+
+// TestSystemGetNodeStatusReturnsAllPIP0001Fields verifies that the
+// PIP-0001 integration endpoint exposes every field PirateCash Core
+// needs at masternode startup (Stage 1) and during liveness checks
+// (Stage 2). Adding fields silently is fine; renaming or dropping any
+// of these breaks the integration contract.
+func TestSystemGetNodeStatusReturnsAllPIP0001Fields(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	expected := domain.NodeStatus{
+		Identity:               "addr-fingerprint",
+		Address:                "addr-fingerprint",
+		PublicKey:              "pub-key-base64",
+		BoxPublicKey:           "box-key-base64",
+		ProtocolVersion:        17,
+		MinimumProtocolVersion: 12,
+		ClientVersion:          "0.42-test",
+		ClientBuild:            777,
+		ConnectedPeers:         5,
+		StartedAt:              time.Date(2026, time.April, 30, 12, 0, 0, 0, time.UTC),
+		UptimeSeconds:          120,
+		CurrentTime:            time.Date(2026, time.April, 30, 12, 2, 0, 0, time.UTC),
+	}
+	// Drop the default Maybe() expectation so the override wins.
+	node.ExpectedCalls = filterCalls(node.ExpectedCalls, "NodeStatus")
+	node.On("NodeStatus").Return(expected)
+
+	server := setupTestServer(t, node, nil)
+
+	for _, path := range []string{"/rpc/v1/system/node_status", "/rpc/v1/system/nodestatus"} {
+		code, result := postJSON(t, server, path, map[string]interface{}{})
+		expectStatusCode(t, code, 200)
+
+		expectField(t, result, "identity", expected.Identity)
+		expectField(t, result, "address", expected.Address)
+		expectField(t, result, "public_key", expected.PublicKey)
+		expectField(t, result, "box_public_key", expected.BoxPublicKey)
+		expectField(t, result, "protocol_version", float64(expected.ProtocolVersion))
+		expectField(t, result, "minimum_protocol_version", float64(expected.MinimumProtocolVersion))
+		expectField(t, result, "client_version", expected.ClientVersion)
+		expectField(t, result, "client_build", float64(expected.ClientBuild))
+		expectField(t, result, "connected_peers", float64(expected.ConnectedPeers))
+		expectField(t, result, "uptime_seconds", float64(expected.UptimeSeconds))
+
+		// Time fields round-trip as RFC3339 strings; compare as time values
+		// so a future timezone-format tweak does not silently break the
+		// contract.
+		for _, f := range []struct {
+			key  string
+			want time.Time
+		}{
+			{"started_at", expected.StartedAt},
+			{"current_time", expected.CurrentTime},
+		} {
+			raw, ok := result[f.key].(string)
+			if !ok {
+				t.Errorf("%s %s: expected string, got %T (%v)", path, f.key, result[f.key], result[f.key])
+				continue
+			}
+			got, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				t.Errorf("%s %s: unparseable time %q: %v", path, f.key, raw, err)
+				continue
+			}
+			if !got.Equal(f.want) {
+				t.Errorf("%s %s: got %v, want %v", path, f.key, got, f.want)
+			}
+		}
+	}
+}
+
+// TestSystemGetNodeStatusViaExecEndpoint pins the canonical RPC
+// dispatch path PirateCash Core actually uses (POST /rpc/v1/exec).
+// The legacy /system/node_status path is a convenience surface;
+// integrators that already speak the exec envelope must keep working.
+func TestSystemGetNodeStatusViaExecEndpoint(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	server := setupTestServer(t, node, nil)
+
+	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
+		"command": "getNodeStatus",
+		"args":    map[string]interface{}{},
+	})
+	expectStatusCode(t, code, 200)
+
+	expectField(t, result, "identity", defaultTestNodeStatus().Identity)
+	expectField(t, result, "address", defaultTestNodeStatus().Address)
+	expectFieldExists(t, result, "public_key")
+	expectFieldExists(t, result, "box_public_key")
+	expectFieldExists(t, result, "protocol_version")
+}
+
+// TestSystemGetNodeStatusSnakeCaseAlias guards the snake_case alias
+// PIP-0001 integrators may use depending on convention. The alias must
+// resolve to the same handler — drift here would surface as
+// inconsistent responses across two spellings of the same command.
+func TestSystemGetNodeStatusSnakeCaseAlias(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	table := rpc.NewCommandTable()
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
+
+	for _, name := range []string{"getNodeStatus", "node_status", "get_node_status", "nodestatus"} {
+		resp := table.Execute(rpc.CommandRequest{Name: name})
+		if resp.Error != nil {
+			t.Fatalf("%s: unexpected error: %v", name, resp.Error)
+		}
+		var got domain.NodeStatus
+		if err := json.Unmarshal(resp.Data, &got); err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		if got.Address != defaultTestNodeStatus().Address {
+			t.Errorf("%s: address = %q, want %q", name, got.Address, defaultTestNodeStatus().Address)
+		}
+		if got.Identity != defaultTestNodeStatus().Identity {
+			t.Errorf("%s: identity = %q, want %q", name, got.Identity, defaultTestNodeStatus().Identity)
+		}
+	}
+}
+
+// TestSystemGetNodeStatusNeverLeaksPrivateKeys is the security-leak
+// guard: NodeStatus is returned over an authenticated localhost RPC
+// channel, but it must NEVER carry private key material under any
+// alias. A future maintainer expanding the struct could accidentally
+// add e.g. `private_key` to domain.NodeStatus — this test catches it
+// at the wire boundary before the leak ships.
+func TestSystemGetNodeStatusNeverLeaksPrivateKeys(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	table := rpc.NewCommandTable()
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
+
+	resp := table.Execute(rpc.CommandRequest{Name: "getNodeStatus"})
+	if resp.Error != nil {
+		t.Fatalf("getNodeStatus: unexpected error: %v", resp.Error)
+	}
+	body := strings.ToLower(string(resp.Data))
+	for _, banned := range []string{
+		"private_key", "privatekey",
+		"private_box_key", "privateboxkey",
+		"secret", "seed",
+		"rpc_password", "rpcpassword",
+		"password",
+	} {
+		if strings.Contains(body, banned) {
+			t.Errorf("getNodeStatus response contains banned field %q (PIP-0001 security: only public material may be exposed): %s", banned, string(resp.Data))
+		}
+	}
 }
 
 func TestSystemPing(t *testing.T) {

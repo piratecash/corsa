@@ -225,6 +225,13 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	rpc.Post("/system/ping", s.legacyHandler("ping"))
 	rpc.Post("/system/hello", s.legacyHandler("hello"))
 	rpc.Post("/system/version", s.legacyHandler("version"))
+	// PIP-0001: PirateCash Core consumes node_status as a single
+	// authenticated probe at masternode startup (Stage 1) and as a
+	// liveness check (Stage 2). Exposed as a legacy path so callers
+	// that prefer per-endpoint URLs do not have to construct the
+	// /rpc/v1/exec envelope.
+	rpc.Post("/system/node_status", s.legacyHandler("getNodeStatus"))
+	rpc.Post("/system/nodestatus", s.legacyHandler("getNodeStatus"))
 
 	// Network
 	rpc.Post("/network/peers", s.legacyHandler("getPeers"))

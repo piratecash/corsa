@@ -30,6 +30,7 @@ Fields that remain outside this scheme:
 - `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers, `queuePersist` — already have their own synchronisation (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Not covered by the domain split.
 - `lastPeerSave`, `lastPeerEvict`, `lastSync` — peer-lifetime timestamps; move with `peerMu`.
 - `reachableGroups` — populated exactly once by `computeReachableGroups` during `New` and treated as immutable for the runtime lifetime of the `Service`. Concurrent reads of the unmutated map are safe without a lock, so no mutex is assigned. If a future change makes it runtime-mutable, it must gain a mutex (either by moving into `ipStateMu` with every reader taking the lock, or its own dedicated synchronisation) in the same commit that adds the writer.
+- `startedAt` — wall-clock timestamp captured exactly once by `NewService` and read by the PIP-0001 `getNodeStatus` RPC handler. Immutable after construction, so it is read without any lock. If a future change ever resets the field at runtime (e.g. soft-restart semantics), it must move under one of the existing domain mutexes — likely `statusMu` — in the same commit.
 
 ### Lock ordering
 
@@ -183,6 +184,7 @@ Every migration step must keep the existing node test suite green. Targeted regr
 - `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers, `queuePersist` — уже имеют собственную синхронизацию (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Не входят в доменное разделение.
 - `lastPeerSave`, `lastPeerEvict`, `lastSync` — peer-lifetime timestamps; едут с `peerMu`.
 - `reachableGroups` — заполняется ровно один раз функцией `computeReachableGroups` при `New` и считается иммутабельным на весь runtime `Service`. Конкурентные чтения немутировавшейся карты безопасны без lock-а, поэтому мьютекс не назначается. Если в будущем появится runtime-запись, в том же коммите необходимо добавить синхронизацию (либо перевести поле под `ipStateMu` с захватом на каждом читателе, либо дать собственную синхронизацию) — иначе writer гонится со всеми нынешними читателями.
+- `startedAt` — wall-clock timestamp, фиксируется один раз в `NewService` и читается RPC-обработчиком PIP-0001 `getNodeStatus`. Иммутабельно после конструктора, поэтому читается без lock-а. Если когда-нибудь появится runtime-перезапись (например, soft-restart), поле обязано в том же коммите переехать под один из доменных мьютексов — скорее всего `statusMu`.
 
 ### Порядок захвата
 

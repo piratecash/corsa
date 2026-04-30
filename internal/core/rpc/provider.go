@@ -16,6 +16,13 @@ type NodeProvider interface {
 	HandleLocalFrame(frame protocol.Frame) protocol.Frame
 	Address() string
 	ClientVersion() string
+
+	// NodeStatus returns the PIP-0001 integration snapshot
+	// (identity, public-key material, protocol/version, peer count,
+	// uptime). Returned by the getNodeStatus RPC command. The struct
+	// is a typed point-in-time view — callers should not assume any
+	// field is stable across calls.
+	NodeStatus() domain.NodeStatus
 	// FetchFileTransfers returns a JSON-encoded list of active and pending
 	// sender/receiver file transfers. Terminal states are excluded.
 	FetchFileTransfers() (json.RawMessage, error)

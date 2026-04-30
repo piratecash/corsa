@@ -70,8 +70,14 @@ type Service struct {
 	cfg        config.Node
 	eventBus   *ebus.Bus
 	trust      *trustStore
-	peerMu     sync.RWMutex
-	peers      []transport.Peer // dial candidates (typed: Address + Source)
+	// startedAt is the wall-clock time NewService was called, captured
+	// once and read without a lock from the NodeStatus RPC handler. It
+	// powers the uptime_seconds field of the PIP-0001 integration
+	// surface (see docs/rpc/system.md → /rpc/v1/system/node_status).
+	// Immutable after construction — no synchronisation required.
+	startedAt time.Time
+	peerMu    sync.RWMutex
+	peers     []transport.Peer // dial candidates (typed: Address + Source)
 
 	// deliveryMu guards the "message-delivery" domain: the per-recipient
 	// pending queues, outbound delivery state, relay retry bookkeeping,
@@ -972,8 +978,14 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// (e.g. handleInboundPushMessage sender-key recovery) that derive
 		// a timeout from s.runCtx before Run() has been called — notably in
 		// unit tests that exercise handlers directly without Run().
-		runCtx:                  context.Background(),
-		identity:                id,
+		runCtx:   context.Background(),
+		identity: id,
+		// startedAt is captured at construction (not at Run()) so the
+		// uptime_seconds reported by getNodeStatus stays meaningful in
+		// unit tests that drive the Service without calling Run, and
+		// matches the moment the in-memory state machine first became
+		// live.
+		startedAt:               time.Now().UTC(),
 		cfg:                     cfg,
 		eventBus:                eventBus,
 		selfBoxSig:              selfContact.BoxSignature,

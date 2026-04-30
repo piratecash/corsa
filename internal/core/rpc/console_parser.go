@@ -355,6 +355,8 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		"fetchdmheaders": true, "fetchrelaystatus": true,
 		"fetchroutetable": true, "fetchroutesummary": true,
 		"fetchtraffichistory": true, "fetchreachableids": true,
+		// PIP-0001 integration probe — both spellings recognised.
+		"getnodestatus": true, "nodestatus": true,
 		// snake_case (deprecated, kept for 2 releases)
 		"get_peers": true, "fetch_peer_health": true, "fetch_network_stats": true,
 		"fetch_identities": true, "fetch_contacts": true, "fetch_trusted_contacts": true,
@@ -362,6 +364,7 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		"fetch_dm_headers": true, "fetch_relay_status": true,
 		"fetch_route_table": true, "fetch_route_summary": true,
 		"fetch_traffic_history": true, "fetch_reachable_ids": true,
+		"node_status": true, "get_node_status": true,
 		// recordAllPeerTraffic with no args uses default format.
 		"recordallpeertraffic": true, "record_all_peer_traffic": true,
 	}
