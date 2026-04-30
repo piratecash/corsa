@@ -128,7 +128,30 @@ type Manager struct {
 	sendCommand        func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error
 	peerBoxKey         func(domain.PeerIdentity) (string, bool) // returns base64 box key
 	peerReachable      func(domain.PeerIdentity) bool           // true if peer is in route table or has direct session
-	stopCh             chan struct{}
+	// onReceiverDownloadComplete is invoked exactly once per successful
+	// receiver-side verification, right after the mapping transitions from
+	// receiverVerifying into receiverWaitingAck and the file is durably
+	// stored at CompletedPath. Always called WITHOUT holding m.mu so the
+	// callback may publish to ebus or call back into the node without
+	// risking re-entrant deadlocks on the manager.
+	//
+	// Optional. nil disables the notification path entirely. Wired in
+	// production from node.Service.initFileTransfer to publish
+	// ebus.TopicFileDownloadCompleted, which the desktop UI subscribes
+	// to in order to play the download-done audio cue.
+	onReceiverDownloadComplete func(ReceiverDownloadCompletedEvent)
+	stopCh                     chan struct{}
+}
+
+// ReceiverDownloadCompletedEvent is the payload of the
+// OnReceiverDownloadComplete callback. Carries enough context for a
+// subscriber to identify the transfer without re-querying the manager.
+type ReceiverDownloadCompletedEvent struct {
+	FileID      domain.FileID
+	Sender      domain.PeerIdentity
+	FileName    string
+	FileSize    uint64
+	ContentType string
 }
 
 // Config holds dependencies for Manager.
@@ -140,6 +163,11 @@ type Config struct {
 	SendCommand   func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error
 	PeerBoxKey    func(domain.PeerIdentity) (string, bool)
 	PeerReachable func(domain.PeerIdentity) bool // true if peer has route or direct session
+	// OnReceiverDownloadComplete fires exactly once per successful
+	// receiver-side verification, immediately after the mapping enters
+	// receiverWaitingAck and the verified file is on disk. Optional.
+	// See Manager.onReceiverDownloadComplete for the locking contract.
+	OnReceiverDownloadComplete func(ReceiverDownloadCompletedEvent)
 }
 
 // NewFileTransferManager creates a new manager. It loads persisted mappings
@@ -147,16 +175,17 @@ type Config struct {
 // active sender entries. Call Start() to begin background goroutines.
 func NewFileTransferManager(cfg Config) *Manager {
 	m := &Manager{
-		senderMaps:    make(map[domain.FileID]*senderFileMapping),
-		receiverMaps:  make(map[domain.FileID]*receiverFileMapping),
-		store:         cfg.Store,
-		downloadDir:   cfg.DownloadDir,
-		mappingsPath:  cfg.MappingsPath,
-		localID:       cfg.LocalID,
-		sendCommand:   cfg.SendCommand,
-		peerBoxKey:    cfg.PeerBoxKey,
-		peerReachable: cfg.PeerReachable,
-		stopCh:        make(chan struct{}),
+		senderMaps:                 make(map[domain.FileID]*senderFileMapping),
+		receiverMaps:               make(map[domain.FileID]*receiverFileMapping),
+		store:                      cfg.Store,
+		downloadDir:                cfg.DownloadDir,
+		mappingsPath:               cfg.MappingsPath,
+		localID:                    cfg.LocalID,
+		sendCommand:                cfg.SendCommand,
+		peerBoxKey:                 cfg.PeerBoxKey,
+		peerReachable:              cfg.PeerReachable,
+		onReceiverDownloadComplete: cfg.OnReceiverDownloadComplete,
+		stopCh:                     make(chan struct{}),
 	}
 
 	// Restore persisted state and rebuild FileStore ref counts.

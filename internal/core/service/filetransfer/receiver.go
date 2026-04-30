@@ -1498,9 +1498,34 @@ func (m *Manager) finalizeVerifiedDownload(
 			Str("completed_path", completedPath).
 			Msg("file_transfer: persist waiting_ack failed after rename — proceeding in memory, will reconcile on restart")
 	}
+
+	// Snapshot fields needed by the post-completion callback BEFORE
+	// releasing the mutex — the mapping pointer is shared state and a
+	// concurrent CleanupTransferByMessageID could race the callback
+	// otherwise. Locking contract requires the callback itself to run
+	// outside m.mu.
+	completionEvent := ReceiverDownloadCompletedEvent{
+		FileID:      fileID,
+		Sender:      sender,
+		FileName:    mapping.FileName,
+		FileSize:    mapping.FileSize,
+		ContentType: mapping.ContentType,
+	}
+	cb := m.onReceiverDownloadComplete
 	m.mu.Unlock()
 
 	m.sendFileDownloaded(fileID, sender)
+
+	// Notify subscribers (e.g. desktop UI playing a download-done audio
+	// cue) AFTER persistence and the wire-side file_downloaded send so
+	// the visible event "download finished" never precedes the durable
+	// state transition. Failures inside the callback must not influence
+	// this path — invoke it synchronously to keep ordering deterministic
+	// for tests and let the subscriber decide whether to off-load to a
+	// goroutine.
+	if cb != nil {
+		cb(completionEvent)
+	}
 	return true
 }
 

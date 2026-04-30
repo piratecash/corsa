@@ -151,6 +151,21 @@ type FileReceivedResult struct {
 	FileID domain.FileID
 }
 
+// FileDownloadCompletedResult is the payload for
+// TopicFileDownloadCompleted. Emitted exactly once when the
+// receiver-side verification succeeds and the verified file is
+// durably stored at its final path. From is the sender of the
+// transfer; the metadata fields mirror the values captured at
+// file_announce time so subscribers can render a notification
+// without re-querying AllFileTransfersSnapshot.
+type FileDownloadCompletedResult struct {
+	From        domain.PeerIdentity
+	FileID      domain.FileID
+	FileName    string
+	FileSize    uint64
+	ContentType string
+}
+
 // ConversationDeleteOutcome is the payload for
 // TopicConversationDeleteCompleted. Emitted by DMRouter only when an
 // in-flight conversation_delete (bulk wipe of the thread with one

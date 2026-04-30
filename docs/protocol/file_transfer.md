@@ -1081,6 +1081,34 @@ fresh download via `StartDownload`.
 > **Planned (not yet implemented):** `Evicted` state with LRU eviction
 > — see [roadmap](../roadmap.md#file-transfer-protocol).
 
+#### Completion notification (`OnReceiverDownloadComplete` → `TopicFileDownloadCompleted`)
+
+The `Verifying → WaitingAck` transition fires
+`Manager.onReceiverDownloadComplete` exactly once with a
+`ReceiverDownloadCompletedEvent` carrying `{FileID, Sender, FileName,
+FileSize, ContentType}`. The callback runs after `m.mu` is released and
+after `file_downloaded` has been dispatched, so subscribers observe a
+durably stored file.
+
+In production wiring (`node.Service.initFileTransfer`) the callback
+publishes `ebus.TopicFileDownloadCompleted` with the typed
+`FileDownloadCompletedResult`. The desktop UI subscribes from
+`internal/app/desktop/window.go` and plays
+`assets/download-done.mp3` so the user gets an audible cue when a
+transfer finishes in the background, regardless of which tab is active.
+
+The notification does **not** fire on:
+
+- `WaitingAck → Completed` (sender's `file_downloaded_ack`) — the file
+  is already on disk and was announced when entering `WaitingAck`.
+- The retry-budget fallback at >20 unanswered `file_downloaded`
+  retries, which forces the local mapping into `Completed` for
+  cleanup. The file was already verified earlier and, by contract, the
+  user has already heard the cue.
+- Stale-generation or stale-pointer aborts inside
+  `finalizeVerifiedDownload`, which return `false` before reaching the
+  callback site.
+
 ## Retry and backoff strategy
 
 All periodic maintenance runs from a single background loop (10-second
@@ -2659,6 +2687,35 @@ stateDiagram-v2
 
 > **Запланировано (не реализовано):** состояние `Evicted` с LRU-вытеснением
 > — см. [roadmap](../roadmap.ru.md#протокол-передачи-файлов).
+
+#### Уведомление о завершении (`OnReceiverDownloadComplete` → `TopicFileDownloadCompleted`)
+
+Переход `Verifying → WaitingAck` ровно один раз вызывает
+`Manager.onReceiverDownloadComplete` с
+`ReceiverDownloadCompletedEvent{FileID, Sender, FileName, FileSize,
+ContentType}`. Колбэк выполняется ПОСЛЕ освобождения `m.mu` и ПОСЛЕ
+отправки `file_downloaded`, поэтому подписчики видят файл, уже
+надёжно сохранённый на диск.
+
+В продакшен-сборке (`node.Service.initFileTransfer`) колбэк публикует
+`ebus.TopicFileDownloadCompleted` с типизированным
+`FileDownloadCompletedResult`. Десктоп UI подписывается из
+`internal/app/desktop/window.go` и проигрывает
+`assets/download-done.mp3`, чтобы пользователь получал звуковую
+индикацию завершения загрузки независимо от того, на какой вкладке он
+сейчас находится.
+
+Уведомление **не** срабатывает в следующих случаях:
+
+- `WaitingAck → Completed` (`file_downloaded_ack` отправителя) — файл
+  уже на диске и был объявлен при входе в `WaitingAck`.
+- Запасной путь по исчерпании retry-бюджета (>20 неподтверждённых
+  ретрансляций `file_downloaded`), который локально переводит маппинг
+  в `Completed` для целей очистки. Файл уже был верифицирован раньше,
+  и звуковой сигнал по контракту уже отыграл.
+- Аборты по устаревшему `Generation` или указателю внутри
+  `finalizeVerifiedDownload`, возвращающего `false` ещё до точки
+  вызова колбэка.
 
 ### Персистентность маппингов
 

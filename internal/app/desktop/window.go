@@ -338,6 +338,16 @@ func (w *Window) startPolling(window *app.Window) {
 		w.eventBus.Subscribe(ebus.TopicConversationDeleteCompleted, func(outcome ebus.ConversationDeleteOutcome) {
 			w.handleConversationDeleteOutcome(outcome)
 		})
+		// Receiver-side download completion: filetransfer.Manager has
+		// just verified and stored the file at its CompletedPath. Play
+		// the download-done audio cue so the user notices the transfer
+		// finished even when the file tab is not in the foreground.
+		// The handler hops onto its own goroutine because the ebus
+		// subscriber inbox is bounded (64) and a blocking 5s playback
+		// here would let publisher overflow drop other notifications.
+		w.eventBus.Subscribe(ebus.TopicFileDownloadCompleted, func(_ ebus.FileDownloadCompletedResult) {
+			go playDownloadDone()
+		})
 	}
 
 	go func() {

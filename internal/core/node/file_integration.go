@@ -11,6 +11,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/service/filerouter"
@@ -49,6 +50,20 @@ func (s *Service) initFileTransfer() {
 		},
 		PeerReachable: func(peer domain.PeerIdentity) bool {
 			return s.isPeerReachable(peer)
+		},
+		// Bridge receiver-side download completion to the ebus so the
+		// desktop UI can play download-done.mp3 without coupling the
+		// filetransfer package to ebus directly. The manager invokes
+		// this callback outside its own mutex; PublishFileDownloadCompleted
+		// is no-op-on-nil so test fixtures that omit eventBus stay safe.
+		OnReceiverDownloadComplete: func(ev filetransfer.ReceiverDownloadCompletedEvent) {
+			ebus.PublishFileDownloadCompleted(s.eventBus, ebus.FileDownloadCompletedResult{
+				From:        ev.Sender,
+				FileID:      ev.FileID,
+				FileName:    ev.FileName,
+				FileSize:    ev.FileSize,
+				ContentType: ev.ContentType,
+			})
 		},
 	})
 

@@ -201,6 +201,23 @@ const (
 	//   func(result ebus.FileReceivedResult)
 	TopicFileReceived = "file.received"
 
+	// TopicFileDownloadCompleted is emitted exactly once per successful
+	// receiver-side verification, immediately after the mapping has
+	// transitioned into receiverWaitingAck and the verified file is
+	// durably stored at its CompletedPath. Sourced from
+	// FileTransferManager via the OnReceiverDownloadComplete callback
+	// wired in node.Service.initFileTransfer.
+	//
+	// Subscribers use this to surface a "download finished" UI cue
+	// (e.g. the desktop layer plays download-done.mp3). The event does
+	// NOT fire on the symmetric sender-side completion (file_downloaded_ack
+	// arrival) — that path is covered by inspecting AllTransfersSnapshot
+	// state changes directly.
+	//
+	// Handler signature:
+	//   func(result ebus.FileDownloadCompletedResult)
+	TopicFileDownloadCompleted = "file.download.completed"
+
 	// TopicSlotStateChanged is emitted by ConnectionManager when a peer
 	// slot transitions between states (queued → dialing → active →
 	// reconnecting → retry_wait). Carries the overlay address and new

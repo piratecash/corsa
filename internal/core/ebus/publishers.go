@@ -120,3 +120,15 @@ func PublishFileReceived(bus *Bus, result FileReceivedResult) {
 	}
 	bus.Publish(TopicFileReceived, result)
 }
+
+// PublishFileDownloadCompleted emits TopicFileDownloadCompleted with a
+// typed FileDownloadCompletedResult. Wired from
+// node.Service.initFileTransfer through the
+// FileTransferManager.OnReceiverDownloadComplete callback so the
+// desktop UI can surface a "download finished" audio cue.
+func PublishFileDownloadCompleted(bus *Bus, result FileDownloadCompletedResult) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicFileDownloadCompleted, result)
+}

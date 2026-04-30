@@ -14,6 +14,9 @@ import (
 //go:embed assets/new-message.mp3
 var notifyMP3 []byte
 
+//go:embed assets/download-done.mp3
+var downloadDoneMP3 []byte
+
 var (
 	otoCtx     *oto.Context
 	otoOnce    sync.Once
@@ -36,21 +39,21 @@ func initAudioContext() (*oto.Context, error) {
 	return otoCtx, otoInitErr
 }
 
-// It is safe to call from any goroutine.  Callers should use `go systemBeep()`.
-// Every call creates a new oto.Player on the shared audio context.  Multiple
-// concurrent playbacks are allowed — the audio driver mixes them.  This means
-// rapid-fire messages produce overlapping sounds ("drum roll") rather than
-// being silently dropped.
-func systemBeep() {
+// playEmbeddedMP3 decodes and plays an MP3 byte slice on the shared audio
+// context. Logs are tagged with `cue` so the source of "audio init failed"
+// or "mp3 decode failed" is unambiguous when more than one notification
+// sound is wired up. Safe to call from any goroutine — every invocation
+// allocates its own player and the audio driver mixes overlapping playbacks.
+func playEmbeddedMP3(cue string, data []byte) {
 	ctx, err := initAudioContext()
 	if err != nil {
-		log.Warn().Err(err).Msg("audio init failed")
+		log.Warn().Str("cue", cue).Err(err).Msg("audio init failed")
 		return
 	}
 
-	decoder, err := mp3.NewDecoder(bytes.NewReader(notifyMP3))
+	decoder, err := mp3.NewDecoder(bytes.NewReader(data))
 	if err != nil {
-		log.Warn().Err(err).Msg("mp3 decode failed")
+		log.Warn().Str("cue", cue).Err(err).Msg("mp3 decode failed")
 		return
 	}
 
@@ -67,10 +70,28 @@ func systemBeep() {
 	for player.IsPlaying() {
 		select {
 		case <-deadline:
-			log.Warn().Msg("systemBeep: playback exceeded 5s deadline, closing player")
+			log.Warn().Str("cue", cue).Msg("audio playback exceeded 5s deadline, closing player")
 			return
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+}
+
+// systemBeep plays the new-message notification sound. Safe to call
+// from any goroutine. Callers should use `go systemBeep()`. Multiple
+// concurrent playbacks are allowed — the audio driver mixes them, so
+// rapid-fire messages produce overlapping sounds ("drum roll") rather
+// than being silently dropped.
+func systemBeep() {
+	playEmbeddedMP3("new-message", notifyMP3)
+}
+
+// playDownloadDone plays the download-finished notification sound after
+// the receiver-side verification has stored the file durably. Wired
+// from window.go's TopicFileDownloadCompleted subscription. Same
+// concurrency contract as systemBeep — callers should run it on a
+// dedicated goroutine.
+func playDownloadDone() {
+	playEmbeddedMP3("download-done", downloadDoneMP3)
 }

@@ -865,6 +865,123 @@ func TestFinalizeVerifiedDownloadHappyPath(t *testing.T) {
 	}
 }
 
+// TestFinalizeVerifiedDownloadFiresCompletionCallback verifies that
+// finalizeVerifiedDownload invokes the OnReceiverDownloadComplete
+// callback exactly once on the happy path with the metadata captured
+// from the receiver mapping. The desktop UI relies on this hook to
+// play download-done.mp3 — silently dropping it would leave the user
+// without an audible cue when a transfer finishes in the background.
+func TestFinalizeVerifiedDownloadFiresCompletionCallback(t *testing.T) {
+	downloadDir := testDownloadDir(t)
+	cc := &commandCollector{}
+	m := newTestTransferManager(t, downloadDir, cc)
+
+	var (
+		got   []ReceiverDownloadCompletedEvent
+		calls int
+	)
+	m.onReceiverDownloadComplete = func(ev ReceiverDownloadCompletedEvent) {
+		calls++
+		got = append(got, ev)
+	}
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("finalize-callback-fires")
+
+	content := []byte("notify-me content")
+	hash := hashContent(content)
+
+	generation := uint64(11)
+	rm := testReceiverMapping(fileID, sender, hash, "doc.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm.Generation = generation
+	rm.ContentType = "application/octet-stream"
+	m.receiverMaps[fileID] = rm
+
+	completedPath := completedDownloadPath(downloadDir, "doc.bin", hash)
+	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
+		t.Fatalf("mkdir completed dir: %v", err)
+	}
+	if err := os.WriteFile(completedPath, content, 0o600); err != nil {
+		t.Fatalf("write completed blob: %v", err)
+	}
+	completedInfo, err := os.Lstat(completedPath)
+	if err != nil {
+		t.Fatalf("lstat completed blob: %v", err)
+	}
+
+	if !m.finalizeVerifiedDownload(fileID, rm, generation, completedPath, completedInfo, sender) {
+		t.Fatal("finalizeVerifiedDownload must return true on matching generation")
+	}
+
+	if calls != 1 {
+		t.Fatalf("OnReceiverDownloadComplete fired %d times; want 1", calls)
+	}
+	ev := got[0]
+	if ev.FileID != fileID {
+		t.Errorf("event.FileID = %q, want %q", ev.FileID, fileID)
+	}
+	if ev.Sender != sender {
+		t.Errorf("event.Sender = %q, want %q", ev.Sender, sender)
+	}
+	if ev.FileName != "doc.bin" {
+		t.Errorf("event.FileName = %q, want %q", ev.FileName, "doc.bin")
+	}
+	if ev.FileSize != uint64(len(content)) {
+		t.Errorf("event.FileSize = %d, want %d", ev.FileSize, len(content))
+	}
+	if ev.ContentType != "application/octet-stream" {
+		t.Errorf("event.ContentType = %q, want %q", ev.ContentType, "application/octet-stream")
+	}
+}
+
+// TestFinalizeVerifiedDownloadDoesNotFireCallbackOnStaleGeneration
+// guards against an audible cue being played for a transfer that the
+// user already cancelled or replaced via cancel+restart. The verifier
+// running on the stale generation must abort BEFORE the callback path
+// — the desktop UI would otherwise notify the user about a download
+// that never produced a usable file.
+func TestFinalizeVerifiedDownloadDoesNotFireCallbackOnStaleGeneration(t *testing.T) {
+	downloadDir := testDownloadDir(t)
+	cc := &commandCollector{}
+	m := newTestTransferManager(t, downloadDir, cc)
+
+	calls := 0
+	m.onReceiverDownloadComplete = func(ReceiverDownloadCompletedEvent) {
+		calls++
+	}
+
+	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	fileID := domain.FileID("finalize-callback-stale")
+
+	content := []byte("stale generation content")
+	hash := hashContent(content)
+
+	const currentGeneration uint64 = 9
+	const staleGeneration uint64 = 7
+	rm := testReceiverMapping(fileID, sender, hash, "stale.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm.Generation = currentGeneration
+	m.receiverMaps[fileID] = rm
+
+	completedPath := completedDownloadPath(downloadDir, "stale.bin", hash)
+	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
+		t.Fatalf("mkdir completed dir: %v", err)
+	}
+	if err := os.WriteFile(completedPath, content, 0o600); err != nil {
+		t.Fatalf("write completed blob: %v", err)
+	}
+	completedInfo, err := os.Lstat(completedPath)
+	if err != nil {
+		t.Fatalf("lstat completed blob: %v", err)
+	}
+
+	if m.finalizeVerifiedDownload(fileID, rm, staleGeneration, completedPath, completedInfo, sender) {
+		t.Fatal("finalizeVerifiedDownload must return false when generation is stale")
+	}
+	if calls != 0 {
+		t.Fatalf("OnReceiverDownloadComplete fired %d times on stale generation; want 0", calls)
+	}
+}
+
 // TestFinalizeVerifiedDownloadStaleCleanupPreservesNewAttemptFile verifies
 // that when a stale verifier aborts on generation mismatch, it does NOT
 // delete a file at completedPath that belongs to a different attempt.
