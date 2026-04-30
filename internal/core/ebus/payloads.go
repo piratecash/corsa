@@ -151,6 +151,70 @@ type FileReceivedResult struct {
 	FileID domain.FileID
 }
 
+// ConversationDeleteOutcome is the payload for
+// TopicConversationDeleteCompleted. Emitted by DMRouter only when an
+// in-flight conversation_delete (bulk wipe of the thread with one
+// peer) reaches a TERMINAL state — either the recipient's
+// conversation_delete_ack arrived with applied (Status ==
+// ConversationDeleteStatusApplied; the local mirror has just run),
+// or the sender's retry budget was exhausted with no terminal applied
+// ack (Abandoned == true). Subscribers (UI / RPC tooling) use this
+// to differentiate a recipient-side wipe confirmation from a
+// transport abandonment.
+//
+// A ConversationDeleteStatusError ack is NOT terminal: the ack
+// handler keeps the pending entry alive and returns so the retry
+// loop can keep chasing the peer. No event is published on that
+// path; subscribers must treat the absence of an event as "still
+// in flight". A "transient error → retrying" UI hint must be
+// sourced from the request lifecycle (the call to
+// SendConversationDelete and any tracking the UI does on its own),
+// not from this topic.
+//
+// Field semantics:
+//
+//   - Status: ConversationDeleteStatusApplied on the success path
+//     (Abandoned == false). Empty string on the abandonment path
+//     (Abandoned == true; no terminal ack was ever observed).
+//     ConversationDeleteStatusError values are NEVER published.
+//   - DeletedRemote: the row count the recipient reports actually
+//     removing on its side. Zero is legitimate when the recipient
+//     had no rows for this conversation and is not an error.
+//   - Abandoned: true when the sender's retry budget was exhausted
+//     before any ack landed. Local rows stay in place under
+//     pessimistic ordering; the user can re-issue the wipe.
+//   - Attempts: number of dispatches actually performed before the
+//     terminal event (ack or budget exhaustion).
+//   - LocalCleanupFailed: true when the post-ack local sweep
+//     (applyLocalConversationWipe inside the ack handler) could
+//     not remove every row in scope. Scope is the intersection
+//     between the click-time local snapshot
+//     (pending.localKnownIDs) and the current chatlog: chatlog
+//     read failure or any per-row DeleteByID failure flips the
+//     flag. Out-of-snapshot rows (e.g. inbound messages that
+//     landed locally after the click) are deliberately SKIPPED
+//     by this sweep and do NOT trip the flag — they remain
+//     OUTSIDE the cleanup scope. The flag describes only
+//     in-scope rows and DOES NOT guarantee both-side survival
+//     of out-of-scope rows: the late-delivery limitation
+//     documented in docs/dm-commands.md (a peer-authored
+//     in-flight message that was already deleted by the peer's
+//     wipe but lands on the originator after the ack) leaves
+//     such a row visible only on the originator. Immutable
+//     rows are likewise kept and do NOT trip the flag. The
+//     peer is still consistent (Status is applied) but some
+//     in-scope local rows survived, so the UI must NOT promise
+//     "wiped on both sides" without qualification when this
+//     flag is set.
+type ConversationDeleteOutcome struct {
+	Peer               domain.PeerIdentity
+	Status             domain.ConversationDeleteStatus
+	DeletedRemote      int
+	Abandoned          bool
+	Attempts           int
+	LocalCleanupFailed bool
+}
+
 // MessageDeleteOutcome is the payload for TopicMessageDeleteCompleted.
 // Emitted by DMRouter when an in-flight message_delete reaches a
 // terminal state — either the recipient's message_delete_ack arrived

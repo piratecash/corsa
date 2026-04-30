@@ -419,6 +419,557 @@ The desktop file-tab "Delete" button covers two cases:
   optionally send the request; this is a future extension and is
   **not** implemented in this iteration.
 
+### Bulk wipe (`conversation_delete`)
+
+`conversation_delete` is the bulk counterpart of `message_delete`.
+The sidebar context menu entry "Delete chat for everyone" wipes the
+entire conversation with one peer on **both** sides in a single
+control round-trip, without iterating per-row from the UI.
+
+Wire-level:
+
+- New control DM commands `DMCommandConversationDelete` and
+  `DMCommandConversationDeleteAck`. Both travel on the same
+  `dm-control` topic as `message_delete`. `IsControl()` returns true
+  for both; they are not stored in chatlog and never appear in the
+  chat thread.
+- `ConversationDeletePayload` carries only a `RequestID` (UUID v4,
+  typed as `ConversationDeleteRequestID` for domain typing). The
+  conversation peer is derived from the verified envelope sender
+  on the recipient side, so a forged payload cannot redirect the
+  wipe to a different conversation. No row list, no scope, no
+  cutoff — the wire payload stays compact regardless of chat
+  history size, so the wipe is deliverable for arbitrarily large
+  threads through the standard control-DM path
+  (`node.maxRelayBodyBytes` is never at risk).
+
+  Each side runs the wipe against its own FROZEN scope, NOT
+  against current chatlog at apply time:
+
+  - The receiver, on first contact for a `(peer, requestID)`,
+    inside `handleInboundConversationDelete` /
+    `processInboundConversationDeleteFreshGather`, gathers every
+    non-immutable row currently in chatlog with the peer and
+    pins that set in `inboundConvDeleteCache`. Every subsequent
+    retry of the same requestID operates ONLY against that
+    cached frozen set — partial-failure retries re-attempt only
+    the cached survivors, lost-ack replays return the cached
+    outcome without touching chatlog at all. Rows the peer
+    authored after first contact are not in the frozen scope
+    and stay on the receiver side.
+  - The sender, inside `applyLocalConversationWipe` called
+    from the ack handler, applies the same predicate
+    constrained by an in-memory **local snapshot** taken at
+    click time (`pendingConversationDelete.localKnownIDs`):
+    a row whose id is NOT in the snapshot is OUTSIDE the
+    sender's cleanup scope and stays on the sender side.
+    Out-of-scope does NOT imply "the user never saw it" or
+    "the peer kept it" — self-authored `sent` rows are
+    visible in the user's own UI and are deliberately kept
+    off the snapshot (see the inclusion rule below), and
+    depending on delivery ordering the peer may still have
+    wiped its copy of such a row. The snapshot's contract
+    is local-only: it bounds what we will delete on THIS
+    side after the peer confirms; it makes no symmetric
+    promise about peer-side survival. The snapshot lives in
+    pending only and never travels on the wire — the
+    payload remains intent-only.
+
+  Immutable rows are the universal carve-out and stay on both
+  sides regardless of snapshot or frozen-scope membership.
+
+  **Snapshot inclusion rule.** `snapshotLocalKnownConversationIDs`
+  applies a delivery-aware filter so the snapshot describes only
+  rows whose state the peer is also expected to know about:
+
+  - Inbound rows (peer-authored): always included. The peer
+    obviously has them — they are in the peer's first-contact
+    gather scope and the receiver-side wipe will remove them.
+  - Outbound rows (self-authored): included only when
+    `chatlog.Entry.DeliveryStatus` is `delivered` (peer node
+    ACK'd receipt) or `seen` (peer user opened the
+    conversation). Outbound rows still in `sent` state — the
+    local node accepted them but the peer node has not yet
+    confirmed receipt — are EXCLUDED from the snapshot.
+  - Immutable rows: skipped.
+
+  The exclusion of `sent` outbound rows closes a hole the
+  drain step alone cannot fix: `CompleteConversationDelete`
+  drains in-flight `SendMessage` / `SendFileAnnounce`
+  goroutines, but those goroutines return on LOCAL handoff
+  (the local node's `send_message` reply), not on peer
+  receipt. A row that's local-accepted-but-not-yet-delivered
+  at click time is still in chatlog, and including it in
+  `localKnownIDs` would mirror-wipe it on this side after
+  the applied ack while the data DM was still in the
+  outbound queue — when the data DM later reached the peer
+  AFTER `conversation_delete` had already been processed
+  there, the peer's gather would not include it (it arrived
+  late), the peer would store it normally, and we would have
+  a receiver-only row. By excluding `sent` outbound rows we
+  always keep them on this side; the peer's outcome depends
+  on delivery ordering:
+
+  - Peer receives the data DM AFTER its first-contact gather
+    for `conversation_delete` (the queue happens to deliver
+    `conversation_delete` first, which is the typical case
+    when both messages were enqueued before the click): the
+    peer's frozen scope does not include the row, the peer
+    stores it normally → both sides hold the row
+    (symmetric).
+  - Peer receives the data DM BEFORE its first-contact
+    gather (the queue delivers the data DM ahead of
+    `conversation_delete`): the peer's gather DOES include
+    the row, the peer wipes it on its side, but the row
+    stays on our side because it was never in
+    `localKnownIDs` → asymmetric ORIGINATOR-only outcome.
+
+  The asymmetric case mirrors the documented inbound
+  late-delivery trade-off (peer-authored row that lands on
+  our side after the click survives only on our side); both
+  asymmetries leave the row alive on the originator of that
+  row. The protocol's contract is "wipe the sender's
+  peer-confirmed local snapshot, with documented
+  out-of-scope asymmetries", NOT a user-saw / both-sides
+  symmetry promise — visible self-authored `sent` rows are
+  by design excluded from the snapshot, and the
+  asymmetric cases are accepted by the design.
+
+  Why the asymmetry: the receiver acts immediately on the
+  wipe-arrival event, so its current chatlog snapshot IS the
+  scope (anything that arrives after that processing is out of
+  scope). The sender acts later (after the ack); without the
+  in-memory snapshot the sender would delete rows that arrived
+  in the meantime, leaving them gone on the sender's side while
+  the peer kept them.
+
+  **Outgoing barrier while pending.** While a wipe is in-flight
+  for a peer, `DMRouter.SendMessage` and `SendFileAnnounce`
+  refuse new sends with the typed `ErrConversationDeleteInflight`
+  and the UI disables the composer (the synchronous gate is
+  `IsConversationDeletePending`). This closes the race where a
+  user-authored message would otherwise reach the peer's
+  chatlog after the peer's wipe ran but before the sender's
+  post-ack sweep — leaving a row gone on the receiver and
+  present on the sender. The barrier lifts only when the pending
+  entry is removed — on a success ack or on abandonment. A
+  transient error ack keeps the pending entry alive and the retry
+  loop running, so the barrier stays raised until the next
+  definitive outcome.
+
+  **Two-phase sender API.** The router exposes the wipe in two
+  steps so the barrier closes synchronously with the user's click:
+  `BeginConversationDelete(peer)` reserves the pending entry on
+  the calling thread (no I/O) and returns the minted requestID;
+  `CompleteConversationDelete(ctx, peer, requestID)` then runs
+  the chatlog snapshot + initial wire dispatch and is safe to
+  invoke from a background goroutine. The desktop UI calls Begin
+  on the event-loop thread before launching the goroutine for
+  Complete; without that split, the goroutine-start window would
+  let a fast Enter / click slip past the barrier check and reach
+  the peer ahead of `conversation_delete`. The convenience
+  wrapper `SendConversationDelete(ctx, peer)` runs both phases
+  inline and is reserved for tests / call sites that do not
+  return to a UI event loop.
+
+  Each pending entry carries a `prepared` flag that gates the
+  retry loop. Begin installs the entry with `prepared=false`
+  (synchronous barrier latch only — `IsConversationDeletePending`
+  reports true and `SendMessage` / `SendFileAnnounce` reject
+  immediately, but the retry-loop's `dueEntries` skips it).
+  Complete's `attachLocalKnownIDs` call promotes the entry to
+  `prepared=true` after the click-time snapshot is in place;
+  only then does the retry loop become eligible to redispatch
+  the wipe. This gate is load-bearing: if the retry loop saw
+  unprepared entries it could fire a wipe whose eventual applied
+  ack would call `applyLocalConversationWipe` with a `nil`
+  `localKnownIDs` and silently report "wiped on both sides" while
+  every local row stayed intact. As a watchdog against stranded
+  reservations (e.g. caller crashes between Begin and the
+  goroutine that runs Complete), the retry loop also reaps
+  unprepared entries older than `convDeleteReservationTTL` and
+  publishes an `Abandoned=true` outcome so the UI's status
+  string transitions out of "dispatching…".
+
+  Complete also waits for the per-peer **in-flight send drain**
+  before snapshotting `localKnownIDs`. `SendMessage` and
+  `SendFileAnnounce` go through a single atomic
+  `convDeleteRetry.acquireSendIfNoPending(peer)` call on the
+  synchronous thread: under the same mutex that guards the
+  pending entry map, this either rejects the send (a wipe is
+  already pending, return `ErrConversationDeleteInflight`) or
+  increments a per-peer in-flight counter. The matching
+  `releaseSend(peer)` runs in the send goroutine via `defer`
+  once the local node's `send_message` reply lands. There is
+  no separate has → Acquire → Begin race window — the atomic
+  acquire collapses the check and the increment.
+  `CompleteConversationDelete` resolves the drain via
+  `inflightDrainedChan(peer)`, blocking on the returned
+  channel inside a `context.WithTimeout(ctx, 10*time.Second)`
+  until the counter reaches zero (chan closed) or the deadline
+  elapses. **On drain timeout Complete does NOT snapshot** —
+  proceeding would reopen exactly the divergence the barrier is
+  meant to close. Instead it ROLLS BACK the reservation
+  (lifting the outgoing barrier) and returns an error; the UI
+  surfaces this through the generic "wipe failed" status path
+  and the user can re-click once the in-flight sends settle.
+  New sends started AFTER Begin observe the pending entry under
+  the same mutex and bounce with `ErrConversationDeleteInflight`
+  before incrementing the in-flight counter.
+
+  Complete starts with a `claimForCompletion` step that refreshes
+  the reservation's TTL anchor (`reservedAt = now`) before the
+  snapshot runs. This closes the race where a slow goroutine
+  startup or a snapshot near the TTL boundary would let the
+  reaper drop the entry while Complete is still working. If the
+  claim itself fails (the reaper had already pruned the entry
+  before the goroutine reached us), Complete returns the typed
+  `ErrConversationDeleteReservationLost`; the desktop UI checks
+  `errors.Is` and suppresses its "wipe request sent" status,
+  since no wire command went out under this requestID — the
+  reaper's earlier `Abandoned=true` outcome is the correct
+  user-facing message and the UI subscriber has already turned
+  it into the localised "abandoned" status string.
+
+  After Complete returns nil the desktop UI writes the "wipe
+  request sent" status through `SetSendStatusIfCurrent` rather
+  than `SetSendStatus`. The atomic compare-and-swap matches the
+  expected "dispatching…" value the same handler had set just
+  before launching the goroutine; if a fast peer ACK has already
+  driven the subscriber to a terminal status (applied, abandoned,
+  applied + LocalCleanupFailed), the live value no longer matches
+  and the CAS is a no-op. Without this guard the goroutine could
+  overwrite a terminal outcome with "waiting for peer" because
+  the subscriber and the dispatch goroutine race on a plain
+  string field.
+
+  **Remaining late-delivery race (known trade-off).** A message
+  the peer SENT before receiving the wipe but that was still in
+  flight to the originator can land on the originator's side
+  AFTER the wipe completes. The peer will already have wiped
+  its outgoing copy at command-arrival; the originator now
+  sees a row that the peer no longer has. The local-snapshot
+  gate prevents the originator's post-ack sweep from deleting
+  it (it was not in the click-time snapshot), so it stays
+  visible on the originator's side as a single asymmetric row.
+  The UI status string warns about this and recommends a
+  single-message `message_delete` to reconcile. Tombstones (see
+  below) cancel only the re-replay class (the SAME envelope
+  arriving again after we deleted it). Closing the in-flight
+  class fully requires either a delivery-queue cancellation
+  hook on the peer side or a cutoff/timestamp on the wire —
+  both tracked follow-ups.
+
+  **Tombstones against late-replay resurrection.** After a
+  successful wipe (both sender post-ack sweep AND receiver-side
+  sweep) the removed ids are recorded in an in-memory tombstone
+  set with a TTL of `wipeTombstoneTTL` (1 hour); each id is
+  pre-marked inside the delete loop so a replay arriving in the
+  window between `DeleteByID` and the post-loop bookkeeping is
+  also caught. When `onNewMessage` fires for a re-delivered
+  envelope (relay retry, network reorder, peer resend during the
+  inbox-replay window), it consults the set first and silently
+  re-DELETEs the row + evicts the active conversation cache
+  before the new-message UI path runs. Without this guard a row
+  the user just wiped would be silently re-inserted by
+  `storeIncomingMessage`, because the original chatlog row is
+  gone and the dedup gate (`seenMessageIDs`) was deliberately
+  cleared as part of the wipe. The tombstone set is in-memory
+  only; a process restart drops it. A persistent tombstone
+  column on `chatlog.Entry` is a tracked follow-up. The
+  tombstone is also reactive — node-level state
+  (`s.topics["dm"]`, fetch_dm_headers, gossip) may still surface
+  the wiped envelope through paths that bypass `onNewMessage`;
+  pushing the tombstone gate down into the node admission path
+  is a tracked follow-up.
+- `ConversationDeleteAckPayload` echoes `RequestID` back and carries
+  `Status` (`applied` / `error`) and `Deleted` (number of rows
+  actually removed on the recipient side). The sender matches an
+  inbound ack to its pending entry on (envelope sender, RequestID),
+  not envelope sender alone — a late ack from an abandoned earlier
+  wipe must NOT silently retire a fresh pending wipe to the same
+  peer (otherwise the local sweep would run before the new wipe was
+  applied on the recipient). The retry loop reuses the SAME
+  RequestID across all dispatches of one request; a fresh
+  SendConversationDelete mints a new one.
+
+Authorization deliberately diverges from `message_delete`. The
+receiver walks every chatlog row of the conversation with the
+envelope sender and removes every non-immutable row regardless of
+authorship. Reusing the per-row `authorizedToDelete` matrix would
+refuse rows the requester did not author — under the default
+`sender-delete` flag (which every regular DM carries) that means
+half the thread survives on each side after a "wipe everything"
+gesture, directly contradicting the user-visible promise of the
+sidebar menu entry.
+
+The bulk gesture is treated as mutual consent to forget the thread,
+authorised by an explicit two-click UI confirmation, so it carries
+stronger authority over peer-authored rows than a single
+`message_delete` would. The only carve-out is `immutable`: those
+rows stay on both sides because the flag is a hard "this row is part
+of the permanent record" promise (e.g. for legal evidence or
+tamper-evident logs) that bulk consent cannot override.
+
+A narrower predicate runs locally on the sender side **after** the
+peer's success ack lands (see `applyLocalConversationWipe`): the
+sender deletes only the **intersection** of the current chatlog
+with the click-time `localKnownIDs` snapshot captured in
+`SendConversationDelete`. Rows OUTSIDE the snapshot — late inbound
+from the peer, self-authored outbound rows still in
+`DeliveryStatus="sent"` at click, or anything else the snapshot
+filtered out — stay on this side; this is purely a LOCAL cleanup
+scope contract. Whether such a row also survives on the receiver
+depends on delivery ordering: a post-click outbound row can
+reach the peer BEFORE the peer's first-contact gather and be
+wiped there, leaving it alive only on the originator (the
+documented originator-only asymmetry), or arrive AFTER and stay
+on both sides. Immutable rows are skipped on both sides. The
+asymmetric scoping closes the post-snapshot wipe-it-on-our-side
+hole without making any symmetric peer-side promise.
+
+Ordering on the sender side matches `message_delete`: **pessimistic**.
+Local rows STAY in chatlog until the peer's
+`conversation_delete_ack` arrives with status `applied`; the wipe
+then runs inside `handleInboundConversationDeleteAck` and only then
+mutates local state. A `error` / abandoned ack leaves the local
+rows alive so the user can re-issue the request rather than discover
+later that one side still holds the history. Abandonment surfaces
+as `Abandoned=true` on `ebus.TopicConversationDeleteCompleted` so
+the UI can warn the user that local rows are kept and the peer side
+was not confirmed.
+
+Per-row failure on the receiver side downgrades the ack: if even one
+non-immutable row's `chatlog.DeleteByID` returns an error,
+`sweepInboundDeleteScope` reports the row in `survivors` and the
+inbound handler (`processInboundConversationDeleteFreshGather` or
+`processInboundConversationDeleteReplay`) commits an `error` ack
+instead of `applied`. The sender therefore does NOT mirror the wipe locally,
+the retry loop schedules another attempt, and the next round picks
+up the surviving rows (rows the previous attempt removed are gone —
+`DeleteByID` is idempotent). This guarantees the
+"delete on the recipient first, then mirror" contract: local rows
+are wiped only when the peer is fully consistent.
+
+**Receiver-side frozen scope per `(peer, requestID)`.** The
+receiver pins the candidate set on FIRST apply and reuses it on
+every retry — chatlog reads only happen on the first apply, never
+on retries. Cache entries live in `inboundConvDeleteCache` keyed
+by `(envelopeSender, requestID)`. TTL details are described
+further down in this section ("Cache TTL is …"). The entry
+carries the frozen `candidates` set, the current `survivors`
+subset (rows whose `DeleteByID` failed in the most recent
+attempt), `gatheredScope` (false for gather-failed tombstones,
+true otherwise), the last reported `(status,
+cumulativeDeleted)`, and the cache timestamp.
+
+Behaviour:
+
+- **First apply**: read CURRENT chatlog, capture every
+  non-immutable id as `candidates`, sweep them once, cache
+  `(candidates, survivors, status, deleted)`. Survivors are the
+  candidates whose `DeleteByID` errored.
+- **Lost-ack retry** (survivors empty): replay the cached
+  `(status, deleted)` ack without touching chatlog at all.
+- **Partial-failure retry** (survivors non-empty): re-attempt
+  `DeleteByID` for each survivor; rows that succeed or are
+  already-gone (idempotent `removed=false`) are dropped from
+  survivors; rows that still error stay. The receiver's CURRENT
+  chatlog is NEVER iterated again — rows the peer added between
+  the first apply and the retry are NOT in `candidates` and are
+  therefore NEVER swept.
+- **Gather failure on first apply** (chatlog read error): a
+  TOMBSTONE entry is cached with `gatheredScope=false` and
+  `lastStatus=Error`. Future retries of the same `(peer,
+  requestID)` short-circuit on the tombstone and reply Error/0
+  WITHOUT attempting another gather — even if chatlog has
+  recovered in the meantime. A recovered cold-gather would pick
+  up rows that arrived after first-seen, expanding scope past
+  the sender's `localKnownIDs` snapshot. Sender exhausts its
+  retry budget on these Error replies and abandons; the user can
+  re-issue with a fresh requestID once the backend is stable.
+- **Fresh wipe** (different `requestID`): bypasses the cache and
+  captures a brand-new candidate set, so a user re-clicking after
+  a successful mirror is still honoured.
+
+Cache TTL is `inboundConvDeleteCacheTTL` (30 minutes) —
+comfortably above the sender's worst-case retry timeline
+(~15 min). Beyond the active scope cache, a separate long-lived
+MINIMAL-OUTCOME set `inboundConvDeleteSeen` (TTL
+`inboundConvDeleteSeenTTL`, 1 year) carries each
+`(peer, requestID)` plus the last
+`(status, cumulativeDeleted)` recorded for it long after the
+heavy scope data has been reaped. The lookup deliberately does
+NOT lazy-delete past TTL — it returns three states (no entry,
+fresh entry, expired-but-present entry); only the reaper purges
+expired entries on its own cadence. An expired-but-present hit
+is replayed CONSERVATIVELY as Error/0 so a long-suspended
+sender (laptop sleep keeping a pending entry alive across the
+TTL boundary) still gets refused a fresh cold-gather that would
+silently widen scope past its localKnownIDs. `handleInboundConversationDelete`
+consults the seen-set ONLY when the live cache reports a miss
+(via `claimColdOrReplay` returning `inboundClaimCold`); a live
+cache entry, including one with non-empty survivors waiting for
+a partial-failure retry, ALWAYS wins. Without that ordering a
+seen entry recorded by the first apply (`status=Error`,
+`cumulativeDeleted=N`) would short-circuit the very retry that
+is supposed to sweep the survivors and the request would be
+forced into retry-budget abandonment despite having recoverable
+work pending. On a confirmed cache miss the seen-set replays
+its minimal outcome:
+
+- **Status=Applied** → reply `(Applied, cumulativeDeleted)`.
+  This is the load-bearing case: a sender retry that arrived
+  after the active cache evicted (e.g. wall-clock-paused
+  laptop) still gets the same successful ack the original
+  apply would have replayed, so the sender's local mirror
+  runs and the two sides converge.
+- **Status=Error** → reply Error/0. This covers gather-failed
+  tombstones and partial-failure outcomes whose survivor list
+  has been lost; sender abandons or user re-issues with a
+  fresh requestID. At the seen-set fallback layer the same
+  requestID can no longer transition to Applied — the heavy
+  scope is gone, there are no survivors to sweep, and a
+  gather-failed tombstone is permanent by design.
+  `cumulativeDeleted` is retained on the seen entry purely
+  for diagnostics (it preserves the running total observed
+  before the heavy scope was reaped); the wire ACK still
+  carries `Deleted=0` on the Error replay to match the
+  documented non-Applied wire contract.
+
+Memory cost has two layers. The full payload (status,
+cumulative, gathered, seenAt) lives in `entries` and is bounded
+by the number of unique `(peer, requestID)` tuples seen in the
+active retention window. `record` REFRESHES `seenAt = now` on
+every call — including every commit from
+`processInboundConversationDeleteFreshGather` /
+`processInboundConversationDeleteReplay` AND every replay
+emitted by `replyInboundConversationDeleteFromSeen` — so the
+1-year TTL is measured from the last observed activity for
+that `(peer, requestID)`, NOT from the genuine first contact.
+Sustained sender retries against a known requestID extend the
+entry so it cannot fall back into the cold-gather path
+mid-stream; once retries stop and a year of silence elapses,
+the reaper moves the key to a key-only `tombstones` map and
+discards the payload. Tombstones are NEVER reaped (matching
+the in-memory-only restart semantics of the rest of the
+seen-set) and are returned by lookup as
+"present-but-not-fresh" — the caller still refuses a fresh
+cold-gather and replies Error/0. This closes the residual
+"sender pending state outlives our seen TTL" hole flagged by
+review (laptop sleep keeping a pending entry alive past the
+seen TTL, then firing a final retry on resume): even after the
+full payload is reaped, the key marker still recognises the
+requestID and refuses scope widening. Memory cost of a
+tombstone is just the key (~50 bytes); over a process lifetime
+this remains negligible at any plausible user-driven wipe rate.
+
+Without the frozen scope the retry path (lost-ack OR partial-
+failure OR gather-failure-then-recover) would silently widen
+the wipe past the sender's `localKnownIDs` snapshot and leave
+the two histories divergent on the eventual `applied`.
+
+**Known limitation: receiver process restart drops the cache.**
+A sender retry that arrives after the receiver restarts misses
+the cache and cold-gathers current chatlog; rows added after the
+original first-contact would be swept on the receiver but absent
+from the sender's snapshot. Closing this requires persisting the
+per-`(peer, requestID)` scope alongside chatlog and is a tracked
+follow-up. The shared `message_delete` pending state has the
+same in-memory caveat.
+
+Per-row failure on the SENDER side after a success ack arrives is a
+separate failure mode: the peer is already consistent, retrying the
+wire would not help. The `applyLocalConversationWipe` helper returns
+`(deleted, ok)` and `ok=false` on chatlog read failure or any
+per-row `DeleteByID` failure. The ack handler then publishes
+`TopicConversationDeleteCompleted` with `Status=applied` (the peer
+DID wipe its side) **and** `LocalCleanupFailed=true` so the UI can
+warn the user that local rows survived the sweep instead of
+promising "wiped on both sides".
+
+Retry policy mirrors `message_delete` (initial 30 s, exponential
+backoff ×2, cap 300 s, 6 dispatches total). State is keyed by peer
+(one in-flight wipe per identity); a duplicate click while a wipe is
+pending is a no-op — the cheap `has(peer)` check followed by atomic
+`tryAdd` keeps the first request alive and returns nil to the caller,
+so the original `requestID` and the original snapshot of locally-
+known IDs both survive. The user sees the eventual outcome of the
+first request via `TopicConversationDeleteCompleted`. Re-clicking
+only takes effect after the first round-trip terminates (success ack
+or abandoned). As with `message_delete`, the pending state is
+in-memory only and a process restart drops the in-flight retry.
+
+**Final-dispatch ACK grace.** When `recordAttemptIfMatch` bumps
+the attempt counter to `convDeleteRetryMaxAttempt` it does NOT
+remove the pending entry. Instead it sets `terminalAt = now`;
+`dueEntries` then skips the entry (no further wire dispatches),
+but the entry stays in the map for `convDeleteTerminalAckGrace`
+(60 s) so a successful applied ACK to that final wire send can
+still arrive and run the local mirror through the regular
+`removeIfMatch` path. The retry loop's `pruneTerminalAckExpired`
+sweep drops the entry — and publishes Abandoned — only if the
+grace expires without an ACK. Without this grace, the final
+wire dispatch could reach the peer, the peer would apply the
+wipe and send applied, but the sender's pending entry would
+already be gone — the ACK would be dropped by the requestID
+guard and local history would survive the wipe even though
+peer history was successfully cleared.
+
+The receiver is idempotent under retry through the per-(peer,
+requestID) cache and the long-lived seen-set (see "Receiver-side
+frozen scope" above). A duplicate `conversation_delete` after a
+successful first apply replays the cached
+`(status, cumulativeDeleted)` ack — the same non-zero `Deleted`
+count the original ack reported, NOT zero — without re-iterating
+chatlog. A duplicate AFTER the active scope cache TTL expires is
+NOT a cold path: `handleInboundConversationDelete` first
+runs `claimColdOrReplay`, which (a) returns
+`inboundClaimReplay` if a live cache entry still exists —
+the live entry always wins over the seen-set so a
+partial-failure retry still gets its survivors swept — or
+(b) returns `inboundClaimCold` if the cache is empty/expired,
+and ONLY THEN does the handler consult the seen-set inside
+the cold branch. A seen-set hit there can resolve to one of
+two states:
+
+- **present-and-fresh** — full payload is still within the
+  1-year TTL and replays the original outcome: for a prior
+  successful apply, `(Applied, cumulativeDeleted)`; for a
+  prior gather-failed tombstone or unresolved first contact,
+  Error/0.
+- **present-but-not-fresh** — either the full payload is past
+  TTL but the reaper has not yet moved it to tombstones, OR
+  the reaper has already discarded the payload and only the
+  key remains in the tombstones map. Both sub-cases reply
+  Error/0 CONSERVATIVELY and refuse a fresh cold-gather.
+
+Only a TRUE seen-set MISS (no entry AND no tombstone for
+this `(peer, requestID)`) cold-gathers current chatlog —
+that is, only a genuinely never-seen requestID. A previously
+known requestID whose full seen entry has been reaped past
+TTL still resolves to present-but-not-fresh via the
+tombstone marker, NOT to a true miss. The sender treats
+`applied` (any `Deleted` count) as terminal success and runs
+the local sweep; `error` is treated as transient and the
+retry loop continues without touching local rows.
+
+UI gating: the sidebar item renders as a non-clickable disabled pill
+when the peer is offline (matches the file-card delete pill style).
+The click handler re-checks `peerOnline` when the user opens the
+confirm step AND when they click Yes — the peer may go offline
+between those clicks, and pessimistic ordering would then leave the
+user with both an unaltered local chat and an abandoned wire
+attempt. The Yes-click guard surfaces a clear status-bar message
+("peer went offline") instead of silently spending the retry
+budget.
+
+In-flight pending outbound DMs to the wiped peer are **not**
+cancelled in this iteration. If a queued message later does land on
+the peer, the user can remove it through the regular `message_delete`
+flow. Adding a delivery-queue cancellation hook is a tracked
+follow-up.
+
 ### Wire flow
 
 ```mermaid
@@ -1054,6 +1605,559 @@ generic-цепочку cleanup. Сейчас один хук:
   UI eviction выполняются синхронно внутри `SendMessageDelete`. Для
   `any-delete` отправка возможна; это будущее расширение, в этой
   итерации не реализовано.
+
+### Массовая очистка (`conversation_delete`)
+
+`conversation_delete` — bulk-аналог `message_delete`. Пункт «Удалить
+чат для всех» в контекстном меню сайдбара одним control round-trip
+очищает всю переписку с одним пиром у **обоих** сторон, без
+поэлементной итерации из UI.
+
+Wire-уровень:
+
+- Новые control DM команды `DMCommandConversationDelete` и
+  `DMCommandConversationDeleteAck`. Обе ходят на том же топике
+  `dm-control`, что и `message_delete`. `IsControl()` возвращает
+  true для обеих; в chatlog не пишутся и в треде чата не
+  показываются.
+- `ConversationDeletePayload` несёт ТОЛЬКО `RequestID` (UUID v4,
+  типизированный как `ConversationDeleteRequestID` ради доменной
+  типизации). Peer переписки выводится из проверенного envelope
+  sender, поэтому подделанный payload не может перенаправить
+  очистку на другую переписку. Никакого row-list, scope или
+  cutoff — wire payload остаётся компактным независимо от
+  размера переписки, и wipe доставляется для произвольно больших
+  тредов через стандартный control-DM путь
+  (`node.maxRelayBodyBytes` никогда не под угрозой).
+
+  Каждая сторона применяет wipe против своего ЗАМОРОЖЕННОГО
+  scope, а НЕ против текущего chatlog в момент применения:
+
+  - Получатель, при first contact для `(peer, requestID)`,
+    внутри `handleInboundConversationDelete` /
+    `processInboundConversationDeleteFreshGather` собирает каждую
+    non-immutable строку, которая у него сейчас есть с peer'ом,
+    и пинит этот set в `inboundConvDeleteCache`. Каждый
+    последующий retry того же requestID работает ТОЛЬКО с
+    замороженным scope — partial-failure retry'и пере-attempt'ят
+    только cached survivors, lost-ack replay'и возвращают
+    cached outcome не трогая chatlog вообще. Строки,
+    написанные peer'ом ПОСЛЕ first contact, не входят в
+    frozen scope и остаются у получателя.
+  - Отправитель, внутри `applyLocalConversationWipe`,
+    вызванного из ack-handler'а, применяет предикат с
+    ограничением через in-memory **локальный snapshot**,
+    снятый в момент клика
+    (`pendingConversationDelete.localKnownIDs`): строка,
+    чьего id нет в snapshot, ВНЕ scope sender-cleanup'а и
+    остаётся на стороне отправителя. «Вне scope» НЕ означает
+    «пользователь её не видел» или «peer её сохранил» —
+    self-authored строки в статусе `sent` пользователю в его
+    собственном UI видны и намеренно держатся вне snapshot
+    (см. правило включения ниже), а в зависимости от порядка
+    доставки peer может уже стереть свою копию такой строки.
+    Контракт snapshot чисто локальный: ограничивает то, что
+    МЫ удалим на ЭТОЙ стороне после подтверждения peer'а; не
+    даёт симметричного обещания о peer-side survival.
+    Snapshot живёт только в pending и никогда не передаётся
+    по wire — payload остаётся intent-only.
+
+  Immutable строки — универсальное исключение и остаются на
+  обеих сторонах независимо от snapshot или frozen-scope.
+
+  **Правило включения в snapshot.**
+  `snapshotLocalKnownConversationIDs` применяет
+  delivery-aware фильтр, чтобы snapshot описывал только те
+  строки, состояние которых peer тоже знает:
+
+  - Inbound (peer-authored): всегда включаются. Peer их сам
+    написал — они в его first-contact gather scope, и его
+    wipe их удалит.
+  - Outbound (self-authored): включаются только при
+    `chatlog.Entry.DeliveryStatus == "delivered"` (peer-нод
+    подтвердил приём) или `"seen"` (пользователь peer'а
+    открыл диалог). Outbound со статусом `"sent"` —
+    локальный нод принял, но peer-нод не подтвердил приём —
+    ИСКЛЮЧАЮТСЯ из snapshot.
+  - Immutable строки пропускаются.
+
+  Исключение `sent` outbound закрывает дыру, которую drain
+  сам по себе закрыть не может: `CompleteConversationDelete`
+  drain'ит in-flight goroutine'ы `SendMessage` /
+  `SendFileAnnounce`, но эти goroutine'ы возвращаются на
+  ЛОКАЛЬНЫЙ handoff (reply `send_message` от локального
+  нода), а не на peer-receipt. Строка
+  «локально принята, но ещё не доставлена» в момент клика
+  всё равно лежит в chatlog, и её попадание в
+  `localKnownIDs` привело бы к её удалению с этой стороны
+  после applied ack, пока data DM ещё в outbound-очереди:
+  когда data DM позже долетит до peer'а УЖЕ ПОСЛЕ того
+  как там обработался `conversation_delete`, gather peer'а
+  её не включит (она пришла поздно), peer её сохранит, а у
+  нас её уже нет — receiver-only row. Исключая `sent`
+  outbound из snapshot, мы ВСЕГДА оставляем такие строки на
+  нашей стороне; исход у peer'а зависит от порядка
+  доставки:
+
+  - peer получает data DM ПОСЛЕ своего first-contact gather
+    для `conversation_delete` (очередь доставила
+    `conversation_delete` первым — типичный кейс, когда оба
+    были в очереди до клика): frozen scope peer'а строку не
+    включает, peer её сохраняет → обе стороны держат строку
+    (симметрично).
+  - peer получает data DM ДО своего first-contact gather
+    (очередь доставила data DM раньше `conversation_delete`):
+    gather peer'а строку ВКЛЮЧАЕТ, peer её удаляет, но у
+    нас она остаётся, потому что её не было в `localKnownIDs`
+    → asymmetric ORIGINATOR-only исход.
+
+  Asymmetric кейс зеркалит документированный inbound
+  late-delivery trade-off (peer-authored row, прилетевший к
+  нам после клика, выживает только у нас); обе асимметрии
+  оставляют строку живой у автора этой строки. Контракт
+  протокола — «удалить peer-confirmed локальный snapshot
+  отправителя, с документированными out-of-scope
+  асимметриями», а НЕ user-saw / both-sides symmetry
+  обещание — видимые self-authored `sent` строки by design
+  исключены из snapshot, а asymmetric кейсы дизайном
+  приняты.
+
+  Почему асимметрия: получатель реагирует на момент прихода
+  команды, поэтому его текущий снимок chatlog — это и есть
+  scope (всё что придёт после обработки — вне scope). Отправитель
+  действует позже (после ack); без in-memory snapshot он бы
+  удалил строки, пришедшие в промежутке, оставив их пропавшими
+  у себя при сохранении у peer'а.
+
+  **Outgoing barrier во время pending.** Пока wipe in-flight
+  для peer'а, `DMRouter.SendMessage` и `SendFileAnnounce`
+  отказывают новым отправкам с типизированной
+  `ErrConversationDeleteInflight`, а UI блокирует composer
+  (синхронный gate — `IsConversationDeletePending`). Это
+  закрывает race, где user-authored сообщение иначе могло бы
+  попасть в chatlog peer'а после применения peer'ом wipe, но
+  до post-ack sweep отправителя — оставляя строку удалённой у
+  получателя и сохранённой у отправителя. Barrier снимается
+  только когда pending entry удаляется — на success ack или на
+  abandonment. Transient error ack оставляет pending entry живой
+  и retry-loop работающим, так что barrier остаётся поднятым до
+  следующего definitive outcome.
+
+  **Двухфазное API отправителя.** Чтобы barrier закрывался
+  синхронно с кликом пользователя, router отдаёт wipe двумя
+  шагами: `BeginConversationDelete(peer)` резервирует pending
+  entry на вызывающем потоке (без I/O) и возвращает minted
+  requestID; `CompleteConversationDelete(ctx, peer, requestID)`
+  затем выполняет chatlog snapshot + начальный wire dispatch и
+  безопасен для запуска из background-горутины. Desktop UI
+  вызывает Begin на event-loop потоке ДО запуска горутины с
+  Complete; без этого split окно старта горутины давало бы
+  быстрому Enter / клику просочиться мимо barrier-проверки и
+  достичь peer'а раньше `conversation_delete`. Convenience-
+  обёртка `SendConversationDelete(ctx, peer)` запускает обе
+  фазы inline и нужна только для тестов и call sites, которые
+  не возвращаются в UI event loop.
+
+  Каждая pending entry несёт флаг `prepared`, который гейтит
+  retry-loop. Begin ставит entry с `prepared=false` (только
+  синхронный barrier latch — `IsConversationDeletePending`
+  возвращает true, `SendMessage` / `SendFileAnnounce` отказывают
+  немедленно, но `dueEntries` retry-loop'а её пропускает).
+  Вызов `attachLocalKnownIDs` внутри Complete переводит entry в
+  `prepared=true` после того, как click-time snapshot привязан;
+  только после этого retry-loop становится eligible для повторной
+  отправки wipe. Этот gate load-bearing: если бы retry-loop видел
+  unprepared entries, он мог бы отправить wipe, чей итоговый
+  applied ack вызвал бы `applyLocalConversationWipe` с `nil`
+  `localKnownIDs` и тихо отрепортил «wiped on both sides», пока
+  все локальные строки оставались целыми. Как watchdog против
+  стрэндед-резерваций (например, caller крашится между Begin и
+  goroutine с Complete), retry-loop также reaps unprepared
+  entries старше `convDeleteReservationTTL` и публикует
+  `Abandoned=true` outcome, чтобы UI-статус не залипал на
+  «dispatching…».
+
+  Complete также ждёт **drain'а in-flight sends** этого пира
+  перед snapshot'ом `localKnownIDs`. `SendMessage` и
+  `SendFileAnnounce` идут через единственный атомарный вызов
+  `convDeleteRetry.acquireSendIfNoPending(peer)` на синхронном
+  потоке: под тем же мьютексом, что и pending-entry map, он
+  либо отклоняет send (wipe уже pending, возвращается
+  `ErrConversationDeleteInflight`), либо инкрементирует
+  per-peer in-flight счётчик. Парный `releaseSend(peer)`
+  запускается в send-goroutine через `defer` после того, как
+  local-нод вернул reply на `send_message`. Никакого отдельного
+  has → Acquire → Begin race-окна нет — атомарный acquire
+  схлопывает check и инкремент в одну операцию.
+  `CompleteConversationDelete` дренит через
+  `inflightDrainedChan(peer)`, блокируясь на возвращённом
+  канале внутри `context.WithTimeout(ctx, 10*time.Second)` пока
+  счётчик не достигнет нуля (chan закрылся) либо deadline не
+  истечёт. **На drain timeout Complete НЕ делает snapshot** —
+  proceeding открыло бы заново тот же divergence, который
+  barrier закрывает. Вместо этого ОТКАТЫВАЕТ резервацию
+  (поднимая outgoing barrier) и возвращает ошибку; UI
+  surface'ит её через generic "wipe failed" статус-путь, и
+  пользователь может кликнуть заново, когда in-flight sends
+  устаканятся. Новые sends, начатые ПОСЛЕ Begin, видят pending
+  entry под тем же мьютексом и отскакивают с
+  `ErrConversationDeleteInflight` ещё до инкремента in-flight
+  счётчика.
+
+  Complete начинается с шага `claimForCompletion`, который
+  рефрешит TTL-якорь резервации (`reservedAt = now`) до запуска
+  snapshot. Это закрывает race, где медленный старт goroutine
+  или snapshot близко к границе TTL дали бы reaper'у дропнуть
+  entry, пока Complete ещё работает. Если сам claim провалился
+  (reaper уже спрунил entry до того, как goroutine дошла), Complete
+  возвращает типизированную `ErrConversationDeleteReservationLost`;
+  desktop UI проверяет через `errors.Is` и подавляет «wipe request
+  sent» статус, потому что под этим requestID реально ничего не
+  было отправлено по проводу — раньше опубликованный reaper'ом
+  `Abandoned=true` outcome является корректным сообщением для
+  пользователя, и UI-подписчик уже перевёл его в локализованную
+  «abandoned» строку.
+
+  После того как Complete вернул nil, desktop UI пишет «wipe
+  request sent» через `SetSendStatusIfCurrent`, а не через
+  `SetSendStatus`. Атомарный compare-and-swap сверяется с
+  ожидаемым «dispatching…», который тот же хендлер установил
+  непосредственно перед запуском goroutine; если быстрый ACK
+  пира уже привёл подписчика в терминальный статус (applied,
+  abandoned, applied + LocalCleanupFailed), live-значение больше
+  не совпадает с expected и CAS — no-op. Без этого guard'а
+  goroutine мог бы перетереть терминальный outcome строкой
+  «waiting for peer», потому что подписчик и dispatch-goroutine
+  гонятся за один plain string field.
+
+  **Оставшийся late-delivery race (известный trade-off).**
+  Сообщение, которое peer ОТПРАВИЛ до получения wipe, но
+  которое было ещё в полёте к инициатору, может приземлиться
+  у инициатора ПОСЛЕ завершения wipe. У peer'а его outgoing
+  копия уже удалена при обработке команды; у инициатора
+  теперь появится строка, которой у peer'а уже нет.
+  Local-snapshot gate не даёт post-ack sweep'у её удалить
+  (её не было в click-time snapshot), поэтому она остаётся
+  видимой у инициатора как одна асимметричная строка.
+  UI-статус предупреждает об этом и рекомендует одиночный
+  `message_delete` для согласования. Tombstones (см. ниже)
+  отменяют только класс re-replay (тот же envelope, приходящий
+  снова после удаления). Полное закрытие in-flight класса
+  требует либо cancellation hook delivery-очереди на стороне
+  peer'а, либо cutoff/timestamp на wire — оба tracked
+  follow-up.
+
+  **Tombstones против late-replay resurrection.** После успешного
+  wipe (и sender post-ack sweep, и receiver-side sweep) удалённые
+  ids записываются в in-memory tombstone-set с TTL
+  `wipeTombstoneTTL` (1 час); каждый id pre-mark'ается внутри
+  delete loop, чтобы replay в окне между `DeleteByID` и post-loop
+  bookkeeping тоже был пойман. Когда `onNewMessage` срабатывает на
+  re-delivered envelope (relay retry, network reorder, повторная
+  отправка peer'ом во время inbox-replay window), он первым делом
+  consult'ит tombstone-set и тихо re-DELETE'ит строку + evict'ит
+  active conversation cache до того как сработает обычный
+  new-message UI path. Без этой защиты только что стёртая строка
+  была бы тихо re-inserted через `storeIncomingMessage`, потому
+  что исходный chatlog row уже удалён, а dedup-gate
+  (`seenMessageIDs`) намеренно очищен как часть wipe. Tombstone-set
+  только in-memory; рестарт процесса его сбрасывает. Persistent
+  tombstone column на `chatlog.Entry` — tracked follow-up.
+  Tombstone reactive — node-level state (`s.topics["dm"]`,
+  fetch_dm_headers, gossip) может всё ещё всплыть с wiped
+  envelope через пути в обход `onNewMessage`; перенос tombstone
+  gate в node admission path — tracked follow-up.
+- `ConversationDeleteAckPayload` echo'ит `RequestID` обратно и
+  несёт `Status` (`applied` / `error`) и `Deleted` (число строк,
+  реально удалённых на стороне получателя). Отправитель матчит
+  входящий ack к своему pending entry по (envelope sender,
+  RequestID), а не только envelope sender — поздний ack от
+  abandoned предыдущей очистки НЕ должен молча retire'ить свежую
+  pending очистку к тому же peer (иначе локальный sweep запустится
+  до того, как новая очистка применится на получателе). Retry-loop
+  переиспользует ТОТ ЖЕ RequestID на всех dispatches одного
+  запроса; новый SendConversationDelete генерирует новый.
+
+Авторизация осознанно расходится с `message_delete`. Получатель
+проходит каждую строку chatlog переписки с envelope sender и
+удаляет каждую non-immutable строку независимо от авторства.
+Переиспользование per-row матрицы `authorizedToDelete` отказало бы в
+удалении строк, которых запрашивающий не автор — при дефолтном
+`sender-delete` (с которым едут все обычные DM) это означало бы,
+что половина переписки выживает на каждой стороне после жеста
+«удалить всё», что прямо противоречит обещанию пункта меню в
+сайдбаре.
+
+Bulk-жест трактуется как взаимное согласие забыть переписку,
+авторизованное явным двухкликовым подтверждением в UI, поэтому
+имеет более сильную власть над строками, написанными пиром, чем
+одиночный `message_delete`. Единственное исключение — `immutable`:
+такие строки остаются на обеих сторонах, потому что флаг — это
+жёсткое обещание «эта строка часть постоянной записи» (например,
+для юридических доказательств или tamper-evident логов), которое
+bulk consent не может переопределить.
+
+На стороне отправителя локально проигрывается более узкий
+предикат **после** прихода успешного ack (см.
+`applyLocalConversationWipe`): отправитель удаляет только
+**пересечение** текущего chatlog с click-time snapshot
+`localKnownIDs`, захваченным в `SendConversationDelete`. Строки
+ВНЕ snapshot — поздний inbound от пира, self-authored outbound
+в `DeliveryStatus="sent"` на момент клика, или любое другое,
+что snapshot отфильтровал — остаются на нашей стороне; это
+чисто LOCAL cleanup scope контракт. Выживет ли такая строка
+у получателя, зависит от порядка доставки: post-click outbound
+может долететь до peer'а ДО его first-contact gather и быть
+там стёртой, остаясь живой только у originator'а
+(документированная originator-only асимметрия), либо прилететь
+ПОСЛЕ и остаться у обеих сторон. Immutable-строки
+пропускаются на обеих сторонах. Асимметричный scope закрывает
+post-snapshot wipe-it-on-our-side hole, не давая никакого
+симметричного peer-side обещания.
+
+Порядок на стороне отправителя совпадает с `message_delete`:
+**pessimistic**. Локальные строки ОСТАЮТСЯ в chatlog до тех пор,
+пока не придёт `conversation_delete_ack` от пира со статусом
+`applied`; только после этого внутри
+`handleInboundConversationDeleteAck` запускается локальный sweep и
+мутируется состояние. `error` / abandoned оставляют локальные
+строки целыми, чтобы пользователь мог переотправить запрос, а не
+обнаружить позже, что одна сторона всё ещё хранит историю.
+Abandoned всплывает как `Abandoned=true` через
+`ebus.TopicConversationDeleteCompleted`, чтобы UI предупредил
+пользователя, что локальные строки сохранены и подтверждения от
+пира не было.
+
+Per-row отказ на стороне получателя downgrades ack: если хоть для
+одной non-immutable строки `chatlog.DeleteByID` возвращает ошибку,
+`sweepInboundDeleteScope` фиксирует строку в `survivors`, а
+inbound-handler (`processInboundConversationDeleteFreshGather` или
+`processInboundConversationDeleteReplay`) коммитит ack `error`,
+а не `applied`. Отправитель в этом случае НЕ отзеркаливает wipe локально, retry-loop
+планирует следующую попытку, и следующий раунд подхватывает
+выжившие строки (уже удалённые гарантированно исчезли — `DeleteByID`
+идемпотентен). Это гарантирует контракт «сначала удалить у
+получателя, потом отзеркалить»: локальные строки удаляются только
+когда пир полностью консистентен.
+
+**Receiver-side замороженный scope по `(peer, requestID)`.**
+Получатель фиксирует candidate-набор на ПЕРВОМ apply и
+переиспользует его на каждом retry — chatlog читается только
+на первом apply, никогда на retry. Cache-записи живут в
+`inboundConvDeleteCache` под ключом `(envelopeSender, requestID)`.
+TTL описан ниже в этом разделе («Cache TTL — …»). Запись несёт
+замороженный `candidates`-набор, текущее подмножество
+`survivors` (строки, на которых `DeleteByID` упал в самом
+свежем attempt), `gatheredScope` (false для tombstone'ов
+gather-failure, true в остальных случаях), последний
+`(status, cumulativeDeleted)` и timestamp.
+
+Поведение:
+
+- **Первый apply**: чтение ТЕКУЩЕГО chatlog, захват каждого
+  non-immutable id как `candidates`, проход по ним один раз,
+  cache `(candidates, survivors, status, deleted)`. Survivors —
+  это candidates, на которых `DeleteByID` упал.
+- **Lost-ack retry** (survivors пуст): replay cached
+  `(status, deleted)` ack без обращения к chatlog.
+- **Partial-failure retry** (survivors не пуст): re-attempt
+  `DeleteByID` для каждого survivor; строки, которые удалось
+  удалить или которые уже отсутствуют (идемпотентный
+  `removed=false`), удаляются из survivors; строки, на которых
+  всё ещё error, остаются. ТЕКУЩИЙ chatlog получателя НИКОГДА
+  не итерируется заново — строки, добавленные пиром между
+  первым apply и retry, НЕ входят в `candidates` и поэтому
+  НИКОГДА не проходят sweep.
+- **Gather failure на первом apply** (ошибка чтения chatlog):
+  кэшируется ТОМБСТОУН с `gatheredScope=false` и
+  `lastStatus=Error`. Будущие retry того же `(peer, requestID)`
+  short-circuit'ятся на томбстоуне и отвечают Error/0 БЕЗ
+  попытки нового gather — даже если chatlog успел восстановиться.
+  Восстановленный cold-gather подхватил бы строки, появившиеся
+  после first-seen, расширяя scope за пределы `localKnownIDs`
+  snapshot отправителя. Sender исчерпает retry budget на этих
+  Error и abandon'ит; пользователь может re-issue с свежим
+  requestID, когда backend стабилизируется.
+- **Свежий wipe** (другой `requestID`): обходит cache и
+  захватывает новый candidate-набор, так что пользователь,
+  кликнувший повторно после успешного зеркала, будет всё ещё
+  уважен.
+
+Cache TTL — `inboundConvDeleteCacheTTL` (30 минут), комфортно
+больше максимального retry-окна sender'а (~15 мин). За
+пределами active scope cache работает отдельный долгоживущий
+MINIMAL-OUTCOME сет `inboundConvDeleteSeen` (TTL
+`inboundConvDeleteSeenTTL`, 1 год), который несёт каждый
+`(peer, requestID)` плюс последний записанный для него
+`(status, cumulativeDeleted)` надолго после того, как тяжёлые
+данные scope'а уже реапнуты. Lookup намеренно НЕ lazy-delete'ит
+после TTL — возвращает три состояния (нет записи / fresh
+запись / expired-but-present); только reaper удаляет expired
+записи на собственном cadence. Hit на expired-but-present
+повторяется КОНСЕРВАТИВНО как Error/0 — это закрывает дыру,
+когда долгий sender (laptop sleep, держащий pending entry
+живым через TTL boundary) всё равно получает отказ в свежем
+cold-gather, который иначе тихо расширил бы scope за пределы
+его localKnownIDs. `handleInboundConversationDelete`
+консультирует seen-set ТОЛЬКО при cache miss (когда
+`claimColdOrReplay` возвращает `inboundClaimCold`); живая
+cache-запись — даже с непустым survivors-сетом, ждущим
+partial-failure retry — ВСЕГДА выигрывает. Без такого порядка
+seen-запись от первого apply (`status=Error`,
+`cumulativeDeleted=N`) короткозамыкала бы тот самый retry,
+который должен сметнуть survivors, и request гарантированно
+улетал бы в retry-budget abandonment, несмотря на recoverable
+работу. На подтверждённом cache miss seen-set воспроизводит
+свой minimal outcome:
+
+- **Status=Applied** → ответ `(Applied, cumulativeDeleted)`.
+  Это load-bearing случай: retry sender'а, прибывший после
+  eviction active cache (например, wall-clock-paused
+  ноутбук), всё равно получает тот же успешный ack, который
+  повторил бы оригинальный apply, так что local mirror у
+  sender'а запускается и обе стороны сходятся.
+- **Status=Error** → ответ Error/0. Покрывает gather-failed
+  tombstones и partial-failure outcomes, чей survivor-список
+  утерян; sender abandon'ит или пользователь re-issue'ит с
+  fresh requestID. На уровне seen-set fallback тот же requestID
+  УЖЕ не может перейти в Applied — heavy scope ушёл, sweep'ить
+  нечего, а gather-failed tombstone permanent by design.
+  `cumulativeDeleted` сохраняется в seen-записи чисто для
+  диагностики (это фотография running total на момент reap'а
+  heavy scope); wire ACK на Error replay всё равно несёт
+  `Deleted=0`, чтобы соответствовать документированному
+  non-Applied wire-контракту.
+
+Memory cost имеет два слоя. Полный payload (status,
+cumulative, gathered, seenAt) живёт в `entries` и ограничен
+числом уникальных `(peer, requestID)` в активном окне
+retention. `record` ОБНОВЛЯЕТ `seenAt = now` на каждом
+вызове — включая каждый commit из
+`processInboundConversationDeleteFreshGather` /
+`processInboundConversationDeleteReplay` И каждый replay из
+`replyInboundConversationDeleteFromSeen` — то есть
+1-летний TTL отсчитывается от последней наблюдённой
+активности по этому `(peer, requestID)`, а НЕ от истинного
+first contact. Длительный поток sender-retry'ев по известному
+requestID растягивает entry и не даёт ей провалиться обратно
+в cold-gather путь посреди серии retry'ев; когда retries
+прекращаются и проходит год тишины, reaper переносит ключ в
+key-only `tombstones` map и сбрасывает payload. Tombstones
+НИКОГДА не reaped (соответствует in-memory-only restart
+семантике остального seen-set), и lookup возвращает их как
+"present-but-not-fresh" — caller всё равно отказывает в
+свежем cold-gather и отвечает Error/0. Это закрывает
+residual «sender pending state переживает наш seen TTL» дыру
+из ревью (laptop sleep, держащий pending entry живым через
+seen TTL boundary, потом firing финального retry на resume):
+даже после reap'а полного payload, key-marker распознаёт
+requestID и блокирует scope-widening. Memory cost tombstone'а
+— это просто ключ (~50 байт); за процесс lifetime это
+негligibly при любой реалистичной user-driven wipe rate.
+
+Без замороженного scope retry-путь (lost-ack ИЛИ
+partial-failure ИЛИ gather-failure-then-recover) тихо расширил
+бы wipe за пределы `localKnownIDs` snapshot отправителя и
+оставил бы истории расходящимися на финальном `applied`.
+
+**Известное ограничение: рестарт процесса получателя дропает
+cache.** Retry sender'а, пришедший после рестарта получателя,
+промахивается мимо cache и cold-gather'ит текущий chatlog;
+строки, добавленные после оригинального first-contact, будут
+sweep'нуты у получателя, но отсутствуют в snapshot'е sender'а.
+Закрытие требует персистенции per-`(peer, requestID)` scope
+рядом с chatlog и является tracked follow-up. У `message_delete`
+pending state та же in-memory оговорка.
+
+Per-row отказ на стороне ОТПРАВИТЕЛЯ после прихода success ack — это
+отдельный failure mode: пир уже консистентен, повторять wire
+бесполезно. Хелпер `applyLocalConversationWipe` возвращает
+`(deleted, ok)` и `ok=false` при провале chatlog read или любой
+per-row `DeleteByID`. Ack-handler тогда публикует
+`TopicConversationDeleteCompleted` со `Status=applied` (пир
+ДЕЙСТВИТЕЛЬНО очистил свою сторону) **и** `LocalCleanupFailed=true`,
+чтобы UI предупредил пользователя о выживших локальных строках
+вместо обещания «очищено у обеих сторон».
+
+Retry-политика повторяет `message_delete` (initial 30 s, экспонента
+×2, cap 300 s, всего 6 dispatches). State ключевится по peer (одна
+in-flight очистка на identity); повторный клик при pending-очистке —
+no-op: cheap `has(peer)` check + атомарный `tryAdd` оставляют первый
+запрос живым и возвращают nil вызывающему, так что и исходный
+`requestID`, и исходный snapshot локально-известных IDs сохраняются.
+Пользователь видит исход первого запроса через
+`TopicConversationDeleteCompleted`. Повторный клик начнёт новую
+очистку только после завершения первого round-trip (success ack или
+abandoned). Как и у `message_delete`, pending-state только in-memory
+и при рестарте процесса теряется.
+
+**ACK grace для финального dispatch.** Когда `recordAttemptIfMatch`
+бьёт attempt-счётчик до `convDeleteRetryMaxAttempt`, он НЕ
+удаляет pending entry. Вместо этого ставит `terminalAt = now`;
+`dueEntries` тогда пропускает entry (никаких больше wire
+dispatches), но entry остаётся в map на
+`convDeleteTerminalAckGrace` (60 s), чтобы успешный applied ACK
+на этот финальный wire send всё ещё мог прийти и запустить
+локальный mirror через обычный `removeIfMatch` путь.
+`pruneTerminalAckExpired` retry-loop'а дропает entry — и
+публикует Abandoned — только если grace истёк без ACK. Без
+этого grace финальный wire dispatch мог бы достичь пира, пир
+применил бы wipe и отправил applied, но sender's pending entry
+уже бы исчез — ACK был бы отброшен requestID-guard'ом, и
+локальная история пережила бы wipe даже при успешной очистке
+у пира.
+
+Получатель идемпотентен под retry через cache по
+(peer, requestID) И долгоживущий seen-set (см. «Receiver-side
+замороженный scope» выше). Дублирующий `conversation_delete`
+после успешного первого apply повторяет cached
+`(status, cumulativeDeleted)` ack — тот же ненулевой `Deleted`,
+который отправил первый ack, НЕ ноль — без повторного прохода
+по chatlog. Дублирующий ПОСЛЕ истечения active scope cache TTL
+НЕ попадает в cold path: `handleInboundConversationDelete`
+сначала запускает `claimColdOrReplay`, который (а) возвращает
+`inboundClaimReplay`, если живой cache entry ещё есть —
+живой entry ВСЕГДА выигрывает над seen-set, чтобы
+partial-failure retry получил свой survivor sweep — либо
+(б) возвращает `inboundClaimCold`, если кеш пуст/истёк, и
+ТОЛЬКО ТОГДА handler консультирует seen-set внутри
+cold-ветки. Hit в seen-set там может разрешиться в одно из
+двух состояний:
+
+- **present-and-fresh** — полный payload в пределах годового
+  TTL и повторяет оригинальный outcome: для прежнего
+  successful apply — `(applied, cumulativeDeleted)`; для
+  прежнего gather-failed tombstone или нерешённого first
+  contact — Error/0.
+- **present-but-not-fresh** — либо payload истёк, но reaper
+  ещё не перенёс его в tombstones, ЛИБО reaper уже сбросил
+  payload и в tombstones-карте остался только ключ. Оба
+  под-кейса отвечают Error/0 КОНСЕРВАТИВНО и отказывают
+  свежему cold-gather.
+
+Только НАСТОЯЩИЙ MISS у seen-set (нет ни entry, ни tombstone
+для этого `(peer, requestID)`) делает cold-gather текущего
+chatlog — то есть только по-настоящему never-seen
+requestID. Ранее известный requestID, payload которого reaped
+после TTL, всё равно резолвится в present-but-not-fresh
+через tombstone-маркер, а НЕ в true miss. Отправитель
+трактует `applied` (любой `Deleted`) как терминальный успех
+и запускает локальный sweep; `error` считается transient и
+retry-loop продолжается без мутации локальных строк.
+
+UI-гейтинг: пункт сайдбара рендерится как неактивная серая pill,
+когда пир оффлайн (визуально совпадает со стилем file-card delete
+pill). Click-handler перепроверяет `peerOnline` и при открытии
+confirm, и при нажатии Yes — пир может уйти оффлайн между этими
+кликами, и pessimistic ordering тогда оставит пользователя с
+неизменным локальным чатом и сожжённым retry-budget. Yes-click
+guard всплывает явным сообщением в статус-баре («пир ушёл оффлайн»)
+вместо тихой траты бюджета попыток.
+
+In-flight pending outbound DM к очищаемому пиру в этой итерации
+**не** отменяются. Если поставленное в очередь сообщение всё-таки
+доставится позже, пользователь сможет удалить его обычным
+`message_delete`. Хук отмены delivery-очереди — tracked follow-up.
 
 ### Сетевой поток
 

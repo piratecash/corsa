@@ -473,7 +473,7 @@ func TestMessageSendDMSuccess(t *testing.T) {
 		Run(func(args mock.Arguments) {
 			capturedTo = args.Get(0).(domain.PeerIdentity)
 			capturedMsg = args.Get(1).(domain.OutgoingDM)
-		})
+		}).Return(nil)
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
@@ -493,6 +493,32 @@ func TestMessageSendDMSuccess(t *testing.T) {
 	if string(capturedMsg.Body) != "hello world" {
 		t.Errorf("expected capturedMsg.Body = %q, got %q", "hello world", capturedMsg.Body)
 	}
+}
+
+// TestMessageSendDMReturns503WhenWipePending pins the
+// outgoing-barrier mapping: when SendMessage rejects with
+// service.ErrConversationDeleteInflight (a wipe is in flight for
+// the peer), the RPC must surface 503 Service Unavailable rather
+// than 400 Bad Request — the input is well-formed, the server is
+// just temporarily refusing the send. RPC clients use the status
+// code to decide whether to retry vs. fix the request.
+func TestMessageSendDMReturns503WhenWipePending(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
+	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
+		Return(service.ErrConversationDeleteInflight)
+	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":   "peer-addr",
+		"body": "hello",
+	})
+
+	expectStatusCode(t, code, 503)
+	expectFieldExists(t, result, "error")
 }
 
 func TestMessageSendDMRejectsNonStringReplyTo(t *testing.T) {
@@ -555,7 +581,7 @@ func TestMessageSendDMAcceptsValidUUIDReplyTo(t *testing.T) {
 	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedMsg = args.Get(1).(domain.OutgoingDM)
-		})
+		}).Return(nil)
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// Without chatlog, existence check is skipped — format-valid UUID is accepted.
@@ -613,7 +639,7 @@ func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
 	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedMsg = args.Get(1).(domain.OutgoingDM)
-		})
+		}).Return(nil)
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	knownEntries := map[string]bool{
@@ -652,7 +678,7 @@ func TestMessageSendDMAcceptsEmptyReplyTo(t *testing.T) {
 	dmRouter.On("SendMessage", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedMsg = args.Get(1).(domain.OutgoingDM)
-		})
+		}).Return(nil)
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)

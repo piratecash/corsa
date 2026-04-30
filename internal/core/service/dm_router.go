@@ -107,6 +107,52 @@ type DMRouter struct {
 	// retry loop (attempt budget exhausted). See dm_router_delete.go.
 	deleteRetry *deleteRetryState
 
+	// convDeleteRetry holds the sender-side pendingConversationDelete
+	// map for in-flight conversation_delete control DMs. Populated by
+	// BeginConversationDelete (synchronous reservation), drained on
+	// success-applied ack (removeIfMatch + local mirror), on
+	// retry-budget abandonment, or on a snapshot-failure rollback in
+	// CompleteConversationDelete. See dm_router_conversation_delete.go.
+	convDeleteRetry *conversationDeleteRetryState
+
+	// wipeTombstones records message IDs the bulk wipe just removed
+	// from chatlog so a delayed re-delivery of the same encrypted
+	// envelope cannot resurrect a row the user thought they had wiped.
+	// Entries expire on a TTL (wipeTombstoneTTL); the wipeTombstoneReaperLoop
+	// goroutine launched from Start() prunes stale entries.
+	wipeTombstones *wipeTombstoneSet
+
+	// inboundConvDeleteCache memoises the receiver-side scope of a
+	// conversation_delete keyed by (peer, requestID) so a sender retry
+	// whose ack got lost on the wire replays the same outcome instead
+	// of re-iterating current chatlog (which would silently widen
+	// scope past the sender's localKnownIDs snapshot). Holds the
+	// heavy data — frozen candidates, current survivors — and is
+	// reaped on the shorter inboundConvDeleteCacheTTL.
+	inboundConvDeleteCache *inboundConversationDeleteCache
+
+	// inboundConvDeleteSeen is the long-lived companion to
+	// inboundConvDeleteCache. The full payload (status,
+	// cumulativeDeleted, gatheredScope, seenAt) lives 1 year
+	// (inboundConvDeleteSeenTTL); after expiry the reaper moves
+	// the key into a key-only `tombstones` map that lives until
+	// process restart. handleInboundConversationDelete consults
+	// the seen-set ONLY in the cold-claim branch (after the live
+	// scope cache reports a miss via claimColdOrReplay) — the
+	// live cache always wins, otherwise an Error seen entry left
+	// by a partial-failure first apply would short-circuit the
+	// very retry that is supposed to sweep the survivors. In the
+	// cold-claim branch a present-and-fresh hit replays the
+	// minimal outcome (Applied/cumulative or Error/0 per the
+	// wire contract); a present-but-not-fresh hit (expired
+	// payload OR tombstone after reap) replies Error/0
+	// CONSERVATIVELY and refuses a fresh cold-gather. Together
+	// the two layers prevent a late wall-clock-paused sender
+	// retry on the same requestID from reopening a cold gather
+	// and silently widening receiver scope past the sender's
+	// localKnownIDs snapshot.
+	inboundConvDeleteSeen *inboundConversationDeleteSeenSet
+
 	// dispatchControlDeleteFn is a test-only override for the
 	// dispatchMessageDelete wire path. When non-nil, dispatchMessageDelete
 	// invokes this function instead of building a payload and calling
@@ -114,6 +160,12 @@ type DMRouter struct {
 	// runs the real dispatch. Tests that need to count dispatches or
 	// avoid the rpc/identity stack assign a counter here.
 	dispatchControlDeleteFn func(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) error
+
+	// dispatchControlConversationDeleteFn is a test-only override for
+	// the dispatchConversationDelete wire path. Mirrors
+	// dispatchControlDeleteFn for the conversation_delete control DM.
+	// Production code leaves this nil and runs the real dispatch.
+	dispatchControlConversationDeleteFn func(ctx context.Context, peer domain.PeerIdentity, requestID domain.ConversationDeleteRequestID) error
 
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
 	pendingScrollToEnd   bool
@@ -141,18 +193,22 @@ type PendingActions struct {
 
 func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus *ebus.Bus, statusMonitor NodeStatusProvider) *DMRouter {
 	r := &DMRouter{
-		client:         client,
-		fileBridge:     fileBridge,
-		eventBus:       eventBus,
-		statusMonitor:  statusMonitor,
-		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
-		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
-		peerGen:        make(map[domain.PeerIdentity]uint64),
-		cache:          NewConversationCache(),
-		uiEvents:       make(chan UIEvent, 32),
-		startupDone:    make(chan struct{}),
-		deleteRetry:    newDeleteRetryState(),
+		client:                 client,
+		fileBridge:             fileBridge,
+		eventBus:               eventBus,
+		statusMonitor:          statusMonitor,
+		peers:                  make(map[domain.PeerIdentity]*RouterPeerState),
+		peerOrder:              make([]domain.PeerIdentity, 0),
+		seenMessageIDs:         make(map[string]struct{}),
+		peerGen:                make(map[domain.PeerIdentity]uint64),
+		cache:                  NewConversationCache(),
+		uiEvents:               make(chan UIEvent, 32),
+		startupDone:            make(chan struct{}),
+		deleteRetry:            newDeleteRetryState(),
+		convDeleteRetry:        newConversationDeleteRetryState(),
+		wipeTombstones:         newWipeTombstoneSet(),
+		inboundConvDeleteCache: newInboundConversationDeleteCache(),
+		inboundConvDeleteSeen:  newInboundConversationDeleteSeenSet(),
 	}
 	// Seed snapCache so Snapshot() returns a valid (though minimal) state
 	// immediately. Without this, the first frames after Start() render an
@@ -302,8 +358,28 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 	}()
 }
 
-func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
+// SendMessage queues a text DM to the peer. Returns
+// ErrConversationDeleteInflight when an in-flight conversation_delete
+// is pending for this peer — the caller (UI/RPC) maps it to a
+// "wipe in progress" hint / 503 instead of letting the new outgoing
+// message reach the peer's chatlog after the peer's wipe ran (which
+// would leave the row gone on the receiver and present on the sender
+// after the eventual ack).
+//
+// acquireSendIfNoPending atomically checks the barrier AND increments
+// the in-flight counter under one mutex hold. The counter is released
+// in the send goroutine (defer) so CompleteConversationDelete's drain
+// wait sees the slot disappear once the send actually finishes.
+// Without the atomic acquire, a separate has() check could observe
+// "no pending" and the send goroutine could land in chatlog AFTER
+// BeginConversationDelete reserved the barrier, expanding scope past
+// the sender's localKnownIDs snapshot.
+func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) error {
 	to = normalizePeer(to)
+
+	if !r.convDeleteRetry.acquireSendIfNoPending(to) {
+		return ErrConversationDeleteInflight
+	}
 
 	r.mu.RLock()
 	gen := r.peerGen[to]
@@ -313,6 +389,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 
 	go func() {
 		defer recoverLog("SendMessage")
+		defer r.convDeleteRetry.releaseSend(to)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		sent, err := r.client.SendDirectMessage(ctx, to, msg)
@@ -370,6 +447,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
 			ReplyTo: msg.ReplyTo,
 		})
 	}()
+	return nil
 }
 
 // SendFileAnnounce sends a file_announce DM and registers the sender-side
@@ -383,6 +461,16 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 
 	to = normalizePeer(to)
 
+	// Same atomic acquire pattern as SendMessage: barrier check +
+	// inflight increment under one mutex hold. PrepareAndSend below
+	// runs the heavyweight transfer setup which may stretch into
+	// seconds; releasing inflight only when the goroutine returns
+	// keeps CompleteConversationDelete's drain wait honest about
+	// when this send is actually settled.
+	if !r.convDeleteRetry.acquireSendIfNoPending(to) {
+		return ErrConversationDeleteInflight
+	}
+
 	r.mu.RLock()
 	gen := r.peerGen[to]
 	r.mu.RUnlock()
@@ -391,6 +479,7 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 
 	go func() {
 		defer recoverLog("SendFileAnnounce")
+		defer r.convDeleteRetry.releaseSend(to)
 
 		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 		defer cancel()
@@ -530,6 +619,24 @@ func (r *DMRouter) SetSendStatus(s string) {
 	r.setSendStatusNotify(s)
 }
 
+// SetSendStatusIfCurrent atomically replaces sendStatus with replacement
+// IFF the current value still equals expected. Returns true on success
+// (UIEventStatusUpdated emitted), false otherwise. Used by the
+// conversation_delete dispatch goroutine to write "wipe request sent"
+// without overwriting a terminal status that a fast peer ACK pushed
+// through the ebus subscriber first.
+func (r *DMRouter) SetSendStatusIfCurrent(expected, replacement string) bool {
+	r.mu.Lock()
+	if r.sendStatus != expected {
+		r.mu.Unlock()
+		return false
+	}
+	r.sendStatus = replacement
+	r.mu.Unlock()
+	r.notify(UIEventStatusUpdated)
+	return true
+}
+
 // NotifyStatusChanged is called by NodeStatusMonitor when network state
 // changes. It rebuilds the snapshot and emits UIEventStatusUpdated so
 // the UI picks up the new NodeStatus.
@@ -625,6 +732,23 @@ func (r *DMRouter) Start() {
 	// note in dm_router_delete.go about JSON persistence as a planned
 	// follow-up).
 	go r.deleteRetryLoop(context.Background())
+
+	// 4. Background retry sweeper for pending conversation_delete
+	// control DMs. Same lifetime story as the message_delete loop.
+	go r.conversationDeleteRetryLoop(context.Background())
+
+	// 5. Wipe-tombstone reaper: prunes expired entries from the
+	// in-memory tombstone set so a long-lived process does not
+	// accumulate tombstones for the rest of its lifetime.
+	go r.wipeTombstoneReaperLoop(context.Background())
+
+	// 6. Inbound conversation_delete cache reaper.
+	go r.inboundConvDeleteCacheReaperLoop(context.Background())
+
+	// 7. Inbound conversation_delete long-lived seen-set reaper.
+	// Lives at much coarser cadence than (6) — see
+	// inboundConvDeleteSeenReapPeriod for rationale.
+	go r.inboundConvDeleteSeenReaperLoop(context.Background())
 }
 
 // runStartup loads initial data from the database and then replays any
@@ -734,6 +858,20 @@ func (r *DMRouter) handleEvent(event protocol.LocalChangeEvent) {
 	switch event.Type {
 	case protocol.LocalChangeNewMessage:
 		if event.Topic != "dm" {
+			return
+		}
+		// Tombstone gate runs BEFORE onNewMessage so a replayed
+		// envelope for a recently-wiped id is re-DELETED and its
+		// UI path (decrypt + sidebar bubble + notification) is
+		// short-circuited. evictWipedConversationFromUI clears
+		// seenMessageIDs at wipe time, so the dedup gate alone
+		// would not catch this — the explicit tombstone check is
+		// load-bearing for the late-relay-replay window. Without
+		// it the row reappears in the active conversation even
+		// though the user has already deleted it. The guard is a
+		// no-op when the id is not tombstoned, so the cost on the
+		// fast path is one map lookup.
+		if r.suppressIfWipeTombstoned(event) {
 			return
 		}
 		r.onNewMessage(event)

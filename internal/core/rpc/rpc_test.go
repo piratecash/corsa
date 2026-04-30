@@ -88,7 +88,7 @@ func newDefaultDMRouterProvider(t *testing.T) *rpcmocks.MockDMRouterProvider {
 	t.Helper()
 	m := rpcmocks.NewMockDMRouterProvider(t)
 	m.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
-	m.On("SendMessage", mock.Anything, mock.Anything).Maybe()
+	m.On("SendMessage", mock.Anything, mock.Anything).Return(nil).Maybe()
 	m.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 	return m
 }

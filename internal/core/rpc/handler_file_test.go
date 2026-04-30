@@ -20,7 +20,7 @@ func TestFileSendAnnounceSuccess(t *testing.T) {
 	var capturedTo domain.PeerIdentity
 	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
 	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
-	dmRouter.On("SendMessage", mock.Anything, mock.Anything).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).Return(nil).Maybe()
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedTo = args.Get(0).(domain.PeerIdentity)
@@ -52,7 +52,7 @@ func TestFileSendAnnounceValidationFailure(t *testing.T) {
 
 	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
 	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
-	dmRouter.On("SendMessage", mock.Anything, mock.Anything).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).Return(nil).Maybe()
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(fmt.Errorf("transmit file not found for hash abc123hash"))
 
@@ -73,6 +73,35 @@ func TestFileSendAnnounceValidationFailure(t *testing.T) {
 	if !strings.Contains(errMsg, "transmit file not found") {
 		t.Errorf("expected error containing 'transmit file not found', got %q", errMsg)
 	}
+}
+
+// TestFileSendAnnounceReturns503WhenWipePending pins the same
+// outgoing-barrier mapping as TestMessageSendDMReturns503WhenWipePending
+// but on the file_announce path: when SendFileAnnounce rejects with
+// service.ErrConversationDeleteInflight, the RPC must surface 503
+// rather than 500. The input is well-formed and the file is valid;
+// the server is just temporarily refusing the send because a
+// conversation_delete is in flight for the peer.
+func TestFileSendAnnounceReturns503WhenWipePending(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+
+	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
+	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).Return(nil).Maybe()
+	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(service.ErrConversationDeleteInflight)
+
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
+		"to":        "peer-addr",
+		"file_name": "document.pdf",
+		"file_size": 1024,
+		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+	})
+
+	expectStatusCode(t, code, 503)
+	expectFieldExists(t, result, "error")
 }
 
 func TestFileSendAnnounceMissingTo(t *testing.T) {
@@ -172,7 +201,7 @@ func TestFileSendAnnounceDefaultContentType(t *testing.T) {
 	var capturedTo domain.PeerIdentity
 	dmRouter := rpcmocks.NewMockDMRouterProvider(t)
 	dmRouter.On("Snapshot").Return(service.RouterSnapshot{}).Maybe()
-	dmRouter.On("SendMessage", mock.Anything, mock.Anything).Maybe()
+	dmRouter.On("SendMessage", mock.Anything, mock.Anything).Return(nil).Maybe()
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedTo = args.Get(0).(domain.PeerIdentity)

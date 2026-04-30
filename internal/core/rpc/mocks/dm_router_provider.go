@@ -110,9 +110,20 @@ func (_c *MockDMRouterProvider_SendFileAnnounce_Call) RunAndReturn(run func(to d
 }
 
 // SendMessage provides a mock function for the type MockDMRouterProvider
-func (_mock *MockDMRouterProvider) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) {
-	_mock.Called(to, msg)
-	return
+func (_mock *MockDMRouterProvider) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) error {
+	ret := _mock.Called(to, msg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SendMessage")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(domain.PeerIdentity, domain.OutgoingDM) error); ok {
+		r0 = returnFunc(to, msg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
 }
 
 // MockDMRouterProvider_SendMessage_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SendMessage'
@@ -145,13 +156,13 @@ func (_c *MockDMRouterProvider_SendMessage_Call) Run(run func(to domain.PeerIden
 	return _c
 }
 
-func (_c *MockDMRouterProvider_SendMessage_Call) Return() *MockDMRouterProvider_SendMessage_Call {
-	_c.Call.Return()
+func (_c *MockDMRouterProvider_SendMessage_Call) Return(err error) *MockDMRouterProvider_SendMessage_Call {
+	_c.Call.Return(err)
 	return _c
 }
 
-func (_c *MockDMRouterProvider_SendMessage_Call) RunAndReturn(run func(to domain.PeerIdentity, msg domain.OutgoingDM)) *MockDMRouterProvider_SendMessage_Call {
-	_c.Run(run)
+func (_c *MockDMRouterProvider_SendMessage_Call) RunAndReturn(run func(to domain.PeerIdentity, msg domain.OutgoingDM) error) *MockDMRouterProvider_SendMessage_Call {
+	_c.Call.Return(run)
 	return _c
 }
 

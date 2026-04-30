@@ -535,6 +535,10 @@ func (r *DMRouter) onControlMessage(event protocol.LocalChangeEvent) {
 		r.handleInboundMessageDelete(sender, payload)
 	case domain.DMCommandMessageDeleteAck:
 		r.handleInboundMessageDeleteAck(sender, payload)
+	case domain.DMCommandConversationDelete:
+		r.handleInboundConversationDelete(sender, payload)
+	case domain.DMCommandConversationDeleteAck:
+		r.handleInboundConversationDeleteAck(sender, payload)
 	default:
 		log.Debug().
 			Str("command", string(cmd)).

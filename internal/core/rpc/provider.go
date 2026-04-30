@@ -70,11 +70,21 @@ type ChatlogProvider interface {
 // DMRouterProvider abstracts access to dm_router.
 type DMRouterProvider interface {
 	Snapshot() service.RouterSnapshot
-	SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM)
+	// SendMessage queues a text DM. Returns
+	// service.ErrConversationDeleteInflight when an in-flight
+	// conversation_delete is pending for the peer; the caller
+	// should surface a localised "wipe in progress" hint and
+	// refuse the attempt.
+	SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) error
 	// SendFileAnnounce validates the transmit file, then asynchronously
 	// sends a file_announce DM and registers the sender-side mapping
 	// using the real DM message ID. Returns an error synchronously if
-	// pre-send validation fails (e.g. transmit file missing).
+	// pre-send validation fails (e.g. transmit file missing) or if a
+	// conversation_delete wipe is in-flight for this peer — the
+	// outgoing barrier returns service.ErrConversationDeleteInflight
+	// (mapped to RPC ErrUnavailable / 503 in command_table) so the
+	// caller can render the same "wipe in progress" hint as for
+	// SendMessage instead of a generic internal error.
 	// onAsyncFailure (may be nil) is called inside the send goroutine
 	// when the async delivery fails, giving the caller a chance to
 	// restore UI state (e.g. re-attach the file for retry).

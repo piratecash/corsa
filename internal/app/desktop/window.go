@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"io"
@@ -78,18 +79,22 @@ type Window struct {
 	lastCursorPos image.Point
 
 	// Context menu state for right-click on recipient buttons.
-	contextMenuPeer      domain.PeerIdentity // fingerprint of the peer whose context menu is open
-	contextMenuPos       image.Point
-	ctxMenuCopy          widget.Clickable
-	ctxMenuDelete        widget.Clickable
-	ctxMenuDeleteConfirm widget.Clickable
-	ctxMenuDeleteCancel  widget.Clickable
-	ctxMenuAlias         widget.Clickable
-	ctxMenuAliasSave     widget.Clickable
-	ctxMenuAliasCancel   widget.Clickable
-	showDeleteConfirm    bool // true when confirmation step is shown
-	showAliasEditor      bool // true when alias input is shown
-	aliasEditor          widget.Editor
+	contextMenuPeer         domain.PeerIdentity // fingerprint of the peer whose context menu is open
+	contextMenuPos          image.Point
+	ctxMenuCopy             widget.Clickable
+	ctxMenuDelete           widget.Clickable
+	ctxMenuDeleteConfirm    widget.Clickable
+	ctxMenuDeleteCancel     widget.Clickable
+	ctxMenuClearChat        widget.Clickable // "Delete chat for everyone" — bulk wipe both sides
+	ctxMenuClearChatConfirm widget.Clickable
+	ctxMenuClearChatCancel  widget.Clickable
+	ctxMenuAlias            widget.Clickable
+	ctxMenuAliasSave        widget.Clickable
+	ctxMenuAliasCancel      widget.Clickable
+	showDeleteConfirm       bool // true when "Delete identity" confirmation step is shown
+	showClearChatConfirm    bool // true when "Delete chat for everyone" confirmation step is shown
+	showAliasEditor         bool // true when alias input is shown
+	aliasEditor             widget.Editor
 
 	// Context menu state for right-click on chat messages.
 	msgContextMsg *service.DirectMessage // message whose context menu is open (nil = closed)
@@ -324,6 +329,14 @@ func (w *Window) startPolling(window *app.Window) {
 	if w.eventBus != nil {
 		w.eventBus.Subscribe(ebus.TopicMessageDeleteCompleted, func(outcome ebus.MessageDeleteOutcome) {
 			w.handleMessageDeleteOutcome(outcome)
+		})
+		// Conversation-wide wipe (sidebar "Delete chat for everyone")
+		// reaches its terminal status the same way: the UI runs the
+		// two-phase BeginConversationDelete + CompleteConversationDelete
+		// which only report local errors, while the wire-side
+		// outcome arrives later via this event.
+		w.eventBus.Subscribe(ebus.TopicConversationDeleteCompleted, func(outcome ebus.ConversationDeleteOutcome) {
+			w.handleConversationDeleteOutcome(outcome)
 		})
 	}
 
@@ -562,6 +575,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 		w.router.SetSendStatus(w.t("status.identity_copied"))
 		w.contextMenuPeer = ""
 		w.showDeleteConfirm = false
+		w.showClearChatConfirm = false
 		w.showAliasEditor = false
 		if w.window != nil {
 			w.window.Invalidate()
@@ -666,6 +680,67 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 			w.window.Invalidate()
 		}
 	}
+
+	// "Delete chat for everyone" — opens its own confirm step. Mirrors
+	// the "Delete identity" two-click flow above; kept as a separate
+	// state flag so the user can see at a glance which destructive
+	// action they are about to confirm (the two share the menu card
+	// surface).
+	for w.ctxMenuClearChat.Clicked(gtx) {
+		// Defensive offline gate. The menu item is rendered as a
+		// non-clickable disabled pill when the peer is offline (see
+		// layoutContextMenuItems), but routing the gate through the
+		// click handler too keeps the state machine consistent in
+		// case a future menu refactor wires the Clickable
+		// unconditionally — issuing a wipe to an offline peer would
+		// burn the entire retry budget waiting for an ack that
+		// cannot come.
+		if !w.peerOnline(w.contextMenuPeer) {
+			return
+		}
+		w.showClearChatConfirm = true
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}
+
+	if w.ctxMenuClearChatConfirm.Clicked(gtx) {
+		peer := w.contextMenuPeer
+		w.contextMenuPeer = ""
+		w.showClearChatConfirm = false
+
+		// Re-check peerOnline at confirm time. The menu item gates
+		// at open time, but the peer may have gone offline between
+		// the user clicking the menu entry and clicking Yes —
+		// dispatching a wipe to an offline peer would burn the
+		// retry budget waiting for an ack that cannot come, and
+		// pessimistic ordering means the local rows would stay
+		// alive on the eventual abandonment, leaving the user
+		// staring at a chat that "did nothing". Surfacing the
+		// offline status as a status-bar message is more honest
+		// than silent abandonment 5 minutes later.
+		if !w.peerOnline(peer) {
+			w.router.SetSendStatus(w.t("status.clear_chat_peer_offline"))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+
+		w.dispatchConversationDeleteAsync(peer)
+
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+		return
+	}
+
+	for w.ctxMenuClearChatCancel.Clicked(gtx) {
+		w.showClearChatConfirm = false
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}
 }
 
 func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
@@ -694,6 +769,18 @@ func (w *Window) triggerSend() {
 		to = domain.PeerIdentity(strings.TrimSpace(w.recipientEditor.Text()))
 	}
 
+	// Synchronous composer barrier while a conversation_delete is
+	// in flight for this peer. The service layer also rejects the
+	// send via ErrConversationDeleteInflight (see SendMessage /
+	// SendFileAnnounce), but checking here saves the file-attach
+	// path from clearing the attachment and spinning up
+	// prepareFileForTransmit only to fail later with a generic
+	// "file prepare failed" status that does not explain why.
+	if to != "" && w.router.IsConversationDeletePending(to) {
+		w.router.SetSendStatus(w.t("status.compose_blocked_during_wipe"))
+		return
+	}
+
 	// File attachment takes priority: if a file is attached, send file_announce DM.
 	if w.attachedFile != "" {
 		w.triggerFileSend(to)
@@ -711,7 +798,18 @@ func (w *Window) triggerSend() {
 	// replyToMsg is cleared by handlePendingActions (ClearReply) after the
 	// send succeeds. On failure the editor text is preserved and the reply
 	// context stays intact so the user can retry without losing the quote.
-	w.router.SendMessage(to, outgoing)
+	if err := w.router.SendMessage(to, outgoing); err != nil {
+		// Outgoing barrier while a conversation_delete is in
+		// flight to this peer — render a localised hint so the
+		// user understands the input is intentionally blocked
+		// until the wipe terminates, not a transient transport
+		// failure.
+		if errors.Is(err, service.ErrConversationDeleteInflight) {
+			w.router.SetSendStatus(w.t("status.compose_blocked_during_wipe"))
+			return
+		}
+		w.router.SetSendStatus(w.t("status.send_failed", err.Error()))
+	}
 }
 
 // triggerFileAttach opens the native file picker dialog via Gio explorer
@@ -871,12 +969,25 @@ func (w *Window) triggerFileSend(to domain.PeerIdentity) {
 			ContentType: result.ContentType,
 		}
 		if err := w.router.SendFileAnnounce(to, outgoing, meta, restoreAttach); err != nil {
-			// SendFileAnnounce failed synchronously (e.g. fileBridge == nil)
-			// before the goroutine that calls PrepareAndSend could take
-			// ownership. The blob has no ref and no pending — clean it up.
+			// SendFileAnnounce failed synchronously (e.g. fileBridge == nil,
+			// or a conversation_delete wipe started while
+			// prepareFileForTransmit was running and tripped the outgoing
+			// barrier) before the goroutine that calls PrepareAndSend
+			// could take ownership. The blob has no ref and no pending —
+			// clean it up.
 			w.client.RemoveUnreferencedTransmitFile(result.FileHash)
 			restoreAttach()
-			w.router.SetSendStatus(w.t("file.prepare_failed", err))
+			// The wipe-pending barrier is a deliberate refusal, not a
+			// file-prep bug; surface the same status the text-send path
+			// uses (compose_blocked_during_wipe) so the user sees the
+			// real reason their attachment was not sent. Other errors
+			// (genuine prep / transport failures) still fall through to
+			// the generic "file.prepare_failed" overlay.
+			if errors.Is(err, service.ErrConversationDeleteInflight) {
+				w.router.SetSendStatus(w.t("status.compose_blocked_during_wipe"))
+			} else {
+				w.router.SetSendStatus(w.t("file.prepare_failed", err))
+			}
 		}
 		if w.window != nil {
 			w.window.Invalidate()
@@ -1091,6 +1202,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 				w.contextMenuPeer = fingerprint
 				w.contextMenuPos = w.lastCursorPos
 				w.showDeleteConfirm = false
+				w.showClearChatConfirm = false
 				w.showAliasEditor = false
 				// Auto-select this identity so the user sees the chat.
 				w.recipientEditor.SetText(fpStr)
@@ -1264,8 +1376,28 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 						if recipient == "" {
 							label = w.t("compose.select_first")
 						}
+						// Visual + interactive disable while a
+						// conversation_delete is in flight for
+						// the active peer. We render through a
+						// dummy Clickable (not w.sendButton) so
+						// even queued click events from the
+						// active sendButton are ignored — the
+						// service-layer ErrConversationDeleteInflight
+						// gate is still enforced as defence in
+						// depth.
+						pending := recipient != "" && w.router.IsConversationDeletePending(recipient)
+						if pending {
+							label = w.t("compose.send_blocked_during_wipe")
+						}
 						return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(260)))
+							if pending {
+								var inert widget.Clickable
+								btn := material.Button(w.theme, &inert, label)
+								btn.Background = color.NRGBA{R: 60, G: 60, B: 64, A: 255}
+								btn.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+								return btn.Layout(gtx)
+							}
 							btn := material.Button(w.theme, &w.sendButton, label)
 							return btn.Layout(gtx)
 						})
@@ -3179,6 +3311,7 @@ func (w *Window) layoutContextMenuOverlay(gtx layout.Context) layout.Dimensions 
 		if _, ok := ev.(pointer.Event); ok {
 			w.contextMenuPeer = ""
 			w.showDeleteConfirm = false
+			w.showClearChatConfirm = false
 			w.showAliasEditor = false
 			if w.window != nil {
 				w.window.Invalidate()
@@ -3239,6 +3372,9 @@ func (w *Window) contextMenuCard(gtx layout.Context) layout.Dimensions {
 		return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			if w.showDeleteConfirm {
 				return w.layoutDeleteConfirmMenu(gtx)
+			}
+			if w.showClearChatConfirm {
+				return w.layoutClearChatConfirmMenu(gtx)
 			}
 			if w.showAliasEditor {
 				return w.layoutAliasEditorMenu(gtx)
@@ -3303,6 +3439,22 @@ func (w *Window) layoutContextMenuItems(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuDelete, w.t("context.delete_identity"),
 				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
 		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			// "Delete chat for everyone" (bulk wipe both sides). The
+			// item is direction-symmetric (no sender/receiver split
+			// like for per-message delete) but still needs the peer
+			// online for the wire round-trip to converge — render
+			// disabled when offline. The disabled variant has no
+			// hit area at all (no Clickable), so the same defensive
+			// offline check inside the click handler is a belt-and-
+			// braces guard rather than the only line of defence.
+			if !w.peerOnline(w.contextMenuPeer) {
+				return w.contextMenuItemDisabled(gtx, w.t("context.clear_chat_both"))
+			}
+			return w.contextMenuItem(gtx, &w.ctxMenuClearChat, w.t("context.clear_chat_both"),
+				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
+		}),
 	)
 }
 
@@ -3351,6 +3503,40 @@ func (w *Window) layoutDeleteConfirmMenu(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuDeleteCancel, w.t("context.delete_no"),
+				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
+		}),
+	)
+}
+
+// layoutClearChatConfirmMenu renders the confirmation step for the
+// "Delete chat for everyone" sidebar action. Visual structure mirrors
+// layoutDeleteConfirmMenu so the user reads the same shape for both
+// destructive sidebar actions; the body text and button widgets are
+// the only differences. Kept as a separate menu (rather than reusing
+// layoutDeleteConfirmMenu with a parameterised label) so the
+// confirm/cancel widget targets stay distinct — sharing widgets
+// would let a stale click event from the per-identity delete path
+// fire the wipe path on the next frame.
+func (w *Window) layoutClearChatConfirmMenu(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuHeader(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuSeparator(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			label := material.Caption(w.theme, w.t("context.clear_chat_confirm"))
+			label.Color = color.NRGBA{R: 230, G: 200, B: 140, A: 255}
+			return layout.Inset{Left: unit.Dp(12), Right: unit.Dp(12), Top: unit.Dp(2), Bottom: unit.Dp(6)}.Layout(gtx, label.Layout)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuClearChatConfirm, w.t("context.delete_yes"),
+				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.contextMenuItem(gtx, &w.ctxMenuClearChatCancel, w.t("context.delete_no"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
 	)
@@ -3692,6 +3878,123 @@ func (w *Window) handleMessageDeleteOutcome(outcome ebus.MessageDeleteOutcome) {
 		// Unknown wire-level status — fall back to a neutral abandoned
 		// message rather than silently lying that delivery succeeded.
 		msg = w.t("status.message_delete_abandoned")
+	}
+	w.router.SetSendStatus(msg)
+	if w.window != nil {
+		w.window.Invalidate()
+	}
+}
+
+// dispatchConversationDeleteAsync reserves the wipe slot
+// synchronously (raising the outgoing barrier before this function
+// returns) and runs the chatlog snapshot + initial wire dispatch on
+// a background goroutine. Mirrors dispatchMessageDeleteAsync above.
+//
+// Why two phases: dispatching the whole flow on the goroutine
+// leaves a scheduling gap between confirm-click and reservation. A
+// fast Enter / click during that gap can pass through SendMessage's
+// barrier check and reach the peer ahead of conversation_delete —
+// the receiver would sweep the row, the requester's snapshot would
+// not contain it (it had not yet committed when the snapshot ran),
+// and the post-ack local sweep would leave it alive on the
+// requester side. Calling BeginConversationDelete on the UI thread
+// closes that window: by the time we return to the event loop,
+// IsConversationDeletePending = true and SendMessage /
+// SendFileAnnounce return ErrConversationDeleteInflight for this
+// peer. CompleteConversationDelete then runs the snapshot + wire
+// dispatch on the goroutine without re-opening the gap.
+//
+// Pessimistic ordering: local rows STAY in chatlog until the peer's
+// conversation_delete_ack arrives with status applied. The
+// goroutine waits only on the wire submission so the UI status
+// reflects "request dispatched, awaiting peer"; the terminal
+// outcome (applied / abandoned / applied+LocalCleanupFailed)
+// arrives asynchronously through TopicConversationDeleteCompleted
+// and is handled by handleConversationDeleteOutcome, which is also
+// the place where the local sweep runs (inside the router's ack
+// handler, only after the peer confirms).
+func (w *Window) dispatchConversationDeleteAsync(peer domain.PeerIdentity) {
+	if w.router == nil {
+		return
+	}
+	requestID, err := w.router.BeginConversationDelete(peer)
+	if err != nil {
+		w.router.SetSendStatus(w.t("status.clear_chat_failed", err.Error()))
+		return
+	}
+	if requestID == "" {
+		// Duplicate click — a wipe is already in flight for this
+		// peer. The existing request continues; nothing to do.
+		return
+	}
+	dispatching := w.t("status.clear_chat_dispatching")
+	w.router.SetSendStatus(dispatching)
+	go func(peer domain.PeerIdentity, requestID domain.ConversationDeleteRequestID, dispatching string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := w.router.CompleteConversationDelete(ctx, peer, requestID)
+		if err == nil {
+			// Atomic compare-and-swap to defeat the TOCTOU race
+			// against a fast peer ACK. handleConversationDeleteOutcome
+			// runs in a separate goroutine driven by the ebus
+			// subscriber and may have already set the terminal
+			// status (applied / abandoned / applied+LocalCleanupFailed)
+			// by the time we reach this line. SetSendStatusIfCurrent
+			// only writes "wipe request sent" when the live
+			// status is still the "dispatching…" we wrote above;
+			// any other value means a higher-priority update
+			// landed first and must be preserved.
+			w.router.SetSendStatusIfCurrent(dispatching, w.t("status.clear_chat_dispatched"))
+			return
+		}
+		// Reservation lost between Begin and Complete — typically
+		// because the goroutine startup gap exceeded the TTL and
+		// the reaper already dropped the entry (and published the
+		// Abandoned outcome that handleConversationDeleteOutcome
+		// has already turned into a "abandoned" status string).
+		// No wire command went out under this requestID, so we
+		// must NOT advertise "dispatched"; we also avoid a
+		// generic "wipe failed" overlay, since the Abandoned
+		// status is already the correct user-facing message.
+		if errors.Is(err, service.ErrConversationDeleteReservationLost) {
+			return
+		}
+		w.router.SetSendStatus(w.t("status.clear_chat_failed", err.Error()))
+	}(peer, requestID, dispatching)
+}
+
+// handleConversationDeleteOutcome is the ebus subscriber invoked when
+// an in-flight conversation_delete reaches a terminal state. Counterpart
+// of handleMessageDeleteOutcome for the bulk wipe-the-thread variant.
+//
+// Pessimistic ordering: local rows survive abandonment, so the
+// "abandoned" status string explicitly tells the user the local chat
+// is unchanged and they can re-issue once the peer is reachable.
+// LocalCleanupFailed flags a separate failure mode — the peer
+// confirmed the wipe but the local sweep could not finish, so the UI
+// must NOT promise "wiped on both sides" without qualification when
+// that flag is set.
+func (w *Window) handleConversationDeleteOutcome(outcome ebus.ConversationDeleteOutcome) {
+	if w.router == nil {
+		return
+	}
+	var msg string
+	switch {
+	case outcome.Abandoned:
+		msg = w.t("status.clear_chat_abandoned")
+	case outcome.Status == domain.ConversationDeleteStatusApplied && outcome.LocalCleanupFailed:
+		// Peer is consistent (it wiped its side) but the local
+		// chatlog still holds some rows — chatlog read failure or a
+		// per-row DeleteByID failure during the post-ack sweep.
+		// Surface the asymmetry instead of claiming "wiped on
+		// both sides".
+		msg = w.t("status.clear_chat_local_cleanup_failed", outcome.DeletedRemote)
+	case outcome.Status == domain.ConversationDeleteStatusApplied:
+		msg = w.t("status.clear_chat_applied", outcome.DeletedRemote)
+	default:
+		// Unknown wire-level status — surface as abandoned rather
+		// than silently lying about peer-side convergence.
+		msg = w.t("status.clear_chat_abandoned")
 	}
 	w.router.SetSendStatus(msg)
 	if w.window != nil {

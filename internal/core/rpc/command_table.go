@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 // CommandRequest holds the parsed input for a command execution.
@@ -387,6 +389,15 @@ func validationError(err error) CommandResponse {
 // internalError creates a CommandResponse for provider/system failures (500).
 func internalError(err error) CommandResponse {
 	return CommandResponse{Error: err, ErrorKind: ErrInternal}
+}
+
+// unavailableError creates a CommandResponse for transient
+// service-state rejections (503): the command exists and the
+// input is well-formed, but the call cannot be served right now
+// (e.g. an in-flight conversation_delete is blocking sends to the
+// peer). Callers can retry once the underlying state clears.
+func unavailableError(err error) CommandResponse {
+	return CommandResponse{Error: err, ErrorKind: ErrUnavailable}
 }
 
 // ctxDone checks whether the command's context has been cancelled.
@@ -970,10 +981,21 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 						return validationError(fmt.Errorf("reply_to references a message that does not exist in this conversation"))
 					}
 				}
-				dmRouter.SendMessage(domain.PeerIdentity(to), domain.OutgoingDM{
+				if err := dmRouter.SendMessage(domain.PeerIdentity(to), domain.OutgoingDM{
 					Body:    body,
 					ReplyTo: replyToID,
-				})
+				}); err != nil {
+					// Wipe-pending barrier is a transient
+					// service-state rejection, not a malformed
+					// request — surface it as 503 so RPC clients
+					// know they can retry once the wipe ends
+					// (the barrier lifts automatically on success
+					// ack / abandonment).
+					if errors.Is(err, service.ErrConversationDeleteInflight) {
+						return unavailableError(fmt.Errorf("send message: %w", err))
+					}
+					return validationError(fmt.Errorf("send message: %w", err))
+				}
 				return jsonResponse(map[string]interface{}{
 					"status":  "pending",
 					"message": "message queued for delivery; actual send is asynchronous",
@@ -1117,6 +1139,13 @@ func registerFileAnnounceCommand(t *CommandTable, node NodeProvider, dmRouter DM
 			FileSize:    fileSize,
 			ContentType: contentType,
 		}, nil); err != nil {
+			// Wipe-pending barrier — same 503 mapping as
+			// send_dm so RPC clients see a transient
+			// rejection (retry once the wipe ends) rather
+			// than a 500 Internal Server Error.
+			if errors.Is(err, service.ErrConversationDeleteInflight) {
+				return unavailableError(fmt.Errorf("file announce failed: %w", err))
+			}
 			return internalError(fmt.Errorf("file announce failed: %w", err))
 		}
 

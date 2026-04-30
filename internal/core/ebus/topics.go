@@ -87,6 +87,50 @@ const (
 	//   func(outcome ebus.MessageDeleteOutcome)
 	TopicMessageDeleteCompleted = "message.delete.completed"
 
+	// TopicConversationDeleteCompleted is emitted by DMRouter only
+	// when an in-flight conversation_delete (the bulk wipe-the-thread
+	// control DM) reaches a TERMINAL state. Subscribers see exactly
+	// two paths:
+	//
+	//   - Status=applied: the peer's conversation_delete_ack arrived
+	//     with applied; the sender's local mirror has just run.
+	//     LocalCleanupFailed=true means "peer is consistent but at
+	//     least one in-scope row survived locally" (UI must surface
+	//     the partial-cleanup caveat). LocalCleanupFailed=false
+	//     means the sender-side sweep over rows in localKnownIDs
+	//     succeeded — this is the correct UI signal for "wipe
+	//     applied; peer confirmed" but is NOT a guarantee that the
+	//     conversation is empty on both sides: rows OUTSIDE the
+	//     localKnownIDs snapshot can still survive asymmetrically
+	//     by design (self-authored "sent" outbound rows are
+	//     deliberately excluded from localKnownIDs to close the
+	//     receiver-only-row hole, and late in-flight rows on
+	//     either side are documented asymmetry — see
+	//     snapshotLocalKnownConversationIDs and the dm_command.go
+	//     payload comment for the full contract). Subscribers
+	//     should map LocalCleanupFailed=false to "wipe applied,
+	//     local cleanup clean" rather than "both sides empty".
+	//   - Abandoned=true: the sender's retry budget for this peer
+	//     was exhausted with no terminal applied ack. Local rows
+	//     survive so the user can re-issue the wipe.
+	//
+	// A ConversationDeleteStatusError ack is NOT terminal: the ack
+	// handler keeps the pending entry alive so the retry loop can
+	// keep chasing the peer, and nothing is published until the
+	// next attempt resolves to applied or the budget runs out
+	// (Abandoned). Subscribers must treat the absence of an event
+	// as "still in flight"; a "transient error → retrying" UI hint
+	// has to be sourced from the request lifecycle itself, not
+	// from this topic.
+	//
+	// Pessimistic ordering: the sender's local chatlog wipe runs
+	// inside the ack handler ONLY on the applied path above; on
+	// Abandoned the local rows survive untouched.
+	//
+	// Handler signature:
+	//   func(outcome ebus.ConversationDeleteOutcome)
+	TopicConversationDeleteCompleted = "conversation.delete.completed"
+
 	// TopicIdentityAdded is emitted when a new identity is discovered and
 	// added to the node's known set. Carries the peer identity so the
 	// receiver can append it locally without an RPC round-trip.
