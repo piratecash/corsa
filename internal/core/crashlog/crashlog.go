@@ -87,9 +87,16 @@ func Setup() func() {
 	log.Logger = zerolog.New(out).With().Timestamp().Caller().Logger()
 
 	// Set the global zerolog level from CORSA_LOG_LEVEL env var.
-	// Supported values: trace, debug, info (default), warn, error.
-	// Use CORSA_LOG_LEVEL=debug to see routing/delivery tracing.
-	level := zerolog.InfoLevel
+	// Supported values: trace, debug, info, warn (default), error.
+	// The default sits at warn so a freshly started daemon does not
+	// flood the console with steady-state info chatter (peer-state
+	// transitions, announce cycles, push-message delivery) — info
+	// volume on a busy node easily reaches several lines per second
+	// and drowns out the warn/error events operators actually need.
+	// Set CORSA_LOG_LEVEL=info to restore the previous verbosity, or
+	// CORSA_LOG_LEVEL=debug / trace to surface routing / delivery
+	// tracing during incident diagnosis.
+	level := zerolog.WarnLevel
 	if envLevel := os.Getenv("CORSA_LOG_LEVEL"); envLevel != "" {
 		if parsed, err := zerolog.ParseLevel(envLevel); err == nil {
 			level = parsed
