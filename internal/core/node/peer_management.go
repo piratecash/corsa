@@ -1759,6 +1759,29 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			continue
 		}
 
+		// Announce-plane receive guard: announce_routes / routes_update /
+		// request_resync are dispatched through the same code path as the
+		// inbound TCP plane on the remote side, so any peer must respect
+		// the strict 128 KiB MaxFrameLine budget for them — even though
+		// the peer-session read loop itself accepts up to 8 MiB. Without
+		// this guard a buggy or hostile peer could push a multi-megabyte
+		// announce_routes frame through the wider response-plane reader,
+		// have it accepted into the local routing table, and then have
+		// our own size-aware sender silently drop the same route on
+		// re-announce — sender and receiver would diverge on which routes
+		// the peer "knows about". `len(line)` includes the trailing
+		// newline so it matches the writer-side `MarshalFrameLineWithLimit`
+		// budget byte-for-byte.
+		if isAnnouncePlaneFrameType(frame.Type) && len(line) > protocol.MaxFrameLine {
+			log.Warn().
+				Str("peer", string(session.address)).
+				Str("type", frame.Type).
+				Int("size", len(line)).
+				Int("limit", protocol.MaxFrameLine).
+				Msg("announce_plane_frame_too_large_dropped")
+			continue
+		}
+
 		// file_command frames use their own wire format (FileCommandFrame)
 		// and require the raw JSON for decryption and routing. Dispatch them
 		// directly to the file router instead of going through the
@@ -1802,9 +1825,15 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 		payload = []byte(s.nodeHelloJSONLine())
 		s.markPeerWrite(session.address, protocol.Frame{Type: "hello"})
 	} else {
-		line, err := protocol.MarshalFrameLine(frame)
+		// Peer-session write: receiver dispatches through readPeerSession
+		// bound by maxResponseLineBytes (8 MiB) — wider than the inbound
+		// command-plane budget because response frames legally batch
+		// many DM bodies (contacts, messages, inbox). Use the matching
+		// MaxResponseLine budget so legitimate batched responses pass
+		// while still rejecting genuinely oversize frames as a self-bug.
+		line, err := protocol.MarshalFrameLineWithLimit(frame, protocol.MaxResponseLine)
 		if err != nil {
-			return protocol.Frame{}, err
+			return protocol.Frame{}, fmt.Errorf("peerSessionRequest: %w", err)
 		}
 		payload = []byte(line)
 		s.markPeerWrite(session.address, frame)
@@ -2124,8 +2153,17 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 					Msg("push_message: sender key still unknown after sync — message dropped")
 			}
 		}
-		if stored {
+		// Ack policy: see shouldAckOnStoreResult — stored=true OR the
+		// dedup branch (stored=false && errCode=="") both mean "we have
+		// this message, sender can stop retrying". errCode!="" leaves
+		// the peer to retry once it addresses the underlying failure
+		// (unknown_sender_key triggers a sync upstream; other codes
+		// surface in the warn log).
+		if shouldAckOnStoreResult(stored, errCode) {
 			s.enqueueAckDeleteOnSession(session, address, "dm", msg.ID, "")
+			if !stored {
+				log.Debug().Str("node", s.identity.Address).Str("peer", string(address)).Str("id", string(msg.ID)).Msg("push_message_dedup_acked")
+			}
 		} else {
 			log.Warn().Str("node", s.identity.Address).Str("peer", string(address)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed_no_ack_delete")
 		}
@@ -2389,6 +2427,26 @@ func (s *Service) respondToInboxRequest(session *peerSession) {
 		})
 	}
 	log.Info().Str("peer", string(session.address)).Str("identity", peerID).Int("messages", len(inbox.Messages)).Int("receipts", len(receipts.Receipts)).Msg("responded to request_inbox")
+}
+
+// shouldAckOnStoreResult returns true when storeIncomingMessage's
+// outcome should trigger an ack_delete back to the sender. The two
+// "ack-worthy" outcomes are:
+//
+//   - stored=true: the message was newly stored, so the sender can
+//     stop retrying.
+//   - stored=false && errCode=="": the message was a duplicate
+//     (already in the dedup index), so we have it and the sender can
+//     also stop retrying.
+//
+// stored=false && errCode!="" is a real failure (unknown sender key,
+// timestamp out of range, etc.) — the sender must retry once it has
+// addressed the underlying cause. Returning false on that path leaves
+// the dedup-and-retry policy intact while keeping the duplicate path
+// from looping forever, which is one of the reconnect-storm
+// amplifiers tracked in CLAUDE.md.
+func shouldAckOnStoreResult(stored bool, errCode string) bool {
+	return stored || errCode == ""
 }
 
 func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string, id protocol.MessageID, status string) {

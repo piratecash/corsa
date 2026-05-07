@@ -63,8 +63,21 @@ Two separate limits exist for different frame contexts:
 | `maxCommandLineBytes` | 128 KiB | Inbound TCP commands (handleConn) |
 | `maxResponseLineBytes` | 8 MiB | Peer session and handshake response frames |
 | `maxPeerCommandBodyBytes` | 128 KiB | Post-parse body check for peer session commands |
+| `protocol.MaxFrameLine` | 128 KiB | Writer-side budget for command-plane writes |
+| `protocol.MaxResponseLine` | 8 MiB | Writer-side budget for peer-session response writes |
 
 The `readFrameLine` function enforces limits incrementally during the read, rejecting oversized frames before allocating the full buffer.
+
+**Writer-side enforcement (`MarshalFrameLineWithLimit`).** `internal/core/protocol/frame.go` exports the contextual `MaxFrameLine = 128 KiB` and `MaxResponseLine = 8 MiB` constants and rejects any frame whose JSON-encoded wire line (including the trailing newline) exceeds the supplied budget with `ErrFrameTooLarge` (wrapped via `fmt.Errorf` so callers detect it through `errors.Is`). The constants are kept in lock-step with the receive-side `maxCommandLineBytes` and `maxResponseLineBytes` guards: a frame that the writer accepts MUST decode under the receiver's guard, byte-for-byte newline included. Two contextual writer paths apply:
+
+- `writeFrameToInboundConn` (inbound TCP) calls `MarshalFrameLineWithLimit(frame, MaxFrameLine)` — receiver dispatches via `handleConn`'s 128 KiB command-plane reader.
+- `peerSessionRequest` (outbound peer sessions) calls `MarshalFrameLineWithLimit(frame, MaxResponseLine)` — receiver dispatches via `readPeerSession`'s 8 MiB response-plane reader, which legally batches multi-message responses (contacts, messages, inbox).
+
+The announce plane (`announce_routes`, `routes_update`) is special-cased to use `MaxFrameLine` regardless of which end opened the TCP connection, because the receiver dispatches announce frames through the inbound-style command-plane reader. The size-aware chunker `chunkAnnounceEntriesBySize` packs entries greedily into wire-safe chunks under that 128 KiB ceiling.
+
+Callers treat `ErrFrameTooLarge` as a self-bug rather than a peer fault. Disconnecting the peer on a self-built oversize frame would only restart the same frame on the next session; instead the frame is dropped with an `outbound_frame_too_large_dropped` / `frame_inbound_too_large` / `announce_routes_entry_oversize_dropped` log line and the session continues. The upstream layer that built the frame is responsible for shrinking the payload before reaching the marshal step. Without this guard, a bug in any of those layers would cap-trip the receiver, the receiver would close the connection, the sender would mark the peer disconnected, both would redial, and the network would enter a reconnect storm.
+
+The shared, unguarded `MarshalFrameLine` entry point still exists for generic infrastructure (`netcore.NetCore.Send` / `SendSync`) where the direction of the frame is unknown to the marshaller; in those paths the budget is enforced upstream by the caller that knows whether the frame is travelling on the command or response plane. The `RawLine` fast-path inside `MarshalFrameLine` is intentionally unchecked, but `MarshalFrameLineWithLimit` does enforce the budget against `RawLine` because that path still produces bytes that hit the same wire limits at the remote.
 
 ### 6. RPC HTTP Body Size Limit
 
@@ -282,6 +295,19 @@ graph TB
 | `maxCommandLineBytes` | 128 KiB | Входящие TCP-команды (handleConn) |
 | `maxResponseLineBytes` | 8 MiB | Фреймы ответов peer-сессий и handshake |
 | `maxPeerCommandBodyBytes` | 128 KiB | Проверка тела после парсинга для команд peer-сессий |
+| `protocol.MaxFrameLine` | 128 KiB | Writer-side бюджет для команд-плоскости |
+| `protocol.MaxResponseLine` | 8 MiB | Writer-side бюджет для peer-session response writes |
+
+**Writer-side enforcement (`MarshalFrameLineWithLimit`).** `internal/core/protocol/frame.go` экспортирует контекстуальные константы `MaxFrameLine = 128 KiB` и `MaxResponseLine = 8 MiB` и отклоняет любой фрейм, чья JSON-сериализация (включая завершающий newline) превышает заданный бюджет, ошибкой `ErrFrameTooLarge` (обёрнута через `fmt.Errorf`, чтобы вызыватели ловили её через `errors.Is`). Константы держатся в синхронизации с приёмными `maxCommandLineBytes` и `maxResponseLineBytes`: фрейм, который writer пропустил, обязан декодироваться под guard'ом получателя — байт-в-байт, включая newline. Применяются два контекстуальных пути writer'а:
+
+- `writeFrameToInboundConn` (inbound TCP) вызывает `MarshalFrameLineWithLimit(frame, MaxFrameLine)` — приёмник диспетчеризует через 128 KiB читатель команд `handleConn`.
+- `peerSessionRequest` (outbound peer-сессии) вызывает `MarshalFrameLineWithLimit(frame, MaxResponseLine)` — приёмник диспетчеризует через 8 MiB читатель ответов `readPeerSession`, который легально батчит multi-message ответы (contacts, messages, inbox).
+
+Announce-плоскость (`announce_routes`, `routes_update`) использует `MaxFrameLine` независимо от того, кто открыл TCP-соединение, потому что приёмник всегда диспетчеризует announce-фреймы через inbound-style command-plane reader. Size-aware чанкер `chunkAnnounceEntriesBySize` упаковывает записи жадно в чанки, укладывающиеся под потолком 128 KiB.
+
+Вызыватели трактуют `ErrFrameTooLarge` как self-bug, а не как ошибку peer'а. Дисконнектить peer'а из-за нашего же oversize-фрейма было бы реконнект-петлёй: следующая сессия отправила бы тот же самый фрейм. Вместо этого фрейм сбрасывается с лог-строкой `outbound_frame_too_large_dropped` / `frame_inbound_too_large` / `announce_routes_entry_oversize_dropped`, сессия продолжает работу. Слой выше обязан уменьшить payload до маршала. Без этого guard'а баг в любом из этих слоёв привёл бы к закрытию соединения приёмником, переподключению отправителя и шторму reconnect'ов в сети.
+
+Незащищённая точка входа `MarshalFrameLine` сохранена для общей инфраструктуры (`netcore.NetCore.Send` / `SendSync`), где направление фрейма неизвестно маршаллеру; в этих путях бюджет применяется выше по стеку вызывателем, который знает, на какой плоскости летит фрейм. Fast-path `RawLine` внутри `MarshalFrameLine` намеренно не проверяется на размер, но `MarshalFrameLineWithLimit` применяет бюджет и к `RawLine`, потому что эта точка входа всё равно производит байты, попадающие под тот же лимит на принимающей стороне.
 
 ### 6. Лимит размера тела HTTP RPC
 

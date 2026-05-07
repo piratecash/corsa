@@ -2035,7 +2035,20 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// Merges active CM slots with PeerProvider candidates, deduplicated
 		// by IP. Network group filtering prevents leaking clearnet addresses
 		// to Tor/I2P peers and vice versa.
+		//
+		// Cap the response at maxAnnouncePeers (64). The peers frame is a
+		// JSON-encoded line bound by MaxFrameLine (128 KiB) and the
+		// receiver enforces the same maxAnnouncePeers cap on
+		// announce_peer ingestion — emitting a longer list would either
+		// blow past the wire-size budget on dense networks or get
+		// silently truncated on the other side. connPeerReachableGroups
+		// already samples by reachability group, so the trim is a
+		// belt-and-braces guard that also fixes the storm scenario
+		// where peerProvider feeds the response a full 800-node table.
 		exchanged := s.buildPeerExchangeResponse(s.connPeerReachableGroups(connID))
+		if len(exchanged) > maxAnnouncePeers {
+			exchanged = exchanged[:maxAnnouncePeers]
+		}
 		peers := make([]string, len(exchanged))
 		for i, a := range exchanged {
 			peers[i] = string(a)
@@ -5823,7 +5836,16 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 			stored, _, _ = s.storeIncomingMessage(msg, true)
 		}
 	}
-	if stored && msg.Topic == "dm" {
+	if shouldAckOnStoreResult(stored, errCode) && msg.Topic == "dm" {
+		// Ack-delete on stored=true OR on the dedup branch (stored=false
+		// && errCode==""): both outcomes mean "we have this message, the
+		// sender can stop retrying". Without the dedup arm a duplicate
+		// push_message would never be acknowledged and the sender would
+		// loop the same id forever, which is one of the reconnect-storm
+		// amplifiers. errCode!="" leaves the peer to retry once it
+		// addresses the underlying failure (unknown_sender_key triggers
+		// a sync upstream; other codes surface in the warn log).
+		//
 		// Prefer the outbound session for ack_delete (single write queue,
 		// no interleaving risk). Fall back to the inbound conn when no
 		// outbound session exists — this is the fix for the case where the
@@ -5832,6 +5854,9 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 			s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
 		} else {
 			s.sendAckDeleteByID(connID, "dm", msg.ID, "")
+		}
+		if !stored {
+			log.Debug().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("id", string(msg.ID)).Msg("push_message_dedup_acked")
 		}
 	} else if !stored {
 		log.Warn().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", string(peerIdentity)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed")

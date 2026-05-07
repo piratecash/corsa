@@ -423,6 +423,19 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					return writeErr
 				}
 			} else if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
+				if errors.Is(err, protocol.ErrFrameTooLarge) {
+					// Self-bug: our outbound frame exceeded the wire size budget.
+					// Disconnecting the peer would treat it as a flap and drag
+					// both sides into a reconnect loop — instead we drop the
+					// offending frame, log loudly, and let the session
+					// continue. The upstream layer that built the oversize
+					// frame must shrink it (announce_routes pagination, peers
+					// cap, etc.).
+					log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Err(err).Msg("outbound_frame_too_large_dropped")
+					s.clearRelayRetryForOutbound(outbound)
+					s.flushPendingPeerFrames(session.address)
+					continue
+				}
 				log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
 				s.markPeerDisconnected(session.address, err)
 				return err

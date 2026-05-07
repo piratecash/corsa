@@ -41,6 +41,23 @@ const (
 	DefaultFlapThreshold    = 3
 	DefaultHoldDownDuration = 30 * time.Second
 	DefaultPenalizedTTL     = 30 * time.Second
+	// MaxHoldDownDuration caps the exponential hold-down growth so that
+	// a chronically flapping peer can be retried at most every 10
+	// minutes. The cap protects mesh convergence — without it, a peer
+	// that has been flapping for an hour would have a multi-hour
+	// hold-down even after it stabilizes.
+	MaxHoldDownDuration = 600 * time.Second
+	// FlapBackoffShiftCap bounds the bit-shift exponent used in the
+	// exp-backoff multiplier so that consecutiveFlaps cannot grow the
+	// shift beyond what an int64 nanosecond duration can hold. The
+	// effective multiplier therefore ranges over 1..2^FlapBackoffShiftCap.
+	FlapBackoffShiftCap = 5
+	// FlapStableWindowMultiplier defines how long after the last
+	// flap-burst a peer must remain stable before consecutiveFlaps is
+	// allowed to reset implicitly inside recordWithdrawalLocked. Two
+	// flap windows give the announce machinery enough room to converge
+	// across the network before forgiving the previous burst.
+	FlapStableWindowMultiplier = 2
 )
 
 // HopsInfinity marks a route as withdrawn. Only the origin node may
@@ -58,6 +75,22 @@ type peerFlapState struct {
 	// holdDownUntil is the time until which AddDirectPeer will apply
 	// a penalized (shorter) TTL. Zero means no hold-down active.
 	holdDownUntil time.Time
+
+	// consecutiveFlaps counts back-to-back hold-down activations that
+	// arrived without a stable window between them. Each new flap-burst
+	// while consecutiveFlaps > 0 doubles the hold-down duration (capped
+	// at MaxHoldDownDuration) so a peer that keeps flapping does not
+	// burn the same short hold-down repeatedly. Reset to zero by
+	// RecordSuccessfulRouteAdd or by passing a stable window.
+	consecutiveFlaps int
+
+	// lastFlapAt is the wall-clock timestamp of the most recent
+	// hold-down activation. Used together with the stable-window check
+	// to decide when consecutiveFlaps may be cleared without an
+	// explicit RecordSuccessfulRouteAdd call. Zero means "no flap
+	// has ever fired", which keeps the field forward-compatible with
+	// state-restore paths that rebuild flapState without history.
+	lastFlapAt time.Time
 }
 
 // RouteSource indicates how a route was learned. The trust hierarchy is:

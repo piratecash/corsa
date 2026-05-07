@@ -66,6 +66,106 @@ func (s *Service) routingTableTTLLoop(ctx context.Context) {
 	}
 }
 
+// isAnnouncePlaneFrameType reports whether a frame type belongs to the
+// announce plane (announce_routes, routes_update, request_resync).
+// These frames are subject to the strict 128 KiB MaxFrameLine budget
+// even when received over peer sessions whose generic line reader
+// accepts up to 8 MiB, because the writer side (chunkAnnounceEntriesBySize)
+// caps them at MaxFrameLine and a wider receive budget would let
+// sender and receiver diverge on which routes a peer is willing to
+// carry. Used by readPeerSession to drop oversize announce-plane
+// frames before they reach the routing table.
+func isAnnouncePlaneFrameType(frameType string) bool {
+	switch frameType {
+	case "announce_routes", "routes_update", "request_resync":
+		return true
+	default:
+		return false
+	}
+}
+
+// chunkAnnounceEntriesBySize splits a route slice into wire-safe chunks.
+// Each chunk's serialized announce frame fits within maxBytes.
+//
+// Algorithm:
+//  1. Build chunks greedily — start with empty current chunk.
+//  2. For each entry, append it to current chunk and pre-marshal the
+//     candidate frame. If the marshaled line fits maxBytes, accept;
+//     otherwise close current chunk and start a new one with just
+//     this entry.
+//  3. If a SINGLE entry's marshaled line exceeds maxBytes, the entry
+//     is rejected (logged and reported via skipped indices) — there
+//     is no way to split a single AnnounceRouteFrame whose Extra
+//     payload alone is oversized.
+//
+// Returns:
+//   - chunks: groups of entries that each fit in maxBytes.
+//   - skipped: indices into the input slice for entries that could
+//     not fit alone (caller must log/track these — they will not be
+//     announced).
+//
+// kind selects the frame type used for the size probe; both
+// announceWireLegacy and announceWireV2 share the same wire shape so
+// the probe is accurate either way.
+func chunkAnnounceEntriesBySize(entries []routing.AnnounceEntry, kind announceWireType, maxBytes int) (chunks [][]routing.AnnounceEntry, skipped []int) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	var current []routing.AnnounceEntry
+	flushCurrent := func() {
+		if len(current) > 0 {
+			chunks = append(chunks, current)
+			current = nil
+		}
+	}
+	for i, entry := range entries {
+		candidate := append(current, entry)
+		frame := buildAnnounceFrame(kind, candidate)
+		if _, err := protocol.MarshalFrameLineWithLimit(frame, maxBytes); err != nil {
+			if !errors.Is(err, protocol.ErrFrameTooLarge) {
+				// Genuine encode failure — propagate by skipping this
+				// entry (callers see it in `skipped`) and keep building
+				// chunks from the rest. We cannot return an error here
+				// without dropping every queued entry that came before.
+				skipped = append(skipped, i)
+				continue
+			}
+			// Size violation — close current chunk and try entry alone.
+			flushCurrent()
+			soloFrame := buildAnnounceFrame(kind, []routing.AnnounceEntry{entry})
+			if _, soloErr := protocol.MarshalFrameLineWithLimit(soloFrame, maxBytes); soloErr != nil {
+				// Entry's own Extra blob already exceeds the budget —
+				// no chunking can save it. Skip and report.
+				skipped = append(skipped, i)
+				continue
+			}
+			current = []routing.AnnounceEntry{entry}
+			continue
+		}
+		current = candidate
+	}
+	flushCurrent()
+	return chunks, skipped
+}
+
+// logSkippedAnnounceEntries emits one structured error per dropped
+// entry so operators can correlate `announce_routes_entry_oversize_dropped`
+// log lines with specific identity/origin pairs. Kept as a helper so
+// SendAnnounceRoutes and SendRoutesUpdate share the exact same shape.
+func logSkippedAnnounceEntries(peerAddress domain.PeerAddress, routes []routing.AnnounceEntry, skipped []int, wireType string) {
+	for _, idx := range skipped {
+		if idx < 0 || idx >= len(routes) {
+			continue
+		}
+		log.Error().
+			Str("peer_address", string(peerAddress)).
+			Str("wire_type", wireType).
+			Str("route_identity", string(routes[idx].Identity)).
+			Str("route_origin", string(routes[idx].Origin)).
+			Msg("announce_routes_entry_oversize_dropped")
+	}
+}
+
 // SendAnnounceRoutes implements routing.PeerSender. It builds an
 // announce_routes frame and sends it to the peer. Supports both outbound
 // sessions (by session address) and inbound connections (by "inbound:"
@@ -76,12 +176,42 @@ func (s *Service) routingTableTTLLoop(ctx context.Context) {
 // inbound sync-flush wait aborts the send rather than consuming the full
 // syncFlushTimeout. Outbound enqueue is non-blocking so ctx only matters
 // for the inbound path.
+//
+// Chunking is size-aware: entries are packed greedily into frames that
+// each fit under MaxFrameLine. Inbound paths share the strict
+// command-plane budget (128 KiB); outbound peer-session paths
+// technically have a wider 8 MiB budget but we use MaxFrameLine here
+// too because the receiver dispatches announce_routes through the
+// inbound-style 128 KiB line reader regardless of which end opened
+// the TCP connection. Entries whose individual encoding exceeds the
+// budget are dropped with announce_routes_entry_oversize_dropped and
+// excluded from the wire frames; remaining entries still ship.
 func (s *Service) SendAnnounceRoutes(ctx context.Context, peerAddress domain.PeerAddress, routes []routing.AnnounceEntry) bool {
 	if len(routes) == 0 {
 		return true
 	}
-	frame := buildAnnounceFrame(announceWireLegacy, routes)
-	return s.sendAnnouncePlaneFrame(ctx, peerAddress, frame)
+	chunks, skipped := chunkAnnounceEntriesBySize(routes, announceWireLegacy, protocol.MaxFrameLine)
+	logSkippedAnnounceEntries(peerAddress, routes, skipped, "announce_routes")
+	for _, chunk := range chunks {
+		frame := buildAnnounceFrame(announceWireLegacy, chunk)
+		if !s.sendAnnouncePlaneFrame(ctx, peerAddress, frame) {
+			return false
+		}
+	}
+	// Truthful delivery contract: when even one entry was dropped by
+	// chunkAnnounceEntriesBySize the snapshot we were handed is NOT
+	// fully on the wire. Callers (sendConnectTimeFullSync, AnnounceLoop)
+	// use the bool result to decide whether to record this snapshot as
+	// the new per-peer baseline / per-peer announce cache — recording
+	// it on partial delivery would let the dropped routes silently
+	// disappear from the peer's view until they change again. Returning
+	// false leaves the caller's cache untouched so the next cycle
+	// retries the full snapshot; the entries that did fit shipped this
+	// cycle, the receiver dedupes them via (identity, origin, seq), and
+	// the broken entry keeps surfacing in the
+	// announce_routes_entry_oversize_dropped log until upstream shrinks
+	// its Extra payload.
+	return len(skipped) == 0
 }
 
 // SendRoutesUpdate implements routing.PeerSender for the v2 wire path.
@@ -112,19 +242,30 @@ func (s *Service) SendRoutesUpdate(ctx context.Context, peerAddress domain.PeerA
 	if len(delta) == 0 {
 		return true
 	}
-	frame := buildAnnounceFrame(announceWireV2, delta)
-	if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame,
-		domain.CapMeshRoutingV1,
-		domain.CapMeshRoutingV2,
-		domain.CapMeshRelayV1,
-	) {
-		log.Debug().
-			Str("peer_address", string(peerAddress)).
-			Int("delta_routes", len(delta)).
-			Msg("routes_update_skipped_or_failed_at_send_time")
-		return false
+	chunks, skipped := chunkAnnounceEntriesBySize(delta, announceWireV2, protocol.MaxFrameLine)
+	logSkippedAnnounceEntries(peerAddress, delta, skipped, "routes_update")
+	for _, chunk := range chunks {
+		frame := buildAnnounceFrame(announceWireV2, chunk)
+		if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame,
+			domain.CapMeshRoutingV1,
+			domain.CapMeshRoutingV2,
+			domain.CapMeshRelayV1,
+		) {
+			log.Debug().
+				Str("peer_address", string(peerAddress)).
+				Int("delta_routes", len(chunk)).
+				Msg("routes_update_skipped_or_failed_at_send_time")
+			return false
+		}
 	}
-	return true
+	// Same truthful-delivery contract as SendAnnounceRoutes: any entry
+	// dropped by chunkAnnounceEntriesBySize means the delta we were
+	// asked to ship is NOT fully on the wire. Returning false leaves
+	// the caller's per-peer announce cache unmodified so the next
+	// announce cycle re-attempts the full delta — the dropped entry
+	// keeps appearing in the announce_routes_entry_oversize_dropped log
+	// until upstream shrinks its Extra payload.
+	return len(skipped) == 0
 }
 
 // SendRequestResync emits a request_resync wire frame to the peer so that
@@ -271,13 +412,29 @@ func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAd
 // dispatches by connID, not address, so a churned replacement
 // connection at the same remoteAddr cannot pick up the bytes.
 func (s *Service) writeFrameToInboundConn(ctx context.Context, connID domain.ConnID, remoteAddr string, frame protocol.Frame) bool {
-	line, err := protocol.MarshalFrameLine(frame)
+	// Inbound TCP path: the receiving peer dispatches through
+	// handleConn's command-plane reader bound by maxCommandLineBytes
+	// (128 KiB). Use the matching writer-side budget so the sender
+	// rejects a self-built oversize frame instead of letting the
+	// remote close the connection with frame-too-large.
+	line, err := protocol.MarshalFrameLineWithLimit(frame, protocol.MaxFrameLine)
 	if err != nil {
 		// Caller-side marshal failure — distinct diagnostic from a
 		// transport drop. Kept on the caller so we can surface
 		// frame_inbound_marshal_failed without going through the
 		// network at all (the strict raw-bytes helper has no
 		// marshal-fallback path; see network_consumer.go).
+		//
+		// frame-too-large is a self-bug: the upstream layer that built
+		// the frame exceeded the wire size budget (announce_routes
+		// pagination missed, peers cap missed, etc.). We return false
+		// so the caller short-circuits without disconnecting the peer
+		// — disconnect-on-self-bug would only restart the same
+		// oversize frame.
+		if errors.Is(err, protocol.ErrFrameTooLarge) {
+			log.Error().Err(err).Str("peer", remoteAddr).Str("type", frame.Type).Msg("frame_inbound_too_large")
+			return false
+		}
 		log.Warn().Err(err).Str("peer", remoteAddr).Msg("frame_inbound_marshal_failed")
 		return false
 	}
@@ -951,6 +1108,27 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 	// flag untouched — see handleRoutesUpdate for the gating contract.
 	if mode == announceReceiveLegacy {
 		s.announceLoop.StateRegistry().GetOrCreate(senderIdentity).MarkBaselineReceived()
+	}
+
+	// Stability signal: a successful announce-plane round-trip from the
+	// peer is concrete evidence the peer is back to stable operation,
+	// so clear its consecutive-flap streak. Without this hook a peer
+	// that recovered cleanly would continue to see the exp-backoff
+	// hold-down growing on the next disconnect even though it had
+	// already proven liveness — see routing.Table.RecordSuccessfulRouteAdd.
+	// The stable-window implicit reset is preserved as a fallback for
+	// peers that go quiet without flapping; this hook fires earlier on
+	// the actual recovery event.
+	//
+	// Gated on accepted+unchanged > 0: both outcomes prove the wire
+	// path is alive — a reconnected peer re-announcing the exact same
+	// table (all unchanged) still demonstrates liveness, matching the
+	// drain-on-unchanged contract enforced a few lines below. Empty or
+	// fully-rejected frames are excluded so a malicious peer cannot
+	// mask its own flap streak by spamming announce frames whose
+	// entries the trust filter discards.
+	if accepted+unchanged > 0 {
+		s.routingTable.RecordSuccessfulRouteAdd(senderIdentity)
 	}
 
 	// Event-driven pending queue drain: new or reconfirmed transit routes

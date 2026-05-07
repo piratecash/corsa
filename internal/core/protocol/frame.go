@@ -10,14 +10,14 @@ import (
 )
 
 type Frame struct {
-	Type                   string                `json:"type"`
-	Version                int                   `json:"version,omitempty"`
-	MinimumProtocolVersion int                   `json:"minimum_protocol_version,omitempty"`
-	Client                 string                `json:"client,omitempty"`
-	Node                   string                `json:"node,omitempty"`
-	Network                string                `json:"network,omitempty"`
-	Listen                 string                `json:"listen,omitempty"`
-	Listener               string                `json:"listener,omitempty"`
+	Type                   string `json:"type"`
+	Version                int    `json:"version,omitempty"`
+	MinimumProtocolVersion int    `json:"minimum_protocol_version,omitempty"`
+	Client                 string `json:"client,omitempty"`
+	Node                   string `json:"node,omitempty"`
+	Network                string `json:"network,omitempty"`
+	Listen                 string `json:"listen,omitempty"`
+	Listener               string `json:"listener,omitempty"`
 	// AdvertisePort is the self-reported listening port introduced by the
 	// advertise-address phase 1 deprecation rollout (ProtocolVersion=11).
 	// It is the only authoritative wire source of the peer's listening
@@ -32,48 +32,48 @@ type Frame struct {
 	// keeps legacy v10 frames indistinguishable on the wire from a v11
 	// frame with no port set — legacy parsers treat the absent field as
 	// "no advertise_port", which is the same as the v11 fallback.
-	AdvertisePort          domain.PeerPort       `json:"advertise_port,omitempty"`
-	NodeType               string                `json:"node_type,omitempty"`
-	ClientVersion          string                `json:"client_version,omitempty"`
-	ClientBuild            int                   `json:"client_build,omitempty"`
-	Services               []string              `json:"services,omitempty"`
-	Networks               []string              `json:"networks,omitempty"` // self-declared reachable network groups (hello frame)
-	Address                string                `json:"address,omitempty"`
-	Recipient              string                `json:"recipient,omitempty"`
-	PubKey                 string                `json:"pubkey,omitempty"`
-	BoxKey                 string                `json:"boxkey,omitempty"`
-	BoxSig                 string                `json:"boxsig,omitempty"`
-	Peers                  []string              `json:"peers,omitempty"`
-	Identities             []string              `json:"identities,omitempty"`
-	Contacts               []ContactFrame        `json:"contacts,omitempty"`
-	Topic                  string                `json:"topic,omitempty"`
-	ID                     string                `json:"id,omitempty"`
-	IDs                    []string              `json:"ids,omitempty"`
-	PendingIDs             []string              `json:"pending_ids,omitempty"`
-	PendingMessages        []PendingMessageFrame `json:"pending_messages,omitempty"`
-	Item                   *MessageFrame         `json:"item,omitempty"`
-	Receipt                *ReceiptFrame         `json:"receipt,omitempty"`
-	Messages               []MessageFrame        `json:"messages,omitempty"`
-	Receipts               []ReceiptFrame        `json:"receipts,omitempty"`
-	Notices                []NoticeFrame         `json:"notices,omitempty"`
-	PeerHealth             []PeerHealthFrame     `json:"peer_health,omitempty"`
-	Subscriber             string                `json:"subscriber,omitempty"`
-	Flag                   string                `json:"flag,omitempty"`
-	CreatedAt              string                `json:"created_at,omitempty"`
-	DeliveredAt            string                `json:"delivered_at,omitempty"`
-	TTLSeconds             int                   `json:"ttl_seconds,omitempty"`
-	Body                   string                `json:"body,omitempty"`
-	Ciphertext             string                `json:"ciphertext,omitempty"`
-	ExpiresAt              int64                 `json:"expires_at,omitempty"`
-	Count                  int                   `json:"count,omitempty"`
-	Limit                  int                   `json:"limit,omitempty"`
-	Status                 string                `json:"status,omitempty"`
-	AckType                string                `json:"ack_type,omitempty"`
-	ObservedAddress        string                `json:"observed_address,omitempty"`
-	Challenge              string                `json:"challenge,omitempty"`
-	Signature              string                `json:"signature,omitempty"`
-	Code                   string                `json:"code,omitempty"`
-	Error                  string                `json:"error,omitempty"`
+	AdvertisePort   domain.PeerPort       `json:"advertise_port,omitempty"`
+	NodeType        string                `json:"node_type,omitempty"`
+	ClientVersion   string                `json:"client_version,omitempty"`
+	ClientBuild     int                   `json:"client_build,omitempty"`
+	Services        []string              `json:"services,omitempty"`
+	Networks        []string              `json:"networks,omitempty"` // self-declared reachable network groups (hello frame)
+	Address         string                `json:"address,omitempty"`
+	Recipient       string                `json:"recipient,omitempty"`
+	PubKey          string                `json:"pubkey,omitempty"`
+	BoxKey          string                `json:"boxkey,omitempty"`
+	BoxSig          string                `json:"boxsig,omitempty"`
+	Peers           []string              `json:"peers,omitempty"`
+	Identities      []string              `json:"identities,omitempty"`
+	Contacts        []ContactFrame        `json:"contacts,omitempty"`
+	Topic           string                `json:"topic,omitempty"`
+	ID              string                `json:"id,omitempty"`
+	IDs             []string              `json:"ids,omitempty"`
+	PendingIDs      []string              `json:"pending_ids,omitempty"`
+	PendingMessages []PendingMessageFrame `json:"pending_messages,omitempty"`
+	Item            *MessageFrame         `json:"item,omitempty"`
+	Receipt         *ReceiptFrame         `json:"receipt,omitempty"`
+	Messages        []MessageFrame        `json:"messages,omitempty"`
+	Receipts        []ReceiptFrame        `json:"receipts,omitempty"`
+	Notices         []NoticeFrame         `json:"notices,omitempty"`
+	PeerHealth      []PeerHealthFrame     `json:"peer_health,omitempty"`
+	Subscriber      string                `json:"subscriber,omitempty"`
+	Flag            string                `json:"flag,omitempty"`
+	CreatedAt       string                `json:"created_at,omitempty"`
+	DeliveredAt     string                `json:"delivered_at,omitempty"`
+	TTLSeconds      int                   `json:"ttl_seconds,omitempty"`
+	Body            string                `json:"body,omitempty"`
+	Ciphertext      string                `json:"ciphertext,omitempty"`
+	ExpiresAt       int64                 `json:"expires_at,omitempty"`
+	Count           int                   `json:"count,omitempty"`
+	Limit           int                   `json:"limit,omitempty"`
+	Status          string                `json:"status,omitempty"`
+	AckType         string                `json:"ack_type,omitempty"`
+	ObservedAddress string                `json:"observed_address,omitempty"`
+	Challenge       string                `json:"challenge,omitempty"`
+	Signature       string                `json:"signature,omitempty"`
+	Code            string                `json:"code,omitempty"`
+	Error           string                `json:"error,omitempty"`
 	// Details carries machine-readable payload for connection_notice-style
 	// control frames. Shape is a function of Code. Kept as json.RawMessage
 	// so the wire layer stays agnostic to per-code schemas — decode it in
@@ -480,6 +480,40 @@ func checkJSONDepth(data string, maxDepth int) error {
 	return nil
 }
 
+// MaxFrameLine is the writer-side wire size budget for a single
+// serialized frame line on the COMMAND plane (inbound TCP via
+// handleConn / writeFrameToInboundConn). The value is kept in lock-step
+// with the receive-side maxCommandLineBytes guard inside admission.go:
+// any frame larger than MaxFrameLine will be rejected by the remote
+// command-plane reader with errCode=frame-too-large, so the sender MUST
+// refuse to put oversize frames on the wire instead of burning a
+// connection per offending frame. The budget includes the trailing
+// newline byte — see MarshalFrameLineWithLimit for the off-by-one
+// rationale. The constant is exported so tests in adjacent packages
+// can pin its value without re-deriving the budget.
+const MaxFrameLine = 128 * 1024
+
+// MaxResponseLine is the writer-side wire size budget for a single
+// serialized frame line on the RESPONSE plane (peer-session writes via
+// peerSessionRequest, where the receiver dispatches through the
+// readPeerSession line reader bound by maxResponseLineBytes). Response
+// frames legally batch many DM bodies into a single line (contacts,
+// messages, inbox), so the budget is wider than MaxFrameLine. As with
+// MaxFrameLine, the budget includes the trailing newline byte — see
+// MarshalFrameLineWithLimit for the off-by-one rationale.
+const MaxResponseLine = 8 * 1024 * 1024
+
+// MarshalFrameLine serializes a frame to its wire form without any
+// size guard. Callers that need the writer-side wire-size budget — and
+// most production callers do — MUST use MarshalFrameLineWithLimit
+// instead, picking MaxFrameLine for command-plane writes and
+// MaxResponseLine for peer-session writes. This unguarded entry point
+// stays in the API for tests, raw-line fast-path callers, and shared
+// infrastructure (NetCore.Send / SendSync) where the direction of the
+// frame is unknown to the marshaller.
+//
+// The RawLine fast-path is left untrusted on purpose — its caller
+// already owns the wire shape and chose to bypass json.Marshal.
 func MarshalFrameLine(frame Frame) (string, error) {
 	if frame.RawLine != "" {
 		return frame.RawLine, nil
@@ -487,6 +521,44 @@ func MarshalFrameLine(frame Frame) (string, error) {
 	data, err := json.Marshal(frame)
 	if err != nil {
 		return "", err
+	}
+	return string(data) + "\n", nil
+}
+
+// MarshalFrameLineWithLimit serializes a frame to its wire form,
+// rejecting frames whose final wire line (JSON + trailing newline)
+// exceeds maxBytes with ErrFrameTooLarge. Use MaxFrameLine (128 KiB)
+// for command-plane writes (inbound TCP via writeFrameToInboundConn)
+// and MaxResponseLine (8 MiB) for peer-session writes that legally
+// carry batched responses (contacts, messages, inbox).
+//
+// The size budget is computed against the FULL wire line including
+// the trailing newline so it matches the receive-side bufio.Reader
+// line counter byte-for-byte: a JSON payload that would emit a wire
+// line of exactly maxBytes+1 (JSON length == maxBytes, plus '\n')
+// would be rejected by the remote, so the writer-side guard rejects
+// it here too.
+//
+// The RawLine fast-path is also size-checked because callers using
+// RawLine still produce bytes that hit the same wire limits — only
+// the fast-path skips the JSON marshal step, not the size budget.
+func MarshalFrameLineWithLimit(frame Frame, maxBytes int) (string, error) {
+	if frame.RawLine != "" {
+		if len(frame.RawLine) > maxBytes {
+			return "", fmt.Errorf("MarshalFrameLineWithLimit: raw line size %d exceeds %d: %w", len(frame.RawLine), maxBytes, ErrFrameTooLarge)
+		}
+		return frame.RawLine, nil
+	}
+	data, err := json.Marshal(frame)
+	if err != nil {
+		return "", err
+	}
+	// +1 accounts for the trailing newline appended below — the
+	// receive-side line reader counts the newline as part of the
+	// line, so a JSON payload with len(data)==maxBytes would produce
+	// a maxBytes+1 wire line and be rejected by the remote.
+	if len(data)+1 > maxBytes {
+		return "", fmt.Errorf("MarshalFrameLineWithLimit: frame size %d (with newline %d) exceeds %d: %w", len(data), len(data)+1, maxBytes, ErrFrameTooLarge)
 	}
 	return string(data) + "\n", nil
 }

@@ -479,6 +479,15 @@ func (t *Table) isPeerInHoldDownLocked(peerIdentity PeerIdentity, now time.Time)
 // recordWithdrawalLocked tracks a disconnect event for flap detection.
 // If the withdrawal count within flapWindow crosses flapThreshold,
 // hold-down is activated. Must be called with t.mu held.
+//
+// Exponential backoff: every consecutive flap-burst that lands while a
+// previous burst is still within FlapStableWindowMultiplier × flapWindow
+// doubles the hold-down duration, capped at MaxHoldDownDuration. The
+// growth is bounded by FlapBackoffShiftCap so the multiplier never
+// overflows int64 ns. Stable peers reset implicitly inside this same
+// helper when the gap from the last burst exceeds the stable window;
+// callers can also reset explicitly via RecordSuccessfulRouteAdd once
+// they observe convergence on the announce plane.
 func (t *Table) recordWithdrawalLocked(peerIdentity PeerIdentity, now time.Time) {
 	fs := t.flapState[peerIdentity]
 	if fs == nil {
@@ -498,9 +507,84 @@ func (t *Table) recordWithdrawalLocked(peerIdentity PeerIdentity, now time.Time)
 	}
 	fs.withdrawTimes = trimmed
 
-	if len(fs.withdrawTimes) >= t.flapThreshold {
-		fs.holdDownUntil = now.Add(t.holdDownDuration)
+	// Implicit stable-window reset: if the previous burst is older than
+	// the stable window, treat this withdrawal as a fresh streak.
+	stableWindow := time.Duration(FlapStableWindowMultiplier) * t.flapWindow
+	if !fs.lastFlapAt.IsZero() && now.Sub(fs.lastFlapAt) > stableWindow {
+		fs.consecutiveFlaps = 0
 	}
+
+	if len(fs.withdrawTimes) >= t.flapThreshold {
+		// Bump consecutiveFlaps only on the *transition* from
+		// "hold-down expired/never armed" to "hold-down active". A
+		// single flap-burst that drops the connection threshold+N
+		// times must arm exactly one hold-down — without this guard
+		// the counter would grow on every withdrawal beyond the
+		// threshold and the next burst would already start at a
+		// multi-step exp-backoff slot.
+		if fs.holdDownUntil.IsZero() || !now.Before(fs.holdDownUntil) {
+			fs.consecutiveFlaps++
+		}
+		fs.lastFlapAt = now
+		fs.holdDownUntil = now.Add(holdDownDurationForBurst(t.holdDownDuration, fs.consecutiveFlaps))
+	}
+}
+
+// holdDownDurationForBurst returns the hold-down duration for the
+// consecutiveFlaps-th burst. The first burst (consecutiveFlaps == 1)
+// uses the configured base duration; each subsequent burst doubles
+// it, capped at MaxHoldDownDuration and bounded by
+// FlapBackoffShiftCap so the bit-shift cannot overflow.
+//
+// A non-positive base disables hold-down entirely and short-circuits
+// to base. Without this guard, exp-backoff would push base*2^shift
+// down the scaled <= 0 branch starting on the second burst and turn a
+// deliberately disabled hold-down into MaxHoldDownDuration — the
+// opposite of what WithHoldDownDuration(0) requests.
+func holdDownDurationForBurst(base time.Duration, consecutiveFlaps int) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	if consecutiveFlaps <= 1 {
+		if base > MaxHoldDownDuration {
+			return MaxHoldDownDuration
+		}
+		return base
+	}
+	shift := consecutiveFlaps - 1
+	if shift > FlapBackoffShiftCap {
+		shift = FlapBackoffShiftCap
+	}
+	scaled := base * (1 << shift)
+	if scaled > MaxHoldDownDuration || scaled <= 0 {
+		return MaxHoldDownDuration
+	}
+	return scaled
+}
+
+// RecordSuccessfulRouteAdd clears the consecutive-flap counter for a
+// peer that has demonstrated stability (e.g. a successful announce-plane
+// round-trip after the hold-down expired). The withdrawTimes history
+// is left untouched so a single successful add does not erase the
+// flap-rate evidence inside the current flapWindow — that history
+// trims itself naturally as the window slides forward. Callers in
+// node.Service invoke this on the post-handshake path after a
+// successful announce_routes exchange.
+//
+// Empty peerIdentity short-circuits as a no-op so callers can pass
+// zero-value identities through without a nil-check.
+func (t *Table) RecordSuccessfulRouteAdd(peerIdentity PeerIdentity) {
+	if peerIdentity == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	fs := t.flapState[peerIdentity]
+	if fs == nil {
+		return
+	}
+	fs.consecutiveFlaps = 0
+	fs.lastFlapAt = time.Time{}
 }
 
 // RemoveDirectPeer handles a peer disconnect. It withdraws the direct
