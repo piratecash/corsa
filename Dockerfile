@@ -7,8 +7,8 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/corsa-node ./cmd/corsa-node
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/corsa-cli ./cmd/corsa-cli
+RUN CGO_ENABLED=0 GOFLAGS="-trimpath" GOOS=linux GOARCH=amd64 go build -o /out/corsa-node ./cmd/corsa-node
+RUN CGO_ENABLED=0 GOFLAGS="-trimpath" GOOS=linux GOARCH=amd64 go build -o /out/corsa-cli ./cmd/corsa-cli
 
 FROM debian:bookworm-slim
 

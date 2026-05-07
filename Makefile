@@ -4,6 +4,7 @@ export
 DIST_DIR ?= dist
 GOCACHE ?= $(CURDIR)/.gocache
 GOMODCACHE ?= $(CURDIR)/.gomodcache
+GOFLAGS ?= -trimpath
 GO ?= go
 
 .PHONY: build-dirs
