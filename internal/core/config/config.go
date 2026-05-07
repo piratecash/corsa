@@ -106,7 +106,7 @@ const (
 	// mandatory even though MinimumProtocolVersion stays at 8 in this build
 	// — the floor raise itself is the v12 contract.
 	ProtocolVersion        = 14
-	MinimumProtocolVersion = 11
+	MinimumProtocolVersion = 14
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
 )
