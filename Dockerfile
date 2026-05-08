@@ -12,7 +12,10 @@ RUN CGO_ENABLED=0 GOFLAGS="-trimpath" GOOS=linux GOARCH=amd64 go build -ldflags=
 
 FROM debian:bookworm-slim
 
-RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin corsa
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 10001 --create-home --shell /usr/sbin/nologin corsa
 
 WORKDIR /home/corsa
 

@@ -79,10 +79,21 @@ func TestRIBCap_RejectsExcessAnnouncement_WhenWorseThanWorst(t *testing.T) {
 }
 
 // TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness
-// drives all three legs of the eviction order: trust tier first, hops
+// drives all three legs of the EVICTION KEY (which bucket member to
+// drop once admission has decided to evict): trust tier first, hops
 // second, expiry timestamp third. Each sub-test isolates one leg by
 // keeping the other two equal across the bucket so the chosen victim
 // is unambiguous.
+//
+// Note: the cap admission FLOOR (whether to evict at all) is
+// intentionally narrower than the eviction key — it omits ExpiresAt
+// because every re-announce arrives with a strictly-later ExpiresAt
+// and including it would thrash the bucket on each cycle. See
+// isStrictlyBetterForCapLocked for the asymmetry rationale. The
+// expiry sub-test below therefore engineers admission via a
+// strict-better tier (lower hops) and verifies that, GIVEN the cap
+// has decided to evict, the eviction key picks the earliest-expiring
+// row among equal-trust + equal-hops incumbents.
 func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 
@@ -165,10 +176,17 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 
 	t.Run("expiry_earliest_evicted_among_same_trust_and_hops", func(t *testing.T) {
 		// Bucket: two announcements at the same trust AND same hops,
-		// distinguished only by ExpiresAt. The earlier-expiring one
-		// is the eviction victim — it would lose its slot to TickTTL
-		// soon anyway, so dropping it now to make room for a longer-
-		// lived candidate is strictly cheaper.
+		// distinguished only by ExpiresAt. The eviction-key contract
+		// (isWorseForEvictionLocked) still uses ExpiresAt as the final
+		// tie-break — the earlier-expiring row is the cheaper eviction
+		// victim because TickTTL would reclaim it soon anyway. To
+		// trigger admission at all under the cap floor, however, the
+		// candidate must improve a real tier (live > expired, trust,
+		// or hops) — see isStrictlyBetterForCapLocked. We therefore
+		// engineer admission via strictly-fewer-hops on the candidate
+		// and verify that the eviction-key picks the earliest-expiring
+		// of the two equal-trust + equal-hops incumbents as the
+		// victim.
 		tbl := NewTable(
 			WithClock(fixedClock(now)),
 			WithMaxNextHopsPerOrigin(2),
@@ -186,24 +204,28 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 			ExpiresAt: now.Add(120 * time.Second),
 		})
 
+		// Hops=2 is strictly better than incumbents' Hops=3 → the cap
+		// floor admits, then the eviction key picks the worst victim
+		// among the equal-trust + equal-hops bucket members by
+		// ExpiresAt.
 		status := mustUpdate(t, tbl, RouteEntry{
 			Identity: "alice", Origin: "bob", NextHop: "hop-new",
-			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 			ExpiresAt: now.Add(180 * time.Second),
 		})
 		if status != RouteAccepted {
-			t.Fatalf("expected RouteAccepted (evicts earliest-expiring), got %v", status)
+			t.Fatalf("expected RouteAccepted (Hops=2 strictly better than incumbents' Hops=3), got %v", status)
 		}
 
 		nextHops := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
 		if _, ok := nextHops["hop-soon"]; ok {
-			t.Fatal("earliest-expiring candidate should have been evicted")
+			t.Fatal("earliest-expiring incumbent should have been evicted (eviction key uses ExpiresAt as final tie-break)")
 		}
 		if _, ok := nextHops["hop-late"]; !ok {
-			t.Fatal("longer-lived candidate must survive")
+			t.Fatal("longer-lived incumbent must survive")
 		}
 		if _, ok := nextHops["hop-new"]; !ok {
-			t.Fatal("incoming candidate with strictly later expiry must occupy the freed slot")
+			t.Fatal("incoming candidate (lower hops) must occupy the freed slot")
 		}
 	})
 }
@@ -296,10 +318,12 @@ func TestRIBCap_HopAckPromotionEvictsAnnouncement_EvenIfMoreHops(t *testing.T) {
 // TestRIBCap_HopAckPromotionRejected_IfAllKAreHopAckOrDirect_AndNotStrictlyBetter
 // covers the negative case of the same trust-tier rule: if every entry
 // in a saturated bucket is already at hop_ack (or higher), the cap
-// requires the incoming hop_ack to be strictly better by the
-// (hops, expiry) tie-break. A worse-hops or equal-hops-equal-expiry
-// hop_ack is dropped, so the bucket cannot be churned by an attacker
-// flooding hop_acks with progressively worse paths.
+// requires the incoming hop_ack to be strictly better by hops. The
+// admission floor (isStrictlyBetterForCapLocked) intentionally
+// excludes ExpiresAt as a tiebreaker so equal-trust + equal-hops
+// re-announces cannot churn the best-K winners; a worse-hops or
+// equal-hops hop_ack is dropped, and the bucket cannot be flooded by
+// progressively worse-or-equal paths.
 func TestRIBCap_HopAckPromotionRejected_IfAllKAreHopAckOrDirect_AndNotStrictlyBetter(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
@@ -325,16 +349,17 @@ func TestRIBCap_HopAckPromotionRejected_IfAllKAreHopAckOrDirect_AndNotStrictlyBe
 		t.Fatalf("hop_ack with worse hops than worst hop_ack: expected RouteRejected, got %v", statusWorse)
 	}
 
-	// Equal-hops, equal-expiry hop_ack — also rejected (not strictly
-	// better; the cap floor is irreflexive). ExpiresAt is filled by
-	// UpdateRoute from defaultTTL with the same fixed clock for both
-	// the seed and the candidate, so the keys collapse.
+	// Equal-hops hop_ack — also rejected. The cap floor is
+	// irreflexive on the (live, trust, hops) tiers and
+	// intentionally excludes ExpiresAt, so no equal-trust +
+	// equal-hops candidate is ever "strictly better" regardless of
+	// when it arrived.
 	statusEqual := mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "ack-d",
 		Hops: 4, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	if statusEqual != RouteRejected {
-		t.Fatalf("hop_ack equal in trust+hops+expiry: expected RouteRejected, got %v", statusEqual)
+		t.Fatalf("hop_ack equal in trust+hops: expected RouteRejected, got %v", statusEqual)
 	}
 
 	// Strictly-better hop_ack (fewer hops) — must be accepted.
@@ -1335,6 +1360,167 @@ func TestRIBCap_MixedVersionMesh_WorksWithUnboundedPeers(t *testing.T) {
 				r.Hops)
 		}
 	}
+}
+
+// TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent
+// pins the cap stability invariant against ExpiresAt-based churn.
+//
+// Root cause it fixes: an earlier version of
+// isStrictlyBetterForCapLocked used `cand.ExpiresAt.After(worst.ExpiresAt)`
+// as the final tiebreaker, mirroring the eviction key. Every
+// re-announce arrives with `ExpiresAt = now + defaultTTL`, strictly
+// later than any existing entry's ExpiresAt, so on every announce
+// cycle the floor admitted the re-announce, displaced an incumbent,
+// and the bucket churned through every available next-hop. In a
+// dense mesh this produced 90%+ eviction-rate (a node with K=4 and
+// 22 direct peers saw ~165 displacement decisions per second on
+// the routing-table cap), routes flapped between Lookup() reads, and
+// the file router could not pick stable paths.
+//
+// The fix narrows the floor: equal-liveness + equal-trust +
+// equal-hops returns false (incumbent wins). ExpiresAt remains in
+// the eviction key (isWorseForEvictionLocked) for the orthogonal
+// "which bucket member to evict GIVEN admission decided to evict"
+// question.
+//
+// Sub-tests cover both halves of the contract: (a) ExpiresAt-only
+// "betterness" must not displace, (b) real improvements (lower
+// hops, higher trust) still displace.
+func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.T) {
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+
+	t.Run("equal_trust_equal_hops_later_expires_rejected", func(t *testing.T) {
+		tbl := NewTable(
+			WithClock(fixedClock(now)),
+			WithMaxNextHopsPerOrigin(2),
+		)
+
+		// Saturate K=2 with announcements at Hops=3, equal trust.
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+
+		// Read incumbent's ExpiresAt and craft a candidate with
+		// strictly-later ExpiresAt — simulates the wall-clock-
+		// advanced re-announce that produced the production
+		// thrashing in dense meshes.
+		var incumbentExpires time.Time
+		for _, r := range tbl.Snapshot().Routes["alice"] {
+			if r.NextHop == "hop-a" {
+				incumbentExpires = r.ExpiresAt
+				break
+			}
+		}
+		if incumbentExpires.IsZero() {
+			t.Fatal("setup: incumbent ExpiresAt should have been filled by UpdateRoute")
+		}
+
+		statsBefore := tbl.CapStats()
+
+		status := mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+			ExpiresAt: incumbentExpires.Add(time.Second),
+		})
+		if status != RouteRejected {
+			t.Fatalf("expected RouteRejected — equal-trust equal-hops candidate must not displace incumbent on ExpiresAt alone, got %v", status)
+		}
+
+		statsAfter := tbl.CapStats()
+		if statsAfter.AcceptedReplaced != statsBefore.AcceptedReplaced {
+			t.Fatalf("AcceptedReplaced should NOT advance on equal-trust equal-hops re-announce; %d → %d",
+				statsBefore.AcceptedReplaced, statsAfter.AcceptedReplaced)
+		}
+		if statsAfter.RejectedFull != statsBefore.RejectedFull+1 {
+			t.Fatalf("RejectedFull should advance by exactly 1; %d → %d",
+				statsBefore.RejectedFull, statsAfter.RejectedFull)
+		}
+
+		bucket := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
+		if _, hasA := bucket["hop-a"]; !hasA {
+			t.Fatal("hop-a (incumbent) should still be in bucket")
+		}
+		if _, hasB := bucket["hop-b"]; !hasB {
+			t.Fatal("hop-b (incumbent) should still be in bucket")
+		}
+		if _, hasC := bucket["hop-c"]; hasC {
+			t.Fatal("hop-c should NOT have been admitted on ExpiresAt-only 'betterness'")
+		}
+		if got := len(bucket); got != 2 {
+			t.Fatalf("bucket should still hold the original K=2 incumbents, got %d entries", got)
+		}
+	})
+
+	t.Run("strictly_lower_hops_still_displaces", func(t *testing.T) {
+		// Sanity: real improvements still pass the floor — the
+		// fix narrows the floor only for the equal-on-all-tiers
+		// case.
+		tbl := NewTable(
+			WithClock(fixedClock(now)),
+			WithMaxNextHopsPerOrigin(2),
+		)
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+
+		status := mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+		if status != RouteAccepted {
+			t.Fatalf("expected RouteAccepted — Hops=2 strictly better than incumbents' Hops=5, got %v", status)
+		}
+
+		bucket := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
+		if _, hasC := bucket["hop-c"]; !hasC {
+			t.Fatal("hop-c should have been admitted via strict-better-by-hops")
+		}
+		liveCount := 0
+		for _, r := range bucket {
+			if !r.IsWithdrawn() {
+				liveCount++
+			}
+		}
+		if liveCount != 2 {
+			t.Fatalf("expected K=2 live entries after displacement, got %d", liveCount)
+		}
+	})
+
+	t.Run("strictly_higher_trust_still_displaces", func(t *testing.T) {
+		// Same sanity from the trust tier: hop_ack displaces
+		// announcement at equal hops because trust strictly wins
+		// (hop_ack > announcement on the trust ladder).
+		tbl := NewTable(
+			WithClock(fixedClock(now)),
+			WithMaxNextHopsPerOrigin(2),
+		)
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+
+		status := mustUpdate(t, tbl, RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Hops: 3, SeqNo: 1, Source: RouteSourceHopAck,
+		})
+		if status != RouteAccepted {
+			t.Fatalf("expected RouteAccepted — hop_ack strictly better than announcement at equal hops, got %v", status)
+		}
+	})
 }
 
 // TestRIBCap_AddDirectPeerRespectsCap pins the invariant that

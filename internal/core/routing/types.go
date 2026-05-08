@@ -449,26 +449,45 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 }
 
 // RouteCapStats captures monotonic counters for the
-// MaxNextHopsPerOrigin admission policy. Each field counts how many
-// times UpdateRoute reached the corresponding RouteAdmissionDecision
-// since the table was constructed. The struct is value-safe to copy —
-// it is published as part of routing.Snapshot and read lock-free by
-// fetchRouteSummary.
+// MaxNextHopsPerOrigin admission policy. Counters cover the full
+// admission surface — UpdateRoute (announce / hop_ack ingestion via
+// admitNewLocked) AND AddDirectPeer (direct registration via
+// admitDirectLocked) — but the two helpers do not contribute
+// symmetrically: only admitNewLocked uses every counter, and
+// admitDirectLocked only ever bumps AcceptedReplaced (saturated
+// direct admission displacing an evictable row), while a below-K
+// direct registration is intentionally silent. See each field's
+// docstring for the exact accounting. The struct is value-safe to
+// copy — it is published as part of routing.Snapshot and read
+// lock-free by fetchRouteSummary.
 //
 // All fields stay at zero on a Table with the cap disabled
-// (maxNextHopsPerOrigin <= 0): the admission policy short-circuits
+// (maxNextHopsPerOrigin <= 0): both admission helpers short-circuit
 // before any counter is touched. That keeps the deployment-default
 // configuration noise-free in observability dashboards.
 type RouteCapStats struct {
 	// Accepted counts entries that fit into a (Identity, Origin) bucket
-	// with room — no eviction was required.
+	// with room — no eviction was required. Sourced exclusively from
+	// admitNewLocked (UpdateRoute). admitDirectLocked deliberately
+	// does NOT bump this counter on a below-K direct registration:
+	// the cap's "eviction rate" metric (see AcceptedReplaced) is
+	// meant to reflect cap pressure on transit/announcement traffic,
+	// and including every direct add would dilute it with steady
+	// per-connect noise.
 	Accepted uint64
 
 	// AcceptedReplaced counts entries that were admitted by displacing
-	// the worst evictable existing entry. Together with Accepted this
-	// is the total number of cap-aware admissions; an operator dividing
-	// AcceptedReplaced by (Accepted + AcceptedReplaced) gets the cap
-	// "eviction rate" that signals whether the cap value is too tight.
+	// the worst evictable existing entry. Both admitNewLocked
+	// (announce / hop_ack pushed a strictly-better row through a
+	// saturated bucket) and admitDirectLocked (direct registration on
+	// a saturated bucket — direct admission cannot be rejected, so
+	// the cap evicts to make room) contribute here. Together with
+	// Accepted this gives the cap "eviction rate"
+	// (AcceptedReplaced / (Accepted + AcceptedReplaced)) signal that
+	// the cap value is too tight; the metric slightly over-reads on
+	// nodes with frequent direct reconnects against saturated
+	// buckets, but that is a real form of cap pressure — the
+	// reconnect would have appended a K+1 row without the cap.
 	AcceptedReplaced uint64
 
 	// RejectedFull counts entries that were dropped because the bucket

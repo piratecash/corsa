@@ -527,11 +527,24 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 //     cannot evict anyone → AdmissionRejectedAllProtected, drop the
 //     new entry.
 //  5. Otherwise compare the incoming entry against the worst
-//     evictable candidate using the same key (live > dead →
-//     TrustRank → Hops → ExpiresAt). If the incoming entry is
-//     strictly better, replace the worst entry's slot in place →
+//     evictable candidate using the strict-better FLOOR key
+//     (live > dead → TrustRank → Hops). The floor is intentionally
+//     narrower than the eviction key in step 3: ExpiresAt
+//     participates in step 3 (picking which bucket member to
+//     evict, where dropping the row closest to expiry is cheapest)
+//     but NOT in step 5 (deciding whether to evict at all). Every
+//     re-announce arrives with ExpiresAt = now+defaultTTL,
+//     strictly later than any existing entry's, so an
+//     ExpiresAt-inclusive floor would let any equal-trust
+//     equal-hops re-announce displace a stable incumbent on each
+//     announce cycle and thrash the best-K winners. The floor
+//     therefore requires a real improvement (live > expired,
+//     higher trust, or strictly fewer hops); equal-on-all-three
+//     means incumbent wins. If the incoming entry is strictly
+//     better, replace the worst entry's slot in place →
 //     AdmissionAcceptedReplaced. Otherwise drop →
-//     AdmissionRejectedFull.
+//     AdmissionRejectedFull. See isStrictlyBetterForCapLocked
+//     for the asymmetry rationale.
 //
 // When the cap is disabled (maxNextHopsPerOrigin <= 0) the function
 // always appends and returns AdmissionAccepted, which is what makes the
@@ -679,9 +692,14 @@ func (t *Table) admitNewLocked(entry RouteEntry, now time.Time) RouteAdmissionDe
 //     eviction key as admitNewLocked ((live > expired) → trust →
 //     hops → expiry) and replace it in-place. Counter
 //     `acceptedReplaced` is incremented because operationally this
-//     is identical to a strict-better cap-driven displacement —
-//     `Accepted+AcceptedReplaced` continues to mean "live entries
-//     written into the cap regime".
+//     IS a cap-driven displacement: a direct registration on a
+//     saturated bucket evicted a row that announce/hop_ack
+//     ingestion would also have evicted. The `Accepted` counter is
+//     deliberately NOT bumped on the below-K branch above — Accepted
+//     is reserved for admitNewLocked so the eviction-rate metric
+//     `AcceptedReplaced / (Accepted + AcceptedReplaced)` continues
+//     to measure cap pressure on announce/hop_ack traffic without
+//     direct-registration noise diluting the denominator.
 //  4. Defensive fallback: if every live entry in the bucket is
 //     direct/local (the AllProtected shape), the new row is still
 //     appended without bumping any counter, leaving the bucket
@@ -857,14 +875,37 @@ func isWorseForEvictionLocked(a, b *RouteEntry, now time.Time) bool {
 	return a.ExpiresAt.Before(b.ExpiresAt)
 }
 
-// isStrictlyBetterForCapLocked is the inverse of
-// isWorseForEvictionLocked, expressed positively: returns true when
-// `cand` is strictly better than `worst` and therefore should displace
-// it. The relation is irreflexive (no entry is strictly better than
-// itself) and shares the same total order, so feeding back the same
-// pointer twice returns false — which is what guarantees the cap
-// "floor" semantics: a worse-or-equal incoming entry is dropped, never
-// admitted.
+// isStrictlyBetterForCapLocked is the cap admission "floor": returns
+// true when `cand` is strictly better than `worst` and therefore
+// should displace it. Sibling of isWorseForEvictionLocked, but with
+// an INTENTIONALLY narrower key — the asymmetry is the cap stability
+// invariant.
+//
+// The two helpers answer different questions:
+//
+//   - isWorseForEvictionLocked picks WHICH bucket member to evict
+//     when admission has already decided that a new row will land.
+//     There it is rational to break ties by ExpiresAt: among rows
+//     of equal trust+hops, the one closest to expiry will be
+//     reclaimed by TickTTL soon anyway, so dropping it now is the
+//     cheapest choice.
+//   - isStrictlyBetterForCapLocked decides WHETHER to evict at all.
+//     Here ExpiresAt is the wrong tiebreaker: every announce arrives
+//     with `ExpiresAt = now + defaultTTL`, which is by construction
+//     strictly later than any existing entry's ExpiresAt. Including
+//     ExpiresAt in the floor would let any equal-trust equal-hops
+//     re-announce displace a stable incumbent on each cycle,
+//     thrashing the best-K winners and producing 90%+ eviction-rate
+//     in dense meshes (the "сеть сходит с ума" symptom). The floor
+//     therefore requires a real improvement — live > expired,
+//     higher trust, or strictly fewer hops — and equal-on-all-tiers
+//     means incumbent wins.
+//
+// The relation is irreflexive (no entry is strictly better than
+// itself) and matches the eviction order on its first three tiers,
+// so feeding back the same pointer twice returns false — the cap
+// "floor" semantics: a worse-or-equal incoming entry is dropped,
+// never admitted.
 //
 // Must be called with t.mu held for the same reason as
 // isWorseForEvictionLocked.
@@ -885,7 +926,11 @@ func isStrictlyBetterForCapLocked(cand, worst *RouteEntry, now time.Time) bool {
 	if cand.Hops != worst.Hops {
 		return cand.Hops < worst.Hops
 	}
-	return cand.ExpiresAt.After(worst.ExpiresAt)
+	// Equal liveness + trust + hops: incumbent wins. ExpiresAt is
+	// deliberately NOT a tiebreaker here — see the doc-comment above
+	// for why. Real improvements are already covered by the live /
+	// trust / hops tiers; everything else is bucket churn.
+	return false
 }
 
 // syncSeqCounterLocked ensures the monotonic SeqNo counter stays ahead of
