@@ -79,9 +79,19 @@ type Config struct {
 }
 
 const (
-	CorsaVersion     = "0.43 alpha"
-	CorsaWireVersion = "0.43-alpha"
-	ClientBuild      = 43
+	// ClientVersionMajor / ClientVersionMinor / ClientVersionBuild are the
+	// three numeric components of the human-readable Corsa release version.
+	// CorsaVersion is derived from them as "MAJOR.MINOR.BUILD" — the single
+	// place to bump on a release.
+	//
+	// ClientVersionBuild also feeds the wire-protocol "client_build" integer
+	// (protocol.Frame.ClientBuild) used by the version-policy heuristic to
+	// detect peers running newer builds. Keep it monotonically increasing
+	// across releases so older peers continue to interpret the comparison
+	// correctly.
+	ClientVersionMajor = 0
+	ClientVersionMinor = 0
+	ClientVersionBuild = 43
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
@@ -93,6 +103,13 @@ const (
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
 )
+
+// CorsaVersion is the canonical release version string ("MAJOR.MINOR.BUILD").
+// It is derived from ClientVersionMajor / ClientVersionMinor / ClientVersionBuild
+// so the three integer constants are the single source of truth — bump them on
+// a release and CorsaVersion follows. Declared as var (not const) because Go
+// const expressions cannot call fmt.Sprintf; treat it as immutable at runtime.
+var CorsaVersion = fmt.Sprintf("%d.%d.%d", ClientVersionMajor, ClientVersionMinor, ClientVersionBuild)
 
 func Default() Config {
 	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":"+DefaultPeerPort)
@@ -133,7 +150,7 @@ func Default() Config {
 			Type:             nodeType,
 			ListenerEnabled:  listenerEnabled,
 			ListenerSet:      listenerSet,
-			ClientVersion:    wireClientVersion(CorsaVersion),
+			ClientVersion:    CorsaVersion,
 			MaxClockDrift:    maxClockDrift,
 			MaxOutgoingPeers: maxOutgoingPeers,
 			MaxIncomingPeers: maxIncomingPeers,
@@ -373,14 +390,6 @@ func appLanguageFromEnv() string {
 	default:
 		return "en"
 	}
-}
-
-func wireClientVersion(version string) string {
-	value := strings.TrimSpace(version)
-	if value == "" {
-		return CorsaWireVersion
-	}
-	return strings.ReplaceAll(value, " ", "-")
 }
 
 func maxClockDriftFromEnv() time.Duration {

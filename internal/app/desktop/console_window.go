@@ -467,9 +467,18 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 	// as connected/known peers during the capture-start race, matching the
 	// peers-tab liveness contract enshrined by activeRowsForTab.
 	connectedPeers := countConnectedPeers(status)
+	// Pre-probe NodeStatus has ProtocolVersion = 0 because the first welcome
+	// has not yet populated the field. Fall back to the runtime's compiled
+	// value (config.ProtocolVersion) so the row never renders a misleading
+	// "Protocol version: 0" — same fallback shape `node.listen` and
+	// `node.type` use for their respective fields.
+	protocolVersion := status.ProtocolVersion
+	if protocolVersion == 0 {
+		protocolVersion = c.parent.runtime.ProtocolVersion()
+	}
 	rows := []string{
 		c.parent.t("node.client_version", c.parent.client.Version()),
-		c.parent.t("node.peer_version", fallback(status.ClientVersion, strings.ReplaceAll(c.parent.client.Version(), " ", "-"))),
+		c.parent.t("node.protocol_version", protocolVersion),
 		c.parent.t("node.listener", status.ListenerEnabled),
 		c.parent.t("node.listen", fallback(status.ListenerAddress, c.parent.runtime.ListenAddress())),
 		c.parent.t("node.type", fallback(status.NodeType, "full")),

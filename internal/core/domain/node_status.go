@@ -65,7 +65,7 @@ type NodeStatus struct {
 	// the PirateCash side.
 	ClientVersion string `json:"client_version"`
 
-	// ClientBuild is the integer build identifier (config.ClientBuild)
+	// ClientBuild is the integer build identifier (config.ClientVersionBuild)
 	// monotonically bumped per release. Easier to compare than
 	// ClientVersion when policy gates have to fire on a specific build.
 	ClientBuild int `json:"client_build"`

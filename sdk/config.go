@@ -106,7 +106,7 @@ func DefaultConfig() Config {
 			PeersStatePath: filepath.Join(".corsa", "peers-"+portSuffix(listenAddress)+".json"),
 			ChatLogDir:     ".corsa",
 			Type:           NodeTypeFull,
-			ClientVersion:  coreconfig.CorsaWireVersion,
+			ClientVersion:  coreconfig.CorsaVersion,
 			MaxClockDrift:  protocol.DefaultMessageTimeDrift,
 		},
 		RPC: RPCConfig{

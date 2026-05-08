@@ -125,7 +125,7 @@ func (c *LocalRPCClient) OpenSessionAt(ctx context.Context, address, clientKind 
 		Version:       config.ProtocolVersion,
 		Client:        clientKind,
 		ClientVersion: strings.ReplaceAll(c.info.Version(), " ", "-"),
-		ClientBuild:   config.ClientBuild,
+		ClientBuild:   config.ClientVersionBuild,
 		Address:       id.Address,
 		PubKey:        identity.PublicKeyBase64(id.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),

@@ -34,8 +34,8 @@ Client and protocol version.
 Response:
 ```json
 {
-  "client_version": "0.21-alpha",
-  "protocol_version": 3,
+  "client_version": "0.0.43",
+  "protocol_version": 14,
   "node_address": "a1b2c3d4..."
 }
 ```
@@ -60,10 +60,10 @@ Response:
   "address": "a1b2c3d4...",
   "public_key": "Q...=",
   "box_public_key": "B...=",
-  "protocol_version": 17,
-  "minimum_protocol_version": 12,
-  "client_version": "0.21-alpha",
-  "client_build": 121,
+  "protocol_version": 14,
+  "minimum_protocol_version": 14,
+  "client_version": "0.0.43",
+  "client_build": 43,
   "connected_peers": 4,
   "started_at": "2026-04-30T12:00:00Z",
   "uptime_seconds": 3742,
@@ -143,8 +143,8 @@ Security guarantees enforced by tests:
 Ответ:
 ```json
 {
-  "client_version": "0.21-alpha",
-  "protocol_version": 3,
+  "client_version": "0.0.43",
+  "protocol_version": 14,
   "node_address": "a1b2c3d4..."
 }
 ```
@@ -170,10 +170,10 @@ challenge-и.
   "address": "a1b2c3d4...",
   "public_key": "Q...=",
   "box_public_key": "B...=",
-  "protocol_version": 17,
-  "minimum_protocol_version": 12,
-  "client_version": "0.21-alpha",
-  "client_build": 121,
+  "protocol_version": 14,
+  "minimum_protocol_version": 14,
+  "client_version": "0.0.43",
+  "client_build": 43,
   "connected_peers": 4,
   "started_at": "2026-04-30T12:00:00Z",
   "uptime_seconds": 3742,

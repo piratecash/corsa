@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/rpc"
 )
 
@@ -26,7 +27,17 @@ func main() {
 	username := flag.String("username", envOrDefault("CORSA_RPC_USERNAME", ""), "RPC username (env: CORSA_RPC_USERNAME)")
 	password := flag.String("password", envOrDefault("CORSA_RPC_PASSWORD", ""), "RPC password (env: CORSA_RPC_PASSWORD)")
 	named := flag.Bool("named", false, "Interpret arguments as key=value named parameters")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	// --version is checked before the positional-command validation so a
+	// version probe does not require a command argument and never reaches
+	// the RPC client. Print the version string and exit 0 — same shape
+	// corsa-node uses, kept symmetric across both binaries.
+	if *versionFlag {
+		fmt.Println(config.CorsaVersion)
+		return
+	}
 
 	args := flag.Args()
 	if len(args) == 0 {

@@ -20,10 +20,10 @@ The handshake commands establish peer connections, negotiate protocol version co
 ```json
 {
   "type": "hello",
-  "version": 3,
+  "version": 14,
   "client": "desktop",
-  "client_version": "<corsa-version-wire>",
-  "client_build": 21
+  "client_version": "<corsa-version>",
+  "client_build": 43
 }
 ```
 
@@ -37,8 +37,8 @@ The handshake commands establish peer connections, negotiate protocol version co
   "listener": "1",
   "advertise_port": 64646,
   "node_type": "full",
-  "client_version": "<wire>",
-  "client_build": 21,
+  "client_version": "<corsa-version>",
+  "client_build": 43,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
   "networks": ["ipv4", "ipv6", "torv3"],
   "capabilities": ["mesh_relay_v1"],
@@ -61,7 +61,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `listen` | string | absent | Removed from the wire in the v12 cleanup. Receivers ignore the field if a legacy peer still echoes it; emitters do not produce it |
 | `advertise_port` | integer | optional | Self-reported listening port. JSON integer in the inclusive range `1..65535`. On the receive side this is the only authoritative source of the peer's listening port; absent / out-of-range / non-integer wire values collapse to `config.DefaultPeerPort` (`64646`). The inbound TCP source port MUST NEVER be reused as a listening port |
 | `node_type` | string | optional | `"full"` (relays mesh traffic) or `"client"` (no relay). Only for `client="node"` |
-| `client_version` | string | optional | Version string (e.g., `"0.1.0"` or `"v1.2.3-wire"`) for logging and diagnostics |
+| `client_version` | string | optional | Version string (e.g., `"0.1.0"` or `"1.2.3"`) for logging and diagnostics. Single source of truth — no separate "wire" form |
 | `client_build` | integer | optional | Monotonic build number for version tracking. Incremented on each release |
 | `services` | array | optional | Capability list: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
 | `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against the peer's overlay address as observed by the receiver (`pc.Address()` — built from the verified TCP IP plus `advertise_port`) since `hello.listen` no longer carries an authoritative host under v12 |
@@ -84,8 +84,8 @@ The handshake commands establish peer connections, negotiate protocol version co
   "listener": "1",
   "advertise_port": 64646,
   "node_type": "full",
-  "client_version": "<wire>",
-  "client_build": 21,
+  "client_version": "<corsa-version>",
+  "client_build": 43,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
   "capabilities": ["mesh_relay_v1"],
   "address": "<fingerprint>",
@@ -519,10 +519,10 @@ stateDiagram-v2
 ```json
 {
   "type": "hello",
-  "version": 3,
+  "version": 14,
   "client": "desktop",
-  "client_version": "<corsa-version-wire>",
-  "client_build": 21
+  "client_version": "<corsa-version>",
+  "client_build": 43
 }
 ```
 
@@ -536,8 +536,8 @@ stateDiagram-v2
   "listener": "1",
   "advertise_port": 64646,
   "node_type": "full",
-  "client_version": "<wire>",
-  "client_build": 21,
+  "client_version": "<corsa-version>",
+  "client_build": 43,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
   "networks": ["ipv4", "ipv6", "torv3"],
   "capabilities": ["mesh_relay_v1"],
@@ -560,7 +560,7 @@ stateDiagram-v2
 | `listen` | string | отсутствует | Удалено из wire в фазе v12 cleanup. Receiver'ы игнорируют поле, если legacy-пир его всё ещё эхо-передаёт; emitter'ы его не производят |
 | `advertise_port` | integer | опционально | Self-reported слушающий порт. JSON-integer в диапазоне `1..65535` включительно. На приёмной стороне это единственный авторитетный источник listening-порта пира; отсутствующие / вне диапазона / нецелочисленные значения на проводе коллапсируются к `config.DefaultPeerPort` (`64646`). Входящий TCP source port НИКОГДА не должен переиспользоваться как listening-порт |
 | `node_type` | string | опционально | `"full"` (релирует трафик) или `"client"` (без relay). Только для `client="node"` |
-| `client_version` | string | опционально | Строка версии (например, `"0.1.0"` или `"v1.2.3-wire"`) для логирования и диагностики |
+| `client_version` | string | опционально | Строка версии (например, `"0.1.0"` или `"1.2.3"`) для логирования и диагностики. Единственный источник истины — отдельной "wire"-формы нет |
 | `client_build` | integer | опционально | Монотонный номер сборки для отслеживания версий. Увеличивается при каждом релизе |
 | `services` | array | опционально | Список возможностей: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
 | `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс `advertise_port`); под v12 `hello.listen` уже не несёт авторитетного host'а |
@@ -583,8 +583,8 @@ stateDiagram-v2
   "listener": "1",
   "advertise_port": 64646,
   "node_type": "full",
-  "client_version": "<wire>",
-  "client_build": 21,
+  "client_version": "<corsa-version>",
+  "client_build": 43,
   "services": ["identity", "contacts", "messages", "gazeta", "relay"],
   "capabilities": ["mesh_relay_v1"],
   "address": "<fingerprint>",

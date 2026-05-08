@@ -1486,7 +1486,7 @@ func (s *Service) Services() []string {
 
 func (s *Service) ClientVersion() string {
 	if strings.TrimSpace(s.cfg.ClientVersion) == "" {
-		return config.CorsaWireVersion
+		return config.CorsaVersion
 	}
 	return s.cfg.ClientVersion
 }
@@ -3064,7 +3064,7 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		AdvertisePort:          advertisePort,
 		NodeType:               string(s.NodeType()),
 		ClientVersion:          s.ClientVersion(),
-		ClientBuild:            config.ClientBuild,
+		ClientBuild:            config.ClientVersionBuild,
 		Services:               s.Services(),
 		Address:                s.identity.Address,
 		PubKey:                 identity.PublicKeyBase64(s.identity.PublicKey),
@@ -5508,7 +5508,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		AdvertisePort: advertisePort,
 		NodeType:      string(s.NodeType()),
 		ClientVersion: s.ClientVersion(),
-		ClientBuild:   config.ClientBuild,
+		ClientBuild:   config.ClientVersionBuild,
 		Services:      s.Services(),
 		Networks:      reachableGroupNames(s.reachableGroups),
 		Address:       s.identity.Address,

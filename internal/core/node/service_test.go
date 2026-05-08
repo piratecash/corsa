@@ -52,7 +52,7 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 
 	// Handshake over unauthenticated TCP connection.
 	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
 	)
 
 	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
@@ -144,7 +144,7 @@ func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
 	defer stop()
 
 	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 0, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "hello", Version: 0, Client: "test", ClientVersion: config.CorsaVersion},
 	)
 
 	if len(frames) != 1 {
@@ -200,7 +200,7 @@ func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
 		Type:          "hello",
 		Version:       0,
 		Client:        "test",
-		ClientVersion: config.CorsaWireVersion,
+		ClientVersion: config.CorsaVersion,
 	})
 
 	reader := bufio.NewReader(conn)
@@ -268,7 +268,7 @@ func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "node",
-		ClientVersion: config.CorsaWireVersion,
+		ClientVersion: config.CorsaVersion,
 		Address:       id.Address,
 		PubKey:        identity.PublicKeyBase64(id.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
@@ -315,7 +315,7 @@ func TestInboundIncompatibleProtocolKeyedByAdvertisePort(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	const advertisePort = domain.PeerPort(64648)
-	const wireClientVersion = "0.99-incompat"
+	const peerClientVersion = "0.99-incompat"
 
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	writeJSONFrame(t, conn, protocol.Frame{
@@ -323,7 +323,7 @@ func TestInboundIncompatibleProtocolKeyedByAdvertisePort(t *testing.T) {
 		Version:                0,
 		MinimumProtocolVersion: 0,
 		Client:                 "test",
-		ClientVersion:          wireClientVersion,
+		ClientVersion:          peerClientVersion,
 		AdvertisePort:          advertisePort,
 	})
 
@@ -358,12 +358,12 @@ func TestInboundIncompatibleProtocolKeyedByAdvertisePort(t *testing.T) {
 		wrong := svc.peerVersions[wrongKey]
 		svc.peerMu.RUnlock()
 
-		if got == wireClientVersion && wrong == "" {
+		if got == peerClientVersion && wrong == "" {
 			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("peerVersions[%q] = %q, peerVersions[%q] = %q; want %q at %q only",
-				wantKey, got, wrongKey, wrong, wireClientVersion, wantKey)
+				wantKey, got, wrongKey, wrong, peerClientVersion, wantKey)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -394,7 +394,7 @@ func TestV2NodeHandshakeRequiresSignedAuth(t *testing.T) {
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "node",
-		ClientVersion: config.CorsaWireVersion,
+		ClientVersion: config.CorsaVersion,
 		Address:       id.Address,
 		PubKey:        identity.PublicKeyBase64(id.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
@@ -457,7 +457,7 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 			Type:          "hello",
 			Version:       config.ProtocolVersion,
 			Client:        "node",
-			ClientVersion: config.CorsaWireVersion,
+			ClientVersion: config.CorsaVersion,
 			Address:       id.Address,
 			PubKey:        identity.PublicKeyBase64(id.PublicKey),
 			BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
@@ -890,7 +890,7 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 
 	// Part 1: TCP handshake + data-only queries via HandleLocalFrame.
 	tcpFrames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
 	)
 	if got := tcpFrames[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome: %#v", got)
@@ -918,7 +918,7 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 
 	// Part 2: separate TCP handshake + repeated local queries.
 	step1 := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
 	)
 	if got := step1[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome over separate connection: %#v", got)
@@ -1054,7 +1054,7 @@ func TestPeerHealthRetainsClientBuild(t *testing.T) {
 			return false
 		}
 		for _, ph := range reply.PeerHealth {
-			if ph.ClientBuild == config.ClientBuild {
+			if ph.ClientBuild == config.ClientVersionBuild {
 				return true
 			}
 		}
@@ -1066,13 +1066,13 @@ func TestPeerHealthRetainsClientBuild(t *testing.T) {
 	}
 	found := false
 	for _, ph := range reply.PeerHealth {
-		if ph.ClientBuild == config.ClientBuild {
+		if ph.ClientBuild == config.ClientVersionBuild {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected at least one peer with ClientBuild=%d, got %+v", config.ClientBuild, reply.PeerHealth)
+		t.Errorf("expected at least one peer with ClientBuild=%d, got %+v", config.ClientVersionBuild, reply.PeerHealth)
 	}
 }
 
@@ -1212,7 +1212,7 @@ func TestUnauthenticatedInboundTrafficNotAttributed(t *testing.T) {
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "node",
-		ClientVersion: config.CorsaWireVersion,
+		ClientVersion: config.CorsaVersion,
 		Address:       spoofedID.Address,
 		PubKey:        identity.PublicKeyBase64(spoofedID.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(spoofedID.BoxPublicKey),
@@ -1289,7 +1289,7 @@ func TestUnauthenticatedPingDoesNotCreateHealth(t *testing.T) {
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "node",
-		ClientVersion: config.CorsaWireVersion,
+		ClientVersion: config.CorsaVersion,
 		Address:       spoofedID.Address,
 		PubKey:        identity.PublicKeyBase64(spoofedID.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(spoofedID.BoxPublicKey),
@@ -1371,7 +1371,7 @@ func TestKnownPeersIncludesNonListenerClients(t *testing.T) {
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "node",
-		ClientVersion: config.CorsaWireVersion,
+		ClientVersion: config.CorsaVersion,
 		Address:       id.Address,
 		PubKey:        identity.PublicKeyBase64(id.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
@@ -4266,7 +4266,7 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-				ClientBuild:     config.ClientBuild,
+				ClientBuild:     config.ClientVersionBuild,
 			},
 			Reason:   domain.VersionLockoutReasonIncompatible,
 			LockedAt: now.Add(-1 * time.Hour),
@@ -6365,7 +6365,7 @@ func TestProtocolTraceLogging(t *testing.T) {
 
 	// --- Test TCP path (dispatchNetworkFrame) ---
 	_ = exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaWireVersion},
+		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
 		protocol.Frame{Type: "ping"},
 	)
 
@@ -6392,7 +6392,7 @@ func TestProtocolTraceLogging(t *testing.T) {
 			Version:                config.ProtocolVersion,
 			MinimumProtocolVersion: config.MinimumProtocolVersion,
 			Client:                 "node",
-			ClientVersion:          config.CorsaWireVersion,
+			ClientVersion:          config.CorsaVersion,
 			Address:                id.Address,
 			PubKey:                 identity.PublicKeyBase64(id.PublicKey),
 			BoxKey:                 identity.BoxPublicKeyBase64(id.BoxPublicKey),
@@ -6420,7 +6420,7 @@ func TestProtocolTraceLogging(t *testing.T) {
 			Version:                config.ProtocolVersion,
 			MinimumProtocolVersion: config.MinimumProtocolVersion,
 			Client:                 "node",
-			ClientVersion:          config.CorsaWireVersion,
+			ClientVersion:          config.CorsaVersion,
 		})
 		errResp := readJSONTestFrame(t, reader)
 		if errResp.Type != "error" || errResp.Code != protocol.ErrCodeHelloAfterAuth {
@@ -7340,7 +7340,7 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                recipientID.Address,
 		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
@@ -7394,7 +7394,7 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                senderID.Address,
 		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
@@ -7531,7 +7531,7 @@ func TestErrorPathTeardownDoesNotHang(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "test-teardown",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 	})
 	welcome := readJSONTestFrame(t, reader)
 	if welcome.Type != "welcome" {
@@ -8299,7 +8299,7 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                recipientID.Address,
 		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
@@ -8360,7 +8360,7 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                senderID.Address,
 		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
@@ -8493,7 +8493,7 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                recipientID.Address,
 		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
@@ -8545,7 +8545,7 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                senderID.Address,
 		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
@@ -8599,7 +8599,7 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                recipientID.Address,
 		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
@@ -9801,7 +9801,7 @@ func TestSubscribeInboxRejectsUnauthenticated(t *testing.T) {
 	writeJSONFrame(t, conn, protocol.Frame{
 		Type: "hello", Version: config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "test-attacker", ClientVersion: config.CorsaWireVersion,
+		Client:                 "test-attacker", ClientVersion: config.CorsaVersion,
 	})
 	welcome := readJSONTestFrame(t, reader)
 	if welcome.Type != "welcome" {
@@ -9870,7 +9870,7 @@ func TestSubscribeInboxRejectsIdentityMismatch(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                attackerID.Address,
 		PubKey:                 identity.PublicKeyBase64(attackerID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(attackerID.BoxPublicKey),
@@ -9952,7 +9952,7 @@ func TestSubscribeInboxAllowsOwnIdentity(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                peerID.Address,
 		PubKey:                 identity.PublicKeyBase64(peerID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(peerID.BoxPublicKey),

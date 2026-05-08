@@ -226,6 +226,11 @@ type NodeStatus struct {
 	ListenerEnabled  bool
 	ListenerAddress  string
 	ClientVersion    string
+	// ProtocolVersion mirrors welcome.Version — the wire protocol version
+	// the local node emits in hello/welcome (see config.ProtocolVersion).
+	// Surfaced here so the desktop console info tab can render it without
+	// reaching into the core config package directly.
+	ProtocolVersion  int
 	Services         []string
 	Capabilities     []string
 	KnownIDs         []string

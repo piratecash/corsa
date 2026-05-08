@@ -43,8 +43,8 @@ func TestNodeStatusReflectsServiceIdentity(t *testing.T) {
 	if status.MinimumProtocolVersion != config.MinimumProtocolVersion {
 		t.Errorf("MinimumProtocolVersion = %d, want %d", status.MinimumProtocolVersion, config.MinimumProtocolVersion)
 	}
-	if status.ClientBuild != config.ClientBuild {
-		t.Errorf("ClientBuild = %d, want %d", status.ClientBuild, config.ClientBuild)
+	if status.ClientBuild != config.ClientVersionBuild {
+		t.Errorf("ClientBuild = %d, want %d", status.ClientBuild, config.ClientVersionBuild)
 	}
 	if status.ClientVersion == "" {
 		t.Error("ClientVersion is empty")

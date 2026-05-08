@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	corsanode "github.com/piratecash/corsa/internal/core/node"
 )
 
@@ -43,6 +44,15 @@ func (r *NodeRuntime) Start(ctx context.Context) {
 
 func (r *NodeRuntime) ListenAddress() string {
 	return r.service.ListenAddress()
+}
+
+// ProtocolVersion returns the wire protocol version compiled into this
+// build. Surfaced for UI fallback paths (e.g. the console info tab) so they
+// can render a sensible value before the first probe response populates
+// service.NodeStatus.ProtocolVersion. Constant for the lifetime of the
+// process — the value is set at compile time via config.ProtocolVersion.
+func (r *NodeRuntime) ProtocolVersion() int {
+	return config.ProtocolVersion
 }
 
 func (r *NodeRuntime) Address() string {

@@ -853,6 +853,7 @@ func (m *NodeStatusMonitor) mergeNodeStatusLocked(s NodeStatus) {
 	m.status.ListenerEnabled = s.ListenerEnabled
 	m.status.ListenerAddress = s.ListenerAddress
 	m.status.ClientVersion = s.ClientVersion
+	m.status.ProtocolVersion = s.ProtocolVersion
 	m.status.Services = s.Services
 	m.status.Capabilities = s.Capabilities
 	m.status.DMHeaders = s.DMHeaders

@@ -32,7 +32,7 @@ func defaultTestNodeStatus() domain.NodeStatus {
 		ProtocolVersion:        config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		ClientVersion:          "0.16-alpha",
-		ClientBuild:            config.ClientBuild,
+		ClientBuild:            config.ClientVersionBuild,
 		ConnectedPeers:         3,
 		StartedAt:              started,
 		UptimeSeconds:          42,

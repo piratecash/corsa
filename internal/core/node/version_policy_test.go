@@ -142,8 +142,8 @@ func TestVersionPolicy_PeerBuildSignal(t *testing.T) {
 			"5.6.7.8:200": "peer-bbb",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild + 1,
-			"5.6.7.8:200": config.ClientBuild + 2,
+			"1.2.3.4:100": config.ClientVersionBuild + 1,
+			"5.6.7.8:200": config.ClientVersionBuild + 2,
 		},
 		peerVersions: make(map[domain.PeerAddress]string),
 	}
@@ -161,8 +161,8 @@ func TestVersionPolicy_PeerBuildSignal(t *testing.T) {
 	if snap.UpdateReason != domain.UpdateReasonPeerBuild {
 		t.Errorf("reason = %q, want %q", snap.UpdateReason, domain.UpdateReasonPeerBuild)
 	}
-	if snap.MaxObservedPeerBuild != config.ClientBuild+2 {
-		t.Errorf("max_build = %d, want %d", snap.MaxObservedPeerBuild, config.ClientBuild+2)
+	if snap.MaxObservedPeerBuild != config.ClientVersionBuild+2 {
+		t.Errorf("max_build = %d, want %d", snap.MaxObservedPeerBuild, config.ClientVersionBuild+2)
 	}
 }
 
@@ -175,8 +175,8 @@ func TestVersionPolicy_BothSignals(t *testing.T) {
 			"5.6.7.8:200": "peer-bbb",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild + 1,
-			"5.6.7.8:200": config.ClientBuild + 2,
+			"1.2.3.4:100": config.ClientVersionBuild + 1,
+			"5.6.7.8:200": config.ClientVersionBuild + 2,
 		},
 		peerVersions: make(map[domain.PeerAddress]string),
 	}
@@ -249,7 +249,7 @@ func TestVersionLockout_ClearedAfterUpgrade(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion - 1),
-				ClientBuild:     config.ClientBuild - 1,
+				ClientBuild:     config.ClientVersionBuild - 1,
 			},
 			Reason: domain.VersionLockoutReasonIncompatible,
 		},
@@ -280,7 +280,7 @@ func TestVersionLockout_NotClearedWhenSameVersion(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-				ClientBuild:     config.ClientBuild,
+				ClientBuild:     config.ClientVersionBuild,
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     time.Now().UTC(),
@@ -434,7 +434,7 @@ func TestVersionPolicy_LockoutKeepsUpdateAvailableAfterTTLExpiry(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-				ClientBuild:     config.ClientBuild,
+				ClientBuild:     config.ClientVersionBuild,
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     now.Add(-2 * time.Hour),
@@ -558,7 +558,7 @@ func TestVersionLockout_ClearStale_ExpiredIdentityLess(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-				ClientBuild:     config.ClientBuild,
+				ClientBuild:     config.ClientVersionBuild,
 			},
 			Reason:   domain.VersionLockoutReasonIncompatible,
 			LockedAt: lockTime,
@@ -594,8 +594,8 @@ func TestVersionPolicy_DisconnectClearsBuildSignal(t *testing.T) {
 			"5.6.7.8:200": "peer-bbb",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild + 1,
-			"5.6.7.8:200": config.ClientBuild + 2,
+			"1.2.3.4:100": config.ClientVersionBuild + 1,
+			"5.6.7.8:200": config.ClientVersionBuild + 2,
 		},
 		peerVersions: map[domain.PeerAddress]string{
 			"1.2.3.4:100": "v1.1.0",
@@ -660,7 +660,7 @@ func TestAddPeer_ClearsVersionLockout(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-				ClientBuild:     config.ClientBuild,
+				ClientBuild:     config.ClientVersionBuild,
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     now.Add(-time.Hour),
@@ -751,7 +751,7 @@ func TestVersionPolicy_DisconnectDoesNotAffectLockoutSignal(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-				ClientBuild:     config.ClientBuild,
+				ClientBuild:     config.ClientVersionBuild,
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     now.Add(-time.Hour),
@@ -764,7 +764,7 @@ func TestVersionPolicy_DisconnectDoesNotAffectLockoutSignal(t *testing.T) {
 			addr: "peer-locked",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			addr: config.ClientBuild + 1,
+			addr: config.ClientVersionBuild + 1,
 		},
 		peerVersions: map[domain.PeerAddress]string{
 			addr: "v1.1.0",
@@ -902,7 +902,7 @@ func TestVersionPolicy_BuildSignalBelowThreshold(t *testing.T) {
 			"1.2.3.4:100": "peer-aaa",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild + 5,
+			"1.2.3.4:100": config.ClientVersionBuild + 5,
 		},
 		peerVersions:  make(map[domain.PeerAddress]string),
 		persistedMeta: make(map[domain.PeerAddress]*peerEntry),
@@ -922,8 +922,8 @@ func TestVersionPolicy_BuildSignalBelowThreshold(t *testing.T) {
 		t.Errorf("reason = %q, want %q", snap.UpdateReason, domain.UpdateReasonNone)
 	}
 	// MaxObservedPeerBuild should still track the value even below threshold.
-	if snap.MaxObservedPeerBuild != config.ClientBuild+5 {
-		t.Errorf("max_build = %d, want %d", snap.MaxObservedPeerBuild, config.ClientBuild+5)
+	if snap.MaxObservedPeerBuild != config.ClientVersionBuild+5 {
+		t.Errorf("max_build = %d, want %d", snap.MaxObservedPeerBuild, config.ClientVersionBuild+5)
 	}
 }
 
@@ -937,8 +937,8 @@ func TestVersionPolicy_BuildSignalIgnoresEqualBuild(t *testing.T) {
 			"5.6.7.8:200": "peer-bbb",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild,
-			"5.6.7.8:200": config.ClientBuild,
+			"1.2.3.4:100": config.ClientVersionBuild,
+			"5.6.7.8:200": config.ClientVersionBuild,
 		},
 		peerVersions:  make(map[domain.PeerAddress]string),
 		persistedMeta: make(map[domain.PeerAddress]*peerEntry),
@@ -966,8 +966,8 @@ func TestVersionPolicy_ReasonTransition_BuildToBoth(t *testing.T) {
 			"5.6.7.8:200": "peer-bbb",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild + 1,
-			"5.6.7.8:200": config.ClientBuild + 2,
+			"1.2.3.4:100": config.ClientVersionBuild + 1,
+			"5.6.7.8:200": config.ClientVersionBuild + 2,
 		},
 		peerVersions:  make(map[domain.PeerAddress]string),
 		persistedMeta: make(map[domain.PeerAddress]*peerEntry),
@@ -1007,8 +1007,8 @@ func TestVersionPolicy_ReasonTransition_BothToBuildonlyAfterTTL(t *testing.T) {
 			"5.6.7.8:200": "peer-bbb",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild + 1,
-			"5.6.7.8:200": config.ClientBuild + 2,
+			"1.2.3.4:100": config.ClientVersionBuild + 1,
+			"5.6.7.8:200": config.ClientVersionBuild + 2,
 		},
 		peerVersions:  make(map[domain.PeerAddress]string),
 		persistedMeta: make(map[domain.PeerAddress]*peerEntry),
@@ -1051,8 +1051,8 @@ func TestVersionPolicy_BuildPlusLockout_ReasonIsBoth(t *testing.T) {
 			"5.6.7.8:200": "peer-bbb",
 		},
 		peerBuilds: map[domain.PeerAddress]int{
-			"1.2.3.4:100": config.ClientBuild + 1,
-			"5.6.7.8:200": config.ClientBuild + 2,
+			"1.2.3.4:100": config.ClientVersionBuild + 1,
+			"5.6.7.8:200": config.ClientVersionBuild + 2,
 		},
 		peerVersions: make(map[domain.PeerAddress]string),
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
@@ -1063,7 +1063,7 @@ func TestVersionPolicy_BuildPlusLockout_ReasonIsBoth(t *testing.T) {
 					ObservedMinimumProtocolVersion: 10,
 					LockedAtLocalVersion: domain.LocalVersionFingerprint{
 						ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-						ClientBuild:     config.ClientBuild,
+						ClientBuild:     config.ClientVersionBuild,
 					},
 					Reason:       domain.VersionLockoutReasonIncompatible,
 					LockedAt:     now.Add(-time.Hour),
@@ -1913,7 +1913,7 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 					PeerIdentity:            "peer-aaa",
 					LockedAtLocalVersion: domain.LocalVersionFingerprint{
 						ProtocolVersion: localProto,
-						ClientBuild:     config.ClientBuild,
+						ClientBuild:     config.ClientVersionBuild,
 					},
 				},
 			},
@@ -1925,7 +1925,7 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 					PeerIdentity:            "peer-bbb",
 					LockedAtLocalVersion: domain.LocalVersionFingerprint{
 						ProtocolVersion: localProto,
-						ClientBuild:     config.ClientBuild,
+						ClientBuild:     config.ClientVersionBuild,
 					},
 				},
 			},
@@ -1937,7 +1937,7 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 					PeerIdentity:            "peer-ccc",
 					LockedAtLocalVersion: domain.LocalVersionFingerprint{
 						ProtocolVersion: localProto,
-						ClientBuild:     config.ClientBuild,
+						ClientBuild:     config.ClientVersionBuild,
 					},
 				},
 			},
@@ -3411,7 +3411,7 @@ func TestTrimPeerEntries_ProtectsActiveLockouts(t *testing.T) {
 			ObservedMinimumProtocolVersion: 10,
 			LockedAtLocalVersion: domain.LocalVersionFingerprint{
 				ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-				ClientBuild:     config.ClientBuild,
+				ClientBuild:     config.ClientVersionBuild,
 			},
 			Reason:   domain.VersionLockoutReasonIncompatible,
 			LockedAt: now,

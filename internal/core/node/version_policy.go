@@ -198,7 +198,7 @@ func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 
 	// --- Peer build signal ---
 	// Count distinct peer identities with ClientBuild > ours.
-	myBuild := config.ClientBuild
+	myBuild := config.ClientVersionBuild
 	buildSeen := make(map[domain.PeerIdentity]struct{})
 	var maxBuild int
 	for addr, build := range s.peerBuilds {
@@ -390,7 +390,7 @@ func (s *Service) setVersionLockoutLocked(
 		ObservedClientVersion:          peerClientVersion,
 		LockedAtLocalVersion: domain.LocalVersionFingerprint{
 			ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-			ClientBuild:     config.ClientBuild,
+			ClientBuild:     config.ClientVersionBuild,
 		},
 		Reason:       domain.VersionLockoutReasonIncompatible,
 		LockedAt:     now,
@@ -455,7 +455,7 @@ func (s *Service) setVersionLockoutLocked(
 func (s *Service) clearStaleVersionLockoutsLocked() {
 	localFP := domain.LocalVersionFingerprint{
 		ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
-		ClientBuild:     config.ClientBuild,
+		ClientBuild:     config.ClientVersionBuild,
 	}
 	now := time.Now().UTC()
 	for addr, entry := range s.persistedMeta {

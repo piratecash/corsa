@@ -40,7 +40,7 @@ func (s *Service) NodeStatus() domain.NodeStatus {
 		ProtocolVersion:        config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		ClientVersion:          s.ClientVersion(),
-		ClientBuild:            config.ClientBuild,
+		ClientBuild:            config.ClientVersionBuild,
 		ConnectedPeers:         s.connectedPeerCount(),
 		StartedAt:              s.startedAt,
 		UptimeSeconds:          uptime,

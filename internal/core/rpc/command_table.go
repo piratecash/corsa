@@ -517,7 +517,7 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 				MinimumProtocolVersion: config.MinimumProtocolVersion,
 				Client:                 "rpc",
 				ClientVersion:          node.ClientVersion(),
-				ClientBuild:            config.ClientBuild,
+				ClientBuild:            config.ClientVersionBuild,
 			})
 			return frameResponse(reply)
 		},
@@ -1496,7 +1496,7 @@ func RegisterDesktopOverrides(t *CommandTable, diag DiagnosticProvider, node Nod
 				MinimumProtocolVersion: config.MinimumProtocolVersion,
 				Client:                 "desktop",
 				ClientVersion:          strings.ReplaceAll(diag.DesktopVersion(), " ", "-"),
-				ClientBuild:            config.ClientBuild,
+				ClientBuild:            config.ClientVersionBuild,
 			})
 			return frameResponse(reply)
 		},

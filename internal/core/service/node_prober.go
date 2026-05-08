@@ -83,7 +83,7 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 		Version:       config.ProtocolVersion,
 		Client:        "desktop",
 		ClientVersion: strings.ReplaceAll(p.info.Version(), " ", "-"),
-		ClientBuild:   config.ClientBuild,
+		ClientBuild:   config.ClientVersionBuild,
 	})
 	if err != nil {
 		status.Error = err.Error()
@@ -105,6 +105,7 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 		status.ListenerAddress = status.Address
 	}
 	status.ClientVersion = welcome.ClientVersion
+	status.ProtocolVersion = welcome.Version
 	status.Services = welcome.Services
 	status.Capabilities = welcome.Capabilities
 

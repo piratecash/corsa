@@ -33,7 +33,6 @@ func New() *App {
 func (a *App) Run(ctx context.Context) error {
 	log.Info().
 		Str("version", config.CorsaVersion).
-		Str("wire", config.CorsaWireVersion).
 		Str("listen", a.service.ListenAddress()).
 		Msg("starting node")
 

@@ -527,7 +527,7 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 		Version:                config.ProtocolVersion,
 		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		Client:                 "node",
-		ClientVersion:          config.CorsaWireVersion,
+		ClientVersion:          config.CorsaVersion,
 		Address:                recipientID.Address,
 		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),

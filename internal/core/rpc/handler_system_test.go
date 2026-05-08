@@ -276,8 +276,8 @@ func TestSystemHelloSendsProtocolMetadata(t *testing.T) {
 	if receivedFrame.ClientVersion == "" {
 		t.Error("hello frame ClientVersion is empty, want non-empty")
 	}
-	if receivedFrame.ClientBuild != config.ClientBuild {
-		t.Errorf("hello frame ClientBuild=%d, want %d", receivedFrame.ClientBuild, config.ClientBuild)
+	if receivedFrame.ClientBuild != config.ClientVersionBuild {
+		t.Errorf("hello frame ClientBuild=%d, want %d", receivedFrame.ClientBuild, config.ClientVersionBuild)
 	}
 }
 
@@ -401,8 +401,8 @@ func TestDesktopOverrideHelloIdentifiesAsDesktop(t *testing.T) {
 	if capturedFrame.ClientVersion != "2.5.0" {
 		t.Errorf("desktop hello: expected ClientVersion='2.5.0', got %q", capturedFrame.ClientVersion)
 	}
-	if capturedFrame.ClientBuild != config.ClientBuild {
-		t.Errorf("desktop hello: expected ClientBuild=%d, got %d", config.ClientBuild, capturedFrame.ClientBuild)
+	if capturedFrame.ClientBuild != config.ClientVersionBuild {
+		t.Errorf("desktop hello: expected ClientBuild=%d, got %d", config.ClientVersionBuild, capturedFrame.ClientBuild)
 	}
 }
 
