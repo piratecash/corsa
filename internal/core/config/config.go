@@ -32,8 +32,7 @@ const (
 )
 
 type Node struct {
-	ListenAddress    string
-	AdvertiseAddress string
+	ListenAddress string
 	// AdvertisePort is the validated self-reported listening port published
 	// in hello.advertise_port. nil means "operator did not supply a valid
 	// CORSA_ADVERTISE_PORT" — callers must resolve the runtime value through
@@ -84,27 +83,11 @@ const (
 	CorsaWireVersion = "0.43-alpha"
 	ClientBuild      = 43
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
-	//
-	// Current value 12 prepares the advertise-address legacy cleanup phase 2:
-	// raising the network-wide MinimumProtocolVersion floor to 12 lets the
-	// next release physically remove the deprecated advertise-address code
-	// paths (observed-address-mismatch reconnect, hello-carried external IP,
-	// CORSA_ADVERTISE_ADDRESS operator config) that were kept only for
-	// dual-stack compatibility with peers below this floor. Until the floor
-	// is raised, this build still ships those paths and accepts older peers;
-	// the bump itself is what signals downstream operators that the floor
-	// will move next. See docs/advertise-address-phase2-minproto12-cleanup.md
-	// for the cleanup plan and preconditions.
-	//
-	// History: v11 introduced the advertise-address phase 1 deprecation
-	// rollout (observed-address-mismatch no longer produced on the штатный
-	// runtime path, hello carries the new additive field advertise_port,
-	// inbound mismatch between observed TCP IP and hello.listen.host no
-	// longer rejects the connection). v12 builds on top of that to enable
-	// the floor raise; the wire change between v11 and v12 is additive
-	// (no payload differences) but the floor semantics differ. Bump is
-	// mandatory even though MinimumProtocolVersion stays at 8 in this build
-	// — the floor raise itself is the v12 contract.
+	// MinimumProtocolVersion is the floor below which inbound peers are
+	// rejected. Both are bumped only by an explicit wire/runtime contract
+	// change documented in docs/protocol/handshake.md. The current floor
+	// is well above v12, so this build does not carry any v10..v13
+	// compatibility paths.
 	ProtocolVersion        = 14
 	MinimumProtocolVersion = 14
 	DefaultOutgoingPeers   = 8
@@ -115,11 +98,6 @@ func Default() Config {
 	listenAddress := envOrDefault("CORSA_LISTEN_ADDRESS", ":"+DefaultPeerPort)
 	nodeType := nodeTypeFromEnv()
 	listenerEnabled, listenerSet := listenerFromEnv()
-	// CORSA_ADVERTISE_ADDRESS is deprecated in the advertise-address phase 1
-	// deprecation rollout: it is kept for backwards compatibility and as a
-	// manual fallback, but it no longer participates in truth-of-advertise
-	// selection. See docs/advertise-address-phase1-deprecation.md §7.1.
-	advertiseAddress := envOrDefault("CORSA_ADVERTISE_ADDRESS", defaultAdvertiseAddress(listenAddress, listenerSet, listenerEnabled, nodeType))
 	advertisePort := advertisePortFromEnv()
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
 	identityPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress)))
@@ -143,7 +121,6 @@ func Default() Config {
 		},
 		Node: Node{
 			ListenAddress:    listenAddress,
-			AdvertiseAddress: advertiseAddress,
 			AdvertisePort:    advertisePort,
 			BootstrapPeers:   bootstrapPeers,
 			IdentityPath:     identityPath,
@@ -320,20 +297,6 @@ func portSuffix(listenAddress string) string {
 		port = listenAddress[idx+1:]
 	}
 	return port
-}
-
-func defaultAdvertiseAddress(listenAddress string, listenerSet bool, listenerEnabled bool, nodeType NodeType) string {
-	effectiveListener := listenerEnabled
-	if !listenerSet {
-		effectiveListener = nodeType != NodeTypeClient
-	}
-	if !effectiveListener {
-		return ""
-	}
-	if strings.HasPrefix(listenAddress, ":") {
-		return "127.0.0.1" + listenAddress
-	}
-	return listenAddress
 }
 
 func bootstrapPeersFromEnv(listenAddress string) []string {

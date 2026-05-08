@@ -58,7 +58,10 @@ SDK example:
 ```go
 cfg := sdk.DefaultConfig()
 cfg.Node.ListenAddress = ":64648"
-cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+// AdvertisePort must be set explicitly when binding to a non-default port —
+// the SDK never auto-derives the advertised port from ListenAddress.
+advertisePort := uint16(64648)
+cfg.Node.AdvertisePort = &advertisePort
 
 runtime, err := sdk.New(cfg)
 if err != nil {
@@ -81,11 +84,19 @@ Git hooks:
 Run examples:
 
 ```bash
-CORSA_LISTEN_ADDRESS=:64646 CORSA_BOOTSTRAP_PEER=127.0.0.1:64647 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
+# Bind explicitly on 127.0.0.1 — the loopback-peer gate accepts dials
+# from 127.0.0.1 only when ListenAddress is itself a loopback host, so
+# a wildcard bind (":64646") would silently reject the second instance
+# below as a non-routable peer.
+CORSA_LISTEN_ADDRESS=127.0.0.1:64646 CORSA_BOOTSTRAP_PEER=127.0.0.1:64647 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
 ```
 
 ```bash
-CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
+# Bind port is non-default (64647), so CORSA_ADVERTISE_PORT must be set
+# explicitly — the runtime never derives advertise_port from the bind
+# port. Without this the node would announce 64646 to its neighbours
+# and they would dial the wrong port.
+CORSA_LISTEN_ADDRESS=127.0.0.1:64647 CORSA_ADVERTISE_PORT=64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
 ```
 
 Default identity files are created under `.corsa/` and are separated by listen port.
@@ -98,8 +109,7 @@ For public or VPS nodes, the practical network settings are:
 
 - `CORSA_LISTEN_ADDRESS` — local bind address
 - `CORSA_LISTENER` — explicit inbound listener override: `1` enables listen, `0` disables it
-- `CORSA_ADVERTISE_ADDRESS` — **Deprecated since `ProtocolVersion=11`.** External address the node used to actively announce to peers. Kept only as a manual fallback hint for the outbound `hello.listen.host` composition while mixed rollouts with `version=10` peers are in flight. The authoritative advertise IP is now derived passively from observed TCP `RemoteAddr` — see `docs/advertise-address-phase1-deprecation.md`. Scheduled for full removal when `MinimumProtocolVersion` reaches `12`
-- `CORSA_ADVERTISE_PORT` — self-reported listening port placed into `hello.advertise_port` and used on the receive side as the authoritative listening-port source when building an announce candidate from the observed TCP IP. Accepts an integer in the inclusive `1..65535` range; empty, non-numeric, or out-of-range values fall back to `64646`. Set this explicitly only when the public dial port differs from the local bind port (e.g. NAT port-forward, reverse proxy rewrite) — the inbound TCP source port is NEVER reused as a listening port
+- `CORSA_ADVERTISE_PORT` — self-reported listening port placed into `hello.advertise_port` / `welcome.advertise_port` and used on the receive side as the authoritative listening-port source when building an announce candidate from the observed TCP IP. Accepts an integer in the inclusive `1..65535` range; empty, non-numeric, or out-of-range values fall back to `64646`. Set this explicitly **whenever the externally dialable port is not `64646`** — the runtime never derives `advertise_port` from `CORSA_LISTEN_ADDRESS`, so a node bound to `:64647` (with no NAT in the loop) still advertises `64646` and is undialable until `CORSA_ADVERTISE_PORT=64647` is set. The same rule covers the NAT / port-forward / reverse-proxy case where the public dial port differs from the local bind port. The inbound TCP source port is NEVER reused as a listening port. There is no `CORSA_ADVERTISE_ADDRESS` env knob in this build: the host component of the local node's external endpoint is no longer wire-published. Each peer announces other peers using the **observed TCP source host** plus that peer's `advertise_port`, so the local node never has to declare its own external IP — neighbours learn it from the packets that actually arrive (see `docs/protocol/handshake.md` → "Advertise Convergence")
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_QUEUE_STATE_PATH` — persisted pending-delivery and relay-retry state
@@ -142,7 +152,6 @@ Example:
 
 ```bash
 CORSA_LISTEN_ADDRESS=:64646 \
-CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
 CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
 GOCACHE=$(pwd)/.gocache \
 GOMODCACHE=$(pwd)/.gomodcache \
@@ -171,7 +180,6 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v corsa-data:/home/corsa/.corsa \
   corsa-node
@@ -186,7 +194,6 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node
@@ -264,7 +271,10 @@ SDK и боты:
 ```go
 cfg := sdk.DefaultConfig()
 cfg.Node.ListenAddress = ":64648"
-cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+// AdvertisePort обязательно указывать явно при не-дефолтном bind-порту —
+// SDK не выводит advertise-порт из ListenAddress автоматически.
+advertisePort := uint16(64648)
+cfg.Node.AdvertisePort = &advertisePort
 
 runtime, err := sdk.New(cfg)
 if err != nil {
@@ -287,11 +297,19 @@ Git хуки:
 Примеры запуска:
 
 ```bash
-CORSA_LISTEN_ADDRESS=:64646 CORSA_BOOTSTRAP_PEER=127.0.0.1:64647 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
+# Bind-имся явно на 127.0.0.1 — loopback-peer гейт принимает дайлы
+# с 127.0.0.1 только если ListenAddress сам на loopback-хосте. При
+# wildcard-bind (":64646") вторая инстанция ниже будет молча
+# отклоняться как non-routable пир.
+CORSA_LISTEN_ADDRESS=127.0.0.1:64646 CORSA_BOOTSTRAP_PEER=127.0.0.1:64647 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
 ```
 
 ```bash
-CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
+# Bind-порт не дефолтный (64647), поэтому CORSA_ADVERTISE_PORT нужно
+# задавать явно — runtime никогда не выводит advertise_port из bind-
+# порта. Без этой переменной нода будет анонсировать соседям 64646,
+# и они будут дозваниваться не туда.
+CORSA_LISTEN_ADDRESS=127.0.0.1:64647 CORSA_ADVERTISE_PORT=64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go run ./cmd/corsa-desktop
 ```
 
 По умолчанию identity-файлы создаются в `.corsa/` и разделяются по порту прослушивания.
@@ -300,8 +318,7 @@ CORSA_LISTEN_ADDRESS=:64647 CORSA_BOOTSTRAP_PEER=127.0.0.1:64646 GOCACHE=$(pwd)/
 
 - `CORSA_LISTEN_ADDRESS` — локальный bind-адрес
 - `CORSA_LISTENER` — явное переопределение входящего listener: `1` включает прослушивание, `0` выключает
-- `CORSA_ADVERTISE_ADDRESS` — **Deprecated с `ProtocolVersion=11`.** Внешний адрес, который нода раньше активно объявляла пирам. Сохраняется только как ручная fallback-подсказка для host-компонента исходящего `hello.listen`, пока идут смешанные rollout'ы с пирами `version=10`. Авторитетный advertise IP теперь выводится пассивно из observed TCP `RemoteAddr` — см. `docs/advertise-address-phase1-deprecation.md`. Запланирован к полному удалению, когда `MinimumProtocolVersion` достигнет `12`
-- `CORSA_ADVERTISE_PORT` — self-reported слушающий порт, помещаемый в `hello.advertise_port` и используемый приёмной стороной как авторитетный источник listening-порта при построении announce-кандидата из observed TCP IP. Принимает целое число в диапазоне `1..65535` включительно; пустые, нечисловые или вне диапазона значения фолбэчат к `64646`. Задавайте явно только если публичный dial-порт отличается от локального bind-порта (например, NAT port-forward, переписывание портов reverse proxy) — входящий TCP source port НИКОГДА не переиспользуется как listening-порт
+- `CORSA_ADVERTISE_PORT` — self-reported слушающий порт, помещаемый в `hello.advertise_port` / `welcome.advertise_port` и используемый приёмной стороной как авторитетный источник listening-порта при построении announce-кандидата из observed TCP IP. Принимает целое число в диапазоне `1..65535` включительно; пустые, нечисловые или вне диапазона значения фолбэчат к `64646`. Задавайте явно **всегда, когда внешне-дайлабельный порт не равен `64646`** — runtime никогда не выводит `advertise_port` из `CORSA_LISTEN_ADDRESS`, поэтому нода с bind-ом на `:64647` (без NAT в цепочке) всё равно анонсирует `64646` и остаётся недостижимой, пока не выставлено `CORSA_ADVERTISE_PORT=64647`. То же правило покрывает NAT / port-forward / reverse-proxy случаи, когда публичный dial-порт отличается от локального bind-порта. Входящий TCP source port НИКОГДА не переиспользуется как listening-порт. В этом билде нет `CORSA_ADVERTISE_ADDRESS`: host-часть внешнего endpoint'а локальной ноды больше не публикуется на проводе. Каждый пир анонсирует других пиров парой **наблюдаемый TCP source host** + `advertise_port` этого пира, так что локальной ноде вообще не приходится сообщать свой внешний IP — соседи учат его из пакетов, которые реально приходят (см. `docs/protocol/handshake.md` → «Advertise Convergence»)
 - `CORSA_BOOTSTRAP_PEERS` — список seed-нод через запятую
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
 - `CORSA_QUEUE_STATE_PATH` — persisted-состояние очереди доставки и relay retry
@@ -348,7 +365,6 @@ Bootstrap seed по умолчанию:
 
 ```bash
 CORSA_LISTEN_ADDRESS=:64646 \
-CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
 CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
 GOCACHE=$(pwd)/.gocache \
 GOMODCACHE=$(pwd)/.gomodcache \
@@ -377,7 +393,6 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v corsa-data:/home/corsa/.corsa \
   corsa-node
@@ -392,7 +407,6 @@ docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
-  -e CORSA_ADVERTISE_ADDRESS=<your-public-ip>:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
   -v $(pwd)/.corsa:/home/corsa/.corsa \
   corsa-node

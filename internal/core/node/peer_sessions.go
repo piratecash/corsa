@@ -44,11 +44,15 @@ import (
 // registry — helpers reading pc.Address()/Identity()/Capabilities()
 // observe the real peer values instead of an anonymous entry.
 //
-// NetCore.Address is set to the peer's advertised listen address
-// (canonical overlay key), NOT the dial address — for fallback-port
-// variants those two can differ. When the peer omits welcome.Listen we
-// fall back to welcome.Address (identity), mirroring the inbound pattern
-// from rememberConnPeerAddr.
+// Under the v12 wire contract welcome.Listen carries no truth, so
+// NetCore.Address is taken UNCONDITIONALLY from session.address — the
+// host:port we successfully dialed. This is the canonical overlay key
+// for the outbound side: pc.Address() callers see a host:port string,
+// never a bare Ed25519 identity, and a hostile or buggy responder
+// cannot influence the registry by stuffing arbitrary content into
+// welcome.listen. Pre-v12 the helper used welcome.Listen as the
+// primary source and fell back to welcome.Address; v12 drops that
+// chain entirely.
 //
 // This helper is pure metadata assignment: it does not touch
 // learnIdentityFromWelcome, peerHealth maps or welcomeMeta — each
@@ -62,8 +66,17 @@ func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame) {
 	if session.netCore == nil {
 		return
 	}
-	advertised := domain.PeerAddress(strings.TrimSpace(welcome.Listen))
+	// session.address — the host:port we actually dialed — is the only
+	// trusted overlay key for the outbound side. welcome.Listen is
+	// intentionally ignored even when a peer still echoes it: under
+	// the v12 wire contract it carries no authoritative information,
+	// so consulting it would just open a wedge for a malicious or
+	// buggy responder to push us away from the dialable address.
+	advertised := session.address
 	if advertised == "" {
+		// Defensive fallback for unit-test fixtures that set up a
+		// session without a dial address. Production outbound paths
+		// always have one.
 		advertised = domain.PeerAddress(strings.TrimSpace(welcome.Address))
 	}
 	session.netCore.SetAddress(advertised)
@@ -249,12 +262,13 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		return false, s.newSelfIdentityError(address, welcome.Listen)
 	}
 	applyWelcomeMetadata(session, welcome)
-	s.learnIdentityFromWelcome(welcome)
-	// learnIdentityFromWelcome stores version/build keyed by the normalized
-	// listen address, which may differ from the dial address (or be absent
-	// entirely when the peer omits the listen field). Store by the
-	// health-tracking key (resolveHealthAddress) so peerHealthFrames can
-	// always find the version — even for fallback-port dial variants.
+	s.learnIdentityFromWelcome(welcome, address)
+	// learnIdentityFromWelcome stores version/build keyed by the dial
+	// address (the only trusted host:port for the outbound side under
+	// the v12 wire contract). Mirror them under the health-tracking
+	// key resolveHealthAddress returns so peerHealthFrames can always
+	// find the version — even for fallback-port dial variants whose
+	// canonical health key differs from the dial target.
 	s.peerMu.RLock()
 	healthKey := s.resolveHealthAddress(address)
 	s.peerMu.RUnlock()
@@ -289,7 +303,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		Type:       "subscribe_inbox",
 		Topic:      "dm",
 		Recipient:  s.identity.Address,
-		Subscriber: s.cfg.AdvertiseAddress,
+		Subscriber: s.identity.Address,
 	}, "subscribed", false); err != nil {
 		return true, err
 	}
@@ -825,7 +839,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// SessionInitReady is emitted, so Slots(), ActiveCount(), and
 	// buildPeerExchangeResponse() do not expose this peer during setup.
 	if wm := session.welcomeMeta; wm != nil {
-		s.learnIdentityFromWelcome(wm.welcome)
+		s.learnIdentityFromWelcome(wm.welcome, dialAddress)
 		s.peerMu.RLock()
 		healthKey := s.resolveHealthAddress(dialAddress)
 		s.peerMu.RUnlock()
@@ -1050,7 +1064,7 @@ func (s *Service) initPeerSession(session *peerSession) error {
 		Type:       "subscribe_inbox",
 		Topic:      "dm",
 		Recipient:  s.identity.Address,
-		Subscriber: s.cfg.AdvertiseAddress,
+		Subscriber: s.identity.Address,
 	}, "subscribed", false); err != nil {
 		return fmt.Errorf("subscribe_inbox: %w", err)
 	}

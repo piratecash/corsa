@@ -32,10 +32,10 @@ The handshake commands establish peer connections, negotiate protocol version co
 ```json
 {
   "type": "hello",
-  "version": 3,
+  "version": 14,
   "client": "node",
   "listener": "1",
-  "listen": "<ip>:64646",
+  "advertise_port": 64646,
   "node_type": "full",
   "client_version": "<wire>",
   "client_build": 21,
@@ -54,17 +54,17 @@ The handshake commands establish peer connections, negotiate protocol version co
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | yes | Always `"hello"` |
-| `version` | integer | yes | Sender's protocol version (e.g., 3). Responder rejects if `version < responder.minimum_protocol_version` |
+| `version` | integer | yes | Sender's protocol version (e.g., 14). Responder rejects if `version < responder.minimum_protocol_version` |
 | `minimum_protocol_version` | integer | no | Minimum protocol version sender accepts. Informational; nodes do not currently send or check this field in incoming `hello` frames |
 | `client` | string | yes | Type: `"desktop"` (UI/CLI) or `"node"` (relay peer) |
-| `listener` | string | optional | `"1"` if accepting inbound peers; `"0"` if not. Client nodes typically send `"0"` |
-| `listen` | string | optional | Legacy advertised listen address in form `<ip>:<port>`. Receivers with `version ≥ 11` MUST NOT treat `listen.host` as a truth source for the peer's IP — the authoritative IP is the observed TCP `RemoteAddr`. The field is still generated for backward compatibility with `version=10` peers. Only meaningful if `listener="1"` |
-| `advertise_port` | integer | optional | Self-reported listening port introduced in `ProtocolVersion=11`. JSON integer in the inclusive range `1..65535`. On the receive side this is the only authoritative source of the peer's listening port when building an announce candidate from the observed TCP IP; absent / out-of-range / non-integer wire values collapse to `config.DefaultPeerPort` (`64646`). The inbound TCP source port MUST NEVER be reused as a listening port |
+| `listener` | string | required for `client="node"` peer hello; omitted by `client="desktop"`, local RPC subscribers, and probe `hello` frames | `"1"` if accepting inbound peers; `"0"` if not. Under the v12 wire contract this is the only signal that distinguishes a peer from a local subscriber: receivers gate the self-loopback identity guard on `Listener=="1"`. Local clients (desktop UI / RPC subscriber / `LocalRPCClient` probes) deliberately omit the field so an absent value does NOT trigger that guard. `listenerEnabledFromFrame` treats absent/empty as "not a listener" and only `"1"` flips the gate |
+| `listen` | string | absent | Removed from the wire in the v12 cleanup. Receivers ignore the field if a legacy peer still echoes it; emitters do not produce it |
+| `advertise_port` | integer | optional | Self-reported listening port. JSON integer in the inclusive range `1..65535`. On the receive side this is the only authoritative source of the peer's listening port; absent / out-of-range / non-integer wire values collapse to `config.DefaultPeerPort` (`64646`). The inbound TCP source port MUST NEVER be reused as a listening port |
 | `node_type` | string | optional | `"full"` (relays mesh traffic) or `"client"` (no relay). Only for `client="node"` |
 | `client_version` | string | optional | Version string (e.g., `"0.1.0"` or `"v1.2.3-wire"`) for logging and diagnostics |
 | `client_build` | integer | optional | Monotonic build number for version tracking. Incremented on each release |
 | `services` | array | optional | Capability list: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
-| `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against `listen` address |
+| `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against the peer's overlay address as observed by the receiver (`pc.Address()` — built from the verified TCP IP plus `advertise_port`) since `hello.listen` no longer carries an authoritative host under v12 |
 | `capabilities` | array | optional | Extended capability tokens for feature negotiation (e.g., `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "file_transfer_v1"]`). Both peers advertise capabilities during handshake; the session uses the intersection. Nodes without this field are treated as having an empty capability set. See [Capability Negotiation](#capability-negotiation) |
 | `address` | string | optional | Peer fingerprint (identity public key hash in hex). Required for mutual authentication on v2+ |
 | `pubkey` | string | optional | Ed25519 public key in base64. Used for message signature verification |
@@ -76,13 +76,13 @@ The handshake commands establish peer connections, negotiate protocol version co
 ```json
 {
   "type": "welcome",
-  "version": 3,
-  "minimum_protocol_version": 2,
+  "version": 14,
+  "minimum_protocol_version": 14,
   "node": "corsa",
   "network": "gazeta-devnet",
   "challenge": "<random-string>",
   "listener": "1",
-  "listen": "<ip>:64646",
+  "advertise_port": 64646,
   "node_type": "full",
   "client_version": "<wire>",
   "client_build": 21,
@@ -107,8 +107,8 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `network` | string | Logical network identifier (e.g., `"gazeta-devnet"`, `"mainnet"`) |
 | `challenge` | string | Random opaque string for authentication. **Included when the initiator's `client` is `"node"` or `"desktop"`** (i.e. always for peer and desktop connections) |
 | `listener` | string | Same as in `hello` |
-| `listen` | string | Same as in `hello`. Legacy/compat field in `version ≥ 11` — not a truth source for the responder's IP |
-| `advertise_port` | integer | Same as in `hello`. The responder's self-reported listening port. Introduced in `ProtocolVersion=11`; receivers fall back to `config.DefaultPeerPort` on absent / out-of-range / non-integer values |
+| `listen` | string | Same as in `hello` — removed from the v12 wire. Receivers tolerate a legacy peer echoing it but never treat it as truth |
+| `advertise_port` | integer | Same as in `hello`. The responder's self-reported listening port; receivers fall back to `config.DefaultPeerPort` on absent / out-of-range / non-integer values |
 | `node_type` | string | Same as in `hello` |
 | `client_version` | string | Same as in `hello` |
 | `client_build` | integer | Same as in `hello` |
@@ -118,7 +118,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `pubkey` | string | Responder's Ed25519 public key |
 | `boxkey` | string | Responder's X25519 public key |
 | `boxsig` | string | Signature of responder's boxkey binding |
-| `observed_address` | string | Initiator's IP address (no port) as seen by responder. Used for NAT detection and peer discovery |
+| `observed_address` | string | Initiator's IP address (no port) as seen by responder. Used by the dialer's `recordObservedAddress` as **NAT-detection telemetry only**: votes per peer identity feed a single "NAT detected" warning when the consensus IP disagrees with the local bind host (`cfg.ListenAddress`). It is NOT consumed for peer discovery, address learning, or any authoritative self-advertise decision under the v12 cleanup baseline |
 
 ### auth_session (initiator → responder)
 
@@ -269,18 +269,22 @@ When initiator sends `pubkey`, `boxkey`, and `boxsig`:
 
 ### Advertise Convergence
 
-Since `ProtocolVersion=11` the truth model for a peer's advertise
-endpoint is passive learning from the inbound TCP `RemoteAddr`.
-`hello.listen.host` is no longer an authoritative input. After a peer
-sends `hello`, the responder derives the decision once from: (a) the
-observed TCP IP, (b) the `listener` flag, and (c) the new
-`advertise_port` field. The possible outcomes are:
+The truth model for a peer's advertise endpoint is passive learning
+from the inbound TCP `RemoteAddr`. `hello.listen.host` is not an
+authoritative input. After a peer sends `hello`, the responder derives
+the decision once from: (a) the observed TCP IP, (b) the `listener`
+flag, and (c) the `advertise_port` field. The possible outcomes are:
 
 - `non_listener` — peer explicitly declared `listener="0"`. Accepted as
   direct-only: known to this session, never announced to other peers.
-- `legacy_direct` — no explicit `listener="1"` AND no usable `listen`
-  (absent, wildcard bind, or structurally invalid host:port). Treated as
-  direct-only for backward compatibility.
+- `legacy_direct` — `listener` is missing, empty, or anything other than
+  exactly `"1"`. The `listen` field is intentionally NOT part of this
+  condition: under the v12 wire contract the `listener` flag is the
+  single source of truth for the "is this peer reachable?" gate, so a
+  frame that omits it (or echoes it as `"0"`, the empty string, or any
+  forward-compatible value the responder does not recognise) is treated
+  as direct-only regardless of what host:port a legacy `listen` string
+  carries.
 - `match` — observed IP is a world-routable IPv4/IPv6 address. Accepted
   as announceable. The persisted candidate is
   `<observed_ip>:<advertise_port>`, where `advertise_port` is the
@@ -288,81 +292,47 @@ observed TCP IP, (b) the `listener` flag, and (c) the new
   inclusive `1..65535` range, otherwise `config.DefaultPeerPort`
   (`64646`). The `listen.host` value is intentionally discarded —
   disagreement between `hello.listen.host` and the observed IP is NOT a
-  reject trigger and NOT a mismatch event under `version ≥ 11`.
+  reject trigger and NOT a mismatch event.
 - `local_exception` — observed IP is non-routable
   (loopback/private/link-local/CGNAT/ULA) or cannot be parsed as IPv4 /
   IPv6. Accepted as direct-only; no announce candidate is written, ever.
   A non-routable observed IP must never leak into peer exchange.
 
-The responder NEVER rejects on an advertise-mismatch basis under
-`version ≥ 11` and NEVER emits a `connection_notice` with code
-`observed-address-mismatch` on its штатный (main) runtime path. The
-inbound source port on the TCP connection MUST NEVER be reused as a
-listening port — candidates always pair the observed IP with
-`advertise_port` (or the default fallback).
+The responder NEVER rejects on advertise-learning grounds and never
+emits any mismatch wire signal. The inbound source port on the TCP
+connection MUST NEVER be reused as a listening port — candidates
+always pair the observed IP with `advertise_port` (or the default
+fallback). The legacy v10/v11 reject-and-correct path
+(`connection_notice{code="observed-address-mismatch"}`, the
+`trustedSelfAdvertiseIP` runtime override, the misadvertise
+repay/forgiveness bookkeeping) was removed in the v12 cleanup phase.
 
-Outbound `hello.listen` is composed as follows:
+Outbound hello and welcome no longer carry the local advertise host.
+Both frames omit `listen` entirely; `listener` carries the binary "is
+a listener" signal and `advertise_port` carries the listening port.
+`hello.advertise_port` and `welcome.advertise_port` are populated from
+`CORSA_ADVERTISE_PORT` if it parses as a valid PeerPort (`1..65535`),
+otherwise `config.DefaultPeerPort` (`64646`). The real local bind
+port is NEVER reused as the advertised port — operators frequently
+dial through NAT / port-forward where the two differ.
 
-| Component | Source (priority order, first non-empty wins) |
-|-----------|-----------------------------------------------|
-| host      | 1. observed-address consensus (≥2 peers agreeing on the same world-routable IP) / 2. legacy runtime override (weak hint, see below) / 3. host component of the deprecated `CORSA_ADVERTISE_ADDRESS` |
-| port      | `CORSA_ADVERTISE_PORT` if valid (`1..65535`), else `config.DefaultPeerPort` (`64646`). The real local bind port is NEVER reused as the advertised port — operators frequently dial through NAT/port-forward where the two differ |
+`welcome.observed_address` is kept on the wire as **NAT-detection
+telemetry**: the responder fills it with the IP component of the
+inbound TCP `RemoteAddr`, the dialer's `recordObservedAddress` collects
+votes per peer identity, and a `NAT detected` log fires once
+`observedAddrConsensusThreshold` distinct peers agree on the same
+world-routable IP that disagrees with the host part of the local
+`cfg.ListenAddress`. Under the v12 baseline this is the field's only
+consumer — the helper that used to project this consensus into outbound
+`hello.listen` (`selfAdvertiseEndpoint`) was removed together with the
+wire-host emit. Operators who need to surface the externally-visible
+host to end users do so through that diagnostic log.
 
-`hello.advertise_port` on the wire carries the same resolved
-integer. Legacy peers running `version=10` ignore the field; they still
-see the syntactically valid `hello.listen` pair as before.
-
-#### Deprecated legacy behaviour (`version=10`)
-
-The following legacy behaviours survive in the codebase only for
-rollout safety and are strictly deprecated. A full removal is scheduled
-for the next major floor when `MinimumProtocolVersion` reaches `12`.
-
-- `world_mismatch` decision and the associated reject-with-notice branch
-  — `version=10` responders compare observed IP against
-  `hello.listen.host` and close the connection with
-  `connection_notice{code="observed-address-mismatch"}` on disagreement.
-  `version=11` never produces this decision in the штатный path; the
-  enum constant lives on only to keep the test-only downgrade-sweep
-  helper compilable and is treated as unreachable by runtime logic.
-- `connection_notice{code="observed-address-mismatch"}` frame payload —
-  a `version=11` node still parses the frame when received from a
-  legacy peer, but handles it as an advisory weak hint (see below),
-  never as an authoritative correction.
-- `welcome.observed_address` — continues to be generated so `version=10`
-  initiators keep their self-correction heuristic working. On receive
-  the field is parsed for telemetry but does NOT on its own trigger an
-  active reconnect cycle under `version ≥ 11`.
-
-`handleObservedAddressMismatchNotice` compat rule: a `version=11` node
-that receives the legacy notice from a `version=10` peer updates its
-runtime `trusted_self_advertise_ip` only when it has not yet
-accumulated an observed-IP consensus of its own. Once consensus exists,
-the legacy notice cannot overwrite the stronger v11-derived endpoint;
-the session is never broken, the persisted state is never downgraded,
-and a hostile or buggy `version=10` peer cannot move the local truth
-model by simply shouting a different IP.
-
-Sticky-state rule: a peer that was once recorded as `announceable` stays
-announceable until an explicit downgrade event (`world_mismatch` or
-`local_exception` arriving after the previous `match`). A follow-up
-`legacy_direct` or `non_listener` does not silently erase prior trust.
-
-Observed-IP downgrade sweep: on `world_mismatch` the responder also
-scans `persistedMeta` for any `announceable` entry whose
-`trusted_advertise_ip` equals the current observed IP, or whose
-persisted address host equals the observed IP. Each such entry is
-demoted to `direct_only` in the same transaction as the incoming
-peer's downgrade and the mismatch accounting —
-`advertise_mismatch_count++` and
-`forgivable_misadvertise_points += banIncrementAdvertiseMismatch` — is
-charged on the surviving swept row. Without this, a peer that keeps
-its real IP but rotates the claimed listen port would both preserve
-its stale `announceable` row and dodge the persisted ranking penalty
-that rollout 5 depends on. When the incoming `peer_address` coincides
-with a row already charged by the sweep, the main switch skips its
-own increment so a single `world_mismatch` event is billed exactly
-once.
+Sticky-state rule: a peer that was once recorded as `announceable`
+stays announceable until an explicit `local_exception` downgrade
+arrives (observed IP turns non-routable on a later session). A
+follow-up `legacy_direct` or `non_listener` does not silently erase
+prior trust.
 
 Peer exchange gate: only peers whose persisted `announce_state` is
 `announceable` are relayed in `get_peers` responses. Peers tagged
@@ -379,24 +349,6 @@ endpoint, the fallback if an alternate port variant won the dial
 race), so checking only one key would let a `direct_only` peer leak
 through whenever the other key happened to be empty.
 
-Forgivable misadvertise repay: each `world_mismatch` charges two
-counters — the peer-level `forgivable_misadvertise_points` bucket on
-`persistedMeta` and the per-IP `s.bans[ip].Score` accumulated by
-`addBanScore`. A later successful `auth_ok` from the same peer repays
-up to `banIncrementAdvertiseMismatch` points in **both** places,
-preventing an honest but flaky peer from permanently climbing toward
-the transport-level ban threshold while its peer-level bucket decays
-normally. The mirror refund clamps at zero — the repay can never push
-`s.bans[ip].Score` below zero, and the cumulative repay can never
-exceed what was originally charged for misadvertise. The refund looks
-up `s.bans` under the verified TCP peer IP derived from the live
-`conn.RemoteAddr()` — the exact key `addBanScore` used when charging
-— NOT the host component of `peerAddress`. For DNS / manually-added
-bootstrap peers `peerAddress` still carries an unresolved hostname,
-so splitting it here would leave the IP-level ban score permanently
-un-refunded while the peer-level bucket decayed: the exact divergence
-the mirror refund was introduced to close.
-
 Outbound-confirmed trust IP invariant: `trusted_advertise_ip` on a
 peer row is always a canonical IPv4/IPv6 address — never a hostname.
 The outbound-success writer (`recordOutboundConfirmed`) refuses any
@@ -405,14 +357,13 @@ and its caller derives that argument from `session.conn.RemoteAddr()`
 (the live TCP endpoint after OS DNS resolution), not from
 `session.address`, which for DNS or manually-added bootstrap peers
 still carries the unresolved hostname. Storing a hostname here would
-permanently break the observed-IP downgrade sweep: the sweep compares
+permanently corrupt downstream IP-keyed comparisons: callers compare
 `trusted_advertise_ip` byte-for-byte against canonical IPs extracted
-from inbound TCP `RemoteAddr`s, so a hostname value would never match
-and the stale `announceable` row would survive every subsequent
-`world_mismatch` targeting the same peer. When no canonical IP can be
-derived from the live connection, the write is skipped — the peer
-remains untracked on the advertise-convergence layer rather than
-learning bad trust from a partial observation.
+from inbound TCP `RemoteAddr`s, so a hostname value would never match.
+When no canonical IP can be derived from the live connection, the
+write is skipped — the peer remains untracked on the
+advertise-convergence layer rather than learning bad trust from a
+partial observation.
 
 Raw/bootstrap path convergence parity: outbound connections that do
 not go through the managed-session state machine — the `push_notice`
@@ -421,20 +372,15 @@ the legacy fresh-dial path in `syncPeer` used for sender-key recovery
 and forced refresh — share the same post-`auth_ok` convergence writer
 as the managed path. All three call sites funnel through
 `recordOutboundAuthSuccess(peerAddress, remoteAddr)`, which takes the
-wrapper-form `host:port` string (managed: `session.netCore.RemoteAddr()`,
-bootstrap `syncPeer`: the bootstrap `*netcore.NetCore.RemoteAddr()`,
-raw `sendNoticeToPeer`: `conn.RemoteAddr().String()` inline, inside
-the §4.4 carve-out), derives the canonical dialed IP and port, and
-then performs the same `recordOutboundConfirmed` + misadvertise-repay
-sequence. Keeping the signature text-only keeps the helper off the
-§2.6.26 `net.Conn` carve-out — it is not a boundary translator, it
-does not own the connection lifecycle, and it has no business
-speaking `net.Conn` in its type. Without this shared hook, peers
-reached only through the bootstrap fan-out or the sender-key recovery
-fresh-dial would never receive `announce_state=announceable` or a
-trusted advertise triple, so their state would diverge from the
-managed path and the hostname / observed-IP sweep invariants above
-would silently not apply there.
+wrapper-form `host:port` string, derives the canonical dialed IP and
+port, and then calls `recordOutboundConfirmed`. Keeping the signature
+text-only keeps the helper off the §2.6.26 `net.Conn` carve-out — it
+is not a boundary translator, it does not own the connection
+lifecycle, and it has no business speaking `net.Conn` in its type.
+Without this shared hook, peers reached only through the bootstrap
+fan-out or the sender-key recovery fresh-dial would never receive
+`announce_state=announceable` or a trusted advertise triple, so their
+state would diverge from the managed path.
 
 ### Node Role Semantics
 
@@ -455,7 +401,7 @@ Valid values for `networks` array:
 - `local` — private/loopback only
 - `unknown` — address type not recognized
 
-The `networks` array is validated against the format of `listen`. For example, if `listen="192.168.1.100:64646"`, only `ipv4` and `local` are valid.
+The `networks` array is validated against the peer's overlay address as the receiver observes it (`pc.Address()` — built from the verified TCP IP plus the self-reported `advertise_port`). For example, if the receiver observes `192.168.1.100:64646`, only `ipv4` and `local` are valid declarations. The legacy `hello.listen` host is not consulted under the v12 wire contract.
 
 ---
 
@@ -585,10 +531,10 @@ stateDiagram-v2
 ```json
 {
   "type": "hello",
-  "version": 3,
+  "version": 14,
   "client": "node",
   "listener": "1",
-  "listen": "<ip>:64646",
+  "advertise_port": 64646,
   "node_type": "full",
   "client_version": "<wire>",
   "client_build": 21,
@@ -607,17 +553,17 @@ stateDiagram-v2
 | Поле | Тип | Обязательное | Описание |
 |------|-----|-------------|----------|
 | `type` | string | да | Всегда `"hello"` |
-| `version` | integer | да | Версия протокола отправителя (например, 3). Ответчик отклоняет, если `version < responder.minimum_protocol_version` |
-| `minimum_protocol_version` | integer | нет | Минимальная версия протокола, которую отправитель принимает (например, 2). Информационное; ноды не отправляют и не проверяют это поле во входящих `hello` фреймах |
+| `version` | integer | да | Версия протокола отправителя (например, 14). Ответчик отклоняет, если `version < responder.minimum_protocol_version` |
+| `minimum_protocol_version` | integer | нет | Минимальная версия протокола, которую отправитель принимает. Информационное; ноды не отправляют и не проверяют это поле во входящих `hello` фреймах |
 | `client` | string | да | Тип: `"desktop"` (UI/CLI) или `"node"` (relay-пир) |
-| `listener` | string | опционально | `"1"` если принимает входящие пиры; `"0"` если нет. Client-ноды обычно отправляют `"0"` |
-| `listen` | string | опционально | Legacy-рекламируемый адрес прослушивания в виде `<ip>:<port>`. Получатели с `version ≥ 11` НЕ ДОЛЖНЫ использовать `listen.host` как источник истины для IP пира — авторитетным источником IP является наблюдаемый TCP `RemoteAddr`. Поле по-прежнему генерируется для обратной совместимости с пирами `version=10`. Смысл только если `listener="1"` |
-| `advertise_port` | integer | опционально | Self-reported слушающий порт, введённый в `ProtocolVersion=11`. JSON-integer в диапазоне `1..65535` включительно. На приёмной стороне это единственный авторитетный источник listening-порта пира при построении announce-кандидата из observed TCP IP; отсутствующие / вне диапазона / нецелочисленные значения на проводе коллапсируются к `config.DefaultPeerPort` (`64646`). Входящий TCP source port НИКОГДА не должен переиспользоваться как listening-порт |
+| `listener` | string | обязательно для node-to-node peer hello (`client="node"`); опускается desktop-клиентами, local RPC subscribers и probe-фреймами от `LocalRPCClient` | `"1"` если принимает входящие пиры; `"0"` если нет. Под v12-контрактом это единственный сигнал, отличающий пира от локального subscriber'а: receiver'ы гейтят self-loopback identity guard на `Listener=="1"`. Локальные клиенты (desktop UI / RPC subscriber / `LocalRPCClient` probes) намеренно опускают поле, чтобы absent-значение НЕ триггерило этот guard. `listenerEnabledFromFrame` трактует absent/пустое как "не listener", и только `"1"` переключает гейт |
+| `listen` | string | отсутствует | Удалено из wire в фазе v12 cleanup. Receiver'ы игнорируют поле, если legacy-пир его всё ещё эхо-передаёт; emitter'ы его не производят |
+| `advertise_port` | integer | опционально | Self-reported слушающий порт. JSON-integer в диапазоне `1..65535` включительно. На приёмной стороне это единственный авторитетный источник listening-порта пира; отсутствующие / вне диапазона / нецелочисленные значения на проводе коллапсируются к `config.DefaultPeerPort` (`64646`). Входящий TCP source port НИКОГДА не должен переиспользоваться как listening-порт |
 | `node_type` | string | опционально | `"full"` (релирует трафик) или `"client"` (без relay). Только для `client="node"` |
 | `client_version` | string | опционально | Строка версии (например, `"0.1.0"` или `"v1.2.3-wire"`) для логирования и диагностики |
 | `client_build` | integer | опционально | Монотонный номер сборки для отслеживания версий. Увеличивается при каждом релизе |
 | `services` | array | опционально | Список возможностей: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
-| `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против адреса `listen` |
+| `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс `advertise_port`); под v12 `hello.listen` уже не несёт авторитетного host'а |
 | `capabilities` | array | опционально | Расширенные capability-токены для согласования функций (например, `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "file_transfer_v1"]`). Оба пира объявляют capabilities при handshake; сессия использует пересечение. Ноды без этого поля считаются с пустым набором. См. [Согласование capabilities](#согласование-capabilities) |
 | `address` | string | опционально | Fingerprint пира (хеш публичного ключа identity в hex). Требуется для взаимной аутентификации на v2+ |
 | `pubkey` | string | опционально | Ed25519 публичный ключ в base64. Используется для проверки подписей сообщений |
@@ -629,13 +575,13 @@ stateDiagram-v2
 ```json
 {
   "type": "welcome",
-  "version": 3,
-  "minimum_protocol_version": 2,
+  "version": 14,
+  "minimum_protocol_version": 14,
   "node": "corsa",
   "network": "gazeta-devnet",
   "challenge": "<random-string>",
   "listener": "1",
-  "listen": "<ip>:64646",
+  "advertise_port": 64646,
   "node_type": "full",
   "client_version": "<wire>",
   "client_build": 21,
@@ -660,8 +606,8 @@ stateDiagram-v2
 | `network` | string | Идентификатор логической сети (например, `"gazeta-devnet"`, `"mainnet"`) |
 | `challenge` | string | Случайная непрозрачная строка для аутентификации. **Включается когда `client` инициатора равен `"node"` или `"desktop"`** (т.е. всегда для peer- и desktop-соединений) |
 | `listener` | string | Аналогично полю в `hello` |
-| `listen` | string | Аналогично полю в `hello` |
-| `advertise_port` | integer | Аналогично полю в `hello`. Self-reported слушающий порт ответчика. Введён в `ProtocolVersion=11`; получатели фолбэчат к `config.DefaultPeerPort` при отсутствии / значении вне диапазона / нецелочисленном значении |
+| `listen` | string | Аналогично полю в `hello` — удалено из v12-wire. Receiver'ы терпят legacy-пира, эхо-передающего поле, но никогда не считают его truth |
+| `advertise_port` | integer | Аналогично полю в `hello`. Self-reported слушающий порт ответчика; получатели фолбэчат к `config.DefaultPeerPort` при отсутствии / значении вне диапазона / нецелочисленном значении |
 | `node_type` | string | Аналогично полю в `hello` |
 | `client_version` | string | Аналогично полю в `hello` |
 | `client_build` | integer | Аналогично полю в `hello` |
@@ -671,7 +617,7 @@ stateDiagram-v2
 | `pubkey` | string | Ed25519 публичный ключ ответчика |
 | `boxkey` | string | X25519 публичный ключ ответчика |
 | `boxsig` | string | Подпись связи boxkey ответчика |
-| `observed_address` | string | IP-адрес инициатора (без порта) как видит ответчик. Используется для обнаружения NAT и discovery пиров |
+| `observed_address` | string | IP-адрес инициатора (без порта) как видит ответчик. Используется дайлером в `recordObservedAddress` **только как NAT-detection telemetry**: голоса per peer identity порождают единственное предупреждение «NAT detected», когда консенсусный IP расходится с host-частью локального `cfg.ListenAddress`. Под v12-baseline поле НЕ потребляется ни для peer discovery, ни для address learning, ни для каких-либо authoritative self-advertise решений |
 
 ### auth_session (инициатор → ответчик)
 
@@ -822,17 +768,22 @@ sequenceDiagram
 
 ### Согласование advertise-адреса
 
-Начиная с `ProtocolVersion=11` модель истины для advertise-endpoint пира —
-это пассивное обучение из входящего TCP `RemoteAddr`. `hello.listen.host`
-больше НЕ является авторитетным входом. После получения `hello` ответчик
-выводит решение один раз из: (a) наблюдаемого TCP IP, (b) флага
-`listener` и (c) нового поля `advertise_port`. Возможные исходы:
+Модель истины для advertise-endpoint пира — пассивное обучение из
+входящего TCP `RemoteAddr`. `hello.listen.host` НЕ является
+авторитетным входом. После получения `hello` ответчик выводит решение
+один раз из: (a) наблюдаемого TCP IP, (b) флага `listener` и (c) поля
+`advertise_port`. Возможные исходы:
 
 - `non_listener` — пир явно объявил `listener="0"`. Принимается как
   direct-only: используется в рамках сессии, не анонсируется другим пирам.
-- `legacy_direct` — нет явного `listener="1"` И нет пригодного `listen`
-  (отсутствует, wildcard-bind или структурно невалидный host:port).
-  Принимается как direct-only для обратной совместимости.
+- `legacy_direct` — `listener` отсутствует, пуст или несёт что угодно
+  кроме строго `"1"`. Поле `listen` целенаправленно НЕ участвует в этом
+  условии: на v12-baseline флаг `listener` — единственный источник
+  истины для гейта «достижимость пира», поэтому фрейм, в котором флаг
+  опущен (или несёт `"0"`, пустую строку, либо какое-то forward-
+  совместимое значение, которого ответчик не знает), трактуется как
+  direct-only независимо от того, какой host:port мог нести legacy-
+  `listen`.
 - `match` — наблюдаемый IP является world-routable IPv4/IPv6 адресом.
   Принимается как announceable. Персистируемый кандидат —
   `<observed_ip>:<advertise_port>`, где `advertise_port` — self-reported
@@ -840,80 +791,48 @@ sequenceDiagram
   включительно, иначе `config.DefaultPeerPort` (`64646`). Значение
   `listen.host` целенаправленно отбрасывается — расхождение между
   `hello.listen.host` и observed IP НЕ является триггером отклонения и
-  НЕ является mismatch-событием при `version ≥ 11`.
+  НЕ является mismatch-событием.
 - `local_exception` — наблюдаемый IP non-routable
   (loopback/приватный/link-local/CGNAT/ULA) либо не парсится как IPv4 /
   IPv6. Принимается как direct-only; announce-кандидат не пишется
   никогда. Non-routable observed IP не должен утекать в peer exchange.
 
-Ответчик НИКОГДА не отклоняет соединение по основанию advertise-mismatch
-при `version ≥ 11` и НИКОГДА не отправляет `connection_notice` с кодом
-`observed-address-mismatch` в штатной runtime-ветке. Входящий source-порт
-TCP-соединения НИКОГДА не переиспользуется как listening-порт —
-кандидаты всегда пара observed IP + `advertise_port` (либо default fallback).
+Ответчик НИКОГДА не отклоняет соединение по основанию advertise-learning
+и не отправляет никакого mismatch-сигнала на проводе. Входящий
+source-порт TCP-соединения НИКОГДА не переиспользуется как
+listening-порт — кандидаты всегда пара observed IP + `advertise_port`
+(либо default fallback). Legacy-путь reject-and-correct из v10/v11
+(`connection_notice{code="observed-address-mismatch"}`, runtime-override
+`trustedSelfAdvertiseIP`, бухгалтерия misadvertise repay/forgiveness)
+удалён в фазе v12 cleanup.
 
-Исходящий `hello.listen` формируется следующим образом:
+Исходящий hello и welcome больше не несут локальный advertise-host.
+Оба фрейма опускают `listen` целиком; `listener` несёт бинарный
+сигнал «есть листенер», а `advertise_port` — слушающий порт.
+`hello.advertise_port` и `welcome.advertise_port` заполняются из
+`CORSA_ADVERTISE_PORT`, если это валидный PeerPort (`1..65535`),
+иначе `config.DefaultPeerPort` (`64646`). Реальный локальный bind-порт
+НИКОГДА не переиспользуется как advertised-порт — операторы регулярно
+dial через NAT/port-forward, где эти два порта различаются.
 
-| Компонент | Источник (порядок приоритета, побеждает первый непустой) |
-|-----------|-----------------------------------------------------------|
-| host      | 1. Консенсус observed-address (≥2 пира сходятся на одном world-routable IP) / 2. Legacy runtime override (слабая подсказка, см. ниже) / 3. Host-часть устаревшего `CORSA_ADVERTISE_ADDRESS` |
-| port      | `CORSA_ADVERTISE_PORT` если валиден (`1..65535`), иначе `config.DefaultPeerPort` (`64646`). Реальный локальный bind-порт НИКОГДА не переиспользуется как advertised-порт — операторы регулярно dial через NAT/port-forward, где эти два порта различаются |
-
-`hello.advertise_port` на проводе несёт то же разрешённое целочисленное
-значение. Legacy-пиры на `version=10` игнорируют это поле; они
-по-прежнему видят синтаксически валидную пару `hello.listen` как раньше.
-
-#### Deprecated legacy-поведение (`version=10`)
-
-Следующие legacy-поведения сохраняются в кодовой базе исключительно
-ради безопасности rollout'а и строго deprecated. Полное удаление
-запланировано к следующему мажорному floor'у, когда
-`MinimumProtocolVersion` достигнет `12`.
-
-- Решение `world_mismatch` и связанная с ним ветка reject-with-notice —
-  ответчики `version=10` сравнивают observed IP с `hello.listen.host` и
-  закрывают соединение через `connection_notice{code="observed-address-mismatch"}`
-  при расхождении. `version=11` никогда не производит это решение в
-  штатной ветке; enum-константа остаётся жить только ради
-  компилируемости test-only downgrade-sweep хелпера и трактуется
-  runtime-логикой как unreachable.
-- `connection_notice{code="observed-address-mismatch"}` payload фрейма —
-  нода `version=11` по-прежнему парсит фрейм, полученный от legacy-пира,
-  но обрабатывает его как advisory weak hint (см. ниже), никогда не как
-  авторитетную коррекцию.
-- `welcome.observed_address` — продолжает генерироваться, чтобы
-  инициаторы `version=10` сохраняли работающим свой self-correction
-  эвристик. На приёме поле парсится для телеметрии, но само по себе НЕ
-  триггерит активный reconnect-цикл при `version ≥ 11`.
-
-Compat-правило `handleObservedAddressMismatchNotice`: нода `version=11`,
-получившая legacy-notice от пира `version=10`, обновляет свой runtime
-`trusted_self_advertise_ip` только когда ещё не накопила собственного
-observed-IP консенсуса. Как только консенсус существует, legacy-notice
-не может перезаписать более сильный v11-derived endpoint; сессия никогда
-не ломается, персистентное состояние никогда не понижается, а
-враждебный или забагованный пир `version=10` не может сдвинуть
-локальную модель истины, просто прокричав другой IP.
+`welcome.observed_address` оставлен на проводе как **NAT-detection
+telemetry**: ответчик кладёт туда IP-часть входящего TCP `RemoteAddr`,
+дайлер через `recordObservedAddress` копит голоса per peer identity,
+и лог-запись `NAT detected` срабатывает, как только
+`observedAddrConsensusThreshold` различных пиров сходятся на одном
+world-routable IP, отличающемся от host-части локального
+`cfg.ListenAddress`. На v12-baseline это единственный потребитель поля
+— helper, раньше проецировавший этот consensus в исходящий
+`hello.listen` (`selfAdvertiseEndpoint`), удалён вместе с emit'ом
+host'а на проводе. Операторы, которым нужно показать
+externally-visible host пользователю, делают это через тот
+диагностический лог.
 
 Sticky-state правило: пир однажды записанный как `announceable` остаётся
-announceable до явного события downgrade (`world_mismatch` или
-`local_exception`, приходящие после `match`). Последующий `legacy_direct`
-или `non_listener` не стирает прошлое доверие молча.
-
-Сметание announceable по observed IP: на `world_mismatch` ответчик
-дополнительно сканирует `persistedMeta` и ищет любые announceable-записи,
-у которых `trusted_advertise_ip` равен текущему observed IP или host
-персистентного адреса совпадает с observed IP. Каждая такая запись
-демоутится до `direct_only` в той же транзакции, что и downgrade
-входящего пира, и на выжившую строку начисляется mismatch-учёт:
-`advertise_mismatch_count++` и
-`forgivable_misadvertise_points += banIncrementAdvertiseMismatch`.
-Без этого пир, сохраняющий свой реальный IP, но меняющий заявленный
-listen-порт между сессиями, и сохранял бы устаревшую announceable-строку,
-и уворачивался бы от rollout-5 ранжирующего штрафа. Если входящий
-`peer_address` совпадает со строкой, которую sweep уже списал,
-главный switch пропускает собственный инкремент — одно событие
-`world_mismatch` должно списываться ровно один раз.
+announceable до явного события downgrade (приход `local_exception` после
+предыдущего `match`, когда observed IP в более поздней сессии стал
+non-routable). Последующий `legacy_direct` или `non_listener` не стирает
+прошлое доверие молча.
 
 Фильтр peer exchange: в ответах `get_peers` релеятся только пиры, у
 которых персистентное `announce_state` равно `announceable`. Пиры с
@@ -930,25 +849,6 @@ fallback `slot.ConnectedAddress`. Convergence-писатель может пол
 поэтому проверка только одного ключа даёт утечку direct_only-пира
 всякий раз, когда второй ключ оказывается пустым.
 
-Возврат forgivable misadvertise points: каждый `world_mismatch` заряжает
-два счётчика — per-peer `forgivable_misadvertise_points` в
-`persistedMeta` и per-IP `s.bans[ip].Score`, который накапливает
-`addBanScore`. Последующий успешный `auth_ok` от того же пира
-возвращает до `banIncrementAdvertiseMismatch` очков **в обоих** местах.
-Это не даёт честному, но нестабильному пиру вечно расти к
-transport-level ban-порогу, пока per-peer bucket корректно затухает.
-Зеркальный возврат клампится в ноль — repay никогда не уводит
-`s.bans[ip].Score` ниже нуля, а кумулятивный возврат никогда не
-превышает изначально списанное за misadvertise. Зеркальный возврат
-ищет запись в `s.bans` по верифицированному TCP IP-пира, полученному
-из живого `conn.RemoteAddr()` — то же самое значение, под которым
-`addBanScore` сохранял Score, — а НЕ по host-части `peerAddress`. Для
-DNS / вручную добавленных bootstrap-пиров `peerAddress` по-прежнему
-содержит неразрешённый hostname, поэтому расщепление его здесь
-оставит IP-level ban score навсегда без рефанда, в то время как
-per-peer bucket корректно затухает: ровно ту самую divergence,
-которую зеркальный возврат и должен был закрыть.
-
 Инвариант trusted IP для outbound-подтверждения: поле
 `trusted_advertise_ip` в записи пира всегда содержит канонический
 IPv4/IPv6 адрес — никогда hostname. Писатель успешного исходящего
@@ -958,14 +858,11 @@ caller берёт этот аргумент из `session.conn.RemoteAddr()` (ж
 TCP-эндпоинт после резолва OS DNS), а не из `session.address`, где для
 DNS- или вручную добавленных bootstrap-пиров по-прежнему лежит
 неразрешённый hostname. Hostname, попавший в `trusted_advertise_ip`,
-навсегда сломает observed-IP downgrade sweep: sweep побайтово
-сравнивает `trusted_advertise_ip` с каноническими IP-ами из входящих
-TCP `RemoteAddr`, поэтому значение-hostname никогда не совпадёт и
-устаревшая строка `announceable` переживёт каждый следующий
-`world_mismatch` по тому же пиру. Если из живого соединения
-невозможно извлечь канонический IP — запись пропускается: пир
-остаётся нетронутым на слое advertise-convergence, а не учит плохое
-доверие по частичному наблюдению.
+навсегда сломал бы downstream-сравнения, ключённые на канонический
+IP. Если из живого соединения невозможно извлечь канонический IP —
+запись пропускается: пир остаётся нетронутым на слое
+advertise-convergence, а не учит плохое доверие по частичному
+наблюдению.
 
 Паритет convergence для raw/bootstrap-пути: исходящие соединения,
 которые не проходят через managed-session state machine — TCP
@@ -974,21 +871,15 @@ fallback для `push_notice`, используемый для доставки 
 для sender-key recovery и forced refresh, — используют тот же
 пост-`auth_ok` convergence writer, что и managed-путь. Все три
 call site сходятся в `recordOutboundAuthSuccess(peerAddress, remoteAddr)`,
-который принимает wrapper-форму `host:port` (managed —
-`session.netCore.RemoteAddr()`, bootstrap `syncPeer` — bootstrap
-`*netcore.NetCore.RemoteAddr()`, raw `sendNoticeToPeer` —
-`conn.RemoteAddr().String()` на месте, внутри §4.4 carve-out),
-берёт канонический dial-IP и порт и выполняет ту же
-последовательность `recordOutboundConfirmed` + repay forgivable
-misadvertise. Строковая сигнатура держит helper вне §2.6.26
-`net.Conn` carve-out'а: функция не рождает и не уничтожает
-`(net.Conn, ConnID)` binding и не принимает решение до
-регистрации — значит, и принимать `net.Conn` ей нечего. Без этого
-общего хука пиры, достижимые только через bootstrap fan-out или
-sender-key recovery fresh-dial, никогда не получили бы
-`announce_state=announceable` или trusted advertise triple, и их
-состояние разошлось бы с managed-путём — а инварианты hostname /
-observed-IP sweep выше молча не применялись бы к этой ветке.
+который принимает wrapper-форму `host:port`, берёт канонический
+dial-IP и порт и вызывает `recordOutboundConfirmed`. Строковая
+сигнатура держит helper вне §2.6.26 `net.Conn` carve-out'а: функция
+не рождает и не уничтожает `(net.Conn, ConnID)` binding и не
+принимает решение до регистрации — значит, и принимать `net.Conn` ей
+нечего. Без этого общего хука пиры, достижимые только через
+bootstrap fan-out или sender-key recovery fresh-dial, никогда не
+получили бы `announce_state=announceable` или trusted advertise
+triple, и их состояние разошлось бы с managed-путём.
 
 ### Семантика ролей ноды
 
@@ -1009,7 +900,7 @@ observed-IP sweep выше молча не применялись бы к это
 - `local` — только приватный/loopback
 - `unknown` — тип адреса не распознан
 
-Массив `networks` валидируется против формата `listen`. Например, если `listen="192.168.1.100:64646"`, только `ipv4` и `local` допустимы.
+Массив `networks` валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс self-reported `advertise_port`). Например, если receiver наблюдает `192.168.1.100:64646`, допустимы только `ipv4` и `local`. Legacy-`hello.listen` под v12-wire не используется.
 
 ---
 

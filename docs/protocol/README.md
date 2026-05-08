@@ -98,7 +98,7 @@ Environment variables:
 
 - `CORSA_LISTEN_ADDRESS` — TCP listen address
 - `CORSA_LISTENER` — `1` force listener on, `0` force off
-- `CORSA_ADVERTISE_ADDRESS` — address advertised to peers
+- `CORSA_ADVERTISE_PORT` — self-reported listening port for `hello.advertise_port` / `welcome.advertise_port` (1..65535, falls back to `64646`). Set this whenever the externally dialable port is NOT `64646` — the runtime never derives `advertise_port` from `CORSA_LISTEN_ADDRESS`, so a node bound to a non-default port (with or without NAT) silently announces `64646` until this variable is set. The local node's external host is no longer wire-published; neighbours announce this node using the observed TCP source host plus this port
 - `CORSA_BOOTSTRAP_PEER` — single bootstrap address
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated bootstrap list (overrides `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — path to identity key file
@@ -262,7 +262,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 
 - `CORSA_LISTEN_ADDRESS` — адрес TCP-листенера
 - `CORSA_LISTENER` — `1` включить листенер, `0` выключить
-- `CORSA_ADVERTISE_ADDRESS` — адрес, рекламируемый пирам
+- `CORSA_ADVERTISE_PORT` — self-reported listening-порт для `hello.advertise_port` / `welcome.advertise_port` (1..65535, fallback `64646`). Задавайте всегда, когда внешне-дайлабельный порт не равен `64646` — runtime никогда не выводит `advertise_port` из `CORSA_LISTEN_ADDRESS`, поэтому нода с bind-ом на не-дефолтный порт (с NAT или без) молча анонсирует `64646`, пока эта переменная не выставлена. Host локальной ноды больше не публикуется на проводе — соседи анонсируют эту ноду парой observed TCP source host + этот порт
 - `CORSA_BOOTSTRAP_PEER` — один bootstrap-адрес
 - `CORSA_BOOTSTRAP_PEERS` — список через запятую (имеет приоритет над `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — путь к файлу identity key

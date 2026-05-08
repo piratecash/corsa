@@ -315,8 +315,8 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Two sessions: one relay-capable, one legacy.
-	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})  // creates direct route
-	svc.onPeerSessionEstablished(idPeerB, nil) // legacy, no route change
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // creates direct route
+	svc.onPeerSessionEstablished(idPeerB, nil)                                        // legacy, no route change
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
@@ -370,8 +370,8 @@ func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
 func TestMixedCap_LegacyCloseDoesNotWithdrawRelayRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})  // creates direct route
-	svc.onPeerSessionEstablished(idPeerB, nil) // legacy session
+	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // creates direct route
+	svc.onPeerSessionEstablished(idPeerB, nil)                                        // legacy session
 
 	// Close the legacy session.
 	svc.onPeerSessionClosed(idPeerB, nil)
@@ -3903,7 +3903,7 @@ func TestRoutingTargetsDeduplicatesFallbackPort(t *testing.T) {
 
 	svc := &Service{
 		identity: &identity.Identity{Address: idNodeA},
-		cfg:      config.Node{ListenAddress: "0.0.0.0:9999", AdvertiseAddress: "10.0.0.99:9999"},
+		cfg:      config.Node{ListenAddress: "0.0.0.0:9999"},
 	}
 	svc.initMaps()
 

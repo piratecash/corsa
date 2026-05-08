@@ -914,7 +914,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		// through one writer.
 		s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
 	}
-	s.learnIdentityFromWelcome(welcome)
+	s.learnIdentityFromWelcome(welcome, address)
 	s.peerMu.RLock()
 	syncHealthKey := s.resolveHealthAddress(address)
 	s.peerMu.RUnlock()
@@ -1026,13 +1026,11 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	if peerAddress == "" || remoteAddr == "" {
 		return
 	}
-	// rawBanIP is the key addBanScore stores under — raw host from the
-	// wrapper's RemoteAddr() string, not the canonicalised form. The
-	// refund must look the peer up under the exact same key, otherwise
-	// hostname-based peers get their peer-level bucket refunded while
-	// their IP-level ban score silently accumulates toward banThreshold.
-	rawBanIP := domain.PeerIP(remoteIPFromString(remoteAddr))
-	dialedIP := canonicalIPFromHost(string(rawBanIP))
+	// dialedIP is the canonical IP form derived from the raw RemoteAddr().
+	// The legacy misadvertise repay path also kept the raw (non-canonical)
+	// form to look the peer up in s.bans, but that path was removed in the
+	// v12 cleanup phase, so only the canonical form survives here.
+	dialedIP := canonicalIPFromHost(remoteIPFromString(remoteAddr))
 	if dialedIP == "" {
 		return
 	}
@@ -1049,20 +1047,13 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 		return
 	}
 	s.recordOutboundConfirmed(peerAddress, domain.PeerIP(dialedIP), domain.PeerPort(dialedPortInt))
-	// Forgivable misadvertise bucket repays a fixed amount on every
-	// successful auth — keeps honest but flaky peers from drifting
-	// toward a ban after transient NAT-remap events. rawBanIP mirrors
-	// the refund onto s.bans; empty rawBanIP (never happens here
-	// because canonicalIPFromHost already rejected it above) would
-	// only move the peer-level bucket.
-	//
-	// A successful handshake also clears any remote-ban window we had
-	// recorded against this peer: the responder just let us in, so the
-	// prior peer-banned notice is no longer authoritative. Without this
-	// clear, the PeerProvider.RemoteBannedFn gate would keep skipping
-	// the peer on subsequent passes even though it is now willing to
-	// talk to us — a stale suppression indistinguishable from the ebus
-	// storm the ban window was introduced to end.
+	// A successful handshake clears any remote-ban window we had recorded
+	// against this peer: the responder just let us in, so the prior
+	// peer-banned notice is no longer authoritative. Without this clear,
+	// the PeerProvider.RemoteBannedFn gate would keep skipping the peer
+	// on subsequent passes even though it is now willing to talk to us —
+	// a stale suppression indistinguishable from the ebus storm the ban
+	// window was introduced to end.
 	//
 	// The clear is symmetric with record. handlePeerBannedNotice writes
 	// into exactly one table per notice (scope driven by reason), so
@@ -1081,16 +1072,13 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	// is not proof the responder has forgiven them. dialedIP is the
 	// canonical form used by recordRemoteIPBanLocked, so (b) hashes
 	// into the same map key as the original write.
-	// Cross-domain write: peer-domain (persistedMeta via clearRemoteBan /
-	// repayMisadvertisePenalty) + ipState-domain (remoteBannedIPs via
-	// clearRemoteIPBanLocked, and bans via repayMisadvertisePenalty's
-	// inner ipStateMu section).  Canonical lock order per docs/locking.md:
-	// s.peerMu → s.ipStateMu.  clearRemoteIPBanLocked takes s.ipStateMu
-	// itself below.
+	// Cross-domain write: peer-domain (persistedMeta via clearRemoteBan)
+	// + ipState-domain (remoteBannedIPs via clearRemoteIPBanLocked).
+	// Canonical lock order per docs/locking.md: s.peerMu → s.ipStateMu.
+	// clearRemoteIPBanLocked takes s.ipStateMu itself below.
 	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
-	_ = s.repayMisadvertisePenaltyOnAuthLocked(peerAddress, rawBanIP)
 	remoteBanCleared := s.clearRemoteBanLocked(peerAddress)
 	s.ipStateMu.Lock()
 	remoteIPBanCleared := s.clearRemoteIPBanLocked(dialedIP)
@@ -1136,12 +1124,27 @@ func scorePeerTargetLocked(health *peerHealth) int64 {
 
 func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
-		if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(frame.Listen)); ok {
-			s.promotePeerAddress(normalizedAddr)
-			s.rememberPeerType(normalizedAddr, frame.NodeType)
-			s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
-			s.addPeerVersion(normalizedAddr, frame.ClientVersion)
-			s.addPeerBuild(normalizedAddr, frame.ClientBuild)
+		// v12 wire contract: the only authoritative port is
+		// frame.AdvertisePort; hello.Listen carries no truth (host or
+		// port) and must not leak through, even when a legacy / mixed-
+		// network fixture still echoes it. Synthesising from observed
+		// TCP host + AdvertisePort unconditionally guarantees that a
+		// peer behind a NAT port-forward (where the listen port and
+		// advertise port differ) is gossipped under the dialable
+		// advertise_port, never under the legacy listen port. An empty
+		// synthesis result means the observed address is not a
+		// parseable host:port (non-IP transport, malformed wrapper
+		// output) — in that case we skip the announce-learning side-
+		// effects but still fall through to the identity / key
+		// material caches below.
+		if advertised := synthesiseAdvertisedFromObserved(observedAddr, frame.AdvertisePort); advertised != "" {
+			if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(advertised)); ok {
+				s.promotePeerAddress(normalizedAddr)
+				s.rememberPeerType(normalizedAddr, frame.NodeType)
+				s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
+				s.addPeerVersion(normalizedAddr, frame.ClientVersion)
+				s.addPeerBuild(normalizedAddr, frame.ClientBuild)
+			}
 		}
 	}
 	if frame.Address != "" {
@@ -1160,13 +1163,16 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 	s.addKnownBoxSig(frame.Address, frame.BoxSig)
 }
 
-// peerListenAddress extracts the advertised listen address from a hello frame.
-// Returns empty string if the peer does not accept inbound connections.
+// peerListenAddress extracts the legacy advertised listen address from a
+// hello frame. Returns empty string if the peer does not accept inbound
+// connections OR if the peer is following the v12 wire contract that
+// removes Listen from the wire entirely.
 //
-// NOTE: the returned value is the peer's self-reported claim; it must not
-// be used to gossip the peer's address to neighbours. Use
-// observedAnnounceAddressFromHello for the announce path so we broadcast
-// the observed TCP source host combined with the advertised port.
+// NOTE: kept as a test helper for parsing legacy frames (mixed-network
+// fixtures, regression tests for the pre-v12 wire shape). Production
+// code does NOT use this — the announce / gossip path goes through
+// observedAnnounceAddressFromHello, which trusts only the observed TCP
+// host plus the self-reported advertise_port.
 func peerListenAddress(hello protocol.Frame) string {
 	if !listenerEnabledFromFrame(hello) {
 		return ""
@@ -1176,23 +1182,29 @@ func peerListenAddress(hello protocol.Frame) string {
 
 // observedAnnounceAddressFromHello returns the peer address we should gossip
 // to neighbours via announce_peer: observed TCP source host combined with
-// the advertised listen port — falling back to config.DefaultPeerPort when
-// hello.Listen carries a bare host without an explicit port.
+// the self-reported advertise_port. Under the v12 wire contract this is
+// the ONLY truth source — hello.Listen carries no authoritative
+// information, neither host nor port, even when a legacy / mixed-network
+// fixture still echoes it.
 //
 // Trust model:
 //   - host — taken from the observed TCP remote address, because it is the
 //     only host we cryptographically trust (the peer cannot lie about where
 //     packets actually come from without hijacking routing).
-//   - port — taken from hello.Listen if it carries one; otherwise
-//     config.DefaultPeerPort. The TCP source port is an ephemeral NAT
-//     mapping that no neighbour could dial into, so it is never used.
-//     The bare-host fallback matches the add_peer RPC contract
-//     (addPeerFrame applies the same default).
+//   - port — taken from hello.advertise_port (collapsed to
+//     config.DefaultPeerPort on absent / invalid wire value). The TCP
+//     source port is an ephemeral NAT mapping that no neighbour could
+//     dial into, so it is never used. The legacy hello.Listen port is
+//     intentionally ignored: if a peer behind a NAT port-forward sets
+//     listen=":<bind-port>" but advertise_port=":<external-port>", the
+//     announce path must gossip the externally dialable port, never the
+//     internal bind port.
 //
 // Returns ("", false) when:
 //   - the peer disabled its listener (Listener="0");
 //   - the observed address is empty (unregistered ConnID, post-close read);
-//   - hello.Listen is empty / whitespace-only;
+//   - the observed address has no usable host part — synthesis from
+//     observed host + advertise_port cannot proceed without a host;
 //   - normalizePeerAddress rejects the observed host (forbidden range,
 //     self-address, ::/::1 unspecified, etc.).
 //
@@ -1205,20 +1217,37 @@ func (s *Service) observedAnnounceAddressFromHello(observedAddr string, hello pr
 	if strings.TrimSpace(observedAddr) == "" {
 		return "", false
 	}
-	advertised := strings.TrimSpace(hello.Listen)
+	advertised := synthesiseAdvertisedFromObserved(observedAddr, hello.AdvertisePort)
 	if advertised == "" {
 		return "", false
 	}
-	// When hello.Listen carries a bare host without an explicit port,
-	// attach config.DefaultPeerPort so downstream normalization has a
-	// dialable endpoint to work with. Without this fallback a legitimate
-	// peer that advertises its listen host without a port (older clients,
-	// simple configs) would never appear in gossip — the observed IP is
-	// still trusted, we just need a canonical port to pair it with.
-	if _, _, ok := splitHostPort(advertised); !ok {
-		advertised = net.JoinHostPort(advertised, config.DefaultPeerPort)
-	}
 	return s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(advertised))
+}
+
+// synthesiseAdvertisedFromObserved builds a host:port form for the
+// peer's advertised endpoint when hello.Listen is empty (the v12 wire
+// shape). Host is taken from the verified TCP remote so it survives
+// even an attacker that lies on the wire; port is the self-reported
+// advertise_port collapsed to DefaultPeerPort on absent/invalid wire
+// value, matching extractAdvertisePort's contract. Returns an empty
+// string when the observed address is not a host:port pair (non-IP
+// transport, malformed RemoteAddr) — the caller treats that as
+// "cannot synthesise" and bails out without learning.
+func synthesiseAdvertisedFromObserved(observedAddr string, advertisePort domain.PeerPort) string {
+	host := remoteIPFromString(observedAddr)
+	if host == "" || !isIPHost(host) {
+		// remoteIPFromString falls back to the raw input when the
+		// host:port split fails, so a malformed observed address like
+		// "not-a-host" survives the empty check. Reject anything that
+		// is not a parseable IP literal — keying announce / learn
+		// state under "not-a-host:64646" would persist garbage.
+		return ""
+	}
+	port := config.DefaultPeerPort
+	if advertisePort.IsValid() {
+		port = strconv.Itoa(int(advertisePort))
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // announcePeerToSessions sends an announce_peer frame with a single new
@@ -1876,12 +1905,11 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				// shared tryApplySelfIdentityCooldown helper consulted
 				// by every outbound failure hook (onCMDialFailed,
 				// runPeerSession), while `peer-ban` / `blacklisted` go
-				// through the generic advertise-mismatch path.
-				// Collapsing every reason to ErrPeerBanned (what
-				// ErrorFromCode would do) defeats the whole point of
-				// detecting self-loopback on the wire — the dialler
-				// would re-enter the churn loop this notice was
-				// explicitly designed to break.
+				// through the standard peer-ban cooldown path. Collapsing
+				// every reason to ErrPeerBanned (what ErrorFromCode would
+				// do) defeats the whole point of detecting self-loopback
+				// on the wire — the dialler would re-enter the churn loop
+				// this notice was explicitly designed to break.
 				s.handleConnectionNotice(session.address, incoming)
 				return protocol.Frame{}, protocol.NoticeErrorFromFrame(incoming)
 			}
@@ -3797,7 +3825,18 @@ func (s *Service) externalListenAddress() string {
 }
 
 func (s *Service) isSelfAddress(address domain.PeerAddress) bool {
-	if address == domain.PeerAddress(s.cfg.AdvertiseAddress) || address == domain.PeerAddress(s.externalListenAddress()) || address == domain.PeerAddress(s.cfg.ListenAddress) {
+	// Compare against the two stable local self-identifiers:
+	//   - cfg.ListenAddress: what we actually bind on (may be ":port"
+	//     wildcard, in which case the host check below catches it via
+	//     the IP filter);
+	//   - externalListenAddress(): "127.0.0.1:<port>" synthesised from
+	//     ListenAddress for tests / single-host clusters that dial
+	//     loopback.
+	// The legacy cfg.AdvertiseAddress field was removed in the v12
+	// cleanup phase: under the v12 wire contract no peer ever sees a
+	// "configured advertise host" of ours, so a peer dialling our
+	// configured advertise host literally cannot happen any more.
+	if address == domain.PeerAddress(s.externalListenAddress()) || address == domain.PeerAddress(s.cfg.ListenAddress) {
 		return true
 	}
 	host, _, ok := splitHostPort(string(address))
@@ -4071,36 +4110,32 @@ func (s *Service) isForbiddenDialIP(ip net.IP) bool {
 }
 
 // allowLoopbackPeers returns true only when the node is **explicitly**
-// configured to listen or advertise on a loopback interface (e.g.
-// "127.0.0.1:64646"). Wildcard binds like ":64646" are NOT loopback —
-// externalListenAddress() synthesises "127.0.0.1:<port>" for those as a
-// test-dialing convenience, but that does not mean the node intends to
-// operate in a local-dev cluster.
+// configured to listen on a loopback interface (e.g. "127.0.0.1:64646").
+// Wildcard binds like ":64646" are NOT loopback — externalListenAddress()
+// synthesises "127.0.0.1:<port>" for those as a test-dialing convenience,
+// but that does not mean the node intends to operate in a local-dev
+// cluster.
 //
-// Without this distinction, every production node that binds ":port" has
-// allowLoopbackPeers=true, which disables self-detection for 127.0.0.1.
-// Inbound connections from localhost then learn ephemeral loopback
-// addresses as dial candidates, and the ConnectionManager enters a
-// connect→EOF→re-dial storm that pollutes health/peer-list/routing.
+// Without this distinction, every production node that binds ":port"
+// has allowLoopbackPeers=true, which disables self-detection for
+// 127.0.0.1. Inbound connections from localhost then learn ephemeral
+// loopback addresses as dial candidates, and the ConnectionManager
+// enters a connect→EOF→re-dial storm that pollutes health/peer-list/
+// routing.
 func (s *Service) allowLoopbackPeers() bool {
-	for _, address := range []string{s.cfg.AdvertiseAddress, s.cfg.ListenAddress} {
-		host, _, ok := splitHostPort(address)
-		if !ok {
-			continue
-		}
-		ip := net.ParseIP(host)
-		if ip != nil && ip.IsLoopback() {
-			return true
-		}
+	host, _, ok := splitHostPort(s.cfg.ListenAddress)
+	if !ok {
+		return false
 	}
-	return false
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Service) isSelfDialIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	for _, address := range []string{s.cfg.AdvertiseAddress, s.externalListenAddress(), s.cfg.ListenAddress} {
+	for _, address := range []string{s.externalListenAddress(), s.cfg.ListenAddress} {
 		host, _, ok := splitHostPort(address)
 		if !ok {
 			continue

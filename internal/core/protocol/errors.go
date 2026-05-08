@@ -32,13 +32,6 @@ const (
 	ErrCodeRateLimited                = "rate-limited"
 	ErrCodeHelloAfterAuth             = "hello-after-auth"
 	ErrCodeSenderIdentityNotVerified  = "sender-identity-not-verified"
-	// ErrCodeObservedAddressMismatch signals that the advertised listen
-	// address in a peer's hello frame does not match the observed remote
-	// TCP endpoint. Used only inside type="connection_notice" frames with
-	// machine-readable details.observed_address. The responder closes the
-	// connection immediately after sending the notice — welcome is not
-	// issued, auth_session is not expected.
-	ErrCodeObservedAddressMismatch = "observed-address-mismatch"
 
 	// ErrCodePeerBanned is returned by the responder when the inbound peer
 	// is on the local ban list (IP-wide blacklist or per-peer timed ban).
@@ -91,9 +84,6 @@ var (
 	ErrRateLimited                = errors.New(ErrCodeRateLimited)
 	ErrHelloAfterAuth             = errors.New(ErrCodeHelloAfterAuth)
 	ErrSenderIdentityNotVerified  = errors.New(ErrCodeSenderIdentityNotVerified)
-	// ErrObservedAddressMismatch is the sentinel for ErrCodeObservedAddressMismatch.
-	// Callers detect a pre-welcome advertise-address rejection via errors.Is.
-	ErrObservedAddressMismatch = errors.New(ErrCodeObservedAddressMismatch)
 	// ErrPeerBanned is the sentinel for ErrCodePeerBanned. Callers use
 	// errors.Is to distinguish a ban-rejection from other pre-welcome
 	// failures so that the dialler can honour the carried expiration
@@ -167,8 +157,6 @@ func ErrorCode(err error) string {
 		return ErrCodeHelloAfterAuth
 	case errors.Is(err, ErrSenderIdentityNotVerified):
 		return ErrCodeSenderIdentityNotVerified
-	case errors.Is(err, ErrObservedAddressMismatch):
-		return ErrCodeObservedAddressMismatch
 	case errors.Is(err, ErrPeerBanned):
 		return ErrCodePeerBanned
 	case errors.Is(err, ErrSelfIdentity):
@@ -236,8 +224,6 @@ func ErrorFromCode(code string) error {
 		return ErrHelloAfterAuth
 	case ErrCodeSenderIdentityNotVerified:
 		return ErrSenderIdentityNotVerified
-	case ErrCodeObservedAddressMismatch:
-		return ErrObservedAddressMismatch
 	case ErrCodePeerBanned:
 		return ErrPeerBanned
 	case ErrCodeSelfIdentity:
@@ -253,12 +239,13 @@ func ErrorFromCode(code string) error {
 // notice carries different reasons (`peer-ban`, `blacklisted`,
 // `self-identity`) that demand different caller reactions — a
 // self-identity notice MUST route through the 24h self-loopback
-// cooldown, while a generic peer-ban triggers the advertise-mismatch
-// cooldown path. A plain ErrorFromCode(code) lookup collapses all
-// reasons into ErrPeerBanned and strips the discrimination signal, so
-// the dialler would churn against a self-looping endpoint instead of
-// suppressing it for the full window. Non-peer-banned codes fall
-// through to ErrorFromCode unchanged.
+// cooldown, while a generic peer-ban / blacklisted notice triggers
+// the standard peer-ban cooldown path. A plain ErrorFromCode(code)
+// lookup collapses all reasons into ErrPeerBanned and strips the
+// discrimination signal, so the dialler would churn against a
+// self-looping endpoint instead of suppressing it for the full
+// window. Non-peer-banned codes fall through to ErrorFromCode
+// unchanged.
 //
 // Details parse errors degrade to the generic sentinel — a malformed
 // details blob is a wire protocol violation, but the outer code is

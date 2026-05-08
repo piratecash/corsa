@@ -14,7 +14,6 @@ func TestRuntimeExecuteHelp(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Node.ListenAddress = "127.0.0.1:0"
-	cfg.Node.AdvertiseAddress = "127.0.0.1:0"
 	cfg.Node.BootstrapPeers = []string{}
 	cfg.Node.ChatLogDir = t.TempDir()
 	cfg.Node.IdentityPath = filepath.Join(cfg.Node.ChatLogDir, "identity.json")

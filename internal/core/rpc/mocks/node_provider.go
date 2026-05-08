@@ -17,8 +17,7 @@ import (
 func NewMockNodeProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
-},
-) *MockNodeProvider {
+}) *MockNodeProvider {
 	mock := &MockNodeProvider{}
 	mock.Mock.Test(t)
 

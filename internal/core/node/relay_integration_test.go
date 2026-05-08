@@ -62,26 +62,23 @@ func TestRelayChain4NodesDMDelivery(t *testing.T) {
 	// Chain: A → B → C (each bootstraps to the next).
 	// All three are full nodes so they can relay.
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addrA,
-		AdvertiseAddress: normalizeAddress(addrA),
-		BootstrapPeers:   []string{normalizeAddress(addrB)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrA,
+		BootstrapPeers: []string{normalizeAddress(addrB)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addrB,
-		AdvertiseAddress: normalizeAddress(addrB),
-		BootstrapPeers:   []string{normalizeAddress(addrA), normalizeAddress(addrC)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrB,
+		BootstrapPeers: []string{normalizeAddress(addrA), normalizeAddress(addrC)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopB()
 
 	nodeC, stopC := startTestNode(t, config.Node{
-		ListenAddress:    addrC,
-		AdvertiseAddress: normalizeAddress(addrC),
-		BootstrapPeers:   []string{normalizeAddress(addrB)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrC,
+		BootstrapPeers: []string{normalizeAddress(addrB)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopC()
 
@@ -218,10 +215,9 @@ func TestMixedNetworkLegacyNodeReceivesViaGossip(t *testing.T) {
 
 	// Full node with relay capability.
 	nodeFull, stopFull := startTestNode(t, config.Node{
-		ListenAddress:    addrFull,
-		AdvertiseAddress: normalizeAddress(addrFull),
-		BootstrapPeers:   []string{normalizeAddress(addrLegacy)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrFull,
+		BootstrapPeers: []string{normalizeAddress(addrLegacy)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -229,10 +225,9 @@ func TestMixedNetworkLegacyNodeReceivesViaGossip(t *testing.T) {
 	// localCapabilities), but we verify that gossip (not relay) is the
 	// delivery mechanism when the recipient happens to be local.
 	nodeLegacy, stopLegacy := startTestNode(t, config.Node{
-		ListenAddress:    addrLegacy,
-		AdvertiseAddress: normalizeAddress(addrLegacy),
-		BootstrapPeers:   []string{normalizeAddress(addrFull)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrLegacy,
+		BootstrapPeers: []string{normalizeAddress(addrFull)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopLegacy()
 
@@ -278,20 +273,18 @@ func TestMixedVersionNewToOldFallsBackToGossip(t *testing.T) {
 
 	// "New" full node with relay.
 	nodeNew, stopNew := startTestNode(t, config.Node{
-		ListenAddress:    addrNew,
-		AdvertiseAddress: normalizeAddress(addrNew),
-		BootstrapPeers:   []string{normalizeAddress(addrOld)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrNew,
+		BootstrapPeers: []string{normalizeAddress(addrOld)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopNew()
 
 	// "Old" full node (still has relay capability in tests, but we
 	// use a global topic to test pure gossip delivery without DM encryption).
 	nodeOld, stopOld := startTestNode(t, config.Node{
-		ListenAddress:    addrOld,
-		AdvertiseAddress: normalizeAddress(addrOld),
-		BootstrapPeers:   []string{normalizeAddress(addrNew)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrOld,
+		BootstrapPeers: []string{normalizeAddress(addrNew)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopOld()
 
@@ -332,18 +325,16 @@ func TestMixedVersionOldToNewContinuesToWork(t *testing.T) {
 	addrNew := freeAddress(t)
 
 	nodeOld, stopOld := startTestNode(t, config.Node{
-		ListenAddress:    addrOld,
-		AdvertiseAddress: normalizeAddress(addrOld),
-		BootstrapPeers:   []string{normalizeAddress(addrNew)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrOld,
+		BootstrapPeers: []string{normalizeAddress(addrNew)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopOld()
 
 	nodeNew, stopNew := startTestNode(t, config.Node{
-		ListenAddress:    addrNew,
-		AdvertiseAddress: normalizeAddress(addrNew),
-		BootstrapPeers:   []string{normalizeAddress(addrOld)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrNew,
+		BootstrapPeers: []string{normalizeAddress(addrOld)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopNew()
 
@@ -498,18 +489,16 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 
 	// Two full nodes: A → B.
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addrA,
-		AdvertiseAddress: normalizeAddress(addrA),
-		BootstrapPeers:   []string{normalizeAddress(addrB)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrA,
+		BootstrapPeers: []string{normalizeAddress(addrB)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addrB,
-		AdvertiseAddress: normalizeAddress(addrB),
-		BootstrapPeers:   []string{normalizeAddress(addrA)},
-		Type:             config.NodeTypeFull,
+		ListenAddress:  addrB,
+		BootstrapPeers: []string{normalizeAddress(addrA)},
+		Type:           config.NodeTypeFull,
 	})
 	defer stopB()
 

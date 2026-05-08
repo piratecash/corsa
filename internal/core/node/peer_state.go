@@ -87,24 +87,11 @@ type peerEntry struct {
 	TrustedAdvertisePort string `json:"trusted_advertise_port,omitempty"`
 
 	// LastObservedIP / LastObservedAt capture the most recent observed IP
-	// hint carried by a mismatch notice or welcome.observed_address for
-	// this peer. These are a single-value snapshot — the runtime history
-	// of size observedIPHistoryMaxSize does not fold into this field.
+	// hint applied through applyAdvertiseValidationResultLocked for this
+	// peer. These are a single-value snapshot — the runtime history of
+	// size observedIPHistoryMaxSize does not fold into this field.
 	LastObservedIP domain.PeerIP `json:"last_observed_ip,omitempty"`
 	LastObservedAt *time.Time    `json:"last_observed_at,omitempty"`
-
-	// AdvertiseMismatchCount counts distinct mismatch events and grows
-	// monotonically across sessions. Used by ranking/degradation logic.
-	AdvertiseMismatchCount int `json:"advertise_mismatch_count,omitempty"`
-
-	// ForgivableMisadvertisePoints accumulates penalty credit reserved
-	// for misadvertise ban points (banIncrementAdvertiseMismatch). Only
-	// this bucket can be repaid by a subsequent successful auth, and
-	// MisadvertisePointsRepaid tracks how much was already forgiven.
-	// Together they enforce the invariant "a repay cannot remove more
-	// than was charged for misadvertise".
-	ForgivableMisadvertisePoints int `json:"forgivable_misadvertise_points,omitempty"`
-	MisadvertisePointsRepaid     int `json:"misadvertise_points_repaid,omitempty"`
 }
 
 // bannedIPEntry is the on-disk representation of an IP-wide ban.
@@ -160,13 +147,13 @@ const (
 	// first observation (no accumulation) because a matching identity is
 	// binary evidence of self-loopback — no benefit to letting the dial
 	// loop retry the same endpoint.
-	peerBanSelfIdentity = 24 * time.Hour
-	peerScoreMax                 = 100
-	peerScoreMin                 = -50
-	maxPersistedPeers            = 500
-	peerStateSaveMinutes         = 5                // minimum interval between periodic saves
-	peerCooldownBase             = 30 * time.Second // base cooldown after first failure
-	peerCooldownMax              = 30 * time.Minute // cap on exponential backoff
+	peerBanSelfIdentity  = 24 * time.Hour
+	peerScoreMax         = 100
+	peerScoreMin         = -50
+	maxPersistedPeers    = 500
+	peerStateSaveMinutes = 5                // minimum interval between periodic saves
+	peerCooldownBase     = 30 * time.Second // base cooldown after first failure
+	peerCooldownMax      = 30 * time.Minute // cap on exponential backoff
 
 	// Eviction thresholds.
 	// A peer is evictable when its score drops below the threshold AND it has
@@ -194,13 +181,6 @@ const (
 	// ping-ponging between two misadvertising peers. Runtime only — it
 	// does NOT get serialised into LastObservedIP / LastObservedAt.
 	observedIPHistoryMaxSize = 5
-
-	// banIncrementAdvertiseMismatch is the soft penalty applied to an
-	// inbound peer that fails the observed/advertised IP match. Kept
-	// intentionally at 5% of banThreshold and half of the invalid-signature
-	// penalty — a repeatedly misadvertising peer should drift toward ban,
-	// but a single honest mistake must not ban immediately.
-	banIncrementAdvertiseMismatch = 50
 
 	// Orphaned health entries — inbound-only peers not present in s.peers.
 	// These accumulate from ephemeral inbound connections (e.g.

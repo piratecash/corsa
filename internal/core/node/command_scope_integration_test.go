@@ -100,11 +100,10 @@ func newScopedTestService(t *testing.T) (*Service, func()) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: addr,
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addr,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		Type:           domain.NodeTypeFull,
 	}, id, nil)
 	svc.disableRateLimiting = true
 

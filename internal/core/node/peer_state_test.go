@@ -132,6 +132,116 @@ func TestLoadPeerStateHandlesNullPeers(t *testing.T) {
 	}
 }
 
+// TestLoadPeerStateDropsLegacyV12CleanupFields pins the cleanup-migration
+// contract for the v12 advertise-address phase 2 cleanup: a pre-v12
+// peers.json that still carries the removed peerEntry fields
+// (advertise_mismatch_count, forgivable_misadvertise_points,
+// misadvertise_points_repaid) must load without error and the next save
+// must drop those keys silently. The migration is implemented as
+// "encoding/json ignores unknown keys on Unmarshal + omitempty drops
+// the absent struct field on Marshal", so no explicit upgrade code is
+// required, but the contract is a guarantee for operators rolling
+// forward and must not regress.
+func TestLoadPeerStateDropsLegacyV12CleanupFields(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "peers.json")
+
+	// Pre-v12 layout: known peerEntry fields plus the three legacy
+	// keys that were removed in the v12 cleanup phase. Hand-rolled
+	// JSON so the test does not depend on a struct literal that
+	// matches the new shape.
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	legacyJSON := `{
+		"version": 2,
+		"updated_at": "` + now + `",
+		"peers": [
+			{
+				"address": "203.0.113.50:64646",
+				"score": 10,
+				"source": "peer_exchange",
+				"announce_state": "announceable",
+				"trusted_advertise_ip": "203.0.113.50",
+				"trusted_advertise_source": "inbound_confirmed",
+				"trusted_advertise_port": "64646",
+				"advertise_mismatch_count": 7,
+				"forgivable_misadvertise_points": 250,
+				"misadvertise_points_repaid": 100,
+				"unrecognised_extension_key": "should also pass through silently"
+			}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatalf("write legacy peers.json: %v", err)
+	}
+
+	state, err := loadPeerState(path)
+	if err != nil {
+		t.Fatalf("loadPeerState must accept pre-v12 layout silently, got %v", err)
+	}
+	if len(state.Peers) != 1 {
+		t.Fatalf("expected one peer to survive load, got %d", len(state.Peers))
+	}
+	pm := state.Peers[0]
+	if pm.Address != "203.0.113.50:64646" {
+		t.Fatalf("address: got %q want %q", pm.Address, "203.0.113.50:64646")
+	}
+	if pm.Score != 10 {
+		t.Fatalf("score: got %d want 10", pm.Score)
+	}
+	if pm.AnnounceState != announceStateAnnounceable {
+		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
+	}
+	if pm.TrustedAdvertiseIP != "203.0.113.50" {
+		t.Fatalf("trusted_advertise_ip: got %q want %q", pm.TrustedAdvertiseIP, "203.0.113.50")
+	}
+	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceInbound {
+		t.Fatalf("trusted_advertise_source: got %q want %q", pm.TrustedAdvertiseSource, trustedAdvertiseSourceInbound)
+	}
+	if pm.TrustedAdvertisePort != "64646" {
+		t.Fatalf("trusted_advertise_port: got %q want %q", pm.TrustedAdvertisePort, "64646")
+	}
+
+	// Round-trip: save the loaded state and assert the rewritten file
+	// contains none of the removed legacy keys. omitempty + the absent
+	// struct field together drop them silently — without an explicit
+	// migration step.
+	rewrittenPath := filepath.Join(t.TempDir(), "peers-rewritten.json")
+	if err := savePeerState(rewrittenPath, state); err != nil {
+		t.Fatalf("savePeerState: %v", err)
+	}
+	rewritten, err := os.ReadFile(rewrittenPath)
+	if err != nil {
+		t.Fatalf("read rewritten peers.json: %v", err)
+	}
+	deprecatedKeys := []string{
+		`"advertise_mismatch_count"`,
+		`"forgivable_misadvertise_points"`,
+		`"misadvertise_points_repaid"`,
+	}
+	for _, key := range deprecatedKeys {
+		if bytesContains(rewritten, []byte(key)) {
+			t.Fatalf("rewritten peers.json must not carry %s, got %s", key, rewritten)
+		}
+	}
+
+	// Sanity: the surviving keys must still be present after the
+	// round-trip so the test fails on a regression that drops too
+	// much rather than too little.
+	survivingKeys := []string{
+		`"address"`,
+		`"announce_state"`,
+		`"trusted_advertise_ip"`,
+		`"trusted_advertise_source"`,
+		`"trusted_advertise_port"`,
+	}
+	for _, key := range survivingKeys {
+		if !bytesContains(rewritten, []byte(key)) {
+			t.Fatalf("rewritten peers.json must still carry %s, got %s", key, rewritten)
+		}
+	}
+}
+
 func TestSavePeerStateNoopForEmptyPath(t *testing.T) {
 	t.Parallel()
 

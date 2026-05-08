@@ -45,9 +45,8 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	address := freeAddress(t)
 	ts := time.Now().UTC().Format(time.RFC3339)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -59,8 +58,16 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome: %#v", got)
 	}
-	if got := frames[0]; got.Listener != "1" || got.Listen != normalizeAddress(address) {
+	// v12 wire contract: welcome.Listen is empty (host is no longer
+	// carried on the wire — neighbours synthesise the dialable peer
+	// address from the observed TCP source host plus AdvertisePort).
+	// The listener flag still signals "this peer accepts inbound"
+	// and AdvertisePort carries the listening port.
+	if got := frames[0]; got.Listener != "1" || got.Listen != "" {
 		t.Fatalf("unexpected welcome listener fields: %#v", got)
+	}
+	if got := frames[0]; !got.AdvertisePort.IsValid() {
+		t.Fatalf("welcome.advertise_port must be populated under the v12 contract, got %d", got.AdvertisePort)
 	}
 
 	// Query local state via HandleLocalFrame (no peers expected initially).
@@ -94,18 +101,16 @@ func TestClientWithoutListenerAnnouncesIdentityButNotDialAddress(t *testing.T) {
 	addressClient := freeAddress(t)
 
 	fullNode, stopFull := startTestNode(t, config.Node{
-		ListenAddress:    addressFull,
-		AdvertiseAddress: normalizeAddress(addressFull),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressFull,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopFull()
 
 	clientNode, stopClient := startTestNode(t, config.Node{
-		ListenAddress:    addressClient,
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             domain.NodeTypeClient,
+		ListenAddress:  addressClient,
+		BootstrapPeers: []string{normalizeAddress(addressFull)},
+		Type:           domain.NodeTypeClient,
 	})
 	defer stopClient()
 
@@ -133,9 +138,8 @@ func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -177,9 +181,8 @@ func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -278,13 +281,100 @@ func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
 	}
 }
 
+// TestInboundIncompatibleProtocolKeyedByAdvertisePort verifies the v12-correct
+// health-key shape on the incompatible-protocol inbound path: peer version
+// metadata MUST be stored under "<observed_TCP_IP>:<advertise_port>", not
+// under "<observed_TCP_IP>:<DefaultPeerPort>" or under the Ed25519 identity.
+//
+// Regression target: prior to the fix this branch built the key from
+// frame.Listen / frame.Address through sanitizeInboundAddress, so under the
+// v12 wire shape (Listen empty, Address = identity not host:port) every
+// peer collapsed onto "<observed_IP>:64646" — the per-peer version-gated
+// ban would aim at the wrong peer record on any node running with a
+// non-default advertise_port.
+//
+// We feed an incompatible hello carrying a non-default AdvertisePort and
+// then read svc.peerVersions: the right key must be populated, the wrong
+// one must stay empty. Reading peerVersions takes peerMu (canonical order
+// observed elsewhere in this file) so a concurrent map writer cannot race
+// with the assertion.
+func TestInboundIncompatibleProtocolKeyedByAdvertisePort(t *testing.T) {
+	t.Parallel()
+
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+	})
+	defer stop()
+
+	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	const advertisePort = domain.PeerPort(64648)
+	const wireClientVersion = "0.99-incompat"
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type:                   "hello",
+		Version:                0,
+		MinimumProtocolVersion: 0,
+		Client:                 "test",
+		ClientVersion:          wireClientVersion,
+		AdvertisePort:          advertisePort,
+	})
+
+	reader := bufio.NewReader(conn)
+	errFrame := readJSONTestFrame(t, reader)
+	if errFrame.Type != "error" || errFrame.Code != protocol.ErrCodeIncompatibleProtocol {
+		t.Fatalf("expected incompatible-protocol error frame, got: %#v", errFrame)
+	}
+	// Drain the connection_notice + EOF so the server-side goroutine has
+	// flushed peerVersions before we sample it.
+	noticeFrame := readJSONTestFrame(t, reader)
+	if noticeFrame.Type != protocol.FrameTypeConnectionNotice {
+		t.Fatalf("expected connection_notice, got: %#v", noticeFrame)
+	}
+	if _, readErr := reader.ReadByte(); readErr == nil {
+		t.Fatal("expected server to close after notice")
+	}
+	_ = conn.Close()
+
+	// The ephemeral source port the kernel picked for our outbound dial is
+	// not predictable, but the peerAddress derivation always uses the
+	// verified TCP source IP (127.0.0.1 here) plus the self-reported
+	// AdvertisePort. Build both candidate keys and assert exactly one
+	// of them is populated.
+	wantKey := domain.PeerAddress(net.JoinHostPort("127.0.0.1", strconv.Itoa(int(advertisePort))))
+	wrongKey := domain.PeerAddress(net.JoinHostPort("127.0.0.1", config.DefaultPeerPort))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		svc.peerMu.RLock()
+		got := svc.peerVersions[wantKey]
+		wrong := svc.peerVersions[wrongKey]
+		svc.peerMu.RUnlock()
+
+		if got == wireClientVersion && wrong == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peerVersions[%q] = %q, peerVersions[%q] = %q; want %q at %q only",
+				wantKey, got, wrongKey, wrong, wireClientVersion, wantKey)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestV2NodeHandshakeRequiresSignedAuth(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
+		ListenAddress: address,
 	})
 	defer stop()
 
@@ -338,8 +428,7 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
+		ListenAddress: address,
 	})
 	defer stop()
 
@@ -429,9 +518,8 @@ func TestPeerDialCandidatesRespectsClientOutgoingLimit(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
+		ListenAddress:  "127.0.0.1:64646",
+		PeersStatePath: filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers: []string{
 			"10.0.0.1:64646",
 			"10.0.0.2:64646",
@@ -471,7 +559,6 @@ func TestPeerDialCandidatesUsesDefaultFullOutgoingLimit(t *testing.T) {
 
 	svc := NewService(config.Node{
 		ListenAddress:     "127.0.0.1:64646",
-		AdvertiseAddress:  "127.0.0.1:64646",
 		PeersStatePath:    filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers:    bootstrap,
 		Type:              domain.NodeTypeFull,
@@ -493,9 +580,8 @@ func TestNormalizePeerAddressPrefersObservedHostAndDefaultPortForPrivateAdvertis
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	got, ok := svc.normalizePeerAddress(domain.PeerAddress("198.51.100.2:50702"), domain.PeerAddress("127.0.0.1:64647"))
@@ -516,9 +602,8 @@ func TestNormalizePeerAddressPrefersObservedHostWhenAdvertisedHostDiffers(t *tes
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	got, ok := svc.normalizePeerAddress(domain.PeerAddress("198.51.100.2:50702"), domain.PeerAddress("198.51.100.3:64647"))
@@ -543,9 +628,8 @@ func TestPeerDialCandidatesSkipForbiddenPrivateRangesAndAddDefaultPortFallback(t
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
+		ListenAddress:  ":64646",
+		PeersStatePath: filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers: []string{
 			"10.0.0.1:64647",     // RFC1918 10/8 — forbidden
 			"127.0.0.1:64647",    // loopback — forbidden
@@ -577,10 +661,16 @@ func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 
+	// Under the v12 cleanup baseline cfg.Node.AdvertiseAddress is gone
+	// and the only source of self-IP for the dial filter is the bind
+	// host in cfg.ListenAddress. Operators that need to recognise their
+	// own public IP (so the dialler does not loop back to itself
+	// through a NAT hairpin) must bind to that public IP explicitly
+	// rather than to the wildcard ":port" form. This test exercises
+	// that deployment shape.
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
+		ListenAddress:  "198.51.100.1:64646",
+		PeersStatePath: filepath.Join(t.TempDir(), "peers.json"),
 		BootstrapPeers: []string{
 			"198.51.100.1:64647",
 			"198.51.100.2:64647",
@@ -602,6 +692,12 @@ func TestPeerDialCandidatesSkipsOwnPublicIP(t *testing.T) {
 
 // TestAllowLoopbackPeersOnlyExplicitLoopback verifies that wildcard binds
 // (":port") do NOT enable loopback peer mode — only explicit "127.x.y.z:port".
+//
+// Under the v12 cleanup baseline cfg.Node.AdvertiseAddress is gone, so
+// the only signal that flips allowLoopbackPeers is the bind host in
+// cfg.ListenAddress: ":port" / "0.0.0.0:port" stay false, "127.x.y.z:port"
+// flips true. The legacy "loopback advertise" subtest no longer applies
+// because there is no separate advertise host config any more.
 func TestAllowLoopbackPeersOnlyExplicitLoopback(t *testing.T) {
 	t.Parallel()
 
@@ -613,23 +709,20 @@ func TestAllowLoopbackPeersOnlyExplicitLoopback(t *testing.T) {
 	tests := []struct {
 		name   string
 		listen string
-		advert string
 		want   bool
 	}{
-		{"wildcard bind", ":64646", "", false},
-		{"0.0.0.0 bind", "0.0.0.0:64646", "", false},
-		{"explicit loopback bind", "127.0.0.1:64646", "", true},
-		{"loopback advertise", ":64646", "127.0.0.1:64646", true},
-		{"public advertise", ":64646", "198.51.100.1:64646", false},
+		{"wildcard bind", ":64646", false},
+		{"0.0.0.0 bind", "0.0.0.0:64646", false},
+		{"explicit loopback bind", "127.0.0.1:64646", true},
+		{"public bind", "198.51.100.1:64646", false},
 	}
 
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			svc := NewService(config.Node{
-				ListenAddress:    tc.listen,
-				AdvertiseAddress: tc.advert,
-				Type:             domain.NodeTypeFull,
+				ListenAddress: tc.listen,
+				Type:          domain.NodeTypeFull,
 			}, id, nil)
 			got := svc.allowLoopbackPeers()
 			if got != tc.want {
@@ -684,9 +777,8 @@ func TestNormalizePeerAddressRejectsLoopbackForWildcardBind(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	// Inbound from 127.0.0.1 with self-reported listen=127.0.0.1:57461.
@@ -727,20 +819,18 @@ func TestClientNodeDoesNotForwardMeshTraffic(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
-		Type:             domain.NodeTypeClient,
-		ListenerEnabled:  true,
-		ListenerSet:      true,
+		ListenAddress:   addressA,
+		BootstrapPeers:  []string{normalizeAddress(addressB)},
+		Type:            domain.NodeTypeClient,
+		ListenerEnabled: true,
+		ListenerSet:     true,
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopB()
 
@@ -769,9 +859,8 @@ func TestDuplicateSendMessageIsDeduplicated(t *testing.T) {
 	address := freeAddress(t)
 	ts := time.Now().UTC().Format(time.RFC3339)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -794,9 +883,8 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -870,16 +958,14 @@ func TestFetchPeerHealthShowsEstablishedSession(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	_, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -912,16 +998,14 @@ func TestPeerHealthIncludesConnID(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	_, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -947,16 +1031,14 @@ func TestPeerHealthRetainsClientBuild(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	_, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1010,16 +1092,14 @@ func TestPeerHealthStatesAreProtocolValid(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	_, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1045,16 +1125,14 @@ func TestNetworkStatsIncludesTrafficAndKnownPeers(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	_, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1112,8 +1190,7 @@ func TestUnauthenticatedInboundTrafficNotAttributed(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
+		ListenAddress: address,
 	})
 	defer stop()
 
@@ -1191,8 +1268,7 @@ func TestUnauthenticatedPingDoesNotCreateHealth(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
+		ListenAddress: address,
 	})
 	defer stop()
 
@@ -1272,8 +1348,7 @@ func TestKnownPeersIncludesNonListenerClients(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
+		ListenAddress: address,
 	})
 	defer stop()
 
@@ -1363,9 +1438,8 @@ func TestQueuedMeshMessageFlushesAfterPeerReconnect(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
@@ -1376,9 +1450,8 @@ func TestQueuedMeshMessageFlushesAfterPeerReconnect(t *testing.T) {
 	}
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1393,7 +1466,7 @@ func TestRoutingTargetsPreferBestHealthySessions(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		cfg:       config.Node{ListenAddress: "self:64646"},
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
@@ -1432,7 +1505,7 @@ func TestRoutingTargetsIncludeNonSessionPeers(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		cfg:       config.Node{ListenAddress: "self:64646"},
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
@@ -1473,7 +1546,7 @@ func TestRoutingTargetsSessionOnlyWhenAllPeersHaveSessions(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		cfg:       config.Node{ListenAddress: "self:64646"},
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
@@ -1503,7 +1576,7 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		cfg:       config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		cfg:       config.Node{ListenAddress: "self:64646"},
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
@@ -1545,7 +1618,7 @@ func TestRoutingTargetsAllowUnknownPeerType(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		cfg:      config.Node{AdvertiseAddress: "self:64646", ListenAddress: ":64646"},
+		cfg:      config.Node{ListenAddress: "self:64646"},
 		sessions: map[domain.PeerAddress]*peerSession{},
 		health:   map[domain.PeerAddress]*peerHealth{},
 	}
@@ -1573,16 +1646,14 @@ func TestMeshMessagePropagation(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1619,16 +1690,14 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1733,20 +1802,18 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             domain.NodeTypeClient,
-		ListenerEnabled:  true,
-		ListenerSet:      true,
+		ListenAddress:   addressB,
+		BootstrapPeers:  []string{normalizeAddress(addressA)},
+		Type:            domain.NodeTypeClient,
+		ListenerEnabled: true,
+		ListenerSet:     true,
 	})
 	defer stopB()
 
@@ -1797,16 +1864,14 @@ func TestFetchTrustedContactsDoesNotIncludeNetworkDiscoveredContacts(t *testing.
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1855,16 +1920,14 @@ func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -1897,10 +1960,9 @@ func TestNodeRejectsMessageOutsideAllowedClockDrift(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		MaxClockDrift:    10 * time.Minute,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		MaxClockDrift:  10 * time.Minute,
 	})
 	defer stop()
 
@@ -1916,10 +1978,9 @@ func TestImportMessageAllowsHistoricalTimestamp(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		MaxClockDrift:    10 * time.Minute,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		MaxClockDrift:  10 * time.Minute,
 	})
 	defer stop()
 
@@ -1954,10 +2015,9 @@ func TestDirectMessageAllowsHistoricalTimestampWithoutTTL(t *testing.T) {
 	}
 
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		MaxClockDrift:    10 * time.Minute,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		MaxClockDrift:  10 * time.Minute,
 	})
 	defer stop()
 
@@ -1990,10 +2050,9 @@ func TestDirectMessageRejectsExpiredTTL(t *testing.T) {
 	}
 
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		MaxClockDrift:    10 * time.Minute,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		MaxClockDrift:  10 * time.Minute,
 	})
 	defer stop()
 
@@ -2021,9 +2080,8 @@ func TestAutoDeleteTTLMessageExpiresFromLogAndInbox(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -2070,16 +2128,14 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 	addressB := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
 	})
 	defer stopA()
 
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
 	})
 	defer stopB()
 
@@ -2134,46 +2190,40 @@ func TestGazetaNoticePropagatesAndDecryptsOnlyForRecipient(t *testing.T) {
 	}
 }
 
-// deriveTestAdvertisePort pins cfg.AdvertisePort to the port component of
-// cfg.AdvertiseAddress (or cfg.ListenAddress as a last resort) when the
-// caller has not set it explicitly. Production v11 resolution goes
-// CORSA_ADVERTISE_PORT → DefaultPeerPort and intentionally ignores the
-// deprecated port baked into CORSA_ADVERTISE_ADDRESS; that is correct
-// for operators and the strict RFC contract. Test fixtures, however,
-// allocate ephemeral ports (freeAddress → net.Listen 127.0.0.1:0) and
-// put that "host:ephemeral_port" straight into cfg.AdvertiseAddress
-// without a matching cfg.AdvertisePort — applying the production rule
-// would silently rewrite the advertised endpoint to
-// 127.0.0.1:DefaultPeerPort and every inbound sanitizeInboundAddress
-// would then key health / routing state under a port nobody is listening
-// on. Deriving AdvertisePort from the test's own listener address keeps
-// the fixture honest while leaving the strict v11 contract unchanged
-// for real operators.
+// deriveTestAdvertisePort pins cfg.AdvertisePort to the port component
+// of cfg.ListenAddress when the caller has not set it explicitly.
+// Production resolution goes CORSA_ADVERTISE_PORT → DefaultPeerPort,
+// which is correct for operators and the strict wire contract. Test
+// fixtures, however, allocate ephemeral ports (freeAddress → net.Listen
+// 127.0.0.1:0) and put that "host:ephemeral_port" straight into
+// cfg.ListenAddress without a matching cfg.AdvertisePort — applying the
+// production rule would silently rewrite the advertised endpoint to
+// 127.0.0.1:DefaultPeerPort and every inbound peerAddressFromInbound
+// would then key health / routing state under a port nobody is
+// listening on. Deriving AdvertisePort from the test's own listener
+// address keeps the fixture honest while leaving the strict contract
+// unchanged for real operators.
 func deriveTestAdvertisePort(cfg config.Node) config.Node {
 	if cfg.AdvertisePort != nil {
 		return cfg
 	}
-	candidates := []string{cfg.AdvertiseAddress, cfg.ListenAddress}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
-		}
-		_, portStr, err := net.SplitHostPort(candidate)
-		if err != nil || portStr == "" || portStr == "0" {
-			continue
-		}
-		portInt, err := strconv.Atoi(portStr)
-		if err != nil {
-			continue
-		}
-		port := domain.PeerPort(portInt)
-		if !port.IsValid() {
-			continue
-		}
-		cfg.AdvertisePort = &port
+	candidate := strings.TrimSpace(cfg.ListenAddress)
+	if candidate == "" {
 		return cfg
 	}
+	_, portStr, err := net.SplitHostPort(candidate)
+	if err != nil || portStr == "" || portStr == "0" {
+		return cfg
+	}
+	portInt, err := strconv.Atoi(portStr)
+	if err != nil {
+		return cfg
+	}
+	port := domain.PeerPort(portInt)
+	if !port.IsValid() {
+		return cfg
+	}
+	cfg.AdvertisePort = &port
 	return cfg
 }
 
@@ -2296,10 +2346,9 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	}
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopA()
 
@@ -2324,10 +2373,9 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	time.Sleep(2500 * time.Millisecond)
 
 	nodeB, stopB := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
+		Type:           domain.NodeTypeFull,
 	}, idB)
 	defer stopB()
 
@@ -2351,10 +2399,9 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 	}
 
 	fullNode, stopFull := startTestNode(t, config.Node{
-		ListenAddress:    addressFull,
-		AdvertiseAddress: normalizeAddress(addressFull),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressFull,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -2377,10 +2424,9 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 	}
 
 	clientNode, stopClient := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    addressClient,
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             domain.NodeTypeClient,
+		ListenAddress:  addressClient,
+		BootstrapPeers: []string{normalizeAddress(addressFull)},
+		Type:           domain.NodeTypeClient,
 	}, idClient)
 	defer stopClient()
 
@@ -2402,9 +2448,8 @@ func TestV2AckDeleteClearsReceiptBacklog(t *testing.T) {
 	}
 
 	fullNode, stopFull := startTestNode(t, config.Node{
-		ListenAddress:    addressFull,
-		AdvertiseAddress: normalizeAddress(addressFull),
-		Type:             domain.NodeTypeFull,
+		ListenAddress: addressFull,
+		Type:          domain.NodeTypeFull,
 	})
 	defer stopFull()
 
@@ -2420,10 +2465,9 @@ func TestV2AckDeleteClearsReceiptBacklog(t *testing.T) {
 	}
 
 	clientNode, stopClient := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    addressClient,
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             domain.NodeTypeClient,
+		ListenAddress:  addressClient,
+		BootstrapPeers: []string{normalizeAddress(addressFull)},
+		Type:           domain.NodeTypeClient,
 	}, idClient)
 	defer stopClient()
 
@@ -2449,18 +2493,16 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	}
 
 	fullNode, stopFull := startTestNode(t, config.Node{
-		ListenAddress:    addressFull,
-		AdvertiseAddress: normalizeAddress(addressFull),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressFull,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopFull()
 
 	senderNode, stopSender := startTestNode(t, config.Node{
-		ListenAddress:    addressSender,
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             domain.NodeTypeClient,
+		ListenAddress:  addressSender,
+		BootstrapPeers: []string{normalizeAddress(addressFull)},
+		Type:           domain.NodeTypeClient,
 	})
 	defer stopSender()
 
@@ -2529,10 +2571,9 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	})
 
 	recipientNode, stopRecipient := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    addressRecipient,
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             domain.NodeTypeClient,
+		ListenAddress:  addressRecipient,
+		BootstrapPeers: []string{normalizeAddress(addressFull)},
+		Type:           domain.NodeTypeClient,
 	}, idRecipient)
 	defer stopRecipient()
 
@@ -2580,18 +2621,16 @@ func TestRelayMessageDoesNotStallGossipDelivery(t *testing.T) {
 	}
 
 	fullNode, stopFull := startTestNode(t, config.Node{
-		ListenAddress:    addressFull,
-		AdvertiseAddress: normalizeAddress(addressFull),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressFull,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopFull()
 
 	senderNode, stopSender := startTestNode(t, config.Node{
-		ListenAddress:    addressSender,
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{normalizeAddress(addressFull)},
-		Type:             domain.NodeTypeClient,
+		ListenAddress:  addressSender,
+		BootstrapPeers: []string{normalizeAddress(addressFull)},
+		Type:           domain.NodeTypeClient,
 	})
 	defer stopSender()
 
@@ -2655,11 +2694,10 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 
 	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  "127.0.0.1:64646",
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
 	createdAt := time.Now().UTC().Truncate(time.Second)
@@ -2708,11 +2746,10 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 
 	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  "127.0.0.1:64646",
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
 	frame := protocol.Frame{
@@ -2784,9 +2821,8 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: "127.0.0.1:64646",
+		Type:          domain.NodeTypeFull,
 	}, recipientID, nil)
 
 	senderID, err := identity.Generate()
@@ -2843,11 +2879,10 @@ func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
 	}
 
 	cfg := config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		Type:             domain.NodeTypeFull,
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		ListenAddress:  "127.0.0.1:64646",
+		Type:           domain.NodeTypeFull,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}
 
 	svc := NewService(cfg, id, nil)
@@ -2928,9 +2963,8 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 	tempDir := t.TempDir()
 
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		ListenAddress:  "127.0.0.1:64646",
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}, id, nil)
 
 	queuedAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
@@ -3016,9 +3050,8 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 	tempDir := t.TempDir()
 
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		ListenAddress:  "127.0.0.1:64646",
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}, id, nil)
 
 	address := domain.PeerAddress("127.0.0.1:65001")
@@ -3069,10 +3102,9 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		ListenAddress:  "127.0.0.1:64646",
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}, id, nil)
 
 	receipt := protocol.DeliveryReceipt{
@@ -3115,11 +3147,10 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  "127.0.0.1:64646",
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
 	receipt := protocol.DeliveryReceipt{
@@ -3310,9 +3341,8 @@ func TestNormalizePeerAddressAcceptsValidV3Onion(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	// 56 base32 chars = valid Tor v3.
@@ -3336,9 +3366,8 @@ func TestNormalizePeerAddressRejectsShortOnion(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	// "junk.onion" is not a valid 16/56 base32 host.
@@ -3361,19 +3390,17 @@ func TestTwoNodesPeerExchangePersistedOnShutdown(t *testing.T) {
 	peersPathA := filepath.Join(dir, "peers-a.json")
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
-		PeersStatePath:   peersPathA,
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
+		PeersStatePath: peersPathA,
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopA()
 
 	_, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
+		Type:           domain.NodeTypeFull,
 	})
 
 	// Wait until A discovers B via peer exchange.
@@ -3425,11 +3452,10 @@ func TestBootstrapLoopFlushesOnShutdown(t *testing.T) {
 	address := freeAddress(t)
 
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		PeersStatePath:   peersPath,
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646"},
+		PeersStatePath: peersPath,
+		Type:           domain.NodeTypeFull,
 	})
 	_ = svc // keep reference
 
@@ -3467,11 +3493,10 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 
 	address1 := freeAddress(t)
 	svc1, stop1 := startTestNode(t, config.Node{
-		ListenAddress:    address1,
-		AdvertiseAddress: normalizeAddress(address1),
-		BootstrapPeers:   []string{},
-		PeersStatePath:   peersPath,
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address1,
+		BootstrapPeers: []string{},
+		PeersStatePath: peersPath,
+		Type:           domain.NodeTypeFull,
 	})
 
 	// Add peers and mark one as connected.
@@ -3494,11 +3519,10 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 	// Start a new node with different listen address but same peers file.
 	address2 := freeAddress(t)
 	svc2, stop2 := startTestNode(t, config.Node{
-		ListenAddress:    address2,
-		AdvertiseAddress: normalizeAddress(address2),
-		BootstrapPeers:   []string{"10.0.0.99:64646"}, // different bootstrap
-		PeersStatePath:   peersPath,
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address2,
+		BootstrapPeers: []string{"10.0.0.99:64646"}, // different bootstrap
+		PeersStatePath: peersPath,
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop2()
 
@@ -3566,7 +3590,6 @@ func TestPeerDialCandidatesIncludesPersistedPeers(t *testing.T) {
 
 	svc := NewService(config.Node{
 		ListenAddress:     ":64646",
-		AdvertiseAddress:  "198.51.100.1:64646",
 		BootstrapPeers:    []string{},
 		PeersStatePath:    peersPath,
 		Type:              domain.NodeTypeFull,
@@ -3597,11 +3620,10 @@ func TestMaybeSavePeerStateRespectsInterval(t *testing.T) {
 	address := freeAddress(t)
 
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		PeersStatePath:   peersPath,
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646"},
+		PeersStatePath: peersPath,
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3657,7 +3679,6 @@ func TestOnionPeersSkippedWithoutProxy(t *testing.T) {
 	// No ProxyAddress configured.
 	svc := NewService(config.Node{
 		ListenAddress:     ":64646",
-		AdvertiseAddress:  "198.51.100.1:64646",
 		BootstrapPeers:    []string{},
 		PeersStatePath:    peersPath,
 		Type:              domain.NodeTypeFull,
@@ -3709,12 +3730,11 @@ func TestOnionPeersIncludedWithProxy(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		BootstrapPeers:   []string{},
-		PeersStatePath:   peersPath,
-		ProxyAddress:     "127.0.0.1:9050",
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  ":64646",
+		BootstrapPeers: []string{},
+		PeersStatePath: peersPath,
+		ProxyAddress:   "127.0.0.1:9050",
+		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
 	candidates := candidateAddresses(svc.peerDialCandidates())
@@ -3736,10 +3756,9 @@ func TestPeerDialCandidatesSortedByScore(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3779,10 +3798,9 @@ func TestPeerDialCandidatesSkipsCooldown(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3821,10 +3839,9 @@ func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3860,10 +3877,9 @@ func TestPeerDialCandidatesSkipsBannedPeer(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3900,10 +3916,9 @@ func TestPeerDialCandidatesBanExpires(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3935,10 +3950,9 @@ func TestPromotePeerAddressDoesNotClearBannedUntil(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -3988,10 +4002,9 @@ func TestPromotePeerAddressDoesNotClearIPWideBanForAlternatePort(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4031,10 +4044,9 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4092,10 +4104,9 @@ func TestEvictStalePeersKeepsBootstrap(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.99:64646"},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.99:64646"},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4132,10 +4143,9 @@ func TestEvictStalePeersRespectsInterval(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4177,10 +4187,9 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4226,10 +4235,9 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4315,65 +4323,6 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 	}
 }
 
-// TestSanitizeInboundAddress verifies that the health-tracking address for
-// inbound connections uses the verified TCP IP, not the self-reported one.
-func TestSanitizeInboundAddress(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		tcpAddr  string
-		claimed  string
-		expected string
-	}{
-		{
-			name:     "matching IPs — use claimed port",
-			tcpAddr:  "1.2.3.4:55000",
-			claimed:  "1.2.3.4:64646",
-			expected: "1.2.3.4:64646",
-		},
-		{
-			name:     "mismatched IPs — use TCP IP with claimed port",
-			tcpAddr:  "1.2.3.4:55000",
-			claimed:  "5.6.7.8:64646",
-			expected: "1.2.3.4:64646",
-		},
-		{
-			name:     "localhost TCP with localhost claimed",
-			tcpAddr:  "127.0.0.1:55000",
-			claimed:  "127.0.0.1:63594",
-			expected: "127.0.0.1:63594",
-		},
-		{
-			name:     "empty tcpAddr — fallback to claimed",
-			tcpAddr:  "",
-			claimed:  "5.6.7.8:64646",
-			expected: "5.6.7.8:64646",
-		},
-		{
-			name:     "empty claimed — return empty",
-			tcpAddr:  "1.2.3.4:55000",
-			claimed:  "",
-			expected: "",
-		},
-		{
-			name:     "claimed not host:port — use TCP IP with default port",
-			tcpAddr:  "1.2.3.4:55000",
-			claimed:  "not-an-address",
-			expected: "1.2.3.4:" + config.DefaultPeerPort,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := sanitizeInboundAddress(tt.tcpAddr, tt.claimed)
-			if got != tt.expected {
-				t.Fatalf("sanitizeInboundAddress(%q, %q) = %q, want %q", tt.tcpAddr, tt.claimed, got, tt.expected)
-			}
-		})
-	}
-}
-
 // TestEvictOrphanedHealthEntries verifies that inbound-only health entries
 // (not present in s.peers) are cleaned up after the staleness window.
 func TestEvictOrphanedHealthEntries(t *testing.T) {
@@ -4381,10 +4330,9 @@ func TestEvictOrphanedHealthEntries(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4497,10 +4445,9 @@ func TestEvictOrphanedHealthEntriesRefreshesAggregate(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4541,10 +4488,9 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4598,10 +4544,9 @@ func TestFallbackCooldownAppliesToAllVariants(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4628,10 +4573,9 @@ func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4676,10 +4620,9 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4728,9 +4671,8 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 
 	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		ListenAddress:  "127.0.0.1:64646",
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}, id, nil)
 
 	primaryAddr := domain.PeerAddress("10.0.0.1:64647")
@@ -4810,10 +4752,9 @@ func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -4895,10 +4836,9 @@ func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 	// Create a service where the primary peer address uses a NON-default port.
 	primaryAddr := "10.0.0.1:64647"
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		BootstrapPeers:   []string{primaryAddr},
-		QueueStatePath:   queuePath,
+		ListenAddress:  "127.0.0.1:64646",
+		BootstrapPeers: []string{primaryAddr},
+		QueueStatePath: queuePath,
 	}, id, nil)
 
 	svc.deliveryMu.RLock()
@@ -4986,10 +4926,9 @@ func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
 	primaryA := "10.0.0.1:64647"
 	primaryB := "10.0.0.1:64648"
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "127.0.0.1:64646",
-		BootstrapPeers:   []string{primaryA, primaryB},
-		QueueStatePath:   queuePath,
+		ListenAddress:  "127.0.0.1:64646",
+		BootstrapPeers: []string{primaryA, primaryB},
+		QueueStatePath: queuePath,
 	}, id, nil)
 
 	svc.deliveryMu.RLock()
@@ -5065,7 +5004,6 @@ func TestQueueStateMigrationOrphansUnknownHost(t *testing.T) {
 	// Bootstrap peer on a DIFFERENT host — 10.99.99.1 has zero candidates.
 	svc := NewService(config.Node{
 		ListenAddress:     "127.0.0.1:64646",
-		AdvertiseAddress:  "127.0.0.1:64646",
 		BootstrapPeers:    []string{"10.0.0.1:64647"},
 		QueueStatePath:    queuePath,
 		AllowPrivatePeers: true,
@@ -5133,7 +5071,6 @@ func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
 	// No bootstrap peer matching this host — but migration is skipped.
 	svc := NewService(config.Node{
 		ListenAddress:     "127.0.0.1:64646",
-		AdvertiseAddress:  "127.0.0.1:64646",
 		BootstrapPeers:    []string{"10.0.0.1:64647"},
 		QueueStatePath:    queuePath,
 		AllowPrivatePeers: true,
@@ -5159,8 +5096,7 @@ func TestRecordObservedAddressIgnoresEmpty(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "")
@@ -5177,8 +5113,7 @@ func TestRecordObservedAddressIgnoresPrivate(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "10.0.0.1")
@@ -5196,8 +5131,7 @@ func TestRecordObservedAddressStoresPublicIP(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
@@ -5213,8 +5147,7 @@ func TestRecordObservedAddressConsensusRequiresTwoPeers(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	// Single observation — no consensus yet.
@@ -5240,8 +5173,7 @@ func TestRecordObservedAddressSameNodeOneVote(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	// Same peer identity reached via two different addresses — still one vote.
@@ -5259,8 +5191,7 @@ func TestRecordObservedAddressNoConsensusWhenPeersDisagree(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
@@ -5275,13 +5206,17 @@ func TestRecordObservedAddressNoConsensusWhenPeersDisagree(t *testing.T) {
 	}
 }
 
-func TestRecordObservedAddressSkipsWhenAdvertiseIsPublic(t *testing.T) {
+// TestRecordObservedAddressSkipsWhenBindIsUnspecified pins the
+// NAT-detection skip for the unspecified-bind case ("0.0.0.0:port",
+// "[::]:port"): the node listens on every interface, so any observed
+// external IP is expected behaviour, not a NAT misconfig signal. The
+// helper still stores the observation so peer accounting stays
+// consistent — only the diagnostic log is suppressed.
+func TestRecordObservedAddressSkipsWhenBindIsUnspecified(t *testing.T) {
 	t.Parallel()
 	id, _ := identity.Generate()
-	// Node already advertises a public IP — observed address should not trigger NAT log.
 	svc := NewService(config.Node{
-		ListenAddress:    "0.0.0.0:64646",
-		AdvertiseAddress: "203.0.113.50:64646",
+		ListenAddress: "0.0.0.0:64646",
 	}, id, nil)
 
 	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
@@ -5290,7 +5225,7 @@ func TestRecordObservedAddressSkipsWhenAdvertiseIsPublic(t *testing.T) {
 	count := len(svc.observedAddrs)
 	svc.peerMu.RUnlock()
 	// Observations still stored, but the consensus path exits early
-	// because advertise address already matches observed.
+	// because the bind host is the unspecified address "0.0.0.0".
 	if count != 2 {
 		t.Fatalf("expected 2 observed addresses, got %d", count)
 	}
@@ -5302,8 +5237,7 @@ func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
 	peerID, _ := identity.Generate()
 	peerAddr := domain.PeerAddress("198.51.100.1:64646")
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	// Simulate what openPeerSession does: record observation keyed by identity,
@@ -5336,8 +5270,7 @@ func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
 	primaryAddr := domain.PeerAddress("198.51.100.1:64647")
 	fallbackAddr := domain.PeerAddress("198.51.100.1:64646")
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:64646",
-		AdvertiseAddress: "192.168.1.10:64646",
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	// Record observation under peer identity.
@@ -5370,10 +5303,9 @@ func TestAddPeerFrameNewPeerPrependedToList(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646"},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5397,10 +5329,9 @@ func TestAddPeerFrameExistingPeerMovedToFront(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5433,10 +5364,9 @@ func TestAddPeerFrameResetsCooldown(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5478,10 +5408,9 @@ func TestAddPeerFrameDefaultPort(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5501,10 +5430,9 @@ func TestAddPeerFrameEmptyAddressError(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5519,10 +5447,9 @@ func TestAddPeerFrameSelfAddressError(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5539,10 +5466,9 @@ func TestAddPeerFrameForbiddenIPError(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: "198.51.100.1:64646",
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5566,10 +5492,9 @@ func TestAddPeerFrameUnreachableOverlayError(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 		// No ProxyAddress → Tor/I2P unreachable.
 	})
 	defer stop()
@@ -5591,10 +5516,9 @@ func TestAddPeerFrameUpdatesSourceToManual(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646"},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5633,11 +5557,10 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 	peersPath := filepath.Join(t.TempDir(), "peers.json")
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		PeersStatePath:   peersPath,
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		PeersStatePath: peersPath,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -5708,9 +5631,8 @@ func TestMessageStoreCalledForLocalDM(t *testing.T) {
 
 	addr := freeAddress(t)
 	svc, cleanup := startTestNode(t, config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: normalizeAddress(addr),
-		BootstrapPeers:   []string{},
+		ListenAddress:  addr,
+		BootstrapPeers: []string{},
 	})
 	defer cleanup()
 
@@ -5795,9 +5717,8 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 
 	addr := freeAddress(t)
 	svc, cleanup := startTestNode(t, config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: normalizeAddress(addr),
-		BootstrapPeers:   []string{},
+		ListenAddress:  addr,
+		BootstrapPeers: []string{},
 	})
 	defer cleanup()
 
@@ -5937,9 +5858,8 @@ func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
 
 	addr := freeAddress(t)
 	svc, cleanup := startTestNode(t, config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: normalizeAddress(addr),
-		BootstrapPeers:   []string{},
+		ListenAddress:  addr,
+		BootstrapPeers: []string{},
 	})
 	defer cleanup()
 
@@ -6053,10 +5973,9 @@ func TestMessageStoreNotCalledForTransitDM(t *testing.T) {
 
 	addr := freeAddress(t)
 	svc, cleanup := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: normalizeAddress(addr),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addr,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	}, relayID)
 	defer cleanup()
 
@@ -6132,10 +6051,9 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 
 	addr := freeAddress(t)
 	svc, cleanup := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: normalizeAddress(addr),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addr,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	}, relayID)
 	defer cleanup()
 
@@ -6223,12 +6141,11 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 
 	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:64646",
-		PeersStatePath:   filepath.Join(tempDir, "peers.json"),
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  "127.0.0.1:0",
+		PeersStatePath: filepath.Join(tempDir, "peers.json"),
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		Type:           domain.NodeTypeFull,
 	}, senderID, nil)
 
 	storeMock, rec := newRecordingMockMessageStore(t)
@@ -6315,9 +6232,8 @@ func TestNodeWithoutMessageStoreStillRelays(t *testing.T) {
 
 	addr := freeAddress(t)
 	svc, cleanup := startTestNode(t, config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: normalizeAddress(addr),
-		BootstrapPeers:   []string{},
+		ListenAddress:  addr,
+		BootstrapPeers: []string{},
 	})
 	defer cleanup()
 
@@ -6420,9 +6336,8 @@ func TestProtocolTraceLogging(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -6743,9 +6658,8 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -6810,9 +6724,8 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -6842,9 +6755,8 @@ func TestAddPeerAddressWithoutNodeTypeKeepsTypeUnknown(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -6917,9 +6829,8 @@ func TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort(t *t
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136:64646"}
@@ -6948,9 +6859,8 @@ func TestObservedAnnounceAddressFromHelloSkipsListenerDisabled(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	hello := protocol.Frame{Listener: "0", Listen: "212.104.118.136:64646"}
@@ -6976,9 +6886,8 @@ func TestObservedAnnounceAddressFromHelloSkipsEmptyObserved(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136:64646"}
@@ -6990,14 +6899,15 @@ func TestObservedAnnounceAddressFromHelloSkipsEmptyObserved(t *testing.T) {
 	}
 }
 
-// TestObservedAnnounceAddressFromHelloSkipsEmptyAdvertised verifies that a
-// hello with an empty or whitespace-only Listen cannot produce an announce
-// address — we require at least a host to attach the default port to.
-//
-// TestObservedAnnounceAddressFromHelloSkipsEmptyAdvertised проверяет, что
-// hello с пустым или пробельным Listen не порождает announce адрес —
-// нужен хотя бы host, к которому можно приклеить дефолтный порт.
-func TestObservedAnnounceAddressFromHelloSkipsEmptyAdvertised(t *testing.T) {
+// TestObservedAnnounceAddressFromHelloSynthesisesAdvertisedFromObserved
+// verifies the v12 wire contract: a hello with empty or whitespace-only
+// Listen still produces an announce address by pairing the observed
+// TCP source host with the self-reported advertise_port (or the
+// default port when AdvertisePort is absent / invalid). Pre-v12 the
+// helper required at least a host in Listen; under the v12 cleanup
+// the host is no longer wire truth and the helper synthesises it
+// from the observed TCP remote.
+func TestObservedAnnounceAddressFromHelloSynthesisesAdvertisedFromObserved(t *testing.T) {
 	t.Parallel()
 
 	id, err := identity.Generate()
@@ -7005,19 +6915,43 @@ func TestObservedAnnounceAddressFromHelloSkipsEmptyAdvertised(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
-	cases := []protocol.Frame{
-		{Listener: "1", Listen: ""},
-		{Listener: "1", Listen: "   "},
+	cases := []struct {
+		name  string
+		hello protocol.Frame
+		want  domain.PeerAddress
+	}{
+		{
+			name:  "empty_listen_default_port",
+			hello: protocol.Frame{Listener: "1", Listen: ""},
+			want:  domain.PeerAddress(net.JoinHostPort("91.234.35.132", config.DefaultPeerPort)),
+		},
+		{
+			name:  "whitespace_listen_default_port",
+			hello: protocol.Frame{Listener: "1", Listen: "   "},
+			want:  domain.PeerAddress(net.JoinHostPort("91.234.35.132", config.DefaultPeerPort)),
+		},
+		{
+			name:  "empty_listen_with_advertise_port",
+			hello: protocol.Frame{Listener: "1", Listen: "", AdvertisePort: domain.PeerPort(40404)},
+			want:  domain.PeerAddress(net.JoinHostPort("91.234.35.132", "40404")),
+		},
 	}
-	for _, hello := range cases {
-		if got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello); ok {
-			t.Fatalf("expected empty hello.Listen %q to be skipped, got %s", hello.Listen, got)
-		}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", tc.hello)
+			if !ok {
+				t.Fatalf("expected announce address to be produced from observed TCP + advertise_port")
+			}
+			if got != tc.want {
+				t.Fatalf("announce address: got %s want %s", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -7046,9 +6980,8 @@ func TestObservedAnnounceAddressFromHelloFallsBackToDefaultPortForHostOnlyHello(
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	// Bare IP without a port in hello.Listen — observed TCP source carries
@@ -7082,9 +7015,8 @@ func TestObservedAnnounceAddressFromHelloSkipsPrivateObserved(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    ":64646",
-		AdvertiseAddress: "198.51.100.1:64646",
-		Type:             domain.NodeTypeFull,
+		ListenAddress: ":64646",
+		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
 	hello := protocol.Frame{Listener: "1", Listen: "198.51.100.5:64646"}
@@ -7109,9 +7041,8 @@ func TestPromotePeerAddress(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7187,9 +7118,8 @@ func TestAddPeerAddressSkipsAlternatePortOnKnownIP(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7264,9 +7194,8 @@ func TestPendingQueueReplacesStaleFrame(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7349,9 +7278,8 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 		t.Fatalf("generate recipient identity: %v", err)
 	}
 	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	}, recipientID)
 	defer stop()
 
@@ -7584,9 +7512,8 @@ func TestErrorPathTeardownDoesNotHang(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7677,9 +7604,8 @@ func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
+		ListenAddress:  "127.0.0.1:0",
+		PeersStatePath: filepath.Join(t.TempDir(), "peers.json"),
 	}, id, nil)
 
 	server, client := net.Pipe()
@@ -7741,9 +7667,8 @@ func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	svc := NewService(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		PeersStatePath:   filepath.Join(t.TempDir(), "peers.json"),
+		ListenAddress:  "127.0.0.1:0",
+		PeersStatePath: filepath.Join(t.TempDir(), "peers.json"),
 	}, id, nil)
 
 	server, client := net.Pipe()
@@ -7786,9 +7711,8 @@ func TestMarkPeerConnectedSetsDirection(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7827,9 +7751,8 @@ func TestMarkPeerDisconnectedClearsDirection(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7857,9 +7780,8 @@ func TestConnectedHostsLocked(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7922,9 +7844,8 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -7997,9 +7918,8 @@ func TestInboundPeerHealthIncludesDirection(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -8029,9 +7949,8 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -8126,9 +8045,8 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -8196,9 +8114,8 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -8252,9 +8169,8 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -8315,9 +8231,8 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 		t.Fatalf("generate relay identity: %v", err)
 	}
 	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	}, relayID)
 	defer stop()
 
@@ -8515,9 +8430,8 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 		t.Fatalf("generate relay identity: %v", err)
 	}
 	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	}, relayID)
 	defer stop()
 
@@ -8738,18 +8652,16 @@ func TestCapabilityExchangeBetweenTwoNodes(t *testing.T) {
 	addressB := freeAddress(t)
 
 	_, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{normalizeAddress(addressB)},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{normalizeAddress(addressB)},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopA()
 
 	svcB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopB()
 
@@ -8788,10 +8700,9 @@ func TestMixedVersionNodeWithoutCapabilitiesField(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stop()
 
@@ -8835,11 +8746,10 @@ func TestMixedVersionLegacyPeerExchange(t *testing.T) {
 	}
 
 	svc := NewService(config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: addr,
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addr,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		Type:           domain.NodeTypeFull,
 	}, nodeID, nil)
 	svc.disableRateLimiting = true
 
@@ -8927,11 +8837,10 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 
 	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:    addr,
-		AdvertiseAddress: addr,
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addr,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -9028,10 +8937,9 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	}
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    addressA,
-		AdvertiseAddress: normalizeAddress(addressA),
-		BootstrapPeers:   []string{},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressA,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopA()
 
@@ -9040,10 +8948,9 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 
 	// NodeB: full node, bootstrap to nodeA, does NOT know sender keys yet.
 	nodeB, stopB := startTestNode(t, config.Node{
-		ListenAddress:    addressB,
-		AdvertiseAddress: normalizeAddress(addressB),
-		BootstrapPeers:   []string{normalizeAddress(addressA)},
-		Type:             domain.NodeTypeFull,
+		ListenAddress:  addressB,
+		BootstrapPeers: []string{normalizeAddress(addressA)},
+		Type:           domain.NodeTypeFull,
 	})
 	defer stopB()
 
@@ -9088,8 +8995,9 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	}
 
 	// Simulate: nodeA forwards a relay_message to nodeB via the peer session.
-	// We inject it as a handleRelayMessage call with senderAddress = nodeA's
-	// advertise address (the address nodeB has an outbound session to).
+	// We inject it as a handleRelayMessage call with senderAddress =
+	// nodeA's peer session address (the address nodeB has an outbound
+	// session to).
 	frame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          "relay-sync-key-1",
@@ -9131,9 +9039,8 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9198,9 +9105,8 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9254,9 +9160,8 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9327,9 +9232,8 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9411,9 +9315,8 @@ func TestHasOutboundSessionForInbound(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9458,9 +9361,8 @@ func TestHasOutboundSessionForInboundResolvesDialOrigin(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9500,9 +9402,8 @@ func TestDuplicateInboundConnectionAllowed(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9553,9 +9454,8 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9613,9 +9513,8 @@ func TestDeleteTrustedContactViaLocalFrame(t *testing.T) {
 	address := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		ListenAddress:  address,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
 	})
 	defer stopA()
 
@@ -9680,9 +9579,8 @@ func TestDeleteTrustedContactMissingAddress(t *testing.T) {
 	address := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		ListenAddress:  address,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
 	})
 	defer stopA()
 
@@ -9704,9 +9602,8 @@ func TestDeleteTrustedContactNotFound(t *testing.T) {
 	address := freeAddress(t)
 
 	nodeA, stopA := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
+		ListenAddress:  address,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
 	})
 	defer stopA()
 
@@ -9728,10 +9625,9 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 	address := freeAddress(t)
 
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   filepath.Join(tempDir, "queue.json"),
+		ListenAddress:  address,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	})
 	defer stop()
 
@@ -9820,10 +9716,9 @@ func TestDeleteTrustedContactPersistsOutboundOnly(t *testing.T) {
 	queuePath := filepath.Join(tempDir, "queue.json")
 
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		TrustStorePath:   filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:   queuePath,
+		ListenAddress:  address,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: queuePath,
 	})
 	defer stop()
 
@@ -9889,9 +9784,8 @@ func TestSubscribeInboxRejectsUnauthenticated(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -9938,9 +9832,8 @@ func TestSubscribeInboxRejectsIdentityMismatch(t *testing.T) {
 		t.Fatalf("generate node identity: %v", err)
 	}
 	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	}, nodeID)
 	defer stop()
 
@@ -10023,9 +9916,8 @@ func TestSubscribeInboxAllowsOwnIdentity(t *testing.T) {
 		t.Fatalf("generate node identity: %v", err)
 	}
 	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	}, nodeID)
 	defer stop()
 

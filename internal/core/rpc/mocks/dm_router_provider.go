@@ -17,8 +17,7 @@ import (
 func NewMockDMRouterProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
-},
-) *MockDMRouterProvider {
+}) *MockDMRouterProvider {
 	mock := &MockDMRouterProvider{}
 	mock.Mock.Test(t)
 

@@ -65,7 +65,10 @@ import (
 func main() {
 	cfg := sdk.DefaultConfig()
 	cfg.Node.ListenAddress = ":64648"
-	cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+	// AdvertisePort must be set explicitly when binding to a non-default port —
+	// the SDK never auto-derives the advertised port from ListenAddress.
+	advertisePort := uint16(64648)
+	cfg.Node.AdvertisePort = &advertisePort
 
 	runtime, err := sdk.New(cfg)
 	if err != nil {
@@ -180,7 +183,10 @@ import (
 func main() {
 	cfg := sdk.DefaultConfig()
 	cfg.Node.ListenAddress = ":64648"
-	cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+	// AdvertisePort must be set explicitly when binding to a non-default port —
+	// the SDK never auto-derives the advertised port from ListenAddress.
+	advertisePort := uint16(64648)
+	cfg.Node.AdvertisePort = &advertisePort
 	cfg.Node.ChatLogDir = ".corsa-bot"
 	cfg.Node.IdentityPath = ".corsa-bot/identity-64648.json"
 	cfg.Node.TrustStorePath = ".corsa-bot/trust-64648.json"
@@ -316,7 +322,10 @@ import (
 func main() {
 	cfg := sdk.DefaultConfig()
 	cfg.Node.ListenAddress = ":64648"
-	cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+	// AdvertisePort обязательно указывать явно при не-дефолтном bind-порту —
+	// SDK не выводит advertise-порт из ListenAddress автоматически.
+	advertisePort := uint16(64648)
+	cfg.Node.AdvertisePort = &advertisePort
 
 	runtime, err := sdk.New(cfg)
 	if err != nil {
@@ -381,7 +390,10 @@ import (
 func main() {
 	cfg := sdk.DefaultConfig()
 	cfg.Node.ListenAddress = ":64648"
-	cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+	// AdvertisePort must be set explicitly when binding to a non-default port —
+	// the SDK never auto-derives the advertised port from ListenAddress.
+	advertisePort := uint16(64648)
+	cfg.Node.AdvertisePort = &advertisePort
 	cfg.Node.ChatLogDir = ".corsa-bot"
 	cfg.Node.IdentityPath = ".corsa-bot/identity-64648.json"
 	cfg.Node.TrustStorePath = ".corsa-bot/trust-64648.json"

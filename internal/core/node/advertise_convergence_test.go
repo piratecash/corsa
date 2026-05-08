@@ -2,7 +2,6 @@ package node
 
 import (
 	"encoding/json"
-	"net"
 	"strconv"
 	"testing"
 	"time"
@@ -12,18 +11,18 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// TestValidateAdvertisedAddress covers every branch of the advertise
-// convergence decision matrix. The helper is a pure function: no
-// Service state, no network side effects — so each row of the matrix
-// maps directly to one test case.
+// TestValidateAdvertisedAddress covers every accept branch of the v12
+// advertise convergence decision matrix. The helper is a pure function:
+// no Service state, no network side effects — so each row of the matrix
+// maps directly to one test case. The v12 contract says the helper
+// never rejects on advertise-learning grounds, so the case shape no
+// longer carries notice / reject expectations.
 func TestValidateAdvertisedAddress(t *testing.T) {
 	cases := []struct {
 		name              string
 		observedTCP       string
 		frame             protocol.Frame
 		wantDecision      advertiseDecision
-		wantShouldReject  bool
-		wantNoticePresent bool
 		wantAnnounceState announceState
 		wantWriteMode     persistWriteMode
 	}{
@@ -40,14 +39,17 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			// Pre-v11 peer with no explicit listener flag AND no usable
+			// Legacy frame with no explicit listener flag AND no usable
 			// listen string: falls to legacy_direct (accept, direct_only)
 			// because we cannot claim the peer is a listener without an
 			// explicit Listener="1" flag and without a usable listen
-			// endpoint. Under v11 an explicit Listener="1" with the same
+			// endpoint. An explicit Listener="1" with the same
 			// world-routable observed IP would instead produce `match` —
 			// that path is covered by match_after_canonicalisation /
-			// world_routable_observed_overrides_listen_host below.
+			// world_routable_observed_overrides_listen_host below. This
+			// branch is reachable today only via desktop / local RPC
+			// frames that legitimately omit listener; v12 peer hellos
+			// always set listener explicitly.
 			name:        "legacy_direct_no_listen",
 			observedTCP: "203.0.113.11:45123",
 			frame: protocol.Frame{
@@ -60,10 +62,12 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			// Pre-v11 peer with wildcard bind in hello.listen and no
+			// Legacy frame with wildcard bind in hello.listen and no
 			// explicit listener flag. usableListen rejects 0.0.0.0 as a
 			// dial target, and without Listener="1" we cannot promote
 			// the peer to announceable — the branch falls to legacy_direct.
+			// Reachable in the v12 baseline only through legacy / mixed
+			// fixtures that still echo listen on the wire.
 			name:        "legacy_direct_wildcard_bind",
 			observedTCP: "203.0.113.12:45123",
 			frame: protocol.Frame{
@@ -100,12 +104,14 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			// v11 contract: hello.listen is no longer a truth input.
-			// The observed IP is world-routable, so the decision is
-			// match and the runtime NEVER rejects on this difference
-			// nor emits a connection_notice. The pre-v11 matrix
-			// classified this case as world_mismatch; we keep the
-			// test name and assert the v11 outcome.
+			// v12 baseline: hello.listen is not a truth input (and
+			// emitters omit it entirely; this fixture echoes it as a
+			// legacy/mixed-network shape). The observed IP is
+			// world-routable, so the decision is match and the runtime
+			// NEVER rejects on the disagreement nor emits any mismatch
+			// wire signal. The pre-v11 matrix classified this case as
+			// world_mismatch; the test name is preserved for git history
+			// while the assertion pins the v12 accept-only outcome.
 			name:        "world_routable_observed_overrides_listen_host",
 			observedTCP: "203.0.113.15:45123",
 			frame: protocol.Frame{
@@ -118,10 +124,10 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			// v11: peer claiming a private range in hello.listen
+			// v12 baseline: peer claiming a private range in hello.listen
 			// while coming in on a world-routable observed IP is
-			// still announceable — the observed IP wins. Old code
-			// rejected on "world mismatch"; the runtime no longer
+			// still announceable — the observed IP wins. The pre-v11
+			// path rejected on "world mismatch"; the runtime no longer
 			// uses hello.listen as truth, so no reject / no notice.
 			name:        "world_routable_observed_with_private_listen_is_match",
 			observedTCP: "203.0.113.16:45123",
@@ -135,12 +141,12 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			// v11: an unparseable observed TCP address falls to
-			// local_exception rather than invalid-reject. We accept
-			// the handshake but never learn a candidate — the
-			// non-IP transport case stays compatible with the
-			// advertise-learning contract (no observed-IP rewrite
-			// for non-IP transports).
+			// v12 baseline: an unparseable observed TCP address falls
+			// to local_exception rather than invalid-reject. We accept
+			// the handshake but never learn a candidate — the non-IP
+			// transport case stays compatible with the advertise-
+			// learning contract (no observed-IP rewrite for non-IP
+			// transports).
 			name:        "unparseable_observed_is_local_exception",
 			observedTCP: "not-a-host:port",
 			frame: protocol.Frame{
@@ -161,59 +167,13 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			if result.Decision != tc.wantDecision {
 				t.Fatalf("decision mismatch: got %q want %q", result.Decision, tc.wantDecision)
 			}
-			if result.ShouldReject != tc.wantShouldReject {
-				t.Fatalf("ShouldReject mismatch: got %v want %v", result.ShouldReject, tc.wantShouldReject)
-			}
-			if tc.wantNoticePresent && result.RejectNotice == nil {
-				t.Fatalf("expected RejectNotice frame, got nil")
-			}
-			if !tc.wantNoticePresent && result.RejectNotice != nil {
-				t.Fatalf("unexpected RejectNotice for decision %s", result.Decision)
-			}
 			if result.PersistAnnounceState != tc.wantAnnounceState {
 				t.Fatalf("announce_state mismatch: got %q want %q", result.PersistAnnounceState, tc.wantAnnounceState)
 			}
 			if result.PersistWriteMode != tc.wantWriteMode {
 				t.Fatalf("write_mode mismatch: got %q want %q", result.PersistWriteMode, tc.wantWriteMode)
 			}
-			if tc.wantNoticePresent {
-				if result.RejectNotice.Type != protocol.FrameTypeConnectionNotice {
-					t.Fatalf("notice frame type mismatch: got %q", result.RejectNotice.Type)
-				}
-				if result.RejectNotice.Code != protocol.ErrCodeObservedAddressMismatch {
-					t.Fatalf("notice code mismatch: got %q", result.RejectNotice.Code)
-				}
-				if result.RejectNotice.Status != protocol.ConnectionStatusClosing {
-					t.Fatalf("notice status mismatch: got %q", result.RejectNotice.Status)
-				}
-				// Details must round-trip through the typed helper.
-				details, err := protocol.ParseObservedAddressMismatchDetails(result.RejectNotice.Details)
-				if err != nil {
-					t.Fatalf("parse notice details: %v", err)
-				}
-				if details.ObservedAddress == "" {
-					t.Fatalf("notice details.observed_address is empty")
-				}
-			}
 		})
-	}
-}
-
-// TestBuildObservedMismatchNoticeOmitsEmptyDetails verifies that the
-// notice constructor does not inject a literal "null" details payload
-// when the observed IP is unknown — the frame must serialise without
-// the details field so legacy peers parsing the JSON see no extra key.
-func TestBuildObservedMismatchNoticeOmitsEmptyDetails(t *testing.T) {
-	notice := buildObservedMismatchNotice("")
-	if notice == nil {
-		t.Fatalf("expected non-nil notice frame")
-	}
-	raw, err := json.Marshal(notice)
-	if err != nil {
-		t.Fatalf("marshal notice: %v", err)
-	}
-	if containsKey(raw, "details") {
-		t.Fatalf("notice JSON must omit empty details, got %s", raw)
 	}
 }
 
@@ -249,15 +209,14 @@ func bytesContains(haystack, needle []byte) bool {
 // newAdvertiseTestService builds a minimal Service usable by the
 // advertise-convergence unit tests. No goroutines are started, no net
 // listener is opened — only the maps the convergence helpers read and
-// write. Tests that need a cfg.AdvertiseAddress value can supply it via
-// the returned pointer and EffectiveListenerEnabled will be true.
-func newAdvertiseTestService(advertise string) *Service {
+// write. Tests that need to mutate cfg fields supply them on the
+// returned pointer.
+func newAdvertiseTestService() *Service {
 	return &Service{
 		cfg: config.Node{
-			Type:             config.NodeTypeFull,
-			ListenerEnabled:  true,
-			ListenerSet:      true,
-			AdvertiseAddress: advertise,
+			Type:            config.NodeTypeFull,
+			ListenerEnabled: true,
+			ListenerSet:     true,
 		},
 		persistedMeta:           make(map[domain.PeerAddress]*peerEntry),
 		observedAddrs:           make(map[domain.PeerIdentity]string),
@@ -270,8 +229,8 @@ func newAdvertiseTestService(advertise string) *Service {
 // already marked announceable is NOT downgraded by a subsequent
 // non_listener or legacy_direct decision. Those two decisions describe
 // the current session only — they must not clobber the trust learned
-// from an earlier match. Only world_mismatch and local_exception are
-// explicit downgrade triggers.
+// from an earlier match. Only local_exception is an explicit downgrade
+// trigger after the v12 cleanup removed the world_mismatch decision.
 func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -283,7 +242,7 @@ func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			svc := newAdvertiseTestService("203.0.113.40:64646")
+			svc := newAdvertiseTestService()
 			const peerAddr domain.PeerAddress = "203.0.113.40:64646"
 			svc.persistedMeta[peerAddr] = &peerEntry{
 				Address:                peerAddr,
@@ -314,69 +273,22 @@ func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 	}
 }
 
-// TestApplyAdvertiseValidationResult_WorldMismatchDowngrades verifies
-// that a previously announceable peer is downgraded to direct_only on a
-// world_mismatch and that the misadvertise bucket is charged exactly
-// banIncrementAdvertiseMismatch points. AdvertiseMismatchCount must
-// advance monotonically so the ranking signal survives restarts.
-func TestApplyAdvertiseValidationResult_WorldMismatchDowngrades(t *testing.T) {
-	svc := newAdvertiseTestService("203.0.113.41:64646")
-	const peerAddr domain.PeerAddress = "203.0.113.41:64646"
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                peerAddr,
-		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.41",
-		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
-		TrustedAdvertisePort:   config.DefaultPeerPort,
-		AdvertiseMismatchCount: 2,
-	}
-	svc.applyAdvertiseValidationResult(peerAddr, advertiseValidationResult{
-		Decision:             advertiseDecisionWorldMismatch,
-		ObservedIPHint:       "198.51.100.41",
-		PersistAnnounceState: announceStateDirectOnly,
-		PersistWriteMode:     persistWriteModeUpdateExisting,
-	})
-	pm := svc.persistedMeta[peerAddr]
-	if pm == nil {
-		t.Fatalf("persistedMeta entry vanished")
-	}
-	if pm.AnnounceState != announceStateDirectOnly {
-		t.Fatalf("announce_state not downgraded: got %q want %q", pm.AnnounceState, announceStateDirectOnly)
-	}
-	if pm.AdvertiseMismatchCount != 3 {
-		t.Fatalf("advertise_mismatch_count: got %d want 3", pm.AdvertiseMismatchCount)
-	}
-	if pm.ForgivableMisadvertisePoints != banIncrementAdvertiseMismatch {
-		t.Fatalf("forgivable_misadvertise_points: got %d want %d",
-			pm.ForgivableMisadvertisePoints, banIncrementAdvertiseMismatch)
-	}
-	if pm.LastObservedIP != "198.51.100.41" {
-		t.Fatalf("last_observed_ip not recorded: got %q", pm.LastObservedIP)
-	}
-	if pm.LastObservedAt == nil {
-		t.Fatalf("last_observed_at must be set on world_mismatch with hint")
-	}
-	if history := svc.observedIPHistoryForPeer(peerAddr); len(history) != 1 || history[0] != "198.51.100.41" {
-		t.Fatalf("observed IP history not updated: %v", history)
-	}
-}
-
-// TestApplyAdvertiseValidationResult_WorldMismatchSkipsCreate verifies
-// that a world_mismatch decision does NOT create a new persistedMeta row
-// when the peer was previously unknown. Downgrade-only write mode must
-// not inject rows for misbehaving peers — that would inflate the top-500
+// TestApplyAdvertiseValidationResult_UpdateExistingSkipsCreate verifies
+// that a downgrade-only persist write does NOT create a new persistedMeta
+// row when the peer was previously unknown. Downgrade-only write mode
+// must not inject rows for unknown peers — that would inflate the top-500
 // persistence budget with hostile data.
-func TestApplyAdvertiseValidationResult_WorldMismatchSkipsCreate(t *testing.T) {
-	svc := newAdvertiseTestService("203.0.113.42:64646")
+func TestApplyAdvertiseValidationResult_UpdateExistingSkipsCreate(t *testing.T) {
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "203.0.113.42:64646"
 	svc.applyAdvertiseValidationResult(peerAddr, advertiseValidationResult{
-		Decision:             advertiseDecisionWorldMismatch,
+		Decision:             advertiseDecisionLocalException,
 		ObservedIPHint:       "198.51.100.42",
 		PersistAnnounceState: announceStateDirectOnly,
 		PersistWriteMode:     persistWriteModeUpdateExisting,
 	})
 	if _, ok := svc.persistedMeta[peerAddr]; ok {
-		t.Fatalf("unexpected persistedMeta row created for unknown peer on world_mismatch")
+		t.Fatalf("unexpected persistedMeta row created for unknown peer under update-existing-only mode")
 	}
 	// Runtime observation hint should still be recorded so the
 	// outbound convergence loop can use it during the same session.
@@ -390,7 +302,7 @@ func TestApplyAdvertiseValidationResult_WorldMismatchSkipsCreate(t *testing.T) {
 // downgrades to direct_only. The sticky rule allows downgrade only on
 // explicit triggers — local_exception is one of them.
 func TestApplyAdvertiseValidationResult_LocalExceptionDowngrades(t *testing.T) {
-	svc := newAdvertiseTestService("203.0.113.43:64646")
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "203.0.113.43:64646"
 	svc.persistedMeta[peerAddr] = &peerEntry{
 		Address:                peerAddr,
@@ -407,174 +319,6 @@ func TestApplyAdvertiseValidationResult_LocalExceptionDowngrades(t *testing.T) {
 	pm := svc.persistedMeta[peerAddr]
 	if pm.AnnounceState != announceStateDirectOnly {
 		t.Fatalf("announce_state not downgraded by local_exception: got %q", pm.AnnounceState)
-	}
-}
-
-// TestApplyAdvertiseValidationResult_WorldMismatchCatchesPortChange
-// reproduces the port-rotation leak: a peer previously known as
-// 203.0.113.42:64646 and marked announceable presents itself in a
-// later session as 203.0.113.42:55555 with a world_mismatch listen.
-// The direct persistedMeta[peerAddress] lookup resolves against the
-// new port and finds nothing, so without the observed-IP sweep the
-// stale announceable row survives and keeps leaking through peer
-// exchange. The sweep must demote the old row by matching on
-// TrustedAdvertiseIP == ObservedIPHint and must also charge mismatch
-// accounting on the surviving row — otherwise a peer could rotate
-// ports to dodge the rollout-5 ranking penalty.
-func TestApplyAdvertiseValidationResult_WorldMismatchCatchesPortChange(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	const oldPeerAddr domain.PeerAddress = "203.0.113.42:64646"
-	svc.persistedMeta[oldPeerAddr] = &peerEntry{
-		Address:                      oldPeerAddr,
-		AnnounceState:                announceStateAnnounceable,
-		TrustedAdvertiseIP:           "203.0.113.42",
-		TrustedAdvertiseSource:       trustedAdvertiseSourceInbound,
-		TrustedAdvertisePort:         config.DefaultPeerPort,
-		AdvertiseMismatchCount:       1,
-		ForgivableMisadvertisePoints: banIncrementAdvertiseMismatch,
-	}
-
-	// New session keys off the rotated port — no direct row to match.
-	const newPeerAddr domain.PeerAddress = "203.0.113.42:55555"
-	svc.applyAdvertiseValidationResult(newPeerAddr, advertiseValidationResult{
-		Decision:             advertiseDecisionWorldMismatch,
-		ObservedIPHint:       "203.0.113.42",
-		PersistAnnounceState: announceStateDirectOnly,
-		PersistWriteMode:     persistWriteModeUpdateExisting,
-	})
-
-	pm := svc.persistedMeta[oldPeerAddr]
-	if pm == nil {
-		t.Fatalf("old persistedMeta row vanished unexpectedly")
-	}
-	if pm.AnnounceState != announceStateDirectOnly {
-		t.Fatalf("stale announceable row not downgraded: got %q want %q",
-			pm.AnnounceState, announceStateDirectOnly)
-	}
-	if pm.LastObservedIP != "203.0.113.42" {
-		t.Fatalf("last_observed_ip not recorded on swept row: got %q", pm.LastObservedIP)
-	}
-	if pm.LastObservedAt == nil {
-		t.Fatalf("last_observed_at must be set on swept row")
-	}
-	// Mismatch accounting must land on the surviving row even though
-	// the incoming peerAddress resolves to nothing — otherwise the
-	// port-rotation path silently skips rollout-5 ranking.
-	if pm.AdvertiseMismatchCount != 2 {
-		t.Fatalf("advertise_mismatch_count not charged on swept row: got %d want 2", pm.AdvertiseMismatchCount)
-	}
-	if pm.ForgivableMisadvertisePoints != 2*banIncrementAdvertiseMismatch {
-		t.Fatalf("forgivable_misadvertise_points not charged on swept row: got %d want %d",
-			pm.ForgivableMisadvertisePoints, 2*banIncrementAdvertiseMismatch)
-	}
-}
-
-// TestApplyAdvertiseValidationResult_WorldMismatchNoDoubleCharge guards
-// the dedup path: when the incoming peerAddress coincides with a row
-// the sweep just charged (same trusted IP, same existing key), the
-// main switch must not apply a second mismatch/points increment on
-// the same event. A single world_mismatch is one misbehaviour — billing
-// it twice would accelerate the peer to ban threshold artificially.
-func TestApplyAdvertiseValidationResult_WorldMismatchNoDoubleCharge(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	const peerAddr domain.PeerAddress = "203.0.113.43:64646"
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                peerAddr,
-		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.43",
-		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
-		TrustedAdvertisePort:   config.DefaultPeerPort,
-	}
-
-	svc.applyAdvertiseValidationResult(peerAddr, advertiseValidationResult{
-		Decision:             advertiseDecisionWorldMismatch,
-		ObservedIPHint:       "203.0.113.43",
-		PersistAnnounceState: announceStateDirectOnly,
-		PersistWriteMode:     persistWriteModeUpdateExisting,
-	})
-
-	pm := svc.persistedMeta[peerAddr]
-	if pm == nil {
-		t.Fatalf("persistedMeta row vanished unexpectedly")
-	}
-	if pm.AnnounceState != announceStateDirectOnly {
-		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateDirectOnly)
-	}
-	if pm.AdvertiseMismatchCount != 1 {
-		t.Fatalf("double-charge: advertise_mismatch_count got %d want 1", pm.AdvertiseMismatchCount)
-	}
-	if pm.ForgivableMisadvertisePoints != banIncrementAdvertiseMismatch {
-		t.Fatalf("double-charge: forgivable_misadvertise_points got %d want %d",
-			pm.ForgivableMisadvertisePoints, banIncrementAdvertiseMismatch)
-	}
-}
-
-// TestDowngradeAnnounceableByObservedIPLocked_MatchesTrustedIP verifies
-// that the sweep matches on TrustedAdvertiseIP alone when the persisted
-// Address is a hostname (the host part does not resemble an IP). This
-// covers peers reached via DNS name but whose confirmed advertise was
-// a raw IP.
-func TestDowngradeAnnounceableByObservedIPLocked_MatchesTrustedIP(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	const addr domain.PeerAddress = "peer.example:64646"
-	svc.persistedMeta[addr] = &peerEntry{
-		Address:                addr,
-		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.50",
-		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
-	}
-
-	svc.peerMu.Lock()
-	svc.downgradeAnnounceableByObservedIPLocked("203.0.113.50")
-	svc.peerMu.Unlock()
-
-	if pm := svc.persistedMeta[addr]; pm.AnnounceState != announceStateDirectOnly {
-		t.Fatalf("TrustedAdvertiseIP match not demoted: got %q", pm.AnnounceState)
-	}
-}
-
-// TestDowngradeAnnounceableByObservedIPLocked_LeavesUnrelatedUntouched
-// asserts the sweep scope is exactly peers whose observed IP matches
-// the hint. Unrelated announceable rows must remain unchanged — a
-// targeted downgrade must never ripple into a mass state reset.
-func TestDowngradeAnnounceableByObservedIPLocked_LeavesUnrelatedUntouched(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	const other domain.PeerAddress = "203.0.113.60:64646"
-	svc.persistedMeta[other] = &peerEntry{
-		Address:                other,
-		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.60",
-		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
-	}
-
-	svc.peerMu.Lock()
-	svc.downgradeAnnounceableByObservedIPLocked("203.0.113.99")
-	svc.peerMu.Unlock()
-
-	if pm := svc.persistedMeta[other]; pm.AnnounceState != announceStateAnnounceable {
-		t.Fatalf("unrelated peer demoted by sweep: got %q", pm.AnnounceState)
-	}
-}
-
-// TestDowngradeAnnounceableByObservedIPLocked_EmptyHintIsNoop covers
-// the guard against an empty hint — any caller that forwards an empty
-// ObservedIPHint must not trigger a blanket downgrade.
-func TestDowngradeAnnounceableByObservedIPLocked_EmptyHintIsNoop(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	const addr domain.PeerAddress = "203.0.113.70:64646"
-	svc.persistedMeta[addr] = &peerEntry{
-		Address:                addr,
-		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.70",
-		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
-	}
-
-	svc.peerMu.Lock()
-	svc.downgradeAnnounceableByObservedIPLocked("")
-	svc.peerMu.Unlock()
-
-	if pm := svc.persistedMeta[addr]; pm.AnnounceState != announceStateAnnounceable {
-		t.Fatalf("empty hint must be no-op, got %q", pm.AnnounceState)
 	}
 }
 
@@ -600,17 +344,15 @@ func TestValidateAdvertisedAddress_IPv6Mapped(t *testing.T) {
 }
 
 // TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored pins the
-// v11 contract for the "peer claims a private range in hello.listen"
-// case. Before phase 1 deprecation this triggered world_mismatch with a
-// reject + connection_notice, on the theory that accepting the peer
-// would poison us into announcing a private-range address. Under v11
-// hello.listen is not a truth input at all: the announce candidate is
-// derived from the observed TCP IP exclusively, so a malicious / buggy
-// hello.listen cannot poison the candidate. The runtime path accepts
-// the handshake, records announceable against the OBSERVED IP, and
-// never emits the reject notice. NormalizedAdvertisedIP mirrors the
-// observed IP — not the forbidden one claimed in hello.listen — which
-// is what keeps the trusted advertise triple clean.
+// contract for the "peer claims a private range in hello.listen" case.
+// Under the v12 cleanup baseline hello.listen is not a truth input at
+// all: the announce candidate is derived from the observed TCP IP
+// exclusively, so a malicious / buggy hello.listen cannot poison the
+// candidate. The runtime path accepts the handshake, records
+// announceable against the OBSERVED IP, and never emits any reject
+// signal. NormalizedAdvertisedIP mirrors the observed IP — not the
+// forbidden one claimed in hello.listen — which is what keeps the
+// trusted advertise triple clean.
 func TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored(t *testing.T) {
 	result := validateAdvertisedAddress("203.0.113.60:45123", protocol.Frame{
 		Type:          "hello",
@@ -619,13 +361,7 @@ func TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored(t *testing.T)
 		AdvertisePort: domain.PeerPort(64646),
 	})
 	if result.Decision != advertiseDecisionMatch {
-		t.Fatalf("expected match (v11 ignores hello.listen as truth), got %q", result.Decision)
-	}
-	if result.ShouldReject {
-		t.Fatalf("v11 must NEVER set ShouldReject: private-range hello.listen is ignored, not rejected")
-	}
-	if result.RejectNotice != nil {
-		t.Fatalf("v11 must NEVER emit a connection_notice on advertise mismatch; got %+v", result.RejectNotice)
+		t.Fatalf("expected match (hello.listen is ignored as truth), got %q", result.Decision)
 	}
 	if result.NormalizedAdvertisedIP != "203.0.113.60" {
 		t.Fatalf("NormalizedAdvertisedIP: got %q want %q (must mirror observed IP, never the forbidden listen host)",
@@ -638,313 +374,27 @@ func TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored(t *testing.T)
 		t.Fatalf("AllowAnnounce must be true for world-routable observed IP, got false")
 	}
 	if result.AdvertisePort != domain.PeerPort(64646) {
-		t.Fatalf("AdvertisePort: got %d want 64646 (v11 takes the self-reported advertise_port)", result.AdvertisePort)
+		t.Fatalf("AdvertisePort: got %d want 64646 (the contract takes the self-reported advertise_port)", result.AdvertisePort)
 	}
 }
 
-// TestRepayMisadvertisePenaltyOnAuth_Caps verifies the repay bucket
-// invariant: a single successful auth can refund at most
-// banIncrementAdvertiseMismatch, and the cumulative repay never exceeds
-// what was originally charged for misadvertise.
-func TestRepayMisadvertisePenaltyOnAuth_Caps(t *testing.T) {
-	svc := newAdvertiseTestService("203.0.113.61:64646")
-	const peerAddr domain.PeerAddress = "203.0.113.61:64646"
-	const banIP domain.PeerIP = "203.0.113.61"
-
-	// Two mismatch events → 2 * banIncrementAdvertiseMismatch charged.
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                      peerAddr,
-		ForgivableMisadvertisePoints: 2 * banIncrementAdvertiseMismatch,
-	}
-
-	svc.peerMu.Lock()
-	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.peerMu.Unlock()
-	if repaid != banIncrementAdvertiseMismatch {
-		t.Fatalf("first repay: got %d want %d", repaid, banIncrementAdvertiseMismatch)
-	}
-	if pm := svc.persistedMeta[peerAddr]; pm.ForgivableMisadvertisePoints != banIncrementAdvertiseMismatch {
-		t.Fatalf("remaining misadvertise points: got %d want %d",
-			pm.ForgivableMisadvertisePoints, banIncrementAdvertiseMismatch)
-	}
-
-	// Second repay drains the remaining bucket exactly.
-	svc.peerMu.Lock()
-	repaid = svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.peerMu.Unlock()
-	if repaid != banIncrementAdvertiseMismatch {
-		t.Fatalf("second repay: got %d want %d", repaid, banIncrementAdvertiseMismatch)
-	}
-
-	// Third repay must be a no-op — the bucket is empty and the invariant
-	// forbids refunding more than was charged for misadvertise.
-	svc.peerMu.Lock()
-	repaid = svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.peerMu.Unlock()
-	if repaid != 0 {
-		t.Fatalf("third repay must be zero, got %d", repaid)
-	}
-	if pm := svc.persistedMeta[peerAddr]; pm.ForgivableMisadvertisePoints != 0 {
-		t.Fatalf("bucket not drained: got %d", pm.ForgivableMisadvertisePoints)
-	}
-	if pm := svc.persistedMeta[peerAddr]; pm.MisadvertisePointsRepaid != 2*banIncrementAdvertiseMismatch {
-		t.Fatalf("cumulative repay: got %d want %d",
-			pm.MisadvertisePointsRepaid, 2*banIncrementAdvertiseMismatch)
-	}
-}
-
-// TestRepayMisadvertisePenaltyOnAuth_MirrorsBanScore reproduces the
-// forgiveness leak between the peer-level bucket and the transport-level
-// ban table. Each world_mismatch charges two scores: the peerEntry
-// forgivable bucket AND the per-IP s.bans[ip].Score via addBanScore.
-// A successful auth must refund BOTH in lock-step — otherwise a noisy
-// but honest peer keeps climbing toward banThreshold on the IP table
-// even though its peer-level bucket is correctly decayed.
-func TestRepayMisadvertisePenaltyOnAuth_MirrorsBanScore(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	svc.bans = map[string]banEntry{
-		"203.0.113.80": {Score: 2 * banIncrementAdvertiseMismatch},
-	}
-	const peerAddr domain.PeerAddress = "203.0.113.80:64646"
-	const banIP domain.PeerIP = "203.0.113.80"
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                      peerAddr,
-		ForgivableMisadvertisePoints: 2 * banIncrementAdvertiseMismatch,
-	}
-
-	// First successful auth refunds one increment in both places.
-	svc.peerMu.Lock()
-	svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.peerMu.Unlock()
-	if got := svc.bans["203.0.113.80"].Score; got != banIncrementAdvertiseMismatch {
-		t.Fatalf("ban score after first repay: got %d want %d",
-			got, banIncrementAdvertiseMismatch)
-	}
-
-	// Second successful auth drains the remaining balance exactly.
-	svc.peerMu.Lock()
-	svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.peerMu.Unlock()
-	if got := svc.bans["203.0.113.80"].Score; got != 0 {
-		t.Fatalf("ban score after full repay: got %d want 0", got)
-	}
-}
-
-// TestRepayMisadvertisePenaltyOnAuth_BanScoreClampsAtZero guards
-// against over-refund: if the forgivable bucket still carries more
-// points than the current s.bans[ip].Score (e.g. the ban score was
-// partially cleared by another code path between charge and repay),
-// the mirror refund must clamp at zero rather than go negative.
-func TestRepayMisadvertisePenaltyOnAuth_BanScoreClampsAtZero(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	svc.bans = map[string]banEntry{
-		"203.0.113.81": {Score: 10}, // less than banIncrementAdvertiseMismatch
-	}
-	const peerAddr domain.PeerAddress = "203.0.113.81:64646"
-	const banIP domain.PeerIP = "203.0.113.81"
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                      peerAddr,
-		ForgivableMisadvertisePoints: banIncrementAdvertiseMismatch,
-	}
-
-	svc.peerMu.Lock()
-	svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.peerMu.Unlock()
-
-	if got := svc.bans["203.0.113.81"].Score; got != 0 {
-		t.Fatalf("ban score must clamp at zero, got %d", got)
-	}
-}
-
-// TestRepayMisadvertisePenaltyOnAuth_MissingBanEntryIsSafe covers the
-// case where the IP was never banned (clean peer): the repay must
-// still update the peer-level bucket without touching s.bans.
-func TestRepayMisadvertisePenaltyOnAuth_MissingBanEntryIsSafe(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	svc.bans = map[string]banEntry{} // empty — IP never seen in ban table
-	const peerAddr domain.PeerAddress = "203.0.113.82:64646"
-	const banIP domain.PeerIP = "203.0.113.82"
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                      peerAddr,
-		ForgivableMisadvertisePoints: banIncrementAdvertiseMismatch,
-	}
-
-	svc.peerMu.Lock()
-	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, banIP)
-	svc.peerMu.Unlock()
-
-	if repaid != banIncrementAdvertiseMismatch {
-		t.Fatalf("repay must proceed when IP not in bans: got %d want %d",
-			repaid, banIncrementAdvertiseMismatch)
-	}
-	if pm := svc.persistedMeta[peerAddr]; pm.ForgivableMisadvertisePoints != 0 {
-		t.Fatalf("peer-level bucket not drained: got %d",
-			pm.ForgivableMisadvertisePoints)
-	}
-	if _, exists := svc.bans["203.0.113.82"]; exists {
-		t.Fatalf("bans map must not gain a phantom entry on refund")
-	}
-}
-
-// TestRepayMisadvertisePenaltyOnAuth_HostnamePeerRefundsRealIP is the
-// regression guard for the hostname peer divergence. Before the fix,
-// repayMisadvertisePenaltyOnAuthLocked parsed the host component of
-// peerAddress to key s.bans — which works for IP peers but silently
-// fails for DNS / manually-added bootstrap peers whose peerAddress
-// carries an unresolved hostname. addBanScore keys s.bans under the
-// real TCP peer IP (from conn.RemoteAddr()), so a hostname lookup
-// never matched and the IP-level ban score accumulated toward
-// banThreshold while the peer-level bucket decayed normally — the
-// exact divergence the earlier refund mirror was meant to close.
-// The fix threads the verified ban IP through an explicit parameter;
-// this test drives the hostname case directly.
-func TestRepayMisadvertisePenaltyOnAuth_HostnamePeerRefundsRealIP(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	const realIP = "203.0.113.90"
-	svc.bans = map[string]banEntry{
-		realIP: {Score: 2 * banIncrementAdvertiseMismatch},
-	}
-	// peerAddress is a hostname — NOT an IP. splitHostPort on this
-	// would return "bootstrap.example.com", which must NOT be used as
-	// the s.bans key.
-	const peerAddr domain.PeerAddress = "bootstrap.example.com:64646"
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                      peerAddr,
-		ForgivableMisadvertisePoints: 2 * banIncrementAdvertiseMismatch,
-	}
-
-	svc.peerMu.Lock()
-	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, domain.PeerIP(realIP))
-	svc.peerMu.Unlock()
-
-	if repaid != banIncrementAdvertiseMismatch {
-		t.Fatalf("hostname peer repay: got %d want %d",
-			repaid, banIncrementAdvertiseMismatch)
-	}
-	if got := svc.bans[realIP].Score; got != banIncrementAdvertiseMismatch {
-		t.Fatalf("ban score at real IP %s: got %d want %d (must be refunded, not hostname-keyed)",
-			realIP, got, banIncrementAdvertiseMismatch)
-	}
-	if _, exists := svc.bans["bootstrap.example.com"]; exists {
-		t.Fatalf("bans map must not gain a hostname-keyed entry")
-	}
-	if pm := svc.persistedMeta[peerAddr]; pm.ForgivableMisadvertisePoints != banIncrementAdvertiseMismatch {
-		t.Fatalf("peer-level bucket: got %d want %d",
-			pm.ForgivableMisadvertisePoints, banIncrementAdvertiseMismatch)
-	}
-}
-
-// TestRepayMisadvertisePenaltyOnAuth_EmptyBanIPSkipsMirror verifies
-// that an empty banIP (no live conn available) only moves the peer-
-// level bucket and never touches s.bans — the peer-level accounting
-// stays correct and the next successful auth with a known IP will
-// try the mirror again.
-func TestRepayMisadvertisePenaltyOnAuth_EmptyBanIPSkipsMirror(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	svc.bans = map[string]banEntry{
-		"203.0.113.91": {Score: 2 * banIncrementAdvertiseMismatch},
-	}
-	const peerAddr domain.PeerAddress = "203.0.113.91:64646"
-	svc.persistedMeta[peerAddr] = &peerEntry{
-		Address:                      peerAddr,
-		ForgivableMisadvertisePoints: banIncrementAdvertiseMismatch,
-	}
-
-	svc.peerMu.Lock()
-	repaid := svc.repayMisadvertisePenaltyOnAuthLocked(peerAddr, "")
-	svc.peerMu.Unlock()
-
-	if repaid != banIncrementAdvertiseMismatch {
-		t.Fatalf("peer-level repay must proceed with empty banIP: got %d want %d",
-			repaid, banIncrementAdvertiseMismatch)
-	}
-	if got := svc.bans["203.0.113.91"].Score; got != 2*banIncrementAdvertiseMismatch {
-		t.Fatalf("ban score must be untouched when banIP empty: got %d want %d",
-			got, 2*banIncrementAdvertiseMismatch)
-	}
-	if pm := svc.persistedMeta[peerAddr]; pm.ForgivableMisadvertisePoints != 0 {
-		t.Fatalf("peer-level bucket not drained: got %d",
-			pm.ForgivableMisadvertisePoints)
-	}
-}
-
-// TestHandleConnectionNotice_SetsOverride drives the outbound-side
-// reaction: a well-formed observed-address-mismatch notice carrying a
-// world-reachable observed IP must install a runtime override so the
-// next outbound hello advertises the corrected IP.
-func TestHandleConnectionNotice_SetsOverride(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-
-	details, err := protocol.MarshalObservedAddressMismatchDetails("203.0.113.70")
-	if err != nil {
-		t.Fatalf("marshal details: %v", err)
-	}
-	svc.handleConnectionNotice(domain.PeerAddress("198.51.100.10:64646"), protocol.Frame{
-		Type:    protocol.FrameTypeConnectionNotice,
-		Code:    protocol.ErrCodeObservedAddressMismatch,
-		Status:  protocol.ConnectionStatusClosing,
-		Details: details,
+// TestHandleConnectionNotice_IgnoresUnknownCode asserts that the
+// connection_notice dispatcher silently drops any frame whose Code is
+// not a recognised dispatch target. After the v12 cleanup the only
+// recognised code is ErrCodePeerBanned; everything else (including
+// the historical observed-address-mismatch which is no longer
+// produced by the wire) must fall through without touching shared
+// state.
+func TestHandleConnectionNotice_IgnoresUnknownCode(t *testing.T) {
+	const peerAddr domain.PeerAddress = "198.51.100.10:64646"
+	svc := newAdvertiseTestService()
+	beforeRows := len(svc.persistedMeta)
+	svc.handleConnectionNotice(peerAddr, protocol.Frame{
+		Type: protocol.FrameTypeConnectionNotice,
+		Code: "unrelated-notice",
 	})
-	svc.peerMu.RLock()
-	got := svc.trustedSelfAdvertiseIP
-	svc.peerMu.RUnlock()
-	if got != "203.0.113.70" {
-		t.Fatalf("trustedSelfAdvertiseIP: got %q want %q", got, "203.0.113.70")
-	}
-}
-
-// TestHandleConnectionNotice_IgnoresNonRoutable asserts that a peer
-// reporting a private-range observed IP never downgrades our self
-// advertise override. A hostile peer on the same LAN must not be able
-// to make us announce 10.x / 192.168.x / 127.x to the rest of the
-// network.
-func TestHandleConnectionNotice_IgnoresNonRoutable(t *testing.T) {
-	cases := []string{
-		"10.0.0.5",
-		"192.168.1.50",
-		"127.0.0.1",
-		"169.254.1.2",
-		"100.64.0.9",
-	}
-	for _, observed := range cases {
-		observed := observed
-		t.Run(observed, func(t *testing.T) {
-			svc := newAdvertiseTestService("198.51.100.10:64646")
-			details, err := protocol.MarshalObservedAddressMismatchDetails(observed)
-			if err != nil {
-				t.Fatalf("marshal details: %v", err)
-			}
-			svc.handleConnectionNotice(domain.PeerAddress("198.51.100.10:64646"), protocol.Frame{
-				Type:    protocol.FrameTypeConnectionNotice,
-				Code:    protocol.ErrCodeObservedAddressMismatch,
-				Details: details,
-			})
-			svc.peerMu.RLock()
-			got := svc.trustedSelfAdvertiseIP
-			svc.peerMu.RUnlock()
-			if got != "" {
-				t.Fatalf("non-routable observation should be ignored, got override %q", got)
-			}
-		})
-	}
-}
-
-// TestHandleConnectionNotice_IgnoresWrongCode asserts that a notice
-// with a different code never touches the self advertise override —
-// only the observed-address-mismatch code may mutate it.
-func TestHandleConnectionNotice_IgnoresWrongCode(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	details, _ := protocol.MarshalObservedAddressMismatchDetails("203.0.113.71")
-	svc.handleConnectionNotice(domain.PeerAddress("198.51.100.10:64646"), protocol.Frame{
-		Type:    protocol.FrameTypeConnectionNotice,
-		Code:    "unrelated-notice",
-		Details: details,
-	})
-	svc.peerMu.RLock()
-	got := svc.trustedSelfAdvertiseIP
-	svc.peerMu.RUnlock()
-	if got != "" {
-		t.Fatalf("override set by unrelated code: got %q", got)
+	if got := len(svc.persistedMeta); got != beforeRows {
+		t.Fatalf("unrelated notice mutated persistedMeta: before=%d after=%d", beforeRows, got)
 	}
 }
 
@@ -959,7 +409,7 @@ func TestHandleConnectionNotice_IgnoresWrongCode(t *testing.T) {
 // refuse us is authoritative about when it will change its mind.
 func TestHandlePeerBannedNotice_PeerBanRecordsPerPeer(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.90:64646"
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
 
 	// Responder says: banned for ten years.
@@ -1002,7 +452,7 @@ func TestHandlePeerBannedNotice_PeerBanRecordsPerPeer(t *testing.T) {
 // for a hostile responder fabricating addresses in the notice payload.
 func TestHandlePeerBannedNotice_UnknownPeerIgnored(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.91:64646"
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	// Deliberately do not register peerAddr in persistedMeta.
 
 	until := time.Now().UTC().Add(time.Hour)
@@ -1033,7 +483,7 @@ func TestHandlePeerBannedNotice_UnknownPeerIgnored(t *testing.T) {
 // let a buggy or hostile responder pin its dial loop with garbage input.
 func TestHandlePeerBannedNotice_ParseFailureDoesNotRecord(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.92:64646"
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
 
 	// An Until field that is not a valid RFC3339 time.
@@ -1065,7 +515,7 @@ func TestHandlePeerBannedNotice_ParseFailureDoesNotRecord(t *testing.T) {
 // the other peers on the blacklisted IP.
 func TestHandlePeerBannedNotice_BlacklistedPropagatesToSiblingIP(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.90:64646"
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	svc.remoteBannedIPs = make(map[string]remoteIPBanEntry)
 	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
 
@@ -1131,7 +581,7 @@ func TestHandlePeerBannedNotice_BlacklistedPropagatesToSiblingIP(t *testing.T) {
 // sharing an egress with one misbehaving node.
 func TestHandlePeerBannedNotice_PeerBanDoesNotPropagateToSiblings(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.91:64646"
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	svc.remoteBannedIPs = make(map[string]remoteIPBanEntry)
 	svc.persistedMeta[peerAddr] = &peerEntry{Address: peerAddr}
 
@@ -1174,158 +624,12 @@ func TestHandlePeerBannedNotice_PeerBanDoesNotPropagateToSiblings(t *testing.T) 
 	}
 }
 
-// TestObservedConsensusIPLocked_Threshold checks the consensus gate:
-// below observedAddrConsensusThreshold distinct peers, no consensus IP
-// is returned; at or above the threshold the most-voted IP wins.
-func TestObservedConsensusIPLocked_Threshold(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-
-	// One reporter: no consensus (threshold is 2).
-	svc.ipStateMu.Lock()
-	svc.observedAddrs[domain.PeerIdentity("peer-aaa")] = "203.0.113.80"
-	_, ok := svc.observedConsensusIPLocked()
-	svc.ipStateMu.Unlock()
-	if ok {
-		t.Fatalf("single reporter must not produce consensus")
-	}
-
-	// Two distinct reporters on the same IP: consensus.
-	svc.ipStateMu.Lock()
-	svc.observedAddrs[domain.PeerIdentity("peer-bbb")] = "203.0.113.80"
-	ip, ok := svc.observedConsensusIPLocked()
-	svc.ipStateMu.Unlock()
-	if !ok {
-		t.Fatalf("expected consensus at threshold")
-	}
-	if ip != "203.0.113.80" {
-		t.Fatalf("consensus IP: got %q want %q", ip, "203.0.113.80")
-	}
-
-	// Two reporters disagreeing: no single IP crosses threshold even
-	// though the aggregate count is >= threshold.
-	svc.ipStateMu.Lock()
-	svc.observedAddrs = map[domain.PeerIdentity]string{
-		domain.PeerIdentity("peer-aaa"): "203.0.113.80",
-		domain.PeerIdentity("peer-bbb"): "203.0.113.81",
-	}
-	_, ok = svc.observedConsensusIPLocked()
-	svc.ipStateMu.Unlock()
-	if ok {
-		t.Fatalf("split-vote must not produce consensus")
-	}
-}
-
-// TestSelfAdvertiseEndpoint_Priority exercises the v11 host-selection
-// priority: learned observed consensus → legacy override → config host.
-// The port always comes from cfg.EffectiveAdvertisePort() (or
-// DefaultPeerPort) regardless of whether a net.Listener is bound.
-func TestSelfAdvertiseEndpoint_Priority(t *testing.T) {
-	t.Run("consensus_wins_over_legacy_override", func(t *testing.T) {
-		// Phase 1 deprecation (ProtocolVersion=11): passive learning from
-		// inbound observed IPs is the primary truth source. A legacy
-		// observed-address-mismatch notice only produces a weak fallback
-		// (trustedSelfAdvertiseIP) and must NEVER override a v11 learned
-		// consensus — otherwise a stray v10 peer could silently demote
-		// the node to a stale endpoint.
-		svc := newAdvertiseTestService("198.51.100.10:64646")
-		svc.trustedSelfAdvertiseIP = "203.0.113.90"
-		svc.observedAddrs = map[domain.PeerIdentity]string{
-			"peer-aaa": "203.0.113.91",
-			"peer-bbb": "203.0.113.91",
-		}
-		if got := svc.selfAdvertiseEndpoint(); got != "203.0.113.91:64646" {
-			t.Fatalf("endpoint: got %q want %q (v11 consensus must win over the legacy override)",
-				got, "203.0.113.91:64646")
-		}
-	})
-
-	t.Run("override_wins_without_consensus", func(t *testing.T) {
-		// No observed-IP consensus yet → the legacy override is the best
-		// host we have. This is the weak-fallback path: mixed-network
-		// nodes that have only spoken to v10 peers still get a routable
-		// self-advertise from the legacy notice.
-		svc := newAdvertiseTestService("198.51.100.10:64646")
-		svc.trustedSelfAdvertiseIP = "203.0.113.90"
-		if got := svc.selfAdvertiseEndpoint(); got != "203.0.113.90:64646" {
-			t.Fatalf("endpoint: got %q want %q", got, "203.0.113.90:64646")
-		}
-	})
-
-	t.Run("consensus_wins_over_config", func(t *testing.T) {
-		svc := newAdvertiseTestService("198.51.100.10:64646")
-		svc.observedAddrs = map[domain.PeerIdentity]string{
-			"peer-aaa": "203.0.113.92",
-			"peer-bbb": "203.0.113.92",
-		}
-		if got := svc.selfAdvertiseEndpoint(); got != "203.0.113.92:64646" {
-			t.Fatalf("endpoint: got %q want %q", got, "203.0.113.92:64646")
-		}
-	})
-
-	t.Run("config_fallback_when_no_override_no_consensus", func(t *testing.T) {
-		svc := newAdvertiseTestService("198.51.100.10:64646")
-		if got := svc.selfAdvertiseEndpoint(); got != "198.51.100.10:64646" {
-			t.Fatalf("endpoint: got %q want %q", got, "198.51.100.10:64646")
-		}
-	})
-
-	t.Run("empty_when_listener_disabled", func(t *testing.T) {
-		svc := newAdvertiseTestService("198.51.100.10:64646")
-		svc.cfg.ListenerEnabled = false
-		svc.cfg.ListenerSet = true
-		if got := svc.selfAdvertiseEndpoint(); got != "" {
-			t.Fatalf("disabled listener must return empty, got %q", got)
-		}
-	})
-
-	// Under the phase 1 deprecation contract (ProtocolVersion=11) the
-	// advertised port is ALWAYS cfg.EffectiveAdvertisePort() — never the
-	// real local listener port and never the stale port baked into
-	// cfg.AdvertiseAddress. The operator-declared CORSA_ADVERTISE_PORT
-	// (or DefaultPeerPort on absence) is the single source of truth,
-	// which matters for NAT / port-forward setups where the bind port
-	// and the advertised port legitimately differ.
-	t.Run("config_fallback_uses_effective_advertise_port", func(t *testing.T) {
-		svc := newAdvertiseTestService("198.51.100.10:55555") // stale port in cfg
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("net.Listen: %v", err)
-		}
-		defer func() { _ = ln.Close() }()
-		svc.listener = ln
-
-		// Neither the stale cfg port (55555) nor the OS-assigned listener
-		// port may appear in the result — only DefaultPeerPort (the
-		// EffectiveAdvertisePort fallback when CORSA_ADVERTISE_PORT is
-		// unset) is allowed.
-		want := net.JoinHostPort("198.51.100.10", config.DefaultPeerPort)
-		if got := svc.selfAdvertiseEndpoint(); got != want {
-			t.Fatalf("endpoint: got %q want %q (v11 always uses EffectiveAdvertisePort, never the listener or stale cfg port)",
-				got, want)
-		}
-	})
-
-	// Explicit CORSA_ADVERTISE_PORT override must flow through
-	// EffectiveAdvertisePort into the config-fallback branch.
-	t.Run("config_fallback_honours_explicit_advertise_port", func(t *testing.T) {
-		svc := newAdvertiseTestService("198.51.100.10:55555")
-		override := domain.PeerPort(40000)
-		svc.cfg.AdvertisePort = &override
-
-		want := net.JoinHostPort("198.51.100.10", "40000")
-		if got := svc.selfAdvertiseEndpoint(); got != want {
-			t.Fatalf("endpoint: got %q want %q (explicit AdvertisePort must win over cfg port and DefaultPeerPort)",
-				got, want)
-		}
-	})
-}
-
 // TestRecordObservedIPHistory_BoundAndDedup verifies both the
 // bounded-history cap at observedIPHistoryMaxSize entries and the
 // adjacent-duplicate suppression that stops the outbound convergence
 // loop from ping-ponging on a repeated observation.
 func TestRecordObservedIPHistory_BoundAndDedup(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "203.0.113.100:64646"
 
 	// Adjacent duplicates fold to a single entry.
@@ -1372,7 +676,7 @@ func entryIP(i int) domain.PeerIP {
 // advertise triple (IP / source / port) and never creates the row with
 // an announceable state that relies on a missing field.
 func TestRecordOutboundConfirmed_WritesTrustedAdvertise(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "203.0.113.120:64646"
 	svc.recordOutboundConfirmed(peerAddr, "203.0.113.120", domain.PeerPort(64646))
 
@@ -1399,7 +703,7 @@ func TestRecordOutboundConfirmed_WritesTrustedAdvertise(t *testing.T) {
 // dialled IPv4-mapped IPv6 address is stored in canonical IPv4 form so
 // the pair (trusted_ip, peer_address) does not drift on restart.
 func TestRecordOutboundConfirmed_CanonicalisesMappedIPv6(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "203.0.113.121:64646"
 	svc.recordOutboundConfirmed(peerAddr, "::ffff:203.0.113.121", domain.PeerPort(64646))
 
@@ -1422,7 +726,7 @@ func TestRecordOutboundConfirmed_CanonicalisesMappedIPv6(t *testing.T) {
 // RemoteAddrs — a hostname there would never match and the announceable
 // row would permanently survive a world_mismatch event.
 func TestRecordOutboundConfirmed_RejectsHostname(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "peer.example:64646"
 
 	// Pre-seed an unrelated announceable row: the refused call must not
@@ -1462,7 +766,7 @@ func TestRecordOutboundConfirmed_RejectsHostname(t *testing.T) {
 // Silently overwriting the row with a hostname (or clearing it) would
 // retroactively corrupt earlier correct evidence.
 func TestRecordOutboundConfirmed_PreservesExistingRowOnHostname(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "peer.example:64646"
 	svc.persistedMeta[peerAddr] = &peerEntry{
 		Address:                peerAddr,
@@ -1502,7 +806,7 @@ func TestRecordOutboundConfirmed_PreservesExistingRowOnHostname(t *testing.T) {
 // TrustedAdvertiseIP would store the unresolved hostname and silently
 // break the observed-IP downgrade sweep.
 func TestRecordOutboundAuthSuccess_HostnamePeerWritesCanonicalIP(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const hostnameAddr domain.PeerAddress = "peer.example:64646"
 
 	// The wrapper's RemoteAddr() returns the OS-resolved TCP host:port,
@@ -1537,7 +841,7 @@ func TestRecordOutboundAuthSuccess_HostnamePeerWritesCanonicalIP(t *testing.T) {
 // socket would yield two different TrustedAdvertiseIP values and the
 // sweep would fail to match one of them.
 func TestRecordOutboundAuthSuccess_CanonicalisesMappedIPv6RemoteAddr(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const hostnameAddr domain.PeerAddress = "dualstack.example:64646"
 
 	// net.TCPAddr{IP: "::ffff:203.0.113.161", Port: 64646}.String() →
@@ -1561,7 +865,7 @@ func TestRecordOutboundAuthSuccess_CanonicalisesMappedIPv6RemoteAddr(t *testing.
 // error) or an empty remoteAddr (wrapper published nothing yet / unit
 // tests); neither must panic or mutate persistedMeta.
 func TestRecordOutboundAuthSuccess_EmptyInputsAreNoop(t *testing.T) {
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "peer.example:64646"
 
 	// Empty remoteAddr must bail before any write attempt.
@@ -1583,7 +887,7 @@ func TestRecordOutboundAuthSuccess_EmptyInputsAreNoop(t *testing.T) {
 // the suppression the ban window was introduced to end.
 func TestRecordOutboundAuthSuccess_ClearsRemoteBan(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.180:64646"
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 
 	// Seed a remote-ban record for this peer.
 	future := time.Now().UTC().Add(24 * time.Hour)
@@ -1619,7 +923,7 @@ func TestRecordOutboundAuthSuccess_ClearsRemoteBan(t *testing.T) {
 func TestRecordOutboundAuthSuccess_ClearsRemoteIPBan(t *testing.T) {
 	const peerAddr domain.PeerAddress = "203.0.113.181:64646"
 	const bannedIP = "203.0.113.181"
-	svc := newAdvertiseTestService("198.51.100.10:64646")
+	svc := newAdvertiseTestService()
 
 	// Seed an IP-wide remote-ban entry for the dialled host.
 	future := time.Now().UTC().Add(24 * time.Hour)
@@ -1647,7 +951,7 @@ func TestRecordOutboundAuthSuccess_ClearsRemoteIPBanFreesSiblings(t *testing.T) 
 	const sibling1 domain.PeerAddress = "198.51.100.55:64646"
 	const sibling2 domain.PeerAddress = "198.51.100.55:64647"
 	const bannedIP = "198.51.100.55"
-	svc := newAdvertiseTestService("203.0.113.10:64646")
+	svc := newAdvertiseTestService()
 
 	future := time.Now().UTC().Add(12 * time.Hour)
 	svc.remoteBannedIPs[bannedIP] = remoteIPBanEntry{
@@ -1684,7 +988,7 @@ func TestRecordOutboundAuthSuccess_PreservesPeerBanSiblingRows(t *testing.T) {
 		peerC    domain.PeerAddress = "198.51.100.105:64648"
 		bannedIP                    = "198.51.100.105"
 	)
-	svc := newAdvertiseTestService("203.0.113.10:64646")
+	svc := newAdvertiseTestService()
 
 	future := time.Now().UTC().Add(12 * time.Hour)
 	svc.remoteBannedIPs[bannedIP] = remoteIPBanEntry{

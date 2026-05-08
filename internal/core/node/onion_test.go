@@ -57,8 +57,7 @@ func TestNormalizePeerAddressAcceptsValidOnion(t *testing.T) {
 
 	svc := &Service{
 		cfg: config.Node{
-			ListenAddress:    ":64646",
-			AdvertiseAddress: "127.0.0.1:64646",
+			ListenAddress: ":64646",
 		},
 	}
 
@@ -77,8 +76,7 @@ func TestNormalizePeerAddressRejectsInvalidOnion(t *testing.T) {
 
 	svc := &Service{
 		cfg: config.Node{
-			ListenAddress:    ":64646",
-			AdvertiseAddress: "127.0.0.1:64646",
+			ListenAddress: ":64646",
 		},
 	}
 
@@ -94,8 +92,7 @@ func TestNormalizePeerAddressOnionWithCustomPort(t *testing.T) {
 
 	svc := &Service{
 		cfg: config.Node{
-			ListenAddress:    ":64646",
-			AdvertiseAddress: "127.0.0.1:64646",
+			ListenAddress: ":64646",
 		},
 	}
 
@@ -114,8 +111,7 @@ func TestNormalizePeerAddressOnionWithNoObserved(t *testing.T) {
 
 	svc := &Service{
 		cfg: config.Node{
-			ListenAddress:    ":64646",
-			AdvertiseAddress: "127.0.0.1:64646",
+			ListenAddress: ":64646",
 		},
 	}
 

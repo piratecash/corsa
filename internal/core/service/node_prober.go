@@ -94,7 +94,16 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 	status.NodeID = welcome.Address
 	status.NodeType = welcome.NodeType
 	status.ListenerEnabled = strings.TrimSpace(welcome.Listener) == "1"
-	status.ListenerAddress = strings.TrimSpace(welcome.Listen)
+	// v12 wire contract: welcome.Listen no longer carries the host
+	// component. Fall back to the local probe address so the
+	// diagnostics surface a sensible host:port to operators rather
+	// than an empty string. status.Address already holds the
+	// configured local endpoint we just connected to.
+	if listen := strings.TrimSpace(welcome.Listen); listen != "" {
+		status.ListenerAddress = listen
+	} else if status.ListenerEnabled {
+		status.ListenerAddress = status.Address
+	}
 	status.ClientVersion = welcome.ClientVersion
 	status.Services = welcome.Services
 	status.Capabilities = welcome.Capabilities

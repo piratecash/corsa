@@ -1,13 +1,21 @@
 package node
 
-// V11 contract tests for the advertise-address phase 1 deprecation rollout.
-// Kept in a dedicated file so reviewers can spot the negative-assertion
-// guards (runtime path NEVER rejects / emits mismatch notices) and the
-// extractAdvertisePort boundary matrix without wading through the full
-// v10 convergence matrix in advertise_convergence_test.go.
+// Advertise-address contract tests under the v12 cleanup baseline.
 //
-// See docs/advertise-address-phase1-deprecation.md §14.2 for the checklist
-// these tests cover.
+// This file collects:
+//
+//   - the extractAdvertisePort boundary matrix;
+//   - the negative-assertion guard that validateAdvertisedAddress never
+//     rejects on advertise-learning grounds;
+//   - end-to-end positives for world-routable / non-routable observed IPs;
+//   - the welcome wire-shape contract: empty Listen, populated
+//     AdvertisePort, and observed_address present as NAT-detection
+//     telemetry (no longer an authoritative self-advertise source);
+//   - the lenient parser contract that a corrupt advertise_port never
+//     breaks an entire Frame decode.
+//
+// See docs/protocol/handshake.md (Advertise Convergence) for the
+// wire/behavioural contract these tests pin.
 
 import (
 	"encoding/json"
@@ -24,9 +32,8 @@ import (
 // IsValid-gated fallback. Every non-[1..65535] wire value — zero, negative,
 // above upper bound — collapses to the PeerPort form of config.DefaultPeerPort
 // so the persisted row and the learned candidate endpoint never carry a
-// nonsensical port. This is the §7.2 wire contract: "any non-integer
-// payload, missing field, or value outside 1..65535 collapses to
-// DefaultPeerPort".
+// nonsensical port. This is the wire contract: "any non-integer payload,
+// missing field, or value outside 1..65535 collapses to DefaultPeerPort".
 func TestExtractAdvertisePort_BoundaryCases(t *testing.T) {
 	defaultPort, err := strconv.Atoi(config.DefaultPeerPort)
 	if err != nil {
@@ -64,10 +71,10 @@ func TestExtractAdvertisePort_BoundaryCases(t *testing.T) {
 }
 
 // TestExtractAdvertisePort_AbsentAndStringWireShape verifies the two wire
-// shapes a v11 parser must tolerate for hello.advertise_port: field absent
-// (zero PeerPort after decode) and a v10-style JSON string. Both collapse
-// to DefaultPeerPort via the IsValid-gated fallback without failing the
-// whole Frame decode.
+// shapes the parser must tolerate for hello.advertise_port: field absent
+// (zero PeerPort after decode) and a v10-style JSON string preserved by
+// PeerPort.UnmarshalJSON. Both collapse to DefaultPeerPort via the
+// IsValid-gated fallback without failing the whole Frame decode.
 func TestExtractAdvertisePort_AbsentAndStringWireShape(t *testing.T) {
 	defaultPort, err := strconv.Atoi(config.DefaultPeerPort)
 	if err != nil {
@@ -77,9 +84,6 @@ func TestExtractAdvertisePort_AbsentAndStringWireShape(t *testing.T) {
 
 	t.Run("field_absent_collapses_to_default", func(t *testing.T) {
 		t.Parallel()
-		// A hello frame that simply omits advertise_port decodes to the
-		// zero PeerPort, which IsValid rejects — extractAdvertisePort
-		// must fall back to DefaultPeerPort.
 		var frame protocol.Frame
 		if err := json.Unmarshal([]byte(`{"type":"hello","listener":"1","listen":"198.51.100.5:64646"}`), &frame); err != nil {
 			t.Fatalf("json.Unmarshal hello without advertise_port: %v", err)
@@ -94,9 +98,6 @@ func TestExtractAdvertisePort_AbsentAndStringWireShape(t *testing.T) {
 
 	t.Run("string_wire_shape_decodes_and_propagates", func(t *testing.T) {
 		t.Parallel()
-		// A v10 peer that historically emitted the port as a string must
-		// still decode; PeerPort.UnmarshalJSON unwraps "\"64646\"" to 64646
-		// and extractAdvertisePort propagates the valid value unchanged.
 		var frame protocol.Frame
 		if err := json.Unmarshal([]byte(`{"type":"hello","listener":"1","listen":"198.51.100.5:64646","advertise_port":"64646"}`), &frame); err != nil {
 			t.Fatalf("json.Unmarshal hello with string advertise_port: %v", err)
@@ -111,10 +112,6 @@ func TestExtractAdvertisePort_AbsentAndStringWireShape(t *testing.T) {
 
 	t.Run("unparseable_string_collapses_to_default", func(t *testing.T) {
 		t.Parallel()
-		// Garbage string payload must not fail the Frame decode; the
-		// lenient PeerPort.UnmarshalJSON collapses it to zero, then
-		// extractAdvertisePort routes that through the DefaultPeerPort
-		// fallback.
 		var frame protocol.Frame
 		if err := json.Unmarshal([]byte(`{"type":"hello","listener":"1","listen":"198.51.100.5:64646","advertise_port":"abc"}`), &frame); err != nil {
 			t.Fatalf("json.Unmarshal hello with garbage advertise_port: %v", err)
@@ -129,16 +126,10 @@ func TestExtractAdvertisePort_AbsentAndStringWireShape(t *testing.T) {
 
 	t.Run("out_of_range_string_collapses_to_default", func(t *testing.T) {
 		t.Parallel()
-		// A string payload that parses as an integer but falls outside
-		// 1..65535 must also collapse — the advertise-convergence layer
-		// rejects it at IsValid, and extractAdvertisePort substitutes
-		// DefaultPeerPort.
 		var frame protocol.Frame
 		if err := json.Unmarshal([]byte(`{"type":"hello","listener":"1","listen":"198.51.100.5:64646","advertise_port":"70000"}`), &frame); err != nil {
 			t.Fatalf("json.Unmarshal hello with out-of-range string: %v", err)
 		}
-		// 70000 fails the 1..65535 gate — extractAdvertisePort must
-		// substitute DefaultPeerPort rather than trust the raw value.
 		if frame.AdvertisePort.IsValid() {
 			t.Fatalf("70000 must not pass IsValid, got valid=true with value %d", frame.AdvertisePort)
 		}
@@ -148,21 +139,22 @@ func TestExtractAdvertisePort_AbsentAndStringWireShape(t *testing.T) {
 	})
 }
 
-// TestValidateAdvertisedAddress_V11NeverRejects is the negative-assertion
-// guard required by §14.2: under the phase 1 deprecation contract the
-// runtime path must NEVER flip ShouldReject=true and NEVER attach a
-// RejectNotice to the result, regardless of what the peer declares in
-// hello.listen. Every previously rejection-producing shape must now flow
-// through to an accept-branch decision so a malformed or disagreeing peer
-// never breaks its own session.
-func TestValidateAdvertisedAddress_V11NeverRejects(t *testing.T) {
+// TestValidateAdvertisedAddress_NeverRejects is the negative-assertion
+// guard required by the v12 cleanup contract: the runtime path must NEVER
+// reject an inbound hello on advertise-learning grounds, regardless of
+// what the peer declares in hello.listen. Every previously rejection-
+// producing shape must now flow through to an accept-branch decision so
+// a malformed or disagreeing peer never breaks its own session. The
+// surviving accept decisions are non_listener, legacy_direct, match,
+// or local_exception.
+func TestValidateAdvertisedAddress_NeverRejects(t *testing.T) {
 	cases := []struct {
 		name        string
 		observedTCP string
 		frame       protocol.Frame
 	}{
 		{
-			name:        "observed_world_listen_private_was_v10_reject",
+			name:        "observed_world_listen_private_was_legacy_reject",
 			observedTCP: "203.0.113.50:45123",
 			frame: protocol.Frame{
 				Type:          "hello",
@@ -182,7 +174,7 @@ func TestValidateAdvertisedAddress_V11NeverRejects(t *testing.T) {
 			},
 		},
 		{
-			name:        "observed_private_legacy_v10_reject_shape",
+			name:        "observed_private_legacy_reject_shape",
 			observedTCP: "10.0.0.50:45123",
 			frame: protocol.Frame{
 				Type:          "hello",
@@ -202,7 +194,7 @@ func TestValidateAdvertisedAddress_V11NeverRejects(t *testing.T) {
 			},
 		},
 		{
-			name:        "advertise_port_zero_was_v10_invalid",
+			name:        "advertise_port_zero_was_legacy_invalid",
 			observedTCP: "203.0.113.52:45123",
 			frame: protocol.Frame{
 				Type:          "hello",
@@ -248,34 +240,25 @@ func TestValidateAdvertisedAddress_V11NeverRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			result := validateAdvertisedAddress(tc.observedTCP, tc.frame)
-			if result.ShouldReject {
-				t.Fatalf("v11 contract violation: ShouldReject=true for %s (decision=%q)",
-					tc.name, result.Decision)
-			}
-			if result.RejectNotice != nil {
-				t.Fatalf("v11 contract violation: RejectNotice attached for %s (decision=%q)",
-					tc.name, result.Decision)
-			}
-			// observed-address-mismatch must not be produced by the
-			// штатный path under any circumstance. Any surviving decision
-			// value produced from this helper is one of the accept
-			// branches — world_mismatch is legacy-only and unreachable here.
-			if result.Decision == advertiseDecisionWorldMismatch {
-				t.Fatalf("v11 contract violation: decision=world_mismatch for %s (штатный path must never produce this)", tc.name)
-			}
-			if result.Decision == advertiseDecisionInvalid {
-				t.Fatalf("v11 contract violation: decision=invalid for %s (штатный path must never produce this)", tc.name)
+			switch result.Decision {
+			case advertiseDecisionMatch,
+				advertiseDecisionLocalException,
+				advertiseDecisionLegacyDirect,
+				advertiseDecisionNonListener:
+				// Accept branches — expected.
+			default:
+				t.Fatalf("v12 contract violation: unexpected decision %q for %s",
+					result.Decision, tc.name)
 			}
 		})
 	}
 }
 
 // TestValidateAdvertisedAddress_WorldObservedProducesCandidate is the
-// end-to-end positive under v11: a world-routable observed IP plus a
-// valid advertise_port produces an announceable row whose
-// NormalizedAdvertisedIP mirrors the observed IP and whose
-// AdvertisePort propagates unchanged. This is the single announce
-// candidate path under the phase 1 contract.
+// end-to-end positive: a world-routable observed IP plus a valid
+// advertise_port produces an announceable row whose NormalizedAdvertisedIP
+// mirrors the observed IP and whose AdvertisePort propagates unchanged.
+// This is the single announce-candidate path under the v12 contract.
 func TestValidateAdvertisedAddress_WorldObservedProducesCandidate(t *testing.T) {
 	t.Parallel()
 
@@ -286,22 +269,16 @@ func TestValidateAdvertisedAddress_WorldObservedProducesCandidate(t *testing.T) 
 	)
 
 	result := validateAdvertisedAddress(observedTCP, protocol.Frame{
-		Type:          "hello",
-		Listener:      "1",
+		Type:     "hello",
+		Listener: "1",
 		// hello.listen.host intentionally set to a DIFFERENT world IP
-		// to prove v11 ignores it as a truth input.
+		// to prove the contract ignores it as a truth input.
 		Listen:        "198.51.100.55:64646",
 		AdvertisePort: advPort,
 	})
 
 	if result.Decision != advertiseDecisionMatch {
 		t.Fatalf("decision: got %q want %q", result.Decision, advertiseDecisionMatch)
-	}
-	if result.ShouldReject {
-		t.Fatalf("v11 accept branch must not flip ShouldReject")
-	}
-	if result.RejectNotice != nil {
-		t.Fatalf("v11 accept branch must not attach a RejectNotice")
 	}
 	if result.PersistAnnounceState != announceStateAnnounceable {
 		t.Fatalf("announce_state: got %q want %q", result.PersistAnnounceState, announceStateAnnounceable)
@@ -315,7 +292,7 @@ func TestValidateAdvertisedAddress_WorldObservedProducesCandidate(t *testing.T) 
 	if result.NormalizedObservedIP != domain.PeerIP(observedHost) {
 		t.Fatalf("NormalizedObservedIP: got %q want %q", result.NormalizedObservedIP, observedHost)
 	}
-	// v11: the trusted advertised IP mirrors the observed IP, not the
+	// The trusted advertised IP mirrors the observed IP, not the
 	// hello.listen host. This is the assertion that pins "observed IP
 	// is the sole truth source".
 	if result.NormalizedAdvertisedIP != domain.PeerIP(observedHost) {
@@ -330,17 +307,17 @@ func TestValidateAdvertisedAddress_WorldObservedProducesCandidate(t *testing.T) 
 	}
 }
 
-// TestValidateAdvertisedAddress_LocalObservedNoAnnounce pins the §14.2
-// invariant "private observed IP → no announce candidate, no leak via
-// peer exchange". A peer reached via a non-routable observed IP still
-// produces an accept decision (v11 never rejects on advertise-learning
-// grounds) but AllowAnnounce must be false, the persisted announce_state
-// must be direct_only, and ObservedIPHint must carry the canonical
-// observed IP so the runtime history can still record the private
-// observation. NormalizedAdvertisedIP is intentionally NOT asserted here:
-// the runtime echoes the self-reported hello.listen host as a diagnostic
-// even on non-routable observations, and the peer-exchange leak guard
-// lives on AllowAnnounce / PersistAnnounceState, not on that diagnostic.
+// TestValidateAdvertisedAddress_LocalObservedNoAnnounce pins the invariant
+// "private observed IP → no announce candidate, no leak via peer exchange".
+// A peer reached via a non-routable observed IP still produces an accept
+// decision (the contract never rejects on advertise-learning grounds) but
+// AllowAnnounce must be false, the persisted announce_state must be
+// direct_only, and ObservedIPHint must carry the canonical observed IP so
+// the runtime history can still record the private observation.
+// NormalizedAdvertisedIP is intentionally NOT asserted here: the runtime
+// echoes the self-reported hello.listen host as a diagnostic even on
+// non-routable observations, and the peer-exchange leak guard lives on
+// AllowAnnounce / PersistAnnounceState, not on that diagnostic.
 func TestValidateAdvertisedAddress_LocalObservedNoAnnounce(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -366,12 +343,6 @@ func TestValidateAdvertisedAddress_LocalObservedNoAnnounce(t *testing.T) {
 			if result.Decision != advertiseDecisionLocalException {
 				t.Fatalf("decision: got %q want %q", result.Decision, advertiseDecisionLocalException)
 			}
-			if result.ShouldReject {
-				t.Fatalf("v11 accept branch must not flip ShouldReject")
-			}
-			if result.RejectNotice != nil {
-				t.Fatalf("v11 accept branch must not attach a RejectNotice")
-			}
 			if result.AllowAnnounce {
 				t.Fatalf("AllowAnnounce must be false for non-routable observed IP (peer-exchange leak guard)")
 			}
@@ -391,124 +362,25 @@ func TestValidateAdvertisedAddress_LocalObservedNoAnnounce(t *testing.T) {
 	}
 }
 
-// TestHandleObservedAddressMismatchNotice_WeakHintGate verifies that a
-// legacy v10 notice is dropped on the floor when v11 passive learning has
-// already produced an observed consensus. The override must survive
-// untouched — otherwise a single stray v10 peer could silently replace
-// a stronger learned endpoint.
-func TestHandleObservedAddressMismatchNotice_WeakHintGate(t *testing.T) {
-	const (
-		consensusIP domain.PeerIP = "203.0.113.80"
-		legacyHint  string        = "198.51.100.77"
-	)
-
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	// Seed the consensus map with two matching votes so
-	// observedConsensusIPLocked crosses observedAddrConsensusThreshold.
-	svc.observedAddrs = map[domain.PeerIdentity]string{
-		"peer-aaa": string(consensusIP),
-		"peer-bbb": string(consensusIP),
-	}
-
-	details, err := protocol.MarshalObservedAddressMismatchDetails(legacyHint)
-	if err != nil {
-		t.Fatalf("MarshalObservedAddressMismatchDetails: %v", err)
-	}
-	svc.handleObservedAddressMismatchNotice(protocol.Frame{
-		Type:    protocol.FrameTypeConnectionNotice,
-		Status:  protocol.ConnectionStatusClosing,
-		Code:    protocol.ErrCodeObservedAddressMismatch,
-		Details: details,
-	})
-
-	if svc.trustedSelfAdvertiseIP != "" {
-		t.Fatalf("v11 weak-hint gate breached: trustedSelfAdvertiseIP=%q (must stay empty when consensus exists)",
-			svc.trustedSelfAdvertiseIP)
-	}
-	// selfAdvertiseEndpoint must publish the consensus IP, not the
-	// legacy hint — this is the observable effect callers rely on.
-	want := string(consensusIP) + ":" + config.DefaultPeerPort
-	if got := svc.selfAdvertiseEndpoint(); got != want {
-		t.Fatalf("selfAdvertiseEndpoint: got %q want %q", got, want)
-	}
-}
-
-// TestHandleObservedAddressMismatchNotice_AppliedWithoutConsensus is the
-// companion fallback: without a v11 consensus the legacy notice is still
-// allowed to seed trustedSelfAdvertiseIP so early-lifetime nodes
-// (not yet accumulated inbound observations) can still learn a routable
-// self-endpoint from a v10 peer. Applied value must be canonicalised.
-func TestHandleObservedAddressMismatchNotice_AppliedWithoutConsensus(t *testing.T) {
-	const legacyHint = "203.0.113.99"
-
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	// observedAddrs left empty on purpose — no v11 consensus yet.
-
-	details, err := protocol.MarshalObservedAddressMismatchDetails(legacyHint)
-	if err != nil {
-		t.Fatalf("MarshalObservedAddressMismatchDetails: %v", err)
-	}
-	svc.handleObservedAddressMismatchNotice(protocol.Frame{
-		Type:    protocol.FrameTypeConnectionNotice,
-		Status:  protocol.ConnectionStatusClosing,
-		Code:    protocol.ErrCodeObservedAddressMismatch,
-		Details: details,
-	})
-
-	if string(svc.trustedSelfAdvertiseIP) != legacyHint {
-		t.Fatalf("trustedSelfAdvertiseIP: got %q want %q (legacy notice must seed the override when no consensus exists)",
-			svc.trustedSelfAdvertiseIP, legacyHint)
-	}
-	want := legacyHint + ":" + config.DefaultPeerPort
-	if got := svc.selfAdvertiseEndpoint(); got != want {
-		t.Fatalf("selfAdvertiseEndpoint: got %q want %q", got, want)
-	}
-}
-
-// TestHandleObservedAddressMismatchNotice_PrivateHintRejected guards the
-// non-routable observed-IP filter. A peer reporting 10.x / 192.168.x /
-// loopback must never be allowed to downgrade our advertise endpoint to
-// a private range — the override stays empty and the node falls back to
-// cfg.AdvertiseAddress.
-func TestHandleObservedAddressMismatchNotice_PrivateHintRejected(t *testing.T) {
-	cases := []string{
-		"10.0.0.7",
-		"192.168.1.1",
-		"127.0.0.1",
-		"100.64.0.5",
-		"fc00::5",
-	}
-	for _, hint := range cases {
-		hint := hint
-		t.Run(hint, func(t *testing.T) {
-			t.Parallel()
-			svc := newAdvertiseTestService("198.51.100.10:64646")
-			details, err := protocol.MarshalObservedAddressMismatchDetails(hint)
-			if err != nil {
-				t.Fatalf("MarshalObservedAddressMismatchDetails(%q): %v", hint, err)
-			}
-			svc.handleObservedAddressMismatchNotice(protocol.Frame{
-				Type:    protocol.FrameTypeConnectionNotice,
-				Status:  protocol.ConnectionStatusClosing,
-				Code:    protocol.ErrCodeObservedAddressMismatch,
-				Details: details,
-			})
-			if svc.trustedSelfAdvertiseIP != "" {
-				t.Fatalf("private hint %q must not seed trustedSelfAdvertiseIP, got %q",
-					hint, svc.trustedSelfAdvertiseIP)
-			}
-		})
-	}
-}
-
-// TestWelcomeFrame_V11CompatFields asserts the wire-compat invariants for
-// the welcome frame emitted by a v11 responder: ObservedAddress field is
-// still present (legacy v10 parsers consume it), AdvertisePort is carried
-// as a JSON integer (v11 wire contract), and ProtocolVersion / MinimumProtocolVersion
-// reflect the post-phase-1 values. This is the single test that catches a
-// regression where a refactor drops observed_address and breaks v10 peers
-// that still rely on it for self-learning.
-func TestWelcomeFrame_V11CompatFields(t *testing.T) {
+// TestWelcomeFrame_AdvertiseAndObservedFields asserts the wire-shape
+// invariants for the welcome frame:
+//   - Listen is EMPTY (the v12 cleanup contract — host is no longer
+//     a wire concept, and AdvertisePort carries the listening port);
+//   - ObservedAddress is still emitted; it feeds recordObservedAddress
+//     on the dialer side, which in turn drives the "NAT detected"
+//     telemetry. Under the v12 baseline the field is diagnostic
+//     telemetry only — there is no authoritative self-advertise
+//     consumer left in production code (selfAdvertiseEndpoint and
+//     observedConsensusIPLocked were removed because the emit path
+//     no longer publishes a Listen host);
+//   - AdvertisePort is carried as a JSON integer;
+//   - ProtocolVersion / MinimumProtocolVersion reflect the current floor.
+//
+// This is the regression guard that catches both directions of the
+// contract: a refactor that re-introduces host on the wire (Listen
+// non-empty) AND a refactor that drops observed_address (cutting the
+// NAT-detection telemetry input).
+func TestWelcomeFrame_AdvertiseAndObservedFields(t *testing.T) {
 	t.Parallel()
 	id, err := identity.Generate()
 	if err != nil {
@@ -520,7 +392,6 @@ func TestWelcomeFrame_V11CompatFields(t *testing.T) {
 			Type:             config.NodeTypeFull,
 			ListenerEnabled:  true,
 			ListenerSet:      true,
-			AdvertiseAddress: "203.0.113.10:64646",
 		},
 	}
 	frame := svc.welcomeFrame("challenge-xyz", "203.0.113.99")
@@ -528,8 +399,11 @@ func TestWelcomeFrame_V11CompatFields(t *testing.T) {
 	if frame.Type != "welcome" {
 		t.Fatalf("frame.Type: got %q want %q", frame.Type, "welcome")
 	}
+	if frame.Listen != "" {
+		t.Fatalf("welcome.listen must be empty under the v12 contract (host is not a wire concept), got %q", frame.Listen)
+	}
 	if frame.ObservedAddress != "203.0.113.99" {
-		t.Fatalf("welcome.observed_address must be carried for v10 compat, got %q", frame.ObservedAddress)
+		t.Fatalf("welcome.observed_address must be carried (outbound consensus input), got %q", frame.ObservedAddress)
 	}
 	if !frame.AdvertisePort.IsValid() {
 		t.Fatalf("welcome.advertise_port must be populated, got %d", frame.AdvertisePort)
@@ -543,69 +417,30 @@ func TestWelcomeFrame_V11CompatFields(t *testing.T) {
 	}
 
 	// Wire-level check: the marshalled JSON must contain observed_address
-	// so a v10 parser keyed on that field name still finds it.
+	// so an outbound dialer keyed on that field name still finds it.
 	raw, err := json.Marshal(frame)
 	if err != nil {
 		t.Fatalf("json.Marshal(welcome): %v", err)
 	}
 	if !containsKey(raw, "observed_address") {
-		t.Fatalf("welcome JSON must carry observed_address key for v10 compat, got %s", raw)
+		t.Fatalf("welcome JSON must carry observed_address key (outbound consensus), got %s", raw)
 	}
 	if !containsKey(raw, "advertise_port") {
-		t.Fatalf("welcome JSON must carry advertise_port key for v11 receivers, got %s", raw)
+		t.Fatalf("welcome JSON must carry advertise_port key, got %s", raw)
+	}
+	if containsKey(raw, "listen") {
+		t.Fatalf("welcome JSON must NOT carry listen key under v12 contract, got %s", raw)
 	}
 	// advertise_port must be an integer on the wire — not a JSON string.
-	// The raw form for a typical port like 64646 should contain
-	// `"advertise_port":64646`, not `"advertise_port":"64646"`.
 	if bytesContains(raw, []byte(`"advertise_port":"`)) {
 		t.Fatalf("welcome.advertise_port must be JSON integer, not string, got %s", raw)
 	}
 }
 
-// TestSelfAdvertiseEndpoint_LearnedObservedWinsOverConfig pins the §14.2
-// checklist item "learned observed IP has priority over
-// CORSA_ADVERTISE_ADDRESS". Once two inbound peers report the same
-// observed IP, observedConsensusIPLocked crosses the threshold and
-// selfAdvertiseEndpoint must return that IP paired with the operator's
-// EffectiveAdvertisePort — the host from CORSA_ADVERTISE_ADDRESS is
-// demoted to a last-resort fallback.
-func TestSelfAdvertiseEndpoint_LearnedObservedWinsOverConfig(t *testing.T) {
-	t.Parallel()
-	svc := newAdvertiseTestService("198.51.100.10:64646") // legacy cfg host
-	svc.observedAddrs = map[domain.PeerIdentity]string{
-		"peer-aaa": "203.0.113.200",
-		"peer-bbb": "203.0.113.200",
-	}
-	want := "203.0.113.200:" + config.DefaultPeerPort
-	if got := svc.selfAdvertiseEndpoint(); got != want {
-		t.Fatalf("selfAdvertiseEndpoint: got %q want %q (learned observed must override cfg host)", got, want)
-	}
-}
-
-// TestSelfAdvertiseEndpoint_LearnedObservedWinsOverLegacyOverride stacks
-// the priority further: even if a legacy v10 mismatch notice previously
-// seeded trustedSelfAdvertiseIP, a subsequent v11 consensus must win.
-// This catches the regression where the v10 override silently pinned
-// the runtime to a stale address after consensus was reached.
-func TestSelfAdvertiseEndpoint_LearnedObservedWinsOverLegacyOverride(t *testing.T) {
-	t.Parallel()
-	svc := newAdvertiseTestService("198.51.100.10:64646")
-	svc.trustedSelfAdvertiseIP = "203.0.113.210" // seeded by legacy notice
-	svc.observedAddrs = map[domain.PeerIdentity]string{
-		"peer-aaa": "203.0.113.211",
-		"peer-bbb": "203.0.113.211",
-	}
-	want := "203.0.113.211:" + config.DefaultPeerPort
-	if got := svc.selfAdvertiseEndpoint(); got != want {
-		t.Fatalf("selfAdvertiseEndpoint: got %q want %q (v11 consensus must override legacy hint)", got, want)
-	}
-}
-
 // TestFrame_LenientAdvertisePortNeverBreaksDecode is the parser-side
 // contract test: no matter how corrupt the advertise_port wire payload
-// is, the whole Frame must still decode without error. This is the
-// mixed-network compat guarantee — a single malformed field cannot fail
-// an entire hello/welcome frame.
+// is, the whole Frame must still decode without error. A single
+// malformed field cannot fail an entire hello/welcome frame.
 func TestFrame_LenientAdvertisePortNeverBreaksDecode(t *testing.T) {
 	raws := []string{
 		`{"type":"hello","advertise_port":64646}`,
@@ -616,8 +451,8 @@ func TestFrame_LenientAdvertisePortNeverBreaksDecode(t *testing.T) {
 		`{"type":"hello","advertise_port":64646.5}`,
 		`{"type":"hello","advertise_port":-1}`,
 		`{"type":"hello","advertise_port":70000}`,
-		// Field missing entirely — not a regression risk but pins the
-		// wire contract "absent field == zero PeerPort".
+		// Field missing entirely — pins the wire contract
+		// "absent field == zero PeerPort".
 		`{"type":"hello"}`,
 	}
 	for _, raw := range raws {
@@ -632,5 +467,30 @@ func TestFrame_LenientAdvertisePortNeverBreaksDecode(t *testing.T) {
 				t.Fatalf("Frame.Type: got %q want %q (decode corruption)", frame.Type, "hello")
 			}
 		})
+	}
+}
+
+// TestValidateAdvertisedAddress_StatelessAcceptDoesNotEmitMismatch is
+// the negative-assertion guard required by §12.2 of the v12 cleanup
+// plan: even with a hello whose listen.host disagrees with the observed
+// TCP IP, the accept branch must not synthesise any mismatch wire
+// signal. There is no longer a place in advertiseValidationResult to
+// carry such a notice; this test pins the structural absence.
+func TestValidateAdvertisedAddress_StatelessAcceptDoesNotEmitMismatch(t *testing.T) {
+	t.Parallel()
+
+	result := validateAdvertisedAddress("203.0.113.250:45000", protocol.Frame{
+		Type:          "hello",
+		Listener:      "1",
+		Listen:        "198.51.100.250:64646",
+		AdvertisePort: 64646,
+	})
+
+	if result.Decision != advertiseDecisionMatch {
+		t.Fatalf("decision: got %q want %q (world-routable observed must accept as match)",
+			result.Decision, advertiseDecisionMatch)
+	}
+	if !result.AllowAnnounce {
+		t.Fatalf("world-routable observed must produce AllowAnnounce=true")
 	}
 }

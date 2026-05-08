@@ -40,7 +40,7 @@ Messages and receipts are persisted and replayed to subscribers, ensuring no dat
 }
 ```
 
-The `subscriber` field is an opaque route identifier used to key the subscription internally. It is **not** validated as a fingerprint. If omitted, the server substitutes the connection's remote address (`conn.RemoteAddr().String()`). For outbound (reverse) subscriptions the node sends its own `AdvertiseAddress` as the subscriber value. Clients should treat this field as an opaque string and must not assume fingerprint format.
+The `subscriber` field is an opaque route identifier used to key the subscription internally. It is **not** validated as a fingerprint. If omitted, the server substitutes the connection's remote address (`conn.RemoteAddr().String()`). For outbound (reverse) subscriptions the node sends its own Ed25519 identity (the same value as the `recipient` field) as the subscriber value, so each node has exactly one stable subscriber id across all sessions. Clients should treat this field as an opaque string and must not assume any particular format.
 
 **Response:**
 ```json
@@ -336,7 +336,7 @@ sequenceDiagram
 }
 ```
 
-Поле `subscriber` — непрозрачный идентификатор маршрута, используемый для ключевания подписки. Оно **не** валидируется как fingerprint. Если не указано, сервер подставляет адрес соединения (`conn.RemoteAddr().String()`). Для исходящих (обратных) подписок нода отправляет свой `AdvertiseAddress` как значение subscriber. Клиенты должны считать это поле непрозрачной строкой и не рассчитывать на формат fingerprint.
+Поле `subscriber` — непрозрачный идентификатор маршрута, используемый для ключевания подписки. Оно **не** валидируется как fingerprint. Если не указано, сервер подставляет адрес соединения (`conn.RemoteAddr().String()`). Для исходящих (обратных) подписок нода отправляет свою Ed25519 identity (то же значение, что и в поле `recipient`) как subscriber, поэтому у каждой ноды ровно один стабильный subscriber id поверх всех сессий. Клиенты должны считать это поле непрозрачной строкой и не рассчитывать на конкретный формат.
 
 **Ответ:**
 ```json

@@ -283,7 +283,9 @@ type PendingMessageFrame struct {
 const (
 	// FrameTypeConnectionNotice is the canonical type string for the
 	// universal transport/control frame introduced by the advertise-address
-	// convergence contract. First consumer: ErrCodeObservedAddressMismatch.
+	// convergence contract. Currently the only producer is the peer-banned
+	// notice path — the v10/v11 observed-address-mismatch consumer was
+	// removed in the v12 cleanup phase.
 	FrameTypeConnectionNotice = "connection_notice"
 
 	// ConnectionStatusClosing is the only Status value currently shipped
@@ -291,44 +293,6 @@ const (
 	// immediately after the frame is flushed.
 	ConnectionStatusClosing = "closing"
 )
-
-// ObservedAddressMismatchDetails is the schema for Frame.Details when
-// Code == ErrCodeObservedAddressMismatch. observed_address carries the
-// bare IP as seen by the responder, without port — matching the shape
-// already used by welcome.observed_address.
-type ObservedAddressMismatchDetails struct {
-	ObservedAddress string `json:"observed_address,omitempty"`
-}
-
-// MarshalObservedAddressMismatchDetails serialises the details payload
-// for ErrCodeObservedAddressMismatch into the opaque json.RawMessage
-// carried by Frame.Details. Returns nil RawMessage (plus nil error) when
-// ObservedAddress is empty so the field is omitted by omitempty.
-func MarshalObservedAddressMismatchDetails(observedIP string) (json.RawMessage, error) {
-	if observedIP == "" {
-		return nil, nil
-	}
-	payload, err := json.Marshal(ObservedAddressMismatchDetails{ObservedAddress: observedIP})
-	if err != nil {
-		return nil, err
-	}
-	return payload, nil
-}
-
-// ParseObservedAddressMismatchDetails decodes Frame.Details for a
-// connection_notice with Code == ErrCodeObservedAddressMismatch. Empty
-// details is not an error: legacy peers may send the notice without a
-// hint, and callers must treat that as "no actionable observed IP".
-func ParseObservedAddressMismatchDetails(raw json.RawMessage) (ObservedAddressMismatchDetails, error) {
-	if len(raw) == 0 {
-		return ObservedAddressMismatchDetails{}, nil
-	}
-	var details ObservedAddressMismatchDetails
-	if err := json.Unmarshal(raw, &details); err != nil {
-		return ObservedAddressMismatchDetails{}, err
-	}
-	return details, nil
-}
 
 // PeerBannedReason is the closed enum of machine-readable reasons the
 // responder can cite when sending a peer-banned notice. Kept as a

@@ -17,7 +17,13 @@ func main() {
 	cfg := sdk.DefaultConfig()
 	cfg.App.Profile = "sic-parvis-magna-bot"
 	cfg.Node.ListenAddress = ":64648"
-	cfg.Node.AdvertiseAddress = "127.0.0.1:64648"
+	// Advertised port MUST be set explicitly when the bot binds to a
+	// non-default port — the SDK never derives advertise_port from
+	// ListenAddress automatically (operators behind NAT / port-forward
+	// run bind and advertise on different values). Here we run on the
+	// same host as our peers, so they match.
+	advertisePort := uint16(64648)
+	cfg.Node.AdvertisePort = &advertisePort
 	cfg.Node.ChatLogDir = ".corsa-bot"
 	cfg.Node.IdentityPath = filepath.Join(".corsa-bot", "identity-64648.json")
 	cfg.Node.TrustStorePath = filepath.Join(".corsa-bot", "trust-64648.json")

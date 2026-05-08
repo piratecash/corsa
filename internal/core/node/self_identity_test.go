@@ -39,11 +39,10 @@ func TestInboundHello_SelfIdentity_EmitsPeerBannedNotice(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -58,21 +57,23 @@ func TestInboundHello_SelfIdentity_EmitsPeerBannedNotice(t *testing.T) {
 	// private key on the remote side), so gating the guard on a crypto
 	// pre-check would make it unreachable in production.
 	//
-	// Listen is populated because the guard is gated on it: subscribers
-	// (local RPC clients using the node identity for self-subscription)
-	// never advertise Listen, and the guard must not break that flow.
-	// Every genuine self-loopback path surfaces Listen because it
-	// originates from our own outbound dialler, which always populates
-	// the field; this test reproduces that wire shape.
+	// Listener="1" is critical: the guard is gated on the listener flag
+	// (the v12 wire shape — host is no longer carried in Listen). Local
+	// subscribers (RPC clients using the node identity for
+	// self-subscription) never set Listener=1, and the guard must not
+	// break that flow. Every genuine self-loopback path surfaces
+	// Listener=1 because it originates from our own outbound dialler,
+	// which always reflects EffectiveListenerEnabled into the listener
+	// flag.
 	helloFrame := protocol.Frame{
-		Type:    "hello",
-		Version: config.ProtocolVersion,
-		Client:  "node",
-		Address: svc.identity.Address,
-		Listen:  "198.51.100.7:64646",
-		PubKey:  "filler-pubkey",
-		BoxKey:  "filler-boxkey",
-		BoxSig:  "filler-boxsig",
+		Type:     "hello",
+		Version:  config.ProtocolVersion,
+		Client:   "node",
+		Address:  svc.identity.Address,
+		Listener: "1",
+		PubKey:   "filler-pubkey",
+		BoxKey:   "filler-boxkey",
+		BoxSig:   "filler-boxsig",
 	}
 	helloLine, err := protocol.MarshalFrameLine(helloFrame)
 	if err != nil {
@@ -124,11 +125,10 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -161,7 +161,7 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 	boxSigsBefore, boxSigsHad := svc.boxSigs[selfAddr]
 	svc.knowledgeMu.RUnlock()
 
-	svc.learnIdentityFromWelcome(welcome)
+	svc.learnIdentityFromWelcome(welcome, "198.51.100.7:64646")
 
 	svc.knowledgeMu.RLock()
 	defer svc.knowledgeMu.RUnlock()
@@ -221,11 +221,10 @@ func TestOnCMDialFailed_SelfIdentityError_AppliesCooldown(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -293,11 +292,10 @@ func TestOnCMDialFailed_WireSentinelSelfIdentity_AppliesCooldown(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -356,11 +354,10 @@ func TestIsSelfIdentity_EdgeCases(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -469,11 +466,10 @@ func TestTryApplySelfIdentityCooldown_StructuredError_Hit(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -522,11 +518,10 @@ func TestTryApplySelfIdentityCooldown_WireSentinel_Hit(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -566,11 +561,10 @@ func TestTryApplySelfIdentityCooldown_UnrelatedError_Miss(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -602,11 +596,10 @@ func TestTryApplySelfIdentityCooldown_NilError_Miss(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -775,11 +768,10 @@ func TestApplySelfIdentityCooldown_NoAccumulation_WithinBanWindow(t *testing.T) 
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -855,11 +847,10 @@ func TestApplySelfIdentityCooldown_ReAppliesAfterBanExpired(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 

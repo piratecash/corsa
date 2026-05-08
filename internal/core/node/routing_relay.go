@@ -504,10 +504,11 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	if err != nil {
 		return
 	}
-	// Advertise convergence: the inbound side may respond with a
-	// connection_notice (observed-address-mismatch) instead of welcome,
-	// meaning it is about to close. Record the observed IP hint so the
-	// next outbound hello self-corrects, then abort this bootstrap write.
+	// Bootstrap fan-out path: the inbound side may respond with a
+	// connection_notice (currently only peer-banned) instead of welcome,
+	// meaning it is about to close. Forward to handleConnectionNotice so
+	// the dialler records the responder-supplied ban window, then abort
+	// this bootstrap write.
 	if welcome.Type == protocol.FrameTypeConnectionNotice {
 		s.handleConnectionNotice(address, welcome)
 		// Remote-first self-loopback discovery on the raw push_notice

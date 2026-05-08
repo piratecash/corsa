@@ -21,9 +21,8 @@ func TestMarkPeerConnectedIncrementsScore(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -50,9 +49,8 @@ func TestMarkPeerDisconnectedWithErrorDecrementsScore(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -78,9 +76,8 @@ func TestMarkPeerDisconnectedCleanDecrementsLess(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -107,9 +104,8 @@ func TestScoreClampedOnRepeatedFailures(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -153,11 +149,10 @@ func TestNewServiceMergesPersistedPeersWithBootstrap(t *testing.T) {
 	}
 
 	cfg := config.Node{
-		ListenAddress:    ":0",
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{"10.0.0.1:64646", "bootstrap.example.com:64646"},
-		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeClient,
+		ListenAddress:  ":0",
+		BootstrapPeers: []string{"10.0.0.1:64646", "bootstrap.example.com:64646"},
+		PeersStatePath: peersPath,
+		Type:           config.NodeTypeClient,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -233,11 +228,10 @@ func TestNewServiceWithEmptyPeersFile(t *testing.T) {
 	}
 
 	cfg := config.Node{
-		ListenAddress:    ":0",
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeClient,
+		ListenAddress:  ":0",
+		BootstrapPeers: []string{"10.0.0.1:64646"},
+		PeersStatePath: peersPath,
+		Type:           config.NodeTypeClient,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -269,10 +263,9 @@ func TestFlushPeerStateWritesFile(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		PeersStatePath:   peersPath,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646"},
+		PeersStatePath: peersPath,
 	})
 	defer stop()
 
@@ -355,11 +348,10 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 	}
 
 	cfg := config.Node{
-		ListenAddress:    ":0",
-		AdvertiseAddress: "",
-		BootstrapPeers:   []string{},
-		PeersStatePath:   peersPath,
-		Type:             config.NodeTypeClient,
+		ListenAddress:  ":0",
+		BootstrapPeers: []string{},
+		PeersStatePath: peersPath,
+		Type:           config.NodeTypeClient,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -428,9 +420,8 @@ func TestCleanDisconnectResetsConsecutiveFailures(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -475,10 +466,9 @@ func TestFlushPeerStateRetryOnWriteFailure(t *testing.T) {
 	badPath := filepath.Join(badDir, "peers.json")
 
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{"10.0.0.1:64646"},
-		PeersStatePath:   badPath,
+		ListenAddress:  address,
+		BootstrapPeers: []string{"10.0.0.1:64646"},
+		PeersStatePath: badPath,
 	})
 	defer stop()
 
@@ -501,9 +491,8 @@ func TestMarkPeerConnectedSetsLastUsefulReceiveAt(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -535,9 +524,8 @@ func TestComputePeerStateHealthyAfterInboundConnect(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -570,9 +558,8 @@ func TestInboundPingUpdatesHealth(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -603,9 +590,8 @@ func TestInboundPongUpdatesHealth(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 
@@ -643,9 +629,8 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 
 	address := freeAddress(t)
 	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:    address,
-		AdvertiseAddress: normalizeAddress(address),
-		BootstrapPeers:   []string{},
+		ListenAddress:  address,
+		BootstrapPeers: []string{},
 	})
 	defer stop()
 

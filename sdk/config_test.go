@@ -1,0 +1,77 @@
+package sdk
+
+import (
+	"testing"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+)
+
+// TestNodeConfigAdvertisePortMapping covers the AdvertisePort plumbing from
+// the public *uint16 SDK field through the (Config).internal() boundary into
+// the validated *domain.PeerPort consumed by the internal config layer. The
+// boundary is the single conversion point between the SDK's primitive optional
+// type and the internal domain type, so it must be covered explicitly:
+//
+//   - nil → nil (operator did not configure the port; internal layer applies
+//     EffectiveAdvertisePort fallback to DefaultPeerPort).
+//   - valid 1..65535 → pointer to PeerPort(value).
+//   - invalid (0; uint16 cannot represent >65535) → nil, matching the
+//     CORSA_ADVERTISE_PORT operator-side fallback path.
+//
+// Without this test the SDK boundary could silently regress to "always nil"
+// (the bug this case was created to prevent: an SDK app on a non-default port
+// would advertise 64646 instead of its real listening port).
+func TestNodeConfigAdvertisePortMapping(t *testing.T) {
+	t.Parallel()
+
+	valid := uint16(64648)
+	zero := uint16(0)
+
+	cases := []struct {
+		name string
+		in   *uint16
+		want *domain.PeerPort
+	}{
+		{
+			name: "nil_falls_back_to_internal_default",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "valid_64648_propagates_as_peer_port",
+			in:   &valid,
+			want: peerPortPtr(domain.PeerPort(64648)),
+		},
+		{
+			name: "zero_collapses_to_nil_via_is_valid",
+			in:   &zero,
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := DefaultConfig()
+			cfg.Node.AdvertisePort = tc.in
+
+			got := cfg.internal().Node.AdvertisePort
+
+			switch {
+			case tc.want == nil && got == nil:
+				return
+			case tc.want == nil && got != nil:
+				t.Fatalf("AdvertisePort = %v, want nil", *got)
+			case tc.want != nil && got == nil:
+				t.Fatalf("AdvertisePort = nil, want %v", *tc.want)
+			case *tc.want != *got:
+				t.Fatalf("AdvertisePort = %v, want %v", *got, *tc.want)
+			}
+		})
+	}
+}
+
+func peerPortPtr(p domain.PeerPort) *domain.PeerPort {
+	return &p
+}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	coreconfig "github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -38,8 +39,20 @@ type AppConfig struct {
 // nor a valid IdentityPath with an existing file is provided,
 // sdk.New returns an error.
 type NodeConfig struct {
-	ListenAddress    string
-	AdvertiseAddress string
+	ListenAddress string
+	// AdvertisePort overrides the listening port published in
+	// hello/welcome for peer discovery. nil means "use the
+	// internal default" (config.DefaultPeerPort = 64646), matching
+	// the operator-level CORSA_ADVERTISE_PORT fallback. Set this
+	// explicitly whenever the SDK process binds to a non-default
+	// port and other peers MUST be told to dial that port — bind
+	// port and advertised port are independent (operators behind
+	// NAT / port-forward typically run them on different values),
+	// so the SDK never silently derives one from the other. Values
+	// outside the inclusive 1..65535 range are ignored at the
+	// boundary and collapse to the default fallback, matching
+	// PeerPort.IsValid.
+	AdvertisePort    *uint16
 	BootstrapPeers   []string
 	PrivateKey       string
 	IdentityPath     string
@@ -85,17 +98,16 @@ func DefaultConfig() Config {
 			Version:  coreconfig.CorsaVersion,
 		},
 		Node: NodeConfig{
-			ListenAddress:    listenAddress,
-			AdvertiseAddress: "127.0.0.1" + listenAddress,
-			BootstrapPeers:   []string{net.JoinHostPort("65.108.204.190", coreconfig.DefaultPeerPort)},
-			IdentityPath:     filepath.Join(".corsa", "identity-"+portSuffix(listenAddress)+".json"),
-			TrustStorePath:   filepath.Join(".corsa", "trust-"+portSuffix(listenAddress)+".json"),
-			QueueStatePath:   filepath.Join(".corsa", "queue-"+portSuffix(listenAddress)+".json"),
-			PeersStatePath:   filepath.Join(".corsa", "peers-"+portSuffix(listenAddress)+".json"),
-			ChatLogDir:       ".corsa",
-			Type:             NodeTypeFull,
-			ClientVersion:    coreconfig.CorsaWireVersion,
-			MaxClockDrift:    protocol.DefaultMessageTimeDrift,
+			ListenAddress:  listenAddress,
+			BootstrapPeers: []string{net.JoinHostPort("65.108.204.190", coreconfig.DefaultPeerPort)},
+			IdentityPath:   filepath.Join(".corsa", "identity-"+portSuffix(listenAddress)+".json"),
+			TrustStorePath: filepath.Join(".corsa", "trust-"+portSuffix(listenAddress)+".json"),
+			QueueStatePath: filepath.Join(".corsa", "queue-"+portSuffix(listenAddress)+".json"),
+			PeersStatePath: filepath.Join(".corsa", "peers-"+portSuffix(listenAddress)+".json"),
+			ChatLogDir:     ".corsa",
+			Type:           NodeTypeFull,
+			ClientVersion:  coreconfig.CorsaWireVersion,
+			MaxClockDrift:  protocol.DefaultMessageTimeDrift,
 		},
 		RPC: RPCConfig{
 			Enabled: false,
@@ -150,13 +162,6 @@ func normalizeConfig(cfg Config) Config {
 			cfg.Node.ListenerEnabled = boolPtr(true)
 		}
 	}
-	if strings.TrimSpace(cfg.Node.AdvertiseAddress) == "" && cfg.Node.ListenerEnabled != nil && *cfg.Node.ListenerEnabled {
-		if strings.HasPrefix(cfg.Node.ListenAddress, ":") {
-			cfg.Node.AdvertiseAddress = "127.0.0.1" + cfg.Node.ListenAddress
-		} else {
-			cfg.Node.AdvertiseAddress = cfg.Node.ListenAddress
-		}
-	}
 	if cfg.Node.BootstrapPeers == nil {
 		cfg.Node.BootstrapPeers = append([]string(nil), base.Node.BootstrapPeers...)
 	}
@@ -209,6 +214,23 @@ func (c Config) internal() coreconfig.Config {
 		listenerSet = true
 	}
 
+	// AdvertisePort optional-mapping. Modelled as *uint16 at the SDK
+	// boundary so the absence-of-value state is type-visible (matches
+	// ListenerEnabled *bool); converted to *domain.PeerPort here so
+	// the internal layers continue consuming the validated domain
+	// type. Out-of-range values (PeerPort.IsValid == false) collapse
+	// to nil so EffectiveAdvertisePort falls back to DefaultPeerPort
+	// — same semantics CORSA_ADVERTISE_PORT applies on the operator
+	// side. The conversion lives at this single boundary so domain
+	// types do not leak into the public SDK API.
+	var advertisePort *domain.PeerPort
+	if cfg.Node.AdvertisePort != nil {
+		port := domain.PeerPort(*cfg.Node.AdvertisePort)
+		if port.IsValid() {
+			advertisePort = &port
+		}
+	}
+
 	return coreconfig.Config{
 		App: coreconfig.App{
 			Name:     cfg.App.Name,
@@ -219,7 +241,7 @@ func (c Config) internal() coreconfig.Config {
 		},
 		Node: coreconfig.Node{
 			ListenAddress:    cfg.Node.ListenAddress,
-			AdvertiseAddress: cfg.Node.AdvertiseAddress,
+			AdvertisePort:    advertisePort,
 			BootstrapPeers:   append([]string(nil), cfg.Node.BootstrapPeers...),
 			IdentityPath:     cfg.Node.IdentityPath,
 			TrustStorePath:   cfg.Node.TrustStorePath,

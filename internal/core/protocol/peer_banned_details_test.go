@@ -127,9 +127,10 @@ func TestErrorFromCode_PeerBanned(t *testing.T) {
 // Details carry reason="self-identity" must decode to ErrSelfIdentity (not
 // ErrPeerBanned). The dialler's cooldown dispatcher (onCMDialFailed)
 // routes self-identity failures into a 24h address cooldown, while a
-// generic ErrPeerBanned goes through the advertise-mismatch path. A plain
-// ErrorFromCode(frame.Code) lookup would collapse both into ErrPeerBanned
-// and the dialler would keep hammering its own reflected endpoint.
+// generic ErrPeerBanned goes through the standard peer-ban cooldown
+// path. A plain ErrorFromCode(frame.Code) lookup would collapse both
+// into ErrPeerBanned and the dialler would keep hammering its own
+// reflected endpoint.
 func TestNoticeErrorFromFrame_SelfIdentityReasonResolvesToSentinel(t *testing.T) {
 	t.Parallel()
 

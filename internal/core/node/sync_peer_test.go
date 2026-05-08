@@ -525,10 +525,9 @@ func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
 // the fix the legacy path returned straight from its inline
 // auth_session/auth_ok exchange without calling that helper: as a
 // result peers reached only through sender-key recovery / forced
-// refresh never got announce_state=announceable, never recorded the
-// trusted advertise triple, and never repaid forgivable misadvertise
-// points — so convergence state depended on which outbound path
-// happened to reach the peer first.
+// refresh never got announce_state=announceable and never recorded
+// the trusted advertise triple — so convergence state depended on
+// which outbound path happened to reach the peer first.
 func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 

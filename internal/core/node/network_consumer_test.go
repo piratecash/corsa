@@ -54,11 +54,10 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 	// newTestService helper (which is in relay_test.go and reaches into
 	// WaitBackground / tempdir machinery the POC does not exercise).
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -195,11 +194,10 @@ func TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend(t *testing.T) 
 			t.Cleanup(backend.Shutdown)
 
 			svc := NewServiceWithNetwork(config.Node{
-				ListenAddress:    "127.0.0.1:0",
-				AdvertiseAddress: "127.0.0.1:0",
-				Type:             config.NodeTypeFull,
-				TrustStorePath:   t.TempDir() + "/trust.json",
-				QueueStatePath:   t.TempDir() + "/queue.json",
+				ListenAddress:  "127.0.0.1:0",
+				Type:           config.NodeTypeFull,
+				TrustStorePath: t.TempDir() + "/trust.json",
+				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -400,11 +398,10 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 			t.Cleanup(backend.Shutdown)
 
 			svc := NewServiceWithNetwork(config.Node{
-				ListenAddress:    "127.0.0.1:0",
-				AdvertiseAddress: "127.0.0.1:0",
-				Type:             config.NodeTypeFull,
-				TrustStorePath:   t.TempDir() + "/trust.json",
-				QueueStatePath:   t.TempDir() + "/queue.json",
+				ListenAddress:  "127.0.0.1:0",
+				Type:           config.NodeTypeFull,
+				TrustStorePath: t.TempDir() + "/trust.json",
+				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -520,11 +517,10 @@ func TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend(t *testing.
 			t.Cleanup(backend.Shutdown)
 
 			svc := NewServiceWithNetwork(config.Node{
-				ListenAddress:    "127.0.0.1:0",
-				AdvertiseAddress: "127.0.0.1:0",
-				Type:             config.NodeTypeFull,
-				TrustStorePath:   t.TempDir() + "/trust.json",
-				QueueStatePath:   t.TempDir() + "/queue.json",
+				ListenAddress:  "127.0.0.1:0",
+				Type:           config.NodeTypeFull,
+				TrustStorePath: t.TempDir() + "/trust.json",
+				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -662,11 +658,10 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 			t.Cleanup(backend.Shutdown)
 
 			svc := NewServiceWithNetwork(config.Node{
-				ListenAddress:    "127.0.0.1:0",
-				AdvertiseAddress: "127.0.0.1:0",
-				Type:             config.NodeTypeFull,
-				TrustStorePath:   t.TempDir() + "/trust.json",
-				QueueStatePath:   t.TempDir() + "/queue.json",
+				ListenAddress:  "127.0.0.1:0",
+				Type:           config.NodeTypeFull,
+				TrustStorePath: t.TempDir() + "/trust.json",
+				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -738,11 +733,10 @@ func TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend(t *testing.T) {
 	t.Cleanup(backend.Shutdown)
 
 	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:    "127.0.0.1:0",
-		AdvertiseAddress: "127.0.0.1:0",
-		Type:             config.NodeTypeFull,
-		TrustStorePath:   t.TempDir() + "/trust.json",
-		QueueStatePath:   t.TempDir() + "/queue.json",
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -832,11 +826,10 @@ func TestSendSessionFrameViaNetwork_NetworkPathVisibleToBackend(t *testing.T) {
 			t.Cleanup(backend.Shutdown)
 
 			svc := NewServiceWithNetwork(config.Node{
-				ListenAddress:    "127.0.0.1:0",
-				AdvertiseAddress: "127.0.0.1:0",
-				Type:             config.NodeTypeFull,
-				TrustStorePath:   t.TempDir() + "/trust.json",
-				QueueStatePath:   t.TempDir() + "/queue.json",
+				ListenAddress:  "127.0.0.1:0",
+				Type:           config.NodeTypeFull,
+				TrustStorePath: t.TempDir() + "/trust.json",
+				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
