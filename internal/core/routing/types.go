@@ -75,12 +75,21 @@ const (
 // (env var CORSA_MAX_NEXT_HOPS_PER_ORIGIN), which the loader threads
 // through to the Table constructor.
 //
-// IMPORTANT: this constant is a recommendation, NOT the runtime default.
-// The default for a freshly constructed Table is 0 (cap disabled) so the
-// initial release can ship the cap code in production with no behaviour
-// change; flipping the runtime default to DefaultMaxNextHopsPerOrigin is
-// a follow-up release. See the rollout strategy in
-// docs/routing-rib-compaction-and-snapshot-refactor.md §10.
+// Two distinct defaults apply at different layers:
+//
+//   - Bare Table (NewTable without WithMaxNextHopsPerOrigin) defaults
+//     to 0 — the cap is disabled. Test fixtures and any caller that
+//     wires a Table directly without going through config see the
+//     pre-cap behaviour by default, which keeps unit tests of the
+//     admission logic deterministic.
+//   - Production Service constructed via config.Default() defaults to
+//     this constant (4). The first rollout release shipped with the
+//     config-layer default also at 0 so existing deployments observed
+//     pre-cap behaviour exactly during the soak period; the second
+//     release flipped the config-layer default to 4. Operators that
+//     need to roll back set CORSA_MAX_NEXT_HOPS_PER_ORIGIN=0
+//     explicitly. See docs/routing-rib-compaction-and-snapshot-refactor.md
+//     §10 for the rollout history.
 const DefaultMaxNextHopsPerOrigin = 4
 
 // RouteAdmissionDecision describes how the cap admission policy

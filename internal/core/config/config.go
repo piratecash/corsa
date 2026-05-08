@@ -12,6 +12,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 type App struct {
@@ -64,15 +65,25 @@ type Node struct {
 	// unit tests that use RFC 1918 addresses as fake peers.
 	AllowPrivatePeers bool
 
-	// MaxNextHopsPerOrigin caps the local routing-table fan-out per
-	// (Identity, Origin) pair. A positive value activates the cap
-	// admission policy in routing.Table — see
-	// docs/routing-rib-compaction-and-snapshot-refactor.md (Stage B)
-	// and routing.WithMaxNextHopsPerOrigin for the exact eviction
-	// rules. Zero disables the cap, which is the rollout default for
-	// the first release that ships the cap code: behaviour matches the
-	// pre-cap table exactly so operators can flip the switch from
-	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN once the cap has soaked.
+	// MaxNextHopsPerOrigin caps the number of LIVE next-hops the
+	// routing table keeps per (Identity, Origin) pair. A positive
+	// value activates the cap admission policy in routing.Table —
+	// see docs/routing-rib-compaction-and-snapshot-refactor.md
+	// (Stage B) and routing.WithMaxNextHopsPerOrigin for the exact
+	// eviction rules. Zero disables the cap entirely (every accepted
+	// entry is stored, the table grows unbounded with the number of
+	// next-hops that learned the same destination, and the
+	// `cap_admission` counters stay at zero); operators set
+	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN=0 explicitly to opt out — for
+	// instance to roll back if a field regression surfaces.
+	//
+	// Production default after the second rollout release is
+	// routing.DefaultMaxNextHopsPerOrigin (4). The first release
+	// shipped with the default at 0 so existing deployments
+	// observed pre-cap behaviour exactly during the soak period;
+	// after dev/staging observation the default flipped to 4. The
+	// loader picks up the flip when CORSA_MAX_NEXT_HOPS_PER_ORIGIN
+	// is unset, so no operator action is required to upgrade.
 	//
 	// Recommended ceiling for production is
 	// routing.DefaultMaxNextHopsPerOrigin (4). The cap bucket is
@@ -455,16 +466,28 @@ func defaultChatLogDir() string {
 func maxNextHopsPerOriginFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_NEXT_HOPS_PER_ORIGIN"))
 	if raw == "" {
-		return 0
+		// Production default after the second rollout release. The
+		// first release shipped with `0` (cap disabled) so existing
+		// deployments observed pre-cap behaviour exactly; after the
+		// observation period on dev/staging the default flips to
+		// `routing.DefaultMaxNextHopsPerOrigin` (4) — the recommended
+		// ceiling. Operators that want to roll back set the env to
+		// "0" explicitly; we keep that as a first-class opt-out so a
+		// future field regression can be neutralised without a
+		// rebuild.
+		return routing.DefaultMaxNextHopsPerOrigin
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 0 {
-		// Negative or unparsable values fall back to the
-		// cap-disabled default. We deliberately do NOT log a warning
-		// here — this helper is invoked once during config loading
-		// and the operator-facing log line belongs at the call site,
-		// not in a generic env parser.
-		return 0
+		// Unparsable or negative values fall back to the production
+		// default — same shape as maxClockDriftFromEnv. We
+		// deliberately do NOT log a warning here: this helper is
+		// invoked once during config loading and the operator-facing
+		// log line belongs at the call site, not in a generic env
+		// parser. An explicit "0" is NOT covered by this branch — it
+		// parses fine and falls through to the return below as the
+		// operator's deliberate cap-disabled signal.
+		return routing.DefaultMaxNextHopsPerOrigin
 	}
 	return value
 }

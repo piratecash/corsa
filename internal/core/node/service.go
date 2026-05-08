@@ -1223,11 +1223,13 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// Initialize distance-vector routing table (Phase 1.2).
 	//
 	// MaxNextHopsPerOrigin pulls the configured cap (Stage B). The
-	// runtime default is 0 (cap disabled) so existing deployments
-	// observe pre-cap behaviour exactly until the operator opts in via
-	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN. See
-	// docs/routing-rib-compaction-and-snapshot-refactor.md §10 for the
-	// rollout shape.
+	// production default is routing.DefaultMaxNextHopsPerOrigin (4)
+	// after the second rollout release; the first release shipped
+	// with 0 (cap disabled) so deployments observed pre-cap
+	// behaviour during the soak period. Operators set
+	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN=0 explicitly to roll back. See
+	// docs/routing-rib-compaction-and-snapshot-refactor.md §10 for
+	// the rollout history.
 	svc.routingTable = routing.NewTable(
 		routing.WithLocalOrigin(routing.PeerIdentity(id.Address)),
 		routing.WithMaxNextHopsPerOrigin(cfg.MaxNextHopsPerOrigin),

@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 func expectedDefaultDataDir(t *testing.T) string {
@@ -320,5 +321,91 @@ func TestDefaultAnchorsPathsToStartupDirectory(t *testing.T) {
 	}
 	if got, want := cfg.Node.TrustStorePath, filepath.Join(dataDir, "trust-64646.json"); got != want {
 		t.Fatalf("TrustStorePath = %q, want %q", got, want)
+	}
+}
+
+// TestMaxNextHopsPerOriginRolloutDefaults pins the second-release
+// rollout shape for the routing-table cap: with no env override, the
+// loader returns the recommended ceiling
+// (routing.DefaultMaxNextHopsPerOrigin = 4); explicit "0" remains a
+// first-class operator opt-out so a future field regression can be
+// neutralised without a rebuild; explicit positive values pass
+// through; unparsable / negative values fall back to the default in
+// the same shape as maxClockDriftFromEnv.
+//
+// The first rollout release shipped with the loader default at 0 so
+// existing deployments observed pre-cap behaviour exactly during the
+// soak period; this test guards the flip to 4 introduced by the
+// second release. Reverting either side without a deliberate plan
+// (e.g. silently restoring `return 0` for the unset case, or
+// promoting "0" into "use default" semantics) breaks the rollout
+// contract and trips this test immediately.
+func TestMaxNextHopsPerOriginRolloutDefaults(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{
+			name: "unset_uses_recommended_default",
+			raw:  "",
+			want: routing.DefaultMaxNextHopsPerOrigin,
+		},
+		{
+			name: "explicit_zero_disables_cap",
+			raw:  "0",
+			want: 0,
+		},
+		{
+			name: "explicit_positive_passes_through",
+			raw:  "2",
+			want: 2,
+		},
+		{
+			name: "explicit_recommended_passes_through",
+			raw:  "4",
+			want: routing.DefaultMaxNextHopsPerOrigin,
+		},
+		{
+			name: "negative_falls_back_to_default",
+			raw:  "-1",
+			want: routing.DefaultMaxNextHopsPerOrigin,
+		},
+		{
+			name: "unparsable_falls_back_to_default",
+			raw:  "abc",
+			want: routing.DefaultMaxNextHopsPerOrigin,
+		},
+		{
+			name: "whitespace_only_treated_as_unset",
+			raw:  "   ",
+			want: routing.DefaultMaxNextHopsPerOrigin,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CORSA_MAX_NEXT_HOPS_PER_ORIGIN", tc.raw)
+			got := maxNextHopsPerOriginFromEnv()
+			if got != tc.want {
+				t.Fatalf("maxNextHopsPerOriginFromEnv() = %d, want %d (raw=%q)", got, tc.want, tc.raw)
+			}
+		})
+	}
+}
+
+// TestDefaultConfigActivatesCapAtRecommendedCeiling pins the
+// integration shape: a Default() build with no env overrides surfaces
+// the recommended cap on Node.MaxNextHopsPerOrigin, which is what the
+// Service-init path threads into routing.WithMaxNextHopsPerOrigin. A
+// regression here means production deployments stop activating the
+// cap on upgrade — the operator-visible symptom would be the
+// `cap_admission` counters stuck at zero on busy nodes that should be
+// evicting routes.
+func TestDefaultConfigActivatesCapAtRecommendedCeiling(t *testing.T) {
+	t.Setenv("CORSA_MAX_NEXT_HOPS_PER_ORIGIN", "")
+
+	cfg := Default()
+	if got, want := cfg.Node.MaxNextHopsPerOrigin, routing.DefaultMaxNextHopsPerOrigin; got != want {
+		t.Fatalf("Default().Node.MaxNextHopsPerOrigin = %d, want %d", got, want)
 	}
 }

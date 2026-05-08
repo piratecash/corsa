@@ -78,14 +78,16 @@ type Table struct {
 	// alongside the K live slots as SeqNo resurrection guards and are
 	// reclaimed by TickTTL after defaultTTL, so the slice may
 	// transiently hold up to K live rows plus one or more tombstones.
-	// Zero (the runtime default) disables the cap — every accepted
-	// entry is stored, and the table grows unbounded with the number
-	// of next-hops that have learned the same (destination, origin).
-	// A positive value triggers an admission policy in UpdateRoute
-	// that may evict the worst evictable LIVE entry (live > expired
-	// → lowest trust → highest hops → earliest expiry) when the live
-	// bucket is full and the incoming entry is strictly better.
-	// Direct and local entries are never evicted — see admitNewLocked.
+	// Zero (the bare-Table default — see WithMaxNextHopsPerOrigin and
+	// DefaultMaxNextHopsPerOrigin for the two-layer default story)
+	// disables the cap — every accepted entry is stored, and the
+	// table grows unbounded with the number of next-hops that have
+	// learned the same (destination, origin). A positive value
+	// triggers an admission policy in UpdateRoute that may evict the
+	// worst evictable LIVE entry (live > expired → lowest trust →
+	// highest hops → earliest expiry) when the live bucket is full
+	// and the incoming entry is strictly better. Direct and local
+	// entries are never evicted — see admitNewLocked.
 	maxNextHopsPerOrigin int
 
 	// capStats holds monotonic counters for the cap admission policy.
@@ -182,10 +184,14 @@ func WithPenalizedTTL(d time.Duration) TableOption {
 // TickTTL on defaultTTL, so the slice can transiently exceed K when
 // recent withdrawals contributed tombstones. A positive cap activates
 // the admission policy in UpdateRoute — see admitNewLocked for the
-// eviction rules. Zero (or negative) disables the cap entirely; this
-// is the runtime default for a freshly constructed Table so the cap
-// code can ship in production without changing observable routing
-// behaviour until operators opt in.
+// eviction rules.
+//
+// Zero (or negative) disables the cap entirely. The bare Table
+// constructor defaults to 0 so unit tests and any caller that wires a
+// Table directly observe the pre-cap behaviour deterministically;
+// production Services constructed via config.Default() activate the
+// cap at DefaultMaxNextHopsPerOrigin (4) — see that constant's
+// docstring for the two-layer default story and the rollout history.
 //
 // Recommended ceiling for production deployments is
 // DefaultMaxNextHopsPerOrigin (4); see the docstring on that constant
