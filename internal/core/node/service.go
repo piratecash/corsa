@@ -2266,33 +2266,6 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			accepted = false
 			return true
 		}
-		// Protocol-version cutover, strict on receive. The send side
-		// already filters file-transfer-capable peers by
-		// FileCommandMinPeerProtocolVersion (see
-		// peerSendableConnectionsLocked, forEachUsableFileTransferPeerLocked
-		// and Router.collectRouteCandidates), so this node never picks a
-		// pre-12 next-hop for file-command traffic. The symmetric receive
-		// gate keeps the cutover honest: a peer that reports a version
-		// below the cutover (or fails to report one at all) must not be
-		// allowed to deliver a frame to file_router — that path requires
-		// the v2 wire format and would otherwise drop the frame silently
-		// on missing-src_pubkey. Raw-version 0 is rejected here for the
-		// same reason send-side rejects it (peerSendableConnectionsLocked
-		// and forEachUsableFileTransferPeerLocked both compare on the
-		// raw negotiated value, so a peer with version 0 never appears as
-		// a sender either). After the inflated-version cap fix the
-		// ranking key in the route-meta layer is bounded above by
-		// config.ProtocolVersion (newer peers are capped, not zeroed),
-		// so PV == 0 in the file pipeline only happens transiently for
-		// pre-handshake / unobserved peers and route-candidate filtering
-		// gates eligibility on the raw value anyway — a 0 on the wire
-		// never wins. Direct comparison on domain.ProtocolVersion avoids
-		// uint8-narrow wrap.
-		pc := s.netCoreForID(connID)
-		if pc == nil || pc.ProtocolVersion() < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
-			accepted = false
-			return true
-		}
 		// Pass the inbound peer identity so the file router applies
 		// split-horizon forwarding and never reflects the frame back
 		// to the neighbor that just delivered it.
@@ -2673,27 +2646,6 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 		if !hasCapability(sess.capabilities, requiredCap) {
 			continue
 		}
-		// File-transfer protocol-version cutover, strict on the
-		// session's RAW negotiated version. peerSession.version is the
-		// version field carried by hello/welcome before any inflated-
-		// version cap (the cap lives one layer above, in the route-
-		// meta helper, and only affects ranking — see
-		// filerouter.PeerRouteMeta.RawProtocolVersion). Here we are
-		// deciding eligibility, not ranking, so we MUST reject every
-		// session whose raw version is below the cutover, including
-		// version == 0 (capability-only / pre-handshake / not observed).
-		// Admitting an unknown-version peer would silently re-open the
-		// v11 black hole that the cutover exists to close — there is
-		// no positive evidence the peer speaks the v2 SrcPubKey wire
-		// format. Inflated-version peers are NOT visible at this layer:
-		// peerSession.version always reflects what the peer reported
-		// directly. Comparing on domain.ProtocolVersion avoids the
-		// uint8-narrow wrap (e.g. version 268 truncating to 12 and
-		// silently passing).
-		if requiredCap == domain.CapFileTransferV1 &&
-			domain.ProtocolVersion(sess.version) < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
-			continue
-		}
 		health := s.health[s.resolveHealthAddress(sess.address)]
 		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
 			continue
@@ -2716,17 +2668,6 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 	// partially-handshaken inbound conns out of the send-path view.
 	s.forEachInboundConnLocked(func(info connInfo) bool {
 		if info.identity != peer || !info.HasCapability(requiredCap) {
-			return true
-		}
-		// Same strict protocol-version cutover as the outbound branch
-		// above; info.protocolVersion is the raw negotiated value
-		// captured from the inbound NetCore. version == 0 (capability-
-		// only / pre-handshake / not observed) is rejected — we have
-		// no positive evidence the peer speaks the v2 SrcPubKey wire
-		// format. Direct comparison on domain.ProtocolVersion avoids
-		// uint8-narrow wrap.
-		if requiredCap == domain.CapFileTransferV1 &&
-			info.protocolVersion < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
 			return true
 		}
 		health := s.health[s.resolveHealthAddress(info.address)]

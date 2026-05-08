@@ -243,18 +243,11 @@ func (s *Service) fileTransferPeerRouteMeta(peer domain.PeerIdentity) (fileroute
 // (peerSendableConnectionsLocked / fileTransferPeerRouteMetaLocked):
 //
 //   - file_transfer_v1 capability is negotiated;
-//   - health entry is Connected and not stalled;
-//   - raw negotiated protocol_version is at or above
-//     domain.FileCommandMinPeerProtocolVersion.
+//   - health entry is Connected and not stalled.
 //
-// The version gate is the critical part. Without it,
-// isPeerReachable / file-transfer scheduling would happily promise a
-// route through a v11 next-hop that Router.collectRouteCandidates and
-// peerSendableConnectionsLocked later reject — reachability lying, with
-// downloads waking up onto a route the actual file router is forbidden
-// to use. The cutover regression for that lie lives in the
-// TestIsPeerReachable_RouteVia(BelowCutover|UnknownVersion)NextHop pair
-// in file_integration_test.go.
+// Authenticity of every file-command frame is enforced at the wire layer
+// (`FileCommandFrame.SrcPubKey` + identity-fingerprint check inside
+// `Router.HandleInbound`); reachability does not need to mirror that check.
 func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(domain.PeerIdentity, time.Time)) {
 	consider := func(id domain.PeerIdentity, address domain.PeerAddress) {
 		health := s.health[s.resolveHealthAddress(address)]
@@ -268,15 +261,6 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 		if sess == nil || !hasCapability(sess.capabilities, domain.CapFileTransferV1) {
 			continue
 		}
-		// Cutover gate, raw negotiated version. peerSession.version is
-		// pre-cap (the route-meta layer is where the inflated-version
-		// cap lives), so a value below the cutover here is always a
-		// genuinely-pre-cutover or unknown peer; admitting it would
-		// re-open the v11 black hole. Comparing on
-		// domain.ProtocolVersion avoids the uint8-narrow wrap.
-		if domain.ProtocolVersion(sess.version) < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
-			continue
-		}
 		consider(sess.peerIdentity, sess.address)
 	}
 
@@ -285,12 +269,6 @@ func (s *Service) forEachUsableFileTransferPeerLocked(now time.Time, visit func(
 	// file-transfer peer set before the session is established.
 	s.forEachInboundConnLocked(func(info connInfo) bool {
 		if !info.HasCapability(domain.CapFileTransferV1) {
-			return true
-		}
-		// Same cutover gate on the inbound tier; info.protocolVersion
-		// is the raw negotiated value captured from the inbound
-		// NetCore.
-		if info.protocolVersion < domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion) {
 			return true
 		}
 		consider(info.identity, info.address)
@@ -372,8 +350,8 @@ const inflationWarnGap = 4
 // connectedAt ASC) decide.
 //
 // RawProtocolVersion (set separately by the caller) keeps the
-// actually-reported value for eligibility checks and audit logging —
-// only the ranking projection is capped here.
+// actually-reported value for audit logging — only the ranking
+// projection is capped here.
 //
 // Logging level is gated by inflationWarnGap (see above): a small
 // gap is the normal staged-rollout shape and lands at DEBUG; a large
@@ -640,18 +618,16 @@ func (s *Service) RemoveSenderMapping(fileID domain.FileID) bool {
 //	  {
 //	    "next_hop": "<peer identity>",
 //	    "hops": 1,
-//	    "protocol_version": 12,                  // normalized ranking key for this next-hop —
+//	    "protocol_version": 14,                  // normalized ranking key for this next-hop —
 //	                                             // equal to the raw negotiated version for peers
 //	                                             // at or below local; capped at config.ProtocolVersion
 //	                                             // by the inflated-version defence (trustedFileRouteVersion)
 //	                                             // when the peer reported v > config.ProtocolVersion.
 //	                                             // The raw negotiated value is not serialized;
-//	                                             // it lives in PeerRouteMeta.RawProtocolVersion
-//	                                             // as the eligibility key only. Pre-cutover and
-//	                                             // unknown peers are filtered out before the plan,
-//	                                             // so this field is bounded above by
-//	                                             // config.ProtocolVersion and below by
-//	                                             // FileCommandMinPeerProtocolVersion.
+//	                                             // it lives in PeerRouteMeta.RawProtocolVersion.
+//	                                             // Bounded above by config.ProtocolVersion;
+//	                                             // peers below the global MinimumProtocolVersion
+//	                                             // are rejected at handshake and never reach the plan.
 //	    "connected_at": "2025-01-01T12:34:56Z",  // omitted when unknown
 //	    "uptime_seconds": 3600.5,                // 0 when connected_at omitted
 //	    "best": true                             // true only for index 0

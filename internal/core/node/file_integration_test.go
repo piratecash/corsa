@@ -25,13 +25,7 @@ func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
-		// v12 — at the file-transfer cutover. file_transfer_v1
-		// capability alone is no longer sufficient (see
-		// FileCommandMinPeerProtocolVersion); the negative coverage
-		// for v11 / unknown-version sessions lives in
-		// TestIsPeerReachable_DirectSessionBelowMinProtocolVersion
-		// and TestIsPeerReachable_DirectSessionUnknownProtocolVersion.
-		version:      12,
+		version:      14,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -41,64 +35,7 @@ func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 	}
 
 	if !svc.isPeerReachable(idPeerB) {
-		t.Fatal("peer with direct v12 file_transfer_v1 session should be reachable")
-	}
-}
-
-// TestIsPeerReachable_DirectSessionBelowMinProtocolVersion is the negative
-// regression for the FileCommandMinPeerProtocolVersion cutover: a peer
-// that has file_transfer_v1 capability but reports a known protocol
-// version below the cutover MUST NOT be reachable. Otherwise we fall
-// straight back into the v11 black hole — the peer would receive a
-// v2-formatted frame and drop it on its trust-store-only pubkey lookup.
-func TestIsPeerReachable_DirectSessionBelowMinProtocolVersion(t *testing.T) {
-	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
-	now := time.Now().UTC()
-
-	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
-		address:      domain.PeerAddress("addr-B"),
-		peerIdentity: idPeerB,
-		version:      domain.FileCommandMinPeerProtocolVersion - 1, // 11 — known pre-cutover
-		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-	}
-	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
-		Connected:           true,
-		LastConnectedAt:     now.Add(-time.Minute),
-		LastUsefulReceiveAt: now,
-	}
-
-	if svc.isPeerReachable(idPeerB) {
-		t.Fatal("peer with file_transfer_v1 but version below FileCommandMinPeerProtocolVersion must NOT be reachable")
-	}
-}
-
-// TestIsPeerReachable_DirectSessionUnknownProtocolVersion is the second
-// negative regression: a peer with file_transfer_v1 capability but with
-// no observed protocol version (the default-zero value of peerSession.version)
-// MUST NOT be reachable for file transfer. Capability alone is no longer
-// proof that the peer speaks the v2 SrcPubKey wire format.
-func TestIsPeerReachable_DirectSessionUnknownProtocolVersion(t *testing.T) {
-	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
-	now := time.Now().UTC()
-
-	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
-		address:      domain.PeerAddress("addr-B"),
-		peerIdentity: idPeerB,
-		// version intentionally left zero — capability-only / pre-handshake
-		// / not observed yet. Capability alone is insufficient evidence the
-		// peer speaks the v2 wire format.
-		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-	}
-	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
-		Connected:           true,
-		LastConnectedAt:     now.Add(-time.Minute),
-		LastUsefulReceiveAt: now,
-	}
-
-	if svc.isPeerReachable(idPeerB) {
-		t.Fatal("peer with file_transfer_v1 but unknown protocol version must NOT be reachable")
+		t.Fatal("peer with direct file_transfer_v1 session should be reachable")
 	}
 }
 
@@ -190,84 +127,6 @@ func TestIsPeerReachable_RouteViaNextHopWithoutFileCapability(t *testing.T) {
 
 	if svc.isPeerReachable(idTargetX) {
 		t.Fatal("target reachable only via non-file-capable next-hop should NOT be reachable")
-	}
-}
-
-// TestIsPeerReachable_RouteViaBelowCutoverNextHop is the routed counterpart
-// of TestIsPeerReachable_DirectSessionBelowMinProtocolVersion: a routed
-// target whose only next-hop reports a protocol version below
-// FileCommandMinPeerProtocolVersion MUST NOT be reachable. Otherwise
-// isPeerReachable lies — it promises a path that the file router's own
-// cutover gate (Router.collectRouteCandidates filtering on
-// PeerRouteMeta.RawProtocolVersion) will reject, so FileTransferManager
-// schedules a download that never actually leaves the node. The
-// reachability layer and the send-path version gate must agree on
-// eligibility, otherwise we're back to the original v11 black hole that
-// motivated the cutover.
-func TestIsPeerReachable_RouteViaBelowCutoverNextHop(t *testing.T) {
-	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
-	now := time.Now().UTC()
-
-	// Relay peer-B advertises file_transfer_v1 capability but reports
-	// version 11 — below the cutover. Capability alone is not proof that
-	// the peer speaks the v2 SrcPubKey wire format; the version gate is
-	// the actual contract.
-	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
-		address:      domain.PeerAddress("addr-B"),
-		peerIdentity: idPeerB,
-		version:      domain.FileCommandMinPeerProtocolVersion - 1,
-		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-	}
-	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
-		Connected:           true,
-		LastConnectedAt:     now.Add(-time.Minute),
-		LastUsefulReceiveAt: now,
-	}
-
-	// Target X is reachable via peer-B at the announce layer, but the
-	// next-hop is below the file-transfer cutover.
-	announceRouteVia(svc, idPeerB, idTargetX, 1)
-
-	if svc.isPeerReachable(idTargetX) {
-		t.Fatal("target via below-cutover next-hop must NOT be reachable; reachability would lie about a path the file router will reject")
-	}
-}
-
-// TestIsPeerReachable_RouteViaUnknownVersionNextHop is the second routed
-// negative regression: a next-hop with file_transfer_v1 capability but
-// no observed protocol version (default-zero peerSession.version) MUST
-// NOT make the routed target reachable. The pre-handshake / capability-
-// only window is exactly the case the cutover refuses to admit on
-// either tier — admitting it on the routed reachability path would
-// reopen the same hole through the back door.
-func TestIsPeerReachable_RouteViaUnknownVersionNextHop(t *testing.T) {
-	t.Parallel()
-	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
-	now := time.Now().UTC()
-
-	// Relay peer-B advertises file_transfer_v1 capability with version
-	// intentionally left at zero (capability-only / pre-handshake / not
-	// observed yet). peerSession.version is the raw negotiated value,
-	// not the capped-inflated ranking key, so 0 here always means
-	// "unknown", never "demoted attacker".
-	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
-		address:      domain.PeerAddress("addr-B"),
-		peerIdentity: idPeerB,
-		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-	}
-	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
-		Connected:           true,
-		LastConnectedAt:     now.Add(-time.Minute),
-		LastUsefulReceiveAt: now,
-	}
-
-	// Target X is reachable via peer-B at the announce layer, but the
-	// next-hop has no observed protocol version.
-	announceRouteVia(svc, idPeerB, idTargetX, 1)
-
-	if svc.isPeerReachable(idTargetX) {
-		t.Fatal("target via unknown-version next-hop must NOT be reachable; capability alone is not enough to clear the file-transfer cutover")
 	}
 }
 
@@ -564,20 +423,17 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
-	// Two next-hops to the same target. Both peers run the cutover /
-	// minimum file-command version (FileCommandMinPeerProtocolVersion
-	// == 12). The previous "higher protocol version wins" fixture
-	// using versions 6/7 became impossible after the file-transfer
-	// cutover: versions below 12 are filtered out, and versions above
-	// config.ProtocolVersion are capped at the local version by
-	// trustedFileRouteVersion (defence against the traffic-capture
-	// attack — the cap collapses the lie to the v=local tier instead
-	// of zeroing it). We therefore exercise the secondary tiebreaker —
-	// equal version, equal hops, longer uptime (older LastConnectedAt)
-	// wins. relayB wins because it has held its session for ~30
-	// minutes while relayC just connected a minute ago. The
-	// behavioural ranking itself is covered exhaustively by filerouter
-	// tests; this test owns the JSON wire contract.
+	// Two next-hops to the same target with equal protocol_version.
+	// Versions above config.ProtocolVersion are capped at the local
+	// version by trustedFileRouteVersion (defence against the
+	// traffic-capture attack — the cap collapses the lie to the
+	// v=local tier instead of zeroing it). We therefore exercise the
+	// secondary tiebreaker — equal version, equal hops, longer uptime
+	// (older LastConnectedAt) wins. relayB wins because it has held
+	// its session for ~30 minutes while relayC just connected a
+	// minute ago. The behavioural ranking itself is covered
+	// exhaustively by filerouter tests; this test owns the JSON wire
+	// contract.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
@@ -734,7 +590,7 @@ func TestFileTransferPeerRouteMetaCapsInflatedVersionAtLocal(t *testing.T) {
 		t.Fatalf("expected inflated version (%d) to be capped at local (%d) for ranking, got %d", inflated, localVersion, meta.ProtocolVersion)
 	}
 	// RawProtocolVersion still mirrors the actually-reported value —
-	// only the ranking projection is capped, the audit/eligibility
+	// only the ranking projection is capped, the audit/diagnostic
 	// surface keeps the truth.
 	if meta.RawProtocolVersion != inflated {
 		t.Fatalf("RawProtocolVersion must report the actually-reported value, got %d (want %d)", meta.RawProtocolVersion, inflated)
@@ -856,9 +712,9 @@ func TestExplainFileRouteCapsInflatedVersionAtLocal(t *testing.T) {
 // upgraded peer keeps its place in the equal-version tier, where the
 // secondary keys (hops ASC, connectedAt ASC) decide.
 //
-// RawProtocolVersion still mirrors the actually-reported value so the
-// receive-side cutover gate and any future audit/diagnostic surfaces
-// can distinguish "legitimately-newer peer" from "v=local peer".
+// RawProtocolVersion still mirrors the actually-reported value so any
+// future audit/diagnostic surfaces can distinguish "legitimately-newer
+// peer" from "v=local peer".
 func TestFileTransferPeerRouteMetaCapsNewerVersionAtLocal(t *testing.T) {
 	t.Parallel()
 
@@ -892,8 +748,8 @@ func TestFileTransferPeerRouteMetaCapsNewerVersionAtLocal(t *testing.T) {
 	if meta.ProtocolVersion != localVersion {
 		t.Fatalf("expected ProtocolVersion to be capped at local (%d), got %d", localVersion, meta.ProtocolVersion)
 	}
-	// RawProtocolVersion is the eligibility key and the audit trail —
-	// it must report the actually-negotiated value, not the cap.
+	// RawProtocolVersion is the audit/diagnostic surface — it must
+	// report the actually-negotiated value, not the cap.
 	if meta.RawProtocolVersion != upgradedVersion {
 		t.Fatalf("RawProtocolVersion must report the actual reported value, got %d (want %d)", meta.RawProtocolVersion, upgradedVersion)
 	}

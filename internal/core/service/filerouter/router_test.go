@@ -14,6 +14,15 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
+// testFixturePeerProtocolVersion is the placeholder protocol version
+// returned by default fixture PeerRouteMeta callbacks. It is pinned at
+// the current production ProtocolVersion / MinimumProtocolVersion (14)
+// so the default fixture describes a peer the live build would actually
+// admit; ranking-DESC tests stay deterministic. Tests exercising
+// specific ranking outcomes wire their own callback returning the
+// version they need.
+const testFixturePeerProtocolVersion = 14
+
 // testNonceCache is a simple in-memory NonceCache for testing.
 type testNonceCache struct {
 	mu     sync.Mutex
@@ -67,17 +76,13 @@ func newTestFileRouter(
 		IsFullNode: func() bool { return isFullNode },
 		RouteSnap:  func() routing.Snapshot { return snap },
 		PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
-			// Default to a protocolVersion at the file-transfer
-			// cutover (domain.FileCommandMinPeerProtocolVersion) so
-			// existing tests that don't care about version still pass
-			// the ranking gate. Tests that exercise the cutover (e.g.
-			// TestRouter_RelaySkipsBelowMinProtocolVersionPeer) wire
-			// their own PeerRouteMeta callback returning a lower
-			// version explicitly.
+			// Default to a fixed positive protocol version so existing
+			// tests that don't care about version still rank
+			// deterministically.
 			return PeerRouteMeta{
 				ConnectedAt:        time.Now(),
-				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 			}, true
 		},
 		// Authenticity is now self-contained in the wire frame
@@ -330,8 +335,8 @@ func TestFileRouterClientNodeNoRelay(t *testing.T) {
 		PeerRouteMeta: func(domain.PeerIdentity) (PeerRouteMeta, bool) {
 			return PeerRouteMeta{
 				ConnectedAt:        time.Now(),
-				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 			}, true
 		},
 		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
@@ -638,8 +643,8 @@ func TestFileRouterEqualHopsPrefersLongestConnectedPeer(t *testing.T) {
 			}
 			return PeerRouteMeta{
 				ConnectedAt:        ts,
-				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 			}, true
 		},
 		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
@@ -707,8 +712,8 @@ func TestFileRouterSkipsUnusablePeerFromPeerRouteMeta(t *testing.T) {
 			if id == healthyRelay {
 				return PeerRouteMeta{
 					ConnectedAt:        now.Add(-5 * time.Minute),
-					ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-					RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+					ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+					RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 				}, true
 			}
 			return PeerRouteMeta{}, false
@@ -780,8 +785,8 @@ func TestSendFileCommandRouteTableFallbackPrefersLongestConnectedEqualHop(t *tes
 			}
 			return PeerRouteMeta{
 				ConnectedAt:        ts,
-				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 			}, true
 		},
 		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
@@ -859,8 +864,8 @@ func TestFileRouterDeduplicatesCandidatesByNextHop(t *testing.T) {
 		PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
 			return PeerRouteMeta{
 				ConnectedAt:        now.Add(-time.Minute),
-				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 			}, true
 		},
 		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
@@ -1018,9 +1023,9 @@ func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 		// Legit: ProtocolVersion mirrors RawProtocolVersion at fixtureLocal.
 		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal},
 		// Inflated: peer claimed v=fixtureLocal+1, capped at ranking
-		// fixtureLocal by node-side trustedFileRouteVersion. Eligible
-		// (Raw>=cutover) and tied with relayClose on the primary key —
-		// uptime decides, and relayClose has the longer one.
+		// fixtureLocal by node-side trustedFileRouteVersion. Tied with
+		// relayClose on the primary key — uptime decides, and
+		// relayClose has the longer one.
 		relayFar: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal + 1},
 	}
 
@@ -1254,10 +1259,9 @@ func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 	// the filerouter package has no access to config.ProtocolVersion,
 	// so the test pins a single value and treats it as the cap
 	// ceiling. The actual production config.ProtocolVersion may be
-	// higher — the only invariants this test exercises are the
-	// cutover floor (Raw >= FileCommandMinPeerProtocolVersion) and
-	// the direct-session promotion contract, both of which are
-	// independent of the absolute ranking value.
+	// higher — the only invariant this test exercises is the
+	// direct-session promotion contract, which is independent of the
+	// absolute ranking value.
 	const fixtureLocal = domain.ProtocolVersion(12)
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
 		// dst has a direct session — that is the live send target.
@@ -1265,12 +1269,11 @@ func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 		// relay reports an inflated version (Raw=99 > fixtureLocal).
 		// The production node-side helper caps the ranking key at the
 		// local version while keeping RawProtocolVersion at 99, so
-		// the candidate stays eligible (Raw >= cutover) and ranks
-		// tied with v=local peers on the primary key. Here the test
-		// covers the direct-session promotion contract; the direct
-		// entry wins independent of the relay's ranking because
-		// step 1 of the send path (direct sessionSend to dst) is
-		// unconditional.
+		// the candidate ranks tied with v=local peers on the primary
+		// key. Here the test covers the direct-session promotion
+		// contract; the direct entry wins independent of the relay's
+		// ranking because step 1 of the send path (direct sessionSend
+		// to dst) is unconditional.
 		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: fixtureLocal, RawProtocolVersion: 99},
 	}
 
@@ -1594,8 +1597,8 @@ func newTestFileRouterAuthorize(
 		PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
 			return PeerRouteMeta{
 				ConnectedAt:        time.Now(),
-				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 			}, true
 		},
 		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
@@ -1783,8 +1786,8 @@ func TestRouter_LocalDeliveryUntrustedSRCDoesNotConsumeNonceSlot(t *testing.T) {
 		PeerRouteMeta: func(domain.PeerIdentity) (PeerRouteMeta, bool) {
 			return PeerRouteMeta{
 				ConnectedAt:        time.Now(),
-				ProtocolVersion:    domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
-				RawProtocolVersion: domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
 			}, true
 		},
 		// SRC is authentic but NOT in the trust store — the exact
@@ -1817,72 +1820,6 @@ func TestRouter_LocalDeliveryUntrustedSRCDoesNotConsumeNonceSlot(t *testing.T) {
 	// in-flight nonces from trusted peers.
 	if cache.Has(frame.Nonce) {
 		t.Fatal("untrusted local frame committed its nonce; replay-cache LRU is consumable by an authentic-but-untrusted SRC")
-	}
-}
-
-// TestRouter_RelaySkipsBelowMinProtocolVersionPeer pins the protocol-
-// version cutover (domain.FileCommandMinPeerProtocolVersion). A v11
-// next-hop advertising file_transfer_v1 would receive a v2-formatted
-// frame and drop it at its missing-SrcPubKey gate, so the file router
-// must NOT pick that next-hop in the first place. The frame must also
-// not silently disappear: when the only candidate route is below the
-// minimum, forwardToNextHop reports "no active route".
-func TestRouter_RelaySkipsBelowMinProtocolVersionPeer(t *testing.T) {
-	t.Parallel()
-
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	hop := domain.PeerIdentity("nexthop-identity-1234567890abcde")
-
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-
-	now := time.Now()
-	snap := routing.Snapshot{
-		TakenAt: now,
-		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
-			dstID: {
-				{Identity: dstID, NextHop: hop, Hops: 1, ExpiresAt: now.Add(time.Minute)},
-			},
-		},
-	}
-
-	// peerRouteMeta reports v11 for the only candidate — below the cutover.
-	belowMinVersion := domain.ProtocolVersion(domain.FileCommandMinPeerProtocolVersion - 1)
-
-	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
-	tr.router = NewRouter(RouterConfig{
-		NonceCache: newTestNonceCache(),
-		LocalID:    localID,
-		IsFullNode: func() bool { return true },
-		RouteSnap:  func() routing.Snapshot { return snap },
-		PeerRouteMeta: func(domain.PeerIdentity) (PeerRouteMeta, bool) {
-			return PeerRouteMeta{
-				ConnectedAt:        time.Now(),
-				ProtocolVersion:    belowMinVersion,
-				RawProtocolVersion: belowMinVersion,
-			}, true
-		},
-		IsAuthorizedForLocalDelivery: func(domain.PeerIdentity) bool { return false },
-		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
-			tr.mu.Lock()
-			defer tr.mu.Unlock()
-			tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
-			return true
-		},
-		LocalDeliver: func(frame protocol.FileCommandFrame) {
-			tr.mu.Lock()
-			defer tr.mu.Unlock()
-			tr.deliveredLocal = append(tr.deliveredLocal, frame)
-		},
-	})
-
-	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
-	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
-
-	if got := tr.sentTo(hop); len(got) != 0 {
-		t.Fatalf("relay must NOT pick a next-hop with protocolVersion < FileCommandMinPeerProtocolVersion; sent=%d", len(got))
 	}
 }
 
