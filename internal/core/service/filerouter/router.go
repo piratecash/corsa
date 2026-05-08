@@ -86,11 +86,23 @@ type PeerRouteMeta struct {
 //     to them but never forward to other destinations.
 //   - File commands have no chatlog, no delivery receipts, no gossip fallback,
 //     no pending queue. If no route exists, the frame is silently dropped.
+//
+// Two routing-table reads coexist deliberately. The hot transit path
+// inside HandleInbound uses the cached snapshot (routeSnap) — a frame
+// in flight has its own metadata and a one-tick delay on a freshly
+// added route is harmless. Locally-originated paths (SendFileCommand
+// and the diagnostic ExplainRoute) read through the per-destination
+// fresh oracle (routeLookup) so a route accepted right before the
+// user-initiated send is visible immediately, without waiting for the
+// cached snapshot's next dirty-flag publish (~500 ms after the writer
+// touched the table). See "Two distinct staleness bounds" in
+// docs/routing.md "Snapshot freshness" for the broader contract.
 type Router struct {
 	nonceCache                  NonceCache
 	localID                     domain.PeerIdentity
 	isFullNode                  func() bool
 	routeSnap                   func() routing.Snapshot
+	routeLookup                 func(dst domain.PeerIdentity) []routing.RouteEntry
 	peerRouteMeta               func(domain.PeerIdentity) (PeerRouteMeta, bool)
 	isAuthorizedForLocalDeliver func(domain.PeerIdentity) bool
 	sessionSend                 func(dst domain.PeerIdentity, data []byte) bool
@@ -120,10 +132,37 @@ type Router struct {
 // by sourcing pubkeys from the relay's own trust store, which made
 // relay-through-stranger impossible.
 type RouterConfig struct {
-	NonceCache    NonceCache
-	LocalID       domain.PeerIdentity
-	IsFullNode    func() bool
-	RouteSnap     func() routing.Snapshot
+	NonceCache NonceCache
+	LocalID    domain.PeerIdentity
+	IsFullNode func() bool
+
+	// RouteSnap returns the cached routing snapshot used by the hot
+	// transit path inside HandleInbound. Bounded staleness ≤ one
+	// refresh tick (currently 500 ms) is acceptable for in-flight
+	// frames: their next-hop decision is bounded by the wire frame
+	// metadata and a one-tick delay on a freshly added route is
+	// strictly better than blocking the routing writers (announce
+	// loop, TickTTL, hop_ack confirmation) for a deep copy on every
+	// transit-forward decision.
+	RouteSnap func() routing.Snapshot
+
+	// RouteLookup returns the fresh per-destination route slice for
+	// locally-originated paths (SendFileCommand and ExplainRoute).
+	// It is the same fresh path the node-level isPeerReachable uses
+	// — a direct routing.Table.Lookup — and exists so a route
+	// accepted right before a user-initiated file send becomes
+	// visible immediately, without waiting for the cached snapshot's
+	// next publish. Without this oracle the user would observe a
+	// 0–500 ms window where isPeerReachable reports the destination
+	// as reachable (it reads the fresh table) but SendFileCommand
+	// fails with "no route to <dst>" because collectRouteCandidates
+	// reads the still-stale cached snapshot.
+	//
+	// May be nil — when unset, locally-originated paths fall back to
+	// RouteSnap, recovering pre-fix behaviour for tests and any
+	// caller that has not wired the oracle yet.
+	RouteLookup func(dst domain.PeerIdentity) []routing.RouteEntry
+
 	PeerRouteMeta func(domain.PeerIdentity) (PeerRouteMeta, bool)
 
 	// IsAuthorizedForLocalDelivery is consulted only when DST == self.
@@ -150,6 +189,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		localID:                     cfg.LocalID,
 		isFullNode:                  cfg.IsFullNode,
 		routeSnap:                   cfg.RouteSnap,
+		routeLookup:                 cfg.RouteLookup,
 		peerRouteMeta:               cfg.PeerRouteMeta,
 		isAuthorizedForLocalDeliver: cfg.IsAuthorizedForLocalDelivery,
 		sessionSend:                 cfg.SessionSend,
@@ -171,36 +211,49 @@ func NewRouter(cfg RouterConfig) *Router {
 // locally-originated / test-injected frames.
 //
 // Processing pipeline (cheapest checks first for DDoS resistance):
-//  1. Anti-replay: nonce cache lookup (Has only, no commit yet) — O(1).
-//  2. Deliverability check: DST == self OR route to DST exists — O(1).
-//  3. Pre-mutation validation: TTL ≤ MaxTTL on the raw incoming value,
-//     freshness |now − Time| ≤ 5 min, and nonce binding
-//     SHA256(SRC||DST||MaxTTL||Time||Payload) == Nonce. MaxTTL is
-//     bound into the nonce so a malicious relay cannot inflate the hop
-//     budget without invalidating the signature chain. All three checks
-//     live in ValidateFileCommandFrame and run before any field is
-//     mutated, so a malicious relay cannot bypass them by inflating
-//     TTL past the ceiling and counting on a later decrement to slip
-//     it back under.
-//  4. TTL decrement: apply hop budget after validation, drop on
-//     exhaustion (loop prevention).
-//  5. Authenticity: decode SrcPubKey, recompute identity fingerprint
-//     against SRC, and ed25519_verify(SrcPubKey, Nonce, Signature).
-//     Self-contained — independent of any peer state on this node.
-//  6. Local delivery (DST == self): IsAuthorizedForLocalDelivery first,
-//     then atomic nonce commit (TryAdd), then dispatch to
-//     FileTransferManager. Authorization gates the commit so an
-//     authentic-but-untrusted SRC cannot evict bounded-LRU entries.
-//  7. Relay restriction: only full nodes forward; client nodes drop
-//     DST ≠ self. Runs BEFORE the relay TryAdd so a client node does
-//     not consume bounded-LRU slots for transit frames it would never
-//     forward — the symmetric defence to the auth-before-commit gate
-//     in the local-delivery branch.
-//  8. Relay path: atomic nonce commit (TryAdd) — exactly one goroutine
-//     proceeds for an authentic transit frame regardless of trust.
-//  9. Capability-aware forwarding: select best route whose next-hop
-//     has file_transfer_v1 AND is not incomingPeer. TTL already
-//     decremented at step 4.
+//
+// 1. Anti-replay: nonce cache lookup (Has only, no commit yet) — O(1).
+// 2. Deliverability check: DST == self OR at least one viable route
+// to DST exists in the cached snapshot. "Viable" applies the same
+// TTL/withdrawn semantics as step 8 (current wall-clock against
+// ExpiresAt, NextHop != self), so a frame whose only cached routes
+// are wall-clock expired is rejected here, before any signature work
+// and before any nonce commit.
+// 3. Pre-mutation validation: TTL ≤ MaxTTL on the raw incoming value,
+// freshness |now − Time| ≤ 5 min, and nonce binding
+// SHA256(SRC||DST||MaxTTL||Time||Payload) == Nonce. MaxTTL is bound
+// into the nonce so a malicious relay cannot inflate the hop budget
+// without invalidating the signature chain. All three checks live in
+// ValidateFileCommandFrame and run before any field is mutated, so a
+// malicious relay cannot bypass them by inflating TTL past the
+// ceiling and counting on a later decrement to slip it back under.
+// 4. TTL decrement: apply hop budget after validation, drop on
+// exhaustion (loop prevention).
+// 5. Authenticity: decode SrcPubKey, recompute identity fingerprint
+// against SRC, and ed25519_verify(SrcPubKey, Nonce, Signature).
+// Self-contained — independent of any peer state on this node.
+// 6. Local delivery (DST == self): IsAuthorizedForLocalDelivery first,
+// then atomic nonce commit (TryAdd), then dispatch to
+// FileTransferManager. Authorization gates the commit so an
+// authentic-but-untrusted SRC cannot evict bounded-LRU entries.
+// 7. Relay restriction: only full nodes forward; client nodes drop
+// DST ≠ self. Runs BEFORE the relay TryAdd so a client node does
+// not consume bounded-LRU slots for transit frames it would never
+// forward — the symmetric defence to the auth-before-commit gate in
+// the local-delivery branch.
+// 8. Collect viable forwarding candidates with split-horizon applied
+// (excludeVia == incomingPeer) and TTL evaluated against
+// time.Now(). If the candidate set is empty — only routes pointing
+// back at the previous hop, or every route wall-clock expired —
+// drop without committing the nonce. This guards against the
+// residual leak where step 2 saw a viable route but split-horizon
+// erases it: the bounded LRU never absorbs an un-forwardable frame.
+// 9. Relay path: atomic nonce commit (TryAdd) — exactly one goroutine
+// proceeds per authentic transit frame, only after step 8 has
+// proven the frame is forwardable.
+// 10. Marshal and forward through the pre-collected candidates.
+// Marshal runs after TryAdd so concurrent transit duplicates that
+// lose the race do not pay the marshal cost.
 func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIdentity) {
 	var frame protocol.FileCommandFrame
 	if err := json.Unmarshal(raw, &frame); err != nil {
@@ -219,12 +272,21 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 		return
 	}
 
-	// 2. Deliverability check: is the frame addressed to us, or can we route it?
+	// 2. Deliverability check: is the frame addressed to us, or can we
+	// route it? The early gate uses the same TTL/withdrawn semantics as
+	// the later candidate collection (current wall-clock against
+	// ExpiresAt), so a frame whose only cached routes are wall-clock
+	// expired is dropped HERE — before signature verification AND
+	// before TryAdd. Without this, a stale-but-non-empty
+	// snap.Routes[DST] would let the frame slip past the early gate,
+	// pass through every authentication step, and only get dropped at
+	// step 8 collectRouteCandidates AFTER the relay TryAdd had
+	// committed the nonce — burning a slot in the bounded LRU for an
+	// un-deliverable frame.
 	isLocal := frame.DST == r.localID
 	if !isLocal {
-		snap := r.routeSnap()
-		if _, hasRoute := snap.Routes[frame.DST]; !hasRoute {
-			log.Debug().Str("dst", string(frame.DST)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no route to destination, dropping")
+		if !r.hasViableRoute(frame.DST, now) {
+			log.Debug().Str("dst", string(frame.DST)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no viable route to destination, dropping")
 			return
 		}
 	}
@@ -334,23 +396,113 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 		return
 	}
 
-	// 8. Relay path: atomic anti-replay commit — only after all
-	// authenticity and policy checks have passed. TryAdd returns true
-	// if this goroutine is the first to insert the nonce; concurrent
-	// transit deliveries of the same valid frame (via multiple
-	// peers/transports) lose the race and are dropped here. Using
-	// TryAdd instead of separate Has+Add closes the TOCTOU window
-	// while still preventing cache poisoning (forged frames never
-	// reach this point).
+	// 8. Collect viable forwarding candidates BEFORE committing the
+	// nonce. The early gate at step 2 already checked viability, but
+	// it does NOT see the split-horizon constraint (excludeVia ==
+	// incomingPeer): if our only viable route to DST happens to point
+	// back at the peer that just handed us this frame, the candidate
+	// set is empty here even though step 2 passed. Doing the
+	// collection before TryAdd guarantees that we never burn a slot
+	// in the bounded LRU for a frame the router cannot in fact
+	// forward — closing the residual replay-cache leak that the
+	// earlier-step TTL gate alone could not.
+	//
+	// collectRouteCandidates evaluates IsExpired against time.Now() and
+	// applies split-horizon (excludeVia == incomingPeer). Concurrent
+	// transit duplicates pay this collection work twice in the worst
+	// case, but only one of them wins the TryAdd race below — far
+	// better than poisoning the cache with un-deliverable frames.
+	candidates := r.collectRouteCandidates(frame.DST, incomingPeer)
+	if len(candidates) == 0 {
+		log.Debug().
+			Str("dst", string(frame.DST)).
+			Str("exclude_via", string(incomingPeer)).
+			Str("nonce", noncePrefix(frame.Nonce)).
+			Msg("file_router: no viable forwarding candidate (split-horizon or all expired), dropping without nonce commit")
+		return
+	}
+
+	// 9. Atomic anti-replay commit — only after we have a viable
+	// candidate to forward through. TryAdd returns true if this
+	// goroutine is the first to insert the nonce; concurrent transit
+	// deliveries of the same valid frame (via multiple peers/transports)
+	// lose the race and are dropped here. Using TryAdd instead of
+	// separate Has+Add closes the TOCTOU window while still preventing
+	// cache poisoning (forged frames never reach this point).
 	if !r.nonceCache.TryAdd(frame.Nonce) {
 		log.Debug().Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: concurrent duplicate, nonce already committed")
 		return
 	}
 
-	// 9. Capability-aware forwarding (TTL already decremented at step 4).
-	// Pass incomingPeer so forwardToNextHop applies split-horizon and
-	// never reflects the frame back to the neighbor that just delivered it.
-	r.forwardToNextHop(frame, incomingPeer)
+	// 10. Marshal and forward through the pre-collected candidates.
+	// The frame is marshalled here, after TryAdd, so concurrent
+	// duplicates that lose the race do not pay the marshal cost.
+	data, err := protocol.MarshalFileCommandFrame(frame)
+	if err != nil {
+		log.Debug().Err(err).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: marshal failed")
+		return
+	}
+	if r.trySendToCandidates(frame.DST, frame.Nonce, candidates, data) {
+		log.Debug().
+			Str("dst", string(frame.DST)).
+			Uint8("ttl", frame.TTL).
+			Str("nonce", noncePrefix(frame.Nonce)).
+			Msg("file_router: forwarded")
+		return
+	}
+	log.Debug().
+		Str("dst", string(frame.DST)).
+		Int("routes_tried", len(candidates)).
+		Str("nonce", noncePrefix(frame.Nonce)).
+		Msg("file_router: all routes exhausted, relay forward failed")
+}
+
+// hasViableRoute is the cheap preflight for HandleInbound's step 2
+// deliverability gate. It checks ONLY structural liveness of the
+// cached routing snapshot:
+//
+//   - dst has at least one entry in snap.Routes;
+//   - the entry is not withdrawn (Hops < HopsInfinity);
+//   - the entry is not wall-clock expired (IsExpired(now));
+//   - the entry's NextHop is not the local identity (no self-loop).
+//
+// It deliberately does NOT replicate the full step-8 candidate
+// selection. In particular it does not see:
+//
+//   - split-horizon (excludeVia == incomingPeer) — relay path-only
+//     constraint that must be re-checked at step 8;
+//   - live next-hop metadata (peerRouteMeta) — a route whose
+//     NextHop has no PeerRouteMeta (peer dropped, no version known)
+//     is still counted as viable here but discarded at step 8.
+//
+// Passing this gate therefore does NOT guarantee a non-empty
+// candidate set at step 8; the relay path runs collectRouteCandidates
+// again and is the authoritative drop point for split-horizon and
+// next-hop-metadata cases. The role of hasViableRoute is narrower:
+// reject frames whose only cached routes are structurally dead
+// (every entry withdrawn / expired / self-loop) before signature
+// work and before any nonce commit, so a flood of authentic frames
+// addressed to peers with stale-cached dead routes cannot burn slots
+// in the bounded LRU. Step 8's collect-before-TryAdd handles the
+// remaining cases (split-horizon erasure, missing next-hop metadata)
+// without committing the nonce either.
+func (r *Router) hasViableRoute(dst domain.PeerIdentity, now time.Time) bool {
+	snap := r.routeSnap()
+	routes, ok := snap.Routes[dst]
+	if !ok {
+		return false
+	}
+	for i := range routes {
+		re := &routes[i]
+		if re.IsWithdrawn() || re.IsExpired(now) {
+			continue
+		}
+		if re.NextHop == r.localID {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // routeCandidate is a single viable next-hop for a destination, used by
@@ -393,6 +545,12 @@ type peerRouteMetaResult struct {
 // self-referencing entries are filtered out. Returns nil when no viable
 // route exists.
 //
+// This variant reads the cached routing snapshot. It is the right call
+// for the hot transit path inside HandleInbound (per-frame, bounded by
+// wire metadata, a one-tick delay on a freshly added route is harmless).
+// Locally-originated paths must use collectFreshRouteCandidates instead
+// — see that function and RouterConfig.RouteLookup for why.
+//
 // excludeVia removes routes whose NextHop matches the given identity.
 // This implements split-horizon forwarding on the transit path: a frame
 // received from neighbor X must never be forwarded back to X, otherwise
@@ -407,12 +565,73 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 		return nil
 	}
 
+	return r.rankRouteCandidates(routes, dst, excludeVia)
+}
+
+// collectFreshRouteCandidates is the locally-originated counterpart of
+// collectRouteCandidates: it reads the routing table through the
+// per-destination fresh oracle (RouterConfig.RouteLookup), so a route
+// accepted right before SendFileCommand or ExplainRoute is visible
+// immediately. The cached snapshot path would only see this route after
+// the next dirty-flag publish (~500 ms after the writer touched the
+// table), which produces the user-visible regression: isPeerReachable
+// already reports reachable (it queries the fresh table), but the send
+// fails because the cached snapshot has not republished yet.
+//
+// When RouteLookup is nil — tests and any caller that has not wired the
+// oracle — falls back to the cached path, preserving pre-fix behaviour.
+//
+// excludeVia is plumbed through for symmetry with collectRouteCandidates,
+// but the locally-originated callers always pass empty (no previous hop
+// to split-horizon against).
+func (r *Router) collectFreshRouteCandidates(dst, excludeVia domain.PeerIdentity) []routeCandidate {
+	if r.routeLookup == nil {
+		return r.collectRouteCandidates(dst, excludeVia)
+	}
+	routes := r.routeLookup(dst)
+	if len(routes) == 0 {
+		return nil
+	}
+	return r.rankRouteCandidates(routes, dst, excludeVia)
+}
+
+// rankRouteCandidates is the shared filter+rank kernel behind both
+// collectRouteCandidates (cached snapshot) and collectFreshRouteCandidates
+// (per-destination Lookup). Splitting the data source from the ranking
+// keeps the comparator/dedup contract identical across hot and cold
+// paths — the transit path and the locally-originated path can never
+// disagree about which next-hop is best for the same input set.
+//
+// `routes` is the raw RouteEntry slice for `dst` from whichever source
+// the caller chose. The function applies the same TTL/withdrawn/self/
+// excludeVia filters as before, deduplicates by NextHop using the same
+// comparator, and finally sorts via routeCandidateLess.
+func (r *Router) rankRouteCandidates(routes []routing.RouteEntry, dst, excludeVia domain.PeerIdentity) []routeCandidate {
+	if len(routes) == 0 {
+		return nil
+	}
+
+	// Evaluate TTL against the current wall clock, not snap.TakenAt.
+	// The cached routing snapshot's TakenAt is the publish moment of
+	// the last refresh tick; the dirty-flag publisher only re-publishes
+	// when the routing table mutates, so a finite-TTL route that
+	// silently aged out between two TickTTL passes (10s cadence)
+	// would still report IsExpired(snap.TakenAt) == false and end up
+	// in the candidates list. trySendToCandidates does not re-check
+	// expiry, so the file router would happily forward through a
+	// dead route. Comparing against time.Now() here closes that gap
+	// without changing the wire-side behaviour: at worst we drop a
+	// candidate that is in fact still alive (the next refresh will
+	// republish), but we never send through a candidate that is
+	// already dead by wall-clock time.
+	now := time.Now()
+
 	var candidates []routeCandidate
 	byNextHop := make(map[domain.PeerIdentity]int)
 	metaCache := make(map[domain.PeerIdentity]peerRouteMetaResult)
 	for i := range routes {
 		re := &routes[i]
-		if re.IsWithdrawn() || re.IsExpired(snap.TakenAt) {
+		if re.IsWithdrawn() || re.IsExpired(now) {
 			continue
 		}
 		if re.NextHop == r.localID {
@@ -524,7 +743,7 @@ type RoutePlanEntry struct {
 //
 // This method is read-only — it never enqueues, dials, or mutates state.
 // It exists to power diagnostics; the live send paths still go through
-// SendFileCommand / forwardToNextHop.
+// SendFileCommand and the inline forwarding stage of HandleInbound.
 func (r *Router) ExplainRoute(dst domain.PeerIdentity) []RoutePlanEntry {
 	var plan []RoutePlanEntry
 
@@ -550,8 +769,11 @@ func (r *Router) ExplainRoute(dst domain.PeerIdentity) []RoutePlanEntry {
 	// (NextHop == dst) when we have already accounted for it via the
 	// synthetic candidate above — listing it twice would mislead a
 	// console reader into thinking there are two independent paths to
-	// the same destination.
-	candidates := r.collectRouteCandidates(dst, "")
+	// the same destination. ExplainRoute mirrors SendFileCommand so it
+	// must read the same source — the fresh per-destination oracle —
+	// otherwise an operator's diagnostic would disagree with the live
+	// send during the cached snapshot's republish window.
+	candidates := r.collectFreshRouteCandidates(dst, "")
 	for _, c := range candidates {
 		if directReachable && c.nextHop == dst {
 			continue
@@ -616,48 +838,6 @@ func (r *Router) trySendToCandidates(dst domain.PeerIdentity, nonce string, cand
 	return false
 }
 
-// forwardToNextHop collects all active routes to DST and tries each
-// next-hop, in the order defined by routeCandidateLess, until one
-// succeeds. TTL is already decremented at step 3 of the pipeline — this
-// function only selects the route and sends.
-//
-// excludeVia is the previous-hop identity: the neighbor that handed us
-// this frame. It is filtered out of the candidate set so the transit
-// node cannot reflect the frame back where it came from (split-horizon).
-// Empty identity disables the filter.
-func (r *Router) forwardToNextHop(frame protocol.FileCommandFrame, excludeVia domain.PeerIdentity) {
-	candidates := r.collectRouteCandidates(frame.DST, excludeVia)
-	if len(candidates) == 0 {
-		log.Debug().
-			Str("dst", string(frame.DST)).
-			Str("exclude_via", string(excludeVia)).
-			Str("nonce", noncePrefix(frame.Nonce)).
-			Msg("file_router: no active route to destination (after split-horizon)")
-		return
-	}
-
-	data, err := protocol.MarshalFileCommandFrame(frame)
-	if err != nil {
-		log.Debug().Err(err).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: marshal failed")
-		return
-	}
-
-	if r.trySendToCandidates(frame.DST, frame.Nonce, candidates, data) {
-		log.Debug().
-			Str("dst", string(frame.DST)).
-			Uint8("ttl", frame.TTL).
-			Str("nonce", noncePrefix(frame.Nonce)).
-			Msg("file_router: forwarded")
-		return
-	}
-
-	log.Debug().
-		Str("dst", string(frame.DST)).
-		Int("routes_tried", len(candidates)).
-		Str("nonce", noncePrefix(frame.Nonce)).
-		Msg("file_router: all routes exhausted, relay forward failed")
-}
-
 // SendFileCommand constructs and sends a FileCommandFrame to the destination.
 // Used by FileTransferManager to send chunk_request, chunk_response, etc.
 //
@@ -704,8 +884,14 @@ func (r *Router) SendFileCommand(
 	// 2. Route table fallback: collect active routes ranked by
 	// routeCandidateLess (see its godoc for the canonical order).
 	// No split-horizon here — this is a locally-originated send, there
-	// is no previous hop to exclude.
-	candidates := r.collectRouteCandidates(dst, "")
+	// is no previous hop to exclude. Uses the per-destination fresh
+	// oracle (RouterConfig.RouteLookup) so a route accepted right
+	// before this user-initiated send is visible immediately. The
+	// cached snapshot used by the transit path would only see the
+	// route after the next dirty-flag publish (~500 ms), which would
+	// reproduce the original "isPeerReachable says yes, send fails"
+	// regression on the very next pipeline step.
+	candidates := r.collectFreshRouteCandidates(dst, "")
 
 	// Filter out routing-table entries whose next_hop == dst: the
 	// direct sessionSend(dst, data) above already attempted that exact

@@ -63,6 +63,34 @@ type Node struct {
 	// addresses. Production nodes never set this — it exists solely for
 	// unit tests that use RFC 1918 addresses as fake peers.
 	AllowPrivatePeers bool
+
+	// MaxNextHopsPerOrigin caps the local routing-table fan-out per
+	// (Identity, Origin) pair. A positive value activates the cap
+	// admission policy in routing.Table — see
+	// docs/routing-rib-compaction-and-snapshot-refactor.md (Stage B)
+	// and routing.WithMaxNextHopsPerOrigin for the exact eviction
+	// rules. Zero disables the cap, which is the rollout default for
+	// the first release that ships the cap code: behaviour matches the
+	// pre-cap table exactly so operators can flip the switch from
+	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN once the cap has soaked.
+	//
+	// Recommended ceiling for production is
+	// routing.DefaultMaxNextHopsPerOrigin (4). The cap bucket is
+	// keyed by (Identity, Origin), and a direct route by
+	// construction has NextHop == Identity, so a single bucket holds
+	// at most one direct entry — direct routes do NOT stack across
+	// buckets. Setting K below the recommended ceiling does not
+	// "run out of slots for direct peers"; it tightens the
+	// strict-better admission floor for transit candidates per
+	// destination. The "rejected_all_protected" counter is a
+	// sanity-counter for the K=1 corner case (the single slot is
+	// held by the direct/local row of that bucket and a non-direct
+	// arrival has nowhere to go) and for synthetic / test /
+	// direct-restore edge cases — it does NOT track fan-out
+	// sizing. The value is taken as-is by the table without further
+	// validation, on the assumption that the operator understands
+	// the trade-off.
+	MaxNextHopsPerOrigin int
 }
 
 type RPC struct {
@@ -127,6 +155,7 @@ func Default() Config {
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
+	maxNextHopsPerOrigin := maxNextHopsPerOriginFromEnv()
 
 	return Config{
 		App: App{
@@ -137,23 +166,24 @@ func Default() Config {
 			Version:  CorsaVersion,
 		},
 		Node: Node{
-			ListenAddress:    listenAddress,
-			AdvertisePort:    advertisePort,
-			BootstrapPeers:   bootstrapPeers,
-			IdentityPath:     identityPath,
-			TrustStorePath:   trustStorePath,
-			QueueStatePath:   queueStatePath,
-			PeersStatePath:   peersStatePath,
-			ChatLogDir:       chatLogDir,
-			DownloadDir:      downloadDir,
-			ProxyAddress:     proxyAddress,
-			Type:             nodeType,
-			ListenerEnabled:  listenerEnabled,
-			ListenerSet:      listenerSet,
-			ClientVersion:    CorsaVersion,
-			MaxClockDrift:    maxClockDrift,
-			MaxOutgoingPeers: maxOutgoingPeers,
-			MaxIncomingPeers: maxIncomingPeers,
+			ListenAddress:        listenAddress,
+			AdvertisePort:        advertisePort,
+			BootstrapPeers:       bootstrapPeers,
+			IdentityPath:         identityPath,
+			TrustStorePath:       trustStorePath,
+			QueueStatePath:       queueStatePath,
+			PeersStatePath:       peersStatePath,
+			ChatLogDir:           chatLogDir,
+			DownloadDir:          downloadDir,
+			ProxyAddress:         proxyAddress,
+			Type:                 nodeType,
+			ListenerEnabled:      listenerEnabled,
+			ListenerSet:          listenerSet,
+			ClientVersion:        CorsaVersion,
+			MaxClockDrift:        maxClockDrift,
+			MaxOutgoingPeers:     maxOutgoingPeers,
+			MaxIncomingPeers:     maxIncomingPeers,
+			MaxNextHopsPerOrigin: maxNextHopsPerOrigin,
 		},
 		RPC: RPC{
 			Host:     envOrDefault("CORSA_RPC_HOST", "127.0.0.1"),
@@ -420,6 +450,23 @@ func maxOutgoingPeersFromEnv() int {
 
 func defaultChatLogDir() string {
 	return appdata.DefaultDir()
+}
+
+func maxNextHopsPerOriginFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_NEXT_HOPS_PER_ORIGIN"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		// Negative or unparsable values fall back to the
+		// cap-disabled default. We deliberately do NOT log a warning
+		// here — this helper is invoked once during config loading
+		// and the operator-facing log line belongs at the call site,
+		// not in a generic env parser.
+		return 0
+	}
+	return value
 }
 
 func maxIncomingPeersFromEnv() int {

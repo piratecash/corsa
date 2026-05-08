@@ -34,6 +34,25 @@ import (
 //
 // If ackSenderAddress is empty, no route can be confirmed (message was
 // stored locally without forwarding).
+//
+// Cap-eviction edge case (Stage B). When MaxNextHopsPerOrigin is active
+// and the (Identity, Origin, NextHop) triple was evicted from the
+// routing table between the relay send and the hop_ack arrival, Lookup
+// returns no matching route and the function logs
+// "route_hop_ack_no_matching_route" without re-creating the entry.
+// This is by design: the planner originally proposed re-admitting the
+// triple as source=hop_ack at this exact moment, but the hop_ack frame
+// only carries the (recipient, next-hop) pair — neither Origin nor
+// SeqNo are on the wire, and a synthetic RouteEntry without authentic
+// origin metadata would forge ranking input that other paths
+// (split-horizon, withdrawal authority) rely on. Letting the
+// evicted-triple case fall through to the existing no-route log path
+// is the correct behaviour: subsequent announcement traffic for the
+// same (Identity, Origin) re-populates the bucket through the normal
+// admission rules, and the cap eviction counter (rejected_full /
+// rejected_all_protected) already documents that the bucket is under
+// pressure. See docs/routing-rib-compaction-and-snapshot-refactor.md
+// §10 "Этап B" → "Принятые решения" for the full rationale.
 func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, ackSenderAddress domain.PeerAddress, routeOrigin domain.PeerIdentity) {
 	if ackSenderAddress == "" {
 		return

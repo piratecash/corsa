@@ -10,27 +10,30 @@ import (
 // depends on exactly once.  Called from Run() on the main goroutine BEFORE
 // the listener starts accepting RPC connections — this establishes the
 // invariant that every hot-path handler (peerHealthFrames,
-// buildPeerExchangeResponse, networkStatsFrame) observes a non-nil snapshot
-// on its first load.  With that invariant the handlers can drop their
-// synchronous rebuild fallbacks entirely, which used to reach cm.mu.RLock
-// and s.peerMu.RLock on the RPC goroutine and re-coupled the "lock-free hot
-// path" contract to the very locks it was built to bypass.
+// buildPeerExchangeResponse, networkStatsFrame, fetchRouteTable) observes a
+// non-nil snapshot on its first load.  With that invariant the handlers
+// can drop their synchronous rebuild fallbacks entirely, which used to
+// reach cm.mu.RLock, s.peerMu.RLock and routing.Table.t.mu.RLock on the
+// RPC goroutine and re-coupled the "lock-free hot path" contract to the
+// very locks it was built to bypass.
 //
-// Running four rebuilds back-to-back at startup is cheap: the node has no
+// Running five rebuilds back-to-back at startup is cheap: the node has no
 // peers yet, so each is O(1).
 func (s *Service) primeHotReadSnapshots() {
 	s.rebuildNetworkStatsSnapshot()
 	s.rebuildPeerHealthSnapshot()
 	s.rebuildPeersExchangeSnapshot()
 	s.rebuildCMSlotsSnapshot()
+	s.rebuildRoutingSnapshot()
 }
 
 // hotReadsRefreshLoop periodically rebuilds every atomic snapshot that the
-// hot RPC path depends on: network_stats, peer_health, peers_exchange, and
-// the ConnectionManager slots view.  Each snapshot is refreshed by its own
-// goroutine with its own ticker so a slow rebuild in one path does not
-// delay the others.  Per-snapshot lock footprint (see docs/locking.md
-// §"Reader path invariants" for the authoritative breakdown):
+// hot RPC path depends on: network_stats, peer_health, peers_exchange, the
+// ConnectionManager slots view, and the routing table.  Each snapshot is
+// refreshed by its own goroutine with its own ticker so a slow rebuild in
+// one path does not delay the others.  Per-snapshot lock footprint (see
+// docs/locking.md §"Reader path invariants" for the authoritative
+// breakdown):
 //
 //   - network_stats / peer_health — short s.peerMu.RLock (peer-domain
 //     placeholder during Phase 2 transition); no IP-state callbacks.
@@ -41,39 +44,73 @@ func (s *Service) primeHotReadSnapshots() {
 //     this specific rebuild even with other domains quiet.
 //   - cm_slots — cm.mu.RLock only (separate mutex inside
 //     ConnectionManager, not covered by the Service domain split).
+//   - routing — routing.Table.t.mu.RLock only (separate mutex inside the
+//     routing package, not covered by the Service domain split).  Skipped
+//     entirely when ConsumeDirty returns false and a previous publish
+//     exists — the deep copy runs only when the table actually mutated
+//     since the last refresh.
 //
 // The snapshots feed different UI panels and there is no correctness
 // relationship between them, so this fan-out is safe.
 //
 // Worst-case staleness for any single snapshot is bounded by
-// networkStatsSnapshotInterval plus the time the refresher needs to acquire
-// its locks per the footprint above.  Under a writer storm the refresher
-// itself may be delayed, but every RPC continues to return the last good
-// snapshot — unblocking the UI during the same reader-starvation
-// conditions that used to freeze hot local RPCs for the full command
-// timeout.
+// networkStatsSnapshotInterval plus the time the refresher needs to
+// acquire its locks per the footprint above.  Under a writer storm the
+// refresher itself may be delayed, but every RPC continues to return
+// the last good snapshot — unblocking the UI during the same
+// reader-starvation conditions that used to freeze hot local RPCs for
+// the full command timeout.
+//
+// One caveat applies specifically to the routing snapshot: this bound
+// covers structural changes only. Routing-specific structural events
+// are route accepted/withdrawn/replaced, direct peer added/removed,
+// flap burst arming hold-down (the disconnect that crossed the flap
+// threshold IS a writer event), and flap-state cleanup that ran
+// inside a TickTTL pass which already touched the table. Time-derived
+// fields are bounded more loosely — the dirty-flag publisher only
+// republishes when a writer touches the table, but wall-clock
+// timestamps that drive these fields advance without writer events:
+//
+//   - A finite-TTL route silently aging out is not a writer event
+//     until TickTTL rewrites it (every 10 s). `IsExpired` against
+//     `snap.TakenAt` and `ttl_seconds` therefore can lag up to
+//     TickTTL_interval (≈10 s) plus one refresh tick.
+//   - `FlapEntry.InHoldDown` flipping from true to false on hold-down
+//     expiry is also driven by wall-clock — `fs.holdDownUntil`
+//     elapsing. TickTTL clears the deadline on its 10 s cadence and
+//     marks the table dirty, so the transition is published within
+//     TickTTL_interval + one refresh. (Hold-down ARMING is structural
+//     and falls under the 500 ms bound; the false→true transition is
+//     a writer event.)
+//
+// Consumers that depend on strict freshness for any time-derived field
+// must read the table directly via `routing.Table.Snapshot()` or
+// `routing.Table.Lookup()` (see docs/routing.md "Snapshot freshness").
 //
 // The initial "prime" rebuild is NOT done here.  It is performed
 // synchronously by primeHotReadSnapshots() from Run() before the listener
 // opens, so RPC handlers never observe a nil snapshot and therefore never
-// need a fallback rebuild path that would re-couple them to cm.mu / s.peerMu.
+// need a fallback rebuild path that would re-couple them to cm.mu / s.peerMu /
+// routing.Table.t.mu.
 //
 // The function returns when every per-snapshot goroutine has exited, so the
 // caller's close(hotReadsDone) still happens-after the final rebuild for
 // each path.
 func (s *Service) hotReadsRefreshLoop(ctx context.Context) {
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildNetworkStatsSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildPeerHealthSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildPeersExchangeSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildCMSlotsSnapshot) }()
+	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildRoutingSnapshot) }()
 	wg.Wait()
 }
 
 // runSnapshotTicker drives one snapshot rebuild on its own ticker until ctx
-// is cancelled.  Isolated into a helper so each of the three hot-read
-// snapshots gets an identical loop shape without duplicating the select.
+// is cancelled.  Isolated into a helper so every hot-read snapshot loop
+// (network_stats, peer_health, peers_exchange, cm_slots, routing) shares
+// the same shape without duplicating the select.
 //
 // A second ctx.Done() check is performed AFTER the ticker fires but BEFORE
 // invoking rebuild().  Without it the two cases race at shutdown: if the

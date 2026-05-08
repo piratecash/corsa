@@ -72,10 +72,34 @@ func (s *Service) initFileTransfer() {
 		LocalID:    domain.PeerIdentity(s.identity.Address),
 		IsFullNode: func() bool { return s.CanForward() },
 		RouteSnap: func() routing.Snapshot {
-			if s.routingTable == nil {
-				return routing.Snapshot{}
-			}
-			return s.routingTable.Snapshot()
+			// Reads the cached routing snapshot maintained by the
+			// hot-reads refresher (routing_snapshot.go). Bounded
+			// staleness ≤ networkStatsSnapshotInterval is acceptable
+			// for the transit path inside HandleInbound: the in-flight
+			// frame has its own metadata and a 500 ms-stale view at
+			// worst delays the failover by one tick — strictly
+			// better than blocking the routing writers (announce
+			// loop, TickTTL, hop_ack confirmation) for a deep copy
+			// on every file-routing decision. Locally-originated
+			// paths (SendFileCommand, ExplainRoute) read through
+			// RouteLookup below instead, which goes straight to the
+			// table and so sees a route the moment it lands.
+			return s.loadRoutingSnapshot()
+		},
+		RouteLookup: func(dst domain.PeerIdentity) []routing.RouteEntry {
+			// Per-destination fresh read for SendFileCommand and
+			// ExplainRoute. routing.Table.Lookup takes t.mu.RLock,
+			// filters withdrawn/expired and pre-sorts at O(K). It is
+			// the same fresh oracle isPeerReachable uses — without
+			// it, the user-initiated send racing the cached
+			// snapshot's republish window would observe
+			// isPeerReachable=true followed immediately by SendFile
+			// returning "no route to <dst>". Direct Table access is
+			// safe here because the lock is per-table (not the
+			// Service domain mutex), so contention is bounded by
+			// concurrent UpdateRoute / TickTTL writers, which is far
+			// shallower than the Service-wide footprint.
+			return s.routingTable.Lookup(dst)
 		},
 		PeerRouteMeta: func(id domain.PeerIdentity) (filerouter.PeerRouteMeta, bool) {
 			return s.fileTransferPeerRouteMeta(id)
@@ -379,48 +403,77 @@ func trustedFileRouteVersion(peer domain.PeerIdentity, reported domain.ProtocolV
 // next-hop has file_transfer_v1 capability. Routes through next-hops without
 // file transfer support are ignored — they cannot carry file commands and
 // would cause pointless retries.
+//
+// Freshness contract: file-transfer entry points (UI "send file", incoming
+// file_announce) AND the FileTransferManager periodic ticker call this.
+// The user-initiated entry points must observe routes the routing table
+// accepted up to the moment of the call — using the cached routing
+// snapshot here would drop a route that arrived between two refresh
+// ticks (≤ 500ms gap) and turn an immediate user action into a "peer
+// not reachable" error. The periodic ticker iterates O(transfers) under
+// FileTransferManager.mu, so a full table deep copy on every iteration
+// would be O(transfers × routes) inside the file-transfer lock — fatal
+// at scale. To satisfy both call sites the function uses
+// routing.Table.Lookup(peer): a per-destination read that takes
+// t.mu.RLock for an O(K) scan where K is the number of routes for this
+// one identity (typically 1–10), not for the whole table.
+//
+// Lock discipline: the peer-domain probe (direct-session check,
+// file-capable peer set, localID copy) runs under a short s.peerMu.RLock
+// that is released BEFORE routing.Table.Lookup is called. The two reads
+// are therefore sequential, not nested — a routing-table writer storm
+// cannot extend a peer-domain hold and vice versa. The previous shape
+// of this function nested t.mu.RLock inside s.peerMu.RLock and coupled
+// the domains' contention together; this two-phase pattern eliminates
+// that coupling and the per-call full-table deep copy in one move.
+//
+// The probe is best-effort by design (peer state may change microseconds
+// after we observed it), so the small staleness gap between the peerMu
+// read and the routing-table read is harmless: the file router runs its
+// own candidate collection (with TTL/split-horizon/capability filters)
+// before any send attempt, so a route that disappears between this
+// probe and the actual send is filtered out at that later stage.
 func (s *Service) isPeerReachable(peer domain.PeerIdentity) bool {
-	s.peerMu.RLock()
-	defer s.peerMu.RUnlock()
 	now := time.Now().UTC()
 
+	// Phase 1: peer-domain probe under a short RLock. Capture everything
+	// we will need from peer state into local copies so the routing
+	// read in Phase 2 does not need s.peerMu held.
+	s.peerMu.RLock()
+	if _, ok := s.fileTransferPeerRouteMetaLocked(peer, now); ok {
+		s.peerMu.RUnlock()
+		return true
+	}
 	// Reuse the same liveness rules as the actual file-router path so
 	// FileTransferManager does not get an optimistic "reachable" result
 	// for peers that are connected on paper but already stalled. The same
 	// now timestamp is used for both the direct-peer and routed-peer checks
 	// to avoid threshold drift around the healthy/degraded/stalled boundary.
-	// Reachability only cares about the boolean result; the meta payload
-	// is discarded here on purpose.
-	if _, ok := s.fileTransferPeerRouteMetaLocked(peer, now); ok {
-		return true
-	}
-
-	// Build the set of peers that currently have at least one usable
-	// file-capable connection. Used to filter route next-hops.
 	fileCapable := s.usableFileTransferPeersLocked(now)
 	localID := domain.PeerIdentity(s.identity.Address)
-	rt := s.routingTable
+	s.peerMu.RUnlock()
 
-	// Check routing table — skip self-routes and next-hops without
-	// file_transfer_v1 capability.
-	if rt != nil {
-		snap := rt.Snapshot()
-		if routes, ok := snap.Routes[peer]; ok {
-			for i := range routes {
-				if routes[i].IsWithdrawn() || routes[i].IsExpired(snap.TakenAt) {
-					continue
-				}
-				if routes[i].NextHop == localID {
-					continue
-				}
-				if _, capable := fileCapable[routes[i].NextHop]; !capable {
-					continue
-				}
-				return true
-			}
-		}
+	// Phase 2: per-destination routing read, lock-sequential with Phase 1.
+	// Lookup filters withdrawn and expired entries against the table's
+	// own clock (time.Now by default), so a finite-TTL route that aged
+	// out since the last TickTTL pass is correctly rejected without
+	// waiting for the 10s TickTTL cycle. The full-table deep copy that
+	// Snapshot() performs is replaced with an O(K) slice scan over only
+	// this destination's routes — important because the periodic
+	// receiver tick can call this for every active transfer under
+	// FileTransferManager.mu.
+	if s.routingTable == nil {
+		return false
 	}
-
+	for _, route := range s.routingTable.Lookup(peer) {
+		if route.NextHop == localID {
+			continue
+		}
+		if _, capable := fileCapable[route.NextHop]; !capable {
+			continue
+		}
+		return true
+	}
 	return false
 }
 

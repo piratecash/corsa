@@ -254,6 +254,196 @@ func TestFileRouterUnknownSenderKeyDropped(t *testing.T) {
 	}
 }
 
+// TestFileRouterDropsRoutesExpiredByWallClockButLiveInSnapshot is the
+// regression test for the TTL fix in collectRouteCandidates: if a cached
+// routing.Snapshot has a TakenAt that is older than the route's
+// ExpiresAt — i.e. by snap.TakenAt the route was still alive — but
+// wall-clock time is already past ExpiresAt, the route is dead. Earlier
+// the filter compared IsExpired(snap.TakenAt) and let such routes
+// through, and trySendToCandidates does not re-check expiry, so the
+// file router would happily forward a frame down a dead path.
+//
+// Setup:
+//
+//   - snap.TakenAt = now - 30s
+//   - route.ExpiresAt = now - 5s
+//
+// snap.TakenAt < route.ExpiresAt → IsExpired(snap.TakenAt) returns false.
+// time.Now() > route.ExpiresAt → IsExpired(now) returns true.
+// The current implementation evaluates against time.Now() and must drop
+// this route. If a future refactor reverts collectRouteCandidates to
+// compare against snap.TakenAt the candidate set will become non-empty,
+// SessionSend will be invoked for the (dead) next-hop, and this test
+// will fail at sentTo(relay1).
+func TestFileRouterDropsRoutesExpiredByWallClockButLiveInSnapshot(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+
+	now := time.Now()
+	staleTakenAt := now.Add(-30 * time.Second)  // snap was published 30s ago
+	routeExpiresAt := now.Add(-5 * time.Second) // route already wall-clock expired
+	if !staleTakenAt.Before(routeExpiresAt) {
+		t.Fatal("test fixture invariant: snap.TakenAt must precede route.ExpiresAt " +
+			"so IsExpired(snap.TakenAt) returns false while IsExpired(time.Now()) returns true")
+	}
+
+	snap := routing.Snapshot{
+		TakenAt: staleTakenAt,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				{
+					Identity:  dstID,
+					NextHop:   relay1,
+					Hops:      2,
+					ExpiresAt: routeExpiresAt,
+				},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	// Mark relay1 as reachable so a regression that lets the route
+	// through cannot be masked by an unreachable next-hop: if the
+	// router decides to forward, SessionSend will succeed and
+	// sentTo(relay1) will be non-empty, making the regression visible.
+	reachable := map[domain.PeerIdentity]bool{relay1: true}
+
+	tr := newTestFileRouter(localID, true, snap, keys, reachable)
+
+	frame := makeSignedFrame(senderID, dstID, 5, "expired-route-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	tr.router.HandleInbound(json.RawMessage(raw), "")
+
+	if got := tr.sentTo(relay1); len(got) != 0 {
+		t.Fatalf("file router forwarded a frame through a wall-clock-expired route; "+
+			"the route is alive vs snap.TakenAt but dead vs time.Now(), so the candidate "+
+			"set must be empty. sentTo(relay1) returned %d frame(s)", len(got))
+	}
+	if got := len(tr.localDeliveries()); got != 0 {
+		t.Fatalf("non-local DST should not produce local delivery; got %d", got)
+	}
+
+	// The frame was un-deliverable: every cached route to DST was
+	// wall-clock expired, so the early deliverability gate (step 2)
+	// rejects it before signature verification, AND the relay path
+	// (step 8) rejects it before the nonce commit. Either gate is
+	// enough to keep the bounded LRU clean — but if a future refactor
+	// reverts step 2 to the key-only check (`_, ok := snap.Routes[DST]`)
+	// AND step 8 back to TryAdd-before-collect, the nonce ends up in
+	// the cache for a frame the router never actually forwards. That
+	// regression poisons the bounded LRU under attack: an adversary
+	// produces authentic frames addressed to peers whose only routes
+	// are stale-but-cached, and every such frame burns a slot. The
+	// assertion below catches the regression by re-injecting the same
+	// frame and asserting that step 1 did NOT see it as already-cached.
+	if tr.nonceCache.Has(frame.Nonce) {
+		t.Fatal("nonce was committed to the replay cache for an un-deliverable frame; " +
+			"either the early deliverability gate or the relay collect-before-TryAdd " +
+			"order regressed, allowing an attacker to evict bounded-LRU slots by sending " +
+			"authentic frames addressed to peers whose only routes are wall-clock expired")
+	}
+}
+
+// TestFileRouterDoesNotCommitNonceWhenSplitHorizonErasesOnlyCandidate is
+// the full-pipeline regression test for the split-horizon leg of the
+// nonce-leak fix in step 8 of HandleInbound. It synthesises the case
+// that hasViableRoute (step 2) cannot detect by design:
+//
+//   - Cached snapshot has exactly one live, non-expired, non-self route
+//     to DST. The early deliverability gate at step 2 sees it and lets
+//     the frame proceed.
+//   - That single route's NextHop equals the peer that delivered the
+//     frame to us (incomingPeer). Step 8's collectRouteCandidates is
+//     called with excludeVia == incomingPeer; split-horizon erases the
+//     only entry, leaving the candidate slice empty.
+//   - The relay path must drop the frame WITHOUT calling nonceCache.TryAdd.
+//     Doing TryAdd before the collect (the pre-fix order) would commit
+//     a nonce for a frame that never gets forwarded — exactly the
+//     bounded-LRU eviction vector the fix closes.
+//
+// TestFileRouterDropsRoutesExpiredByWallClockButLiveInSnapshot covers
+// the TTL-expiry leg of the same fix; this test covers the remaining
+// leg (split-horizon). Together they pin both legs of the
+// collect-before-TryAdd invariant.
+//
+// Existing TestFileRouterExcludeViaWinsOverHigherVersion in router_test.go
+// asserts split-horizon at the collectRouteCandidates unit level, but
+// does not run HandleInbound and therefore cannot observe the nonce
+// commit decision. Adding the full-pipeline assertion here closes the
+// gap: a future refactor that puts TryAdd back ahead of collect, OR
+// drops the split-horizon excludeVia argument, would fail this test.
+func TestFileRouterDoesNotCommitNonceWhenSplitHorizonErasesOnlyCandidate(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	// incomingPeer is BOTH the previous hop AND the only NextHop in our
+	// routing table for DST. Split-horizon must therefore drop the only
+	// candidate and the relay path must refuse to commit the nonce.
+	incomingPeer := domain.PeerIdentity("incoming-neighbor-identity-12345")
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+
+	now := time.Now()
+	snap := routing.Snapshot{
+		TakenAt: now,
+		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
+			dstID: {
+				// Single live route, NextHop == incomingPeer. hasViableRoute
+				// (step 2) sees this as viable — it does not know about
+				// excludeVia. Only step 8's collectRouteCandidates with
+				// excludeVia==incomingPeer can erase it.
+				{
+					Identity:  dstID,
+					NextHop:   incomingPeer,
+					Hops:      1,
+					ExpiresAt: now.Add(time.Minute),
+				},
+			},
+		},
+	}
+
+	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
+	// Mark incomingPeer as reachable so a regression that lets the
+	// frame through cannot be masked by an unreachable next-hop:
+	// SessionSend would succeed and the test would observe a forwarded
+	// frame, making the regression impossible to miss.
+	reachable := map[domain.PeerIdentity]bool{incomingPeer: true}
+
+	tr := newTestFileRouter(localID, true, snap, keys, reachable)
+
+	frame := makeSignedFrame(senderID, dstID, 5, "split-horizon-payload", priv)
+	raw, _ := protocol.MarshalFileCommandFrame(frame)
+
+	// Pass incomingPeer as the previous hop so HandleInbound applies
+	// split-horizon against it.
+	tr.router.HandleInbound(json.RawMessage(raw), incomingPeer)
+
+	if got := tr.sentTo(incomingPeer); len(got) != 0 {
+		t.Fatalf("file router reflected the frame back to the previous hop; "+
+			"split-horizon must drop NextHop == incomingPeer regardless of how "+
+			"attractive the route is. sentTo(incomingPeer) returned %d frame(s)", len(got))
+	}
+	if got := len(tr.localDeliveries()); got != 0 {
+		t.Fatalf("non-local DST should not produce local delivery; got %d", got)
+	}
+	if tr.nonceCache.Has(frame.Nonce) {
+		t.Fatal("nonce was committed to the replay cache for a frame whose only " +
+			"forwarding candidate was erased by split-horizon. The relay path " +
+			"must collect candidates BEFORE TryAdd; reverting to TryAdd-first " +
+			"lets an attacker holding a route to himself evict bounded-LRU slots " +
+			"by reflecting frames onto themselves")
+	}
+}
+
 // TestFileRouterRejectsTTLInflation verifies that a frame with TTL inflated
 // above MaxTTL by a malicious relay is rejected before the router applies
 // its own decrement. Without the pre-decrement validation, TTL = MaxTTL + 1

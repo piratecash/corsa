@@ -185,6 +185,16 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			return flapState[i].PeerIdentity < flapState[j].PeerIdentity
 		})
 
+		// Cap admission counters from the same atomic snapshot. Stay
+		// at zero on tables with the cap disabled — see
+		// routing.RouteCapStats for per-field semantics.
+		capStats := map[string]uint64{
+			"accepted":               snap.CapStats.Accepted,
+			"accepted_replaced":      snap.CapStats.AcceptedReplaced,
+			"rejected_full":          snap.CapStats.RejectedFull,
+			"rejected_all_protected": snap.CapStats.RejectedAllProtected,
+		}
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -193,6 +203,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"reachable_identities": len(destinations),
 			"direct_peers":         len(directPeers),
 			"flap_state":           flapState,
+			"cap_admission":        capStats,
 		})
 	}
 }

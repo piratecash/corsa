@@ -60,6 +60,113 @@ const (
 	FlapStableWindowMultiplier = 2
 )
 
+// DefaultMaxNextHopsPerOrigin is the recommended ceiling for the
+// "K next-hops per (Identity, Origin) pair" cap that bounds local RIB
+// growth on large meshes. Without a cap the table grows O(N×M) — N
+// destinations × M next-hops that learned the route — which on a
+// 1000-node mesh produces hundreds of thousands of entries and turns
+// every full-table snapshot into a multi-megabyte deep copy.
+//
+// Four is enough to keep multipath behaviour intact (primary + 1 backup
+// + 1 spare for probing + 1 inertial slot) while bounding the per-pair
+// memory footprint at a constant. Operators can override per-deployment
+// via the WithMaxNextHopsPerOrigin Table option, or — when constructing
+// the Service from configuration — via config.Node.MaxNextHopsPerOrigin
+// (env var CORSA_MAX_NEXT_HOPS_PER_ORIGIN), which the loader threads
+// through to the Table constructor.
+//
+// IMPORTANT: this constant is a recommendation, NOT the runtime default.
+// The default for a freshly constructed Table is 0 (cap disabled) so the
+// initial release can ship the cap code in production with no behaviour
+// change; flipping the runtime default to DefaultMaxNextHopsPerOrigin is
+// a follow-up release. See the rollout strategy in
+// docs/routing-rib-compaction-and-snapshot-refactor.md §10.
+const DefaultMaxNextHopsPerOrigin = 4
+
+// RouteAdmissionDecision describes how the cap admission policy
+// resolved an incoming RouteEntry that did not match an existing
+// (Identity, Origin, NextHop) triple. It is INTERNAL to the cap
+// admission helpers (admitNewLocked, admitDirectLocked) and is NOT
+// returned from public Table APIs — callers of UpdateRoute see only
+// the coarser RouteUpdateStatus (Accepted / Unchanged / Rejected),
+// which intentionally collapses cap-induced rejections and
+// stale-SeqNo rejections into the same outward signal because both
+// share the same caller obligation ("drop and move on").
+//
+// The decision surfaces externally only via the aggregate counters
+// in RouteCapStats (published into routing.Snapshot.CapStats and
+// the cap_admission JSON object on fetchRouteSummary). Operators
+// distinguish cap pressure from stale-SeqNo churn by reading those
+// monotonic counters, not per-call diagnostics. If a future caller
+// needs per-call distinction, the decision must be plumbed out of
+// admit*Locked and onto a new public return value — not inferred
+// from RouteUpdateStatus.
+type RouteAdmissionDecision uint8
+
+const (
+	// AdmissionAccepted means the entry was inserted into a
+	// (Identity, Origin) bucket that had room — no eviction required.
+	AdmissionAccepted RouteAdmissionDecision = iota
+
+	// AdmissionAcceptedReplaced means the (Identity, Origin) bucket was
+	// at the cap and a worse existing candidate was evicted to make
+	// room. The displaced entry is dropped silently — there is no
+	// per-call "admission diagnostic" surfacing the replaced
+	// row's identity / origin / next-hop. The only externally
+	// observable signal is the monotonic counter in CapStats
+	// (`AcceptedReplaced`).
+	AdmissionAcceptedReplaced
+
+	// AdmissionRejectedFull means the (Identity, Origin) bucket was at
+	// the cap and the incoming entry was not strictly better than the
+	// worst evictable candidate. The incoming entry is dropped — caller
+	// must NOT insert it. This is the "cap eviction floor" path that
+	// keeps an authentic-but-worse next-hop from cycling out a stable
+	// best-K when the bucket is saturated with already-good routes.
+	AdmissionRejectedFull
+
+	// AdmissionRejectedAllProtected means the (Identity, Origin) bucket
+	// was at the cap and every existing entry was direct or local —
+	// none were evictable. The incoming entry is dropped because direct
+	// routes represent live sessions that the table must never displace
+	// implicitly: only the session lifecycle (RemoveDirectPeer on
+	// disconnect) may retire them.
+	//
+	// In practice this branch is rare: the bucket is keyed by
+	// (Identity, Origin), and a direct route by construction has
+	// NextHop == Identity, so a single bucket can hold at most ONE
+	// direct entry (the row that represents the live session to that
+	// specific destination peer). The local entry is the synthetic
+	// self-route, which is also at most one per bucket, and only for
+	// the local origin's own destination. So "every member is
+	// direct/local" can really only mean "K is very small (most often
+	// K=1), the single protected slot in this bucket is held by the
+	// direct/local row, and an announcement / hop_ack for a different
+	// next-hop arrived". Operators seeing a non-zero counter with
+	// K≥2 should investigate synthetic / test fixtures or a
+	// direct-restore edge case rather than fan-out sizing.
+	AdmissionRejectedAllProtected
+)
+
+// String renders the decision as a stable human-readable token suitable
+// for logs and metric labels. Values not produced by UpdateRoute return
+// "unknown(N)" so a forgotten case in a switch is visible in diagnostics
+// instead of silently collapsing into a default branch.
+func (d RouteAdmissionDecision) String() string {
+	switch d {
+	case AdmissionAccepted:
+		return "accepted"
+	case AdmissionAcceptedReplaced:
+		return "accepted_replaced"
+	case AdmissionRejectedFull:
+		return "rejected_full"
+	case AdmissionRejectedAllProtected:
+		return "rejected_all_protected"
+	default:
+		return fmt.Sprintf("unknown(%d)", d)
+	}
+}
+
 // HopsInfinity marks a route as withdrawn. Only the origin node may
 // set hops to this value on the wire; transit nodes invalidate locally
 // and stop advertising the route instead.
@@ -264,6 +371,15 @@ type Snapshot struct {
 	// FlapState contains the flap detection state captured at the same instant
 	// as the routes, avoiding inconsistency between separate reads.
 	FlapState []FlapEntry
+
+	// CapStats holds the cumulative admission-policy counters for the
+	// MaxNextHopsPerOrigin cap. Stays at the zero value on tables with
+	// the cap disabled — see RouteCapStats for the per-field semantics.
+	// Carried in Snapshot rather than fetched separately so RPC handlers
+	// observe a consistent view of "current routes vs. how many were
+	// dropped/replaced by the cap" without a second round-trip into the
+	// table.
+	CapStats RouteCapStats
 }
 
 // BestRoute returns the best (lowest hop count, highest trust) non-withdrawn
@@ -321,6 +437,52 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 		SeqNo:    e.SeqNo,
 		Extra:    e.Extra,
 	}
+}
+
+// RouteCapStats captures monotonic counters for the
+// MaxNextHopsPerOrigin admission policy. Each field counts how many
+// times UpdateRoute reached the corresponding RouteAdmissionDecision
+// since the table was constructed. The struct is value-safe to copy —
+// it is published as part of routing.Snapshot and read lock-free by
+// fetchRouteSummary.
+//
+// All fields stay at zero on a Table with the cap disabled
+// (maxNextHopsPerOrigin <= 0): the admission policy short-circuits
+// before any counter is touched. That keeps the deployment-default
+// configuration noise-free in observability dashboards.
+type RouteCapStats struct {
+	// Accepted counts entries that fit into a (Identity, Origin) bucket
+	// with room — no eviction was required.
+	Accepted uint64
+
+	// AcceptedReplaced counts entries that were admitted by displacing
+	// the worst evictable existing entry. Together with Accepted this
+	// is the total number of cap-aware admissions; an operator dividing
+	// AcceptedReplaced by (Accepted + AcceptedReplaced) gets the cap
+	// "eviction rate" that signals whether the cap value is too tight.
+	AcceptedReplaced uint64
+
+	// RejectedFull counts entries that were dropped because the bucket
+	// was at the cap and the incoming entry was not strictly better
+	// than the worst evictable candidate. A rising RejectedFull rate
+	// indicates the network is offering more next-hop alternatives than
+	// the cap admits — usually fine, but a spike alongside flap activity
+	// suggests the cap is too tight to track route churn.
+	RejectedFull uint64
+
+	// RejectedAllProtected counts entries dropped because every entry
+	// in the saturated bucket was direct or local — none could be
+	// evicted by the cap. The bucket is keyed by (Identity, Origin)
+	// and a direct route by construction has NextHop == Identity,
+	// so a single bucket holds at most one direct + one local entry
+	// — direct routes do NOT stack across buckets. A non-zero
+	// counter is therefore a sanity signal for the K=1 corner case
+	// (the single slot is held by the direct/local row and a
+	// non-direct arrival has no slot) or for synthetic / test /
+	// direct-restore edge cases, NOT a fan-out diagnostic. With
+	// K≥2 a non-zero counter usually points at fixture state, not
+	// at undersizing the cap.
+	RejectedAllProtected uint64
 }
 
 // FlapEntry describes the flap detection state for a single peer.

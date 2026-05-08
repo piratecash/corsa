@@ -54,6 +54,12 @@ func (c *testNonceCache) TryAdd(nonce string) bool {
 type testFileRouter struct {
 	router *Router
 
+	// nonceCache is exposed so tests that exercise the anti-replay
+	// commit path (e.g. the "frame dropped without committing the
+	// nonce" assertion in the wall-clock-expiry regression) can
+	// observe whether a given nonce was actually inserted.
+	nonceCache *testNonceCache
+
 	mu             sync.Mutex
 	sentFrames     map[domain.PeerIdentity][]json.RawMessage
 	deliveredLocal []protocol.FileCommandFrame
@@ -66,12 +72,14 @@ func newTestFileRouter(
 	senderPubKeys map[domain.PeerIdentity]ed25519.PublicKey,
 	reachableHops map[domain.PeerIdentity]bool,
 ) *testFileRouter {
+	nonceCache := newTestNonceCache()
 	tr := &testFileRouter{
 		sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+		nonceCache: nonceCache,
 	}
 
 	tr.router = NewRouter(RouterConfig{
-		NonceCache: newTestNonceCache(),
+		NonceCache: nonceCache,
 		LocalID:    localID,
 		IsFullNode: func() bool { return isFullNode },
 		RouteSnap:  func() routing.Snapshot { return snap },
@@ -825,6 +833,236 @@ func TestSendFileCommandRouteTableFallbackPrefersLongestConnectedEqualHop(t *tes
 	}
 	if len(tr.sentTo(relayNew)) != 0 {
 		t.Fatalf("expected relayNew not to be used after relayOld succeeded, got %d sends", len(tr.sentTo(relayNew)))
+	}
+}
+
+// TestSendFileCommandUsesFreshRouteLookupWhenSnapshotIsStale pins the
+// fix for the "route just arrived, send fails for ~500 ms" regression.
+//
+// Scenario: a route is accepted into the routing table at T=0. The
+// hot-reads refresher's dirty-flag publish has not yet republished
+// the cached snapshot, so RouteSnap still returns the empty pre-route
+// view. The user clicks "send file" at T=10 ms. isPeerReachable
+// (node-side) reads routing.Table.Lookup directly and reports the
+// destination as reachable; without the fresh oracle, SendFileCommand
+// would re-read the cached snapshot, find no candidates, and return
+// "no route to <dst>" — even though the route is in fact in the
+// table.
+//
+// The fix wires RouterConfig.RouteLookup to the same fresh
+// per-destination Lookup the reachability gate uses. This test
+// reproduces the disagreement: RouteSnap is empty, RouteLookup
+// returns the route, and SendFileCommand must succeed via the relay.
+//
+// As a control, a sibling sub-test verifies that an unwired
+// RouteLookup (RouterConfig field nil) preserves the pre-fix fallback
+// to RouteSnap — a stale snapshot then surfaces the bug exactly as
+// before. This is the failure mode any pre-fix or partially-wired
+// caller would experience and it documents why the oracle is required
+// at the wiring site.
+func TestSendFileCommandUsesFreshRouteLookupWhenSnapshotIsStale(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	relayID := domain.PeerIdentity("relay-identity-1234567890abcdef")
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+
+	now := time.Now()
+
+	// Stale snapshot — does NOT contain a route to dstID. Models the
+	// state right after the routing table accepted the route but
+	// before the hot-reads refresher republished.
+	staleSnap := routing.Snapshot{
+		TakenAt: now.Add(-300 * time.Millisecond),
+		Routes:  map[domain.PeerIdentity][]routing.RouteEntry{},
+	}
+
+	// Fresh per-destination view — contains the route as it lives in
+	// the routing.Table at the moment of the SendFileCommand call.
+	freshLookup := func(dst domain.PeerIdentity) []routing.RouteEntry {
+		if dst != dstID {
+			return nil
+		}
+		return []routing.RouteEntry{
+			{
+				Identity: dstID, Origin: dstID, NextHop: relayID,
+				Hops: 2, ExpiresAt: now.Add(time.Minute),
+				Source: routing.RouteSourceAnnouncement,
+			},
+		}
+	}
+
+	t.Run("fresh_lookup_wired_send_succeeds_via_relay", func(t *testing.T) {
+		tr := &testFileRouter{
+			sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+		}
+		tr.router = NewRouter(RouterConfig{
+			NonceCache:  newTestNonceCache(),
+			LocalID:     localID,
+			IsFullNode:  func() bool { return true },
+			RouteSnap:   func() routing.Snapshot { return staleSnap },
+			RouteLookup: freshLookup,
+			PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
+				if id != relayID {
+					return PeerRouteMeta{}, false
+				}
+				return PeerRouteMeta{
+					ConnectedAt:        now.Add(-time.Minute),
+					ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+					RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				}, true
+			},
+			IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool { return false },
+			SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+				tr.mu.Lock()
+				defer tr.mu.Unlock()
+				if dst == dstID {
+					// No direct session — force the route-table fallback
+					// path that this test is actually exercising.
+					return false
+				}
+				tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+				return true
+			},
+			LocalDeliver: func(frame protocol.FileCommandFrame) {},
+		})
+
+		err := tr.router.SendFileCommand(
+			dstID,
+			"recipient-box-key",
+			domain.FileCommandPayload{Command: domain.FileActionChunkReq},
+			priv,
+			func(_ string, payload domain.FileCommandPayload) (string, error) {
+				return string(payload.Command), nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("SendFileCommand should have succeeded via the fresh route, got %v", err)
+		}
+
+		if got := len(tr.sentTo(relayID)); got != 1 {
+			t.Fatalf("expected exactly one frame to relay via the fresh route, got %d", got)
+		}
+	})
+
+	t.Run("fresh_lookup_unset_falls_back_to_stale_snapshot_and_fails", func(t *testing.T) {
+		// Control: leaving RouteLookup nil restores the pre-fix path.
+		// SendFileCommand reads the empty cached snapshot, finds no
+		// candidates, and returns "no route to <dst>". This is the
+		// exact regression the fix closes; pinning it here documents
+		// why every Router caller must wire RouteLookup.
+		tr := &testFileRouter{
+			sentFrames: make(map[domain.PeerIdentity][]json.RawMessage),
+		}
+		tr.router = NewRouter(RouterConfig{
+			NonceCache: newTestNonceCache(),
+			LocalID:    localID,
+			IsFullNode: func() bool { return true },
+			RouteSnap:  func() routing.Snapshot { return staleSnap },
+			// RouteLookup intentionally nil.
+			PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
+				return PeerRouteMeta{
+					ConnectedAt:        now.Add(-time.Minute),
+					ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+					RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				}, true
+			},
+			IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool { return false },
+			SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
+				tr.mu.Lock()
+				defer tr.mu.Unlock()
+				if dst == dstID {
+					return false
+				}
+				tr.sentFrames[dst] = append(tr.sentFrames[dst], json.RawMessage(data))
+				return true
+			},
+			LocalDeliver: func(frame protocol.FileCommandFrame) {},
+		})
+
+		err := tr.router.SendFileCommand(
+			dstID,
+			"recipient-box-key",
+			domain.FileCommandPayload{Command: domain.FileActionChunkReq},
+			priv,
+			func(_ string, payload domain.FileCommandPayload) (string, error) {
+				return string(payload.Command), nil
+			},
+		)
+		if err == nil {
+			t.Fatalf("expected SendFileCommand to fail with stale snapshot and no fresh oracle")
+		}
+
+		if got := len(tr.sentTo(relayID)); got != 0 {
+			t.Fatalf("relay should not have received a frame when the cached snapshot is empty and no fresh oracle is wired, got %d", got)
+		}
+	})
+}
+
+// TestRouterExplainRouteUsesFreshRouteLookup pins that the diagnostic
+// surface mirrors what SendFileCommand would actually do — both must
+// read the same fresh per-destination oracle, otherwise an operator
+// staring at ExplainRoute output would see a route the live send
+// cannot use (or vice versa) during the cached snapshot's republish
+// window. ExplainRoute is the "why did SendFileCommand pick this
+// next-hop" tool, so the moment they read different sources, the tool
+// stops being useful.
+func TestRouterExplainRouteUsesFreshRouteLookup(t *testing.T) {
+	t.Parallel()
+
+	localID := domain.PeerIdentity("sender-node-identity-1234567890")
+	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	relayID := domain.PeerIdentity("relay-identity-1234567890abcdef")
+
+	now := time.Now()
+	staleSnap := routing.Snapshot{
+		TakenAt: now.Add(-300 * time.Millisecond),
+		Routes:  map[domain.PeerIdentity][]routing.RouteEntry{},
+	}
+
+	router := NewRouter(RouterConfig{
+		NonceCache: newTestNonceCache(),
+		LocalID:    localID,
+		IsFullNode: func() bool { return true },
+		RouteSnap:  func() routing.Snapshot { return staleSnap },
+		RouteLookup: func(dst domain.PeerIdentity) []routing.RouteEntry {
+			if dst != dstID {
+				return nil
+			}
+			return []routing.RouteEntry{
+				{
+					Identity: dstID, Origin: dstID, NextHop: relayID,
+					Hops: 2, ExpiresAt: now.Add(time.Minute),
+					Source: routing.RouteSourceAnnouncement,
+				},
+			}
+		},
+		PeerRouteMeta: func(id domain.PeerIdentity) (PeerRouteMeta, bool) {
+			if id != relayID {
+				return PeerRouteMeta{}, false
+			}
+			return PeerRouteMeta{
+				ConnectedAt:        now.Add(-time.Minute),
+				ProtocolVersion:    domain.ProtocolVersion(testFixturePeerProtocolVersion),
+				RawProtocolVersion: domain.ProtocolVersion(testFixturePeerProtocolVersion),
+			}, true
+		},
+		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool { return false },
+		SessionSend:                  func(dst domain.PeerIdentity, data []byte) bool { return false },
+		LocalDeliver:                 func(frame protocol.FileCommandFrame) {},
+	})
+
+	plan := router.ExplainRoute(dstID)
+	// peerRouteMeta(dstID) returns ok=false, so no synthetic direct
+	// candidate is prepended; the plan should consist solely of the
+	// relay candidate the fresh oracle reports.
+	if len(plan) != 1 {
+		t.Fatalf("expected ExplainRoute to surface the fresh route as the only plan entry, got %d entries: %#v", len(plan), plan)
+	}
+	if plan[0].NextHop != relayID {
+		t.Fatalf("expected ExplainRoute to point at relay %q, got %q", relayID, plan[0].NextHop)
 	}
 }
 

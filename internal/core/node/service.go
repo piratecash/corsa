@@ -348,6 +348,16 @@ type Service struct {
 	// decoupling.  Rebuilt by hotReadsRefreshLoop on its own ticker; see
 	// cm_slots_snapshot.go.
 	cmSlotsSnap cmSlotsSnapPtr
+	// routingSnap caches routing.Table.Snapshot() so fetchRouteTable /
+	// fetchRouteSummary / fetchRouteLookup, the file router's RouteSnap
+	// callback and the desktop reachability path do not perform a deep
+	// copy of the full routing table on every call.  At ~9000 entries
+	// today and a projected 10⁵-10⁶ at 1000 nodes, the per-call deep
+	// copy under routing.Table.t.mu.RLock blocks every routing writer
+	// (announce loop, TickTTL, hop_ack confirmation) for the duration
+	// of the copy. Rebuilt by hotReadsRefreshLoop on the same ticker
+	// shape as the four snapshots above; see routing_snapshot.go.
+	routingSnap routingSnapPtr
 
 	// File transfer subsystem (Iteration 21).
 	//
@@ -1211,8 +1221,16 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	})
 
 	// Initialize distance-vector routing table (Phase 1.2).
+	//
+	// MaxNextHopsPerOrigin pulls the configured cap (Stage B). The
+	// runtime default is 0 (cap disabled) so existing deployments
+	// observe pre-cap behaviour exactly until the operator opts in via
+	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN. See
+	// docs/routing-rib-compaction-and-snapshot-refactor.md §10 for the
+	// rollout shape.
 	svc.routingTable = routing.NewTable(
 		routing.WithLocalOrigin(routing.PeerIdentity(id.Address)),
+		routing.WithMaxNextHopsPerOrigin(cfg.MaxNextHopsPerOrigin),
 	)
 	svc.router = NewTableRouter(svc, svc.routingTable)
 	svc.announceLoop = routing.NewAnnounceLoop(
