@@ -5,6 +5,8 @@ DIST_DIR ?= dist
 GOCACHE ?= $(CURDIR)/.gocache
 GOMODCACHE ?= $(CURDIR)/.gomodcache
 GOFLAGS ?= -trimpath
+GO_LDFLAGS ?= -s -w
+GO_WINDOWS_GUI_LDFLAGS ?= $(GO_LDFLAGS) -H windowsgui
 GO ?= go
 
 .PHONY: build-dirs
@@ -66,35 +68,35 @@ enforce-netcore-boundary:
 
 .PHONY: build-node-macos-arm64
 build-node-macos-arm64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -o $(DIST_DIR)/corsa-node-darwin-arm64 ./cmd/corsa-node
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-node-darwin-arm64 ./cmd/corsa-node
 
 .PHONY: build-node-macos-amd64
 build-node-macos-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-node-darwin-amd64 ./cmd/corsa-node
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-node-darwin-amd64 ./cmd/corsa-node
 
 .PHONY: build-node-linux-amd64
 build-node-linux-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-node-linux-amd64 ./cmd/corsa-node
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-node-linux-amd64 ./cmd/corsa-node
 
 .PHONY: build-node-windows-amd64
 build-node-windows-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-node-windows-amd64.exe ./cmd/corsa-node
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-node-windows-amd64.exe ./cmd/corsa-node
 
 .PHONY: build-desktop-macos-arm64
 build-desktop-macos-arm64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -o $(DIST_DIR)/corsa-desktop-darwin-arm64 ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-darwin-arm64 ./cmd/corsa-desktop
 
 .PHONY: build-desktop-macos-amd64
 build-desktop-macos-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-desktop-darwin-amd64 ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-darwin-amd64 ./cmd/corsa-desktop
 
 .PHONY: build-desktop-linux-amd64
 build-desktop-linux-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-desktop-linux-amd64 ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-linux-amd64 ./cmd/corsa-desktop
 
 .PHONY: build-desktop-windows-amd64
 build-desktop-windows-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -ldflags="-H windowsgui" -o $(DIST_DIR)/corsa-desktop-windows-amd64.exe ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -ldflags="$(GO_WINDOWS_GUI_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-windows-amd64.exe ./cmd/corsa-desktop
 
 .PHONY: build-node-all
 build-node-all: build-node-macos-arm64 build-node-macos-amd64 build-node-linux-amd64 build-node-windows-amd64
@@ -104,19 +106,19 @@ build-desktop-all: build-desktop-macos-arm64 build-desktop-macos-amd64 build-des
 
 .PHONY: build-cli-macos-arm64
 build-cli-macos-arm64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -o $(DIST_DIR)/corsa-cli-darwin-arm64 ./cmd/corsa-cli
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-cli-darwin-arm64 ./cmd/corsa-cli
 
 .PHONY: build-cli-macos-amd64
 build-cli-macos-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-cli-darwin-amd64 ./cmd/corsa-cli
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-cli-darwin-amd64 ./cmd/corsa-cli
 
 .PHONY: build-cli-linux-amd64
 build-cli-linux-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-cli-linux-amd64 ./cmd/corsa-cli
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-cli-linux-amd64 ./cmd/corsa-cli
 
 .PHONY: build-cli-windows-amd64
 build-cli-windows-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST_DIR)/corsa-cli-windows-amd64.exe ./cmd/corsa-cli
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-cli-windows-amd64.exe ./cmd/corsa-cli
 
 .PHONY: build-cli-all
 build-cli-all: build-cli-macos-arm64 build-cli-macos-amd64 build-cli-linux-amd64 build-cli-windows-amd64
