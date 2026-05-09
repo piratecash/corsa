@@ -360,18 +360,17 @@ func TestFetchRouteSummary(t *testing.T) {
 }
 
 // TestFetchRouteSummary_OverloadEngagedCyclesSurfaced pins the
-// operator-visible contract for the Phase 0 overload-gate counter
-// (cluster-mesh-architecture-plan.md round 15.1 P3 fix, refined to
-// strict semantic in round 15.4). The fetchRouteSummary response
+// operator-visible contract for the overload-gate counter (strict
+// "actually shed work" semantic). The fetchRouteSummary response
 // MUST include an `overload` JSON object with `engaged_cycles` set
 // to the cumulative number of cycles where at least one delta-due
 // peer was skipped specifically because of overload — i.e. cycles
 // where the gate actually shed CPU. Cycles where the gate engaged
 // but every peer was forced-due (no delta to suppress) do NOT count.
-// The earlier round 15 left
-// the contract on `AnnounceLoop.OverloadCycleCount()` only —
-// in-process accessor with no operator surface — and a regression
-// in routing_commands.go that drops the field from the JSON response
+// Without this contract surfaced through RPC, the counter would only
+// be observable via the in-process `AnnounceLoop.OverloadCycleCount()`
+// accessor — no operator surface — and a regression in
+// routing_commands.go that drops the field from the JSON response
 // would have gone unnoticed by tests. This test pins the contract by
 // configuring a deliberately non-zero value on the mock and
 // asserting the JSON path is non-zero with the exact value plumbed

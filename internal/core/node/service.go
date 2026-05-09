@@ -1237,9 +1237,9 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	)
 	svc.router = NewTableRouter(svc, svc.routingTable)
 
-	// Phase 0 cluster-mesh-architecture-plan.md: configurable announce
-	// interval and overload-mode gate. Both default to the existing
-	// pre-Phase-0 behaviour when their config knobs are zero.
+	// Configurable announce interval and overload-mode gate. Both
+	// default to the existing pre-Phase-0 behaviour when their config
+	// knobs are zero.
 	//
 	// AnnounceInterval lets densely-connected receivers cut delta-cycle
 	// CPU by raising the period (e.g. 60s) at the cost of

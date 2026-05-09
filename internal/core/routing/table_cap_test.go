@@ -1138,12 +1138,18 @@ func TestRIBCap_RemoveDirectPeer_ExposesBackupsFromK(t *testing.T) {
 // TestRIBCap_AnnounceWireSchemaUnchanged_ContentReflectsBestK pins the
 // part of the wire contract the cap actually preserves: the wire
 // SCHEMA is unchanged — `BuildAnnounceSnapshot` still produces exactly
-// one `AnnounceEntry` per `(Identity, Origin)` pair regardless of K,
-// and the surviving entry's (Identity, Origin) agrees between capped
-// and cap-disabled tables. The wire CONTENT (Hops/Extra of the
+// one `AnnounceEntry` per Identity regardless of K (post-hot-fix
+// stage-4 aggregation collapses multiple Origin lineages to one winner
+// per destination), and the surviving entry's Identity agrees between
+// capped and cap-disabled tables. The wire CONTENT (Hops/Extra of the
 // surviving entry) reflects whatever the cap's best-K rows happen to
 // be — see TestRIBCap_AnnounceContentDiffersWhenCapDropsLowerHopsWireWinner
 // for the case where the two projections actually disagree on Hops.
+//
+// This test uses a single Origin per Identity so the post-hot-fix
+// per-Identity aggregation is observationally identical to the
+// pre-hot-fix per-(Identity, Origin) aggregation — both produce 1
+// entry. The pin still holds.
 //
 // This test uses a homogeneous announcement bucket — every entry shares
 // the same Source (RouteSourceAnnouncement), so cap-rank and wire-rank
@@ -1187,20 +1193,24 @@ func TestRIBCap_AnnounceWireSchemaUnchanged_ContentReflectsBestK(t *testing.T) {
 	}
 
 	// Run the production wire-aggregation pass. After BuildAnnounceSnapshot
-	// both projections must collapse to exactly one entry per (Identity,
-	// Origin) — that is the wire schema invariant the cap preserves.
+	// both projections must collapse to exactly one live winner entry per
+	// Identity (per-Identity Stage 4 aggregation hot-fix) — no own-origin
+	// tombstones in this scenario because all entries are live announcements.
+	// That single live winner is the wire schema invariant the cap preserves.
 	withCapWire := BuildAnnounceSnapshot(withCap)
 	withoutCapWire := BuildAnnounceSnapshot(withoutCap)
 	if got := len(withCapWire.Entries); got != 1 {
-		t.Fatalf("cap=2 wire-aggregated snapshot should have 1 entry per (Identity, Origin), got %d: %+v",
+		t.Fatalf("cap=2 wire-aggregated snapshot should have 1 live winner entry per Identity, got %d: %+v",
 			got, withCapWire.Entries)
 	}
 	if got := len(withoutCapWire.Entries); got != 1 {
-		t.Fatalf("cap=0 wire-aggregated snapshot should have 1 entry per (Identity, Origin), got %d: %+v",
+		t.Fatalf("cap=0 wire-aggregated snapshot should have 1 live winner entry per Identity, got %d: %+v",
 			got, withoutCapWire.Entries)
 	}
 	// The (Identity, Origin) of the surviving entry agrees — wire
-	// schema invariant.
+	// schema invariant. Single-Origin scenario, so per-Identity Stage 4
+	// aggregation reduces to per-(Identity, Origin) collapse — same
+	// observable result as pre-hot-fix.
 	if withCapWire.Entries[0].Identity != withoutCapWire.Entries[0].Identity ||
 		withCapWire.Entries[0].Origin != withoutCapWire.Entries[0].Origin {
 		t.Fatalf("cap-vs-uncapped wire projection diverges on (Identity, Origin): cap=%+v, uncapped=%+v",

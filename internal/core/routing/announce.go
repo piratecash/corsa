@@ -658,11 +658,10 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 		a.lastDeltaCycleAt = now
 	}
 
-	// Phase 0 cluster-mesh-architecture-plan.md: backlog/CPU
-	// backpressure. When the gate is engaged, delta sends for peers
-	// that don't owe a forced full sync this cycle are skipped — the
-	// node still emits forced-full-sync to peers whose deadline has
-	// elapsed, preserving the TTL/2 freshness invariant.
+	// Backlog/CPU backpressure. When the gate is engaged, delta sends
+	// for peers that don't owe a forced full sync this cycle are
+	// skipped — the node still emits forced-full-sync to peers whose
+	// deadline has elapsed, preserving the TTL/2 freshness invariant.
 	//
 	// overloadCycles counter: incremented post-wg only when at least
 	// one peer was actually skipped due to overload during this

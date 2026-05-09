@@ -436,11 +436,10 @@ func TestAnnounceLoop_OverloadGate_DisengagedAllowsDeltas(t *testing.T) {
 	}
 }
 
-// TestAnnounceLoop_TickInterval_DividesBothCadences pins the P1+P2
-// fix from cluster-mesh-architecture-plan.md round 15.1: the
-// announce-loop ticker must divide BOTH the per-input forced-full
-// cap AND the operator-configured AnnounceInterval cleanly. Two
-// invariants:
+// TestAnnounceLoop_TickInterval_DividesBothCadences pins the
+// gcd-based tick-interval invariant: the announce-loop ticker must
+// divide BOTH the per-input forced-full cap AND the operator-configured
+// AnnounceInterval cleanly. Two invariants:
 //
 //  1. `cap % tick == 0` — forced-full deadlines land exactly on a
 //     tick. Without this, with cap=60s and tick=45s the deadline at
@@ -542,10 +541,9 @@ func TestAnnounceLoop_TickInterval_DividesBothCadences(t *testing.T) {
 }
 
 // TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap pins
-// the P2 fix from cluster-mesh-architecture-plan.md round 15.6:
-// the rate-limit window for forced-full retry attempts must be
-// clamped to forcedFullSyncInterval so it cannot stretch the
-// effective forced-full cadence beyond what
+// the rate-limit clamp invariant: the rate-limit window for
+// forced-full retry attempts must be clamped to forcedFullSyncInterval
+// so it cannot stretch the effective forced-full cadence beyond what
 // EffectiveForcedFullSyncInterval projects.
 //
 // Without the clamp, an operator setting AnnounceInterval=10s gets
@@ -639,9 +637,8 @@ func TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap(t *testing.T) {
 }
 
 // TestAnnounceLoop_TickInterval_BusyLoopGuard pins the floor
-// behaviour for non-second-aligned inputs from
-// cluster-mesh-architecture-plan.md round 15.2 (P2). Without the
-// 1-second floor on production cadences (≥1s), a misuse like
+// behaviour for non-second-aligned inputs. Without the 1-second
+// floor on production cadences (≥1s), a misuse like
 // `WithAnnounceInterval(59*time.Second + 1*time.Nanosecond)` would
 // produce gcd=1ns and turn `time.NewTicker` into a busy loop.
 //
@@ -744,8 +741,8 @@ func TestAnnounceLoop_TickInterval_BusyLoopGuard(t *testing.T) {
 }
 
 // TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline pins the
-// P1 fix from cluster-mesh-architecture-plan.md round 15.9: the
-// triggerCh handler MUST NOT call ticker.Reset(tickInterval). An
+// invariant that the triggerCh handler MUST NOT call
+// ticker.Reset(tickInterval). An
 // earlier version did so to coalesce "trigger then immediate
 // periodic tick" pairs, but with triggers arriving slightly faster
 // than the tick the Reset pushed the next natural tick forward on
