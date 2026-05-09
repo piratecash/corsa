@@ -513,6 +513,29 @@ type RouteCapStats struct {
 	RejectedAllProtected uint64
 }
 
+// OverloadStats captures cumulative counters for the announce-loop
+// overload gate. EngagedCycles counts cycles where the gate
+// ACTUALLY shed work — at least one peer was skipped specifically
+// because of overload (a delta-due peer suppressed by the gate).
+// Cycles where the gate engaged but every peer was forced-due
+// (initial sync, periodic forced-full deadline) do NOT count, nor
+// do forced-only wakes where no delta cycle was due to begin with.
+// The counter is therefore a strict "gate actually saved CPU"
+// signal, not a proxy for "host briefly reported overloaded". Zero
+// when the gate is not wired or has never shed work. Surfaced by
+// fetchRouteSummary under the "overload" JSON object so operators
+// can see whether backpressure is firing in production.
+//
+// Wire-safe value type — copy-by-value, no internal pointers, no
+// mutex. Each numeric is monotonically non-decreasing.
+type OverloadStats struct {
+	// EngagedCycles is the cumulative number of cycles where the
+	// OverloadGate actually shed work (at least one delta-due peer
+	// was suppressed). Reset to zero on process restart (the
+	// underlying counter is in-memory atomic).
+	EngagedCycles uint64
+}
+
 // FlapEntry describes the flap detection state for a single peer.
 // Exported for RPC observability — callers should treat this as read-only.
 type FlapEntry struct {

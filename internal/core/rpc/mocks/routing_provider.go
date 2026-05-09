@@ -37,6 +37,50 @@ func (_m *MockRoutingProvider) EXPECT() *MockRoutingProvider_Expecter {
 	return &MockRoutingProvider_Expecter{mock: &_m.Mock}
 }
 
+// OverloadStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) OverloadStats() routing.OverloadStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for OverloadStats")
+	}
+
+	var r0 routing.OverloadStats
+	if returnFunc, ok := ret.Get(0).(func() routing.OverloadStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(routing.OverloadStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_OverloadStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OverloadStats'
+type MockRoutingProvider_OverloadStats_Call struct {
+	*mock.Call
+}
+
+// OverloadStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) OverloadStats() *MockRoutingProvider_OverloadStats_Call {
+	return &MockRoutingProvider_OverloadStats_Call{Call: _e.mock.On("OverloadStats")}
+}
+
+func (_c *MockRoutingProvider_OverloadStats_Call) Run(run func()) *MockRoutingProvider_OverloadStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_OverloadStats_Call) Return(overloadStats routing.OverloadStats) *MockRoutingProvider_OverloadStats_Call {
+	_c.Call.Return(overloadStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_OverloadStats_Call) RunAndReturn(run func() routing.OverloadStats) *MockRoutingProvider_OverloadStats_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // PeerTransport provides a mock function for the type MockRoutingProvider
 func (_mock *MockRoutingProvider) PeerTransport(peerIdentity domain.PeerIdentity) (domain.PeerAddress, domain.NetGroup) {
 	ret := _mock.Called(peerIdentity)

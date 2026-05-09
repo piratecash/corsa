@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -388,6 +389,68 @@ func TestMaxNextHopsPerOriginRolloutDefaults(t *testing.T) {
 			got := maxNextHopsPerOriginFromEnv()
 			if got != tc.want {
 				t.Fatalf("maxNextHopsPerOriginFromEnv() = %d, want %d (raw=%q)", got, tc.want, tc.raw)
+			}
+		})
+	}
+}
+
+// TestAnnounceIntervalFromEnv covers the env-loader contract for the
+// Phase 0 density-aware tuning knob: empty/invalid/non-positive values
+// fall back to zero (which the Service init translates into "use the
+// routing-package default"), valid positive integers pass through as
+// seconds. The forced-full-sync cap (DefaultTTL/2) is enforced inside
+// the AnnounceLoop, NOT here — this loader is just text→duration.
+func TestAnnounceIntervalFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"unset_returns_zero_for_package_default", "", 0},
+		{"explicit_30_seconds_passes_through", "30", 30 * time.Second},
+		{"dense_mesh_60_seconds_passes_through", "60", 60 * time.Second},
+		{"explicit_zero_treated_as_unset", "0", 0},
+		{"negative_falls_back_to_zero", "-30", 0},
+		{"unparsable_falls_back_to_zero", "abc", 0},
+		{"whitespace_only_treated_as_unset", "   ", 0},
+		{"large_value_passes_through", "300", 300 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CORSA_ANNOUNCE_INTERVAL_SECONDS", tc.raw)
+			got := announceIntervalFromEnv()
+			if got != tc.want {
+				t.Fatalf("announceIntervalFromEnv() = %v, want %v (raw=%q)", got, tc.want, tc.raw)
+			}
+		})
+	}
+}
+
+// TestOverloadGoroutineThresholdFromEnv covers the env-loader contract
+// for the Phase 0 overload-mode trip point: empty/invalid/non-positive
+// values fall back to zero (which the Service init translates into
+// "disable the gate"); valid positive integers pass through. There is
+// no domain default — operators must set the value deliberately.
+func TestOverloadGoroutineThresholdFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"unset_disables_gate", "", 0},
+		{"explicit_zero_disables_gate", "0", 0},
+		{"explicit_negative_disables_gate", "-1000", 0},
+		{"unparsable_disables_gate", "abc", 0},
+		{"whitespace_only_disables_gate", "   ", 0},
+		{"hub_node_threshold_5000", "5000", 5000},
+		{"high_threshold_passes_through", "20000", 20000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CORSA_OVERLOAD_GOROUTINE_THRESHOLD", tc.raw)
+			got := overloadGoroutineThresholdFromEnv()
+			if got != tc.want {
+				t.Fatalf("overloadGoroutineThresholdFromEnv() = %d, want %d (raw=%q)", got, tc.want, tc.raw)
 			}
 		})
 	}

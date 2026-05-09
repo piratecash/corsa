@@ -32,6 +32,10 @@ func newMockRoutingProvider(
 	t.Helper()
 	m := rpcmocks.NewMockRoutingProvider(t)
 	m.On("RoutingSnapshot").Return(snapshot).Maybe()
+	// Phase 0 overload-gate counters surface through fetchRouteSummary.
+	// Default to a zero stats struct in handler tests; specific tests
+	// asserting overload reporting can override with their own mock setup.
+	m.On("OverloadStats").Return(routing.OverloadStats{}).Maybe()
 
 	if peerTransports != nil {
 		m.EXPECT().PeerTransport(mock.Anything).RunAndReturn(
@@ -352,6 +356,80 @@ func TestFetchRouteSummary(t *testing.T) {
 	}
 	if inHD, _ := flapEntry["in_hold_down"].(bool); !inHD {
 		t.Error("expected in_hold_down=true")
+	}
+}
+
+// TestFetchRouteSummary_OverloadEngagedCyclesSurfaced pins the
+// operator-visible contract for the Phase 0 overload-gate counter
+// (cluster-mesh-architecture-plan.md round 15.1 P3 fix, refined to
+// strict semantic in round 15.4). The fetchRouteSummary response
+// MUST include an `overload` JSON object with `engaged_cycles` set
+// to the cumulative number of cycles where at least one delta-due
+// peer was skipped specifically because of overload — i.e. cycles
+// where the gate actually shed CPU. Cycles where the gate engaged
+// but every peer was forced-due (no delta to suppress) do NOT count.
+// The earlier round 15 left
+// the contract on `AnnounceLoop.OverloadCycleCount()` only —
+// in-process accessor with no operator surface — and a regression
+// in routing_commands.go that drops the field from the JSON response
+// would have gone unnoticed by tests. This test pins the contract by
+// configuring a deliberately non-zero value on the mock and
+// asserting the JSON path is non-zero with the exact value plumbed
+// through.
+func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
+	now := time.Now()
+	const expectedEngagedCycles uint64 = 7
+
+	// Build a mock that returns a non-zero OverloadStats. The
+	// helper newMockRoutingProvider defaults to zero via .Maybe(),
+	// which would mask a regression where the handler dropped the
+	// field. Construct the mock directly here so the .On("OverloadStats")
+	// expectation is mandatory and asserts both invocation and
+	// the value flow through to the JSON response.
+	provider := rpcmocks.NewMockRoutingProvider(t)
+	provider.On("RoutingSnapshot").Return(routing.Snapshot{
+		TakenAt:       now,
+		Routes:        map[routing.PeerIdentity][]routing.RouteEntry{},
+		TotalEntries:  0,
+		ActiveEntries: 0,
+	}).Once()
+	provider.On("OverloadStats").Return(routing.OverloadStats{
+		EngagedCycles: expectedEngagedCycles,
+	}).Once()
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	overloadRaw, ok := result["overload"]
+	if !ok {
+		t.Fatalf("response missing 'overload' object: %v", result)
+	}
+	overload, ok := overloadRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("'overload' is not a JSON object: %T", overloadRaw)
+	}
+
+	engagedRaw, ok := overload["engaged_cycles"]
+	if !ok {
+		t.Fatalf("'overload.engaged_cycles' missing: %v", overload)
+	}
+	engaged, ok := engagedRaw.(float64) // JSON numbers decode as float64
+	if !ok {
+		t.Fatalf("'overload.engaged_cycles' is not a number: %T", engagedRaw)
+	}
+	if uint64(engaged) != expectedEngagedCycles {
+		t.Fatalf("expected overload.engaged_cycles=%d, got %v",
+			expectedEngagedCycles, engaged)
 	}
 }
 

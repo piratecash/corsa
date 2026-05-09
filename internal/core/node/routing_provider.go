@@ -120,3 +120,19 @@ func (s *Service) reachableIDsFrame() protocol.Frame {
 		Identities: ids,
 	}
 }
+
+// OverloadStats returns the cumulative engagement counters for the
+// announce-loop overload gate (Phase 0 cluster-mesh-architecture-plan.md).
+// Surfaced via fetchRouteSummary so operators can see whether
+// backpressure is firing in production. Lock-free: the underlying
+// counter is in-memory atomic on AnnounceLoop.
+//
+// Implements rpc.RoutingProvider.
+func (s *Service) OverloadStats() routing.OverloadStats {
+	if s.announceLoop == nil {
+		return routing.OverloadStats{}
+	}
+	return routing.OverloadStats{
+		EngagedCycles: s.announceLoop.OverloadCycleCount(),
+	}
+}

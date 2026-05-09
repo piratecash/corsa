@@ -125,6 +125,14 @@ type RoutingProvider interface {
 	// for a directly connected peer identified by its Ed25519 fingerprint.
 	// Returns zero values if the peer is not currently connected.
 	PeerTransport(peerIdentity domain.PeerIdentity) (address domain.PeerAddress, network domain.NetGroup)
+
+	// OverloadStats returns the cumulative engagement counters for the
+	// announce-loop overload gate (Phase 0). Returned struct is
+	// value-safe; caller may pass it through JSON without further
+	// copies. When the gate is not wired or has never engaged, all
+	// fields stay at zero. See docs/routing.md "Operator tuning"
+	// section for the contract.
+	OverloadStats() routing.OverloadStats
 }
 
 // ConnectionDiagnosticProvider exposes ConnectionManager and PeerProvider

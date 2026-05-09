@@ -195,6 +195,15 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"rejected_all_protected": snap.CapStats.RejectedAllProtected,
 		}
 
+		// Phase 0 overload-gate counters. Stay at zero when the gate
+		// is not wired (CORSA_OVERLOAD_GOROUTINE_THRESHOLD unset) or
+		// has never engaged. See routing.OverloadStats and
+		// docs/routing.md "Operator tuning" section.
+		overload := rp.OverloadStats()
+		overloadStats := map[string]uint64{
+			"engaged_cycles": overload.EngagedCycles,
+		}
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -204,6 +213,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"direct_peers":         len(directPeers),
 			"flap_state":           flapState,
 			"cap_admission":        capStats,
+			"overload":             overloadStats,
 		})
 	}
 }

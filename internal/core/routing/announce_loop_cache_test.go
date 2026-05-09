@@ -62,8 +62,35 @@ func newControllableMockPeerSender(t *testing.T) (*routingmocks.MockPeerSender, 
 }
 
 func TestAnnounceLoop_NoopSuppression(t *testing.T) {
-	// After the first full sync, subsequent cycles with no table changes
-	// should not produce any sends.
+	// Validates that an unchanged-snapshot delta cycle produces no
+	// wire send (no-op suppression), independent of the periodic
+	// forced-full-sync cadence which is allowed to fire on its own
+	// schedule for freshness.
+	//
+	// Design note: this test deliberately uses a LONG AnnounceInterval
+	// (10s) so the periodic forced-full deadline (forcedCap=20s)
+	// cannot fire during the test budget — the test then exercises
+	// the no-op suppression path explicitly via `TriggerUpdate()`.
+	// An older version of this test ran with AnnounceInterval=50ms
+	// and waited 250ms expecting "exactly 1 send", which silently
+	// depended on the pre-Phase-0 fixed 30s rate-limit window
+	// blocking subsequent forced syncs. After round 15.6 clamped
+	// the rate-limit window to forcedCap (=100ms at 50ms interval),
+	// forced full syncs legitimately fire several times in 250ms,
+	// breaking the "exactly 1 send" assertion. The new shape is
+	// trigger-based and clock-independent: forced-full firing on
+	// schedule is a CORRECT behaviour the test must not penalise.
+	//
+	// Counter assertion (round 15.9): the wire-call count alone is
+	// NOT enough — a regression that took follow-up triggers down
+	// the !isDeltaCycle early-return path (e.g. by removing the
+	// triggerCh handler's `lastDeltaCycleAt = time.Time{}` reset)
+	// would also leave the wire count at 1 and silently pass.
+	// `NoopSuppressedTotal()` advances ONLY when the per-peer
+	// goroutine reached `ComputeDelta` and the result was empty, so
+	// asserting it advanced ≥3 after three follow-up triggers
+	// pins that the suppression actually came from the no-op
+	// branch and not from any other early-return.
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 	sender, rec := newControllableMockPeerSender(t)
 
@@ -77,8 +104,12 @@ func TestAnnounceLoop_NoopSuppression(t *testing.T) {
 		}
 	}
 
+	// AnnounceInterval=10s → forcedCap=20s; periodic forced-full
+	// deadline never fires during the ≤500ms test budget. Initial
+	// sync is forced via TriggerUpdate to avoid waiting 10s for
+	// the first natural tick.
 	loop := routing.NewAnnounceLoop(table, sender, peers,
-		routing.WithAnnounceInterval(50*time.Millisecond))
+		routing.WithAnnounceInterval(10*time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -87,16 +118,67 @@ func TestAnnounceLoop_NoopSuppression(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for several periodic cycles.
-	time.Sleep(250 * time.Millisecond)
+	// Step 1 — force the initial sync via TriggerUpdate. The trigger
+	// path runs announceToAllPeers synchronously inside Run's select;
+	// the peer has no baseline (LastSentSnapshot=nil) so needsFull
+	// fires forced full sync. Wait for it to be recorded.
+	loop.TriggerUpdate()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for rec.callCount() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if rec.callCount() != 1 {
+		t.Fatalf("expected 1 send after initial trigger, got %d", rec.callCount())
+	}
+
+	// Snapshot baseline before follow-up triggers. The forced-full
+	// initial sync above does NOT reach ComputeDelta (it goes through
+	// sendFullAnnounce / needsFull branch), so the no-op counter
+	// must still be zero at this point. Still, capture as a baseline
+	// rather than asserting ==0 — the contract under test is that
+	// the counter ADVANCES across the follow-ups, not its precise
+	// pre-state.
+	noopBefore := loop.NoopSuppressedTotal()
+
+	// Step 2 — the table is unchanged from the initial-sync snapshot.
+	// Each subsequent TriggerUpdate must run a delta cycle that
+	// computes an empty delta and suppresses the wire send (no-op
+	// path, `announce_skipped_noop` + `noopSuppressedTotal`).
+	const followups = 3
+	for i := 0; i < followups; i++ {
+		loop.TriggerUpdate()
+		// Wait for the trigger to be consumed and the per-peer
+		// goroutine to land at the no-op branch. Polling the counter
+		// removes the tight coupling to a fixed sleep that broke
+		// historically when the loop hot-path got slower.
+		gateDeadline := time.Now().Add(200 * time.Millisecond)
+		expected := noopBefore + uint64(i+1)
+		for loop.NoopSuppressedTotal() < expected && time.Now().Before(gateDeadline) {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
 	cancel()
 	<-done
 
-	// First cycle should send (full sync). Subsequent cycles should be
-	// no-ops because the table hasn't changed. Expect exactly 1 send.
-	calls := rec.getCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 send (initial full sync only), got %d", len(calls))
+	// Total send count must still be 1: only the initial sync went
+	// out; the three follow-up triggers all hit the no-op
+	// suppression branch because the snapshot was unchanged.
+	if got := rec.callCount(); got != 1 {
+		t.Fatalf("expected 1 send (initial only); follow-up triggers on unchanged snapshot must be suppressed by no-op path; got %d", got)
+	}
+
+	// Counter must have advanced at least once per follow-up
+	// trigger. Strict equality is avoided because a stray cycle
+	// (extremely unlikely at AnnounceInterval=10s during a sub-
+	// second test, but possible under very heavy CI load) would
+	// flake the test without indicating a real regression. The
+	// minimum bound (advanced ≥ followups) is what pins the
+	// invariant: each follow-up trigger reached ComputeDelta and
+	// produced an empty delta.
+	if got := loop.NoopSuppressedTotal() - noopBefore; got < uint64(followups) {
+		t.Fatalf("expected NoopSuppressedTotal to advance >= %d after %d follow-up triggers (proves delta path was reached, not an early-return); got delta=%d",
+			followups, followups, got)
 	}
 }
 

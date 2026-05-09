@@ -271,6 +271,7 @@ type Service struct {
 	inboundByIP               map[string]int                            // IP → active inbound connection count (per-IP cap)
 	routingTable              *routing.Table                            // distance-vector routing table (Phase 1.2)
 	announceLoop              *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
+	overloadMonitor           *overloadMonitor                          // CPU/backlog backpressure gate for the announce loop (Phase 0)
 	identitySessions          map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
 	identityRelaySessions     map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
 	disableRateLimiting       bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
@@ -1235,10 +1236,35 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		routing.WithMaxNextHopsPerOrigin(cfg.MaxNextHopsPerOrigin),
 	)
 	svc.router = NewTableRouter(svc, svc.routingTable)
+
+	// Phase 0 cluster-mesh-architecture-plan.md: configurable announce
+	// interval and overload-mode gate. Both default to the existing
+	// pre-Phase-0 behaviour when their config knobs are zero.
+	//
+	// AnnounceInterval lets densely-connected receivers cut delta-cycle
+	// CPU by raising the period (e.g. 60s) at the cost of
+	// state-propagation granularity. Forced-full-sync cadence is
+	// independently capped at DefaultTTL/2 inside the AnnounceLoop, so
+	// freshness invariants hold regardless of the configured interval.
+	//
+	// OverloadGate (overloadMonitor) skips delta cycles for peers that
+	// don't owe a forced full sync this round when the host is
+	// CPU/backlog-saturated. Goroutine count is the proxy; threshold is
+	// configured via CORSA_OVERLOAD_GOROUTINE_THRESHOLD and disabled by
+	// default (zero threshold). Forced-full-sync still fires on schedule
+	// so receivers never see stale routes past TTL/2.
+	svc.overloadMonitor = newOverloadMonitor(cfg.OverloadGoroutineThreshold)
+	announceLoopOpts := []routing.AnnounceLoopOption{
+		routing.WithOverloadGate(svc.overloadMonitor),
+	}
+	if cfg.AnnounceInterval > 0 {
+		announceLoopOpts = append(announceLoopOpts, routing.WithAnnounceInterval(cfg.AnnounceInterval))
+	}
 	svc.announceLoop = routing.NewAnnounceLoop(
 		svc.routingTable,
 		svc,
 		svc.routingCapablePeers,
+		announceLoopOpts...,
 	)
 
 	svc.relayStates = newRelayStateStore()

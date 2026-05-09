@@ -102,6 +102,38 @@ type Node struct {
 	// validation, on the assumption that the operator understands
 	// the trade-off.
 	MaxNextHopsPerOrigin int
+
+	// AnnounceInterval overrides the periodic routing-announce cadence
+	// (env: CORSA_ANNOUNCE_INTERVAL_SECONDS). The default is
+	// routing.DefaultAnnounceInterval (30s) which produces a delta
+	// cycle every 30s and a forced full sync every 60s
+	// (DefaultTTL/2). For densely-connected meshes (>10 direct peers)
+	// operators can raise this to 45-60s to halve the periodic
+	// delta-computation CPU; the forced-full-sync cadence is
+	// independently capped at DefaultTTL/2 so freshness invariants
+	// hold even when AnnounceInterval is increased. Setting
+	// AnnounceInterval == DefaultTTL/2 effectively makes every tick
+	// a forced full sync (no in-between deltas), trading freshness
+	// granularity for CPU savings — appropriate for dense mesh
+	// receivers that are CPU-bound on inbound announce processing
+	// from many peers. Zero or negative is interpreted as "use
+	// routing.DefaultAnnounceInterval".
+	AnnounceInterval time.Duration
+
+	// OverloadGoroutineThreshold sets the goroutine-count threshold
+	// (env: CORSA_OVERLOAD_GOROUTINE_THRESHOLD) above which the
+	// routing announce loop suppresses non-critical delta sends to
+	// preserve CPU. Forced full sync still fires on schedule so the
+	// freshness invariant (DefaultTTL/2) holds. Zero or negative
+	// disables the throttle entirely (rollout default — existing
+	// deployments observe pre-Phase-0 behaviour exactly until
+	// operators opt in). The proxy is goroutine count because each
+	// inbound frame spawns at least one goroutine; sustained backlog
+	// produces visible pile-up. A reasonable value for hub nodes with
+	// 30+ direct peers is 5000-10000; tune from observed
+	// runtime.NumGoroutine() under normal load × 2-3 as the trip
+	// point.
+	OverloadGoroutineThreshold int
 }
 
 type RPC struct {
@@ -167,6 +199,8 @@ func Default() Config {
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
 	maxNextHopsPerOrigin := maxNextHopsPerOriginFromEnv()
+	announceInterval := announceIntervalFromEnv()
+	overloadGoroutineThreshold := overloadGoroutineThresholdFromEnv()
 
 	return Config{
 		App: App{
@@ -177,24 +211,26 @@ func Default() Config {
 			Version:  CorsaVersion,
 		},
 		Node: Node{
-			ListenAddress:        listenAddress,
-			AdvertisePort:        advertisePort,
-			BootstrapPeers:       bootstrapPeers,
-			IdentityPath:         identityPath,
-			TrustStorePath:       trustStorePath,
-			QueueStatePath:       queueStatePath,
-			PeersStatePath:       peersStatePath,
-			ChatLogDir:           chatLogDir,
-			DownloadDir:          downloadDir,
-			ProxyAddress:         proxyAddress,
-			Type:                 nodeType,
-			ListenerEnabled:      listenerEnabled,
-			ListenerSet:          listenerSet,
-			ClientVersion:        CorsaVersion,
-			MaxClockDrift:        maxClockDrift,
-			MaxOutgoingPeers:     maxOutgoingPeers,
-			MaxIncomingPeers:     maxIncomingPeers,
-			MaxNextHopsPerOrigin: maxNextHopsPerOrigin,
+			ListenAddress:              listenAddress,
+			AdvertisePort:              advertisePort,
+			BootstrapPeers:             bootstrapPeers,
+			IdentityPath:               identityPath,
+			TrustStorePath:             trustStorePath,
+			QueueStatePath:             queueStatePath,
+			PeersStatePath:             peersStatePath,
+			ChatLogDir:                 chatLogDir,
+			DownloadDir:                downloadDir,
+			ProxyAddress:               proxyAddress,
+			Type:                       nodeType,
+			ListenerEnabled:            listenerEnabled,
+			ListenerSet:                listenerSet,
+			ClientVersion:              CorsaVersion,
+			MaxClockDrift:              maxClockDrift,
+			MaxOutgoingPeers:           maxOutgoingPeers,
+			MaxIncomingPeers:           maxIncomingPeers,
+			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
+			AnnounceInterval:           announceInterval,
+			OverloadGoroutineThreshold: overloadGoroutineThreshold,
 		},
 		RPC: RPC{
 			Host:     envOrDefault("CORSA_RPC_HOST", "127.0.0.1"),
@@ -488,6 +524,53 @@ func maxNextHopsPerOriginFromEnv() int {
 		// parses fine and falls through to the return below as the
 		// operator's deliberate cap-disabled signal.
 		return routing.DefaultMaxNextHopsPerOrigin
+	}
+	return value
+}
+
+// announceIntervalFromEnv reads CORSA_ANNOUNCE_INTERVAL_SECONDS and
+// returns the routing-announce period for the AnnounceLoop. Zero is
+// returned when the env var is unset, invalid, or non-positive — the
+// caller (Service init) treats zero as "use the package default
+// (routing.DefaultAnnounceInterval, 30s)" so the routing layer keeps
+// the fallback in one place.
+//
+// The cap on forced-full-sync cadence (DefaultTTL/2) is independent
+// of this value and is enforced inside the AnnounceLoop, so an
+// operator-supplied interval longer than DefaultTTL/2 cannot push
+// freshness past the invariant — it just turns each tick into a
+// forced full sync with no in-between deltas. See the AnnounceInterval
+// doc-comment on Node for the trade-off.
+func announceIntervalFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CORSA_ANNOUNCE_INTERVAL_SECONDS"))
+	if raw == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// overloadGoroutineThresholdFromEnv reads
+// CORSA_OVERLOAD_GOROUTINE_THRESHOLD and returns the goroutine-count
+// trip point for the announce-loop overload gate. Zero is returned
+// when the env var is unset, invalid, non-positive, or the operator
+// explicitly sets "0" — the Service init treats zero as "disable the
+// gate" so existing deployments observe pre-Phase-0 behaviour exactly
+// until they opt in. There is no domain default for this knob: turning
+// it on without a deliberate value would either over-suppress (low
+// threshold) or never engage (high threshold), neither of which is
+// useful as an unattended default.
+func overloadGoroutineThresholdFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_OVERLOAD_GOROUTINE_THRESHOLD"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0
 	}
 	return value
 }
