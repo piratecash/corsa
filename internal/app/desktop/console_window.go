@@ -35,8 +35,8 @@ import (
 )
 
 const (
-	defaultConsoleWindowWidth  = unit.Dp(1140)
-	defaultConsoleWindowHeight = unit.Dp(1020)
+	defaultConsoleWindowWidth  = unit.Dp(768)
+	defaultConsoleWindowHeight = unit.Dp(550)
 	maxVisibleSuggestions      = 5
 	// maxConsoleCommandHistory bounds the in-memory ring of submitted commands
 	// reachable via Up/Down arrows in the console input. Older entries are

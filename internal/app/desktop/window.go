@@ -296,7 +296,7 @@ func (w *Window) Run() error {
 		w.fileExplorer = explorer.NewExplorer(window)
 		window.Option(
 			app.Title(w.t("app.title")+" — "+w.t("app.subtitle")),
-			app.Size(unit.Dp(1100), unit.Dp(1100)),
+			app.Size(unit.Dp(768), unit.Dp(550)),
 		)
 
 		w.startPolling(window)
