@@ -120,11 +120,16 @@ jobs:
             build_cmds: |
               make build-node-macos-amd64
               make build-desktop-macos-amd64
-          - name: windows
+          - name: windows-amd64
             runs_on: windows-latest
             build_cmds: |
               make build-node-windows-amd64
               make build-desktop-windows-amd64
+          - name: windows-arm64
+            runs_on: windows-latest
+            build_cmds: |
+              make build-node-windows-arm64
+              make build-desktop-windows-arm64
 
     steps:
       - name: Checkout
@@ -156,11 +161,11 @@ jobs:
           fi
 
       - name: Package Windows artifacts
-        if: matrix.name == 'windows'
+        if: startsWith(matrix.name, 'windows-')
         shell: bash
         run: |
           mkdir -p release
-          powershell -Command "Compress-Archive -Path dist/corsa-node-windows-amd64.exe,dist/corsa-desktop-windows-amd64.exe -DestinationPath release/corsa-windows-amd64.zip"
+          powershell -Command "Compress-Archive -Path dist/corsa-node-${{ matrix.name }}.exe,dist/corsa-desktop-${{ matrix.name }}.exe -DestinationPath release/corsa-${{ matrix.name }}.zip"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
