@@ -34,7 +34,7 @@ func holdDownLeft(t *testing.T, tbl *Table, peerID PeerIdentity) time.Duration {
 	t.Helper()
 	tbl.mu.Lock()
 	defer tbl.mu.Unlock()
-	fs := tbl.flapState[peerID]
+	fs := tbl.flap.state[peerID]
 	if fs == nil {
 		return 0
 	}
@@ -46,7 +46,7 @@ func consecutiveFlapsFor(t *testing.T, tbl *Table, peerID PeerIdentity) int {
 	t.Helper()
 	tbl.mu.Lock()
 	defer tbl.mu.Unlock()
-	fs := tbl.flapState[peerID]
+	fs := tbl.flap.state[peerID]
 	if fs == nil {
 		return 0
 	}
@@ -142,7 +142,7 @@ func TestRecordWithdrawal_ExpBackoffCapsAtMax(t *testing.T) {
 	}
 
 	tbl.mu.Lock()
-	fs := tbl.flapState["flappy"]
+	fs := tbl.flap.state["flappy"]
 	tbl.mu.Unlock()
 	if fs == nil {
 		t.Fatal("flap state must exist after bursts")
@@ -237,15 +237,15 @@ func TestRecordSuccessfulRouteAdd_ResetsStreak(t *testing.T) {
 
 // TestRecordSuccessfulRouteAdd_EmptyIdentityNoOp documents the
 // no-allocation guard: an empty identity must not insert a fresh
-// flapState entry. Without this guard a misbehaving caller could
+// flap-state entry. Without this guard a misbehaving caller could
 // pollute the flap-state map by passing zero-value identities.
 func TestRecordSuccessfulRouteAdd_EmptyIdentityNoOp(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin("me"))
 	tbl.RecordSuccessfulRouteAdd("")
 	tbl.mu.Lock()
 	defer tbl.mu.Unlock()
-	if len(tbl.flapState) != 0 {
-		t.Fatalf("flapState must remain empty after RecordSuccessfulRouteAdd(\"\"), got %d entries", len(tbl.flapState))
+	if len(tbl.flap.state) != 0 {
+		t.Fatalf("flap.state must remain empty after RecordSuccessfulRouteAdd(\"\"), got %d entries", len(tbl.flap.state))
 	}
 }
 

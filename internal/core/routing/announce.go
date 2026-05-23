@@ -736,7 +736,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// either (a) the operator-set AnnounceInterval has not
 			// elapsed since the last delta cycle, OR (b) the overload
 			// gate is engaged, skip the per-peer table scan and
-			// snapshot build entirely. AnnounceTo walks t.routes for
+			// snapshot build entirely. AnnounceTo walks the route store for
 			// O(total_routes_in_table) per peer; on a 5000-entry table
 			// with 33 peers this is ~165k entry comparisons per cycle
 			// even when nothing will be sent. The early return here

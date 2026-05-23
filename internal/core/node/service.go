@@ -1229,11 +1229,22 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// with 0 (cap disabled) so deployments observed pre-cap
 	// behaviour during the soak period. Operators set
 	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN=0 explicitly to roll back. See
-	// docs/routing-rib-compaction-and-snapshot-refactor.md §10 for
-	// the rollout history.
+	// the "RIB compaction (MaxNextHopsPerOrigin cap)" section in
+	// docs/routing.md and the DefaultMaxNextHopsPerOrigin constant
+	// docstring for the eviction-policy and two-layer-default
+	// contract.
+	// Phase 1 P2/P3 knobs. The SeqNo flap cap and fast-invalidation
+	// thresholds activate when the operator-configured values are
+	// positive; zero (or negative) keeps the corresponding path
+	// disabled — same shape as MaxNextHopsPerOrigin. Defaults come
+	// from the env-var readers in internal/core/config and fall back
+	// to the package-level constants documented on routing.Default*.
 	svc.routingTable = routing.NewTable(
 		routing.WithLocalOrigin(routing.PeerIdentity(id.Address)),
 		routing.WithMaxNextHopsPerOrigin(cfg.MaxNextHopsPerOrigin),
+		routing.WithMaxSeqAdvancePerWindow(cfg.MaxSeqAdvancePerWindow),
+		routing.WithSeqAdvanceWindow(cfg.SeqAdvanceWindow),
+		routing.WithMaxSaneHops(cfg.MaxSaneHops),
 	)
 	svc.router = NewTableRouter(svc, svc.routingTable)
 

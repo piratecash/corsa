@@ -632,7 +632,18 @@ func TestAnnounceLoop_PartialDeltaDoesNotDestroyExistingRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Build snapshots for delta computation.
+	// Build snapshots for delta computation. Post-Phase-A
+	// ComputeDelta keys on (Identity, IsWithdrawn) and the
+	// "changed" comparison checks SeqNo, Hops, and Extra — Origin
+	// does NOT participate in either, so the Origin value on the
+	// manually-built oldSnap is independent of what AnnounceTo
+	// emits as far as delta-matching is concerned. We still set
+	// Origin to "node-A" here to match the sender table's
+	// localOrigin (created with WithLocalOrigin("node-A"), and
+	// AnnounceTo emits Origin = "node-A" — the sender-originated
+	// migration contract from route_store_lookup.go), keeping the
+	// fixture's shape representative of a real cached snapshot
+	// even though equality is unaffected.
 	oldSnap := routing.BuildAnnounceSnapshot([]routing.AnnounceEntry{
 		{Identity: "peer-B", Origin: "node-A", SeqNo: 1, Hops: 1},
 	})

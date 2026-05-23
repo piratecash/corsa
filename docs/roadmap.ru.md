@@ -1027,14 +1027,10 @@ gzip-сжатие payload анонса.
 
 **Прогресс:**
 
-- [ ] Реализовать инкрементальные анонсы маршрутов (дельта с последнего анонса per peer)
-- [ ] Трекинг per-peer последнего отправленного `SeqNo` для каждого маршрута
-- [ ] Полная синхронизация таблицы только при установлении новой peer-сессии
 - [ ] Заменить `s.seen` map на ротируемый Bloom filter (2 фильтра, ротация 5 мин)
 - [ ] Добавить измерение RTT в peer-сессии (из ping/pong round-trip)
 - [ ] Добавить компонент латентности в составную метрику маршрутов
 - [ ] Реализовать сжатие анонсов для больших таблиц маршрутов
-- [ ] Реализовать overload mode: adaptive backpressure, снижение gossip fan-out, приоритизация authenticated peer'ов
 - [ ] Ввести жёсткие лимиты на concurrent handshakes, frame decode budget и queue growth budget
 - [ ] Защититься от compression/decompression bomb и oversized frame payload
 - [ ] Измерить трафик анонсов маршрутов как процент от общего
@@ -1044,7 +1040,6 @@ gzip-сжатие payload анонса.
 - [ ] Нагрузочный тест: измерение экономии bandwidth от delta-анонсов
 - [ ] Нагрузочный тест: handshake/relay flood, проверка controlled degradation без остановки честного трафика
 - [ ] Реализовать адаптивную агрессивность relay на основе степени ноды: ноды со степенью > `high_degree_threshold` (по умолчанию 15) снижают gossip fanout ratio для гашения broadcast-штормов в плотных кластерах; ноды с малой степенью relay-ят на полной агрессивности для обеспечения связности
-- [ ] Реализовать density-aware интервалы announce: `announce_interval_dense` (по умолчанию 60 с, когда число пиров > порога) vs `announce_interval_sparse` (по умолчанию 30 с) — адаптирует частоту объявлений к размеру сети, снижая overhead в крупных сетях
 - [ ] Реализовать подписанные route announcements (capability `mesh_attested_links_v1`): Ed25519-подпись, покрывающая `identity_fingerprint || box_public_key || timestamp || route_table_hash` — предотвращает спуфинг route announcement без signing key; неподписанные announcements продолжают приниматься от нод без capability (обратная совместимость)
 - [ ] Unit-тест: high-degree нода снижает fanout ratio; low-degree relay-ит на полной скорости
 - [ ] Unit-тест: dense announce interval применяется при числе пиров > порога

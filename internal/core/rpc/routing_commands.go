@@ -185,14 +185,36 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			return flapState[i].PeerIdentity < flapState[j].PeerIdentity
 		})
 
-		// Cap admission counters from the same atomic snapshot. Stay
-		// at zero on tables with the cap disabled — see
-		// routing.RouteCapStats for per-field semantics.
+		// Cap admission counters from the same atomic snapshot. The
+		// JSON envelope carries THREE independent policies with
+		// SEPARATE kill switches:
+		//   - K-cap (`accepted` / `accepted_replaced` / `rejected_full`
+		//     / `rejected_all_protected`) — stays at zero only when
+		//     `MaxNextHopsPerOrigin <= 0`.
+		//   - SeqNo flap cap (`seqno_flap_holdowns`) — stays at zero
+		//     only when `MaxSeqAdvancePerWindow <= 0` OR
+		//     `SeqAdvanceWindow <= 0`.
+		//   - Fast invalidation (`fast_invalidations`) — stays at
+		//     zero only when `MaxSaneHops <= 0`.
+		// Disabling the K-cap does NOT silence the P2/P3 counters,
+		// and disabling either P2/P3 knob does NOT silence the K-cap
+		// counters. See routing.RouteCapStats for the per-field
+		// semantics.
+		// Per-policy kill-switch knobs are documented in the block
+		// comment above; per-field semantics live on
+		// routing.RouteCapStats. JSON key ordering is NOT a wire
+		// contract — encoding/json sorts map keys alphabetically on
+		// marshal, and dashboards key on field names. If a future
+		// caller needs a stable ordered shape it should switch to a
+		// struct with explicit json tags instead of editing this
+		// map literal.
 		capStats := map[string]uint64{
 			"accepted":               snap.CapStats.Accepted,
 			"accepted_replaced":      snap.CapStats.AcceptedReplaced,
 			"rejected_full":          snap.CapStats.RejectedFull,
 			"rejected_all_protected": snap.CapStats.RejectedAllProtected,
+			"seqno_flap_holdowns":    snap.CapStats.SeqNoFlapHoldowns,
+			"fast_invalidations":     snap.CapStats.FastInvalidations,
 		}
 
 		// Phase 0 overload-gate counters. Stay at zero when the gate

@@ -47,8 +47,10 @@ type tableForwardResult struct {
 	Address domain.PeerAddress
 
 	// RouteOrigin is the Origin field from the RouteEntry that was selected.
-	// Stored in relayForwardState so that hop_ack confirmation at this
-	// intermediate node can match the exact (Identity, Origin, NextHop) triple.
+	// Retained for plumbing-stability across the relay → hop_ack path, but
+	// IGNORED by route promotion post-Phase-A: confirmRouteViaHopAck matches
+	// on (Identity, NextHop) only because the routing table no longer keys
+	// on Origin. See routing_hop_ack.go for the migration note.
 	RouteOrigin domain.PeerIdentity
 }
 
@@ -119,9 +121,13 @@ func (s *Service) sendFrameToAddress(ctx context.Context, address domain.PeerAdd
 // both caps for transit). Using it directly avoids re-resolution, which
 // could pick a different session for the same identity with weaker capabilities.
 //
-// routeOrigin is the Origin field from the selected RouteEntry. It is stored
-// in relayForwardState so that hop_ack confirmation can match the exact
-// (Identity, Origin, NextHop) triple.
+// routeOrigin is the Origin field from the selected RouteEntry. It is
+// retained on the call signature for caller-stability — relayForwardState
+// still stores it and the hop_ack confirmation path still receives it —
+// but it is IGNORED for route promotion post-Phase-A. The routing table
+// no longer keys on Origin (per-(Identity, Uplink) storage), so
+// confirmRouteViaHopAck matches on (Identity, NextHop) only. See
+// routing_hop_ack.go for the migration note.
 //
 // nextHopHops is the hop count from the selected RouteEntry. Used by the
 // retry path to re-resolve with correct capability requirements: hops=1
@@ -180,7 +186,9 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 // routing work identically regardless of connection direction.
 //
 // routeOrigin is the Origin field from the routing decision. Stored in
-// relayForwardState for triple-scoped hop_ack confirmation.
+// relayForwardState for plumbing-stability; IGNORED by post-Phase-A
+// hop_ack promotion, which matches on (Identity, NextHop) only. See
+// routing_hop_ack.go for the migration note.
 //
 // ctx is the caller's request/cycle context and is propagated into
 // writeFrameToInbound so the inbound sync-flush wait honours cancellation.

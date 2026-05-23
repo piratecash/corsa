@@ -8,9 +8,14 @@ import (
 // --- §9.1 admission rules ---
 
 // TestRIBCap_AcceptsUpToK_PerOriginPair verifies the trivial cap
-// invariant: while the (Identity, Origin) bucket is below the cap,
-// every new announcement triple is accepted as-is — no eviction, no
-// rejection. The bucket grows linearly until it hits maxNextHopsPerOrigin.
+// invariant: while the per-Identity bucket holds fewer than K live
+// UplinkClaim rows, every new announcement is accepted as-is — no
+// eviction, no rejection. The bucket grows linearly until it hits
+// maxNextHopsPerOrigin. The historical test name keeps the
+// "...PerOriginPair" suffix for grep continuity with operator
+// dashboards and bug reports — semantically the cap bucket is
+// per-(Identity, Uplink) post-Phase-A (Origin was dropped from
+// the dedup key — see uplink_claim.go).
 func TestRIBCap_AcceptsUpToK_PerOriginPair(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
@@ -18,7 +23,9 @@ func TestRIBCap_AcceptsUpToK_PerOriginPair(t *testing.T) {
 		WithMaxNextHopsPerOrigin(3),
 	)
 
-	// Three distinct next-hops on the same (Identity, Origin) pair.
+	// Three distinct uplinks for the same Identity (Origin is
+	// dropped from the dedup key post-Phase-A; the bucket is now
+	// keyed per-Identity with per-(Identity, Uplink) dedup).
 	for i, nh := range []PeerIdentity{"hop-a", "hop-b", "hop-c"} {
 		status := mustUpdate(t, tbl, RouteEntry{
 			Identity: "alice", Origin: "bob", NextHop: nh,
@@ -407,7 +414,7 @@ func TestRIBCap_HopAckPromotionRejected_IfAllKAreHopAckOrDirect_AndNotStrictlyBe
 //     remain in the slice as SeqNo resurrection guards.
 //
 // Both sub-scenarios end with Lookup returning the live announcement,
-// but the path through admitNewLocked is different — the test
+// but the path through routeStore.AdmitNew is different — the test
 // exercises both to pin the design.
 func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
@@ -539,10 +546,12 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 // negative case.
 //
 // The cap invariant after this design is "at most K LIVE
-// (non-tombstone) entries per (Identity, Origin)". The total number
-// of rows in the slice can temporarily exceed K when recent
-// withdrawals contributed tombstones; TickTTL reclaims them after
-// defaultTTL.
+// (non-tombstone) UplinkClaim rows per Identity" — post-Phase-A
+// the bucket key is per-Identity with per-(Identity, Uplink) dedup,
+// not the legacy (Identity, Origin) triple (see uplink_claim.go).
+// The total number of rows in the slice can temporarily exceed K
+// when recent withdrawals contributed tombstones; TickTTL reclaims
+// them after defaultTTL.
 func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 
@@ -578,7 +587,7 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 		}
 
 		// And the cap REJECTION counters are NOT advanced — the
-		// tombstone never went through admitNewLocked.
+		// tombstone never went through routeStore.AdmitNew.
 		statsAfter := tbl.CapStats()
 		if statsAfter.RejectedFull != statsBefore.RejectedFull {
 			t.Fatalf("RejectedFull should not advance for tombstone admissions; %d → %d",
@@ -589,7 +598,7 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 				statsBefore.RejectedAllProtected, statsAfter.RejectedAllProtected)
 		}
 		if statsAfter.Accepted != statsBefore.Accepted {
-			t.Fatalf("Accepted should not advance for tombstones (they bypass admitNewLocked); %d → %d",
+			t.Fatalf("Accepted should not advance for tombstones (they bypass routeStore.AdmitNew); %d → %d",
 				statsBefore.Accepted, statsAfter.Accepted)
 		}
 	})
@@ -639,10 +648,10 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 // TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple pins the
 // invariant that the public Table.UpdateRoute API entry point — a
 // withdrawal entry (Hops = HopsInfinity) for an (Identity, Origin,
-// NextHop) triple not yet in the bucket — bypasses admitNewLocked
+// NextHop) triple not yet in the bucket — bypasses routeStore.AdmitNew
 // exactly like the internal WithdrawRoute idx<0 path. Without the
 // short-circuit, a saturated live bucket would route the tombstone
-// through admitNewLocked, which counts only live entries (rule 1
+// through routeStore.AdmitNew, which counts only live entries (rule 1
 // strips the tombstone from bucketCount) and rejects the new entry
 // on RejectedFull or RejectedAllProtected — silently dropping the
 // SeqNo resurrection guard for the new triple even though the cap
@@ -701,7 +710,7 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 		}
 
 		// Cap counters must NOT advance — the tombstone short-circuited
-		// out of admitNewLocked, so neither acceptance nor rejection
+		// out of routeStore.AdmitNew, so neither acceptance nor rejection
 		// counters should change.
 		statsAfter := tbl.CapStats()
 		if statsAfter.Accepted != statsBefore.Accepted {
@@ -726,7 +735,7 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 		// The point of routing tombstones through UpdateRoute idx<0
 		// at all (rather than forcing every caller through
 		// WithdrawRoute) is to preserve the SeqNo resurrection guard
-		// for the new triple. If admitNewLocked had rejected the
+		// for the new triple. If routeStore.AdmitNew had rejected the
 		// tombstone, a delayed announcement with a lower SeqNo for
 		// the same (Identity, Origin, NextHop) would not find a
 		// tombstone via the idx>=0 path in UpdateRoute and could
@@ -797,7 +806,7 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 // (the live entry), pushing live count from K to K+1.
 //
 // The promotion now temporarily detaches the tombstone slot, runs
-// admitNewLocked on the live entry, and either lets it append/evict
+// routeStore.AdmitNew on the live entry, and either lets it append/evict
 // like any fresh admission or restores the tombstone on rejection
 // (preserving the SeqNo guard).
 func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
@@ -868,7 +877,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		}
 
 		// Promotion attempt — incoming Hops=10 is worse than worst
-		// live (hop-b, Hops=3), so admitNewLocked rejects with
+		// live (hop-b, Hops=3), so routeStore.AdmitNew rejects with
 		// AdmissionRejectedFull.
 		status := mustUpdate(t, tbl, RouteEntry{
 			Identity: "alice", Origin: "bob", NextHop: "hop-c",
@@ -926,7 +935,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		}
 
 		// Promotion with Hops=2 — strictly better than worst live
-		// (hop-b, Hops=6). admitNewLocked evicts hop-b and admits
+		// (hop-b, Hops=6). routeStore.AdmitNew evicts hop-b and admits
 		// hop-c as live.
 		status := mustUpdate(t, tbl, RouteEntry{
 			Identity: "alice", Origin: "bob", NextHop: "hop-c",
@@ -1182,21 +1191,28 @@ func TestRIBCap_AnnounceWireSchemaUnchanged_ContentReflectsBestK(t *testing.T) {
 	withCap := makeTable(2).AnnounceTo("excluded")
 	withoutCap := makeTable(0).AnnounceTo("excluded")
 
-	// AnnounceTo row counts MUST track the cap — the wire pipeline's
-	// aggregation step is what collapses these into one entry, not
-	// AnnounceTo itself.
-	if len(withCap) != 2 {
-		t.Fatalf("cap=2 AnnounceTo should produce one row per stored RouteEntry (2), got %d", len(withCap))
+	// Post-A1 round-4 contract: AnnounceTo itself returns the
+	// per-Identity-collapsed wire projection (live winner +
+	// own-direct tombstones). Pre-A1 / pre-round-4 it dumped one
+	// row per stored RouteEntry and BuildAnnounceSnapshot did
+	// the collapse downstream; the collapse moved to
+	// AnnounceProjectionFor when outbound SeqNo synthesis was
+	// introduced (non-winning emits would have spuriously bumped
+	// the per-Identity outbound counter, breaking the
+	// delta-cycle invariant). Both cap and no-cap tables now
+	// emit exactly one live winner for the only Identity in this
+	// fixture.
+	if len(withCap) != 1 {
+		t.Fatalf("cap=2 AnnounceTo should produce one live winner per Identity, got %d", len(withCap))
 	}
-	if len(withoutCap) != 4 {
-		t.Fatalf("cap=0 AnnounceTo should produce one row per stored RouteEntry (4), got %d", len(withoutCap))
+	if len(withoutCap) != 1 {
+		t.Fatalf("cap=0 AnnounceTo should produce one live winner per Identity, got %d", len(withoutCap))
 	}
 
-	// Run the production wire-aggregation pass. After BuildAnnounceSnapshot
-	// both projections must collapse to exactly one live winner entry per
-	// Identity (per-Identity Stage 4 aggregation hot-fix) — no own-origin
-	// tombstones in this scenario because all entries are live announcements.
-	// That single live winner is the wire schema invariant the cap preserves.
+	// BuildAnnounceSnapshot stays in the pipeline as a defensive
+	// pass — for the routing-driven AnnounceTo input it is now
+	// essentially a no-op (the per-Identity collapse already
+	// happened upstream).
 	withCapWire := BuildAnnounceSnapshot(withCap)
 	withoutCapWire := BuildAnnounceSnapshot(withoutCap)
 	if got := len(withCapWire.Entries); got != 1 {
@@ -1343,8 +1359,9 @@ func TestRIBCap_MixedVersionMesh_WorksWithUnboundedPeers(t *testing.T) {
 		_, err := tbl.UpdateRoute(RouteEntry{
 			Identity: "alice", Origin: "bob",
 			// Construct a fresh next-hop identity per iteration; the
-			// exact bytes don't matter, only that the dedup triple
-			// changes each call so we exercise the new-triple path.
+			// exact bytes don't matter, only that the (Identity,
+			// Uplink=NextHop) dedup pair changes each call so we
+			// exercise the new-claim admission path.
 			NextHop: PeerIdentity("hop-" + string(rune('a'+i%26)) + string(rune('a'+i/26))),
 			Hops:    hops,
 			SeqNo:   1,
@@ -1535,8 +1552,10 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 
 // TestRIBCap_AddDirectPeerRespectsCap pins the invariant that
 // AddDirectPeer goes through cap admission so the bucket never holds
-// more than K live entries per (Identity, Origin) — even though
-// direct admission itself must always succeed.
+// more than K live UplinkClaim rows per Identity — even though
+// direct admission itself must always succeed. Post-Phase-A the
+// bucket is keyed per-Identity with per-(Identity, Uplink) dedup;
+// the legacy (Identity, Origin) framing is gone (see uplink_claim.go).
 //
 // Direct routes have NextHop == Identity (Validate enforces this), so
 // the (peer, self) bucket can in principle accumulate one direct row
@@ -1545,11 +1564,11 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 // Without cap-aware admission, AddDirectPeer's bare append/in-place
 // overwrite was the last public Table API path that could push live
 // count from K to K+1: the regular UpdateRoute path was already
-// migrated to admitNewLocked in earlier rounds, but
+// migrated to routeStore.AdmitNew in earlier rounds, but
 // AddDirectPeer/idx<0 and AddDirectPeer/tombstone-reactivation were
 // not.
 //
-// admitDirectLocked closes that gap: it never rejects (a direct
+// routeStore.AdmitDirect closes that gap: it never rejects (a direct
 // entry models a session the OS already holds open, refusing to
 // record it would silently desync the table from the transport
 // layer), but it evicts the worst evictable row when the bucket is
@@ -1721,16 +1740,27 @@ func TestRIBCap_AddDirectPeerRespectsCap(t *testing.T) {
 // --- helpers ---
 
 // nextHopsByOrigin slices a Snapshot down to a NextHop→RouteEntry map
-// for the entries belonging to the given (Identity, Origin) pair. Tests
-// use this to assert presence/absence and to read out the surviving
-// fields after a cap admission decision.
-func nextHopsByOrigin(t *testing.T, snap Snapshot, identity, origin PeerIdentity) map[PeerIdentity]RouteEntry {
+// for the entries belonging to the given Identity. Post-Phase-A the
+// per-(Identity, Origin) dedup is gone — storage is per-(Identity,
+// Uplink) — so the origin parameter is retained only for caller-
+// stability (test fixtures pass the same Origin throughout, which
+// continues to compile) but is no longer used to filter. The returned
+// map contains every NextHop in the identity bucket; under
+// MaxNextHopsPerOrigin cap K, that is at most K live entries plus any
+// tombstones (which carry IsWithdrawn() == true via Hops=HopsInfinity
+// on the synthesised RouteEntry).
+//
+// Tests that previously used the helper to partition a bucket across
+// multiple Origin lineages must instead engineer their fixture so
+// every claim lives on a different Uplink (NextHop) — the cap is
+// per-(Identity, Uplink) now. The pre-Phase-A "K-per-(Identity,
+// Origin) cap with multiple Origins coexisting under the same
+// Identity" shape is intentionally collapsed.
+func nextHopsByOrigin(t *testing.T, snap Snapshot, identity, _ PeerIdentity) map[PeerIdentity]RouteEntry {
 	t.Helper()
 	out := make(map[PeerIdentity]RouteEntry)
 	for _, r := range snap.Routes[identity] {
-		if r.Origin == origin {
-			out[r.NextHop] = r
-		}
+		out[r.NextHop] = r
 	}
 	return out
 }

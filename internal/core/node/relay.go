@@ -34,7 +34,7 @@ type relayForwardState struct {
 	ForwardedTo          domain.PeerAddress   // who I forwarded to (for loop detection)
 	AbandonedForwardedTo []domain.PeerAddress // old ForwardedTo values from reroutes (stale ack rejection)
 	Recipient            domain.PeerIdentity  // final recipient identity (for hop_ack route confirmation)
-	RouteOrigin          domain.PeerIdentity  // route origin from routing decision (for triple-scoped hop_ack)
+	RouteOrigin          domain.PeerIdentity  // route origin from routing decision (retained for plumbing-stability; IGNORED by hop_ack promotion post-Phase-A — see routing_hop_ack.go)
 	HopCount             int                  // incremented on each hop
 	RemainingTTL         int                  // seconds until cleanup (decremented by ticker)
 }
@@ -269,9 +269,11 @@ func (rs *relayStateStore) lookupRecipient(messageID string) domain.PeerIdentity
 }
 
 // lookupRouteOrigin returns the route origin for a relayed message, or ""
-// if the message ID is unknown or origin was not recorded. Used by hop_ack
-// processing to scope route confirmation to the exact (Identity, Origin,
-// NextHop) triple that carried the message.
+// if the message ID is unknown or origin was not recorded. The value is
+// surfaced for plumbing-stability but IGNORED by hop_ack route promotion
+// post-Phase-A: confirmRouteViaHopAck matches on (Identity, NextHop)
+// only because the routing table no longer keys on Origin. See
+// routing_hop_ack.go for the migration note.
 func (rs *relayStateStore) lookupRouteOrigin(messageID string) domain.PeerIdentity {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -709,12 +711,15 @@ func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, frame prot
 	// actually sent the ack.
 	//
 	// Stale ack guard (table-routed path): when RouteOrigin is set, the
-	// message was sent via a specific routing table triple. After a
-	// reroute, store() updates ForwardedTo and RouteOrigin to reflect the
-	// new path. A late ack from the old next-hop would have a different
-	// peer identity than ForwardedTo — we skip route confirmation to avoid
-	// promoting a stale triple. The comparison is identity-based (not
-	// transport address) because a single peer may have multiple sessions
+	// message was sent through a specific routing-table next-hop selection
+	// (post-Phase-A the routing-table key is (Identity, Uplink=NextHop);
+	// RouteOrigin itself is wire-only metadata IGNORED by hop_ack
+	// promotion — see routing_hop_ack.go). After a reroute, store()
+	// updates ForwardedTo to reflect the new path. A late ack from the
+	// old next-hop would have a different peer identity than ForwardedTo
+	// — we skip route confirmation to avoid promoting a stale (Identity,
+	// NextHop) claim. The comparison is identity-based (not transport
+	// address) because a single peer may have multiple sessions
 	// (inbound + outbound) and the ack can arrive on any of them.
 	//
 	// Gossip fan-out: when RouteOrigin is empty, the message was broadcast
@@ -1031,10 +1036,12 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 }
 
 // sendRelayMessageWithOrigin is the table-directed variant of sendRelayMessage.
-// It stores the route Origin in relayForwardState so that hop_ack confirmation
-// can match the exact (Identity, Origin, NextHop) triple that carried the
-// message. The gossip path (sendRelayMessage) leaves RouteOrigin empty because
-// gossip delivery is not scoped to a specific route triple.
+// It plumbs the route Origin into relayForwardState alongside the next-hop;
+// this field is retained for caller-stability but is IGNORED for route
+// promotion post-Phase-A — confirmRouteViaHopAck matches on (Identity,
+// NextHop) only because the routing table no longer keys on Origin. The
+// gossip path (sendRelayMessage) leaves RouteOrigin empty because gossip
+// delivery is not scoped to a specific routing-table entry.
 func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity) bool {
 	frame := protocol.Frame{
 		Type:        "relay_message",

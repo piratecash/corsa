@@ -160,9 +160,13 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 // until the cycle after that.
 //
 // Production receive-side fix is in Table.UpdateRoute on the RouteUnchanged
-// branch: an alive same-SeqNo same-source same-hops re-application extends
-// ExpiresAt to now+defaultTTL. Without that fix this invariant alone is not
-// sufficient; with it, this invariant is the second half of the contract.
+// branch: an alive same-SeqNo same-hops re-application extends ExpiresAt to
+// now+defaultTTL irrespective of stored Source (round-5o weakening accepts
+// weaker incoming source as long as the routing decision matches — the
+// hop_ack promotion contract requires this, see route_store_mutation.go's
+// reconfirmation block doc-comment). Without that fix this invariant alone
+// is not sufficient; with it, this invariant is the second half of the
+// contract.
 func TestRoutingConstants_RefreshIntervalInvariant(t *testing.T) {
 	refresh := time.Duration(routing.ForcedFullSyncMultiplier) * routing.DefaultAnnounceInterval
 	half := routing.DefaultTTL / 2

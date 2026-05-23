@@ -25,35 +25,34 @@ import (
 // provably correct next-hop, even under gossip fan-out where multiple
 // peers received the relay_message but only one actually delivered it.
 //
-// routeOrigin scopes the confirmation to the exact (Identity, Origin,
-// NextHop) triple that was used for the original routing decision. When
-// non-empty, only the route matching all three fields is promoted. When
-// empty (gossip path where no specific triple was chosen), the first
-// matching NextHop in Lookup order is promoted — this is a weaker
-// guarantee but acceptable for gossip-originated relays.
+// routeOrigin is retained on the signature for caller-stability (the
+// relay-side plumbing still threads it through tableForwardResult /
+// sendTableDirectedRelay) but is IGNORED post-Phase-A: the routing
+// table no longer stores Origin (per-(Identity, Uplink) storage),
+// and the synthesised Origin on Lookup output is always localOrigin
+// (or Identity fallback), which carries no per-route disambiguation
+// signal. The (Identity, NextHop) pair is the post-A1 unique key —
+// the same uplink cannot have two distinct "lineages" to the same
+// destination, so the per-Origin scoping became degenerate.
 //
-// If ackSenderAddress is empty, no route can be confirmed (message was
-// stored locally without forwarding).
+// If ackSenderAddress is empty, no route can be confirmed (message
+// was stored locally without forwarding).
 //
-// Cap-eviction edge case (Stage B). When MaxNextHopsPerOrigin is active
-// and the (Identity, Origin, NextHop) triple was evicted from the
-// routing table between the relay send and the hop_ack arrival, Lookup
-// returns no matching route and the function logs
+// Cap-eviction edge case. When MaxNextHopsPerOrigin is active and the
+// (Identity, Uplink) claim was evicted from the routing table
+// between the relay send and the hop_ack arrival, Lookup returns no
+// matching route and the function logs
 // "route_hop_ack_no_matching_route" without re-creating the entry.
-// This is by design: the planner originally proposed re-admitting the
-// triple as source=hop_ack at this exact moment, but the hop_ack frame
-// only carries the (recipient, next-hop) pair — neither Origin nor
-// SeqNo are on the wire, and a synthetic RouteEntry without authentic
-// origin metadata would forge ranking input that other paths
-// (split-horizon, withdrawal authority) rely on. Letting the
-// evicted-triple case fall through to the existing no-route log path
-// is the correct behaviour: subsequent announcement traffic for the
-// same (Identity, Origin) re-populates the bucket through the normal
-// admission rules, and the cap eviction counter (rejected_full /
-// rejected_all_protected) already documents that the bucket is under
-// pressure. See docs/routing-rib-compaction-and-snapshot-refactor.md
-// §10 "Этап B" → "Принятые решения" for the full rationale.
+// This is by design: the hop_ack frame only carries the
+// (recipient, next-hop) pair — neither Origin nor SeqNo are on the
+// wire — and a synthetic RouteEntry without authentic SeqNo would
+// forge ranking input that other paths (split-horizon, withdrawal
+// authority) rely on. Subsequent announcement traffic for the same
+// (Identity, Uplink) re-populates the bucket through the normal
+// admission rules.
 func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, ackSenderAddress domain.PeerAddress, routeOrigin domain.PeerIdentity) {
+	_ = routeOrigin // post-A1: per-Origin scoping is degenerate; see doc-comment above.
+
 	if ackSenderAddress == "" {
 		return
 	}
@@ -71,13 +70,11 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 		return
 	}
 
-	// Find the route that matches the actual triple used for the send.
+	// Find the claim matching the (Identity, NextHop) pair used for
+	// the send. Per-Origin disambiguation is gone (storage no longer
+	// keeps Origin, see Phase A migration contract).
 	for _, route := range routes {
 		if route.NextHop != nextHopIdentity {
-			continue
-		}
-		// When routeOrigin is known, enforce exact triple match.
-		if routeOrigin != "" && route.Origin != routeOrigin {
 			continue
 		}
 		if route.Source >= routing.RouteSourceHopAck {
@@ -100,14 +97,12 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 			log.Warn().Err(err).
 				Str("identity", string(recipientIdentity)).
 				Str("next_hop", string(nextHopIdentity)).
-				Str("origin", string(route.Origin)).
 				Msg("route_hop_ack_confirm_failed")
 			return
 		}
 		if status == routing.RouteAccepted {
 			log.Debug().
 				Str("identity", string(recipientIdentity)).
-				Str("origin", string(route.Origin)).
 				Str("next_hop", string(route.NextHop)).
 				Msg("route_confirmed_via_hop_ack")
 		}
@@ -117,6 +112,5 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 	log.Debug().
 		Str("identity", string(recipientIdentity)).
 		Str("ack_sender", string(ackSenderAddress)).
-		Str("route_origin", string(routeOrigin)).
 		Msg("route_hop_ack_no_matching_route")
 }

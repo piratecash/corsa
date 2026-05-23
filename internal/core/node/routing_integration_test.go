@@ -868,16 +868,27 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 		t.Fatalf("expected 0 active transit routes after peer disconnect, got %d", len(routes))
 	}
 
-	// But the transit route should NOT have a wire-ready withdrawal SeqNo
-	// bump — only the originator (peer-C) can do that. Verify via snapshot
-	// that the entry's Origin is still peer-C (not node-A).
+	// The transit route must be present in storage as a tombstone
+	// (Withdrawn=true) but with NO wire-ready withdrawal generated —
+	// only the originator (peer-C) may emit hops=16 on the wire.
+	// Pre-Phase-A the test pinned this indirectly by checking Origin
+	// remained peer-C (signalling "we did not forge as origin");
+	// post-A1 storage drops Origin, so the synthesised boundary Origin
+	// from Lookup is localOrigin (idNodeA in this fixture). The
+	// contract "we did not emit a wire withdrawal for the transit
+	// route" is now structural: InvalidateAllVia only generates
+	// wire withdrawals for own-direct claims (Source == Direct), and
+	// this transit claim has Source == Announcement — see
+	// route_store_mutation.go for the contract. Verifying that the
+	// invalidated entry is in storage as a withdrawn tombstone is
+	// what survives the storage swap.
 	snap := svc.routingTable.Snapshot()
 	transitRoutes := snap.Routes[idTargetX]
 	if len(transitRoutes) == 0 {
 		t.Fatal("expected invalidated transit entry in snapshot")
 	}
-	if transitRoutes[0].Origin != idPeerC {
-		t.Fatalf("transit route origin should remain peer-C, got %s", transitRoutes[0].Origin)
+	if !transitRoutes[0].IsWithdrawn() {
+		t.Fatalf("transit entry should be marked withdrawn locally, got %+v", transitRoutes[0])
 	}
 }
 
@@ -918,10 +929,28 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 // confirmRouteViaHopAck must only promote the specific (identity, origin, nextHop)
 // entry that matches. Different origin or different identity must not be affected.
 
-func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
+// TestHopAckScoping_IgnoresRouteOriginPostPhaseA pins the post-Phase-A
+// behaviour of confirmRouteViaHopAck: the routeOrigin parameter is
+// preserved on the signature for caller-stability but is ignored
+// (per-(Identity, Origin, NextHop) triple scoping became degenerate
+// when storage dropped Origin in favour of per-(Identity, Uplink)
+// claims). The hop_ack promotes the claim matching (recipient,
+// ackSender) regardless of whatever routeOrigin value the relay
+// path passed through.
+//
+// The pre-Phase-A tests TestHopAckScoping_DifferentOriginNotPromoted
+// and TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop set up
+// two routes to the same Identity via the SAME NextHop but DIFFERENT
+// Origins, then asserted per-Origin scoping; those scenarios cannot
+// exist in post-A1 storage at all (the second UpdateRoute collapses
+// onto the same (Identity, Uplink) claim as a same-SeqNo / worse-Hops
+// reconfirmation). Per-NextHop scoping — the relevant invariant —
+// continues to be covered by
+// TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted below.
+func TestHopAckScoping_IgnoresRouteOriginPostPhaseA(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	// Two routes to target-X via peer-B, but different origins.
+	// Single route to target-X via peer-B.
 	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
 		Origin:    idOriginC,
@@ -932,108 +961,26 @@ func TestHopAckScoping_DifferentOriginNotPromoted(t *testing.T) {
 		ExpiresAt: time.Now().Add(routing.DefaultTTL),
 	})
 	if err != nil || status != routing.RouteAccepted {
-		t.Fatal("route 1 should be accepted")
+		t.Fatal("route should be accepted")
 	}
 
-	status, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  idTargetX,
-		Origin:    idOriginD,
-		NextHop:   idPeerB,
-		Hops:      3,
-		SeqNo:     1,
-		Source:    routing.RouteSourceAnnouncement,
-		ExpiresAt: time.Now().Add(routing.DefaultTTL),
-	})
-	if err != nil || status != routing.RouteAccepted {
-		t.Fatal("route 2 should be accepted")
-	}
-
-	// hop_ack with specific origin=origin-D — only that triple should
-	// be promoted. origin-C must remain announcement despite sharing
-	// the same NextHop.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), domain.PeerIdentity(idOriginD))
+	// hop_ack with a routeOrigin value that does NOT match any
+	// stored claim's Origin (pre-Phase-A this would have rejected
+	// the promotion as a triple-mismatch; post-Phase-A the value is
+	// ignored and the (Identity=target-X, NextHop=peer-B) claim is
+	// promoted regardless).
+	svc.confirmRouteViaHopAck(
+		domain.PeerIdentity(idTargetX),
+		domain.PeerAddress(idPeerB),
+		domain.PeerIdentity("origin-mismatch-that-would-have-blocked-pre-A1"),
+	)
 
 	routes := svc.routingTable.Lookup(idTargetX)
-	if len(routes) < 2 {
-		t.Fatalf("expected 2 routes, got %d", len(routes))
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
-
-	var foundC, foundD bool
-	for _, r := range routes {
-		if r.Origin == idOriginC {
-			foundC = true
-			if r.Source != routing.RouteSourceAnnouncement {
-				t.Fatalf("origin-C route must remain announcement (not part of confirmed triple), got %s", r.Source)
-			}
-		}
-		if r.Origin == idOriginD {
-			foundD = true
-			if r.Source != routing.RouteSourceHopAck {
-				t.Fatalf("origin-D route should be promoted to hop_ack, got %s", r.Source)
-			}
-		}
-	}
-	if !foundC || !foundD {
-		t.Fatalf("expected both origins present: foundC=%v foundD=%v", foundC, foundD)
-	}
-}
-
-func TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop(t *testing.T) {
-	svc := newTestServiceWithRouting(t, idNodeA)
-
-	// Two routes to target-X via peer-B, different origins.
-	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  idTargetX,
-		Origin:    idOriginC,
-		NextHop:   idPeerB,
-		Hops:      2,
-		SeqNo:     1,
-		Source:    routing.RouteSourceAnnouncement,
-		ExpiresAt: time.Now().Add(routing.DefaultTTL),
-	})
-	if err != nil || status != routing.RouteAccepted {
-		t.Fatal("route 1 should be accepted")
-	}
-
-	status, err = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  idTargetX,
-		Origin:    idOriginD,
-		NextHop:   idPeerB,
-		Hops:      3,
-		SeqNo:     1,
-		Source:    routing.RouteSourceAnnouncement,
-		ExpiresAt: time.Now().Add(routing.DefaultTTL),
-	})
-	if err != nil || status != routing.RouteAccepted {
-		t.Fatal("route 2 should be accepted")
-	}
-
-	// Gossip path (empty origin) promotes the first matching NextHop in
-	// Lookup order — origin-C with hops=2 wins.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
-
-	routes := svc.routingTable.Lookup(idTargetX)
-	if len(routes) < 2 {
-		t.Fatalf("expected 2 routes, got %d", len(routes))
-	}
-
-	var foundC, foundD bool
-	for _, r := range routes {
-		if r.Origin == idOriginC {
-			foundC = true
-			if r.Source != routing.RouteSourceHopAck {
-				t.Fatalf("gossip fallback: origin-C (first in Lookup order) should be promoted, got %s", r.Source)
-			}
-		}
-		if r.Origin == idOriginD {
-			foundD = true
-			if r.Source != routing.RouteSourceAnnouncement {
-				t.Fatalf("origin-D should remain announcement, got %s", r.Source)
-			}
-		}
-	}
-	if !foundC || !foundD {
-		t.Fatalf("expected both origins present: foundC=%v foundD=%v", foundC, foundD)
+	if routes[0].Source != routing.RouteSourceHopAck {
+		t.Fatalf("route should be promoted to hop_ack regardless of routeOrigin parameter, got %s", routes[0].Source)
 	}
 }
 
@@ -2135,14 +2082,24 @@ func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
 
 // --- Intermediate hop RouteOrigin propagation ---
 
-// TestTryForwardViaRoutingTableReturnsRouteOrigin verifies that
-// tryForwardViaRoutingTable returns the selected route's Origin field
-// so that the intermediate relay hop can persist it in relayForwardState
-// for triple-scoped hop_ack confirmation.
-func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
+// TestTryForwardViaRoutingTablePlumbsRouteOrigin verifies that
+// tryForwardViaRoutingTable plumbs the selected route's Origin field
+// into tableForwardResult.RouteOrigin. Post-Phase-A the Origin field
+// is no longer the wire-derived transit-Origin (storage dropped it);
+// Lookup synthesises Origin = localOrigin per the migration contract
+// (see uplink_claim.go's toRouteEntry doc-comment). The RouteOrigin
+// plumbing is retained for source compatibility with the relay-path
+// signature, but the value carries no routing-disambiguation signal
+// — confirmRouteViaHopAck ignores it (see
+// TestHopAckScoping_IgnoresRouteOriginPostPhaseA). This test pins
+// the new contract so future readers see exactly what value flows
+// through.
+func TestTryForwardViaRoutingTablePlumbsRouteOrigin(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 
-	// Add a route to target-X via peer-C with origin "origin-D".
+	// Add a route to target-X via peer-C. The on-the-wire Origin
+	// here (idOriginD) is consumed by UpdateRoute for anti-spoof
+	// and then dropped by the storage layer.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity: idTargetX, Origin: idOriginD, NextHop: idPeerC,
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
@@ -2174,8 +2131,13 @@ func TestTryForwardViaRoutingTableReturnsRouteOrigin(t *testing.T) {
 	if result.Address == "" {
 		t.Fatal("expected table-directed forward to succeed")
 	}
-	if result.RouteOrigin != idOriginD {
-		t.Fatalf("expected RouteOrigin='origin-D', got %q", result.RouteOrigin)
+	// Post-Phase-A: RouteOrigin reflects the synthesised Origin
+	// from Lookup, which is localOrigin (idNodeB in this fixture)
+	// — NOT the wire-time Origin (idOriginD) that was dropped by
+	// storage. Pre-A1 this test pinned idOriginD; the assertion
+	// is intentionally flipped to document the post-A1 contract.
+	if result.RouteOrigin != idNodeB {
+		t.Fatalf("expected RouteOrigin=localOrigin (idNodeB=%q), got %q", idNodeB, result.RouteOrigin)
 	}
 }
 

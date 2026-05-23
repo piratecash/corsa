@@ -65,17 +65,29 @@ type Node struct {
 	// unit tests that use RFC 1918 addresses as fake peers.
 	AllowPrivatePeers bool
 
-	// MaxNextHopsPerOrigin caps the number of LIVE next-hops the
-	// routing table keeps per (Identity, Origin) pair. A positive
-	// value activates the cap admission policy in routing.Table —
-	// see docs/routing-rib-compaction-and-snapshot-refactor.md
-	// (Stage B) and routing.WithMaxNextHopsPerOrigin for the exact
-	// eviction rules. Zero disables the cap entirely (every accepted
-	// entry is stored, the table grows unbounded with the number of
-	// next-hops that learned the same destination, and the
-	// `cap_admission` counters stay at zero); operators set
-	// CORSA_MAX_NEXT_HOPS_PER_ORIGIN=0 explicitly to opt out — for
-	// instance to roll back if a field regression surfaces.
+	// MaxNextHopsPerOrigin caps the number of LIVE UplinkClaim entries
+	// the routing table keeps per Identity (per-Identity bucket
+	// post-Phase-A — the legacy (Identity, Origin) bucket key is gone
+	// because storage dropped the Origin dimension). The knob name
+	// kept the historical "...PerOrigin" suffix for config / env-var
+	// stability across the migration. A positive value activates the
+	// cap admission policy in routing.Table — see the "RIB
+	// compaction (MaxNextHopsPerOrigin cap)" section in
+	// docs/routing.md and routing.WithMaxNextHopsPerOrigin for the
+	// exact eviction rules. Zero disables the K-cap entirely (every accepted entry
+	// is stored, the table grows unbounded with the number of
+	// next-hops that learned the same destination, and the FOUR
+	// K-cap counters in the `cap_admission` JSON envelope —
+	// `accepted` / `accepted_replaced` / `rejected_full` /
+	// `rejected_all_protected` — stay at zero). The other two
+	// counters in the same envelope (`seqno_flap_holdowns` from
+	// Phase 1 P2 and `fast_invalidations` from Phase 1 P3) are
+	// gated by independent knobs (`MaxSeqAdvancePerWindow` +
+	// `SeqAdvanceWindow`, and `MaxSaneHops` respectively) — they
+	// can still grow when the K-cap is disabled, and vice versa.
+	// Operators set CORSA_MAX_NEXT_HOPS_PER_ORIGIN=0 explicitly to
+	// opt out of the K-cap — for instance to roll back if a field
+	// regression surfaces.
 	//
 	// Production default after the second rollout release is
 	// routing.DefaultMaxNextHopsPerOrigin (4). The first release
@@ -87,8 +99,8 @@ type Node struct {
 	//
 	// Recommended ceiling for production is
 	// routing.DefaultMaxNextHopsPerOrigin (4). The cap bucket is
-	// keyed by (Identity, Origin), and a direct route by
-	// construction has NextHop == Identity, so a single bucket holds
+	// per-Identity UplinkClaim storage; a direct route by
+	// construction has Uplink == Identity, so a single bucket holds
 	// at most one direct entry — direct routes do NOT stack across
 	// buckets. Setting K below the recommended ceiling does not
 	// "run out of slots for direct peers"; it tightens the
@@ -102,6 +114,44 @@ type Node struct {
 	// validation, on the assumption that the operator understands
 	// the trade-off.
 	MaxNextHopsPerOrigin int
+
+	// MaxSeqAdvancePerWindow caps the per-Identity outbound-SeqNo
+	// advance rate (Phase 1 P2 SeqNo flap cap). When more than this
+	// many fresh outbound-SeqNo allocations land for a single
+	// Identity inside SeqAdvanceWindow, `routing.Table.AnnounceTo`
+	// (via the internal `routeStore.AnnounceProjectionFor` layer)
+	// suppresses wire emit for that Identity for
+	// `routing.DefaultSeqHoldDownDuration` (DefaultTTL/2). Zero (or
+	// negative) disables the cap entirely — fast-loop test fixtures
+	// and the bare-Table default both leave it disabled so existing
+	// unit tests stay deterministic. Production default is
+	// routing.DefaultMaxSeqAdvancePerWindow (10) read from
+	// CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW; operators on noisy meshes
+	// can raise this if false positives surface during the rollout
+	// soak. See routing.RouteCapStats.SeqNoFlapHoldowns for the
+	// operator-facing counter that surfaces engage events.
+	MaxSeqAdvancePerWindow int
+
+	// SeqAdvanceWindow is the sliding-window length for the SeqNo
+	// flap-cap detector (Phase 1 P2). Outbound-SeqNo advances older
+	// than `now - window` are trimmed from the per-Identity
+	// velocity tracker on every record / clearExpired pass. Zero
+	// disables the cap entirely (same effect as
+	// MaxSeqAdvancePerWindow=0 — the bare-Table default). Production
+	// default is routing.DefaultSeqAdvanceWindow (5 min) read from
+	// CORSA_SEQNO_ADVANCE_WINDOW_SECONDS.
+	SeqAdvanceWindow time.Duration
+
+	// MaxSaneHops bounds the per-claim hop count above which a
+	// fresh ingest is fast-invalidated locally (Phase 1 P3). Claims
+	// with `Hops > MaxSaneHops` are recorded as tombstones at the
+	// observed SeqNo and dropped from Lookup immediately, sparing
+	// the next 120s TTL window the cost of steering traffic onto a
+	// count-to-infinity uplink. Zero (or negative) disables the
+	// path. Production default is routing.MaxSaneHops (8) read from
+	// CORSA_MAX_SANE_HOPS; operators on deep meshes can raise this
+	// if 9+ hop chains are routinely legitimate.
+	MaxSaneHops int
 
 	// AnnounceInterval overrides the periodic routing-announce cadence
 	// (env: CORSA_ANNOUNCE_INTERVAL_SECONDS). The default is
@@ -199,6 +249,9 @@ func Default() Config {
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
 	maxNextHopsPerOrigin := maxNextHopsPerOriginFromEnv()
+	maxSeqAdvancePerWindow := maxSeqAdvancePerWindowFromEnv()
+	seqAdvanceWindow := seqAdvanceWindowFromEnv()
+	maxSaneHops := maxSaneHopsFromEnv()
 	announceInterval := announceIntervalFromEnv()
 	overloadGoroutineThreshold := overloadGoroutineThresholdFromEnv()
 
@@ -229,6 +282,9 @@ func Default() Config {
 			MaxOutgoingPeers:           maxOutgoingPeers,
 			MaxIncomingPeers:           maxIncomingPeers,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
+			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
+			SeqAdvanceWindow:           seqAdvanceWindow,
+			MaxSaneHops:                maxSaneHops,
 			AnnounceInterval:           announceInterval,
 			OverloadGoroutineThreshold: overloadGoroutineThreshold,
 		},
@@ -516,14 +572,98 @@ func maxNextHopsPerOriginFromEnv() int {
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 0 {
 		// Unparsable or negative values fall back to the production
-		// default — same shape as maxClockDriftFromEnv. We
-		// deliberately do NOT log a warning here: this helper is
-		// invoked once during config loading and the operator-facing
-		// log line belongs at the call site, not in a generic env
-		// parser. An explicit "0" is NOT covered by this branch — it
-		// parses fine and falls through to the return below as the
+		// default — same shape as maxClockDriftFromEnv. No
+		// operator-facing log line is emitted (here or at the
+		// service call-site): the MaxNextHopsPerOrigin rename +
+		// deprecation surface is deferred to the Phase 6 cleanup
+		// window, and shipping a warn that operators would have
+		// to silence in dashboards for two phases provides no
+		// migration value today. An explicit "0" is NOT covered
+		// by this branch — it parses fine and falls through to the
+		// return below as the
 		// operator's deliberate cap-disabled signal.
 		return routing.DefaultMaxNextHopsPerOrigin
+	}
+	return value
+}
+
+// maxSeqAdvancePerWindowFromEnv reads CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW
+// and returns the SeqNo flap-cap threshold (Phase 1 P2). The production
+// default is routing.DefaultMaxSeqAdvancePerWindow (10) when the env
+// var is unset, whitespace-only, or unparsable; explicit "0" AND any
+// valid negative integer pass through unchanged and reach the routing
+// layer's `maxSeqAdvancePerWindow <= 0` short-circuit to disable the
+// cap. The negative pass-through matches the Node.MaxSeqAdvancePerWindow
+// doc-comment ("Zero (or negative) disables the cap entirely") and
+// gives operators a documented kill-switch — see also the
+// TestMaxSeqAdvancePerWindowFromEnv table-driven regression. This
+// shape DIFFERS from maxNextHopsPerOriginFromEnv on purpose: the K-cap
+// loader keeps the pre-P3 "negative coerces to default" semantic for
+// stable-knob compatibility (see TestMaxNextHopsPerOriginRolloutDefaults).
+func maxSeqAdvancePerWindowFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW"))
+	if raw == "" {
+		return routing.DefaultMaxSeqAdvancePerWindow
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		// Only malformed input falls back to the production default.
+		// A valid negative integer passes through and disables the
+		// cap in the routing layer (`maxSeqAdvancePerWindow <= 0`
+		// short-circuit in `FlapDetector.recordSeqAdvanceLocked`),
+		// matching the Node.MaxSeqAdvancePerWindow doc-comment
+		// ("Zero (or negative) disables the cap entirely"). Without
+		// the negative pass-through, `CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW=-1`
+		// would silently enable the production default (10), which
+		// contradicts the documented kill-switch contract.
+		return routing.DefaultMaxSeqAdvancePerWindow
+	}
+	return value
+}
+
+// seqAdvanceWindowFromEnv reads CORSA_SEQNO_ADVANCE_WINDOW_SECONDS and
+// returns the SeqNo flap-cap sliding-window length (Phase 1 P2). Zero
+// (or negative) disables the cap entirely (same effect as
+// MaxSeqAdvancePerWindow=0); production default is
+// routing.DefaultSeqAdvanceWindow (5 minutes). Operator-set values
+// pass through as Duration(seconds * time.Second).
+func seqAdvanceWindowFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CORSA_SEQNO_ADVANCE_WINDOW_SECONDS"))
+	if raw == "" {
+		return routing.DefaultSeqAdvanceWindow
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil {
+		// Same shape as maxSeqAdvancePerWindowFromEnv: only
+		// malformed input falls back to default. Negative passes
+		// through and disables the cap via the `seqAdvanceWindow <= 0`
+		// short-circuit in `FlapDetector.recordSeqAdvanceLocked` /
+		// `isInSeqHoldDownLocked`, matching the Node.SeqAdvanceWindow
+		// doc-comment.
+		return routing.DefaultSeqAdvanceWindow
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// maxSaneHopsFromEnv reads CORSA_MAX_SANE_HOPS and returns the fast-
+// invalidation hops threshold (Phase 1 P3). Zero or negative disables
+// the path (the routeStore admission flow returns early before the
+// fast-invalidation branch). Production default is routing.MaxSaneHops
+// (8) when the env var is unset; an explicit "0" (or any negative)
+// disables the cap.
+func maxSaneHopsFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_SANE_HOPS"))
+	if raw == "" {
+		return routing.MaxSaneHops
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		// Only malformed input falls back to default. Negative
+		// passes through and disables the fast-invalidation path
+		// via the `s.maxSaneHops > 0` gate in `ApplyUpdate`,
+		// matching the Node.MaxSaneHops doc-comment
+		// ("Zero (or negative) disables the path").
+		return routing.MaxSaneHops
 	}
 	return value
 }

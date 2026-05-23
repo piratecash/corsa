@@ -1068,14 +1068,10 @@ does not produce false negatives.
 
 **Progress:**
 
-- [ ] Implement incremental route announcements (delta since last announce per peer)
-- [ ] Track per-peer last-sent `SeqNo` for each route
-- [ ] Full table sync only on new peer session establishment
 - [ ] Replace `s.seen` map with rotating Bloom filter (2 filters, 5 min rotation)
 - [ ] Add RTT measurement to peer sessions (from ping/pong round-trip)
 - [ ] Add latency component to composite route metric
 - [ ] Implement announce compression for large route tables
-- [ ] Implement overload mode: adaptive backpressure, lower gossip fan-out, prioritize authenticated peers
 - [ ] Enforce hard limits for concurrent handshakes, frame decode budget, and queue growth budget
 - [ ] Protect against compression/decompression bombs and oversized frame payloads
 - [ ] Measure route announcement traffic as percentage of total
@@ -1085,7 +1081,6 @@ does not produce false negatives.
 - [ ] Load test: measure bandwidth savings from delta announcements
 - [ ] Load test: handshake/relay flood, verify controlled degradation without stopping honest traffic
 - [ ] Implement adaptive relay aggressiveness based on node degree: nodes with degree > `high_degree_threshold` (default 15) reduce gossip fanout ratio to dampen broadcast storms in dense clusters; low-degree nodes relay at full aggressiveness to ensure connectivity
-- [ ] Implement density-aware announce intervals: `announce_interval_dense` (default 60 s, when peer count > threshold) vs `announce_interval_sparse` (default 30 s) — adapts announcement frequency to network size, reducing overhead in large networks
 - [ ] Implement signed route announcements (capability `mesh_attested_links_v1`): Ed25519 signature covering `identity_fingerprint || box_public_key || timestamp || route_table_hash` — prevents route announcement spoofing without the signing key; unsigned announcements still accepted from nodes without the capability (backward compatible)
 - [ ] Unit test: high-degree node reduces fanout ratio; low-degree node relays at full rate
 - [ ] Unit test: dense announce interval applied when peer count > threshold

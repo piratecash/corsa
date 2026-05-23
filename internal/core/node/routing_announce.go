@@ -995,11 +995,16 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 				wireRoute.SeqNo,
 			) {
 				accepted++
-				// After withdrawing the best triple, a less-preferred backup
-				// route may now be the active path. If Lookup still returns
-				// reachable entries for this identity, trigger a drain so
-				// pending send_message frames can be delivered via the backup
-				// route immediately instead of waiting for the retry loop.
+				// After withdrawing the (Identity, Uplink) claim we
+				// just tombstoned, a less-preferred backup claim via
+				// a different uplink may now be the active path
+				// (post-Phase-A storage keys per (Identity, Uplink),
+				// so other uplinks for this Identity are untouched
+				// by this withdrawal). If Lookup still returns
+				// reachable entries for this identity, trigger a
+				// drain so pending send_message frames can be
+				// delivered via the backup route immediately instead
+				// of waiting for the retry loop.
 				if remaining := s.routingTable.Lookup(withdrawnID); len(remaining) > 0 {
 					drainIdentities[withdrawnID] = struct{}{}
 				}

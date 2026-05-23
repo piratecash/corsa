@@ -35,9 +35,11 @@ type RoutingDecision struct {
 	RelayNextHopAddress domain.PeerAddress
 
 	// RelayRouteOrigin is the Origin field from the RouteEntry selected by
-	// the router. Stored in relayForwardState so that hop_ack confirmation
-	// can match the exact (Identity, Origin, NextHop) triple that carried
-	// the message, rather than promoting any route with a matching NextHop.
+	// the router. Retained on the struct for plumbing-stability across the
+	// relay → hop_ack path, but IGNORED for route promotion post-Phase-A:
+	// the routing table now keys on (Identity, Uplink), and
+	// confirmRouteViaHopAck matches on (Identity, NextHop) only. See
+	// internal/core/node/routing_hop_ack.go for the migration note.
 	// Empty when RelayNextHop is nil.
 	RelayRouteOrigin domain.PeerIdentity
 

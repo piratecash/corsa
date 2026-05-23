@@ -185,11 +185,15 @@ func TestUpdateRouteRejectedDoesNotMarkDirty(t *testing.T) {
 }
 
 // TestUpdateRouteUnchangedDirtyContract pins the dirty contract for the
-// three RouteUnchanged sub-paths inside UpdateRoute. Only the exact-
-// reconfirmation branch rewrites ExpiresAt — the others observe the entry
-// without mutating it and must leave dirty untouched, otherwise every
-// stable-network announce tick would force a snapshot rebuild and defeat
-// the dirty-flag economy.
+// three RouteUnchanged sub-paths inside UpdateRoute. After the round-5o
+// reconfirmation-gate weakening the refresh fires on same-SeqNo +
+// same-Hops irrespective of stored Source (a weaker incoming after a
+// hop_ack promotion still refreshes TTL — see route_store_mutation.go's
+// reconfirmation block doc-comment for why the previous Source-equality
+// requirement was a bug). The only RouteUnchanged sub-path that must
+// stay clean is the hops-divergence one (different hops → no refresh
+// → no dirty), which keeps the dirty-flag economy intact for the
+// hops-mismatch scenario the original concern targeted.
 func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 
@@ -242,10 +246,27 @@ func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 		}
 	})
 
-	t.Run("weaker_source_keeps_clean", func(t *testing.T) {
+	t.Run("weaker_source_refreshes_ttl_marks_dirty", func(t *testing.T) {
 		// Seed with hop_ack (trust=1), then deliver an announcement
-		// (trust=0) at the same SeqNo: weaker trust path, no rewrite,
-		// no dirty.
+		// (trust=0) at the same SeqNo + same Hops. This is the
+		// post-hop_ack forced-full-sync TTL-refresh scenario:
+		// confirmRouteViaHopAck promoted the stored Source up to
+		// HopAck, but the upstream's subsequent forced-full-sync
+		// frame is always Source=Announcement (hop_ack rides a
+		// separate frame; ANNOUNCE never carries Source=HopAck).
+		// The reconfirmation path must still refresh ExpiresAt so
+		// confirmed routes do not age out by TTL despite being
+		// actively re-announced. ExpiresAt rewrite → dirty mark
+		// (snapshot republish carries the new ttl_seconds field).
+		//
+		// The "dirty-flag economy" concern (preventing snapshot
+		// rebuilds on stable-network tick noise) is preserved by
+		// the hops-divergence path (`worse_hops_same_source_keeps_
+		// clean`): weaker hops still skip the refresh and keep
+		// dirty clean. Source mismatch alone is not a sufficient
+		// signal to skip refresh — it merely reflects the stored
+		// claim's promotion history, not a wire-frame
+		// disagreement.
 		tbl := NewTable(WithClock(fixedClock(now)))
 		mustUpdate(t, tbl, RouteEntry{
 			Identity: "alice", Origin: "bob", NextHop: "charlie",
@@ -263,8 +284,8 @@ func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 		if status != RouteUnchanged {
 			t.Fatalf("expected RouteUnchanged, got %v", status)
 		}
-		if tbl.IsDirty() {
-			t.Fatal("weaker-source tie marked dirty; nothing was rewritten")
+		if !tbl.ConsumeDirty() {
+			t.Fatal("weaker-source same-hops tie did not mark dirty; TTL refresh must trigger republish")
 		}
 	})
 }
@@ -498,9 +519,11 @@ func TestTickTTLClearsExpiredHoldDownAndMarksDirty(t *testing.T) {
 func TestUpdateRouteCapRejectionMarksDirty(t *testing.T) {
 	tbl := NewTable(WithMaxNextHopsPerOrigin(1))
 
-	// Saturate the (Identity, Origin) bucket with one hop_ack — it
-	// will protect against further hop_ack admissions of the same or
-	// worse rank.
+	// Saturate the per-Identity bucket with one hop_ack — it will
+	// protect against further hop_ack admissions of the same or
+	// worse rank. (Post-Phase-A the cap bucket is per-Identity with
+	// per-(Identity, Uplink) dedup — Origin was dropped from the
+	// dedup key, see uplink_claim.go.)
 	mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "bob", NextHop: "hop-a",
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,

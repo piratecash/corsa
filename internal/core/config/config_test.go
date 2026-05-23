@@ -472,3 +472,99 @@ func TestDefaultConfigActivatesCapAtRecommendedCeiling(t *testing.T) {
 		t.Fatalf("Default().Node.MaxNextHopsPerOrigin = %d, want %d", got, want)
 	}
 }
+
+// TestMaxSeqAdvancePerWindowFromEnv pins the kill-switch contract on
+// Node.MaxSeqAdvancePerWindow doc-comment: "Zero (or negative)
+// disables the cap entirely". Unset / malformed / whitespace-only
+// inputs fall back to the production default
+// (routing.DefaultMaxSeqAdvancePerWindow = 10). Negative integers
+// MUST pass through unchanged — they reach
+// FlapDetector.recordSeqAdvanceLocked's `maxSeqAdvancePerWindow <= 0`
+// short-circuit and disable the cap, matching the documented
+// operator contract. Without the pass-through,
+// CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW=-1 would silently activate the
+// production default (10), contradicting the documented kill-switch.
+func TestMaxSeqAdvancePerWindowFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"unset_uses_production_default", "", routing.DefaultMaxSeqAdvancePerWindow},
+		{"explicit_zero_disables_cap", "0", 0},
+		{"negative_disables_cap_per_doc", "-1", -1},
+		{"explicit_positive_passes_through", "25", 25},
+		{"unparsable_falls_back_to_default", "abc", routing.DefaultMaxSeqAdvancePerWindow},
+		{"whitespace_only_treated_as_unset", "   ", routing.DefaultMaxSeqAdvancePerWindow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW", tc.raw)
+			got := maxSeqAdvancePerWindowFromEnv()
+			if got != tc.want {
+				t.Fatalf("maxSeqAdvancePerWindowFromEnv() = %d, want %d (raw=%q)", got, tc.want, tc.raw)
+			}
+		})
+	}
+}
+
+// TestSeqAdvanceWindowFromEnv mirrors TestMaxSeqAdvancePerWindowFromEnv
+// for the sliding-window length: negative seconds pass through as a
+// negative time.Duration that disables the cap via
+// `FlapDetector.seqAdvanceWindow <= 0`. Production default for unset
+// / malformed inputs is routing.DefaultSeqAdvanceWindow (5 min).
+func TestSeqAdvanceWindowFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"unset_uses_production_default", "", routing.DefaultSeqAdvanceWindow},
+		{"explicit_zero_disables_cap", "0", 0},
+		{"negative_disables_cap_per_doc", "-1", -1 * time.Second},
+		{"explicit_positive_passes_through", "120", 120 * time.Second},
+		{"unparsable_falls_back_to_default", "abc", routing.DefaultSeqAdvanceWindow},
+		{"whitespace_only_treated_as_unset", "   ", routing.DefaultSeqAdvanceWindow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CORSA_SEQNO_ADVANCE_WINDOW_SECONDS", tc.raw)
+			got := seqAdvanceWindowFromEnv()
+			if got != tc.want {
+				t.Fatalf("seqAdvanceWindowFromEnv() = %v, want %v (raw=%q)", got, tc.want, tc.raw)
+			}
+		})
+	}
+}
+
+// TestMaxSaneHopsFromEnv pins the kill-switch contract on
+// Node.MaxSaneHops doc-comment: "Zero (or negative) disables the
+// path". Negative integers MUST pass through unchanged — they reach
+// the `s.maxSaneHops > 0` gate in ApplyUpdate's fast-invalidation
+// branch and disable the path, matching the documented operator
+// contract. Without the pass-through, CORSA_MAX_SANE_HOPS=-1 would
+// silently activate the production default (routing.MaxSaneHops=8),
+// contradicting the documented kill-switch.
+func TestMaxSaneHopsFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"unset_uses_production_default", "", routing.MaxSaneHops},
+		{"explicit_zero_disables_cap", "0", 0},
+		{"negative_disables_cap_per_doc", "-1", -1},
+		{"explicit_positive_passes_through", "12", 12},
+		{"unparsable_falls_back_to_default", "abc", routing.MaxSaneHops},
+		{"whitespace_only_treated_as_unset", "   ", routing.MaxSaneHops},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CORSA_MAX_SANE_HOPS", tc.raw)
+			got := maxSaneHopsFromEnv()
+			if got != tc.want {
+				t.Fatalf("maxSaneHopsFromEnv() = %d, want %d (raw=%q)", got, tc.want, tc.raw)
+			}
+		})
+	}
+}

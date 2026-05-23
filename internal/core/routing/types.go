@@ -60,20 +60,92 @@ const (
 	FlapStableWindowMultiplier = 2
 )
 
+// SeqNo flap cap defaults (Phase 1 P2). The cap bounds the rate at
+// which a single Identity's outbound wire SeqNo can advance, so a
+// misbehaving peer that announces high-frequency SeqNo bumps cannot
+// drive AnnounceLoop's wire emit + snapshot rebuild cycle
+// indefinitely. The cap protects the per-cycle delta dispatcher, the
+// per-peer announce baseline cache, and the CPU cost of
+// BuildAnnounceSnapshot from a single Identity hot-loop.
+//
+// Defaults:
+//
+//   - DefaultMaxSeqAdvancePerWindow: 10 outbound-SeqNo advances per
+//     sliding window before hold-down engages. Operators on noisy
+//     meshes can raise this via CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW.
+//   - DefaultSeqAdvanceWindow: 5-minute sliding window. Tunable via
+//     CORSA_SEQNO_ADVANCE_WINDOW_SECONDS.
+//   - DefaultSeqHoldDownDuration: DefaultTTL/2 (60s on defaults).
+//     NOT separately tunable — preserves the refresh-interval
+//     invariant EffectiveForcedFullSyncInterval <= DefaultTTL/2,
+//     so a hold-down cannot be shorter than the receiver-side TTL
+//     window that the suppression must outlast.
+//
+// Hold-down semantics: receive-side ingest keeps processing announces
+// (local stored state stays accurate); wire emit for the Identity to
+// ALL peers is suppressed for DefaultSeqHoldDownDuration; ApplyUpdate
+// rejects incoming announces whose outbound-projected SeqNo would
+// advance past `observed+1` while hold-down is active. The full
+// contract — including detection model, observability surface, and
+// interaction with the other Phase 1 admission rules — is documented
+// in docs/routing.md under "SeqNo flap cap"; the engage / release
+// log fields are pinned by the FlapDetector docstring in flap.go.
+const (
+	DefaultMaxSeqAdvancePerWindow = 10
+	DefaultSeqAdvanceWindow       = 5 * time.Minute
+	DefaultSeqHoldDownDuration    = DefaultTTL / 2
+)
+
+// MaxSaneHops bounds the per-claim hop count above which a fresh
+// ingest is fast-invalidated locally (Phase 1 P3). DV protocols
+// self-bound at HopsInfinity (16); a claim approaching that bound is
+// almost always a routing loop or a pre-loop convergence stage —
+// admitting it just delays the inevitable and steers send_message /
+// relay traffic onto a known-doomed uplink for up to TTL.
+//
+// Default 8 leaves comfortable headroom over typical mesh diameters
+// (5-6 hops for a 100-node mesh) while still catching count-to-
+// infinity loops early. Operators on deep meshes can override via
+// CORSA_MAX_SANE_HOPS.
+//
+// Fast-invalidation semantics: the bad claim is stored as a
+// tombstone at incoming.SeqNo (NO bump — the upstream's next legit
+// advance must strictly exceed the observed bad SeqNo for recovery)
+// with ExpiresAt=now+defaultTTL. Wire emit suppression is automatic
+// because AnnounceProjectionFor only emits own-direct tombstones
+// (Source == RouteSourceDirect) and fast-invalidated transit claims
+// stay Source != Direct. The full contract — including the order
+// of checks against the cross-Origin admission rules — is
+// documented inline in route_store_mutation.go's ApplyUpdate fast-
+// invalidation branch and in docs/routing.md under "RIB compaction".
+const MaxSaneHops = 8
+
 // DefaultMaxNextHopsPerOrigin is the recommended ceiling for the
-// "K next-hops per (Identity, Origin) pair" cap that bounds local RIB
-// growth on large meshes. Without a cap the table grows O(N×M) — N
+// "K next-hops per Identity" cap that bounds local RIB growth on
+// large meshes. Without a cap the table grows O(N×M) — N
 // destinations × M next-hops that learned the route — which on a
 // 1000-node mesh produces hundreds of thousands of entries and turns
 // every full-table snapshot into a multi-megabyte deep copy.
 //
+// Storage shape note: post-Phase-A the cap bounds the count of LIVE
+// (non-withdrawn) UplinkClaim rows in each (Identity) bucket — see
+// route_store.go's bucket layout and uplink_claim.go's type-level
+// doc-comment for why Origin was dropped from the dedup key. The
+// constant name keeps the historical "PerOrigin" suffix purely for
+// operator-facing knob stability (env var name, config field name,
+// dashboards keyed on the metric label); semantically it is
+// "max LIVE uplinks per Identity" today. Tombstones (withdrawn
+// claims) live OUTSIDE the K-counted slots so the SeqNo-resurrection
+// guard cannot be evicted under cap pressure.
+//
 // Four is enough to keep multipath behaviour intact (primary + 1 backup
-// + 1 spare for probing + 1 inertial slot) while bounding the per-pair
-// memory footprint at a constant. Operators can override per-deployment
-// via the WithMaxNextHopsPerOrigin Table option, or — when constructing
-// the Service from configuration — via config.Node.MaxNextHopsPerOrigin
-// (env var CORSA_MAX_NEXT_HOPS_PER_ORIGIN), which the loader threads
-// through to the Table constructor.
+// + 1 spare for probing + 1 inertial slot) while bounding the per-
+// Identity memory footprint at a constant. Operators can override
+// per-deployment via the WithMaxNextHopsPerOrigin Table option, or —
+// when constructing the Service from configuration — via
+// config.Node.MaxNextHopsPerOrigin (env var
+// CORSA_MAX_NEXT_HOPS_PER_ORIGIN), which the loader threads through
+// to the Table constructor.
 //
 // Two distinct defaults apply at different layers:
 //
@@ -88,19 +160,19 @@ const (
 //     pre-cap behaviour exactly during the soak period; the second
 //     release flipped the config-layer default to 4. Operators that
 //     need to roll back set CORSA_MAX_NEXT_HOPS_PER_ORIGIN=0
-//     explicitly. See docs/routing-rib-compaction-and-snapshot-refactor.md
-//     §10 for the rollout history.
+//     explicitly.
 const DefaultMaxNextHopsPerOrigin = 4
 
 // RouteAdmissionDecision describes how the cap admission policy
 // resolved an incoming RouteEntry that did not match an existing
-// (Identity, Origin, NextHop) triple. It is INTERNAL to the cap
-// admission helpers (admitNewLocked, admitDirectLocked) and is NOT
-// returned from public Table APIs — callers of UpdateRoute see only
-// the coarser RouteUpdateStatus (Accepted / Unchanged / Rejected),
-// which intentionally collapses cap-induced rejections and
-// stale-SeqNo rejections into the same outward signal because both
-// share the same caller obligation ("drop and move on").
+// (Identity, Uplink=NextHop) claim. It is INTERNAL to the cap
+// admission helpers (routeStore.AdmitNew, routeStore.AdmitDirect)
+// and is NOT returned from public Table APIs — callers of
+// UpdateRoute see only the coarser RouteUpdateStatus
+// (Accepted / Unchanged / Rejected), which intentionally collapses
+// cap-induced rejections and stale-SeqNo rejections into the same
+// outward signal because both share the same caller obligation
+// ("drop and move on").
 //
 // The decision surfaces externally only via the aggregate counters
 // in RouteCapStats (published into routing.Snapshot.CapStats and
@@ -108,16 +180,16 @@ const DefaultMaxNextHopsPerOrigin = 4
 // distinguish cap pressure from stale-SeqNo churn by reading those
 // monotonic counters, not per-call diagnostics. If a future caller
 // needs per-call distinction, the decision must be plumbed out of
-// admit*Locked and onto a new public return value — not inferred
-// from RouteUpdateStatus.
+// routeStore.Admit* and onto a new public return value — not
+// inferred from RouteUpdateStatus.
 type RouteAdmissionDecision uint8
 
 const (
 	// AdmissionAccepted means the entry was inserted into a
-	// (Identity, Origin) bucket that had room — no eviction required.
+	// per-Identity UplinkClaim bucket that had room — no eviction required.
 	AdmissionAccepted RouteAdmissionDecision = iota
 
-	// AdmissionAcceptedReplaced means the (Identity, Origin) bucket was
+	// AdmissionAcceptedReplaced means the per-Identity UplinkClaim bucket was
 	// at the cap and a worse existing candidate was evicted to make
 	// room. The displaced entry is dropped silently — there is no
 	// per-call "admission diagnostic" surfacing the replaced
@@ -126,7 +198,7 @@ const (
 	// (`AcceptedReplaced`).
 	AdmissionAcceptedReplaced
 
-	// AdmissionRejectedFull means the (Identity, Origin) bucket was at
+	// AdmissionRejectedFull means the per-Identity UplinkClaim bucket was at
 	// the cap and the incoming entry was not strictly better than the
 	// worst evictable candidate. The incoming entry is dropped — caller
 	// must NOT insert it. This is the "cap eviction floor" path that
@@ -134,26 +206,27 @@ const (
 	// best-K when the bucket is saturated with already-good routes.
 	AdmissionRejectedFull
 
-	// AdmissionRejectedAllProtected means the (Identity, Origin) bucket
+	// AdmissionRejectedAllProtected means the per-Identity UplinkClaim bucket
 	// was at the cap and every existing entry was direct or local —
 	// none were evictable. The incoming entry is dropped because direct
 	// routes represent live sessions that the table must never displace
 	// implicitly: only the session lifecycle (RemoveDirectPeer on
 	// disconnect) may retire them.
 	//
-	// In practice this branch is rare: the bucket is keyed by
-	// (Identity, Origin), and a direct route by construction has
-	// NextHop == Identity, so a single bucket can hold at most ONE
-	// direct entry (the row that represents the live session to that
-	// specific destination peer). The local entry is the synthetic
-	// self-route, which is also at most one per bucket, and only for
-	// the local origin's own destination. So "every member is
-	// direct/local" can really only mean "K is very small (most often
-	// K=1), the single protected slot in this bucket is held by the
-	// direct/local row, and an announcement / hop_ack for a different
-	// next-hop arrived". Operators seeing a non-zero counter with
-	// K≥2 should investigate synthetic / test fixtures or a
-	// direct-restore edge case rather than fan-out sizing.
+	// In practice this branch is rare: post-Phase-A the bucket is
+	// keyed by (Identity, Uplink) and a direct route by construction
+	// has Uplink == Identity, so a single Identity bucket can hold
+	// at most ONE direct entry (the row that represents the live
+	// session to that specific destination peer). The local entry
+	// is the synthetic self-route, which is also at most one per
+	// Identity and only for the local origin's own destination. So
+	// "every member is direct/local" can really only mean "K is
+	// very small (most often K=1), the single protected slot in
+	// this Identity bucket is held by the direct/local row, and
+	// an announcement / hop_ack for a different uplink arrived".
+	// Operators seeing a non-zero counter with K≥2 should
+	// investigate synthetic / test fixtures or a direct-restore
+	// edge case rather than fan-out sizing.
 	AdmissionRejectedAllProtected
 )
 
@@ -255,18 +328,35 @@ func (s RouteSource) TrustRank() int {
 	}
 }
 
-// RouteEntry represents a single route in the distance-vector table.
+// RouteEntry is the boundary value of a single route in the
+// distance-vector table — the shape Table.UpdateRoute / AnnounceTo /
+// Lookup pass on their public surface. It is NOT identical to the
+// wire frame: announce_routes frames carry AnnounceEntry, which has
+// (Identity, Origin, Hops, SeqNo, Extra) and no NextHop (the
+// receiver knows the next-hop is the sender of the frame, so the
+// wire never serialises it).
 //
-// Dedup key: (Identity, Origin, NextHop) — this triple uniquely identifies
-// a route lineage. Two entries with the same triple are the same route at
-// different points in time; the one with the higher SeqNo wins.
+// Storage shape is different again. Post-Phase-A the routing table
+// stores per-(Identity, Uplink) UplinkClaim values; Origin is
+// consumed by Table.UpdateRoute for the foreign-origin Direct anti-
+// spoof and then dropped, and Lookup output synthesises Origin =
+// localOrigin (or Identity fallback). The post-A1 dedup key inside
+// storage is (Identity, Uplink=NextHop); the legacy (Identity,
+// Origin, NextHop) triple is gone. Origin remains on RouteEntry
+// only as wire-frame metadata for pre-A1 receiver compat. See
+// uplink_claim.go and table_mutation.go::UpdateRoute for the
+// migration contract.
 type RouteEntry struct {
 	// Identity is the Ed25519 fingerprint of the destination node.
 	Identity PeerIdentity
 
-	// Origin is the peer identity that originally advertised this route.
-	// Only the origin may advance SeqNo or send a withdrawal (hops=16)
-	// on the wire.
+	// Origin is the peer identity that originally advertised this route
+	// on the wire. Pre-A1 it scoped SeqNo space and decided who was
+	// allowed to send a withdrawal (hops=16). Post-A1 it is wire-only
+	// metadata: ingest consumes it for the foreign-Origin Direct anti-
+	// spoof (Table.UpdateRoute), and emit always synthesises it to
+	// localOrigin (or Identity fallback). Storage does NOT key on
+	// Origin anymore — see the type-level doc-comment above.
 	Origin PeerIdentity
 
 	// NextHop is the peer identity from which we learned this route.
@@ -278,13 +368,21 @@ type RouteEntry struct {
 	// HopsInfinity (16) means withdrawn.
 	Hops int
 
-	// SeqNo is a monotonically increasing sequence number scoped to the
-	// Origin. Only the origin may advance it. Comparison is valid only
-	// between entries sharing the same (Identity, Origin) pair.
+	// SeqNo is a monotonically increasing sequence number. Pre-A1 it was
+	// scoped per Origin (only the origin could advance it). Post-A1 the
+	// wire SeqNo is synthesised per (Identity, sender) by
+	// routeStore.nextOutboundSeqLockedPerPeer /
+	// nextOutboundSeqLockedBroadcast — see route_store.go's outboundContent
+	// + outboundMax + outboundPeerMax field doc-comments. Storage still
+	// keeps the native SeqNo on the UplinkClaim (used as the lower bound
+	// for outbound synthesis and for the ApplyUpdate freshness check).
+	// Within a single Identity's stored claims, the higher native SeqNo
+	// still wins the live-vs-tombstone resurrection guard.
 	SeqNo uint64
 
 	// Source indicates how this route was learned. Used for trust-based
-	// tie-breaking within the same (Identity, Origin, NextHop) triple.
+	// tie-breaking within the same (Identity, Uplink) pair post-Phase-A
+	// (storage no longer keys on Origin — see the type-level doc-comment).
 	Source RouteSource
 
 	// ExpiresAt is the absolute time when this entry expires. Derived from
@@ -333,7 +431,11 @@ func (e RouteEntry) Validate() error {
 }
 
 // IsWithdrawn returns true if the route has been explicitly withdrawn
-// (hops == HopsInfinity) or has expired.
+// (hops >= HopsInfinity). Expiry is a SEPARATE check — see
+// IsExpired(now). The two predicates are orthogonal: a withdrawn
+// route can also be expired (TickTTL hasn't reclaimed it yet), and
+// an expired route can still be non-withdrawn (the upstream stopped
+// re-announcing but never sent a withdrawal frame).
 func (e RouteEntry) IsWithdrawn() bool {
 	return e.Hops >= HopsInfinity
 }
@@ -345,7 +447,13 @@ func (e RouteEntry) IsExpired(now time.Time) bool {
 	return !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt)
 }
 
-// DedupKey returns the triple that uniquely identifies a route lineage.
+// DedupKey returns the legacy (Identity, Origin, NextHop) triple
+// shape of the entry. Post-Phase-A storage keys on (Identity,
+// Uplink) per uplink_claim.go; this helper is retained only for
+// diagnostic / RPC outputs that still serialise the triple form
+// for backward compatibility with pre-A1 tooling. New callers
+// should not use it as a storage key — see UplinkClaim and
+// routeStore.findByUplinkLocked.
 func (e RouteEntry) DedupKey() RouteTriple {
 	return RouteTriple{
 		Identity: e.Identity,
@@ -448,39 +556,65 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 	}
 }
 
-// RouteCapStats captures monotonic counters for the
-// MaxNextHopsPerOrigin admission policy. Counters cover the full
-// admission surface — UpdateRoute (announce / hop_ack ingestion via
-// admitNewLocked) AND AddDirectPeer (direct registration via
-// admitDirectLocked) — but the two helpers do not contribute
-// symmetrically: only admitNewLocked uses every counter, and
-// admitDirectLocked only ever bumps AcceptedReplaced (saturated
-// direct admission displacing an evictable row), while a below-K
-// direct registration is intentionally silent. See each field's
-// docstring for the exact accounting. The struct is value-safe to
-// copy — it is published as part of routing.Snapshot and read
-// lock-free by fetchRouteSummary.
+// RouteCapStats captures monotonic counters for three INDEPENDENT
+// admission / invalidation policies that share a JSON envelope:
 //
-// All fields stay at zero on a Table with the cap disabled
-// (maxNextHopsPerOrigin <= 0): both admission helpers short-circuit
-// before any counter is touched. That keeps the deployment-default
-// configuration noise-free in observability dashboards.
+//  1. MaxNextHopsPerOrigin admission (Accepted, AcceptedReplaced,
+//     RejectedFull, RejectedAllProtected). Covers the full admission
+//     surface — UpdateRoute (announce / hop_ack ingestion via
+//     routeStore.AdmitNew) AND AddDirectPeer (direct registration via
+//     routeStore.AdmitDirect) — but the two helpers do not contribute
+//     symmetrically: only AdmitNew uses every counter, and AdmitDirect
+//     only ever bumps AcceptedReplaced (saturated direct admission
+//     displacing an evictable row), while a below-K direct
+//     registration is intentionally silent. See each field's
+//     docstring for the exact accounting.
+//  2. SeqNo flap cap (SeqNoFlapHoldowns). Phase 1 P2; gated by the
+//     `maxSeqAdvancePerWindow` + `seqAdvanceWindow` knobs on
+//     FlapDetector.
+//  3. Fast invalidation on hops > MaxSaneHops (FastInvalidations).
+//     Phase 1 P3; gated by the `maxSaneHops` knob on routeStore.
+//
+// The struct is value-safe to copy — it is published as part of
+// routing.Snapshot and read lock-free by fetchRouteSummary.
+//
+// Per-cap kill-switch contract:
+//
+//   - The K-cap counters (Accepted / AcceptedReplaced / RejectedFull
+//     / RejectedAllProtected) stay at zero on a Table with the cap
+//     disabled (maxNextHopsPerOrigin <= 0): both admission helpers
+//     short-circuit before any counter is touched.
+//   - SeqNoFlapHoldowns stays at zero when EITHER the P2 threshold
+//     OR the P2 window is non-positive (the FlapDetector
+//     short-circuit), independently of the K-cap.
+//   - FastInvalidations stays at zero when maxSaneHops <= 0 (the
+//     ApplyUpdate fast-invalidation gate), independently of the
+//     K-cap and the P2 cap.
+//
+// Operators reading the cap_admission JSON object must therefore
+// gate their dashboards / alerts on the relevant knob (NOT on
+// MaxNextHopsPerOrigin alone) — disabling the K-cap does NOT
+// silence the P2/P3 counters.
 type RouteCapStats struct {
-	// Accepted counts entries that fit into a (Identity, Origin) bucket
-	// with room — no eviction was required. Sourced exclusively from
-	// admitNewLocked (UpdateRoute). admitDirectLocked deliberately
-	// does NOT bump this counter on a below-K direct registration:
-	// the cap's "eviction rate" metric (see AcceptedReplaced) is
-	// meant to reflect cap pressure on transit/announcement traffic,
-	// and including every direct add would dilute it with steady
-	// per-connect noise.
+	// Accepted counts entries that fit into a per-Identity UplinkClaim
+	// bucket with room — no eviction was required. Sourced exclusively
+	// from routeStore.AdmitNew (UpdateRoute). routeStore.AdmitDirect
+	// deliberately does NOT bump this counter on a below-K direct
+	// registration: the cap's "eviction rate" metric (see
+	// AcceptedReplaced) is meant to reflect cap pressure on
+	// transit/announcement traffic, and including every direct add
+	// would dilute it with steady per-connect noise.
+	//
+	// Post-Phase-A the cap-admission bucket is per-Identity (storage
+	// dropped the Origin dimension — see uplink_claim.go); the
+	// pre-A1 (Identity, Origin)-keyed bucket is gone.
 	Accepted uint64
 
 	// AcceptedReplaced counts entries that were admitted by displacing
-	// the worst evictable existing entry. Both admitNewLocked
+	// the worst evictable existing entry. Both routeStore.AdmitNew
 	// (announce / hop_ack pushed a strictly-better row through a
-	// saturated bucket) and admitDirectLocked (direct registration on
-	// a saturated bucket — direct admission cannot be rejected, so
+	// saturated bucket) and routeStore.AdmitDirect (direct registration
+	// on a saturated bucket — direct admission cannot be rejected, so
 	// the cap evicts to make room) contribute here. Together with
 	// Accepted this gives the cap "eviction rate"
 	// (AcceptedReplaced / (Accepted + AcceptedReplaced)) signal that
@@ -500,17 +634,51 @@ type RouteCapStats struct {
 
 	// RejectedAllProtected counts entries dropped because every entry
 	// in the saturated bucket was direct or local — none could be
-	// evicted by the cap. The bucket is keyed by (Identity, Origin)
-	// and a direct route by construction has NextHop == Identity,
-	// so a single bucket holds at most one direct + one local entry
-	// — direct routes do NOT stack across buckets. A non-zero
-	// counter is therefore a sanity signal for the K=1 corner case
-	// (the single slot is held by the direct/local row and a
-	// non-direct arrival has no slot) or for synthetic / test /
-	// direct-restore edge cases, NOT a fan-out diagnostic. With
-	// K≥2 a non-zero counter usually points at fixture state, not
-	// at undersizing the cap.
+	// evicted by the cap. The bucket is per-Identity UplinkClaim
+	// storage (post-Phase-A, no Origin dimension); a direct route by
+	// construction has Uplink == Identity, so a single bucket holds
+	// at most one direct + one local entry — direct routes do NOT
+	// stack across buckets. A non-zero counter is therefore a sanity
+	// signal for the K=1 corner case (the single slot is held by the
+	// direct/local row and a non-direct arrival has no slot) or for
+	// synthetic / test / direct-restore edge cases, NOT a fan-out
+	// diagnostic. With K≥2 a non-zero counter usually points at
+	// fixture state, not at undersizing the cap.
 	RejectedAllProtected uint64
+
+	// SeqNoFlapHoldowns counts how many times the per-Identity SeqNo
+	// flap cap engaged hold-down (Phase 1 P2). Hold-down suppresses
+	// all wire emits for a single Identity for DefaultSeqHoldDownDuration
+	// after the per-Identity outbound-SeqNo advance count crosses
+	// MaxSeqAdvancePerWindow inside the SeqAdvanceWindow sliding
+	// window. A non-zero counter means at least one upstream lineage
+	// drove our outbound SeqNo namespace forward fast enough to trip
+	// the cap — usually a count-to-infinity loop, a hostile
+	// retransmission storm, or a buggy peer. Together with the
+	// per-hold-down warn-level log this is the only externally
+	// visible signal that the cap is firing.
+	//
+	// Counter is monotonic: each hold-down ARMING bumps the count
+	// once; subsequent advances during an active hold-down are
+	// suppressed (no re-arm during hold-down). Hold-down expiry by
+	// TickTTL does not decrement.
+	SeqNoFlapHoldowns uint64
+
+	// FastInvalidations counts fast-invalidation events triggered by
+	// hops > MaxSaneHops on incoming ingest (Phase 1 P3). The bad
+	// claim is recorded as a tombstone at incoming.SeqNo so the
+	// SeqNo-resurrection guard for the (Identity, Uplink) pair
+	// remains intact, and AnnounceProjectionFor's "only own-direct
+	// tombstones emit on the wire" rule (Source == Direct) makes the
+	// invalidation strictly local — there is no count-to-infinity
+	// withdrawal frame we would forward on the upstream's behalf.
+	//
+	// Each accepted invalidation bumps the counter once; stale
+	// invalidations (incoming.SeqNo <= old.SeqNo) are dropped and
+	// do NOT bump. Phase 1 ships a single bucket; Phase 2 will
+	// split it into by_hop_limit / by_hop_ack_timeout sub-counters
+	// when the hop_ack timeout path lands.
+	FastInvalidations uint64
 }
 
 // OverloadStats captures cumulative counters for the announce-loop
