@@ -135,3 +135,19 @@ func (s *Service) OverloadStats() routing.OverloadStats {
 		EngagedCycles: s.announceLoop.OverloadCycleCount(),
 	}
 }
+
+// HealthSnapshot returns the Phase 2 per-(Identity, Uplink)
+// RouteHealthState snapshot for fetchRouteHealth RPC observability.
+// Delegates to routing.Table.HealthSnapshot which takes t.mu.RLock
+// and returns a deep-copied slice; safe to publish lock-free.
+//
+// Returns nil when the routing table is not wired (legacy test
+// fixtures) or when no health entries are tracked yet.
+//
+// Implements rpc.RoutingProvider.
+func (s *Service) HealthSnapshot() []routing.RouteHealthState {
+	if s.routingTable == nil {
+		return nil
+	}
+	return s.routingTable.HealthSnapshot()
+}

@@ -129,8 +129,18 @@ func TestTableRouterNoSessionGossipFallback(t *testing.T) {
 func TestTableRouterPrefersBetterRoute(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 
-	// Two routes: hop_ack via peer-B (2 hops) and announcement via peer-C (1 hop).
-	// hop_ack should be preferred (higher trust).
+	// Phase 2 changed Lookup ranking from "source-tier first, then
+	// hops" to a single CompositeScore (base − hops×10 + RTTBonus +
+	// healthPenalty + sourceBonus). At equal hops the source bonus
+	// (+20 Direct / +10 HopAck / +0 Announcement) decides the
+	// ordering, which is what this test asserts. At unequal hops
+	// the new ranking is additive — see
+	// docs/protocol/route_health.md §4.2. The original
+	// test used hops=3 vs hops=2, which after Phase 2 ties at score
+	// 80 vs 80; equalised here to 2 vs 2 so the source-priority
+	// invariant the test is actually about remains observable.
+
+	// announcement via peer-C, 2 hops → score 80
 	status, _ := table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "target-X",
@@ -143,11 +153,12 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 		t.Fatal("first UpdateRoute should accept")
 	}
 
+	// hop_ack via peer-B, 2 hops → score 90 (wins by +10 source bonus)
 	status, _ = table.UpdateRoute(routing.RouteEntry{
 		Identity: "target-X",
 		Origin:   "target-X",
 		NextHop:  "peer-B",
-		Hops:     3,
+		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceHopAck,
 	})

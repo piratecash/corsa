@@ -2321,27 +2321,35 @@ func TestLookupSortsBySourceThenHops(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(WithClock(fixedClock(now)))
 
-	// announcement with 1 hop — fewest hops but lowest trust
+	// Phase 2 changed Lookup ranking from "source-tier first, then
+	// hops" to a single CompositeScore (base − hops×10 + RTTBonus +
+	// healthPenalty + sourceBonus). With equal hops the source bonus
+	// alone drives the ordering, which reproduces the original
+	// source-priority contract this test asserts. With unequal hops
+	// the new ranking is additive — see
+	// docs/protocol/route_health.md §4.2 for the rationale.
+
+	// announcement with 1 hop — lowest trust bonus (+0)
 	mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "x", NextHop: "n1",
 		Hops: 1, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
-	// direct with 1 hop — highest trust
+	// direct with 1 hop — highest trust bonus (+20)
 	mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "me", NextHop: "alice",
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
-	// hop_ack with 3 hops — middle trust, most hops
+	// hop_ack with 1 hop — middle trust bonus (+10)
 	mustUpdate(t, tbl, RouteEntry{
 		Identity: "alice", Origin: "z", NextHop: "n3",
-		Hops: 3, SeqNo: 1, Source: RouteSourceHopAck,
+		Hops: 1, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 
 	routes := tbl.Lookup("alice")
 	if len(routes) != 3 {
 		t.Fatalf("expected 3 routes, got %d", len(routes))
 	}
-	// Source priority: direct > hop_ack > announcement
+	// Source priority at equal hops: direct > hop_ack > announcement.
 	if routes[0].Source != RouteSourceDirect {
 		t.Fatalf("first route should be direct, got %s", routes[0].Source)
 	}

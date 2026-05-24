@@ -14,12 +14,35 @@ import (
 //     refinement over v1. Advertised only when v1 is also advertised so a
 //     mixed-version network never sees v2 without v1.
 //   - file_transfer_v1: file transfer commands (Iteration 21)
+//   - mesh_route_probe_v1: active route reachability probes
+//     (route_probe_v1 / route_probe_ack_v1) introduced in Phase 2
+//     (docs/protocol/route_health.md). Probes are sent only to
+//     peers advertising this capability. Mixed-version interop:
+//     mesh_routing_v1-only peers still produce health entries on
+//     our side (every accepted claim is seeded Questionable by
+//     UpdateRoute regardless of caps); what they skip is the
+//     active probe send path — their pairs stay Questionable until
+//     organic relay hop_ack traffic confirms them, ranked with the
+//     standard scoreHealthQPenalty CompositeScore penalty (sized
+//     for strict-tier ordering — every Questionable below every
+//     Good). See docs/protocol/route_health.md "Capability gating"
+//     for the full contract.
+//   - mesh_route_query_v1: targeted single-hop route queries
+//     (route_query_v1 / route_query_response_v1) introduced in Phase 2.
+//     Queries are sent on-demand when all known uplinks for a target
+//     identity are Bad/Dead; rate-limited 3 per target per 30s; never
+//     forwarded. Fan-out targets must advertise the FULL triplet
+//     mesh_route_query_v1 + mesh_relay_v1 + mesh_routing_v1 because
+//     the ingested response lands as a transit next-hop — see
+//     CapMeshRouteQueryV1 doc-comment in internal/core/domain/capability.go.
 func localCapabilities() []domain.Capability {
 	return []domain.Capability{
 		domain.CapMeshRelayV1,
 		domain.CapMeshRoutingV1,
 		domain.CapMeshRoutingV2,
 		domain.CapFileTransferV1,
+		domain.CapMeshRouteProbeV1,
+		domain.CapMeshRouteQueryV1,
 	}
 }
 

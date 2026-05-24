@@ -103,6 +103,132 @@ func TestSeqNoFlap_HoldDownEngagesAfterThreshold(t *testing.T) {
 	}
 }
 
+// TestSeqNoFlap_AnnounceTargetFor_RespectsHoldDown — PR 11.33 P2
+// regression. AnnounceTargetFor is the per-identity projection
+// helper used by handleRouteQuery to build route_query_response.
+// It MUST honour the SeqNo flap-cap hold-down the same way
+// AnnounceProjectionFor does — otherwise a peer could receive a
+// route_query answer for a target that the announce path is
+// explicitly NOT advertising, leaking the over-active Identity
+// past the cap.
+//
+// Setup mirrors TestSeqNoFlap_HoldDownEngagesAfterThreshold:
+// drive 4 advances against threshold=3 to engage hold-down on
+// `victim`, then verify (1) AnnounceTargetFor(victim, ...)
+// returns ok=false during hold-down, (2) AnnounceTargetFor for
+// an unrelated `quiet` Identity still returns ok=true (per-
+// Identity scope, not global).
+func TestSeqNoFlap_AnnounceTargetFor_RespectsHoldDown(t *testing.T) {
+	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	const (
+		localID PeerIdentity = "node-A"
+		victim  PeerIdentity = "victim"
+		quiet   PeerIdentity = "quiet"
+		viewer  PeerIdentity = "peer-Z"
+	)
+
+	tbl := NewTable(
+		WithClock(clock),
+		WithLocalOrigin(localID),
+		WithMaxSeqAdvancePerWindow(3),
+		WithSeqAdvanceWindow(1*time.Minute),
+		WithSeqHoldDownDuration(2*time.Minute),
+	)
+
+	// Seed a stable quiet Identity so the per-Identity scope
+	// assertion has something to match.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: quiet, Origin: "src-quiet", NextHop: "uplink-q",
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+	})
+
+	// Drive 4 distinct-content advances for `victim` via
+	// AnnounceTo cycles; the 4th tips velocity over threshold=3
+	// and engages hold-down.
+	uplinks := []PeerIdentity{"u1", "u2", "u3", "u4"}
+	for i, up := range uplinks {
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: victim, Origin: "src-v", NextHop: up,
+			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
+		})
+		_ = tbl.AnnounceTo(viewer)
+		now = now.Add(time.Second)
+	}
+	if tbl.CapStats().SeqNoFlapHoldowns != 1 {
+		t.Fatalf("setup: SeqNoFlapHoldowns=%d, want 1 (hold-down should have engaged)", tbl.CapStats().SeqNoFlapHoldowns)
+	}
+
+	// AnnounceTargetFor on victim must return ok=false (held).
+	if _, _, ok := tbl.AnnounceTargetFor(victim, viewer); ok {
+		t.Fatal("AnnounceTargetFor returned ok=true for held-down Identity; route_query would leak past the flap cap")
+	}
+
+	// Quiet Identity unaffected — hold-down is per-Identity.
+	if _, _, ok := tbl.AnnounceTargetFor(quiet, viewer); !ok {
+		t.Fatal("AnnounceTargetFor returned ok=false for quiet Identity; hold-down is per-Identity, must not affect siblings")
+	}
+}
+
+// TestSeqNoFlap_AnnounceTargetFor_SuppressesArmingEmit — second
+// arm of the PR 11.33 P2 contract. When AnnounceTargetFor itself
+// engages hold-down inside the call (the over-threshold advance
+// is THIS call's emit), the response must still be suppressed —
+// not just the next call. Mirrors AnnounceProjectionFor's
+// `if armed { ... continue }` branch.
+func TestSeqNoFlap_AnnounceTargetFor_SuppressesArmingEmit(t *testing.T) {
+	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	const (
+		localID PeerIdentity = "node-A"
+		victim  PeerIdentity = "victim"
+		viewer  PeerIdentity = "peer-Z"
+	)
+
+	tbl := NewTable(
+		WithClock(clock),
+		WithLocalOrigin(localID),
+		WithMaxSeqAdvancePerWindow(3),
+		WithSeqAdvanceWindow(1*time.Minute),
+		WithSeqHoldDownDuration(2*time.Minute),
+	)
+
+	// Drive 3 advances via AnnounceTo (within threshold). The
+	// 4th advance will tip over — but instead of issuing it via
+	// AnnounceTo, we issue it via AnnounceTargetFor. The arm
+	// happens INSIDE that call; the result must be suppressed.
+	uplinks := []PeerIdentity{"u1", "u2", "u3"}
+	for i, up := range uplinks {
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: victim, Origin: "src-v", NextHop: up,
+			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
+		})
+		_ = tbl.AnnounceTo(viewer)
+		now = now.Add(time.Second)
+	}
+	// Pre-condition: hold-down has NOT yet engaged.
+	if tbl.CapStats().SeqNoFlapHoldowns != 0 {
+		t.Fatalf("setup: SeqNoFlapHoldowns=%d, want 0 (only 3 advances so far)", tbl.CapStats().SeqNoFlapHoldowns)
+	}
+
+	// Land the 4th distinct-content claim, then call
+	// AnnounceTargetFor — this is the call that pushes velocity
+	// over the threshold.
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: victim, Origin: "src-v", NextHop: "u4",
+		Hops: 2, SeqNo: 14, Source: RouteSourceAnnouncement,
+	})
+	_, _, ok := tbl.AnnounceTargetFor(victim, viewer)
+	if ok {
+		t.Fatal("AnnounceTargetFor returned ok=true on the arming call; the engage-this-call emit must be suppressed (mirrors AnnounceProjectionFor's armed branch)")
+	}
+	if tbl.CapStats().SeqNoFlapHoldowns != 1 {
+		t.Fatalf("SeqNoFlapHoldowns=%d after arming call, want 1", tbl.CapStats().SeqNoFlapHoldowns)
+	}
+}
+
 // TestSeqNoFlap_HoldDownReleasesAfterDuration walks the clock past
 // hold-down and verifies the suppression lifts: the next cycle
 // resumes wire emit for the previously-held Identity, and

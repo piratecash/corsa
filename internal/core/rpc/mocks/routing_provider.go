@@ -37,6 +37,52 @@ func (_m *MockRoutingProvider) EXPECT() *MockRoutingProvider_Expecter {
 	return &MockRoutingProvider_Expecter{mock: &_m.Mock}
 }
 
+// HealthSnapshot provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) HealthSnapshot() []routing.RouteHealthState {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for HealthSnapshot")
+	}
+
+	var r0 []routing.RouteHealthState
+	if returnFunc, ok := ret.Get(0).(func() []routing.RouteHealthState); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]routing.RouteHealthState)
+		}
+	}
+	return r0
+}
+
+// MockRoutingProvider_HealthSnapshot_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'HealthSnapshot'
+type MockRoutingProvider_HealthSnapshot_Call struct {
+	*mock.Call
+}
+
+// HealthSnapshot is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) HealthSnapshot() *MockRoutingProvider_HealthSnapshot_Call {
+	return &MockRoutingProvider_HealthSnapshot_Call{Call: _e.mock.On("HealthSnapshot")}
+}
+
+func (_c *MockRoutingProvider_HealthSnapshot_Call) Run(run func()) *MockRoutingProvider_HealthSnapshot_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_HealthSnapshot_Call) Return(routeHealthStates []routing.RouteHealthState) *MockRoutingProvider_HealthSnapshot_Call {
+	_c.Call.Return(routeHealthStates)
+	return _c
+}
+
+func (_c *MockRoutingProvider_HealthSnapshot_Call) RunAndReturn(run func() []routing.RouteHealthState) *MockRoutingProvider_HealthSnapshot_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // OverloadStats provides a mock function for the type MockRoutingProvider
 func (_mock *MockRoutingProvider) OverloadStats() routing.OverloadStats {
 	ret := _mock.Called()

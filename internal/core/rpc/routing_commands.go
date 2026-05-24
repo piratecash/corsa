@@ -31,17 +31,28 @@ func RegisterRoutingCommands(t *CommandTable, rp RoutingProvider) {
 		Category:    "routing",
 		Usage:       "<identity>",
 	}
+	// Phase 2 (cluster-mesh) — per-(Identity, Uplink) route
+	// health, RTT EWMA, and transition timestamps. Read-only
+	// observability surface; does NOT trigger probe sends. See
+	// docs/protocol/route_health.md
+	healthInfo := CommandInfo{
+		Name:        "fetchRouteHealth",
+		Description: "Get Phase 2 route health states per (Identity, Uplink) pair",
+		Category:    "routing",
+	}
 
 	if rp == nil {
 		t.RegisterUnavailable(tableInfo)
 		t.RegisterUnavailable(summaryInfo)
 		t.RegisterUnavailable(lookupInfo)
+		t.RegisterUnavailable(healthInfo)
 		return
 	}
 
 	t.Register(tableInfo, routeTableHandler(rp))
 	t.Register(summaryInfo, routeSummaryHandler(rp))
 	t.Register(lookupInfo, routeLookupHandler(rp))
+	t.Register(healthInfo, routeHealthHandler(rp))
 }
 
 // routeTableHandler returns the full routing table as a structured JSON response.
@@ -139,9 +150,37 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		snap := rp.RoutingSnapshot()
 		snapTime := snap.TakenAt
 
-		// Count unique reachable destinations (active, non-withdrawn routes).
-		// RouteSourceLocal (synthetic self-route) is excluded — reachability
-		// is about remote peers, not the node itself.
+		// PR 11.28 P2#2 — health-aware reachability. "Reachable"
+		// means the relay path could actually select at least one
+		// route to the identity, matching the contract on
+		// Table.Lookup: skip withdrawn / expired AND skip
+		// HealthDead pairs unless Source == Direct. Without the
+		// Dead filter a target with one transit route stuck in
+		// Dead would be reported as reachable even though Lookup
+		// excludes it and the relay path falls back to gossip /
+		// triggers a route query. Direct claims are exempt because
+		// their session-bound lifecycle is the ground truth (PR
+		// 11.25 / 11.26 alignment).
+		//
+		// Build the per-(Identity, Uplink) Dead lookup from
+		// snap.Health (cached alongside Routes by Table.Snapshot,
+		// PR 11.27 P2#1) — no extra RoutingProvider call.
+		deadPair := make(map[routing.PeerIdentity]map[routing.PeerIdentity]struct{})
+		for _, h := range snap.Health {
+			if h.Health != routing.HealthDead {
+				continue
+			}
+			byUplink, ok := deadPair[h.Identity]
+			if !ok {
+				byUplink = make(map[routing.PeerIdentity]struct{})
+				deadPair[h.Identity] = byUplink
+			}
+			byUplink[h.Uplink] = struct{}{}
+		}
+
+		// Count unique reachable destinations (selectable routes).
+		// RouteSourceLocal (synthetic self-route) is excluded —
+		// reachability is about remote peers, not the node itself.
 		destinations := make(map[string]struct{})
 		directPeers := make(map[string]struct{})
 		for ident, entries := range snap.Routes {
@@ -151,6 +190,11 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 				}
 				if e.Source == routing.RouteSourceLocal {
 					continue
+				}
+				if e.Source != routing.RouteSourceDirect {
+					if _, dead := deadPair[ident][e.NextHop]; dead {
+						continue
+					}
 				}
 				destinations[string(ident)] = struct{}{}
 				if e.Source == routing.RouteSourceDirect {
@@ -241,8 +285,30 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 }
 
 // routeLookupHandler returns routes for a specific destination identity,
-// sorted by preference (source priority, then hops ascending).
-// Uses the atomic snapshot for TTL computation, consistent with routeTableHandler.
+// ranked by the Phase 2 CompositeScore (the same ranking the relay
+// path uses through routing.Table.Lookup). Operators reading this RPC
+// see the same CompositeScore tiers the data plane would pick,
+// including the HealthDead exclusion and the Direct exemption to that
+// exclusion (see routing/table_lookup.go for the live-Lookup
+// contract). NOTE: when multiple routes tie on CompositeScore this
+// RPC applies a deterministic origin / next_hop / seq_no tiebreak
+// for diff-friendly output, whereas Table.Lookup preserves storage
+// iteration order on ties — within a tied set the first entry here
+// is not guaranteed to be the one the relay path would pick, but
+// both are equivalently selectable per the ranking model. Callers
+// needing exact relay-path parity should treat same-score entries
+// as equivalent.
+//
+// PR 11.26 P2#1 / 11.27 P2#1 — cached hot-read. Both the route
+// entries AND the per-(Identity, Uplink) Health labels are read
+// from the SAME atomic RoutingSnapshot pointer (routing.Snapshot
+// carries Health alongside Routes, populated atomically by
+// Table.Snapshot under one t.mu.RLock). The RPC handler never
+// touches t.mu directly — it grabs the cached snapshot via
+// rp.RoutingSnapshot() (Load on an atomic.Pointer) and walks it
+// in process. This preserves the "fetchRouteLookup is a cached
+// hot-read; no routing-mutex blocking" contract documented in
+// docs/rpc/routing.md and docs/locking.md.
 func routeLookupHandler(rp RoutingProvider) CommandHandler {
 	return func(req CommandRequest) CommandResponse {
 		if r, done := ctxDone(req); done {
@@ -261,6 +327,20 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 		snapTime := snap.TakenAt
 		entries := snap.Routes[routing.PeerIdentity(identityArg)]
 
+		// Build a (uplink) → *RouteHealthState index keyed by Uplink
+		// only — we are looking at a single Identity, so all entries
+		// in the index share that Identity. snap.Health is the cached
+		// deep-copied slice — iterating it is O(total_health) but
+		// happens against the immutable snapshot, no lock taken.
+		healthByUplink := map[routing.PeerIdentity]*routing.RouteHealthState{}
+		for _, state := range snap.Health {
+			if state.Identity != routing.PeerIdentity(identityArg) {
+				continue
+			}
+			s := state // capture by value, take address of the copy
+			healthByUplink[state.Uplink] = &s
+		}
+
 		type wireRoute struct {
 			Origin     string  `json:"origin"`
 			NextHop    string  `json:"next_hop"`
@@ -270,42 +350,90 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 			TTLSeconds float64 `json:"ttl_seconds"`
 		}
 
-		var result []wireRoute
+		type scoredEntry struct {
+			wire  wireRoute
+			score float64
+		}
+
+		// CompositeScore-based ranking on the same filter contract as
+		// routing.Table.Lookup: drop HealthDead claims unless the
+		// claim is RouteSourceDirect (Direct stays selectable; see
+		// table_lookup.go "Direct exemption" branch). The synthetic
+		// self-route (RouteSourceLocal, Hops=0) IS present in the
+		// cached snapshot because Table.Snapshot injects it for the
+		// node's own identity (see Table.Snapshot in
+		// internal/core/routing/table_lookup.go). It flows through
+		// this filter+score path unchanged — RouteSourceLocal
+		// carries the +20 source bonus and Hops=0, so it ranks
+		// first when the caller queries the local identity. Matches
+		// what Table.Lookup itself returns.
+		var scored []scoredEntry
 		for _, e := range entries {
 			if e.IsWithdrawn() || e.IsExpired(snapTime) {
 				continue
+			}
+			h := healthByUplink[e.NextHop]
+			if h != nil && h.Health == routing.HealthDead && e.Source != routing.RouteSourceDirect {
+				continue
+			}
+			// Direct + Dead → substitute Bad for scoring (matches
+			// the Lookup-side adjustment in
+			// table_lookup.go::sortRoutesByCompositeScoreLocked) so
+			// Direct stays selectable but deprioritised.
+			if e.Source == routing.RouteSourceDirect && h != nil && h.Health == routing.HealthDead {
+				adjusted := *h
+				adjusted.Health = routing.HealthBad
+				h = &adjusted
 			}
 			ttl := e.ExpiresAt.Sub(snapTime).Seconds()
 			if ttl < 0 {
 				ttl = 0
 			}
-			result = append(result, wireRoute{
-				Origin:     string(e.Origin),
-				NextHop:    string(e.NextHop),
-				Hops:       e.Hops,
-				SeqNo:      e.SeqNo,
-				Source:     e.Source.String(),
-				TTLSeconds: ttl,
+			scored = append(scored, scoredEntry{
+				wire: wireRoute{
+					Origin:     string(e.Origin),
+					NextHop:    string(e.NextHop),
+					Hops:       e.Hops,
+					SeqNo:      e.SeqNo,
+					Source:     e.Source.String(),
+					TTLSeconds: ttl,
+				},
+				score: routing.CompositeScore(uint8(e.Hops), e.Source, h),
 			})
 		}
 
-		// Stable sort: source trust (desc), hops (asc), origin, next_hop, seq_no (desc).
-		sort.Slice(result, func(i, j int) bool {
-			pi, pj := sourcePriority(result[i].Source), sourcePriority(result[j].Source)
-			if pi != pj {
-				return pi > pj
+		// Sort descending by score (higher = better). At equal
+		// score this RPC applies a deterministic origin / next_hop /
+		// seq_no tiebreak so operators eyeballing diffs across
+		// requests see a stable order — useful for monitoring
+		// dashboards. NOTE: Table.Lookup's relay-path winner uses
+		// an insertion-sort that preserves storage iteration order
+		// at equal score, so on a tied pair the relay path may
+		// pick a different first entry than this RPC reports. The
+		// divergence is bounded to ties (genuinely indistinguishable
+		// by the ranking model — a Good 2-hop with the same RTT
+		// and the same source as another Good 2-hop), so it does
+		// not affect "which CompositeScore tier the relay would
+		// pick"; only the within-tier ordering. PR 11.35 P3 —
+		// callers needing exact relay-path parity should treat
+		// any same-score entry as equivalently selectable.
+		sort.SliceStable(scored, func(i, j int) bool {
+			if scored[i].score != scored[j].score {
+				return scored[i].score > scored[j].score
 			}
-			if result[i].Hops != result[j].Hops {
-				return result[i].Hops < result[j].Hops
+			if scored[i].wire.Origin != scored[j].wire.Origin {
+				return scored[i].wire.Origin < scored[j].wire.Origin
 			}
-			if result[i].Origin != result[j].Origin {
-				return result[i].Origin < result[j].Origin
+			if scored[i].wire.NextHop != scored[j].wire.NextHop {
+				return scored[i].wire.NextHop < scored[j].wire.NextHop
 			}
-			if result[i].NextHop != result[j].NextHop {
-				return result[i].NextHop < result[j].NextHop
-			}
-			return result[i].SeqNo > result[j].SeqNo
+			return scored[i].wire.SeqNo > scored[j].wire.SeqNo
 		})
+
+		result := make([]wireRoute, 0, len(scored))
+		for _, s := range scored {
+			result = append(result, s.wire)
+		}
 
 		return jsonResponse(map[string]interface{}{
 			"identity":    identityArg,
@@ -316,8 +444,13 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 	}
 }
 
-// sourcePriority maps wire source strings to numeric priority.
-// Higher value = more trusted, matching RouteSource.TrustRank().
+// sourcePriority was the pre-Phase-2 wire-source ranking helper
+// used by fetchRouteLookup before PR 11.26 P2#1 aligned the
+// handler with routing.Table.Lookup's CompositeScore ranking.
+// Retained as a dead-code stub for one release to keep external
+// debug snippets that imported it compiling; remove on next sweep.
+//
+//nolint:unused
 func sourcePriority(source string) int {
 	switch source {
 	case "local":
@@ -330,5 +463,92 @@ func sourcePriority(source string) int {
 		return 0
 	default:
 		return -1
+	}
+}
+
+// routeHealthHandler exposes the Phase 2 RouteHealthState snapshot
+// (docs/protocol/route_health.md). Output is a
+// flat list keyed by (identity, uplink) so callers that need
+// per-identity grouping can do so locally — keeping the wire shape
+// simple avoids ambiguity about ordering.
+//
+// Health string labels match RouteHealth.String:
+// "good" / "questionable" / "bad" / "dead". rtt_ms is the EWMA
+// estimate in milliseconds (0 = no sample yet). last_hop_ack and
+// last_probe are RFC3339 timestamps; the zero-time appears as the
+// JSON-empty default for cold state. probe_failures is the
+// consecutive-failure counter currently used by the state machine
+// (reset on any confirmation). transition_at marks the most recent
+// Health state change — useful for "transitioned N seconds ago"
+// dashboard widgets.
+//
+// The handler is a pure read — it does NOT trigger probe sends or
+// any other side effect. Probes run on their own ticker
+// (HealthProbeInterval).
+func routeHealthHandler(rp RoutingProvider) CommandHandler {
+	return func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
+		snap := rp.HealthSnapshot()
+
+		type wireState struct {
+			Identity      string `json:"identity"`
+			Uplink        string `json:"uplink"`
+			Health        string `json:"health"`
+			RTTMs         int64  `json:"rtt_ms"`
+			LastHopAck    string `json:"last_hop_ack,omitempty"`
+			LastProbe     string `json:"last_probe,omitempty"`
+			ProbeFailures int    `json:"probe_failures"`
+			TransitionAt  string `json:"transition_at,omitempty"`
+		}
+
+		states := make([]wireState, 0, len(snap))
+		for _, s := range snap {
+			ws := wireState{
+				Identity:      string(s.Identity),
+				Uplink:        string(s.Uplink),
+				Health:        s.Health.String(),
+				RTTMs:         s.RTT.Milliseconds(),
+				ProbeFailures: s.ProbeFailures,
+			}
+			// PR 11.15 P3 / 11.16: emit last_hop_ack ONLY for pairs
+			// that have actually received positive evidence
+			// (relay_hop_ack or probe_ack with reachable=true).
+			// The RouteHealthState.LastHopAck field is also used
+			// internally as the applyIdleTick timeline reference
+			// and gets stamped at creation (ensureLocked) for any
+			// fresh entry — including announcement-only entries
+			// that have never been confirmed. Gating emission on
+			// the Confirmed flag preserves the protocol contract
+			// in docs/protocol/route_health.md: last_hop_ack is
+			// omitted when the pair has never been confirmed.
+			if s.Confirmed && !s.LastHopAck.IsZero() {
+				ws.LastHopAck = s.LastHopAck.UTC().Format(time.RFC3339)
+			}
+			if !s.LastProbe.IsZero() {
+				ws.LastProbe = s.LastProbe.UTC().Format(time.RFC3339)
+			}
+			if !s.TransitionAt.IsZero() {
+				ws.TransitionAt = s.TransitionAt.UTC().Format(time.RFC3339)
+			}
+			states = append(states, ws)
+		}
+
+		// Stable sort: identity asc, uplink asc. Test fixtures
+		// rely on deterministic ordering; production consumers
+		// can re-sort as needed.
+		sort.Slice(states, func(i, j int) bool {
+			if states[i].Identity != states[j].Identity {
+				return states[i].Identity < states[j].Identity
+			}
+			return states[i].Uplink < states[j].Uplink
+		})
+
+		return jsonResponse(map[string]interface{}{
+			"states":      states,
+			"count":       len(states),
+			"snapshot_at": time.Now().UTC().Format(time.RFC3339),
+		})
 	}
 }

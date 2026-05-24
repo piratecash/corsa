@@ -120,7 +120,7 @@ Response:
 
 ### fetchRouteLookup
 
-Lookup routes for a specific destination identity. Returns routes sorted by preference (source priority, then hops ascending).
+Lookup routes for a specific destination identity. Returns routes ranked by the same Phase 2 `CompositeScore` that the relay path uses through `routing.Table.Lookup` (hops + source-trust bonus + RTT bonus + health penalty). The handler reads from the cached `routing.Snapshot` — both route entries and per-(Identity, Uplink) `RouteHealthState` are captured atomically inside `Table.Snapshot` under one `t.mu.RLock`, so the RPC is a lock-free hot read against the atomic-pointer snapshot. `HealthDead` claims are filtered (matching `Lookup`'s contract); `RouteSourceDirect` claims are exempt from the Dead filter and ranked with a `Bad`-equivalent penalty so they stay selectable as last resort, mirroring local relay-path behaviour. See `docs/protocol/route_health.md` for the full scoring formula.
 
 ```bash
 corsa-cli fetchRouteLookup <identity>
@@ -156,7 +156,7 @@ Response:
 | Field | Type | Description |
 |---|---|---|
 | `identity` | string | Queried destination identity |
-| `routes` | array | Routes sorted by preference (source trust desc, then hops asc) |
+| `routes` | array | Routes ranked descending by Phase 2 `CompositeScore` (the same ranking `routing.Table.Lookup` applies on the relay path). `HealthDead` transit claims are filtered out; `RouteSourceDirect` claims are exempt from that filter and ranked with a `Bad`-equivalent penalty. See `docs/protocol/route_health.md`. Tie-break: `origin` asc, `next_hop` asc, `seq_no` desc — deterministic for diffing across requests. |
 | `routes[].origin` | string | Peer that originated this route |
 | `routes[].next_hop` | string | Peer to forward through |
 | `routes[].hops` | int | Distance to destination |
@@ -167,6 +167,63 @@ Response:
 | `snapshot_at` | string | ISO 8601 timestamp when snapshot was taken |
 
 When the queried identity matches the node's own identity, a synthetic local route (`source: "local"`, `hops: 0`) is always present. Returns `count: 0` and empty `routes` array if the identity is unknown or has no active routes. Returns 400 if `identity` argument is missing or malformed (must be 40-char lowercase hex).
+
+### fetchRouteHealth
+
+Returns the Phase 2 per-`(Identity, Uplink)` route health snapshot:
+health state, RTT EWMA estimate, hop-ack/probe timestamps, and
+the probe-failure counter. The handler is a pure read — it does
+NOT trigger probe sends or any other side effect. Probes run on
+their own ticker (`HealthProbeInterval`, see
+`docs/protocol/route_health.md`).
+
+```bash
+corsa-cli fetchRouteHealth
+```
+
+Response:
+```json
+{
+  "states": [
+    {
+      "identity":       "abc123...",
+      "uplink":         "def456...",
+      "health":         "good",
+      "rtt_ms":         45,
+      "last_hop_ack":   "2026-05-23T11:59:30Z",
+      "last_probe":     "2026-05-23T11:59:00Z",
+      "probe_failures": 0,
+      "transition_at":  "2026-05-23T11:55:00Z"
+    }
+  ],
+  "count":       1,
+  "snapshot_at": "2026-05-23T12:00:00Z"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `states` | array | Health states keyed by `(identity, uplink)`. Sorted ascending by `(identity, uplink)`. |
+| `states[].identity` | string | Destination identity of the tracked route. |
+| `states[].uplink` | string | Direct-peer identity through which the route is tracked. |
+| `states[].health` | string | One of `"good"`, `"questionable"`, `"bad"`, `"dead"`. See `docs/protocol/route_health.md` for the state machine. |
+| `states[].rtt_ms` | int | EWMA RTT estimate in milliseconds. `0` when no sample has been taken yet. |
+| `states[].last_hop_ack` | string | Optional. RFC 3339 timestamp of the last `relay_hop_ack` or `route_probe_ack_v1(reachable=true)` for this pair. Omitted when the pair has never been confirmed. |
+| `states[].last_probe` | string | Optional. RFC 3339 timestamp of the last probe OBSERVATION for this pair — either an ack arrival (`applyProbeAck`) or a probe-failure tick (`applyProbeFailure`, fired by the timeout watcher when no ack arrived within `HealthProbeTimeout`). Omitted when no probe has been observed yet. NOTE: the send timestamp is NOT exposed here — it lives only in the in-process outstanding-probe registry (`probeRegistry.outstandingProbe.SentAt`) and never reaches `RouteHealthState`. A probe that is in flight (sent, no ack/timeout yet) therefore appears the same in `last_probe` as a pair that has not been probed at all; operators distinguishing "in-flight" from "cold" need to read `probe_failures` and `last_hop_ack` in conjunction. |
+| `states[].probe_failures` | int | Consecutive probe-failure counter. Reset to zero on any successful confirmation; crossing `HealthProbeFailureThreshold` (3) forces `Bad`. |
+| `states[].transition_at` | string | Optional RFC 3339 timestamp of the most recent state transition. Useful for "transitioned N seconds ago" dashboards. |
+| `count` | int | Number of tracked pairs. |
+| `snapshot_at` | string | RFC 3339 timestamp when the snapshot was assembled. |
+
+Returns `count: 0` and an empty `states` array when no health
+entries are tracked yet (cold-start, no traffic).
+
+`fetchRouteHealth` is independent of the routing snapshot
+discussed in **Snapshot freshness** below — health state has its
+own data path through `routing.Table.HealthSnapshot()`, which
+takes a read-lock on `t.mu` and returns a deep-copied slice. The
+handler is invoked synchronously and the snapshot reflects the
+live table state at the moment of the RPC call.
 
 ### Snapshot freshness
 
@@ -316,7 +373,7 @@ corsa-cli fetchRouteSummary
 
 ### fetchRouteLookup
 
-Поиск маршрутов для конкретного destination identity. Возвращает маршруты, отсортированные по предпочтению (приоритет source, затем hops по возрастанию).
+Поиск маршрутов для конкретного destination identity. Маршруты ранжируются по Phase 2 `CompositeScore` — тот же ranking, который relay path применяет в `routing.Table.Lookup` (hops + source-trust bonus + RTT bonus + health penalty). Handler читает из кешированного `routing.Snapshot` — и route entries, и per-(Identity, Uplink) `RouteHealthState` snapshot'ятся атомарно внутри `Table.Snapshot` под одним `t.mu.RLock`, поэтому RPC — lock-free hot read через atomic-pointer snapshot. `HealthDead` claims фильтруются (контракт совпадает с `Lookup`); `RouteSourceDirect` claims exempt от Dead-фильтра и ранжируются с `Bad`-equivalent penalty, оставаясь selectable как last resort — отражает локальное relay-path поведение. Полная формула — в `docs/protocol/route_health.md`.
 
 ```bash
 corsa-cli fetchRouteLookup <identity>
@@ -352,7 +409,7 @@ corsa-cli fetchRouteLookup <identity>
 | Поле | Тип | Описание |
 |---|---|---|
 | `identity` | string | Запрошенный destination identity |
-| `routes` | array | Маршруты, отсортированные по предпочтению (trust source desc, затем hops asc) |
+| `routes` | array | Маршруты ранжируются по убыванию Phase 2 `CompositeScore` (тот же ranking, что `routing.Table.Lookup` применяет на relay path). `HealthDead` transit claims фильтруются; `RouteSourceDirect` claims exempt от этого фильтра и ранжируются с `Bad`-equivalent penalty. См. `docs/protocol/route_health.md`. Tie-break: `origin` asc, `next_hop` asc, `seq_no` desc — детерминизм для diff'ов между запросами. |
 | `routes[].origin` | string | Peer, породивший этот маршрут |
 | `routes[].next_hop` | string | Peer для пересылки |
 | `routes[].hops` | int | Расстояние до цели |
@@ -363,6 +420,52 @@ corsa-cli fetchRouteLookup <identity>
 | `snapshot_at` | string | ISO 8601 timestamp момента снапшота |
 
 Когда запрашиваемый identity совпадает с собственным identity ноды, синтетический локальный маршрут (`source: "local"`, `hops: 0`) всегда присутствует. Возвращает `count: 0` и пустой массив `routes`, если identity неизвестен или не имеет активных маршрутов. Возвращает 400, если аргумент `identity` отсутствует или имеет неверный формат (должен быть 40-символьный hex в нижнем регистре).
+
+### fetchRouteHealth
+
+Возвращает Phase 2 snapshot per-`(Identity, Uplink)` health: состояние, RTT EWMA, timestamps hop-ack/probe и счётчик probe-failures. Handler — pure read и НЕ триггерит probe-send'ы или другие side effects. Probe'ы запускаются на собственном ticker'е (`HealthProbeInterval`, см. `docs/protocol/route_health.md`).
+
+```bash
+corsa-cli fetchRouteHealth
+```
+
+Ответ:
+```json
+{
+  "states": [
+    {
+      "identity":       "abc123...",
+      "uplink":         "def456...",
+      "health":         "good",
+      "rtt_ms":         45,
+      "last_hop_ack":   "2026-05-23T11:59:30Z",
+      "last_probe":     "2026-05-23T11:59:00Z",
+      "probe_failures": 0,
+      "transition_at":  "2026-05-23T11:55:00Z"
+    }
+  ],
+  "count":       1,
+  "snapshot_at": "2026-05-23T12:00:00Z"
+}
+```
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `states` | array | Health-state'ы по ключу `(identity, uplink)`. Отсортированы по возрастанию `(identity, uplink)`. |
+| `states[].identity` | string | Destination identity отслеживаемого маршрута. |
+| `states[].uplink` | string | Direct-peer identity, через который маршрут отслеживается. |
+| `states[].health` | string | Одно из `"good"`, `"questionable"`, `"bad"`, `"dead"`. State machine описана в `docs/protocol/route_health.md`. |
+| `states[].rtt_ms` | int | EWMA-оценка RTT в миллисекундах. `0` когда samples ещё не было. |
+| `states[].last_hop_ack` | string | Optional. RFC 3339 timestamp последнего `relay_hop_ack` или `route_probe_ack_v1(reachable=true)`. Отсутствует когда пара ни разу не подтверждалась. |
+| `states[].last_probe` | string | Optional. RFC 3339 timestamp последнего НАБЛЮДЕНИЯ probe для пары — либо приход ack'а (`applyProbeAck`), либо probe-failure tick (`applyProbeFailure`, срабатывает в timeout watcher'е когда ack не пришёл за `HealthProbeTimeout`). Отсутствует когда наблюдений ещё не было. NB: send timestamp здесь НЕ выставляется — он живёт только в in-process outstanding-probe registry (`probeRegistry.outstandingProbe.SentAt`) и в `RouteHealthState` не попадает. In-flight probe (отправлен, ack/timeout ещё не пришли) выглядит в `last_probe` так же как пара, которую ни разу не пробовали; операторы, отличающие "in-flight" от "cold", смотрят `probe_failures` и `last_hop_ack` в комбинации. |
+| `states[].probe_failures` | int | Счётчик подряд probe-failures. Сбрасывается на любое успешное подтверждение; пересечение `HealthProbeFailureThreshold` (3) форсит `Bad`. |
+| `states[].transition_at` | string | Optional RFC 3339 timestamp последнего state-transition'а. Используется для «transitioned N seconds ago» дашбордов. |
+| `count` | int | Количество отслеживаемых пар. |
+| `snapshot_at` | string | RFC 3339 timestamp когда snapshot собран. |
+
+Возвращает `count: 0` и пустой `states`, когда health-entries ещё не отслеживаются (cold-start, нет трафика).
+
+`fetchRouteHealth` независим от snapshot маршрутизации, обсуждаемого в **Свежесть снапшота** ниже — health state имеет собственный data path через `routing.Table.HealthSnapshot()`, который берёт read-lock на `t.mu` и возвращает deep-copied slice. Handler инвокается синхронно, snapshot отражает live состояние таблицы на момент RPC-вызова.
 
 ### Свежесть снапшота
 

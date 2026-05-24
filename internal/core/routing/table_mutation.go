@@ -121,6 +121,80 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	if mutated {
 		t.dirty.Store(true)
 	}
+	// Phase 2 health bookkeeping at the live-update boundary
+	// (review concerns P1#1 / P1#2 / 11.21 P2#1):
+	//
+	//   1. Resurrection eviction. When admission accepts a live
+	//      claim and a stale Bad/Dead health entry survives for
+	//      the same (Identity, Uplink) pair, drop it so the next
+	//      Lookup does not filter the fresh claim out under the
+	//      stale "do-not-select" label. Good/Questionable entries
+	//      are preserved — only the labels that exclude the pair
+	//      from selection need to be cleared.
+	//   2. New-pair ensure. After step 1, if no health entry
+	//      exists for the pair (cold start OR just-evicted Bad/
+	//      Dead), create a fresh Questionable entry. Without this
+	//      step newly accepted routes would stay nil-health
+	//      forever: invisible to fetchRouteHealth, never aged by
+	//      TickHealth, and never picked up by the probe-sender
+	//      ticker (which iterates HealthSnapshot for Questionable
+	//      pairs). The documented verify-before-trust contract
+	//      (docs/routing.md "Capability gating") reduces to "the
+	//      pair waits in Questionable for the next 15s probe tick"
+	//      once the entry exists.
+	//
+	// PR 11.21 P2#1 gate: liveness reconfirmation runs only when
+	// ApplyUpdate actually mutated storage. RouteAccepted always
+	// mutates (admission, SeqNo bump, or hops improvement);
+	// RouteUnchanged is conditional — ApplyUpdate returns
+	// (RouteUnchanged, true) for a same-SeqNo same-hops
+	// reconfirmation that refreshed ExpiresAt, but it returns
+	// (RouteUnchanged, false) for a same-SeqNo WORSE-hops
+	// announcement that was explicitly ignored to defend against
+	// path-poisoning (see route_store_mutation.go::ApplyUpdate
+	// "sameHopsReconfirmation" branch). Treating the latter as a
+	// fresh liveness signal would let a worse-hops announce
+	// resurrect a Dead pair through the eviction branch — Lookup
+	// would then select the old optimistic route again. Gating on
+	// `mutated` is correct because mutated==true means storage
+	// either accepted the entry or refreshed its TTL, both of
+	// which are legitimate "peer is still talking about this
+	// route" signals; mutated==false means storage explicitly
+	// kept the prior state, so neither liveness reset nor
+	// resurrection should fire.
+	if mutated && !entry.IsWithdrawn() {
+		existing := t.health.getLocked(entry.Identity, entry.NextHop)
+		if existing != nil && (existing.Health == HealthBad || existing.Health == HealthDead) {
+			t.health.evictUplinkLocked(entry.Identity, entry.NextHop)
+			existing = nil
+		}
+		if existing == nil {
+			// Seed the fresh / just-evicted entry as
+			// HealthQuestionable rather than HealthGood. Good is
+			// reserved for confirmed reachability (hop_ack or
+			// probe_ack(reachable=true)) — see RouteHealth's type
+			// doc on the Good constant. Seeding Good on every
+			// accepted announce would let a peer-attested claim
+			// (an Announcement source frame, including a
+			// route_query_response_v1) bypass local
+			// verify-before-trust and earn the full composite-
+			// score bonus for up to one passive idle window
+			// (60s) without any probe round-trip. Starting at
+			// Questionable means the probe loop picks the pair
+			// up on its next 15 s tick, sends a probe, and
+			// either confirms (→ Good) or escalates failures
+			// (→ Bad). The Questionable ranking penalty
+			// (scoreHealthQPenalty) is intentional: it ensures an
+			// unverified new uplink doesn't outrank an existing
+			// Good alternative until the probe loop has cleared
+			// it. PR 11.35 P2 sized the penalty to enforce
+			// strict-tier ordering, so the new pair is below
+			// every Good alternative regardless of its hop count
+			// or RTT.
+			state := t.health.ensureLocked(entry.Identity, entry.NextHop, t.clock())
+			state.Health = HealthQuestionable
+		}
+	}
 	return status, nil
 }
 
@@ -180,6 +254,94 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 	if mutated {
 		t.dirty.Store(true)
 	}
+
+	// PR 11.26 P2#3 — health seeding for direct peers. UpdateRoute's
+	// admission path seeds RouteHealthState for every fresh claim
+	// (see UpdateRoute's PR 11.9 P1#1 / 11.21 P2#1 health
+	// bookkeeping), but AdmitDirectPeer bypasses UpdateRoute and
+	// would leave the new direct claim with NO health entry —
+	// invisible to fetchRouteHealth observability, never aged by
+	// TickHealth, never picked up by the probe-sender ticker.
+	//
+	// For Direct, the session establishment IS the confirmation —
+	// we just completed the handshake. Seed Health=Good rather than
+	// Questionable (the verify-before-trust seed used for
+	// announcement-only claims): the Phase 2 probe loop should not
+	// fire probes against a direct peer because the session
+	// liveness is observable through ping/pong already. Confirmed
+	// stays false here because we have not received any organic
+	// hop_ack on this pair yet — applyHopAck / applyProbeAck flip
+	// the flag when actual reachability evidence arrives.
+	//
+	// The keying pair (Identity == Uplink == peerIdentity) matches
+	// AdmitDirectPeer's storage shape (Direct claims always have
+	// NextHop = Identity by RouteEntry.Validate). The health reset
+	// is gated to preserve the connect-storm fast-path
+	// (TestAddDirectPeerIdempotentDoesNotMarkDirty in
+	// table_dirty_test.go): on an idempotent re-add with health
+	// already Good and no probe failures the reset is a true
+	// no-op, so we neither mutate the published Snapshot.Health
+	// nor mark dirty. Reset (and dirty-mark) fire on:
+	//
+	//   - mutated == true: AdmitDirectPeer admitted a new claim
+	//     or reactivated a tombstone. New session ⇒ inherit
+	//     historical degraded health from the prior session would
+	//     start the new live connection pre-degraded.
+	//   - existing == nil: first-ever ensure (cold start).
+	//   - existing.Health != HealthGood OR existing.ProbeFailures > 0:
+	//     defensive — should be unreachable in production because
+	//     TickHealth skips Direct pairs (PR 11.27 P2#2), but covers
+	//     paths like ForceHealthForTest in test fixtures.
+	//
+	// RTT EWMA is preserved across the reset because per-pair
+	// latency does not change across a quick reconnect — losing
+	// it would re-anchor the EWMA at zero on the next sample.
+	// Confirmed is preserved too: it is monotonic-up by design
+	// (see RouteHealthState.Confirmed doc-comment), and a peer
+	// that proved reachability on the prior session stays
+	// "historically confirmed" across a session boundary. New
+	// hop_ack / probe_ack evidence on the new session is what
+	// would have flipped it anyway.
+	//
+	// PR 11.30 P3 — LastHopAck preservation. We deliberately do
+	// NOT stamp LastHopAck=now in the reset path. The combination
+	// of (Confirmed preserved) + (LastHopAck=now) would emit a
+	// synthetic fresh last_hop_ack on the wire (fetchRouteHealth
+	// gates emission on Confirmed; see routing_commands.go and
+	// the Confirmed flag doc in health.go), claiming a real ack
+	// timestamp that never happened on the new session. Keeping
+	// the historical LastHopAck means: for a never-confirmed pair
+	// the RPC still omits the field (gated by Confirmed=false);
+	// for a historically-confirmed pair the RPC shows the actual
+	// last real-evidence timestamp, which may legitimately be
+	// older than the current session. The session-start moment
+	// IS recorded — TransitionAt below — so operators have a
+	// distinct "session bounced at T" signal separate from
+	// "last real hop_ack at T". TickHealth skips Direct pairs
+	// (PR 11.27 P2#2), so a stale LastHopAck never decays the
+	// pair on the passive timeline.
+	existing := t.health.getLocked(peerIdentity, peerIdentity)
+	needsReset := mutated || existing == nil ||
+		existing.Health != HealthGood || existing.ProbeFailures > 0
+	if needsReset {
+		state := t.health.ensureLocked(peerIdentity, peerIdentity, now)
+		state.Health = HealthGood
+		state.TransitionAt = now
+		state.ProbeFailures = 0
+		// LastHopAck intentionally NOT reset — see doc-comment
+		// above. For a fresh ensureLocked (existing==nil) the
+		// store already stamps LastHopAck=now as a placeholder
+		// (used internally as an idle-timer reference; gated out
+		// of the wire by Confirmed=false). For an existing
+		// entry, the historical timestamp survives.
+		// State change is part of the published Snapshot.Health,
+		// so the snapshot publisher needs to refresh. mutated==true
+		// already marked dirty above; the health-only reset paths
+		// (idempotent storage + degraded health) need the explicit
+		// mark too.
+		t.dirty.Store(true)
+	}
+
 	return AddDirectPeerResult{Entry: entry, Penalized: penalized}, nil
 }
 
@@ -269,10 +431,41 @@ func (t *Table) TickTTL() TickTTLResult {
 	// either changed; a no-op tick (nothing expired and no flap-state
 	// cleanup) must not force a republish.
 	flapMutated := t.flap.tickLocked(now)
+	// Phase 2 health reconciliation: when CompactExpired physically
+	// removes a claim, the matching RouteHealthState entry is no
+	// longer backed by storage. Without the reconciliation step,
+	// a future announce that resurrects the same (Identity, Uplink)
+	// pair could be filtered out of Lookup by a stale Bad/Dead
+	// health label — see docs/protocol/route_health.md
+	// §4.7 Resolved decision #6 (tight sync). Reconciliation runs
+	// only when storage actually removed something so the common
+	// no-op tick stays cheap.
+	if totalRemoved > 0 {
+		t.reconcileHealthLocked()
+	}
 	if totalRemoved > 0 || flapMutated {
 		t.dirty.Store(true)
 	}
 	return TickTTLResult{Exposed: exposed, Removed: totalRemoved}
+}
+
+// reconcileHealthLocked drops every RouteHealthState entry whose
+// (Identity, Uplink) pair has no remaining claim in storage.
+// Invoked after operations that physically remove claims
+// (TickTTL.CompactExpired). The walk is O(N_health) per call but
+// only fires after a non-empty CompactExpired pass; for steady-
+// state nodes (no expirations on a tick) the cost is zero.
+//
+// Caller must hold t.mu in W mode.
+func (t *Table) reconcileHealthLocked() {
+	if t.health == nil || len(t.health.states) == 0 {
+		return
+	}
+	for key := range t.health.states {
+		if _, idx := t.store.findByUplinkLocked(key.Identity, key.Uplink); idx < 0 {
+			delete(t.health.states, key)
+		}
+	}
 }
 
 // RefreshDirectPeers is a no-op retained for API compatibility.

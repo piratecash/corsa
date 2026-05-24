@@ -16,6 +16,8 @@ func TestLocalCapabilities(t *testing.T) {
 		domain.CapMeshRoutingV1,
 		domain.CapMeshRoutingV2,
 		domain.CapFileTransferV1,
+		domain.CapMeshRouteProbeV1,
+		domain.CapMeshRouteQueryV1,
 	}
 	if len(caps) != len(expected) {
 		t.Fatalf("localCapabilities() = %v, want %v", caps, expected)
@@ -29,7 +31,7 @@ func TestLocalCapabilities(t *testing.T) {
 
 func TestLocalCapabilityStrings(t *testing.T) {
 	strs := localCapabilityStrings()
-	expected := []string{"mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "file_transfer_v1"}
+	expected := []string{"mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "file_transfer_v1", "mesh_route_probe_v1", "mesh_route_query_v1"}
 	if len(strs) != len(expected) {
 		t.Fatalf("localCapabilityStrings() = %v, want %v", strs, expected)
 	}
@@ -199,10 +201,12 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 	}
 
 	// localCapabilities() returns [mesh_relay_v1, mesh_routing_v1,
-	// mesh_routing_v2, file_transfer_v1]. The remote hello advertises
+	// mesh_routing_v2, file_transfer_v1, mesh_route_probe_v1,
+	// mesh_route_query_v1]. The remote hello advertises
 	// ["mesh_relay_v1", "mesh_routing_v1"]. The intersection should contain
-	// only the two common capabilities — v2 is absent on the remote side,
-	// so it is not part of the negotiated set.
+	// only the two common capabilities — v2, file_transfer_v1, route_probe
+	// and route_query are absent on the remote side, so they are not part
+	// of the negotiated set.
 	if len(caps) != 2 || caps[0] != domain.CapMeshRelayV1 || caps[1] != domain.CapMeshRoutingV1 {
 		t.Fatalf("expected [mesh_relay_v1, mesh_routing_v1], got %v", caps)
 	}

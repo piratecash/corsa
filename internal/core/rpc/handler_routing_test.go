@@ -36,6 +36,12 @@ func newMockRoutingProvider(
 	// Default to a zero stats struct in handler tests; specific tests
 	// asserting overload reporting can override with their own mock setup.
 	m.On("OverloadStats").Return(routing.OverloadStats{}).Maybe()
+	// PR 11.26 P2#1: fetchRouteLookup now consults HealthSnapshot to
+	// apply the Phase 2 Dead filter + CompositeScore ranking. Default
+	// to an empty health snapshot so existing tests pass unchanged —
+	// they exercise the wire shape, not health-aware sorting.
+	// Health-specific tests can override with their own .On call.
+	m.On("HealthSnapshot").Return([]routing.RouteHealthState(nil)).Maybe()
 
 	if peerTransports != nil {
 		m.EXPECT().PeerTransport(mock.Anything).RunAndReturn(
@@ -831,6 +837,122 @@ func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 	count, _ := result["count"].(float64)
 	if int(count) != 1 {
 		t.Errorf("expected count=1, got %v", count)
+	}
+}
+
+// TestFetchRouteLookupFiltersDeadTransit — PR 11.26 P2#1
+// regression. The RPC handler must mirror Table.Lookup's Phase 2
+// filter: HealthDead transit claims are dropped. A transit route
+// with Health=Dead must not appear in the response, even when
+// the snapshot still carries it as a live (non-withdrawn,
+// non-expired) entry.
+func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
+	now := time.Now()
+	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	// PR 11.27 P2#1: Health travels alongside Routes inside the
+	// cached routing.Snapshot, so the test fixture seeds both
+	// halves in the same struct.
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			targetID: {
+				{
+					Identity:  targetID,
+					Origin:    "good",
+					NextHop:   "uplink-good",
+					Hops:      3,
+					SeqNo:     1,
+					Source:    routing.RouteSourceAnnouncement,
+					ExpiresAt: now.Add(100 * time.Second),
+				},
+				{
+					Identity:  targetID,
+					Origin:    "dead",
+					NextHop:   "uplink-dead",
+					Hops:      2, // would normally win on hops alone
+					SeqNo:     2,
+					Source:    routing.RouteSourceAnnouncement,
+					ExpiresAt: now.Add(100 * time.Second),
+				},
+			},
+		},
+		TakenAt: now,
+		Health: []routing.RouteHealthState{
+			{Identity: targetID, Uplink: "uplink-dead", Health: routing.HealthDead},
+		},
+	}, nil)
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "fetchRouteLookup",
+		Args: map[string]interface{}{"identity": string(targetID)},
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	routes, _ := result["routes"].([]interface{})
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route after Dead filter, got %d: %v", len(routes), routes)
+	}
+	first, _ := routes[0].(map[string]interface{})
+	if nh, _ := first["next_hop"].(string); nh != "uplink-good" {
+		t.Fatalf("Dead transit leaked into response: NextHop = %q, want uplink-good", nh)
+	}
+}
+
+// TestFetchRouteLookupExemptsDirectFromDeadFilter — PR 11.26 P2#1
+// + 11.25 alignment. Direct claims with Health=Dead must STAY in
+// the response (Direct exemption mirrors Lookup-side behaviour).
+// The session is alive even when no organic hop_ack flowed
+// lately; the announce plane keeps advertising the Direct route
+// (PR 11.24 P2#1), so the relay-path RPC view must agree.
+func TestFetchRouteLookupExemptsDirectFromDeadFilter(t *testing.T) {
+	now := time.Now()
+	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	provider := newMockRoutingProvider(t, routing.Snapshot{
+		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
+			targetID: {
+				{
+					Identity:  targetID,
+					Origin:    "self",
+					NextHop:   targetID,
+					Hops:      1,
+					SeqNo:     1,
+					Source:    routing.RouteSourceDirect,
+					ExpiresAt: time.Time{}, // Direct: ExpiresAt zero
+				},
+			},
+		},
+		TakenAt: now,
+		Health: []routing.RouteHealthState{
+			{Identity: targetID, Uplink: targetID, Health: routing.HealthDead},
+		},
+	}, nil)
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "fetchRouteLookup",
+		Args: map[string]interface{}{"identity": string(targetID)},
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	routes, _ := result["routes"].([]interface{})
+	if len(routes) != 1 {
+		t.Fatalf("Direct Dead claim excluded from response; expected exemption (PR 11.26 P2#1). Got %d routes: %v", len(routes), routes)
 	}
 }
 

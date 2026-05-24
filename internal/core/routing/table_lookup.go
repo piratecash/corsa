@@ -30,7 +30,12 @@ package routing
 func (t *Table) Announceable(excludeVia PeerIdentity) []RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.store.AnnounceableFor(excludeVia, t.clock())
+	// Phase 2 (PR 11.23 P2): pass the health-store's Dead probe
+	// so locally-Dead pairs are suppressed from the announceable
+	// set — same contract as Lookup's Dead filter. healthStore.
+	// isDeadLocked is a pure map read under t.mu.RLock(); it
+	// does not take any additional lock.
+	return t.store.AnnounceableFor(excludeVia, t.clock(), t.health.isDeadLocked)
 }
 
 // AnnounceTo returns the wire-safe AnnounceEntry projection of routes
@@ -72,35 +77,306 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 	// The return-value contract was widened to (entries, mutated)
 	// so AnnounceTo can react inside the same writer-lock critical
 	// section the mutation happened in.
-	entries, mutated := t.store.AnnounceProjectionFor(excludeVia, t.clock())
+	// Phase 2 (PR 11.23 P2): same health-store probe as
+	// Announceable above — locally-Dead claims are excluded from
+	// the live-winner candidate pool so we stop re-advertising
+	// them to neighbours. If all claims for an Identity are Dead,
+	// AnnounceProjectionFor falls through to the tombstone branch
+	// (own-direct tombstones emit; transit tombstones never do).
+	entries, mutated := t.store.AnnounceProjectionFor(excludeVia, t.clock(), t.health.isDeadLocked)
 	if mutated {
 		t.dirty.Store(true)
 	}
 	return entries
 }
 
-// Lookup returns all non-withdrawn, non-expired routes for the given
-// identity, sorted by preference: source priority
-// (local > direct > hop_ack > announcement), then by hops ascending
-// within the same source tier.
+// AnnounceTargetFor returns the per-receiver wire projection of
+// a single (target) identity for a specific requester —
+// effectively one iteration of AnnounceProjectionFor scoped to
+// a single identity. Used by handleRouteQuery to construct
+// route_query_response_v1 with the same outbound-SeqNo namespace
+// as a regular announce_routes frame to the same receiver: the
+// wire SeqNo comes from nextOutboundSeqLockedPerPeer just like
+// AnnounceProjectionFor's per-Identity emit, so subsequent
+// announce_routes cycles to the same receiver see a
+// monotonically non-decreasing SeqNo timeline. Without this
+// alignment a raw `claim.SeqNo` on the wire would diverge from
+// the responder's outbound-counter namespace and the receiver
+// could reject later legitimate announces as stale, or trip the
+// cross-Origin lineage guard via a mismatched LastIngressOrigin
+// (PR 11.32 P2).
+//
+// Returns (entry, uplink, true) on a live winner; (zero,
+// "", false) when no non-Dead non-withdrawn non-expired claim is
+// selectable. Direct (own-origin) claims are exempt from the
+// Dead filter, mirroring AnnounceProjectionFor's PR 11.24 / 11.25
+// behaviour. Tombstones are NOT projected — route_query is a
+// positive-existence query; withdrawals propagate through
+// announce_routes only.
+//
+// uplink is the live winner's claim.Uplink, kept on the return
+// signature so the wire frame can carry best_uplink as
+// informational metadata (the receiver ignores it for routing
+// decisions — see handleRouteQueryResponse's BestUplink note).
+//
+// Side effects: advances per-receiver outbound SeqNo for the
+// target identity via nextOutboundSeqLockedPerPeer; marks the
+// table dirty so the snapshot publisher republishes the new
+// outbound counter value on its next tick (without dirty the
+// publisher's ConsumeDirty fast-path would skip the rebuild).
+//
+// Lock contract: acquires t.mu in W mode. Callers must not hold
+// any other domain mutex of node.Service at invocation time.
+func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry, PeerIdentity, bool) {
+	if target == "" || requester == "" || target == requester {
+		return AnnounceEntry{}, "", false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.clock()
+
+	// PR 11.33 P2 — SeqNo flap-cap hold-down gate. Mirrors
+	// AnnounceProjectionFor's top-of-loop
+	// isInSeqHoldDownLocked check (route_store_lookup.go).
+	// When an Identity's outbound-SeqNo advance rate crossed
+	// MaxSeqAdvancePerWindow inside SeqAdvanceWindow, wire emit
+	// for X is suppressed to every peer for the entire
+	// DefaultSeqHoldDownDuration window — and that suppression
+	// applies to route_query_response too, otherwise a peer
+	// receives a route_query answer for a target that the
+	// announce path is explicitly NOT advertising. Return
+	// Found=false here so the responder reports "no route" while
+	// hold-down is active. Receive-side state stays accurate
+	// regardless (this gate is wire-emit only).
+	if t.flap.isInSeqHoldDownLocked(target, now) {
+		return AnnounceEntry{}, "", false
+	}
+
+	bucket, ok := t.store.buckets[target]
+	if !ok {
+		return AnnounceEntry{}, "", false
+	}
+
+	// Pick live winner using the SAME CompositeScore ranking
+	// Table.Lookup applies (sortRoutesByCompositeScoreLocked).
+	// PR 11.34 P2 — earlier the picker used isBetterLiveClaim
+	// (Hops + SeqNo + Extra + Uplink), which is the announce-plane's
+	// wire-stability comparator. That disagreed with Lookup's
+	// CompositeScore winner whenever health / RTT / source-trust
+	// flipped the ranking, so a route_query response could
+	// advertise a 2-hop Bad path while the relay path's Lookup
+	// already selected a 3-hop Good alternative — defeating the
+	// whole point of route_query as a recovery mechanism after a
+	// Bad/Dead transition.
+	//
+	// Aligning the picker with Lookup's CompositeScore means
+	// AnnounceTargetFor advertises whatever the responder would
+	// itself select for that target. The Dead filter with Direct
+	// exemption is the same one applied at the Lookup level; the
+	// Direct + Dead → Bad-equivalent score substitution mirrors
+	// sortRoutesByCompositeScoreLocked so a Dead Direct claim is
+	// deprioritised but selectable as last resort (PR 11.25 / 11.26).
+	scoreClaim := func(claim *UplinkClaim) float64 {
+		// Mirror sortRoutesByCompositeScoreLocked exactly: fetch
+		// the health state once (Local has no health by design,
+		// but UplinkClaim cannot be Local — synthesised at
+		// Lookup-time only — so we skip that guard here), then
+		// apply the Direct + Dead → Bad-equivalent substitution
+		// before scoring. Keeps the two CompositeScore call sites
+		// (Lookup's sort and this picker) on identical inputs.
+		h := t.health.getLocked(target, claim.Uplink)
+		if claim.Source == RouteSourceDirect && h != nil && h.Health == HealthDead {
+			adjusted := *h
+			adjusted.Health = HealthBad
+			h = &adjusted
+		}
+		return CompositeScore(uint8(claim.Hops), claim.Source, h)
+	}
+	var liveWinner *UplinkClaim
+	var liveWinnerScore float64
+	for i := range bucket {
+		claim := &bucket[i]
+		if claim.Uplink == requester {
+			continue
+		}
+		if claim.IsExpired(now) || claim.IsWithdrawn() {
+			continue
+		}
+		// Dead filter with Direct exemption — symmetric with the
+		// Lookup-side and AnnounceProjectionFor filters
+		// (table_lookup.go::Lookup, route_store_lookup.go's PR
+		// 11.24 P2#1 / 11.25 split).
+		if claim.Source != RouteSourceDirect && t.health.isDeadLocked(target, claim.Uplink) {
+			continue
+		}
+		score := scoreClaim(claim)
+		if liveWinner == nil || score > liveWinnerScore {
+			w := *claim
+			liveWinner = &w
+			liveWinnerScore = score
+		}
+	}
+	if liveWinner == nil {
+		return AnnounceEntry{}, "", false
+	}
+
+	// emitOrigin matches AnnounceProjectionFor's sender-originated
+	// synthesis: localOrigin (post-Phase-A wire-Origin contract),
+	// with the empty-fallback-to-identity guard for test fixtures
+	// that build Tables without WithLocalOrigin.
+	emitOrigin := t.localOrigin
+	if emitOrigin == "" {
+		emitOrigin = target
+	}
+
+	sig := outboundEmitSig{
+		Uplink:    liveWinner.Uplink,
+		Hops:      liveWinner.Hops,
+		Withdrawn: false,
+		ExtraSig:  string(normalizeExtra(liveWinner.Extra)),
+	}
+	wireSeqNo, armed := t.store.nextOutboundSeqLockedPerPeer(target, requester, sig, liveWinner.SeqNo, liveWinner.LastIngressOrigin, now)
+	if armed {
+		// PR 11.33 P2 — the advance we just recorded crossed the
+		// SeqNo flap-cap threshold and engaged hold-down INSIDE
+		// this call. The top-of-function gate already passed
+		// (hold-down was not active when we entered), so without
+		// this extra suppression the peer that triggered the
+		// engage would still receive the over-threshold emit —
+		// only the NEXT call would observe suppression. That
+		// contradicts the "wire emit suppressed to EVERY peer"
+		// contract documented on the SeqNo flap cap; mirrors
+		// AnnounceProjectionFor's symmetric branch
+		// (route_store_lookup.go).
+		//
+		// Storage state (outboundContent, outboundMax,
+		// outboundPeerMax) is intentionally kept past this
+		// branch: when hold-down expires the cache hit on the
+		// same sig will reuse the burnt SeqNo on the receiver's
+		// first post-release emit, so the receiver's monotonic-
+		// SeqNo timeline never goes backwards.
+		//
+		// Mark dirty so the snapshot publisher republishes the
+		// SeqNoFlapHoldowns counter bump (visible via
+		// fetchRouteSummary).
+		t.dirty.Store(true)
+		return AnnounceEntry{}, "", false
+	}
+	t.dirty.Store(true)
+
+	return AnnounceEntry{
+		Identity: target,
+		Origin:   emitOrigin,
+		Hops:     int(liveWinner.Hops),
+		SeqNo:    wireSeqNo,
+		Extra:    liveWinner.Extra,
+	}, liveWinner.Uplink, true
+}
+
+// Lookup returns all selectable routes for the given identity,
+// ranked by the Phase 2 CompositeScore (composite of hops, RTT
+// EWMA, RouteHealth penalty, and source-trust bonus — see
+// docs/protocol/route_health.md). HealthDead claims
+// are filtered out as "do not select"; HealthBad / HealthQuestionable
+// remain in the result but with reduced scores so the caller picks
+// them only when no better path exists.
+//
+// Backward-compat (nil-health path): when a (Identity, Uplink) pair
+// has no RouteHealthState yet (cold-start, no hop_ack / probe seen),
+// CompositeScore falls back to base − hops × 10 + sourceBonus, which
+// reproduces the pre-Phase-2 by-hops-with-source-priority ordering
+// modulo trust-tier ties. This keeps callers that have not yet wired
+// health into their flow unchanged.
 //
 // When the queried identity matches the node's own localOrigin, a
-// synthetic local route (Hops=0, RouteSourceLocal) is prepended. This
-// ensures a node can always resolve a route to itself without
-// requiring an external peer session or an explicit table entry. The
-// self-route injection lives here rather than in routeStore because
-// it is a routing-domain invariant, not storage state.
+// synthetic local route (Hops=0, RouteSourceLocal) is prepended. The
+// synthetic entry has no health state and is scored as nil-health, so
+// it lands at the top of the ranked result (RouteSourceLocal carries
+// the same +20 source bonus as Direct, and Hops=0 gives the maximum
+// base score). The self-route injection lives here rather than in
+// routeStore because it is a routing-domain invariant, not storage
+// state.
 func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	var result []RouteEntry
+	var candidates []RouteEntry
 	if t.localOrigin != "" && identity == t.localOrigin {
-		result = append(result, t.localRouteEntry())
+		candidates = append(candidates, t.localRouteEntry())
 	}
-	result = append(result, t.store.LookupActive(identity, t.clock())...)
-	sortRoutes(result)
+	candidates = append(candidates, t.store.LookupActive(identity, t.clock())...)
+
+	// Empty candidate set returns nil (not an empty slice) to keep the
+	// pre-Phase-2 callers that probe `routes == nil` working. The
+	// pre-allocation below would otherwise produce a non-nil empty
+	// slice and break existing nil-equality checks.
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Filter HealthDead claims and rank the remainder by composite
+	// score. The filter is keyed strictly on Health==HealthDead, NOT
+	// on `score < 0`: the base formula (100 − hops×10) goes negative
+	// for hops > 10 (a legitimate very-bad route), and after PR 11.35
+	// P2 strict-tier penalties (Q=−250, Bad=−500) every Questionable
+	// and Bad claim — including 1-hop low-RTT Direct ones — also
+	// scores well below zero. Sign-based filtering cannot tell any
+	// of these legitimately-selectable last-resort claims apart from
+	// the Dead sentinel, so the only correct Dead gate is the Health
+	// field check. Phase 2 still selects high-hop / Questionable /
+	// Bad routes as last resort, while Dead claims are excluded
+	// outright (the wire withdrawal / gossip fallback machinery
+	// takes over).
+	//
+	// PR 11.25 P2 — Direct exemption. RouteSourceDirect claims are
+	// EXEMPT from the Dead filter, mirroring the symmetric exemption
+	// on the announce projection (route_store_lookup.go). Direct
+	// routes are session-bound: their storage lifecycle is driven by
+	// AddDirectPeer / RemoveDirectPeer, and a live storage claim
+	// means the underlying session is alive (RemoveDirectPeer would
+	// have tombstoned it on disconnect). A HealthDead label on a
+	// Direct claim means "no organic hop_ack traffic has flowed
+	// lately" — a symptom of message-flow patterns, NOT of session
+	// loss. Excluding such a claim from Lookup would force the
+	// relay path to fall back to gossip / trigger a route query
+	// while the announce plane keeps advertising the route, leaving
+	// local forwarding and outbound announce semantics in
+	// disagreement. Keep Direct claims selectable; the
+	// Questionable / Bad penalties from CompositeScore are
+	// sufficient to deprioritise them against confirmed
+	// alternatives if any exist.
+	//
+	// The filter pass is O(N) where N is at most
+	// MaxOutgoingPeers + MaxIncomingPeers (≤24 in densely connected
+	// production meshes) plus the optional self-route.
+	var result []RouteEntry
+	for _, entry := range candidates {
+		health := t.lookupHealthLocked(identity, entry)
+		if health != nil && health.Health == HealthDead && entry.Source != RouteSourceDirect {
+			continue
+		}
+		result = append(result, entry)
+	}
+	sortRoutesByCompositeScoreLocked(result, t.health, identity)
 	return result
+}
+
+// lookupHealthLocked returns the RouteHealthState for the given
+// route entry, or nil when (a) the route is the synthetic self-route
+// (RouteSourceLocal — never tracked), (b) the health store is nil
+// (defensive — should not happen post-NewTable), or (c) no state
+// has been recorded for the (identity, uplink) pair yet.
+//
+// Caller must hold t.mu in R mode.
+func (t *Table) lookupHealthLocked(identity PeerIdentity, entry RouteEntry) *RouteHealthState {
+	if entry.Source == RouteSourceLocal {
+		return nil
+	}
+	if t.health == nil {
+		return nil
+	}
+	return t.health.getLocked(identity, entry.NextHop)
 }
 
 // InspectTriple returns the raw route entry for the given lookup key,
@@ -165,6 +441,16 @@ func (t *Table) Snapshot() Snapshot {
 	// FlapEntry; see flap.go for the exact contract.
 	snap.FlapState = t.flap.snapshotLocked(now)
 
+	// Phase 2 health snapshot (PR 11.27 P2#1) captured inside the
+	// same RLock as routes/flap so consumers that need to apply
+	// Lookup-style ranking (HealthDead filter, CompositeScore) read
+	// a self-consistent view without a second t.mu.RLock round
+	// trip. fetchRouteLookup is the primary consumer; without this
+	// the RPC would call HealthSnapshot separately and break the
+	// documented hot-read contract (cached snapshot, no routing
+	// mutex per request).
+	snap.Health = t.health.snapshotLocked()
+
 	// CapStats is read AFTER the routes/flap pass: a writer that
 	// landed an admission decision after we released that pass would
 	// already have moved past the t.mu critical section, so its
@@ -175,16 +461,58 @@ func (t *Table) Snapshot() Snapshot {
 	return snap
 }
 
-// sortRoutes sorts routes by preference: source priority first
-// (direct > hop_ack > announcement), then by hops ascending.
+// sortRoutesByCompositeScoreLocked sorts routes by Phase 2
+// CompositeScore (descending — highest score wins, lands at index 0).
+// The function is a stable insertion sort to keep the deterministic
+// ordering tests rely on when scores tie (insertion sort preserves
+// original order for equal compare results).
 //
-// Lives at Table level rather than inside routeStore because Lookup
-// applies it AFTER the synthetic self-route is merged with the
-// storage results — the sort needs to see the local route as the
-// highest-priority candidate.
-func sortRoutes(routes []RouteEntry) {
+// The synthetic self-route (RouteSourceLocal) is naturally ranked
+// first because its hop-0, +20-source-bonus composite score (~120)
+// dominates any storage-side claim (max realistic ≈ 100 for a 1-hop
+// Direct with low RTT and Good health).
+//
+// Lives at Table level (not inside routeStore) because Lookup applies
+// it AFTER the synthetic self-route is merged with the storage
+// results — the sort needs to see the local route as a candidate.
+//
+// Caller must hold t.mu in R mode (Lookup holds RLock; the health
+// store reads are O(1) per entry).
+func sortRoutesByCompositeScoreLocked(routes []RouteEntry, health *healthStore, identity PeerIdentity) {
+	if len(routes) < 2 {
+		return
+	}
+	scoreOf := func(r RouteEntry) float64 {
+		var h *RouteHealthState
+		if health != nil && r.Source != RouteSourceLocal {
+			h = health.getLocked(identity, r.NextHop)
+		}
+		// PR 11.26 P2 — Direct Dead score adjustment. The PR 11.25
+		// Direct-exempt branch keeps Dead Direct claims in the
+		// candidate set (session is alive even if no organic hop_ack
+		// flowed), but CompositeScore returns the -1 "excluded"
+		// sentinel for ANY Dead, sinking Direct below every transit
+		// alternative. That contradicts the exemption rationale:
+		// Direct should stay selectable, just deprioritised. Treat
+		// Dead Direct as Bad for scoring — same scoreHealthBadPenalty
+		// as any other Bad pair, which lets a Good or Questionable
+		// transit alternative win (the desired behaviour: prefer
+		// confirmed paths) while still ranking Dead Direct above
+		// other Bad transit options thanks to Direct's +20 source
+		// bonus. PR 11.35 P2 widened the Bad penalty so the
+		// strict-tier invariant holds across the score; Dead Direct
+		// is therefore "strictly below every non-Bad alternative,
+		// strictly above every transit Bad" under the same rule
+		// applied to a genuine Bad Direct.
+		if r.Source == RouteSourceDirect && h != nil && h.Health == HealthDead {
+			adjusted := *h
+			adjusted.Health = HealthBad
+			h = &adjusted
+		}
+		return CompositeScore(uint8(r.Hops), r.Source, h)
+	}
 	for i := 1; i < len(routes); i++ {
-		for j := i; j > 0 && isBetter(&routes[j], &routes[j-1]); j-- {
+		for j := i; j > 0 && scoreOf(routes[j]) > scoreOf(routes[j-1]); j-- {
 			routes[j], routes[j-1] = routes[j-1], routes[j]
 		}
 	}

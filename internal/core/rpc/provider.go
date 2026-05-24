@@ -133,6 +133,20 @@ type RoutingProvider interface {
 	// fields stay at zero. See docs/routing.md "Operator tuning"
 	// section for the contract.
 	OverloadStats() routing.OverloadStats
+
+	// HealthSnapshot returns a deep copy of every tracked
+	// RouteHealthState (Phase 2). Used by fetchRouteHealth RPC
+	// observability — the snapshot is built under
+	// routing.Table.t.mu.RLock and is safe to publish lock-free.
+	// Returns nil when no health entries are tracked yet so
+	// callers can compare cheaply.
+	//
+	// HealthSnapshot is a pure read — it MUST NOT trigger probe
+	// sends or any other side effect. Observers reading the
+	// snapshot for diagnostics get a point-in-time view; the
+	// probe sender ticker operates on its own schedule, not on
+	// RPC pressure.
+	HealthSnapshot() []routing.RouteHealthState
 }
 
 // ConnectionDiagnosticProvider exposes ConnectionManager and PeerProvider

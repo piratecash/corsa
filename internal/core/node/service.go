@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -272,6 +273,9 @@ type Service struct {
 	routingTable              *routing.Table                            // distance-vector routing table (Phase 1.2)
 	announceLoop              *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
 	overloadMonitor           *overloadMonitor                          // CPU/backlog backpressure gate for the announce loop (Phase 0)
+	probeRegistry             *probeRegistry                            // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
+	queryRateLimit            *queryRateLimit                           // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
+	queryIDCounter            atomic.Uint64                             // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
 	identitySessions          map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
 	identityRelaySessions     map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
 	disableRateLimiting       bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
@@ -1278,6 +1282,25 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		announceLoopOpts...,
 	)
 
+	// Phase 2 probe registry — sender bookkeeping for outstanding
+	// route_probe_v1 frames. The timeout callback fires
+	// routing.Table.MarkProbeFailure for pairs whose ack does not
+	// arrive within HealthProbeTimeout; the registry's mutex is
+	// disjoint from t.mu so the timeout fire does not nest locks.
+	// See docs/protocol/route_health.md / §2.6.
+	svc.probeRegistry = newProbeRegistry(
+		routing.HealthProbeTimeout,
+		nil, // production clock; tests override via newProbeRegistry directly
+		svc.routingTable.MarkProbeFailure,
+	)
+
+	// Phase 2 route_query_v1 rate limit — per-target sliding
+	// window cap to protect neighbours from a query storm when a
+	// node's relay loop repeatedly hits Bad/Dead Lookup outcomes.
+	// Production budget = queryFanOutLimit per queryRateWindow
+	// (overview §7.5, docs/protocol/route_health.md).
+	svc.queryRateLimit = newQueryRateLimit(nil, 0, 0)
+
 	svc.relayStates = newRelayStateStore()
 	svc.relayStates.restore(queueState.RelayForwardStates)
 	svc.relayLimiter = newRelayRateLimiter()
@@ -1396,6 +1419,16 @@ func (s *Service) Run(ctx context.Context) error {
 	go func() {
 		defer crashlog.DeferRecover()
 		s.routingTableTTLLoop(routingCtx)
+	}()
+
+	// Phase 2 probe sender (PR 11.3c). Walks Questionable
+	// (Identity, Uplink) pairs every HealthProbeInterval and emits
+	// route_probe_v1; the outstanding-probe registry arms a
+	// HealthProbeTimeout watcher that converts no-ack outcomes into
+	// MarkProbeFailure. Honours the Phase 0 overload gate.
+	go func() {
+		defer crashlog.DeferRecover()
+		s.probeLoop(routingCtx)
 	}()
 
 	// On shutdown: close all inbound connections so handleConn goroutines
@@ -2328,6 +2361,78 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// to the neighbor that just delivered it.
 		s.handleFileCommandFrame(json.RawMessage(line), s.inboundPeerIdentity(connID))
 		return true
+	case "route_probe_v1":
+		// Auth gate enforced above. Phase 2 reachability probe gated
+		// by mesh_route_probe_v1 (overview §7.6,
+		// docs/protocol/route_health.md). Peers that
+		// do not advertise the capability MUST NOT receive probes; the
+		// receive-side gate here is the symmetric guard against an
+		// older peer accidentally routing the frame to us.
+		//
+		// Type string is the raw "route_probe_v1" literal (kept in
+		// sync with protocol.RouteProbeFrameType) because the
+		// command_scope_test AST inspector only extracts string-literal
+		// case labels; using the constant would render this case
+		// invisible to the wire-vs-data invariant tests.
+		if !s.connHasCapability(connID, domain.CapMeshRouteProbeV1) {
+			accepted = false
+			return true
+		}
+		probe, err := protocol.UnmarshalRouteProbeFrame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRouteProbe(connID, s.inboundPeerIdentity(connID), probe)
+		return true
+	case "route_probe_ack_v1":
+		// Auth gate enforced above. Same capability gate as the probe
+		// request — both sides of the probe round trip share
+		// mesh_route_probe_v1. Same string-literal rationale as
+		// route_probe_v1 above.
+		if !s.connHasCapability(connID, domain.CapMeshRouteProbeV1) {
+			accepted = false
+			return true
+		}
+		ack, err := protocol.UnmarshalRouteProbeAckFrame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRouteProbeAck(s.inboundPeerIdentity(connID), ack)
+		return true
+	case "route_query_v1":
+		// Auth gate enforced above. Phase 2 targeted route query
+		// gated by mesh_route_query_v1 (overview §7.5,
+		// docs/protocol/route_health.md). Same
+		// string-literal rationale as route_probe_v1: the AST
+		// inspector in command_scope_test only matches BasicLit
+		// case labels.
+		if !s.connHasCapability(connID, domain.CapMeshRouteQueryV1) {
+			accepted = false
+			return true
+		}
+		query, err := protocol.UnmarshalRouteQueryFrame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRouteQuery(connID, s.inboundPeerIdentity(connID), query)
+		return true
+	case "route_query_response_v1":
+		// Auth gate enforced above. Same capability gate as the
+		// query request — both sides share mesh_route_query_v1.
+		if !s.connHasCapability(connID, domain.CapMeshRouteQueryV1) {
+			accepted = false
+			return true
+		}
+		resp, err := protocol.UnmarshalRouteQueryResponseFrame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRouteQueryResponse(s.inboundPeerIdentity(connID), resp)
+		return true
 	default:
 		accepted = false
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
@@ -2356,6 +2461,18 @@ var p2pWireCommands = map[string]bool{
 	"routes_update":          true,
 	"request_resync":         true,
 	"file_command":           true,
+	// Phase 2 (mesh_route_probe_v1, additive). String literals kept
+	// in sync with protocol.RouteProbeFrameType /
+	// protocol.RouteProbeAckFrameType — switch-case labels in
+	// dispatchNetworkFrame use the same literals so the
+	// command_scope_test AST inspector can cross-check both surfaces.
+	"route_probe_v1":     true,
+	"route_probe_ack_v1": true,
+	// Phase 2 (mesh_route_query_v1, additive). Targeted single-hop
+	// route query used for fast recovery when all known uplinks for
+	// an identity are Bad/Dead — same string-literal pattern.
+	"route_query_v1":          true,
+	"route_query_response_v1": true,
 }
 
 // isP2PWireCommand returns true if the command name belongs to the

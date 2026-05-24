@@ -85,8 +85,29 @@ func (s *routeStore) InspectTriple(key RouteTriple) *RouteEntry {
 // We do NOT send fake hops=16 withdrawals from this method —
 // that would violate the per-origin SeqNo invariant.
 //
-// Caller must hold t.mu (reader OK).
-func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time) []RouteEntry {
+// Phase 2 health filter (PR 11.23 P2 / 11.24 P2#1 / 11.25): when
+// an `isDead` callback is supplied, transit claims (Source !=
+// RouteSourceDirect) whose (Identity, Uplink) pair is currently
+// marked HealthDead are suppressed from the result. A locally-
+// Dead transit route stops being advertised so neighbours do not
+// keep refreshing a path we already gave up on.
+//
+// RouteSourceDirect claims are EXEMPT from the filter — their
+// lifecycle is session-driven (AddDirectPeer / RemoveDirectPeer
+// emit real wire withdrawals on disconnect), and a HealthDead
+// label on a Direct claim signals "no organic hop_ack lately",
+// not "route is gone". Silently dropping a Direct claim from
+// announce would violate the own-origin withdrawal contract on
+// the HealthDead constant (health.go): neighbours would keep
+// the prior live route until TTL (~120 s) instead of seeing an
+// authoritative withdrawal. The symmetric exemption applies on
+// the Lookup-side filter (table_lookup.go) — local forwarding
+// and outbound announce semantics must agree on Direct routes.
+// Pass nil to skip filtering (test fixtures, pre-Phase-2 callers).
+//
+// Caller must hold t.mu (reader OK); isDead is invoked under
+// that lock and must not block on it.
+func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isDead func(identity, uplink PeerIdentity) bool) []RouteEntry {
 	var result []RouteEntry
 	for identity, bucket := range s.buckets {
 		if identity == excludeVia {
@@ -97,6 +118,27 @@ func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time) []R
 				continue
 			}
 			if claim.IsWithdrawn() || claim.IsExpired(now) {
+				continue
+			}
+			// PR 11.24 P2#1: Direct (own-origin) claims are
+			// EXEMPT from the Phase 2 Dead filter. Direct routes
+			// have ExpiresAt=zero by design and their lifecycle is
+			// driven by AddDirectPeer / RemoveDirectPeer — the
+			// session-disconnect path emits a real wire withdrawal
+			// (hops=16 + SeqNo bump). The HealthDead label on a
+			// Direct claim signals "no organic hop_ack traffic has
+			// flowed lately", NOT "the route is gone"; the session
+			// is still alive and we know our own connectivity.
+			// Suppressing the announce here would let neighbours
+			// keep the prior live route until TTL (≈120 s) while
+			// we silently stopped advertising — that is NOT the
+			// withdrawal semantic the HealthDead contract promises
+			// for own-origin routes. Foreign-origin (transit)
+			// claims stay subject to the filter: the doc says
+			// transit Dead routes converge via TTL expiry or
+			// origin's own withdrawal, which is exactly what
+			// suppressing the announce accomplishes for them.
+			if claim.Source != RouteSourceDirect && isDead != nil && isDead(identity, claim.Uplink) {
 				continue
 			}
 			result = append(result, toRouteEntry(identity, s.localOrigin, claim))
@@ -188,7 +230,27 @@ func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time) []R
 // watermark mutations are intentionally NOT reflected: they are
 // not snapshot-visible and a republish on every cycle would be
 // wasted work.
-func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Time) ([]AnnounceEntry, bool) {
+// Phase 2 health filter (PR 11.23 P2 / 11.24 P2#1 / 11.25):
+// when an `isDead` callback is supplied, transit claims (Source
+// != RouteSourceDirect) whose (Identity, Uplink) pair is
+// currently HealthDead are excluded from the live-winner
+// candidate pool. RouteSourceDirect claims are EXEMPT — Direct
+// lifecycle is session-driven (AddDirectPeer /
+// RemoveDirectPeer), so a HealthDead label there means "no
+// organic hop_ack lately" rather than "route is gone";
+// suppressing a Direct claim from announce would silently
+// abandon the route on the wire (no authoritative withdrawal)
+// and force neighbours to wait out TTL. The Lookup-side filter
+// in table_lookup.go applies the same Direct exemption — local
+// forwarding and outbound announce semantics must agree.
+//
+// If ALL live transit candidates for an Identity are Dead and
+// no Direct candidate exists, no live winner is selected and
+// the tombstone branch fires per the existing rules (own-direct
+// tombstones emit; transit tombstones never emit). Pass nil to
+// disable filtering — test fixtures and pre-Phase-2 callers do
+// this.
+func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Time, isDead func(identity, uplink PeerIdentity) bool) ([]AnnounceEntry, bool) {
 	origin := s.localOrigin
 
 	var result []AnnounceEntry
@@ -238,6 +300,23 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 				if claim.Source == RouteSourceDirect {
 					tombstones = append(tombstones, *claim)
 				}
+				continue
+			}
+			// Phase 2 health filter (PR 11.23 P2 / 11.24 P2#1):
+			// skip locally-Dead transit pairs so they are not
+			// re-advertised. Direct (own-origin) claims are
+			// exempt — their lifecycle is session-driven via
+			// AddDirectPeer / RemoveDirectPeer, which emit real
+			// wire withdrawals on disconnect. Health-Dead on a
+			// Direct claim is a "no recent organic hop_ack"
+			// signal, NOT "route is gone", and silently dropping
+			// it from announce would violate the own-origin
+			// withdrawal contract on the HealthDead constant
+			// (health.go) — neighbours would keep the prior live
+			// route until TTL (~120 s) instead of seeing an
+			// authoritative withdrawal. See AnnounceableFor for
+			// the symmetric exemption.
+			if claim.Source != RouteSourceDirect && isDead != nil && isDead(identity, claim.Uplink) {
 				continue
 			}
 			if liveWinner == nil || isBetterLiveClaim(claim, liveWinner) {

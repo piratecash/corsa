@@ -93,6 +93,26 @@ var requiredP2PWireCommands = map[string]bool{
 
 	// File transfer
 	"file_command": true,
+
+	// Phase 2 cluster-mesh route health, RTT, and targeted-query
+	// primitives (mesh_route_probe_v1 capability gate). Both frames
+	// travel through the same dispatchNetworkFrame switch as the
+	// other wire commands; the capability gate keeps them invisible
+	// to peers that did not negotiate mesh_route_probe_v1. See
+	// docs/protocol/route_health.md §2.5 and
+	// docs/protocol/route_health.md §7.6 for the wire
+	// contract.
+	"route_probe_v1":     true,
+	"route_probe_ack_v1": true,
+
+	// Phase 2 cluster-mesh targeted route query (mesh_route_query_v1
+	// capability gate). Single-hop on-demand lookup used for fast
+	// recovery when all known uplinks for an identity transition to
+	// Bad/Dead. See docs/protocol/route_health.md §4.4
+	// and docs/protocol/route_health.md §7.5 for the wire
+	// contract.
+	"route_query_v1":          true,
+	"route_query_response_v1": true,
 }
 
 // extractSwitchCasesFromFunc parses service.go via go/ast and returns every

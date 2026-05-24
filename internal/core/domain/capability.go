@@ -36,6 +36,49 @@ const (
 	// FileCommandFrame traffic. The file_announce DM is not gated
 	// because it travels through the standard DM pipeline.
 	CapFileTransferV1 Capability = "file_transfer_v1"
+
+	// CapMeshRouteProbeV1 gates active reachability probes
+	// (route_probe_v1 / route_probe_ack_v1 wire frames) introduced
+	// in Phase 2 (docs/protocol/route_health.md). Probes verify that
+	// a (target identity, uplink peer) pair is currently usable
+	// without waiting for organic traffic to generate a hop_ack.
+	// Only peers advertising this capability receive probes from us.
+	//
+	// Mixed-version interop. A peer with mesh_routing_v1 but without
+	// this capability is NOT excluded from the Phase 2 ranking model:
+	// every accepted (Identity, Uplink) claim is still seeded as
+	// Questionable in our local RouteHealthState and aged by the
+	// passive idle timeline, regardless of the announcing peer's
+	// capabilities (see Table.UpdateRoute and docs/routing.md
+	// "Capability gating"). What this capability gates is strictly
+	// the active probe send path — pairs we observe but cannot
+	// probe stay Questionable until either organic relay traffic
+	// emits a hop_ack or the passive timeline escalates them
+	// further. CompositeScore ranks them with the standard
+	// Questionable penalty, so they sit below confirmed
+	// alternatives but remain selectable.
+	CapMeshRouteProbeV1 Capability = "mesh_route_probe_v1"
+
+	// CapMeshRouteQueryV1 gates targeted single-hop route queries
+	// (route_query_v1 / route_query_response_v1 wire frames)
+	// introduced in Phase 2. Queries trigger an on-demand lookup of
+	// the best route to a target identity from a directly connected
+	// peer, used for fast recovery after all known uplinks for that
+	// identity transition to Bad/Dead health. Queries are
+	// rate-limited to 3 per target per 30s and never forwarded —
+	// they are strictly single-hop.
+	//
+	// Fan-out triplet. A peer is eligible as a route_query_v1
+	// fan-out target only if it advertises the FULL triplet:
+	// mesh_route_query_v1 + mesh_relay_v1 + mesh_routing_v1.
+	// route_query_v1 alone would let the peer answer queries, but
+	// the ingested response always lands as a transit next-hop
+	// (Hops = BestHops + 1) and requires both mesh_relay_v1 (to
+	// forward relay_message frames addressed to us through that
+	// peer) and mesh_routing_v1 (to act as transit at all). The
+	// sender filters candidates accordingly in peersWithRouteQueryCap
+	// (internal/core/node/routing_query_sender.go).
+	CapMeshRouteQueryV1 Capability = "mesh_route_query_v1"
 )
 
 // String returns the stable string label for the capability.
@@ -47,7 +90,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1:
+	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1:
 		return c, true
 	default:
 		return "", false

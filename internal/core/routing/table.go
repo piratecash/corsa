@@ -148,6 +148,19 @@ type Table struct {
 	// the consumer (publisher) reads it lock-free from the hot-reads
 	// refresher.
 	dirty atomic.Bool
+
+	// health owns the RouteHealthState map keyed per (Identity,
+	// Uplink) — the Phase 2 quality-signal layer introduced in
+	// docs/protocol/route_health.md. healthStore has no
+	// mutex of its own; t.mu protects it in the same way it protects
+	// store and flap, so a Lookup-path can read uplinks, RTT, and
+	// health under a single RLock without cross-mutex coordination.
+	//
+	// PR 11.1 introduces the field and the leaf data structure;
+	// integration with Lookup (composite-score ranking) and with the
+	// relay_hop_ack handler (MarkHopAck) lands in PR 11.2. Probe and
+	// query wire frames + ack handling land in PR 11.3 / 11.4.
+	health *healthStore
 }
 
 // TableOption configures optional Table parameters.
@@ -318,9 +331,10 @@ func WithMaxNextHopsPerOrigin(n int) TableOption {
 // initialization pass.
 func NewTable(opts ...TableOption) *Table {
 	t := &Table{
-		store: newRouteStore(),
-		clock: time.Now,
-		flap:  newFlapDetector(),
+		store:  newRouteStore(),
+		clock:  time.Now,
+		flap:   newFlapDetector(),
+		health: newHealthStore(),
 	}
 	// Link the FlapDetector into routeStore so Phase 1 P2 (SeqNo
 	// flap cap) helpers nextOutboundSeqLockedPerPeer /

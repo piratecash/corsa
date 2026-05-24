@@ -38,6 +38,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // tableForwardResult describes the outcome of tryForwardViaRoutingTable.
@@ -71,6 +72,10 @@ type tableForwardResult struct {
 func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domain.PeerIdentity, frame protocol.Frame, excludeIdentity domain.PeerIdentity) tableForwardResult {
 	routes := s.routingTable.Lookup(recipient)
 	if len(routes) == 0 {
+		// Phase 2 on-demand recovery: nudge route discovery for
+		// recipient. Per-target rate limit inside SendRouteQuery
+		// caps the fan-out at 3 emissions per 30 s.
+		s.triggerRouteQueryAsync(recipient)
 		return tableForwardResult{}
 	}
 
@@ -93,10 +98,31 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 				Str("origin", string(route.Origin)).
 				Int("hops", route.Hops).
 				Msg("relay_forward_via_routing_table")
+			// PR 11.35 P2 — fast recovery when the selected route
+			// is HealthBad. Lookup is CompositeScore-ranked with
+			// Dead filtered (Direct exempt), so the top candidate
+			// being Bad means every alternative is also Bad or
+			// worse. Fire route_query in the background to
+			// discover fresher uplinks; the send through the Bad
+			// route still happened above as best-effort. Without
+			// this signal the relay path would wait for a Dead
+			// transition or send failure before triggering
+			// recovery, prolonging the unhealthy window.
+			// triggerRouteQueryAsync is rate-limited and
+			// spawn-throttled so this is safe under sustained
+			// traffic — see TableRouter.Route for the symmetric
+			// trigger on the directed-relay path.
+			if health, tracked := s.routingTable.HealthFor(recipient, route.NextHop); tracked && health == routing.HealthBad {
+				s.triggerRouteQueryAsync(recipient)
+			}
 			return tableForwardResult{Address: address, RouteOrigin: route.Origin}
 		}
 	}
 
+	// All routes exhausted without a successful send — nudge
+	// route discovery before falling back to gossip. Phase 2
+	// on-demand recovery (overview §7.5).
+	s.triggerRouteQueryAsync(recipient)
 	return tableForwardResult{}
 }
 

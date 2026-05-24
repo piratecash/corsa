@@ -497,19 +497,68 @@ type Snapshot struct {
 	// dropped/replaced by the cap" without a second round-trip into the
 	// table.
 	CapStats RouteCapStats
+
+	// Health is the deep-copied Phase 2 RouteHealthState slice
+	// captured under the same t.mu.RLock as Routes/FlapState/CapStats
+	// (PR 11.27 P2#1). RPC handlers that need to apply the live
+	// Lookup contract (Dead filter, CompositeScore ranking) can read
+	// this directly from the cached snapshot without taking
+	// t.mu.RLock per request — restoring the documented hot-read
+	// behaviour for fetchRouteLookup. Refresh latency matches the
+	// rest of the snapshot (≤ rebuildRoutingSnapshot interval).
+	//
+	// Returned as a value slice (not a map keyed by (Identity,
+	// Uplink)) because RouteHealthState already carries Identity
+	// and Uplink as fields — callers that need O(1) per-identity
+	// lookup build a local index. Empty slice means no health
+	// entries are tracked (cold-start, no traffic).
+	Health []RouteHealthState
 }
 
-// BestRoute returns the best (lowest hop count, highest trust) non-withdrawn
-// route for the given identity, or nil if none exists.
+// BestRoute returns the best (lowest hop count, highest trust)
+// SELECTABLE route for the given identity, or nil if none exists.
+// "Selectable" matches the Phase 2 Table.Lookup contract:
+//
+//   - Withdrawn / expired routes are skipped.
+//   - HealthDead claims are skipped, EXCEPT when Source ==
+//     RouteSourceDirect — Direct (own-origin) routes are
+//     session-bound and stay selectable even when Dead, ranked
+//     after non-Dead alternatives.
+//
+// Without the Health-aware filter this method would report a
+// route as "best" even when the relay path has already excluded
+// it from Lookup, leaving reachability counters in
+// fetchRouteSummary lying about a target the data plane cannot
+// reach. See PR 11.28 P2#2 for the symmetric fixes on
+// reachableIDsFrame and reachableFromSnapshot.
+//
+// The "best" comparator (isBetter) still uses by-hops + source
+// trust — this is observability-shape, not the production
+// CompositeScore ranking used by Table.Lookup. Consumers that
+// need the live ranking should call Table.Lookup directly;
+// BestRoute is the snapshot-cached convenience for "is there
+// SOMETHING usable here?".
 func (s Snapshot) BestRoute(identity PeerIdentity) *RouteEntry {
 	routes, ok := s.Routes[identity]
 	if !ok {
 		return nil
 	}
+	// Build per-uplink Dead lookup from the snapshot's Health
+	// slice. O(N) join; N is bounded by the per-identity uplink
+	// cap (≤ MaxOutgoingPeers + MaxIncomingPeers in production).
+	deadUplinks := map[PeerIdentity]struct{}{}
+	for _, h := range s.Health {
+		if h.Identity == identity && h.Health == HealthDead {
+			deadUplinks[h.Uplink] = struct{}{}
+		}
+	}
 	var best *RouteEntry
 	for i := range routes {
 		r := &routes[i]
 		if r.IsWithdrawn() || r.IsExpired(s.TakenAt) {
+			continue
+		}
+		if _, dead := deadUplinks[r.NextHop]; dead && r.Source != RouteSourceDirect {
 			continue
 		}
 		if best == nil || isBetter(r, best) {

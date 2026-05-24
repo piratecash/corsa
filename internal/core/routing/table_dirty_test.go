@@ -325,6 +325,50 @@ func TestAddDirectPeerReactivationMarksDirty(t *testing.T) {
 	}
 }
 
+// TestAddDirectPeerIdempotentWithDegradedHealthMarksDirty — PR
+// 11.29 P2 regression. The idempotent storage fast-path (peer
+// already has an alive direct claim) is a no-op for routes but
+// MUST mark dirty when it changes the published Snapshot.Health,
+// which happens when the existing health entry is degraded
+// (Bad/Dead/Questionable or ProbeFailures > 0) and AddDirectPeer
+// resets it back to Good as part of the session-bound
+// "handshake is the proof of liveness" contract.
+//
+// In production this combination is unreachable today because
+// TickHealth skips Direct pairs (PR 11.27 P2#2), but test
+// fixtures (ForceHealthForTest) can drive a Direct into
+// Bad/Dead, and the contract on AddDirectPeer must keep
+// Snapshot.Health honest regardless.
+func TestAddDirectPeerIdempotentWithDegradedHealthMarksDirty(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin("alice"))
+
+	// First add — real mutation, dirty.
+	mustAddDirect(t, tbl, "bob")
+	tbl.ConsumeDirty()
+
+	// Force the direct pair into Dead via the test seam. The
+	// storage claim stays alive (own-direct, ExpiresAt=zero), so
+	// the next AddDirectPeer hits the idempotent fast-path.
+	tbl.ForceHealthForTest("bob", "bob", HealthDead)
+	tbl.ConsumeDirty()
+
+	// Second add for the same peer — idempotent for storage, but
+	// the health reset path runs (Health was Dead) and the
+	// published Snapshot.Health changes.
+	mustAddDirect(t, tbl, "bob")
+	if !tbl.ConsumeDirty() {
+		t.Fatal("idempotent AddDirectPeer with degraded health did not mark dirty; Snapshot.Health changed but readers won't see it until next unrelated mutation")
+	}
+
+	// Health must be back to Good after the reset.
+	tbl.mu.RLock()
+	state := tbl.health.getLocked("bob", "bob")
+	tbl.mu.RUnlock()
+	if state == nil || state.Health != HealthGood {
+		t.Fatalf("Direct health not reset to Good: state=%+v", state)
+	}
+}
+
 // TestRemoveDirectPeerMarksDirty verifies that RemoveDirectPeer always
 // marks dirty: at minimum recordWithdrawalLocked appends to withdrawTimes,
 // which is part of the published FlapState.

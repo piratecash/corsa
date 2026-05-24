@@ -78,6 +78,12 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		log.Debug().
 			Str("recipient", msg.Recipient).
 			Msg("route_via_table_no_route")
+		// Phase 2 on-demand recovery: nudge route discovery
+		// when the table holds nothing usable for the recipient.
+		// Per-target rate limit inside SendRouteQuery prevents
+		// query storms; the goroutine spawn is bounded to one per
+		// rate-limit cycle.
+		r.svc.triggerRouteQueryAsync(domain.PeerIdentity(msg.Recipient))
 		return decision
 	}
 
@@ -100,6 +106,24 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 			Int("hops", route.Hops).
 			Str("source", route.Source.String()).
 			Msg("route_via_table")
+		// PR 11.35 P2 — fast recovery when the selected route is
+		// HealthBad. Lookup returns CompositeScore-ranked results
+		// and filters Dead (with Direct exemption), so the top
+		// candidate being HealthBad means there is no Good or
+		// Questionable alternative available — every alternative
+		// is also Bad or worse. Fire route_query in the
+		// background to discover fresher uplinks while still
+		// forwarding via the selected Bad route as best-effort.
+		// Without this signal the relay path would wait for a
+		// Dead transition (~60 s after Bad onset) or an actual
+		// send failure before triggering recovery, stretching
+		// the unhealthy window. triggerRouteQueryAsync is rate-
+		// limited per target (3 emissions per 30 s) and
+		// spawn-throttled, so firing on every Bad-route send is
+		// safe under sustained traffic.
+		if health, tracked := r.table.HealthFor(routing.PeerIdentity(msg.Recipient), route.NextHop); tracked && health == routing.HealthBad {
+			r.svc.triggerRouteQueryAsync(domain.PeerIdentity(msg.Recipient))
+		}
 		return decision
 	}
 
@@ -108,5 +132,9 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		Str("recipient", msg.Recipient).
 		Int("routes_found", len(routes)).
 		Msg("route_via_table_no_session_fallback_gossip")
+	// Phase 2 on-demand recovery: routes existed in the table but
+	// none had a usable connection. Nudge route discovery so the
+	// next message has fresher uplink data; rate-limit applies.
+	r.svc.triggerRouteQueryAsync(domain.PeerIdentity(msg.Recipient))
 	return decision
 }

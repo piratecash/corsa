@@ -40,16 +40,15 @@ import (
 //
 // Cap-eviction edge case. When MaxNextHopsPerOrigin is active and the
 // (Identity, Uplink) claim was evicted from the routing table
-// between the relay send and the hop_ack arrival, Lookup returns no
-// matching route and the function logs
-// "route_hop_ack_no_matching_route" without re-creating the entry.
-// This is by design: the hop_ack frame only carries the
-// (recipient, next-hop) pair — neither Origin nor SeqNo are on the
-// wire — and a synthetic RouteEntry without authentic SeqNo would
-// forge ranking input that other paths (split-horizon, withdrawal
-// authority) rely on. Subsequent announcement traffic for the same
-// (Identity, Uplink) re-populates the bucket through the normal
-// admission rules.
+// between the relay send and the hop_ack arrival, InspectTriple
+// returns nil and the function logs "route_hop_ack_no_matching_route"
+// without re-creating the entry. This is by design: the hop_ack
+// frame only carries the (recipient, next-hop) pair — neither
+// Origin nor SeqNo are on the wire — and a synthetic RouteEntry
+// without authentic SeqNo would forge ranking input that other
+// paths (split-horizon, withdrawal authority) rely on. Subsequent
+// announcement traffic for the same (Identity, Uplink) re-populates
+// the bucket through the normal admission rules.
 func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, ackSenderAddress domain.PeerAddress, routeOrigin domain.PeerIdentity) {
 	_ = routeOrigin // post-A1: per-Origin scoping is degenerate; see doc-comment above.
 
@@ -65,52 +64,41 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 		nextHopIdentity = domain.PeerIdentity(ackSenderAddress)
 	}
 
-	routes := s.routingTable.Lookup(recipientIdentity)
-	if len(routes) == 0 {
+	// PR 11.12 P2#1 — atomic confirmation. Table.ConfirmHopAck
+	// folds three previously-separate steps (InspectTriple,
+	// MarkHopAck, UpdateRoute) into one t.mu.Lock critical
+	// section so a concurrent withdrawal / TickTTL-expiry /
+	// cap-eviction cannot interleave between the storage check
+	// and the health/source mutations and leave orphan health
+	// behind. The method also folds in the Dead-filter fix
+	// (raw InspectTriple inside, no Lookup-style Dead filter)
+	// and the inactive-route guard (withdrawn/expired short-
+	// circuits before any health touch).
+	//
+	// `applied=false` means the (recipient, next-hop) pair has
+	// no live storage claim — no health was written and no
+	// promotion ran. This is the cap-eviction edge case
+	// documented on the function header.
+	//
+	// `applied=true` means health was refreshed to Good (with
+	// rtt=0 we preserve the prior EWMA value untouched). status
+	// distinguishes whether source promotion actually happened
+	// (RouteAccepted) vs. the claim already being at HopAck or
+	// better (RouteUnchanged) vs. an internal refusal that left
+	// health refreshed but did not promote (RouteRejected).
+	status, applied := s.routingTable.ConfirmHopAck(recipientIdentity, nextHopIdentity, 0)
+	if !applied {
+		log.Debug().
+			Str("identity", string(recipientIdentity)).
+			Str("next_hop", string(nextHopIdentity)).
+			Str("ack_sender", string(ackSenderAddress)).
+			Msg("route_hop_ack_no_matching_route")
 		return
 	}
-
-	// Find the claim matching the (Identity, NextHop) pair used for
-	// the send. Per-Origin disambiguation is gone (storage no longer
-	// keeps Origin, see Phase A migration contract).
-	for _, route := range routes {
-		if route.NextHop != nextHopIdentity {
-			continue
-		}
-		if route.Source >= routing.RouteSourceHopAck {
-			return // already confirmed or better
-		}
-
-		confirmed := routing.RouteEntry{
-			Identity:  route.Identity,
-			Origin:    route.Origin,
-			NextHop:   route.NextHop,
-			Hops:      route.Hops,
-			SeqNo:     route.SeqNo,
-			Source:    routing.RouteSourceHopAck,
-			ExpiresAt: route.ExpiresAt,
-			Extra:     route.Extra,
-		}
-
-		status, err := s.routingTable.UpdateRoute(confirmed)
-		if err != nil {
-			log.Warn().Err(err).
-				Str("identity", string(recipientIdentity)).
-				Str("next_hop", string(nextHopIdentity)).
-				Msg("route_hop_ack_confirm_failed")
-			return
-		}
-		if status == routing.RouteAccepted {
-			log.Debug().
-				Str("identity", string(recipientIdentity)).
-				Str("next_hop", string(route.NextHop)).
-				Msg("route_confirmed_via_hop_ack")
-		}
-		return
+	if status == routing.RouteAccepted {
+		log.Debug().
+			Str("identity", string(recipientIdentity)).
+			Str("next_hop", string(nextHopIdentity)).
+			Msg("route_confirmed_via_hop_ack")
 	}
-
-	log.Debug().
-		Str("identity", string(recipientIdentity)).
-		Str("ack_sender", string(ackSenderAddress)).
-		Msg("route_hop_ack_no_matching_route")
 }
