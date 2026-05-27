@@ -232,3 +232,175 @@ func TestCompositeScore_SourceBonusOrdering(t *testing.T) {
 		t.Fatalf("hopAck−announce = %f, want %f", hopAck-announce, scoreSourceHopAck)
 	}
 }
+
+// ---------------------------------------------------------------------
+// Phase 3 PR 12.1 — composite score reliability term.
+// Spec: docs/cluster-mesh/phase-3-multipath-reputation.md §4.1.
+// Release-blocking invariant: strict-tier ordering Good ≻ Q ≻ Bad must
+// survive the new term — ReliabilityBonusMax (≤ scoreSourceDirect = 20)
+// is sized to stay below the gap between health tiers
+// (scoreHealthQPenalty = 250 / scoreHealthBadPenalty = 500).
+// ---------------------------------------------------------------------
+
+// TestCompositeScore_ReliabilityIgnoredDuringWarmup — until the pair
+// has ReliabilityWarmupSamples observations the reliability term must
+// be zero. The fallback must reproduce the Phase 2 behaviour so a
+// fresh just-learned uplink ranks the same way it did before PR 12.1.
+func TestCompositeScore_ReliabilityIgnoredDuringWarmup(t *testing.T) {
+	health := &RouteHealthState{Health: HealthGood, RTT: 30 * time.Millisecond}
+	phase2 := CompositeScore(2, RouteSourceAnnouncement, health)
+
+	// Same pair, fewer than the warmup attempts: ReliabilityScore is
+	// "set" but should be ignored.
+	healthSeeded := *health
+	healthSeeded.HopAckAttempts = ReliabilityWarmupSamples - 1
+	healthSeeded.HopAckSuccesses = ReliabilityWarmupSamples - 1
+	healthSeeded.ReliabilityScore = 1.0
+	phase3Warming := CompositeScore(2, RouteSourceAnnouncement, &healthSeeded)
+	if !almostEqual(phase2, phase3Warming) {
+		t.Fatalf("warmup reliability leaked into score: phase2=%f, warming=%f", phase2, phase3Warming)
+	}
+}
+
+// TestCompositeScore_ReliabilityBonusFavorsReliableUplink — once the
+// pair is past the warmup, identical hops/health/source/RTT inputs
+// must rank the more-reliable pair higher. This is the core
+// motivation for the reliability term.
+func TestCompositeScore_ReliabilityBonusFavorsReliableUplink(t *testing.T) {
+	base := func(ratio float64) *RouteHealthState {
+		return &RouteHealthState{
+			Health:           HealthGood,
+			RTT:              30 * time.Millisecond,
+			HopAckAttempts:   100,
+			HopAckSuccesses:  uint64(ratio * 100),
+			ReliabilityScore: ratio,
+		}
+	}
+	reliable := CompositeScore(2, RouteSourceAnnouncement, base(0.95))
+	flaky := CompositeScore(2, RouteSourceAnnouncement, base(0.40))
+	if reliable <= flaky {
+		t.Fatalf("expected reliable (.95) > flaky (.40): reliable=%f, flaky=%f", reliable, flaky)
+	}
+}
+
+// TestCompositeScore_ReliabilityBonusBoundedToReliabilityBonusMax —
+// the term span is exactly ±ReliabilityBonusMax. A score=1.0 pair
+// (perfect reliability) earns the max bonus relative to a score=0
+// pair (total black hole) over otherwise identical inputs.
+func TestCompositeScore_ReliabilityBonusBoundedToReliabilityBonusMax(t *testing.T) {
+	healthFull := &RouteHealthState{
+		Health:           HealthGood,
+		HopAckAttempts:   ReliabilityWarmupSamples,
+		HopAckSuccesses:  ReliabilityWarmupSamples,
+		ReliabilityScore: 1.0,
+	}
+	healthZero := *healthFull
+	healthZero.HopAckSuccesses = 0
+	healthZero.ReliabilityScore = 0.0
+
+	full := CompositeScore(3, RouteSourceAnnouncement, healthFull)
+	zero := CompositeScore(3, RouteSourceAnnouncement, &healthZero)
+	delta := full - zero
+	// Bonus formula: (score - 0.5) * 2 * Max ⇒ ratio 1.0 = +Max,
+	// ratio 0.0 = −Max, total span = 2*Max.
+	want := 2 * ReliabilityBonusMax
+	if !almostEqual(delta, want) {
+		t.Fatalf("reliability span: full−zero = %f, want %f (2*ReliabilityBonusMax)", delta, want)
+	}
+}
+
+// TestCompositeScore_ReliabilityBonusPreservesStrictTier_GoodVsQ —
+// release-blocking invariant: every Good pair (even with zero
+// reliability) must outrank every Questionable pair (even with
+// perfect reliability), across all hop counts and source tiers.
+// Phase 3 §4.1 sizes ReliabilityBonusMax specifically so this
+// holds; if someone bumps Max the test fires.
+func TestCompositeScore_ReliabilityBonusPreservesStrictTier_GoodVsQ(t *testing.T) {
+	worstGood := &RouteHealthState{
+		Health:           HealthGood,
+		HopAckAttempts:   ReliabilityWarmupSamples,
+		HopAckSuccesses:  0,
+		ReliabilityScore: 0.0,
+	}
+	bestQ := &RouteHealthState{
+		Health:           HealthQuestionable,
+		HopAckAttempts:   ReliabilityWarmupSamples,
+		HopAckSuccesses:  ReliabilityWarmupSamples,
+		ReliabilityScore: 1.0,
+		RTT:              10 * time.Millisecond,
+	}
+	// Worst-case Good: 15 hops + Announcement + zero reliability.
+	worst := CompositeScore(15, RouteSourceAnnouncement, worstGood)
+	// Best-case Q: 1 hop + Direct + full reliability + low RTT.
+	best := CompositeScore(1, RouteSourceDirect, bestQ)
+	if worst <= best {
+		t.Fatalf("strict-tier invariant broken: worst Good %f <= best Q %f", worst, best)
+	}
+}
+
+// TestCompositeScore_ReliabilityBonusPreservesStrictTier_QVsBad —
+// same release-blocking guard one tier lower: every Questionable
+// outranks every Bad.
+func TestCompositeScore_ReliabilityBonusPreservesStrictTier_QVsBad(t *testing.T) {
+	worstQ := &RouteHealthState{
+		Health:           HealthQuestionable,
+		HopAckAttempts:   ReliabilityWarmupSamples,
+		HopAckSuccesses:  0,
+		ReliabilityScore: 0.0,
+	}
+	bestBad := &RouteHealthState{
+		Health:           HealthBad,
+		HopAckAttempts:   ReliabilityWarmupSamples,
+		HopAckSuccesses:  ReliabilityWarmupSamples,
+		ReliabilityScore: 1.0,
+		RTT:              10 * time.Millisecond,
+	}
+	worst := CompositeScore(15, RouteSourceAnnouncement, worstQ)
+	best := CompositeScore(1, RouteSourceDirect, bestBad)
+	if worst <= best {
+		t.Fatalf("strict-tier invariant broken: worst Q %f <= best Bad %f", worst, best)
+	}
+}
+
+// TestCompositeScore_DeadStillReturnsSentinelEvenWithPerfectReliability
+// — Dead is the sentinel "do not select" state and the reliability
+// term must not rescue it. Lookup is the authoritative Dead filter
+// (Direct-exempt etc.); CompositeScore returning scoreExcluded for
+// Dead remains the diagnostic-grade signal.
+func TestCompositeScore_DeadStillReturnsSentinelEvenWithPerfectReliability(t *testing.T) {
+	healthDead := &RouteHealthState{
+		Health:           HealthDead,
+		RTT:              10 * time.Millisecond,
+		HopAckAttempts:   100,
+		HopAckSuccesses:  100,
+		ReliabilityScore: 1.0,
+	}
+	got := CompositeScore(1, RouteSourceDirect, healthDead)
+	if !almostEqual(got, scoreExcluded) {
+		t.Fatalf("CompositeScore for Dead+perfect-reliability = %f, want %f (sentinel)", got, scoreExcluded)
+	}
+}
+
+// TestCompositeScore_ReliabilitySymmetricAround05 — at ReliabilityScore
+// = 0.5 the bonus is zero: the EMA-of-binary-outcomes baseline is the
+// neutral "no signal" point. Above 0.5 we add, below 0.5 we subtract,
+// linearly to ±ReliabilityBonusMax at the edges.
+func TestCompositeScore_ReliabilitySymmetricAround05(t *testing.T) {
+	base := &RouteHealthState{
+		Health:           HealthGood,
+		HopAckAttempts:   ReliabilityWarmupSamples,
+		HopAckSuccesses:  ReliabilityWarmupSamples,
+		ReliabilityScore: 0.5,
+	}
+	withNeutral := CompositeScore(2, RouteSourceAnnouncement, base)
+
+	noRep := *base
+	noRep.HopAckAttempts = 0
+	noRep.HopAckSuccesses = 0
+	noRep.ReliabilityScore = 0
+	withoutRep := CompositeScore(2, RouteSourceAnnouncement, &noRep)
+
+	if !almostEqual(withNeutral, withoutRep) {
+		t.Fatalf("ReliabilityScore=0.5 must yield zero bonus: got %f vs no-rep %f", withNeutral, withoutRep)
+	}
+}

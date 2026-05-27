@@ -56,6 +56,17 @@ func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
 	if rtt > 0 {
 		state.RTT = UpdateRTT(state.RTT, rtt)
 	}
+	// Phase 3 PR 12.2 — fold the reputation primitive into the same
+	// critical section the Phase 2 health update runs in. A
+	// concurrent MarkHopFailure could otherwise interleave between
+	// applyHopAck and applyHopAckSuccess and bump ConsecutiveFailures
+	// past the BlackHoleThreshold while the success that should
+	// reset it sits midway through this method. See
+	// docs/cluster-mesh/phase-3-multipath-reputation.md §2.5 for
+	// the locking-ownership decision (reputation lives inside
+	// RouteHealthState under the same t.mu) and §4.2 for the
+	// wire-up contract.
+	state.applyHopAckSuccess(now)
 	// PR 11.28 P2#1: health is part of the published Snapshot
 	// (Snapshot.Health, populated atomically by Table.Snapshot
 	// alongside Routes). Without marking dirty here the snapshot
@@ -142,6 +153,13 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 	if rtt > 0 {
 		state.RTT = UpdateRTT(state.RTT, rtt)
 	}
+	// Phase 3 PR 12.2 — atomic reputation update, paired with the
+	// applyHopAck above for the same TOCTOU reason MarkHopAck pairs
+	// the two calls. ConfirmHopAck is the "with live-storage proof"
+	// flavour of MarkHopAck, so a success here is doubly authentic
+	// (storage check + hop-ack arrival) and the reputation bump
+	// reflects that without any additional verification.
+	state.applyHopAckSuccess(now)
 	// PR 11.28 P2#1: health mutation always lands here (whether or
 	// not the source promotion fires below), so mark dirty so the
 	// snapshot publisher picks up the new Health label on the next
@@ -292,6 +310,99 @@ func (t *Table) MarkProbeFailure(identity, uplink PeerIdentity) {
 	t.dirty.Store(true)
 }
 
+// MarkHopFailure records a relay hop-ack timeout for the
+// (identity, uplink) pair on the Phase 3 reputation primitives. The
+// production caller is node.Service.onRelayHopAckTimeout (wired up in
+// internal/core/node/routing_relay.go, fired by the relay state
+// store's TTL ticker when a forwarded message's HopAckRemainingTicks
+// elapses with no matching relay_hop_ack arrival).
+//
+// MarkHopFailure mutates ONLY the reputation surface
+// (HopAckAttempts / ReliabilityScore / ConsecutiveFailures /
+// CooldownUntil). The Phase 2 health state machine
+// (Health / LastHopAck / ProbeFailures / TransitionAt) is owned by
+// MarkHopAck / MarkProbeAck / MarkProbeFailure / TickHealth and stays
+// untouched here. The split is deliberate
+// (docs/cluster-mesh/phase-3-multipath-reputation.md §4.1): a single
+// relay hop-ack timeout is weak evidence about the route's overall
+// liveness — the passive 122-second hop_ack timeline and the active
+// probe path own the Health label, while reputation aggregates
+// success/failure ratios for ranking and black-hole detection.
+//
+// Anti-orphan guards (matching MarkProbeAck(reachable=false) and
+// ConfirmHopAck's storage check):
+//
+//   - Absent (identity, uplink) pair → no-op. A timeout fired against
+//     a pair the storage has already dropped (TickTTL eviction, cap
+//     eviction, WithdrawRoute tombstone) must not resurrect a phantom
+//     reputation entry that the next legitimate UpdateRoute admission
+//     would carry forward as "this uplink already has consecutive
+//     failures".
+//   - Withdrawn or expired storage claim → no-op. Reputation should
+//     not paint a route red that is already gone for unrelated
+//     reasons.
+//   - Empty identity or uplink → no-op (defensive guard).
+//
+// Lock contract: acquires t.mu in W mode. Callers must not hold any
+// other domain mutex of node.Service at invocation time
+// (relayStateStore.mu is acceptable because it is disjoint from
+// routing.Table.mu and the production caller releases it before
+// invoking this method — see node.Service.onRelayHopAckTimeout). The
+// hop-ack budget has already elapsed by the time this is called, so
+// there is no concurrent wire I/O for this (identity, uplink) pair to
+// coordinate with.
+func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
+	if identity == "" || uplink == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Storage check: absent / withdrawn / expired claim → no-op.
+	// The raw InspectTriple call mirrors ConfirmHopAck's anti-
+	// orphan pattern (PR 11.12 P2#1.2): we inspect storage
+	// explicitly so a timeout fired against a route that has
+	// already been withdrawn or aged out does not register a
+	// failure against a peer who is no longer carrying the route
+	// for us.
+	entry := t.store.InspectTriple(RouteTriple{Identity: identity, NextHop: uplink})
+	if entry == nil {
+		return
+	}
+	now := t.clock()
+	if entry.IsWithdrawn() || entry.IsExpired(now) {
+		return
+	}
+
+	// Anti-orphan guard symmetric to Phase 2 MarkProbeAck
+	// (reachable=false) and MarkProbeFailure: getLocked returns
+	// nil for pairs whose health entry was evicted (TickTTL,
+	// reconcileHealthLocked after cap pressure), and a single
+	// late hop-ack timeout must NOT resurrect such a pair as a
+	// fresh Good-labelled entry with ConsecutiveFailures=1. The
+	// Phase 3 plan §4.2 spells this out as "если pair не tracked —
+	// no-op (нет previous evidence — не создаём synthetic Bad-
+	// сигнал)". The pair gets re-seeded only when positive
+	// evidence (hop_ack, probe_ack reachable=true) or fresh wire-
+	// frame admission (UpdateRoute) creates a Questionable
+	// placeholder; subsequent failures then accumulate normally.
+	//
+	// In production Phase 2's UpdateRoute admission always seeds
+	// a Questionable health entry for every newly-learned
+	// (Identity, Uplink) pair, so the "live claim, no health"
+	// case is the eviction-then-late-timeout race — exactly the
+	// case the guard exists for.
+	state := t.health.getLocked(identity, uplink)
+	if state == nil {
+		return
+	}
+	state.applyHopAckFailure(now)
+	// PR 11.28 P2#1: Snapshot.Health (and the Phase 3 reputation
+	// fields it includes) needs republish on every mutation; see
+	// MarkHopAck doc-comment.
+	t.dirty.Store(true)
+}
+
 // HealthSnapshot returns a deep copy of every tracked
 // RouteHealthState. Backs the fetchRouteHealth RPC handler in
 // internal/core/rpc/routing_commands.go (PR 11.5) — the handler
@@ -366,6 +477,23 @@ func (t *Table) TickHealth() {
 	now := t.clock()
 	mutated := false
 	for key, state := range t.health.states {
+		// Phase 3 PR 12.4 — release expired black-hole cooldowns
+		// on every pair (Direct included). The PR 11.27 P2#2
+		// skip below applies only to the Good→Questionable→Bad→
+		// Dead passive idle promotion, NOT to the reputation
+		// primitive's cooldown lifecycle: a Direct peer that
+		// reliably missed 5 hop_acks earns the same 2-minute
+		// cooldown as a transit pair, and the auto-clear must
+		// fire on the same cadence regardless of source. The
+		// no-op-on-zero / future-deadline branches inside
+		// applyCooldownExpiryLocked keep this cheap for the
+		// common case where no pair is cooled down.
+		before := state.CooldownUntil
+		state.applyCooldownExpiryLocked(now)
+		if !before.Equal(state.CooldownUntil) {
+			mutated = true
+		}
+
 		if key.Identity == key.Uplink {
 			// Direct pair — lifecycle is session-driven, see
 			// the doc-comment above. Skip aging.
@@ -418,6 +546,76 @@ func (t *Table) HealthFor(identity, uplink PeerIdentity) (RouteHealth, bool) {
 		return HealthGood, false
 	}
 	return state.Health, true
+}
+
+// RouteReputationState is the public projection of the Phase 3
+// PR 12.1 reputation primitives carried inside RouteHealthState.
+// Kept as a separate type so the RPC layer (Phase 3 PR 12.7
+// fetchRouteReputation in internal/core/rpc/routing_commands.go)
+// can publish a stable shape without depending on the internal
+// RouteHealthState struct — RouteHealthState mixes Phase 2
+// health-machine fields and the Phase 3 reputation fields, and
+// fetchRouteReputation should not surface the health-machine
+// fields a second time (fetchRouteHealth already does).
+type RouteReputationState struct {
+	Identity            PeerIdentity
+	Uplink              PeerIdentity
+	HopAckAttempts      uint64
+	HopAckSuccesses     uint64
+	ReliabilityScore    float64
+	ConsecutiveFailures int
+	CooldownUntil       time.Time
+}
+
+// ReputationSnapshot returns a deep copy of every tracked
+// (Identity, Uplink) reputation state as a RouteReputationState
+// slice. Backs the Phase 3 PR 12.7 fetchRouteReputation RPC
+// handler — the handler calls this synchronously per request,
+// no intermediate atomic.Pointer cache. Each call takes t.mu in
+// R mode, walks the healthStore (≤ MaxOutgoingPeers +
+// MaxIncomingPeers entries in production), projects each
+// reputation field set into the returned slice, and releases
+// the lock. Returns nil when the store is empty so callers can
+// compare cheaply.
+//
+// Lock window. Same trade-off as HealthSnapshot: reading under
+// R mode lets concurrent ReputationSnapshot calls share the
+// lock, but they still compete with writer methods
+// (MarkHopAck, MarkHopFailure, MarkProbeAck, etc.) on the same
+// t.mu. Map walk + struct projection is O(N) where N is bounded
+// by the per-identity uplink cap and the active identity
+// count — a non-blocking workload in practice. Promotion to
+// the atomic.Pointer snapshot pattern is reserved for future
+// telemetry-driven tuning if the read path ever becomes hot
+// enough to conflict with the writer workload.
+//
+// ReputationSnapshot is a pure read — it MUST NOT trigger any
+// side effect (no probe send, no digest emit, no reputation
+// mutation). The trust-budget invariant from Phase 3 §2.3
+// extends to the observability surface: reading reputation is
+// strictly an internal observation, never gossiped or
+// transferred between nodes.
+//
+// Safe to call from any goroutine.
+func (t *Table) ReputationSnapshot() []RouteReputationState {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.health == nil || len(t.health.states) == 0 {
+		return nil
+	}
+	out := make([]RouteReputationState, 0, len(t.health.states))
+	for _, state := range t.health.states {
+		out = append(out, RouteReputationState{
+			Identity:            state.Identity,
+			Uplink:              state.Uplink,
+			HopAckAttempts:      state.HopAckAttempts,
+			HopAckSuccesses:     state.HopAckSuccesses,
+			ReliabilityScore:    state.ReliabilityScore,
+			ConsecutiveFailures: state.ConsecutiveFailures,
+			CooldownUntil:       state.CooldownUntil,
+		})
+	}
+	return out
 }
 
 // ForceHealthForTest is a public test-only seam that lets test code

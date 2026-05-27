@@ -15,7 +15,8 @@ import (
 func NewMockRoutingProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *MockRoutingProvider {
+},
+) *MockRoutingProvider {
 	mock := &MockRoutingProvider{}
 	mock.Mock.Test(t)
 
@@ -183,6 +184,52 @@ func (_c *MockRoutingProvider_PeerTransport_Call) Return(address domain.PeerAddr
 }
 
 func (_c *MockRoutingProvider_PeerTransport_Call) RunAndReturn(run func(peerIdentity domain.PeerIdentity) (domain.PeerAddress, domain.NetGroup)) *MockRoutingProvider_PeerTransport_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ReputationSnapshot provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) ReputationSnapshot() []routing.RouteReputationState {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ReputationSnapshot")
+	}
+
+	var r0 []routing.RouteReputationState
+	if returnFunc, ok := ret.Get(0).(func() []routing.RouteReputationState); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]routing.RouteReputationState)
+		}
+	}
+	return r0
+}
+
+// MockRoutingProvider_ReputationSnapshot_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReputationSnapshot'
+type MockRoutingProvider_ReputationSnapshot_Call struct {
+	*mock.Call
+}
+
+// ReputationSnapshot is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) ReputationSnapshot() *MockRoutingProvider_ReputationSnapshot_Call {
+	return &MockRoutingProvider_ReputationSnapshot_Call{Call: _e.mock.On("ReputationSnapshot")}
+}
+
+func (_c *MockRoutingProvider_ReputationSnapshot_Call) Run(run func()) *MockRoutingProvider_ReputationSnapshot_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_ReputationSnapshot_Call) Return(routeReputationStates []routing.RouteReputationState) *MockRoutingProvider_ReputationSnapshot_Call {
+	_c.Call.Return(routeReputationStates)
+	return _c
+}
+
+func (_c *MockRoutingProvider_ReputationSnapshot_Call) RunAndReturn(run func() []routing.RouteReputationState) *MockRoutingProvider_ReputationSnapshot_Call {
 	_c.Call.Return(run)
 	return _c
 }

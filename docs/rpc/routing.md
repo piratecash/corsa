@@ -101,7 +101,7 @@ Response:
 | `total_entries` | int | Total route entries in table |
 | `active_entries` | int | Non-withdrawn, non-expired entries |
 | `withdrawn_entries` | int | Entries with hops=16 or expired |
-| `reachable_identities` | int | Unique destinations with at least one active route |
+| `reachable_identities` | int | Unique destinations with at least one *selectable* route, matching `Table.Lookup`: excludes withdrawn/expired, `HealthDead` transit pairs (Direct exempt), and black-hole cooled-down pairs (no Direct exemption) |
 | `direct_peers` | int | Destinations reachable via direct route (hops=1, source=direct) |
 | `flap_state` | array | Peers with active flap detection state |
 | `flap_state[].peer_identity` | string | Peer Ed25519 fingerprint |
@@ -156,7 +156,7 @@ Response:
 | Field | Type | Description |
 |---|---|---|
 | `identity` | string | Queried destination identity |
-| `routes` | array | Routes ranked descending by Phase 2 `CompositeScore` (the same ranking `routing.Table.Lookup` applies on the relay path). `HealthDead` transit claims are filtered out; `RouteSourceDirect` claims are exempt from that filter and ranked with a `Bad`-equivalent penalty. See `docs/protocol/route_health.md`. Tie-break: `origin` asc, `next_hop` asc, `seq_no` desc — deterministic for diffing across requests. |
+| `routes` | array | Routes ranked descending by Phase 2 `CompositeScore` (the same ranking `routing.Table.Lookup` applies on the relay path). `HealthDead` transit claims are filtered out; `RouteSourceDirect` claims are exempt from that filter and ranked with a `Bad`-equivalent penalty. Black-hole cooled-down pairs (`cooldown_until` in the future) are also filtered out, with NO Direct exemption — matching `Table.Lookup`. See `docs/protocol/route_health.md`. Tie-break: `origin` asc, `next_hop` asc, `seq_no` desc — deterministic for diffing across requests. |
 | `routes[].origin` | string | Peer that originated this route |
 | `routes[].next_hop` | string | Peer to forward through |
 | `routes[].hops` | int | Distance to destination |
@@ -224,6 +224,86 @@ own data path through `routing.Table.HealthSnapshot()`, which
 takes a read-lock on `t.mu` and returns a deep-copied slice. The
 handler is invoked synchronously and the snapshot reflects the
 live table state at the moment of the RPC call.
+
+### fetchRouteReputation
+
+```
+corsa-cli fetchRouteReputation
+```
+
+Phase 3 PR 12.7 — per-`(Identity, Uplink)` hop-ack reputation
+snapshot. Returns the same per-pair shape as `fetchRouteHealth`
+(by design — a UI can join the two by `(identity, uplink)`
+without reshaping), restricted to the reputation fields the
+Phase 3 plan adds (`HopAckAttempts`, `HopAckSuccesses`,
+`ReliabilityScore`, `ConsecutiveFailures`, `CooldownUntil`).
+Wire-protocol contract — `docs/cluster-mesh/phase-3-multipath-reputation.md`
+§4.7.
+
+```json
+{
+  "states": [
+    {
+      "identity":             "<dest-fp>",
+      "uplink":               "<peer-fp>",
+      "hop_ack_attempts":     42,
+      "hop_ack_successes":    37,
+      "reliability_score":    0.88,
+      "consecutive_failures": 1,
+      "cooldown_until":       "2026-05-23T12:05:00Z"
+    },
+    ...
+  ],
+  "count":       N,
+  "snapshot_at": "<RFC3339>"
+}
+```
+
+Field semantics:
+
+- `hop_ack_attempts` / `hop_ack_successes` — raw counters since
+  the pair was first observed. Together they yield the long-run
+  success ratio; the EWMA-smoothed instantaneous view that
+  `CompositeScore` actually consumes is `reliability_score`.
+- `reliability_score` — float in `[0, 1]`. Below
+  `ReliabilityWarmupSamples=3` attempts the score is reported
+  verbatim but `CompositeScore` ignores it.
+- `consecutive_failures` — current streak; resets to zero on any
+  organic success.
+- `cooldown_until` — RFC3339 deadline of an armed black-hole
+  cooldown. **Emitted ONLY when armed** (the zero-time
+  placeholder is omitted so consumers can rely on "key present"
+  ⇔ "cooldown armed"). The arm fires after
+  `BlackHoleThreshold=5` consecutive failures; it auto-clears
+  once the `BlackHoleCooldown=2min` window elapses via
+  `Table.TickHealth.applyCooldownExpiryLocked`, or earlier on an
+  organic hop-ack success.
+- `count` — total number of tracked pairs (matches `len(states)`).
+- `snapshot_at` — RFC3339 timestamp when the handler built the
+  response. Same field shape as `fetchRouteHealth`.
+
+States are sorted ascending by `(identity, uplink)` for
+deterministic ordering — matches `fetchRouteHealth`'s sort so
+joining the two surfaces is just a lockstep iteration.
+
+Returns `count: 0` and an empty `states` array when no
+reputation entries are tracked yet (cold-start, no traffic).
+
+**Pure read invariant.** The handler MUST NOT trigger any side
+effect — no probe send, no digest emit, no `MarkHopFailure`, no
+reputation mutation. Reputation is local-only state (Phase 3
+zero-trust budget): observers see a point-in-time view, never a
+re-emission. The "force a probe" capability deliberately does
+not exist on any transport path; UI aggregation (ranked top-N
+reputable uplinks, success-rate histograms) lives on top of this
+raw snapshot, never aliased under the `fetchRouteReputation` name.
+
+`fetchRouteReputation` shares the same lock-and-copy contract as
+`fetchRouteHealth` — `routing.Table.ReputationSnapshot()` takes
+`t.mu.RLock` and returns a deep-copied slice. No
+`atomic.Pointer` cache today; promotion is reserved for
+telemetry-driven tuning if the read path ever becomes hot enough
+to conflict with the writer workload.
 
 ### Snapshot freshness
 
@@ -354,7 +434,7 @@ corsa-cli fetchRouteSummary
 | `total_entries` | int | Всего записей маршрутов в таблице |
 | `active_entries` | int | Не-отозванные, не-истёкшие записи |
 | `withdrawn_entries` | int | Записи с hops=16 или истёкшие |
-| `reachable_identities` | int | Уникальные destinations с хотя бы одним активным маршрутом |
+| `reachable_identities` | int | Уникальные destinations с хотя бы одним *selectable* маршрутом, как у `Table.Lookup`: исключает withdrawn/expired, `HealthDead` transit-пары (Direct exempt) и black-hole cooled-down пары (без Direct exemption) |
 | `direct_peers` | int | Destinations, доступные через direct route (hops=1, source=direct) |
 | `flap_state` | array | Peer'ы с активным состоянием flap detection |
 | `flap_state[].peer_identity` | string | Ed25519 fingerprint peer'a |
@@ -373,7 +453,7 @@ corsa-cli fetchRouteSummary
 
 ### fetchRouteLookup
 
-Поиск маршрутов для конкретного destination identity. Маршруты ранжируются по Phase 2 `CompositeScore` — тот же ranking, который relay path применяет в `routing.Table.Lookup` (hops + source-trust bonus + RTT bonus + health penalty). Handler читает из кешированного `routing.Snapshot` — и route entries, и per-(Identity, Uplink) `RouteHealthState` snapshot'ятся атомарно внутри `Table.Snapshot` под одним `t.mu.RLock`, поэтому RPC — lock-free hot read через atomic-pointer snapshot. `HealthDead` claims фильтруются (контракт совпадает с `Lookup`); `RouteSourceDirect` claims exempt от Dead-фильтра и ранжируются с `Bad`-equivalent penalty, оставаясь selectable как last resort — отражает локальное relay-path поведение. Полная формула — в `docs/protocol/route_health.md`.
+Поиск маршрутов для конкретного destination identity. Маршруты ранжируются по Phase 2 `CompositeScore` — тот же ranking, который relay path применяет в `routing.Table.Lookup` (hops + source-trust bonus + RTT bonus + health penalty). Handler читает из кешированного `routing.Snapshot` — и route entries, и per-(Identity, Uplink) `RouteHealthState` snapshot'ятся атомарно внутри `Table.Snapshot` под одним `t.mu.RLock`, поэтому RPC — lock-free hot read через atomic-pointer snapshot. `HealthDead` claims фильтруются (контракт совпадает с `Lookup`); `RouteSourceDirect` claims exempt от Dead-фильтра и ранжируются с `Bad`-equivalent penalty, оставаясь selectable как last resort — отражает локальное relay-path поведение. Black-hole cooled-down пары (`cooldown_until` в будущем) тоже фильтруются, БЕЗ Direct exemption — как в `Table.Lookup`. Полная формула — в `docs/protocol/route_health.md`.
 
 ```bash
 corsa-cli fetchRouteLookup <identity>
@@ -466,6 +546,87 @@ corsa-cli fetchRouteHealth
 Возвращает `count: 0` и пустой `states`, когда health-entries ещё не отслеживаются (cold-start, нет трафика).
 
 `fetchRouteHealth` независим от snapshot маршрутизации, обсуждаемого в **Свежесть снапшота** ниже — health state имеет собственный data path через `routing.Table.HealthSnapshot()`, который берёт read-lock на `t.mu` и возвращает deep-copied slice. Handler инвокается синхронно, snapshot отражает live состояние таблицы на момент RPC-вызова.
+
+### fetchRouteReputation
+
+```
+corsa-cli fetchRouteReputation
+```
+
+Phase 3 PR 12.7 — per-`(Identity, Uplink)` snapshot hop-ack
+репутации. Возвращает ту же per-pair форму, что и
+`fetchRouteHealth` (намеренно — UI может join'ить два по
+`(identity, uplink)` без reshape'а), ограниченную полями
+репутации, которые добавил Phase 3 plan (`HopAckAttempts`,
+`HopAckSuccesses`, `ReliabilityScore`, `ConsecutiveFailures`,
+`CooldownUntil`). Wire-protocol контракт —
+`docs/cluster-mesh/phase-3-multipath-reputation.md` §4.7.
+
+```json
+{
+  "states": [
+    {
+      "identity":             "<dest-fp>",
+      "uplink":               "<peer-fp>",
+      "hop_ack_attempts":     42,
+      "hop_ack_successes":    37,
+      "reliability_score":    0.88,
+      "consecutive_failures": 1,
+      "cooldown_until":       "2026-05-23T12:05:00Z"
+    },
+    ...
+  ],
+  "count":       N,
+  "snapshot_at": "<RFC3339>"
+}
+```
+
+Семантика полей:
+
+- `hop_ack_attempts` / `hop_ack_successes` — сырые счётчики с
+  момента первого наблюдения пары. Вместе дают long-run success
+  ratio; EWMA-smoothed instant view, который реально потребляет
+  `CompositeScore`, — это `reliability_score`.
+- `reliability_score` — float в `[0, 1]`. Ниже
+  `ReliabilityWarmupSamples=3` attempts score выводится
+  verbatim, но `CompositeScore` его игнорирует.
+- `consecutive_failures` — текущий streak; сбрасывается на
+  любой organic success.
+- `cooldown_until` — RFC3339 deadline armed black-hole
+  cooldown'а. **Emit'ится ТОЛЬКО при armed** (zero-time
+  placeholder опускается, чтобы консумеры могли полагаться на
+  «key present» ⇔ «cooldown armed»). Arm срабатывает после
+  `BlackHoleThreshold=5` подряд failures; auto-clear'ится когда
+  `BlackHoleCooldown=2мин` окно elaps'ится через
+  `Table.TickHealth.applyCooldownExpiryLocked`, или раньше —
+  на organic hop-ack success'е.
+- `count` — общее число tracked pairs (matches `len(states)`).
+- `snapshot_at` — RFC3339 timestamp когда handler собрал
+  response. Та же field shape, что и у `fetchRouteHealth`.
+
+States сортируются по возрастанию `(identity, uplink)` для
+детерминированного ордера — matches sort `fetchRouteHealth`'а,
+так что join двух surface'ов — это просто lockstep iteration.
+
+Возвращает `count: 0` и пустой `states`, когда reputation-
+entries ещё не отслеживаются (cold-start, нет трафика).
+
+**Pure read invariant.** Handler НЕ ДОЛЖЕН triggers'ить ни
+один side effect — никакого probe send, digest emit,
+`MarkHopFailure`, reputation mutation. Reputation — local-only
+state (Phase 3 zero-trust budget): observers видят point-in-time
+view, никогда re-emission. «Force a probe» capability
+deliberately не существует ни на одном transport path; UI
+aggregation (ranked top-N reputable uplinks, success-rate
+histograms) живёт поверх этого raw snapshot'а, никогда не
+alias'нутый под именем `fetchRouteReputation`.
+
+`fetchRouteReputation` разделяет тот же lock-and-copy контракт
+что и `fetchRouteHealth` — `routing.Table.ReputationSnapshot()`
+берёт `t.mu.RLock` и возвращает deep-copied slice. Никакого
+`atomic.Pointer` cache на сегодня; promotion зарезервирован для
+telemetry-driven tuning'а, если read path когда-нибудь станет
+hot'ным enough для конфликта с writer workload.
 
 ### Свежесть снапшота
 

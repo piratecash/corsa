@@ -41,6 +41,24 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
+// nextRelayShapingHint returns a monotonically advancing per-
+// Service counter used as the `hint` argument to
+// routing.Table.LookupForRelay. The hint feeds the Phase 3 PR
+// 12.6 multi-path traffic shaping rotation: LookupForRelay
+// reorders the ranked result roughly once every
+// routing.ShapingProbeRatio calls (when the conditions for
+// shaping are met). Keeping the counter on Service (rather than
+// inside routing.Table) lets the table stay stateless w.r.t.
+// shaping cadence — tests deterministically invoke
+// LookupForRelay(identity, 0) for the rotation arm and any
+// non-multiple-of-ratio hint for the plain-Lookup arm.
+//
+// Safe for concurrent callers: atomic.Uint64.Add is the only
+// synchronisation needed.
+func (s *Service) nextRelayShapingHint() uint64 {
+	return s.relayShapingHint.Add(1)
+}
+
 // tableForwardResult describes the outcome of tryForwardViaRoutingTable.
 type tableForwardResult struct {
 	// Address is the transport address the frame was sent to. Empty if no
@@ -53,6 +71,341 @@ type tableForwardResult struct {
 	// on (Identity, NextHop) only because the routing table no longer keys
 	// on Origin. See routing_hop_ack.go for the migration note.
 	RouteOrigin domain.PeerIdentity
+}
+
+// onRelayHopAckTimeout is the Phase 3 PR 12.2 callback fired by the
+// relay state store's TTL ticker when a forwarded relay_message's
+// hop-ack budget (defaultHopAckBudgetSeconds) elapses without a
+// matching relay_hop_ack arrival. It resolves the abandoned
+// next-hop's transport address to its peer identity and records the
+// failure on the per-(Identity, Uplink) reputation primitive via
+// routing.Table.MarkHopFailure (PR 12.1 reputation surface).
+//
+// The state argument is a value copy snapshotted by
+// relayStateStore.tickHopAckBudgets BEFORE the callback fired; no
+// mutation here propagates back to the live store entry, and the
+// store's HopAckObserved flag has already been flipped to true so a
+// late relay_hop_ack arriving after this callback still runs through
+// handleRelayHopAck → confirmRouteViaHopAck (which calls
+// applyHopAckSuccess and clears the cooldown the failure may have
+// armed). See handleRelayHopAck's doc-comment for the recovery
+// contract.
+//
+// Empty ForwardedTo means there was no downstream hop to ack
+// (final-recipient path, stored-locally fallback) — those entries
+// must NOT have a tracked budget in the first place
+// (HopAckRemainingTicks=0 keeps the ticker from arming them), so a
+// callback firing with ForwardedTo="" indicates a logic bug; we
+// defensively no-op rather than fire a phantom MarkHopFailure on a
+// resolved identity that would be empty anyway.
+//
+// Identity resolution mirrors confirmRouteViaHopAck: ask the peer
+// registry first, fall back to treating the address as an identity
+// only when the session has already torn down. An empty resolved
+// identity means we have no way to attribute the failure to a routing
+// pair, so the callback is a no-op for that case as well — the
+// reputation primitive would refuse it via the
+// Table.MarkHopFailure(identity="", ...) guard anyway, but bailing
+// out here keeps the structured log honest.
+//
+// Lock contract: this method takes routing.Table.mu via
+// MarkHopFailure (briefly, W mode). The store-side caller already
+// released relayStateStore.mu BEFORE invoking us (see
+// relayStateStore.ttlTicker), so the two mutexes never nest.
+func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
+	if state.ForwardedTo == "" {
+		// Defensive: see doc-comment above. A state with empty
+		// ForwardedTo should never have a non-zero
+		// HopAckRemainingTicks, so reaching this branch is a sign
+		// the call-site stamping logic drifted. Log so we notice.
+		log.Debug().
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Msg("relay_hop_ack_timeout_empty_forwarded_to")
+		return
+	}
+	if state.Recipient == "" {
+		log.Debug().
+			Str("id", state.MessageID).
+			Str("forwarded_to", string(state.ForwardedTo)).
+			Msg("relay_hop_ack_timeout_empty_recipient")
+		return
+	}
+
+	nextHopIdentity := s.resolvePeerIdentity(state.ForwardedTo)
+	if nextHopIdentity == "" {
+		// Session may have closed between forward and timeout —
+		// resolvePeerIdentity returned "". Treat the address as
+		// the identity directly only when it parses as one; the
+		// "inbound:..." form would fail MarkHopFailure's empty
+		// check anyway. We log either way so the operator sees a
+		// "we timed out but couldn't blame anyone" trail.
+		nextHopIdentity = domain.PeerIdentity(state.ForwardedTo)
+		if nextHopIdentity == "" {
+			log.Debug().
+				Str("id", state.MessageID).
+				Str("recipient", string(state.Recipient)).
+				Str("forwarded_to", string(state.ForwardedTo)).
+				Msg("relay_hop_ack_timeout_unresolved_uplink")
+			return
+		}
+	}
+
+	s.routingTable.MarkHopFailure(state.Recipient, nextHopIdentity)
+
+	log.Debug().
+		Str("id", state.MessageID).
+		Str("recipient", string(state.Recipient)).
+		Str("next_hop", string(nextHopIdentity)).
+		Int("budget_seconds", defaultHopAckBudgetSeconds).
+		Msg("routing_hop_ack_timeout_uplink_marked_failure")
+
+	// Phase 3 PR 12.3 — multi-path failover. Try to re-send the
+	// original frame through an alternative uplink before falling
+	// back to the existing periodic retryRelayDeliveries / gossip
+	// path. Bounded by MaxFailoverRetries; respects the Phase 0
+	// overload gate so a node already shedding work does not
+	// amplify outbound traffic.
+	s.tryFailoverRelay(state, nextHopIdentity)
+}
+
+// tryFailoverRelay is the Phase 3 PR 12.3 multi-path failover step
+// fired from onRelayHopAckTimeout after the reputation primitive
+// records the hop-ack failure. It re-sends the same relay_message
+// frame (snapshotted on relayForwardState.FrameLine at original
+// forward time) through the highest-ranked alternative uplink that
+// is NOT the just-failed peer, NOT the previous-hop incoming
+// sender (split horizon), and NOT in the AbandonedForwardedTo list
+// (already-tried retries).
+//
+// Bounded by MaxFailoverRetries (=1) so the per-message latency
+// budget stays predictable: at most one extra hop-ack budget
+// window (defaultHopAckBudgetSeconds) before gossip fallback or
+// periodic retryRelayDeliveries takes over. Each successful retry
+// advances RetryAttempt by exactly one via
+// relayStateStore.recordFailoverRetry, which also re-arms the
+// hop-ack budget and clears HopAckObserved so the new uplink gets
+// a fresh deadline.
+//
+// Skipped silently (with a structured log) when:
+//
+//   - FrameLine is empty (origin/forward path failed to marshal
+//     the frame at stamp time, or this is a final-recipient /
+//     stored-locally entry that never had a downstream forward to
+//     retry).
+//   - RetryAttempt has reached MaxFailoverRetries.
+//   - The Phase 0 overload gate is engaged — symmetric to the
+//     probe loop's overload skip (Phase 2 §4.7 decision #4).
+//   - The frame line fails to parse back to a protocol.Frame
+//     (defensive guard; should not happen for our own marshal
+//     output but stays safe under future format changes).
+//   - Table.Lookup returns no alternative uplinks after the
+//     skip-failed / split-horizon / abandoned filters.
+//
+// Lock contract: the caller (onRelayHopAckTimeout) is invoked from
+// the relay state TTL ticker AFTER rs.mu has been released. This
+// function acquires routing.Table.mu briefly via Lookup (R mode)
+// and the relay state store rs.mu separately via
+// retryAttemptCountFor / recordFailoverRetry (W mode). The two
+// mutexes are never held simultaneously.
+func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.PeerIdentity) {
+	if state.FrameLine == "" {
+		log.Debug().
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Msg("relay_failover_skipped_no_frame")
+		return
+	}
+	// Re-read RetryAttempt from the live store — the snapshot the
+	// ticker captured is stale once we cross the rs.mu boundary,
+	// and a concurrent recordFailoverRetry from a different
+	// hop-ack-timeout fire (different MessageID, same address)
+	// could have advanced our limit while we were not looking.
+	currentAttempt, present := s.relayStates.retryAttemptCountFor(state.MessageID)
+	if !present {
+		// TTL eviction beat us between callback fire and now.
+		return
+	}
+	if currentAttempt >= MaxFailoverRetries {
+		log.Debug().
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Int("retry_attempt", currentAttempt).
+			Int("max", MaxFailoverRetries).
+			Msg("relay_failover_skipped_max_retries")
+		// Phase 3 PR 12.3 (review fix): retry budget exhausted is
+		// the same "we cannot reach the recipient via any table
+		// route" terminal state as the no-alternative branch below.
+		// Without gossip fallback an intermediate-hop message that
+		// burned its retry budget would just stop — the periodic
+		// retryRelayDeliveries path holds no FrameLine for intermediate
+		// hops and cannot rescue it. Fire gossip on the stashed wire
+		// bytes so receivers reachable via the broader routing-target
+		// fan-out still have a chance to deliver.
+		s.failoverGossipFallback(state, failedUplink)
+		return
+	}
+	if s.overloadMonitor != nil && s.overloadMonitor.IsOverloaded() {
+		// Symmetric to probeTick — under overload we skip
+		// active retries and let the slower passive timelines
+		// converge. Phase 0 overload gate documented in
+		// docs/cluster-mesh-architecture-plan.md §0.2.
+		log.Debug().
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Msg("relay_failover_skipped_overload")
+		return
+	}
+
+	frame, err := protocol.ParseFrameLine(state.FrameLine)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Msg("relay_failover_skipped_unparseable_frame")
+		return
+	}
+
+	// Resolve the previous-hop incoming sender so the split-
+	// horizon skip applies by identity (a peer may have multiple
+	// transport sessions). state.PreviousHop is empty on the
+	// origin path (we created the message ourselves), in which
+	// case there is no incoming-sender identity to skip.
+	previousHopIdentity := domain.PeerIdentity("")
+	if state.PreviousHop != "" {
+		previousHopIdentity = s.resolvePeerIdentity(state.PreviousHop)
+	}
+
+	// Resolve abandoned addresses to identities once so the
+	// per-route loop below stays O(routes × abandoned) without
+	// re-resolving on each comparison.
+	abandonedIdentities := make(map[domain.PeerIdentity]struct{}, len(state.AbandonedForwardedTo))
+	for _, addr := range state.AbandonedForwardedTo {
+		if id := s.resolvePeerIdentity(addr); id != "" {
+			abandonedIdentities[id] = struct{}{}
+		}
+	}
+
+	// Lookup returns CompositeScore-ranked entries with HealthDead
+	// and (PR 12.4 wire-up) CooldownUntil already filtered out.
+	// The failover path therefore picks the next best uplink
+	// without having to re-implement the scoring logic.
+	routes := s.routingTable.Lookup(state.Recipient)
+	for _, route := range routes {
+		if route.NextHop == failedUplink {
+			continue
+		}
+		if previousHopIdentity != "" && route.NextHop == previousHopIdentity {
+			continue
+		}
+		if _, abandoned := abandonedIdentities[route.NextHop]; abandoned {
+			continue
+		}
+		address := s.resolveRouteNextHopAddress(route.NextHop, route.Hops)
+		if address == "" {
+			continue
+		}
+		if !s.sendFrameToAddress(s.runCtx, address, frame) {
+			continue
+		}
+		if !s.relayStates.recordFailoverRetry(state.MessageID, address) {
+			// TTL evicted between send and bookkeeping. The
+			// frame is already on the wire; the receiver will
+			// dedupe by ID if the original arrived too.
+			log.Debug().
+				Str("id", state.MessageID).
+				Str("recipient", string(state.Recipient)).
+				Msg("relay_failover_state_evicted_after_send")
+			return
+		}
+		log.Info().
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Str("failed_uplink", string(failedUplink)).
+			Str("retry_uplink", string(route.NextHop)).
+			Str("retry_address", string(address)).
+			Int("retry_attempt", currentAttempt+1).
+			Int("hops", route.Hops).
+			Msg("relay_failover_retried")
+		return
+	}
+
+	log.Debug().
+		Str("id", state.MessageID).
+		Str("recipient", string(state.Recipient)).
+		Str("failed_uplink", string(failedUplink)).
+		Int("candidates_considered", len(routes)).
+		Msg("relay_failover_no_alternative")
+	// Phase 3 PR 12.3 (review fix): no table alternative AND we
+	// already used FrameLine to know the wire bytes. Fire gossip
+	// fallback on those bytes so the message has one more chance
+	// to reach the recipient through the broader routing-target
+	// fan-out. retryRelayDeliveries does NOT rescue intermediate-
+	// hop messages (no FrameLine in topics["dm"]), so without
+	// this fallback the message would simply stop here.
+	s.failoverGossipFallback(state, failedUplink)
+}
+
+// failoverGossipFallback parses the stashed FrameLine and fans the
+// frame out through relayViaGossip with the failed uplink's transport
+// address as the exclude. Used by tryFailoverRelay's terminal branches
+// (retry budget exhausted, no table alternative) to give the message
+// one final chance via the broader routing-target set before it
+// genuinely stops.
+//
+// Receivers dedupe by message ID, so any peer that may already have
+// received the original forward simply drops the gossip copy. The
+// exclude is best-effort: relayViaGossip takes a single exclude
+// address, so abandoned uplinks earlier in the failover chain may
+// still receive a gossip copy and dedupe it.
+//
+// No-op when FrameLine is empty (origin marshal-failure path) or the
+// parse fails — the message has nothing recoverable to gossip.
+func (s *Service) failoverGossipFallback(state relayForwardState, failedUplink domain.PeerIdentity) {
+	if state.FrameLine == "" {
+		return
+	}
+	frame, err := protocol.ParseFrameLine(state.FrameLine)
+	if err != nil {
+		log.Debug().
+			Err(err).
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Msg("relay_failover_gossip_skipped_unparseable_frame")
+		return
+	}
+	// Gossip exclude follows the canonical relay split-horizon: on
+	// an intermediate hop the message arrived FROM PreviousHop, so
+	// gossiping back to them would loop (and they already have the
+	// message). relayViaGossip takes a single exclude, so we pass
+	// PreviousHop when set. On the origin path (PreviousHop empty —
+	// we created the message) there is no upstream to protect, so
+	// we exclude the just-failed downstream instead to avoid an
+	// immediate pointless re-send to the peer that just timed out.
+	// The failed downstream may still be reached via gossip on the
+	// intermediate-hop branch — that is acceptable: the timeout
+	// could have been transient and the receiver dedupes by
+	// message ID regardless.
+	excludeAddr := state.PreviousHop
+	if excludeAddr == "" {
+		excludeAddr = state.ForwardedTo
+	}
+	forwardedTo := s.relayViaGossip(frame, excludeAddr)
+	if forwardedTo == "" {
+		log.Debug().
+			Str("id", state.MessageID).
+			Str("recipient", string(state.Recipient)).
+			Str("failed_uplink", string(failedUplink)).
+			Msg("relay_failover_gossip_no_candidates")
+		return
+	}
+	log.Info().
+		Str("id", state.MessageID).
+		Str("recipient", string(state.Recipient)).
+		Str("failed_uplink", string(failedUplink)).
+		Str("gossip_first_target", string(forwardedTo)).
+		Msg("relay_failover_gossip_fired")
 }
 
 // tryForwardViaRoutingTable consults the routing table for a next-hop to
@@ -70,7 +423,15 @@ type tableForwardResult struct {
 // burn the full syncFlushTimeout. Outbound enqueue is non-blocking and
 // does not observe ctx beyond the pre-entry check.
 func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domain.PeerIdentity, frame protocol.Frame, excludeIdentity domain.PeerIdentity) tableForwardResult {
-	routes := s.routingTable.Lookup(recipient)
+	// Phase 3 PR 12.6 — LookupForRelay applies the multi-path
+	// traffic shaping rotation on top of the standard ranked
+	// Lookup result. The plain Lookup ordering still applies
+	// to most relay forwards; only roughly one in
+	// routing.ShapingProbeRatio calls rotate when the top
+	// candidate qualifies as a shaping candidate AND a non-
+	// shaping alternative is available. See LookupForRelay's
+	// doc-comment for the precise contract.
+	routes := s.routingTable.LookupForRelay(recipient, s.nextRelayShapingHint())
 	if len(routes) == 0 {
 		// Phase 2 on-demand recovery: nudge route discovery for
 		// recipient. Per-target rate limit inside SendRouteQuery
@@ -239,16 +600,39 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 		if !s.writeFrameToInbound(ctx, address, frame) {
 			return false
 		}
+		// Phase 3 PR 12.2 / PR 12.3 (review fix) — symmetric with
+		// sendRelayMessage{,WithOrigin} on the outbound side: arm
+		// the hop-ack budget AND stash the wire bytes so
+		// onRelayHopAckTimeout's reputation + failover path treats
+		// inbound-directed origin relays the same as their outbound
+		// counterparts. Without these stamps a relay forwarded
+		// through an inbound-only peer would never enter Phase 3
+		// timeout/failover at all — the ticker would skip the
+		// entry (HopAckRemainingTicks=0 = not tracking) and the
+		// failover gossip fallback would have no FrameLine to
+		// re-emit.
+		originLine, marshalErr := protocol.MarshalFrameLine(frame)
+		if marshalErr != nil {
+			originLine = ""
+			log.Warn().
+				Err(marshalErr).
+				Str("id", string(msg.ID)).
+				Str("recipient", msg.Recipient).
+				Str("address", string(address)).
+				Msg("relay_origin_frame_marshal_failed_inbound_retry_disabled")
+		}
 		// Persist relay state — mirrors what sendRelayMessage does for outbound.
 		stored := s.relayStates.store(&relayForwardState{
-			MessageID:        string(msg.ID),
-			PreviousHop:      "",
-			ReceiptForwardTo: "",
-			ForwardedTo:      address,
-			Recipient:        domain.PeerIdentity(msg.Recipient),
-			RouteOrigin:      routeOrigin,
-			HopCount:         1,
-			RemainingTTL:     relayStateTTLSeconds,
+			MessageID:            string(msg.ID),
+			PreviousHop:          "",
+			ReceiptForwardTo:     "",
+			ForwardedTo:          address,
+			Recipient:            domain.PeerIdentity(msg.Recipient),
+			RouteOrigin:          routeOrigin,
+			HopCount:             1,
+			RemainingTTL:         relayStateTTLSeconds,
+			HopAckRemainingTicks: defaultHopAckBudgetSeconds,
+			FrameLine:            originLine,
 		})
 		if !stored {
 			log.Warn().

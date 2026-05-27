@@ -35,7 +35,17 @@ func (t *Table) Announceable(excludeVia PeerIdentity) []RouteEntry {
 	// set — same contract as Lookup's Dead filter. healthStore.
 	// isDeadLocked is a pure map read under t.mu.RLock(); it
 	// does not take any additional lock.
-	return t.store.AnnounceableFor(excludeVia, t.clock(), t.health.isDeadLocked)
+	//
+	// Phase 3 PR 12.4: also pass the cooldown probe so cooled-
+	// down (Identity, Uplink) pairs are dropped from the
+	// announceable set. The closure captures `now` at call time
+	// so isCooledDownLocked compares against the same clock
+	// reading the rest of the call uses.
+	now := t.clock()
+	cooledDown := func(identity, uplink PeerIdentity) bool {
+		return t.health.isCooledDownLocked(identity, uplink, now)
+	}
+	return t.store.AnnounceableFor(excludeVia, now, t.health.isDeadLocked, cooledDown)
 }
 
 // AnnounceTo returns the wire-safe AnnounceEntry projection of routes
@@ -83,7 +93,14 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 	// them to neighbours. If all claims for an Identity are Dead,
 	// AnnounceProjectionFor falls through to the tombstone branch
 	// (own-direct tombstones emit; transit tombstones never do).
-	entries, mutated := t.store.AnnounceProjectionFor(excludeVia, t.clock(), t.health.isDeadLocked)
+	//
+	// Phase 3 PR 12.4: black-hole cooldown filter on the same
+	// projection path — symmetric with Announceable above.
+	now := t.clock()
+	cooledDown := func(identity, uplink PeerIdentity) bool {
+		return t.health.isCooledDownLocked(identity, uplink, now)
+	}
+	entries, mutated := t.store.AnnounceProjectionFor(excludeVia, now, t.health.isDeadLocked, cooledDown)
 	if mutated {
 		t.dirty.Store(true)
 	}
@@ -210,6 +227,13 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 		if claim.Source != RouteSourceDirect && t.health.isDeadLocked(target, claim.Uplink) {
 			continue
 		}
+		// Phase 3 PR 12.4: black-hole cooldown filter, no Direct
+		// exemption — a cooled-down direct uplink would carry the
+		// route_query response into the same dead-end the
+		// reputation primitive already learned to avoid.
+		if t.health.isCooledDownLocked(target, claim.Uplink, now) {
+			continue
+		}
 		score := scoreClaim(claim)
 		if liveWinner == nil || score > liveWinnerScore {
 			w := *claim
@@ -301,11 +325,12 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
+	now := t.clock()
 	var candidates []RouteEntry
 	if t.localOrigin != "" && identity == t.localOrigin {
 		candidates = append(candidates, t.localRouteEntry())
 	}
-	candidates = append(candidates, t.store.LookupActive(identity, t.clock())...)
+	candidates = append(candidates, t.store.LookupActive(identity, now)...)
 
 	// Empty candidate set returns nil (not an empty slice) to keep the
 	// pre-Phase-2 callers that probe `routes == nil` working. The
@@ -356,10 +381,121 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 		if health != nil && health.Health == HealthDead && entry.Source != RouteSourceDirect {
 			continue
 		}
+		// Phase 3 PR 12.4: black-hole cooldown filter. Unlike the
+		// Dead filter above, there is NO Direct exemption — the
+		// 5 consecutive hop-ack failures that armed the cooldown
+		// are empirical evidence that the peer cannot deliver,
+		// regardless of whether the underlying session is alive.
+		// Suppressing Direct here matches the announce-side
+		// filter (route_store_lookup.go) so local forwarding and
+		// outbound announce semantics agree. The arm auto-clears
+		// via TickHealth's applyCooldownExpiryLocked sweep after
+		// BlackHoleCooldown elapses, so this is self-healing.
+		// Self-route (RouteSourceLocal) is excluded from the
+		// check structurally — its NextHop is the local identity
+		// itself, which is never tracked in the health store.
+		if entry.Source != RouteSourceLocal && t.health.isCooledDownLocked(identity, entry.NextHop, now) {
+			continue
+		}
 		result = append(result, entry)
 	}
 	sortRoutesByCompositeScoreLocked(result, t.health, identity)
 	return result
+}
+
+// LookupForRelay is the Phase 3 PR 12.6 multi-path traffic
+// shaping wrapper over Lookup. It returns the same ranked result
+// as Lookup, EXCEPT when (a) the supplied `hint` is divisible by
+// ShapingProbeRatio AND (b) the top-ranked candidate is a
+// shaping candidate (isShapingCandidate) AND (c) at least one
+// alternative non-shaping candidate exists earlier in the
+// ranked tail. In that single case the top entry yields its
+// slot to the highest-ranked non-shaping alternative; the
+// shaping candidate moves to index 1. All other ranking remains
+// untouched.
+//
+// The effect is a roughly 1-in-ShapingProbeRatio rotation that
+// pushes relay traffic onto an alternative when the favourite
+// is under-observed (warmup) or just exited cooldown — see
+// isShapingCandidate's doc-comment for the qualifying criteria.
+// Phase 3 §4.6 records the design rationale and the choice of
+// ratio.
+//
+// Caller-provided `hint`: Service.nextRelayShapingHint()
+// (atomic.Uint64 increment) so the rotation cadence stays
+// deterministic across concurrent relay forwards without
+// requiring per-Table counter state. The function is therefore
+// stateless w.r.t. shaping; this also keeps tests trivially
+// deterministic — `LookupForRelay(identity, 0)` always reorders
+// when the conditions hold, `LookupForRelay(identity, 1)`
+// always returns the plain Lookup order.
+//
+// Constraints the shaping pass respects:
+//
+//   - The alternative MUST be in a healthy tier (Good or
+//     Questionable). Lookup already drops cooled-down pairs, but it
+//     keeps fully-observed Bad pairs (merely low-scored) and Direct
+//     Dead pairs (direct exemption), so the wrapper applies its own
+//     tier gate via isShapingAlternativeAcceptable — the rotation
+//     never diverts traffic onto a known-worse path (Phase 3 §4.6).
+//   - The alternative MUST itself be a non-shaping candidate;
+//     swapping one shaping candidate for another would just
+//     move the warmup gap around without accelerating sample
+//     accrual.
+//
+// Returns nil when Lookup itself returns nil. Lock contract:
+// inherits Lookup's t.mu.RLock window.
+func (t *Table) LookupForRelay(identity PeerIdentity, hint uint64) []RouteEntry {
+	routes := t.Lookup(identity)
+	if len(routes) < 2 {
+		return routes
+	}
+	if ShapingProbeRatio == 0 || hint%ShapingProbeRatio != 0 {
+		return routes
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	now := t.clock()
+
+	topHealth := t.lookupHealthLocked(identity, routes[0])
+	if !isShapingCandidate(topHealth, now) {
+		return routes
+	}
+
+	// Find the highest-ranked acceptable alternative. Routes is sorted
+	// descending by CompositeScore, so the first qualifying entry in
+	// routes[1:] is the best alternative. "Acceptable" means it is
+	// neither a shaping candidate itself NOR a Bad/Dead pair: Lookup
+	// keeps fully-observed Bad pairs (only low-scored) and Direct Dead
+	// pairs (direct exemption), so a plain !isShapingCandidate check
+	// would happily promote a known-worse path over a merely-warming
+	// Good one. See isShapingAlternativeAcceptable / Phase 3 §4.6.
+	for i := 1; i < len(routes); i++ {
+		altHealth := t.lookupHealthLocked(identity, routes[i])
+		if !isShapingAlternativeAcceptable(altHealth, now) {
+			continue
+		}
+		// Promote routes[i] to index 0, demote the original
+		// shaping candidate to index 1. Other entries stay
+		// in their relative order — this matches the
+		// "single rotation slot" semantic the plan describes.
+		shaped := make([]RouteEntry, 0, len(routes))
+		shaped = append(shaped, routes[i])
+		for j := 0; j < len(routes); j++ {
+			if j == i {
+				continue
+			}
+			shaped = append(shaped, routes[j])
+		}
+		return shaped
+	}
+
+	// No non-shaping alternative — leave the order alone. The
+	// shaping pass exists to ACCELERATE reliability accrual; if
+	// every alternative is also under-observed there is no
+	// point rotating among them.
+	return routes
 }
 
 // lookupHealthLocked returns the RouteHealthState for the given

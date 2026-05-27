@@ -24,9 +24,10 @@ import (
 // can mutate them inline (e.g. set health = nil to test empty
 // store path).
 type stubRoutingProvider struct {
-	snapshot routing.Snapshot
-	health   []routing.RouteHealthState
-	overload routing.OverloadStats
+	snapshot   routing.Snapshot
+	health     []routing.RouteHealthState
+	overload   routing.OverloadStats
+	reputation []routing.RouteReputationState
 }
 
 func (s *stubRoutingProvider) RoutingSnapshot() routing.Snapshot {
@@ -43,6 +44,15 @@ func (s *stubRoutingProvider) OverloadStats() routing.OverloadStats {
 
 func (s *stubRoutingProvider) HealthSnapshot() []routing.RouteHealthState {
 	return s.health
+}
+
+// ReputationSnapshot satisfies the Phase 3 PR 12.7 extension of
+// the RoutingProvider interface. Tests that exercise
+// fetchRouteReputation pre-populate stubRoutingProvider.reputation
+// inline; legacy tests leave it nil and the snapshot path
+// returns nil unchanged.
+func (s *stubRoutingProvider) ReputationSnapshot() []routing.RouteReputationState {
+	return s.reputation
 }
 
 // TestFetchRouteHealth_UnavailableWhenProviderNil — same "hide

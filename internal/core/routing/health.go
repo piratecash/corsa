@@ -98,6 +98,88 @@ const (
 	HealthProbeTimeout = 5 * time.Second
 )
 
+// Phase 3 PR 12.1 — reputation primitives. The constants below
+// configure the local hop-ack success/failure book-keeping that
+// docs/cluster-mesh/phase-3-multipath-reputation.md §4.1 describes.
+// They are NOT operator-tunable knobs — Phase 3 §4.9 decision #3 keeps
+// them as code constants until field telemetry shows a concrete need.
+//
+// The reliability term is deliberately small compared with the health-
+// state penalty: docs/cluster-mesh/phase-3-multipath-reputation.md §4.1
+// fixes the strict-tier ordering Good ≻ Questionable ≻ Bad as a
+// release-blocking invariant — see also the doc-comment on
+// scoreHealthQPenalty / scoreHealthBadPenalty in score.go. Bumping
+// ReliabilityBonusMax above scoreSourceDirect would let a high-
+// reliability Bad pair outrank a low-reliability Good pair and break
+// every Bad-path recovery trigger downstream.
+const (
+	// ReliabilityWarmupSamples is the minimum number of observed
+	// hop-ack attempts before CompositeScore folds in the reliability
+	// term. Below the threshold a single failure could swing the EMA
+	// across the whole [0, 1] range — too noisy to act on. Three
+	// observations let the term carry useful signal without delaying
+	// Bad-path detection past Phase 2's passive 122 s timeline.
+	ReliabilityWarmupSamples uint64 = 3
+
+	// ReliabilityEWMAFactor is the alpha of the per-pair success-ratio
+	// EMA. Smaller than the RTT alpha (EWMASmoothingFactor = 0.3) on
+	// purpose: relay reliability changes more slowly than network RTT,
+	// and we want a single timeout to nudge the score, not dominate it.
+	ReliabilityEWMAFactor = 0.2
+
+	// BlackHoleThreshold is the number of consecutive hop-ack failures
+	// at which applyHopAckFailure arms a cooldown. Five matches the
+	// roadmap iter-2 §3e value the Phase 3 plan absorbs verbatim.
+	BlackHoleThreshold = 5
+
+	// BlackHoleCooldown is how long an armed pair stays out of
+	// Lookup / Announceable selection after the threshold is crossed.
+	// Two minutes is the original iter-2 §3e value: long enough for a
+	// transient relay-side failure (queue backlog, GC pause) to clear,
+	// short enough that a permanently-broken alternative is retried
+	// soon. The PR 12.4 filter consumes CooldownUntil; Phase 3 §4.4
+	// describes the integration. applyCooldownExpiryLocked clears the
+	// arm when the window elapses (called from Table.TickHealth).
+	BlackHoleCooldown = 2 * time.Minute
+
+	// ReliabilityShapingMinAttempts is the per-(Identity, Uplink)
+	// attempt count below which the pair is considered "new /
+	// under-observed" by the Phase 3 PR 12.6 multi-path traffic
+	// shaping helper. Until the counter reaches this floor the
+	// shaping pass occasionally rotates traffic onto an alternative
+	// uplink so the new pair's reliability statistics accumulate
+	// against a real, non-degenerate sample size before
+	// CompositeScore's reliability term starts to dominate the
+	// ranking. Phase 3 §4.6 documents the chosen value (10).
+	ReliabilityShapingMinAttempts uint64 = 10
+
+	// ShapingRecentCooldownWindow bounds how long after a
+	// black-hole cooldown was cleared the pair still counts as a
+	// shaping candidate. Mirrors ReliabilityShapingMinAttempts on
+	// the recovery side: a pair that JUST exited cooldown deserves
+	// a brief grace period where alternative paths absorb some
+	// traffic, so a recurrence of the failure pattern is detected
+	// faster (the alternative also sees enough samples to
+	// recompute its own reliability) and a degenerate single-
+	// success-then-relapse cycle does not lock in the recovering
+	// pair too quickly.
+	ShapingRecentCooldownWindow = 1 * time.Minute
+
+	// ShapingProbeRatio is the denominator of the Phase 3 PR 12.6
+	// hint-driven shaping rotation. LookupForRelay reorders the
+	// ranked result so a shaping candidate yields the top slot to
+	// an alternative on every (hint % ShapingProbeRatio == 0) call.
+	// Ratio 4 = roughly one in four relay forwards goes through
+	// the alternative when a shaping candidate would otherwise
+	// win, balancing reliability-sample accrual against the
+	// per-message latency cost of routing through a longer path.
+	// Phase 3 §4.6 records the choice; the constant is not
+	// operator-tunable (Phase 3 §4.9 keeps reputation knobs out
+	// of the operator surface until field telemetry demonstrates
+	// a concrete need).
+	ShapingProbeRatio uint64 = 4
+)
+
 // RouteHealthState tracks the active reachability of a
 // (target identity, uplink peer) pair. Key shape is per-pair —
 // adapted from the original iter-1.5 (Identity, Origin, NextHop)
@@ -196,6 +278,77 @@ type RouteHealthState struct {
 	// state change. Used by RPC observability ("transitioned 12s
 	// ago") and by debugging tooling.
 	TransitionAt time.Time
+
+	// Phase 3 PR 12.1 — reputation primitives. The fields below are
+	// owned by the same RouteHealthState entry, mutated under the
+	// same routing.Table.t.mu (W mode for apply*, R mode for read),
+	// and snapshotted by the same healthStore.snapshotLocked path.
+	// docs/cluster-mesh/phase-3-multipath-reputation.md §2.5 fixes
+	// the locking decision; placing the fields here (rather than in
+	// a parallel reputationStore) keeps Lookup-path reads atomic
+	// without cross-mutex coordination.
+	//
+	// Production hop-ack call sites do NOT yet write into these
+	// fields — PR 12.2 wires Table.MarkHopAck / Table.MarkHopFailure
+	// to call applyHopAckSuccess / applyHopAckFailure. PR 12.4
+	// consumes CooldownUntil as a Lookup / Announceable filter.
+	// PR 12.7 surfaces the snapshot through fetchRouteReputation.
+
+	// HopAckAttempts is the total number of hop-ack outcomes
+	// observed for this pair — successes and failures combined.
+	// Used as the cold-start gate for the reliability term in
+	// CompositeScore (term ignored while
+	// HopAckAttempts < ReliabilityWarmupSamples). Saturates
+	// implicitly at math.MaxUint64; in practice traffic volume
+	// per (Identity, Uplink) pair never approaches the limit.
+	HopAckAttempts uint64
+
+	// HopAckSuccesses is the subset of HopAckAttempts where
+	// applyHopAckSuccess was called. Kept alongside Attempts so
+	// observability can report the raw counter pair, not just the
+	// derived ratio.
+	HopAckSuccesses uint64
+
+	// ReliabilityScore is the EWMA-smoothed hop-ack success ratio,
+	// in [0, 1]. Updated by applyHopAckSuccess (outcome 1.0) and
+	// applyHopAckFailure (outcome 0.0) at ReliabilityEWMAFactor.
+	// The very first apply seeds the score with its outcome
+	// directly to avoid biasing the long-run estimate toward 0.5.
+	// CompositeScore consumes this via reliabilityBonus once the
+	// pair is past the warmup gate.
+	ReliabilityScore float64
+
+	// ConsecutiveFailures counts hop-ack failures since the most
+	// recent success. applyHopAckSuccess resets it to zero. When
+	// the counter reaches BlackHoleThreshold the apply method arms
+	// CooldownUntil — the local "this uplink is misbehaving"
+	// signal that PR 12.4 turns into a Lookup-time filter.
+	ConsecutiveFailures int
+
+	// CooldownUntil is the wall-clock deadline before which the
+	// pair is excluded from Lookup / Announceable / AnnounceTargetFor
+	// (PR 12.4). Zero means "not armed". A success during the
+	// cooldown window clears the arm immediately (see
+	// applyHopAckSuccess); otherwise applyCooldownExpiryLocked
+	// (called from Table.TickHealth) clears it once the deadline
+	// elapses and gives the uplink a second chance.
+	CooldownUntil time.Time
+
+	// LastCooldownClearedAt records the wall-clock time the most
+	// recent cooldown arm was cleared (by either organic success
+	// via applyHopAckSuccess or by the TickHealth-driven
+	// applyCooldownExpiryLocked sweep). Zero before any cooldown
+	// has ever been armed.
+	//
+	// Used by the Phase 3 PR 12.6 multi-path traffic shaping
+	// helper (isShapingCandidate) so a pair that JUST exited
+	// cooldown still rotates partial traffic onto an alternative
+	// uplink for ShapingRecentCooldownWindow afterwards. Without
+	// this field a recovered-from-cooldown pair would immediately
+	// resume monopolising relay forwards and a recurrence of the
+	// failure pattern would take another full 5 hop-acks to
+	// detect.
+	LastCooldownClearedAt time.Time
 }
 
 // applyHopAck advances the state machine on relay_hop_ack reception
@@ -314,6 +467,185 @@ func (s *RouteHealthState) applyIdleTick(now time.Time) {
 	}
 }
 
+// applyHopAckSuccess records a positive hop-ack outcome on the
+// reputation primitives. Distinct from applyHopAck (Phase 2 health
+// state machine) by design: the state-machine side and the reputation
+// side are independent surfaces over the same pair so a future PR
+// could change one without disturbing the other. PR 12.2 wires both
+// at the Table level (MarkHopAck / ConfirmHopAck call applyHopAck
+// then applyHopAckSuccess inside one t.mu.Lock).
+//
+// Cold-start contract: the very first observation seeds the EMA with
+// its outcome verbatim — for a success that means ReliabilityScore=1.
+// This matches UpdateRTT's documented cold-start behaviour (score.go)
+// and avoids the "every fresh pair starts at 0.5" bias that an
+// uninitialised EMA would otherwise introduce.
+//
+// Side effects beyond the EMA: HopAckAttempts and HopAckSuccesses
+// increment; ConsecutiveFailures resets to zero; an armed
+// CooldownUntil is cleared (a late hop-ack is positive evidence and
+// must immediately restore selectability — see §4.1 contract in
+// docs/cluster-mesh/phase-3-multipath-reputation.md).
+//
+// Caller must hold the owning routing.Table's t.mu in W mode.
+func (s *RouteHealthState) applyHopAckSuccess(now time.Time) {
+	s.HopAckAttempts++
+	s.HopAckSuccesses++
+	if s.HopAckAttempts == 1 {
+		s.ReliabilityScore = 1.0
+	} else {
+		s.ReliabilityScore = (1-ReliabilityEWMAFactor)*s.ReliabilityScore + ReliabilityEWMAFactor*1.0
+	}
+	if s.ReliabilityScore > 1.0 {
+		s.ReliabilityScore = 1.0
+	}
+	s.ConsecutiveFailures = 0
+	// Phase 3 PR 12.6 — record the cooldown clear so the
+	// shaping helper keeps the pair on a partial-traffic regime
+	// for ShapingRecentCooldownWindow even after a successful
+	// recovery. We stamp ONLY when we actually clear an armed
+	// cooldown so a steady-state success path (no cooldown
+	// ever armed) does not falsely trigger shaping.
+	if !s.CooldownUntil.IsZero() {
+		s.LastCooldownClearedAt = now
+	}
+	s.CooldownUntil = time.Time{}
+}
+
+// applyHopAckFailure records a negative hop-ack outcome on the
+// reputation primitives. Symmetric to applyHopAckSuccess on the
+// counter / EMA side, but only HopAckAttempts bumps —
+// HopAckSuccesses stays put so the observable success ratio is
+// honest. The 0.0 outcome blends into the EMA at
+// ReliabilityEWMAFactor, the consecutive-failure counter
+// increments, and on the BlackHoleThreshold-th consecutive failure
+// the apply method arms CooldownUntil = now + BlackHoleCooldown so
+// PR 12.4's Lookup filter can suppress the pair until the window
+// elapses.
+//
+// Cold-start contract: a first-ever apply call seeds ReliabilityScore
+// at its outcome (0.0 for a failure). This is symmetric with
+// applyHopAckSuccess's first-call branch and is documented in §4.1.
+//
+// The apply method does NOT clear or shorten an already-armed
+// cooldown — repeated failures inside the window keep the deadline
+// where the threshold crossing left it. A success (organic late
+// hop-ack landing during the window) is the only event that lifts
+// the arm early.
+//
+// Caller must hold the owning routing.Table's t.mu in W mode.
+func (s *RouteHealthState) applyHopAckFailure(now time.Time) {
+	s.HopAckAttempts++
+	if s.HopAckAttempts == 1 {
+		s.ReliabilityScore = 0.0
+	} else {
+		s.ReliabilityScore = (1-ReliabilityEWMAFactor)*s.ReliabilityScore + ReliabilityEWMAFactor*0.0
+	}
+	if s.ReliabilityScore < 0.0 {
+		s.ReliabilityScore = 0.0
+	}
+	s.ConsecutiveFailures++
+	if s.ConsecutiveFailures >= BlackHoleThreshold && s.CooldownUntil.IsZero() {
+		s.CooldownUntil = now.Add(BlackHoleCooldown)
+	}
+}
+
+// applyCooldownExpiryLocked is the per-tick helper Table.TickHealth
+// (Phase 3 PR 12.4) calls on every tracked pair to release a
+// black-hole cooldown whose deadline has elapsed. Clearing the
+// CooldownUntil deadline AND the ConsecutiveFailures counter gives
+// the uplink a clean slate — the next observed hop-ack (success or
+// failure) starts from "no consecutive failures yet" so a single
+// stray retry timeout does NOT immediately re-arm the cooldown.
+//
+// The "Locked" suffix mirrors the rest of healthStore's contract:
+// callers must hold the owning routing.Table's t.mu in W mode. The
+// method is a no-op for pairs without an armed cooldown (zero
+// CooldownUntil) or whose deadline is still in the future.
+func (s *RouteHealthState) applyCooldownExpiryLocked(now time.Time) {
+	if s.CooldownUntil.IsZero() {
+		return
+	}
+	if now.Before(s.CooldownUntil) {
+		return
+	}
+	s.CooldownUntil = time.Time{}
+	s.ConsecutiveFailures = 0
+	// Phase 3 PR 12.6 — stamp the clear so the shaping helper
+	// keeps the pair on partial-traffic mode briefly even after
+	// the cooldown auto-released. Mirror of the equivalent stamp
+	// on applyHopAckSuccess's organic-recovery branch.
+	s.LastCooldownClearedAt = now
+}
+
+// isShapingCandidate reports whether the (Identity, Uplink) pair
+// should still be considered for multi-path traffic shaping by
+// the Phase 3 PR 12.6 LookupForRelay rotation. Two conditions
+// qualify a pair as a shaping candidate; either is sufficient:
+//
+//   - Warmup: HopAckAttempts is below ReliabilityShapingMinAttempts.
+//     The reliability EMA needs more samples before its signal
+//     becomes ranking-grade, so the shaping pass rotates traffic
+//     onto alternative uplinks to accelerate sample accrual.
+//   - Post-cooldown grace: LastCooldownClearedAt is non-zero and
+//     `now` is within ShapingRecentCooldownWindow of it. A pair
+//     that just exited cooldown receives a brief partial-traffic
+//     regime so a recurrence of the failure pattern is detected
+//     faster (the alternative uplink also builds up enough
+//     samples to be reliably preferred if the recovered pair
+//     misbehaves again).
+//
+// Returns false for nil state — the caller (LookupForRelay) treats
+// "no health entry tracked yet" as "no shaping needed" because the
+// nil-health CompositeScore branch already produces the safe by-
+// hops fallback ranking.
+//
+// Pure: no clock, no I/O, no mutation. Safe to call under either
+// t.mu mode (callers hold R for Lookup-path reads).
+func isShapingCandidate(state *RouteHealthState, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	if state.HopAckAttempts < ReliabilityShapingMinAttempts {
+		return true
+	}
+	if !state.LastCooldownClearedAt.IsZero() && now.Sub(state.LastCooldownClearedAt) <= ShapingRecentCooldownWindow {
+		return true
+	}
+	return false
+}
+
+// isShapingAlternativeAcceptable reports whether a route's health makes
+// it a valid target to promote OVER a shaping candidate in
+// Table.LookupForRelay. Two conditions must hold:
+//
+//   - it must NOT itself be a shaping candidate — swapping one warmup /
+//     just-cooled-down pair for another only moves the sample gap
+//     around without accelerating reliability accrual;
+//   - it must be in a healthy tier (HealthGood or HealthQuestionable).
+//     A HealthBad or HealthDead alternative must never win the slot:
+//     shaping exists to gather samples on a merely-under-observed path,
+//     not to divert traffic onto a known-worse one. Lookup already
+//     drops cooled-down pairs, but a fully-observed Bad pair is NOT a
+//     shaping candidate and a Direct HealthDead pair survives Lookup's
+//     direct exemption, so without this tier gate either could be
+//     promoted over a healthy warmup candidate (Phase 3 §4.6:
+//     "Bad / Dead / cooled-down alternatives never chosen over a
+//     shaping candidate — the alternative must be Good / Questionable").
+//
+// A nil state (no health recorded yet) carries no negative signal and
+// is treated as acceptable, mirroring CompositeScore's nil-health
+// handling.
+func isShapingAlternativeAcceptable(state *RouteHealthState, now time.Time) bool {
+	if isShapingCandidate(state, now) {
+		return false
+	}
+	if state == nil {
+		return true
+	}
+	return state.Health == HealthGood || state.Health == HealthQuestionable
+}
+
 // healthKey identifies a tracked (Identity, Uplink) pair.
 type healthKey struct {
 	Identity domain.PeerIdentity
@@ -361,6 +693,49 @@ func (s *healthStore) isDeadLocked(identity, uplink PeerIdentity) bool {
 	}
 	state := s.states[healthKey{Identity: identity, Uplink: uplink}]
 	return state != nil && state.Health == HealthDead
+}
+
+// isCooledDownLocked reports whether the (Identity, Uplink) pair
+// is currently inside an armed black-hole cooldown window — that
+// is, CooldownUntil is non-zero AND `now` is before that deadline.
+// Returns false for absent entries (cold pairs / never-seen
+// claims) and for entries whose cooldown has expired but TickHealth
+// has not yet cleared the field.
+//
+// Phase 3 PR 12.4 contract: the cooldown filter is applied
+// symmetrically on Lookup (table_lookup.go::Lookup), the
+// per-target picker (AnnounceTargetFor), and the announce
+// projection (AnnounceableFor / AnnounceProjectionFor). Unlike
+// the Dead filter, there is NO Direct exemption — a Direct pair
+// that reliably misses hop_acks IS a black hole even though the
+// underlying session is alive, and suppressing it from Lookup
+// matches the "this peer can't actually deliver" signal that
+// the 5 consecutive failures already recorded on the reputation
+// surface. The release-blocking invariant is pinned by
+// TestBlackHole_DirectClaimNotExempt.
+//
+// The `now` parameter exists because TickHealth's
+// applyCooldownExpiryLocked sweep runs at HealthProbeInterval
+// (15 s) cadence, so there can be up to one tick of lag between
+// "CooldownUntil elapsed" and "CooldownUntil field cleared".
+// Reading the live `now` against the stored deadline closes that
+// gap on every Lookup / Announce projection without needing the
+// sweep to land first.
+//
+// Caller must hold t.mu in R mode; this helper performs only a
+// map read and a time comparison.
+func (s *healthStore) isCooledDownLocked(identity, uplink PeerIdentity, now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	state := s.states[healthKey{Identity: identity, Uplink: uplink}]
+	if state == nil {
+		return false
+	}
+	if state.CooldownUntil.IsZero() {
+		return false
+	}
+	return now.Before(state.CooldownUntil)
 }
 
 // getLocked returns the state for the pair, or nil when no state is

@@ -529,6 +529,12 @@ func TestIsFireAndForgetFrame(t *testing.T) {
 		{"announce_routes", true},
 		{"routes_update", true},
 		{"request_resync", true},
+		// Phase 3 route-sync pair: one-way frames whose reply (the
+		// summary) arrives asynchronously through the dispatcher, so they
+		// must skip the peerSessionRequest reply-wait too — otherwise the
+		// summary is consumed as the digest's "reply" and dropped.
+		{"route_sync_digest_v1", true},
+		{"route_sync_summary_v1", true},
 		{"send_delivery_receipt", false},
 		{"send_message", false},
 		{"publish_notice", false},

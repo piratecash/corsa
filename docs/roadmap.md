@@ -24,7 +24,6 @@ Quick links:
 - [Android app](#iter-7)
 - [Google WSS fallback](#iter-10)
 - [Voice calls](#iter-20)
-- [Reliability, reputation, and multi-path](#iter-2)
 - [Optimization and scaling](#iter-3)
 - [Structured overlay (DHT)](#iter-4)
 - [Second-layer encryption](#iter-8)
@@ -426,224 +425,6 @@ gracefully when network conditions are insufficient.
 - [ ] Integration test: file transfer during active call does not degrade audio
 - [ ] Update `docs/protocol/relay.md` (lossy media channel, priority bypass)
 
-<a id="iter-2"></a>
-### Reliability, reputation, multi-path, and incremental sync
-
-**Goal:** multiple routes per identity, automatic failover based on
-hop-by-hop ack success rate, protection against black-hole nodes.
-Also adds incremental sync via table digest for efficient reconnection.
-
-Note: capability negotiation and announcement size limits are already
-handled in iterations 0 and 1 respectively. Health tracking, probes,
-and composite scoring are handled in iteration 1.5. This iteration
-focuses on reliability, multi-path failover, and sync optimization.
-
-**2.0. Incremental sync via table digest:**
-
-When a peer reconnects, both sides can skip the full table dump by
-exchanging a compact table digest first. This requires a **route
-cache** that survives session close — unlike iteration 1 where all
-routes from a peer are invalidated immediately on disconnect.
-
-The route cache stores a read-only snapshot of what the peer last
-announced, with a separate expiry (e.g., 5 minutes). On reconnect
-within the cache window, the digest is compared and only deltas are
-exchanged. If the cache has expired or the digest misses, full sync
-occurs (same as iteration 1).
-
-**`route_sync_digest`** — sent immediately after handshake to a known peer:
-
-```json
-{
-  "type": "route_sync_digest",
-  "table_hash": "sha256_of_sorted_identity_seq_pairs",
-  "entry_count": 47,
-  "max_seq": 142
-}
-```
-
-```mermaid
-sequenceDiagram
-    participant A as Node A
-    participant B as Node B (reconnecting)
-
-    Note over B: Session re-established after disconnect
-
-    B->>A: route_sync_digest(hash=abc123, count=47, max_seq=142)
-    A->>A: Compare: cached state from B<br/>had hash=abc123, max_seq=142
-
-    alt Digest matches (cache still valid)
-        Note over A: No changes needed
-        A->>B: route_sync_digest(hash=def456, count=52, max_seq=198)
-        Note over A,B: Both sides exchange only deltas
-    else Digest mismatch or cache expired
-        A->>B: announce_routes [full table dump]
-        B->>A: announce_routes [full table dump]
-        Note over A,B: Full resync (same as first connect)
-    end
-```
-*Diagram — Incremental sync via table digest on reconnect*
-
-**3a. Multiple routes and failover:**
-
-The table already stores multiple routes per identity (from iteration 2).
-This iteration adds active route selection and failover. When a
-`relay_hop_ack` is not received within 10 seconds from the primary
-next_hop, the node retries via the second-best route. If that also fails,
-gossip fallback is used.
-
-```
-Identity "F":
-  route 1: via peer_C, 2 hops, reliability 0.95  ← primary
-  route 2: via peer_D, 3 hops, reliability 0.80  ← fallback
-  route 3: gossip                                  ← last resort
-```
-
-**3b. Route reputation based on hop-by-hop ack:**
-
-The reputation of a route is measured by the success rate of
-`relay_hop_ack` responses, not by end-to-end delivery receipts. This is
-critical because a delivery receipt can arrive via gossip even when the
-chosen next_hop dropped the message.
-
-**Protection against false penalties:** penalties must not be transferable
-across the network. Otherwise an attacker can not only poison routing, but
-also falsely bury honest nodes through slander. Therefore, in this
-iteration reputation is strictly **local**:
-
-1. **Penalize only locally observed behavior.** A node penalizes a
-   next_hop only for its own observed `relay_hop_ack` timeout, locally
-   observed failover, and repeated delivery failures through that next_hop.
-2. **Third-party complaints are not evidence.** No inbound frames, route
-   announcements, or negative claims such as "peer X is bad" should
-   directly change `ReliabilityScore`.
-3. **Penalty is soft and reversible.** The route is first deprioritized or
-   placed into cooldown/quarantine, not permanently banned.
-4. **The score applies to the route, not absolute guilt.** If the path via
-   `nextHop=A` often fails, that is a reason to lower `route_score`, not a
-   reason to globally classify identity A as malicious for the whole
-   network.
-
-**Why receipt path failures reinforce this choice:** the hop-by-hop
-receipt return path (from iteration 1) can partially fail — for example,
-node C delivers to F and sends receipt back toward A, but node B is
-temporarily offline. If scoring used end-to-end receipt arrival, A
-would penalize the forward path (A→B→C) for a failure that happened
-on the **return** path (C→B→A). Since `relay_hop_ack` is sent
-immediately by the direct next_hop before any further forwarding, it
-is immune to downstream or return-path failures. This is the strongest
-argument for hop-ack-only scoring.
-
-```go
-type RouteEntry struct {
-    // ... existing fields from iteration 2
-    HopAckAttempts   int
-    HopAckSuccesses  int
-    ReliabilityScore float64  // successes / attempts (0.0 to 1.0)
-}
-```
-
-When `relay_hop_ack` is received → `HopAckSuccesses++`.
-When 10s passes without `relay_hop_ack` → `HopAckAttempts++` only
-(no success). Score is recalculated.
-
-If `ReliabilityScore` drops below 0.3 after at least 5 attempts, the
-route is deprioritized (but not removed — it may recover).
-
-**3c. Composite route selection:**
-
-Routes are ranked by a locally computed `RouteScore`:
-`ReliabilityScore * 100 - Hops * 10`. A longer but reliable route beats a
-shorter but flaky one.
-
-```mermaid
-flowchart TD
-    MSG["Relay message for F"]
-    ROUTES["Lookup all routes for F"]
-    RANK["Rank by:<br/>reliability * 100 - hops * 10"]
-    TRY1["Try route 1 (best score)"]
-    ACK1{"relay_hop_ack<br/>within 10s?"}
-    TRY2["Try route 2 (next best)"]
-    ACK2{"relay_hop_ack<br/>within 10s?"}
-    GOSSIP["Gossip fallback"]
-    DONE["Delivered"]
-
-    MSG --> ROUTES --> RANK --> TRY1 --> ACK1
-    ACK1 -->|yes| DONE
-    ACK1 -->|no, timeout| TRY2 --> ACK2
-    ACK2 -->|yes| DONE
-    ACK2 -->|no, timeout| GOSSIP
-
-    style DONE fill:#c8e6c9,stroke:#2e7d32
-    style GOSSIP fill:#fff3e0,stroke:#e65100
-```
-*Diagram — Multi-path failover with hop-ack based reputation*
-
-**3d. Multi-path and blast-radius reduction:**
-
-The node should not blindly trust a single "best" route, especially when
-that route is new or has only recently recovered from cooldown. For an
-identity with multiple routes, selection should be multi-path:
-
-- a stable primary gets most of the traffic;
-- a secondary stays warm and is used periodically to verify liveness;
-- new or suspicious routes get only a small traffic share until they build
-  local success history.
-
-This reduces the impact of route poisoning and black-hole attacks: an
-attacker does not receive the entire flow immediately even after a
-successful route announcement.
-
-**3e. Black-hole detection:**
-
-A node that consistently claims routes via `announce_routes` but never
-returns `relay_hop_ack` is a suspected black hole. After 5 consecutive
-failures through that next_hop (across different messages), the node logs
-a warning and adds a 2-minute penalty cooldown during which that
-next_hop is skipped for new messages (existing retries continue).
-
-**Done when:** when node C in chain A-B-C-D-E-F disconnects, the message
-is automatically rerouted via an alternative path within 10-20 seconds
-(hop-ack timeout + retry). A black-hole node is detected and deprioritized
-after 5 messages.
-
-**Progress:**
-
-- [ ] Store multiple routes per identity in `PeerAwarenessTable` (may already exist from iteration 2)
-- [ ] Add `HopAckAttempts`, `HopAckSuccesses`, `ReliabilityScore` to `RouteEntry`
-- [ ] Track hop-ack success/failure per `(identity, origin, nextHop)` triple
-- [ ] Implement 10s hop-ack timeout → mark attempt as failed
-- [ ] Implement composite route ranking: `reliability * 100 - hops * 10`
-- [ ] Keep penalties local: do not accept external claims about "bad" peers as input to `ReliabilityScore`
-- [ ] Implement automatic failover: try next route on hop-ack timeout
-- [ ] Implement multi-path traffic shaping: new/suspicious routes get only partial traffic until they build history
-- [ ] Implement gossip fallback as last resort
-- [ ] Implement black-hole detection: 5 consecutive failures → 2-min cooldown
-- [ ] Add slow-start trust for new peers: a fresh next-hop cannot immediately receive all traffic
-- [ ] Cap the maximum influence of a single peer on route selection so one node cannot attract the whole flow
-- [ ] Add decay/recovery for reputation and cooldown expiry so defenses do not create eternal bans
-- [ ] Log warning on suspected black-hole node
-- [ ] Write unit tests for reputation scoring
-- [ ] Write unit tests for protection against false penalties (external negative signal does not change score)
-- [ ] Write unit tests for failover logic (primary fails → secondary → gossip)
-- [ ] Write unit tests for progressive rollout on new/suspicious routes
-- [ ] Write unit tests for black-hole detection and cooldown
-- [ ] Integration test: disconnect middle node, verify rerouting within 20s
-- [ ] Integration test: black-hole node (accepts relay, never acks), verify detection
-- [ ] Integration test: attacker attempts to force false reputation decay of an honest peer; score does not enter permanent penalty
-- [ ] Implement ingress suppression: exclude the arrival link from relay candidate set for each relayed message — prevents back-routing and reduces unnecessary relay load
-- [ ] Implement per-peer handshake rate budget: cap handshake initiation attempts to `max_handshake_attempts_per_peer` (default 3 per 60 s) to prevent resource exhaustion by rapid reconnect/handshake loops
-- [ ] Unit test: ingress link excluded from relay candidates for relayed message
-- [ ] Unit test: handshake rate budget exhausted → further attempts deferred until window expires
-
-**Release / Compatibility:**
-
-- [ ] Failover and reputation affect route selection only, not base compatibility
-- [ ] Without `relay_hop_ack`, network degrades to gossip fallback, not breakage
-- [ ] Mixed-version test: node with reputation/failover works with node without these improvements
-- [ ] Black-hole mitigation does not cause false full ban without fallback path
-- [ ] Confirmed: iteration 3 does not require raising `MinimumProtocolVersion`
-
 <a id="iter-3"></a>
 ### Optimization and scaling
 
@@ -774,25 +555,21 @@ changes.
 ```mermaid
 graph LR
     I1["Iteration 1<br/>Routing table<br/>+ withdrawals"]
-    I2["Iteration 2<br/>Multi-path +<br/>reputation"]
     I3["Iteration 3<br/>Optimization +<br/>scaling"]
     I4["Iteration 4<br/>DHT<br/>(future)"]
 
-    I1 --> I2 --> I3 --> I4
+    I1 --> I3 --> I4
 
     I1 -.- W1["+ directed routing<br/>+ fast withdrawal"]
-    I2 -.- W2["+ failover in 10-20s<br/>+ black-hole detection"]
     I3 -.- W3["+ 50+ nodes<br/>bandwidth optimized"]
 
     style I1 fill:#e8f5e9,stroke:#2e7d32
-    style I2 fill:#e8f5e9,stroke:#2e7d32
     style I3 fill:#fff3e0,stroke:#e65100
     style I4 fill:#f3e5f5,stroke:#7b1fa2
     style W1 fill:#ffffff,stroke:#ccc
-    style W2 fill:#ffffff,stroke:#ccc
     style W3 fill:#ffffff,stroke:#ccc
 ```
-*Diagram — Iteration dependency and incremental delivery*
+*Diagram — Iteration dependency and incremental delivery (iter-2 absorbed by Phase 3 of cluster-mesh plan — see `docs/cluster-mesh-architecture-plan.md` §10.5)*
 
 ### Technical debt / Refactoring
 

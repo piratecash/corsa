@@ -113,6 +113,16 @@ var requiredP2PWireCommands = map[string]bool{
 	// contract.
 	"route_query_v1":          true,
 	"route_query_response_v1": true,
+
+	// Phase 3 PR 12.5 cluster-mesh incremental-sync digest exchange
+	// (mesh_route_sync_v1 capability gate). On reconnect to a
+	// known peer the sender emits a digest of its last-known
+	// (Identity, MaxSeqNo) view through that peer; on match the
+	// receiver short-circuits the next forced full sync. See
+	// docs/cluster-mesh/phase-3-multipath-reputation.md §4.5 for
+	// the wire contract.
+	"route_sync_digest_v1":  true,
+	"route_sync_summary_v1": true,
 }
 
 // extractSwitchCasesFromFunc parses service.go via go/ast and returns every

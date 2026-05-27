@@ -72,8 +72,18 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		GossipTargets:   gossipTargets,
 	}
 
-	// Table lookup for directed relay.
-	routes := r.table.Lookup(routing.PeerIdentity(msg.Recipient))
+	// Table lookup for directed relay. Phase 3 PR 12.6 routes
+	// the call through LookupForRelay so the per-Service shaping
+	// hint feeds the multi-path rotation — see
+	// tryForwardViaRoutingTable for the matching path. Tests that
+	// build a partial Service (no svc) fall back to plain Lookup
+	// because there is no hint source available.
+	var routes []routing.RouteEntry
+	if r.svc != nil {
+		routes = r.table.LookupForRelay(routing.PeerIdentity(msg.Recipient), r.svc.nextRelayShapingHint())
+	} else {
+		routes = r.table.Lookup(routing.PeerIdentity(msg.Recipient))
+	}
 	if len(routes) == 0 {
 		log.Debug().
 			Str("recipient", msg.Recipient).

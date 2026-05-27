@@ -20,6 +20,8 @@
 package node
 
 import (
+	"strings"
+
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
@@ -186,13 +188,30 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 		return session.peerIdentity
 	}
 
-	// Inbound connection: match on the connection's transport address.
+	// Inbound connection: match on the connection's transport
+	// address. Callers reach this path with EITHER the raw remote
+	// address (used by handleRelayHopAck which receives the
+	// transport-level senderAddress) OR the "inbound:<remote>"
+	// transport key (produced by resolveRouteNextHopAddress /
+	// inboundConnKeyFromInfo for table-directed forwards through
+	// an inbound peer — see also routing_announce.go's
+	// `strings.HasPrefix(... "inbound:")` branches). Without the
+	// strip the prefix-form would never match info.remoteAddr and
+	// onRelayHopAckTimeout would record reputation failures against
+	// a bogus uplink identity equal to the inbound key string, also
+	// preventing the failover loop's identity-keyed skip from
+	// excluding the just-failed peer.
+	remoteAddr := string(address)
+	if stripped, ok := strings.CutPrefix(remoteAddr, "inbound:"); ok {
+		remoteAddr = stripped
+	}
+
 	// Outbound NetCores are resolved via s.sessions above, so skip them
 	// here — a pre-activation outbound entry must not answer identity
 	// lookups before the session is installed.
 	var result domain.PeerIdentity
 	s.forEachInboundConnLocked(func(info connInfo) bool {
-		if info.remoteAddr == string(address) {
+		if info.remoteAddr == remoteAddr {
 			result = info.identity
 			return false // Stop iteration
 		}

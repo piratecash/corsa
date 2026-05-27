@@ -443,6 +443,14 @@ func (t *Table) TickTTL() TickTTLResult {
 	if totalRemoved > 0 {
 		t.reconcileHealthLocked()
 	}
+	// Phase 3 PR 12.5: reap stale digest snapshots on the same
+	// cadence as the route TTL sweep. Entries that aged past
+	// SessionDigestCacheTTL without a reconnect are dead weight;
+	// keeping them lets the cache grow unboundedly across a long
+	// outage where the peer view has likely drifted anyway. The
+	// helper is a no-op when the cache is empty, so steady-state
+	// nodes pay nothing.
+	t.pruneExpiredDigestSnapshotsLocked(now)
 	if totalRemoved > 0 || flapMutated {
 		t.dirty.Store(true)
 	}

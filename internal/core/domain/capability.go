@@ -79,6 +79,32 @@ const (
 	// sender filters candidates accordingly in peersWithRouteQueryCap
 	// (internal/core/node/routing_query_sender.go).
 	CapMeshRouteQueryV1 Capability = "mesh_route_query_v1"
+
+	// CapMeshRouteSyncV1 gates incremental table sync via the
+	// route_sync_digest_v1 / route_sync_summary_v1 wire frames
+	// introduced in Phase 3 PR 12.5
+	// (docs/cluster-mesh/phase-3-multipath-reputation.md §4.5). On
+	// reconnect to a known peer the sender emits its last-observed
+	// digest of the (Identity, MaxSeqNo) pairs reachable through
+	// that peer; the receiver compares against its current table
+	// and replies with match=true/false. A match short-circuits
+	// the next forced full-sync to that peer, saving the full
+	// announce payload on the common "reconnect within 5 min and
+	// nothing changed" case. A mismatch is a no-op; the normal
+	// announce cycle still emits a full snapshot.
+	//
+	// The capability is ORTHOGONAL to the announce-plane caps
+	// (mesh_routing_v1 / mesh_routing_v2 / future mesh_routing_v3).
+	// Peers without it negotiate the digest exchange away and
+	// continue receiving the full announce stream unchanged; the
+	// suppression only applies between pairs that both negotiated
+	// mesh_route_sync_v1. The digest itself is local-only metadata
+	// (no trust transferred) — a mismatched or absent reply is
+	// harmless because the announce path remains the authoritative
+	// source of routing state. See the Phase 3 plan §4.5 for the
+	// full protocol contract and §2.4 for the wire-vs-RPC
+	// separation invariant.
+	CapMeshRouteSyncV1 Capability = "mesh_route_sync_v1"
 )
 
 // String returns the stable string label for the capability.
@@ -90,7 +116,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1:
+	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1:
 		return c, true
 	default:
 		return "", false

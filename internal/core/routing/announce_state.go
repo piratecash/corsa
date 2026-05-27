@@ -31,6 +31,26 @@ type AnnouncePeerState struct {
 	// sync regardless of delta state.
 	needsFullResync bool
 
+	// resyncIsHard distinguishes WHY needsFullResync is set, which the
+	// Phase 3 digest-suppression gate needs to decide whether the forced
+	// full sync may be elided on a digest match:
+	//
+	//   - false (soft): the resync was triggered by a session boundary
+	//     (MarkReconnected / MarkDisconnected). A reconnecting pair that
+	//     agrees on its mutual routing view via the route_sync digest
+	//     exchange MAY skip this full sync — that is the entire point of
+	//     Phase 3 incremental sync (docs/protocol/route_sync.md).
+	//   - true (hard): the resync was demanded by an explicit
+	//     request_resync or a consistency-loss signal (MarkInvalid). The
+	//     peer is asking for a fresh full table; a digest match must NOT
+	//     suppress it.
+	//
+	// Only meaningful while needsFullResync is true; cleared together with
+	// needsFullResync on RecordFullSyncSuccess. A brand-new peer
+	// (lastSentSnapshot == nil) is non-suppressible regardless of this
+	// flag because the suppression gate also requires a prior baseline.
+	resyncIsHard bool
+
 	// lastSuccessfulFullSyncAt is the timestamp of the last successful
 	// full sync send.
 	lastSuccessfulFullSyncAt time.Time
@@ -120,6 +140,7 @@ func (s *AnnouncePeerState) PeerIdentity() PeerIdentity {
 // produced the other fields.
 type announcePeerStateView struct {
 	NeedsFullResync          bool
+	ResyncIsHard             bool
 	LastSentSnapshot         *AnnounceSnapshot
 	LastSuccessfulFullSyncAt time.Time
 	LastFullSyncAttemptAt    time.Time
@@ -135,6 +156,7 @@ func (s *AnnouncePeerState) View() announcePeerStateView {
 	defer s.mu.Unlock()
 	return announcePeerStateView{
 		NeedsFullResync:          s.needsFullResync,
+		ResyncIsHard:             s.resyncIsHard,
 		LastSentSnapshot:         s.lastSentSnapshot,
 		LastSuccessfulFullSyncAt: s.lastSuccessfulFullSyncAt,
 		LastFullSyncAttemptAt:    s.lastFullSyncAttemptAt,
@@ -150,6 +172,7 @@ func (s *AnnouncePeerState) RecordFullSyncSuccess(snapshot *AnnounceSnapshot, no
 	defer s.mu.Unlock()
 	s.lastSentSnapshot = snapshot
 	s.needsFullResync = false
+	s.resyncIsHard = false
 	s.lastSuccessfulFullSyncAt = now
 }
 
@@ -349,6 +372,10 @@ func (r *AnnounceStateRegistry) MarkDisconnected(peerID PeerIdentity) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.needsFullResync = true
+	// Session-boundary resync is soft: a reconnect that agrees on the
+	// digest may suppress this full sync. Reset explicitly so a prior
+	// hard resync (request_resync) does not bleed across the boundary.
+	s.resyncIsHard = false
 	s.disconnectedAt = now
 	// Reset rate limit timer — reconnect resets forced-full rate limit.
 	s.lastFullSyncAttemptAt = time.Time{}
@@ -397,6 +424,11 @@ func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity, caps []Peer
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.needsFullResync = true
+	// Reconnect resync is soft (digest-suppressible) — see resyncIsHard.
+	// Reset explicitly so a hard resync recorded before the reconnect
+	// (request_resync that never got serviced) does not survive into the
+	// new session and block the digest optimisation.
+	s.resyncIsHard = false
 	s.disconnectedAt = time.Time{}
 	s.lastFullSyncAttemptAt = time.Time{}
 	s.capabilities = capsCopy
@@ -513,6 +545,11 @@ func (r *AnnounceStateRegistry) MarkInvalid(peerID PeerIdentity) {
 	if ok {
 		s.mu.Lock()
 		s.needsFullResync = true
+		// Consistency-loss / request_resync is a hard resync: a digest
+		// match must never suppress it. The peer is explicitly asking
+		// for a fresh full table (or we detected desync), so the
+		// optimisation does not apply.
+		s.resyncIsHard = true
 		s.mu.Unlock()
 	}
 }

@@ -40,12 +40,24 @@ func RegisterRoutingCommands(t *CommandTable, rp RoutingProvider) {
 		Description: "Get Phase 2 route health states per (Identity, Uplink) pair",
 		Category:    "routing",
 	}
+	// Phase 3 PR 12.7 — per-(Identity, Uplink) hop-ack reputation
+	// observability (HopAckAttempts / HopAckSuccesses /
+	// ReliabilityScore / ConsecutiveFailures / CooldownUntil).
+	// Read-only over RoutingProvider.ReputationSnapshot; never
+	// triggers a probe, digest, or MarkHopFailure side effect
+	// (Phase 3 §2.4 architectural-constraint contract).
+	reputationInfo := CommandInfo{
+		Name:        "fetchRouteReputation",
+		Description: "Get Phase 3 per-(Identity, Uplink) reputation (hop-ack success ratio, cooldown state)",
+		Category:    "routing",
+	}
 
 	if rp == nil {
 		t.RegisterUnavailable(tableInfo)
 		t.RegisterUnavailable(summaryInfo)
 		t.RegisterUnavailable(lookupInfo)
 		t.RegisterUnavailable(healthInfo)
+		t.RegisterUnavailable(reputationInfo)
 		return
 	}
 
@@ -53,6 +65,7 @@ func RegisterRoutingCommands(t *CommandTable, rp RoutingProvider) {
 	t.Register(summaryInfo, routeSummaryHandler(rp))
 	t.Register(lookupInfo, routeLookupHandler(rp))
 	t.Register(healthInfo, routeHealthHandler(rp))
+	t.Register(reputationInfo, routeReputationHandler(rp))
 }
 
 // routeTableHandler returns the full routing table as a structured JSON response.
@@ -178,6 +191,29 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			byUplink[h.Uplink] = struct{}{}
 		}
 
+		// Phase 3 PR 12.4 — black-hole cooldown filter, matching
+		// Table.Lookup. A (Identity, Uplink) pair inside an armed
+		// cooldown window is NOT selectable by the relay path, so
+		// reachability must exclude it too — otherwise fetchRouteSummary
+		// reports a route as reachable that the relay path would skip.
+		// Unlike the Dead filter there is NO Direct exemption: the 5
+		// consecutive hop-ack failures that armed the cooldown are
+		// empirical "cannot deliver" evidence regardless of session
+		// liveness (mirrors healthStore.isCooledDownLocked). snapTime is
+		// the consistent "now" the rest of this handler already uses.
+		cooledPair := make(map[routing.PeerIdentity]map[routing.PeerIdentity]struct{})
+		for _, h := range snap.Health {
+			if h.CooldownUntil.IsZero() || !snapTime.Before(h.CooldownUntil) {
+				continue
+			}
+			byUplink, ok := cooledPair[h.Identity]
+			if !ok {
+				byUplink = make(map[routing.PeerIdentity]struct{})
+				cooledPair[h.Identity] = byUplink
+			}
+			byUplink[h.Uplink] = struct{}{}
+		}
+
 		// Count unique reachable destinations (selectable routes).
 		// RouteSourceLocal (synthetic self-route) is excluded —
 		// reachability is about remote peers, not the node itself.
@@ -195,6 +231,11 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 					if _, dead := deadPair[ident][e.NextHop]; dead {
 						continue
 					}
+				}
+				// Cooldown filter has no Direct exemption — applies to
+				// every source.
+				if _, cooled := cooledPair[ident][e.NextHop]; cooled {
+					continue
 				}
 				destinations[string(ident)] = struct{}{}
 				if e.Source == routing.RouteSourceDirect {
@@ -288,9 +329,10 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 // ranked by the Phase 2 CompositeScore (the same ranking the relay
 // path uses through routing.Table.Lookup). Operators reading this RPC
 // see the same CompositeScore tiers the data plane would pick,
-// including the HealthDead exclusion and the Direct exemption to that
-// exclusion (see routing/table_lookup.go for the live-Lookup
-// contract). NOTE: when multiple routes tie on CompositeScore this
+// including the HealthDead exclusion (with its Direct exemption) and
+// the black-hole cooldown exclusion (NO Direct exemption) — see
+// routing/table_lookup.go for the live-Lookup contract. NOTE: when
+// multiple routes tie on CompositeScore this
 // RPC applies a deterministic origin / next_hop / seq_no tiebreak
 // for diff-friendly output, whereas Table.Lookup preserves storage
 // iteration order on ties — within a tied set the first entry here
@@ -374,6 +416,15 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 			}
 			h := healthByUplink[e.NextHop]
 			if h != nil && h.Health == routing.HealthDead && e.Source != routing.RouteSourceDirect {
+				continue
+			}
+			// Phase 3 PR 12.4 — black-hole cooldown filter, matching
+			// Table.Lookup. A pair inside an armed cooldown window is not
+			// selectable by the relay path, so it must be dropped here
+			// too. NO Direct exemption (mirrors
+			// healthStore.isCooledDownLocked): the cooldown is empirical
+			// "cannot deliver" evidence regardless of session liveness.
+			if h != nil && !h.CooldownUntil.IsZero() && snapTime.Before(h.CooldownUntil) {
 				continue
 			}
 			// Direct + Dead → substitute Bad for scoring (matches
@@ -538,6 +589,92 @@ func routeHealthHandler(rp RoutingProvider) CommandHandler {
 		// Stable sort: identity asc, uplink asc. Test fixtures
 		// rely on deterministic ordering; production consumers
 		// can re-sort as needed.
+		sort.Slice(states, func(i, j int) bool {
+			if states[i].Identity != states[j].Identity {
+				return states[i].Identity < states[j].Identity
+			}
+			return states[i].Uplink < states[j].Uplink
+		})
+
+		return jsonResponse(map[string]interface{}{
+			"states":      states,
+			"count":       len(states),
+			"snapshot_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+}
+
+// routeReputationHandler exposes the Phase 3 PR 12.7 per-
+// (Identity, Uplink) reputation snapshot
+// (docs/cluster-mesh/phase-3-multipath-reputation.md §4.7).
+// Output is a flat list keyed by (identity, uplink) — same
+// shape convention as fetchRouteHealth so an operator UI can
+// join the two surfaces by (identity, uplink) without
+// reshaping. Each state carries the raw counter pair and the
+// derived EMA / cooldown fields:
+//
+//   - hop_ack_attempts / hop_ack_successes — total observations
+//     and successful subset. Operators read the ratio
+//     (successes / attempts) as the long-run reliability;
+//     reliability_score is the EWMA-smoothed instantaneous
+//     view that CompositeScore actually consumes.
+//   - reliability_score — float in [0, 1].
+//   - consecutive_failures — current streak; resets on any
+//     success.
+//   - cooldown_until — RFC3339 deadline of an armed black-hole
+//     cooldown. Emitted ONLY when non-zero so absent pairs and
+//     cleared cooldowns produce a clean JSON payload.
+//
+// Wire-vs-RPC invariant (Phase 3 §2.4): the handler is a pure
+// read; it does NOT trigger probe sends, digest emits,
+// MarkHopFailure, or any other side effect. Reputation is
+// local-only state — the snapshot is for internal observation,
+// never gossiped or transferred between nodes. UI aggregation
+// (e.g. ranked top-N reputable uplinks, success-rate
+// histograms) lives on top of this raw snapshot, not under
+// the fetchRouteReputation name — that contract carries the
+// exact wire shape documented here on every transport path.
+func routeReputationHandler(rp RoutingProvider) CommandHandler {
+	return func(req CommandRequest) CommandResponse {
+		if r, done := ctxDone(req); done {
+			return r
+		}
+		snap := rp.ReputationSnapshot()
+
+		type wireState struct {
+			Identity            string  `json:"identity"`
+			Uplink              string  `json:"uplink"`
+			HopAckAttempts      uint64  `json:"hop_ack_attempts"`
+			HopAckSuccesses     uint64  `json:"hop_ack_successes"`
+			ReliabilityScore    float64 `json:"reliability_score"`
+			ConsecutiveFailures int     `json:"consecutive_failures"`
+			CooldownUntil       string  `json:"cooldown_until,omitempty"`
+		}
+
+		states := make([]wireState, 0, len(snap))
+		for _, s := range snap {
+			ws := wireState{
+				Identity:            string(s.Identity),
+				Uplink:              string(s.Uplink),
+				HopAckAttempts:      s.HopAckAttempts,
+				HopAckSuccesses:     s.HopAckSuccesses,
+				ReliabilityScore:    s.ReliabilityScore,
+				ConsecutiveFailures: s.ConsecutiveFailures,
+			}
+			// Emit CooldownUntil only when armed — the zero
+			// time would JSON-encode to a non-trivial RFC3339
+			// string ("0001-01-01T00:00:00Z") that operators
+			// would have to special-case downstream.
+			if !s.CooldownUntil.IsZero() {
+				ws.CooldownUntil = s.CooldownUntil.UTC().Format(time.RFC3339)
+			}
+			states = append(states, ws)
+		}
+
+		// Stable sort: identity asc, uplink asc. Matches the
+		// fetchRouteHealth contract so UI consumers reading both
+		// commands can join by (identity, uplink) without
+		// re-sorting.
 		sort.Slice(states, func(i, j int) bool {
 			if states[i].Identity != states[j].Identity {
 				return states[i].Identity < states[j].Identity

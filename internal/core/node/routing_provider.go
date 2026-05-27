@@ -151,3 +151,20 @@ func (s *Service) HealthSnapshot() []routing.RouteHealthState {
 	}
 	return s.routingTable.HealthSnapshot()
 }
+
+// ReputationSnapshot returns the Phase 3 PR 12.7 per-(Identity,
+// Uplink) reputation snapshot for fetchRouteReputation RPC
+// observability. Delegates to routing.Table.ReputationSnapshot
+// which takes t.mu.RLock and returns a deep-copied slice.
+//
+// Returns nil when the routing table is not wired (legacy test
+// fixtures) or when no reputation entries are tracked yet so
+// callers can compare cheaply.
+//
+// Implements rpc.RoutingProvider.
+func (s *Service) ReputationSnapshot() []routing.RouteReputationState {
+	if s.routingTable == nil {
+		return nil
+	}
+	return s.routingTable.ReputationSnapshot()
+}

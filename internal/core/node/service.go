@@ -276,6 +276,7 @@ type Service struct {
 	probeRegistry             *probeRegistry                            // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
 	queryRateLimit            *queryRateLimit                           // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
 	queryIDCounter            atomic.Uint64                             // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
+	relayShapingHint          atomic.Uint64                             // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
 	identitySessions          map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
 	identityRelaySessions     map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
 	disableRateLimiting       bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
@@ -1399,6 +1400,11 @@ func (s *Service) Run(ctx context.Context) error {
 	// Wire relay state persistence: when the TTL ticker evicts expired
 	// entries, persist the updated state so disk stays in sync with memory.
 	s.relayStates.onEvict = func() { s.persistRelayState() }
+	// Phase 3 PR 12.2 — wire the hop-ack budget timeout callback so the
+	// routing.Table reputation primitive learns about (Recipient,
+	// ForwardedTo) pairs that never produced a hop_ack. The handler
+	// lives in routing_relay.go alongside the other relay-plane wiring.
+	s.relayStates.onHopAckTimeout = s.onRelayHopAckTimeout
 	// Start relay state TTL ticker; stopped on shutdown.
 	s.relayStates.start()
 	defer s.relayStates.stop()
@@ -2433,6 +2439,43 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		}
 		s.handleRouteQueryResponse(s.inboundPeerIdentity(connID), resp)
 		return true
+	case "route_sync_digest_v1":
+		// Auth gate enforced above. Phase 3 PR 12.5 incremental-
+		// sync digest gated by mesh_route_sync_v1
+		// (docs/cluster-mesh/phase-3-multipath-reputation.md §4.5).
+		// Peers that did not negotiate the capability never
+		// receive the frame in the first place; the symmetric
+		// receive-side gate here is the defence in depth.
+		//
+		// Type string is the raw literal (kept in sync with
+		// protocol.RouteSyncDigestFrameType) so the
+		// command_scope_test AST inspector that only extracts
+		// string-literal case labels picks it up.
+		if !s.connHasCapability(connID, domain.CapMeshRouteSyncV1) {
+			accepted = false
+			return true
+		}
+		digestFrame, err := protocol.UnmarshalRouteSyncDigestFrame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRouteSyncDigest(connID, s.inboundPeerIdentity(connID), digestFrame)
+		return true
+	case "route_sync_summary_v1":
+		// Auth gate enforced above. Same capability gate as the
+		// digest request — both sides share mesh_route_sync_v1.
+		if !s.connHasCapability(connID, domain.CapMeshRouteSyncV1) {
+			accepted = false
+			return true
+		}
+		summaryFrame, err := protocol.UnmarshalRouteSyncSummaryFrame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRouteSyncSummary(s.inboundPeerIdentity(connID), summaryFrame)
+		return true
 	default:
 		accepted = false
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
@@ -2473,6 +2516,13 @@ var p2pWireCommands = map[string]bool{
 	// an identity are Bad/Dead — same string-literal pattern.
 	"route_query_v1":          true,
 	"route_query_response_v1": true,
+	// Phase 3 PR 12.5 (mesh_route_sync_v1, additive). Incremental-
+	// sync digest exchange — receiver short-circuits the next
+	// forced full sync on a digest match. Same string-literal
+	// pattern as the Phase 2 frames so command_scope_test stays
+	// happy.
+	"route_sync_digest_v1":  true,
+	"route_sync_summary_v1": true,
 }
 
 // isP2PWireCommand returns true if the command name belongs to the
@@ -6206,10 +6256,24 @@ func expectedReplyType(requestType string) string {
 // blocks reading the next inbound frame as the "reply", which either
 // stalls the session for the read deadline or consumes an unrelated
 // inbound frame meant for the dispatcher.
+//
+// route_sync_digest_v1 / route_sync_summary_v1 are the Phase 3 incremental
+// reconnect-sync pair, and they are ASYMMETRICALLY one-way: emitting a
+// digest does not yield a synchronous reply on the session — the peer's
+// route_sync_summary_v1 arrives later as its own unsolicited inbound frame
+// and is routed to handleRouteSyncSummary by the dispatcher. If the digest
+// were not fire-and-forget the session send path would route it through
+// peerSessionRequest and, with expectedReplyType("") , consume the first
+// subsequent inbound frame (often the very summary, or an unrelated frame)
+// as the "reply" and drop it — leaving the reconnect optimisation inert on
+// the outbound path. Both directions are therefore fire-and-forget; the
+// session loop additionally dispatches an inbound route_sync frame that
+// lands mid-peerSessionRequest (see peer_management.go).
 func isFireAndForgetFrame(frameType string) bool {
 	switch frameType {
 	case "announce_routes", "routes_update", "request_resync",
-		"push_message", "push_notice", "relay_delivery_receipt":
+		"push_message", "push_notice", "relay_delivery_receipt",
+		protocol.RouteSyncDigestFrameType, protocol.RouteSyncSummaryFrameType:
 		return true
 	default:
 		return isRelayFrame(frameType) || frameType == protocol.FileCommandFrameType

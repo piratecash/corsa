@@ -4,17 +4,21 @@ import "time"
 
 // CompositeScore is the unified ranking function for uplink claims,
 // introduced in Phase 2 (docs/protocol/route_health.md
-// §2.2). It replaces the pure-by-hops sort that Lookup used pre-Phase-2
-// and serves as the single source of truth that Phase 3 will extend
-// with a reliability term (overview §10.5).
+// §2.2) and extended in Phase 3 PR 12.1 with a hop-ack reliability
+// term (docs/cluster-mesh/phase-3-multipath-reputation.md §4.1).
+// It replaces the pure-by-hops sort that Lookup used pre-Phase-2
+// and remains the single source of truth for rank comparisons after
+// the Phase 3 add-on.
 //
 // Score components (higher is better):
 //
 //   - base: 100 − hops × 10. Prefers shorter paths but does not
 //     dominate other factors — a 3-hop low-RTT path can beat a
 //     2-hop high-RTT path by ~20 points.
+//
 //   - RTT bonus: +30 when RTT < 20 ms, linear taper to 0 at 100 ms,
 //     0 above 100 ms. Nudges selection toward local-network paths.
+//
 //   - health penalty: 0 (Good), −250 (Questionable), −500 (Bad).
 //     Dead forces the result to −1 (scoreExcluded sentinel) to mark
 //     the claim "excluded from selection".
@@ -33,14 +37,24 @@ import "time"
 //     signal would fire on a path the selector already preferred,
 //     which is meaningless. Within a tier the composite still ranks
 //     by hops / RTT / source as before.
+//
 //   - source bonus: +20 (Direct), +10 (HopAck), 0 (Announcement).
 //     Mirrors the existing RouteSource.TrustRank() ordering but in
 //     score units.
 //
+//   - reliability bonus (Phase 3 PR 12.1): ±ReliabilityBonusMax,
+//     symmetric around ReliabilityScore=0.5. Only applied once the
+//     pair has at least ReliabilityWarmupSamples observed hop-ack
+//     attempts — below that the EMA is too noisy to act on. The
+//     magnitude is deliberately small relative to the health
+//     penalties so the strict-tier invariant
+//     (Good ≻ Questionable ≻ Bad) survives any reliability extreme;
+//     this is release-blocking, see ReliabilityBonusMax above.
+//
 // nil-health safe: passing health=nil returns base + sourceBonus and
-// skips RTT/health terms. This preserves backward compatibility with
-// callers that have not yet wired health tracking into Lookup (PR
-// 11.2 integration).
+// skips RTT/health/reliability terms. This preserves backward
+// compatibility with callers that have not yet wired health tracking
+// into Lookup (PR 11.2 integration).
 //
 // The function is pure — no clock, no state mutation, no I/O — so it
 // runs lock-free and is safe to call under either t.mu.RLock or
@@ -72,6 +86,18 @@ const (
 	// that bypass the Health check; it must not be used as the
 	// primary Dead filter.
 	scoreExcluded = -1.0
+
+	// ReliabilityBonusMax is the peak magnitude of the Phase 3 PR 12.1
+	// reliability term: ReliabilityScore=1.0 adds +ReliabilityBonusMax,
+	// ReliabilityScore=0.0 subtracts the same amount, 0.5 contributes
+	// nothing. Sized at 20 to match scoreSourceDirect so a perfectly
+	// reliable announcement-source pair can match a less-reliable
+	// direct-source pair on the source-trust axis but cannot rescue a
+	// Bad-tier pair against a Good-tier alternative — the strict-tier
+	// invariant documented above remains release-blocking under the
+	// reliability term. See
+	// docs/cluster-mesh/phase-3-multipath-reputation.md §4.1.
+	ReliabilityBonusMax = 20.0
 )
 
 // CompositeScore ranks an uplink claim characterised by its hop count
@@ -110,7 +136,44 @@ func CompositeScore(hops uint8, source RouteSource, health *RouteHealthState) fl
 
 	score += sourceBonus(source)
 
+	if health != nil {
+		score += reliabilityBonus(health)
+	}
+
 	return score
+}
+
+// reliabilityBonus computes the Phase 3 PR 12.1 reliability component
+// of CompositeScore. The bonus is symmetric around ReliabilityScore =
+// 0.5: a perfectly reliable pair (1.0) earns +ReliabilityBonusMax, a
+// total black-hole pair (0.0) loses the same amount, and a 50/50
+// pair contributes nothing — the EMA-of-binary-outcomes baseline.
+//
+// Cold-start gate: pairs with fewer than ReliabilityWarmupSamples
+// observations get a zero bonus. Below that threshold the EMA carries
+// too little signal to outweigh accidental ranking flips (one stray
+// timeout on a brand-new uplink should NOT mark it as preferred or
+// undesirable for the rest of the session). docs/cluster-mesh/
+// phase-3-multipath-reputation.md §4.1 documents this contract.
+//
+// The function is pure — no clock, no I/O, no state mutation — so it
+// runs under either t.mu mode like its sibling rttBonus.
+func reliabilityBonus(health *RouteHealthState) float64 {
+	if health.HopAckAttempts < ReliabilityWarmupSamples {
+		return 0
+	}
+	// Clamp defensively: the apply* methods already enforce [0,1],
+	// but a future code path that sets the field directly (tests,
+	// migration tooling) shouldn't be able to push the score out of
+	// the documented range.
+	score := health.ReliabilityScore
+	if score < 0 {
+		score = 0
+	}
+	if score > 1 {
+		score = 1
+	}
+	return (score - 0.5) * 2 * ReliabilityBonusMax
 }
 
 // rttBonus computes the RTT-component of CompositeScore.

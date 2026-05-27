@@ -1957,6 +1957,17 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
+			// Phase 3 route-sync pair is unsolicited and one-way: a digest
+			// or summary that lands while THIS session is waiting on an
+			// unrelated peerSessionRequest reply must be handed to the
+			// dispatcher (→ handleRouteSyncDigest / handleRouteSyncSummary),
+			// not returned as the reply and dropped. Mirrors the
+			// fire-and-forget classification in isFireAndForgetFrame.
+			if incoming.Type == protocol.RouteSyncDigestFrameType ||
+				incoming.Type == protocol.RouteSyncSummaryFrameType {
+				s.dispatchPeerSessionFrame(session.address, session, incoming)
+				continue
+			}
 			if expectedType == "" || incoming.Type == expectedType {
 				_ = session.conn.SetReadDeadline(time.Time{})
 				return incoming, nil
@@ -2398,6 +2409,87 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		s.peerMu.RUnlock()
 		if session != nil {
 			s.handleRequestResync(session.peerIdentity)
+		}
+	case "route_sync_digest_v1":
+		// Phase 3 PR 12.5 — incremental-sync digest arriving on an
+		// outbound session. sendFrameToIdentity prefers outbound
+		// candidates, so a peer that received OUR digest replies on
+		// the same TCP, and the reply reader is THIS dispatcher.
+		// Without an explicit case the summary would be silently
+		// dropped and the digest match would almost never arm
+		// AnnounceLoop suppression on the production path.
+		if !s.sessionHasCapability(address, domain.CapMeshRouteSyncV1) {
+			return
+		}
+		digestFrame, err := protocol.UnmarshalRouteSyncDigestFrame([]byte(frame.RawLine))
+		if err != nil {
+			log.Debug().
+				Err(err).
+				Str("peer", string(address)).
+				Msg("peer_session: route_sync_digest parse failed")
+			return
+		}
+		s.peerMu.RLock()
+		session := s.sessions[address]
+		s.peerMu.RUnlock()
+		if session == nil {
+			return
+		}
+		// The handler answers via sendFrameViaNetwork with connID,
+		// but on the outbound-session arrival path we do not have a
+		// connID — the session's own writer goroutine takes the
+		// summary via sendCh. Build the summary inline here so the
+		// reply mirrors the digest-handler logic without needing
+		// connID plumbing through the outbound side.
+		localDigest, localCount := s.routingTable.SyncDigestFor(session.peerIdentity)
+		match := localDigest == digestFrame.Digest
+		summary := protocol.RouteSyncSummaryFrame{
+			Type:           protocol.RouteSyncSummaryFrameType,
+			Digest:         digestFrame.Digest,
+			Match:          match,
+			ExpectFullSync: !match,
+		}
+		raw, marshalErr := protocol.MarshalRouteSyncSummaryFrame(summary)
+		if marshalErr != nil {
+			log.Warn().
+				Err(marshalErr).
+				Str("peer_identity", string(session.peerIdentity)).
+				Msg("route_sync_summary_marshal_failed_outbound_reply")
+			return
+		}
+		_ = s.sendSessionFrameViaNetwork(s.runCtx, session, protocol.Frame{
+			Type:    protocol.RouteSyncSummaryFrameType,
+			RawLine: string(raw) + "\n",
+		})
+		log.Debug().
+			Str("peer_identity", string(session.peerIdentity)).
+			Str("their_digest", digestFrame.Digest).
+			Uint32("their_count", digestFrame.KnownIdentitiesCount).
+			Str("our_digest", localDigest).
+			Uint32("our_count", localCount).
+			Bool("match", match).
+			Msg("route_sync_digest_compared_outbound")
+	case "route_sync_summary_v1":
+		// Phase 3 PR 12.5 — incremental-sync summary arriving on an
+		// outbound session (the common case: we initiated the digest
+		// from the session-open hook). Without this case Match=true
+		// summaries are dropped and the suppression is never armed.
+		if !s.sessionHasCapability(address, domain.CapMeshRouteSyncV1) {
+			return
+		}
+		summaryFrame, err := protocol.UnmarshalRouteSyncSummaryFrame([]byte(frame.RawLine))
+		if err != nil {
+			log.Debug().
+				Err(err).
+				Str("peer", string(address)).
+				Msg("peer_session: route_sync_summary parse failed")
+			return
+		}
+		s.peerMu.RLock()
+		session := s.sessions[address]
+		s.peerMu.RUnlock()
+		if session != nil {
+			s.handleRouteSyncSummary(session.peerIdentity, summaryFrame)
 		}
 	case "error":
 		// Remote sent an explicit error frame before closing the connection.

@@ -147,6 +147,19 @@ type RoutingProvider interface {
 	// probe sender ticker operates on its own schedule, not on
 	// RPC pressure.
 	HealthSnapshot() []routing.RouteHealthState
+
+	// ReputationSnapshot returns a deep copy of every tracked
+	// per-(Identity, Uplink) reputation state (Phase 3 PR 12.7).
+	// Used by fetchRouteReputation RPC observability — the
+	// snapshot is built under routing.Table.t.mu.RLock and is
+	// safe to publish lock-free. Returns nil when no
+	// reputation entries are tracked yet.
+	//
+	// Pure read: must NOT fire probes, digests, MarkHopFailure,
+	// or any other side effect. Reputation is local-only state
+	// (Phase 3 §2.3 trust-budget invariant); observers see a
+	// point-in-time view, never a re-emission.
+	ReputationSnapshot() []routing.RouteReputationState
 }
 
 // ConnectionDiagnosticProvider exposes ConnectionManager and PeerProvider

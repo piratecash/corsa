@@ -736,6 +736,15 @@ func newTestServiceWithRouting(t *testing.T, localIdentity string) *Service {
 		Save:     func(string, queueStateFile) error { return nil },
 		Wait:     realQueueStatePersistWait,
 	})
+	// Phase 3 PR 12.3 review fix: the multi-path failover terminal
+	// branches now reach relayViaGossip (gossip fallback on retry
+	// exhaustion / no alternative), which dereferences
+	// s.relayLimiter. Production NewService always wires it; the
+	// routing test fixture must too, otherwise onRelayHopAckTimeout
+	// nil-panics. An empty limiter is allow-all, so it does not
+	// change the behaviour of tests that never reach the gossip
+	// path.
+	svc.relayLimiter = newRelayRateLimiter()
 	return svc
 }
 

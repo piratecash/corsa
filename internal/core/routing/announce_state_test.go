@@ -327,3 +327,54 @@ func TestAnnounceStateRegistry_MarkInvalid(t *testing.T) {
 		t.Fatal("expected NeedsFullResync=true after MarkInvalid")
 	}
 }
+
+// TestAnnounceStateRegistry_ResyncIsHard_Classification pins the
+// Phase 3 digest-suppression contract: the resync triggered by
+// MarkInvalid (request_resync / consistency loss) is HARD and must
+// never be suppressed by a digest match, while the resync triggered
+// by a session boundary (MarkReconnected / MarkDisconnected) is SOFT
+// and IS suppressible. RecordFullSyncSuccess clears both flags.
+func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
+	r := NewAnnounceStateRegistry()
+	s := r.GetOrCreate("peer-A")
+
+	// A fresh peer needs a full resync, but it is soft — the hardness
+	// only matters once a baseline exists, and a brand-new peer is
+	// non-suppressible via the LastSentSnapshot==nil gate anyway.
+	if s.View().ResyncIsHard {
+		t.Fatal("fresh peer must not be classified as a hard resync")
+	}
+
+	// Establish a baseline so the suppression gate's LastSentSnapshot
+	// precondition is met and the classification becomes meaningful.
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, time.Now())
+	if v := s.View(); v.NeedsFullResync || v.ResyncIsHard {
+		t.Fatalf("RecordFullSyncSuccess must clear both flags, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
+	}
+
+	// request_resync / consistency loss → HARD.
+	r.MarkInvalid("peer-A")
+	if v := s.View(); !v.NeedsFullResync || !v.ResyncIsHard {
+		t.Fatalf("MarkInvalid must set a hard resync, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
+	}
+
+	// A successful full sync clears the hardness again.
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, time.Now())
+	if s.View().ResyncIsHard {
+		t.Fatal("RecordFullSyncSuccess did not clear ResyncIsHard")
+	}
+
+	// Session boundary → SOFT, even if a hard resync preceded it.
+	r.MarkInvalid("peer-A")
+	r.MarkReconnected("peer-A", nil)
+	if v := s.View(); !v.NeedsFullResync || v.ResyncIsHard {
+		t.Fatalf("MarkReconnected must reclassify to a soft resync, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
+	}
+
+	// MarkDisconnected is likewise a soft resync.
+	r.MarkInvalid("peer-A")
+	r.MarkDisconnected("peer-A")
+	if v := s.View(); !v.NeedsFullResync || v.ResyncIsHard {
+		t.Fatalf("MarkDisconnected must reclassify to a soft resync, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
+	}
+}

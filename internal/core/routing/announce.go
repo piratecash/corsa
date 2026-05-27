@@ -44,6 +44,24 @@ const (
 	// sync attempts for a single peer. Prevents flood when a peer is
 	// repeatedly marked NeedsFullResync.
 	MinForcedFullSyncInterval = DefaultAnnounceInterval
+
+	// DigestRoundTripGrace bounds how long the reconnect path defers the
+	// first forced full sync to a peer while a route_sync_digest_v1 is in
+	// flight awaiting its summary (Phase 3 §4.5). It must cover a
+	// worst-case mesh round trip (request enqueue + WAN RTT + remote
+	// handler + reply) so the reconnect-triggered announce cycle holds off
+	// the full sync long enough for a match to arrive — without letting a
+	// silent or slow peer defer the freshness-restoring full sync for
+	// long: on no summary within the grace the next periodic cycle
+	// full-syncs as the safe degradation path. A match summary replaces
+	// this short window with the cadence-length window
+	// (EffectiveForcedFullSyncInterval) via ConfirmPeerDigestMatch.
+	//
+	// MarkPeerDigestPending clamps the grace to the loop's
+	// EffectiveForcedFullSyncInterval so a node configured with a very
+	// short AnnounceInterval (cadence < grace) never suppresses for longer
+	// than one forced-full cadence — the freshness invariant holds.
+	DigestRoundTripGrace = 5 * time.Second
 )
 
 // EffectiveForcedFullSyncInterval computes the forced-full-sync cadence
@@ -225,6 +243,50 @@ type AnnounceLoop struct {
 
 	// cycleCounter provides a monotonic announce_cycle_id for log correlation.
 	cycleCounter atomic.Uint64
+
+	// digestSuppressionMu protects digestSuppression. Kept separate
+	// from a.mu (which governs the Run/running lifecycle) so per-peer
+	// goroutines spawned by announceToAllPeers can poll the
+	// suppression map without contending against shutdown or startup
+	// paths.
+	digestSuppressionMu sync.Mutex
+
+	// digestSuppression records, per peer, the deadline past which the
+	// forced-full-sync may fire again AND the digest we emitted to that
+	// peer on reconnect. The stored digest is the correlation anchor:
+	// ConfirmPeerDigestMatch only extends the window when an inbound
+	// route_sync_summary_v1 echoes EXACTLY the digest we sent, so a
+	// stale, unsolicited, or empty-echo summary cannot suppress a
+	// forced full sync it has no relation to (Phase 3 §4.5 trust
+	// invariant; UnmarshalRouteSyncSummaryFrame's "empty echo = no
+	// correlation" contract).
+	//
+	// Armed short on reconnect by MarkPeerDigestPending; extended to one
+	// forced-full cadence by ConfirmPeerDigestMatch on a correlated
+	// match. nil until first arm so idle nodes pay zero allocation.
+	//
+	// Suppression applies ONLY to soft (session-boundary) resyncs and
+	// the periodic full-sync deadline; the initial sync
+	// (LastSentSnapshot == nil) and HARD resyncs (request_resync /
+	// MarkInvalid, view.ResyncIsHard) bypass the gate so the peer always
+	// gets a baseline when it truly needs one.
+	digestSuppression map[PeerIdentity]digestSuppressionEntry
+}
+
+// digestSuppressionEntry is the per-peer suppression record: the
+// deadline, the digest we emitted (the correlation anchor for an
+// inbound summary echo), and whether a correlated match has already
+// been consumed. See AnnounceLoop.digestSuppression.
+type digestSuppressionEntry struct {
+	until    time.Time
+	expected string
+	// confirmed is set once ConfirmPeerDigestMatch has accepted a
+	// correlated echo and extended the window. It makes the confirm
+	// single-shot: a duplicate or replayed summary echoing the same
+	// digest within the window cannot keep pushing `until` forward, so
+	// one correlated reply suppresses AT MOST one forced-full cadence
+	// (Phase 3 §4.5 invariant).
+	confirmed bool
 }
 
 // OverloadCycleCount returns the cumulative number of cycles where
@@ -260,6 +322,162 @@ func (a *AnnounceLoop) OverloadCycleCount() uint64 {
 // signal — not surfaced through RPC.
 func (a *AnnounceLoop) NoopSuppressedTotal() uint64 {
 	return a.noopSuppressedTotal.Load()
+}
+
+// ConfirmPeerDigestMatch correlates an inbound route_sync_summary_v1
+// echo against the digest THIS node emitted to the peer on reconnect,
+// and — only on a match — extends the suppression window to one
+// forced-full cadence. It returns true when the summary correlated and
+// suppression was (re)armed, false when it was ignored.
+//
+// Correlation is the whole point (Phase 3 §4.5 trust invariant): a
+// summary may suppress a forced full sync ONLY if it is a reply to a
+// digest we actually sent. The handler must therefore have an active
+// pending entry (armed by MarkPeerDigestPending) whose stored digest
+// equals `echo`. A summary is IGNORED when:
+//
+//   - no pending entry exists (unsolicited — we never sent a digest);
+//   - the entry was already confirmed once (single-shot — a duplicate or
+//     replayed summary must not keep extending the window, so one reply
+//     defers at most one forced-full cadence);
+//   - the pending entry has already elapsed (the round trip overran the
+//     grace; the safe path already full-synced or will);
+//   - `echo` is empty (UnmarshalRouteSyncSummaryFrame's documented
+//     "no correlation, drop the update" contract);
+//   - `echo` differs from the digest we sent (stale or spoofed).
+//
+// On a correlated match the window length is derived from THIS loop's
+// EffectiveForcedFullSyncInterval (= min(2*AnnounceInterval,
+// DefaultTTL/2)) anchored at `now`, never a caller-supplied deadline,
+// so custom operator intervals stay honest and the window never exceeds
+// one cadence (beyond which the digest is too stale to trust).
+//
+// The delta path keeps firing regardless, so any real state change still
+// propagates; only the byte-heavy periodic re-sync is elided. Suppression
+// is consulted only for soft (session-boundary) resyncs and the periodic
+// deadline branch — initial sync (LastSentSnapshot == nil) and HARD
+// resyncs (view.ResyncIsHard) bypass the gate, see announceToAllPeers.
+//
+// `now` is injected so tests drive a deterministic clock; production
+// passes time.Now().UTC(). Safe to call from any goroutine.
+func (a *AnnounceLoop) ConfirmPeerDigestMatch(peer PeerIdentity, echo string, now time.Time) bool {
+	if peer == "" || echo == "" {
+		return false
+	}
+	a.digestSuppressionMu.Lock()
+	defer a.digestSuppressionMu.Unlock()
+	if a.digestSuppression == nil {
+		return false
+	}
+	entry, ok := a.digestSuppression[peer]
+	if !ok || entry.confirmed || !now.Before(entry.until) || entry.expected != echo {
+		return false
+	}
+	entry.until = now.Add(EffectiveForcedFullSyncInterval(a.interval))
+	entry.confirmed = true
+	a.digestSuppression[peer] = entry
+	return true
+}
+
+// MarkPeerDigestPending arms a SHORT suppression window when a
+// route_sync_digest_v1 has just been emitted to the peer on reconnect
+// and we are awaiting its summary. Without it the reconnect's own
+// TriggerUpdate cycle would full-sync the peer before the summary could
+// possibly arrive, which is the exact race that left Phase 3 incremental
+// sync ineffective on its intended path.
+//
+// The window is DigestRoundTripGrace, clamped to the loop's
+// EffectiveForcedFullSyncInterval so a node with a very short
+// AnnounceInterval never defers a full sync past one forced-full cadence
+// (the freshness invariant). On a correlated match ConfirmPeerDigestMatch
+// extends this to the cadence-length window; on a mismatch or no reply
+// the grace elapses (or ClearPeerDigestSuppression removes it) and the
+// next cycle full-syncs — the documented safe degradation.
+//
+// `sentDigest` is the digest emitted to the peer in the same reconnect
+// step; it is stored as the correlation anchor so only a summary echoing
+// exactly this value can extend the window (see ConfirmPeerDigestMatch).
+//
+// `now` is injected for deterministic tests; production passes
+// time.Now().UTC(). Safe to call from any goroutine. No-op when peer is
+// empty or the derived window is non-positive (loop without a configured
+// interval).
+func (a *AnnounceLoop) MarkPeerDigestPending(peer PeerIdentity, now time.Time, sentDigest string) {
+	if peer == "" {
+		return
+	}
+	grace := DigestRoundTripGrace
+	if cadence := EffectiveForcedFullSyncInterval(a.interval); grace > cadence {
+		grace = cadence
+	}
+	if grace <= 0 {
+		return
+	}
+	a.digestSuppressionMu.Lock()
+	defer a.digestSuppressionMu.Unlock()
+	if a.digestSuppression == nil {
+		a.digestSuppression = make(map[PeerIdentity]digestSuppressionEntry)
+	}
+	a.digestSuppression[peer] = digestSuppressionEntry{
+		until:    now.Add(grace),
+		expected: sentDigest,
+	}
+}
+
+// ClearPeerDigestSuppression removes any active suppression window for the
+// peer so the next announce cycle is free to forced-full-sync immediately.
+// Called when a route_sync_summary_v1 reports match=false: the digests
+// diverged, so a pending grace armed on reconnect must not keep deferring
+// the resync. Safe to call from any goroutine; no-op for absent entries.
+func (a *AnnounceLoop) ClearPeerDigestSuppression(peer PeerIdentity) {
+	if peer == "" {
+		return
+	}
+	a.digestSuppressionMu.Lock()
+	defer a.digestSuppressionMu.Unlock()
+	if a.digestSuppression == nil {
+		return
+	}
+	delete(a.digestSuppression, peer)
+}
+
+// isDigestSuppressionActive reports whether the periodic forced-
+// full-sync to the peer is currently suppressed. Returns false
+// for absent entries and for entries whose deadline has elapsed
+// (the helper evicts stale entries on the way out so the map
+// does not grow unbounded as peers come and go).
+//
+// Production caller: announceToAllPeers — see the
+// `needsFull && view.LastSentSnapshot != nil && !view.ResyncIsHard`
+// guard around the forced-full deadline branch.
+func (a *AnnounceLoop) isDigestSuppressionActive(peer PeerIdentity, now time.Time) bool {
+	a.digestSuppressionMu.Lock()
+	defer a.digestSuppressionMu.Unlock()
+	if a.digestSuppression == nil {
+		return false
+	}
+	entry, ok := a.digestSuppression[peer]
+	if !ok {
+		return false
+	}
+	if !now.Before(entry.until) {
+		delete(a.digestSuppression, peer)
+		return false
+	}
+	return true
+}
+
+// IsDigestSuppressionActiveForTest is the public test seam for
+// node-package integration tests that need to assert "the
+// summary handler armed suppression for this peer". The
+// "ForTest" suffix is the conventional Go signal that
+// production code must NOT call this — production reads route
+// through the internal isDigestSuppressionActive helper called
+// from the announce-cycle goroutine.
+//
+// Safe to call from any goroutine.
+func (a *AnnounceLoop) IsDigestSuppressionActiveForTest(peer PeerIdentity, now time.Time) bool {
+	return a.isDigestSuppressionActive(peer, now)
 }
 
 // TickInterval reports the actual ticker period the Run loop uses.
@@ -729,6 +947,40 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				if now.Sub(view.LastSuccessfulFullSyncAt) >= forcedFullSyncInterval {
 					needsFull = true
 				}
+			}
+
+			// Phase 3 PR 12.5 — digest-match suppression. When a
+			// route_sync exchange for this peer is in flight or
+			// already reported match=true (and the suppression
+			// deadline has not elapsed), elide the forced full
+			// sync. The delta path still runs in this cycle, so any
+			// state that did change is still propagated; only the
+			// byte-heavy full re-confirmation is saved.
+			//
+			// The reconnect full sync is the PRIMARY path this gate
+			// targets (docs/protocol/route_sync.md): on reconnect
+			// the session hook arms a short pending window via
+			// MarkPeerDigestPending and emits the digest, so this
+			// very cycle (fired by the reconnect TriggerUpdate) sees
+			// an active window and holds off the full sync until the
+			// summary lands. A match extends the window for one
+			// cadence; a mismatch / silence clears it and the next
+			// cycle full-syncs.
+			//
+			// Two conditions exempt the gate so a peer never misses a
+			// needed baseline:
+			//
+			//   - view.LastSentSnapshot == nil: the peer has no prior
+			//     baseline (first-ever sync, or a hard reset).
+			//     Suppression would leave it with no routing state.
+			//   - view.ResyncIsHard: an explicit request_resync or a
+			//     consistency-loss MarkInvalid set this. The peer is
+			//     demanding a fresh full table; a digest hint must not
+			//     suppress it. A soft (session-boundary) resync, by
+			//     contrast, IS suppressible — that is the reconnect
+			//     optimisation.
+			if needsFull && view.LastSentSnapshot != nil && !view.ResyncIsHard && a.isDigestSuppressionActive(peer.Identity, now) {
+				needsFull = false
 			}
 
 			// Phase 0 short-circuit before the expensive scan: if the

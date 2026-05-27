@@ -161,6 +161,23 @@ type Table struct {
 	// relay_hop_ack handler (MarkHopAck) lands in PR 11.2. Probe and
 	// query wire frames + ack handling land in PR 11.3 / 11.4.
 	health *healthStore
+
+	// sessionDigestCache is the Phase 3 PR 12.5 incremental-sync
+	// digest cache — per-peer snapshots stashed at session-close
+	// time so a reconnect within SessionDigestCacheTTL can emit
+	// the stored digest without re-walking the table. Lives here
+	// (rather than as a separate structure in node.Service) so
+	// the digest content and its source-of-truth (the storage
+	// buckets) share a single mutex — see Phase 3 plan §2.6 for
+	// the placement decision.
+	//
+	// The cache is NOT persisted across restart: process wipe =
+	// cold-start digest re-computation on the first reconnect,
+	// which is consistent with reputation persistence policy
+	// (Phase 3 §4.9 decision #6). nil until first
+	// RecordPeerDigestSnapshot to keep zero-allocation idle
+	// nodes cheap.
+	sessionDigestCache map[PeerIdentity]sessionDigestEntry
 }
 
 // TableOption configures optional Table parameters.

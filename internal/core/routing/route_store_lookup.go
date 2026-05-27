@@ -21,6 +21,88 @@ import "time"
 // (Identity, Origin=sender, NextHop=sender) triple on legacy
 // receivers — see uplink_claim.go for the full rationale.
 
+// announceDigestEntriesForLocked returns the (Identity, lastWireSeqNo)
+// pairs this store has announced to `peer` and would STILL announce —
+// i.e. the per-peer outbound view the peer currently holds as its
+// "routes via this node". It is the sender-side counterpart of a
+// receiver's SyncDigestFor(thisNode): when the two nodes are in sync the
+// sets are identical, which is exactly the digest-match the Phase 3
+// reconnect optimisation needs.
+//
+// Why outboundPeerMax (not claim.SeqNo): the wire SeqNo the receiver
+// stored for (Identity, via=thisNode) is the per-peer synthesised value
+// from nextOutboundSeqLockedPerPeer, recorded in outboundPeerMax[
+// (Identity, peer)] — NOT the local claim's native SeqNo (which is the
+// upstream uplink's wire value, a different number at each hop). Reading
+// outboundPeerMax reproduces precisely what the peer stored, so the two
+// digests line up. Using the via-peer set (SyncDigestFor(peer)) here
+// instead — as the pre-fix code did — compared two disjoint sets
+// (routes-via-peer vs routes-the-peer-has-via-us) and so almost never
+// matched in a normal topology.
+//
+// An identity is included only when it is still announceable to `peer`
+// (a live, non-Dead, non-cooled winner via some uplink != peer exists):
+// a since-withdrawn or gone-Dead route is no longer part of what the
+// peer should have, so dropping it makes the digest mismatch and the
+// reconnect safely falls back to a full sync.
+//
+// Read-only: no SeqNo synthesis, no cache mutation, no hold-down arming.
+// Caller must hold t.mu (R mode suffices).
+func (s *routeStore) announceDigestEntriesForLocked(peer PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool) []DigestEntry {
+	var entries []DigestEntry
+	for key, wireSeqNo := range s.outboundPeerMax {
+		if key.Peer != peer {
+			continue
+		}
+		identity := key.Identity
+		if identity == peer {
+			// Split-horizon: never digest "reach the peer via itself".
+			continue
+		}
+		if !s.hasAnnounceableWinnerLocked(identity, peer, now, isDead, isCooledDown) {
+			continue
+		}
+		entries = append(entries, DigestEntry{Identity: identity, MaxSeqNo: wireSeqNo})
+	}
+	return entries
+}
+
+// hasAnnounceableWinnerLocked reports whether the store currently holds a
+// live winner for `identity` reachable via some uplink OTHER than
+// `excludeVia` that would survive the announce filters (not withdrawn,
+// not expired, not Dead unless Direct, not cooled-down). It mirrors the
+// candidate-eligibility rules of AnnounceProjectionFor without performing
+// the winner ranking or any mutation — it only answers "would we still
+// announce this identity to excludeVia at all".
+//
+// Caller must hold t.mu (R mode suffices).
+func (s *routeStore) hasAnnounceableWinnerLocked(identity, excludeVia PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool) bool {
+	bucket, ok := s.buckets[identity]
+	if !ok {
+		return false
+	}
+	for i := range bucket {
+		claim := &bucket[i]
+		if claim.Uplink == excludeVia {
+			continue
+		}
+		if claim.IsWithdrawn() || claim.IsExpired(now) {
+			continue
+		}
+		// Dead filter with the same Direct exemption AnnounceProjectionFor
+		// applies: a Dead transit claim is excluded, but a Dead Direct
+		// claim stays announceable (its lifecycle is session-bound).
+		if isDead != nil && claim.Source != RouteSourceDirect && isDead(identity, claim.Uplink) {
+			continue
+		}
+		if isCooledDown != nil && isCooledDown(identity, claim.Uplink) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // LookupActive returns all non-withdrawn, non-expired claims for
 // the given identity, projected back to RouteEntry in storage
 // order. The owning Table layers preference sorting plus the
@@ -107,7 +189,7 @@ func (s *routeStore) InspectTriple(key RouteTriple) *RouteEntry {
 //
 // Caller must hold t.mu (reader OK); isDead is invoked under
 // that lock and must not block on it.
-func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isDead func(identity, uplink PeerIdentity) bool) []RouteEntry {
+func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool) []RouteEntry {
 	var result []RouteEntry
 	for identity, bucket := range s.buckets {
 		if identity == excludeVia {
@@ -139,6 +221,20 @@ func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isD
 			// origin's own withdrawal, which is exactly what
 			// suppressing the announce accomplishes for them.
 			if claim.Source != RouteSourceDirect && isDead != nil && isDead(identity, claim.Uplink) {
+				continue
+			}
+			// Phase 3 PR 12.4: black-hole cooldown filter. Unlike
+			// the Dead filter above, the cooldown gate applies to
+			// every Source — including Direct. Reputation's 5
+			// consecutive failures already recorded the empirical
+			// "this peer cannot deliver" signal; advertising the
+			// route while we ourselves know it is a black hole
+			// would set neighbours up to forward through us into
+			// the same dead-end. The cooldown auto-clears after
+			// BlackHoleCooldown so the suppression is self-
+			// healing — unlike Dead which sticks until external
+			// confirmation arrives.
+			if isCooledDown != nil && isCooledDown(identity, claim.Uplink) {
 				continue
 			}
 			result = append(result, toRouteEntry(identity, s.localOrigin, claim))
@@ -250,7 +346,7 @@ func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isD
 // tombstones emit; transit tombstones never emit). Pass nil to
 // disable filtering — test fixtures and pre-Phase-2 callers do
 // this.
-func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Time, isDead func(identity, uplink PeerIdentity) bool) ([]AnnounceEntry, bool) {
+func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool) ([]AnnounceEntry, bool) {
 	origin := s.localOrigin
 
 	var result []AnnounceEntry
@@ -317,6 +413,14 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 			// authoritative withdrawal. See AnnounceableFor for
 			// the symmetric exemption.
 			if claim.Source != RouteSourceDirect && isDead != nil && isDead(identity, claim.Uplink) {
+				continue
+			}
+			// Phase 3 PR 12.4: black-hole cooldown filter, no
+			// Direct exemption — mirror of the AnnounceableFor
+			// branch. The arm comes from reputation's 5
+			// consecutive hop-ack failures (PR 12.2 wiring) and
+			// auto-clears after BlackHoleCooldown.
+			if isCooledDown != nil && isCooledDown(identity, claim.Uplink) {
 				continue
 			}
 			if liveWinner == nil || isBetterLiveClaim(claim, liveWinner) {

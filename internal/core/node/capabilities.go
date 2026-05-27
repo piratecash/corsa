@@ -35,6 +35,15 @@ import (
 //     mesh_route_query_v1 + mesh_relay_v1 + mesh_routing_v1 because
 //     the ingested response lands as a transit next-hop — see
 //     CapMeshRouteQueryV1 doc-comment in internal/core/domain/capability.go.
+//   - mesh_route_sync_v1: incremental table sync via the
+//     route_sync_digest_v1 / route_sync_summary_v1 exchange
+//     introduced in Phase 3 PR 12.5. On reconnect to a known peer
+//     the sender emits a digest of its last-known (Identity,
+//     MaxSeqNo) view through that peer; on match the receiver
+//     short-circuits the next forced full-sync. Orthogonal to the
+//     announce-plane caps — peers without it keep receiving the
+//     full announce stream as before. See
+//     docs/cluster-mesh/phase-3-multipath-reputation.md §4.5.
 func localCapabilities() []domain.Capability {
 	return []domain.Capability{
 		domain.CapMeshRelayV1,
@@ -43,6 +52,7 @@ func localCapabilities() []domain.Capability {
 		domain.CapFileTransferV1,
 		domain.CapMeshRouteProbeV1,
 		domain.CapMeshRouteQueryV1,
+		domain.CapMeshRouteSyncV1,
 	}
 }
 

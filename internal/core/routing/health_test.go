@@ -490,3 +490,341 @@ func TestNewTable_InitialisesHealthStore(t *testing.T) {
 		t.Fatalf("freshly initialised health store has %d entries, want 0", got)
 	}
 }
+
+// ---------------------------------------------------------------------
+// Phase 3 PR 12.1 — reputation primitives (hop-ack reliability + black-hole
+// cooldown). All tests below exercise apply* methods on RouteHealthState
+// directly; no production call site yet feeds them — that wire-up lands
+// in PR 12.2 (Table.MarkHopAck / Table.MarkHopFailure plumbing).
+// Architectural anchor: docs/cluster-mesh/phase-3-multipath-reputation.md §4.1.
+// ---------------------------------------------------------------------
+
+// TestRouteReputation_ColdStartUntilWarmupSamples — until the pair has
+// accumulated ReliabilityWarmupSamples positive/negative observations,
+// CompositeScore must NOT fold the reliability term: the EMA is too
+// noisy on a sample size of 1-2 to outweigh the strict-tier health
+// invariant. The §4.1 contract is "cold-start ignored".
+//
+// The check is structural: CompositeScore with a fresh pair (Attempts=2)
+// should equal CompositeScore with HopAckAttempts=0 — same shape, no
+// reliability bonus added.
+func TestRouteReputation_ColdStartUntilWarmupSamples(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	cold := &RouteHealthState{
+		Health:       HealthGood,
+		LastHopAck:   base,
+		TransitionAt: base,
+	}
+	warming := &RouteHealthState{
+		Health:           HealthGood,
+		LastHopAck:       base,
+		TransitionAt:     base,
+		HopAckAttempts:   ReliabilityWarmupSamples - 1,
+		HopAckSuccesses:  ReliabilityWarmupSamples - 1,
+		ReliabilityScore: 1.0,
+	}
+
+	coldScore := CompositeScore(1, RouteSourceAnnouncement, cold)
+	warmingScore := CompositeScore(1, RouteSourceAnnouncement, warming)
+	if !almostEqual(coldScore, warmingScore) {
+		t.Fatalf("reliability bonus leaked during warmup: cold=%f, warming=%f", coldScore, warmingScore)
+	}
+
+	// One more observation crosses the threshold — bonus kicks in.
+	warmed := *warming
+	warmed.HopAckAttempts = ReliabilityWarmupSamples
+	warmed.HopAckSuccesses = ReliabilityWarmupSamples
+	warmedScore := CompositeScore(1, RouteSourceAnnouncement, &warmed)
+	if warmedScore <= warmingScore {
+		t.Fatalf("crossing warmup threshold did not boost score: warming=%f, warmed=%f", warmingScore, warmedScore)
+	}
+}
+
+// TestRouteReputation_SuccessIncrementsAttemptsAndScore — every
+// applyHopAckSuccess bumps both attempts and successes, recomputes the
+// ratio, and resets ConsecutiveFailures. ReliabilityScore is the EMA
+// of binary outcomes (1.0 for success) — the first call seeds at 1.0,
+// subsequent successes keep it at 1.0.
+func TestRouteReputation_SuccessIncrementsAttemptsAndScore(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Health:              HealthGood,
+		LastHopAck:          base,
+		TransitionAt:        base,
+		ConsecutiveFailures: 4,
+	}
+	state.applyHopAckSuccess(base.Add(1 * time.Second))
+	if state.HopAckAttempts != 1 || state.HopAckSuccesses != 1 {
+		t.Fatalf("after 1 success: Attempts=%d, Successes=%d, want 1,1", state.HopAckAttempts, state.HopAckSuccesses)
+	}
+	if !almostEqual(state.ReliabilityScore, 1.0) {
+		t.Fatalf("after 1 success: ReliabilityScore=%f, want 1.0 (cold-start seed)", state.ReliabilityScore)
+	}
+	if state.ConsecutiveFailures != 0 {
+		t.Fatalf("ConsecutiveFailures = %d, want 0 (success must reset)", state.ConsecutiveFailures)
+	}
+
+	state.applyHopAckSuccess(base.Add(2 * time.Second))
+	state.applyHopAckSuccess(base.Add(3 * time.Second))
+	if state.HopAckAttempts != 3 || state.HopAckSuccesses != 3 {
+		t.Fatalf("after 3 successes: Attempts=%d, Successes=%d, want 3,3", state.HopAckAttempts, state.HopAckSuccesses)
+	}
+	if !almostEqual(state.ReliabilityScore, 1.0) {
+		t.Fatalf("after 3 successes: ReliabilityScore=%f, want 1.0", state.ReliabilityScore)
+	}
+}
+
+// TestRouteReputation_FailureIncrementsConsecutiveAndDecaysScore —
+// applyHopAckFailure bumps attempts only (NOT successes), increments
+// the consecutive counter, and blends the EMA toward 0 at the
+// canonical alpha. Documents the §4.1 invariant "failure = outcome 0.0".
+func TestRouteReputation_FailureIncrementsConsecutiveAndDecaysScore(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Health:           HealthGood,
+		LastHopAck:       base,
+		TransitionAt:     base,
+		ReliabilityScore: 1.0, // pretend pair was steady-state reliable
+		HopAckAttempts:   10,
+		HopAckSuccesses:  10,
+	}
+	state.applyHopAckFailure(base.Add(1 * time.Second))
+	if state.HopAckAttempts != 11 {
+		t.Fatalf("HopAckAttempts = %d, want 11 (failure bumps attempts)", state.HopAckAttempts)
+	}
+	if state.HopAckSuccesses != 10 {
+		t.Fatalf("HopAckSuccesses = %d, want 10 (failure must NOT bump successes)", state.HopAckSuccesses)
+	}
+	if state.ConsecutiveFailures != 1 {
+		t.Fatalf("ConsecutiveFailures = %d, want 1", state.ConsecutiveFailures)
+	}
+	// EMA blend at alpha=0.2: 1.0*0.8 + 0.0*0.2 = 0.8.
+	wantScore := 1.0*(1-ReliabilityEWMAFactor) + 0.0*ReliabilityEWMAFactor
+	if !almostEqual(state.ReliabilityScore, wantScore) {
+		t.Fatalf("ReliabilityScore = %f, want %f (alpha=%.2f blend)", state.ReliabilityScore, wantScore, ReliabilityEWMAFactor)
+	}
+}
+
+// TestRouteReputation_BlackHoleArmedAfter5ConsecutiveFailures — when
+// ConsecutiveFailures crosses BlackHoleThreshold the apply method must
+// arm CooldownUntil = now + BlackHoleCooldown. Below the threshold the
+// cooldown stays zero. Overview §9.5 lists this as a release-blocking
+// test name.
+func TestRouteReputation_BlackHoleArmedAfter5ConsecutiveFailures(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Health:       HealthGood,
+		LastHopAck:   base,
+		TransitionAt: base,
+	}
+	// First 4 failures — no cooldown armed.
+	for i := 1; i <= BlackHoleThreshold-1; i++ {
+		state.applyHopAckFailure(base.Add(time.Duration(i) * time.Second))
+		if !state.CooldownUntil.IsZero() {
+			t.Fatalf("CooldownUntil armed prematurely after %d failures: %v", i, state.CooldownUntil)
+		}
+	}
+	// 5-th failure — arms cooldown.
+	armAt := base.Add(time.Duration(BlackHoleThreshold) * time.Second)
+	state.applyHopAckFailure(armAt)
+	wantUntil := armAt.Add(BlackHoleCooldown)
+	if !state.CooldownUntil.Equal(wantUntil) {
+		t.Fatalf("CooldownUntil = %v, want %v (now + BlackHoleCooldown)", state.CooldownUntil, wantUntil)
+	}
+	if state.ConsecutiveFailures != BlackHoleThreshold {
+		t.Fatalf("ConsecutiveFailures = %d, want %d", state.ConsecutiveFailures, BlackHoleThreshold)
+	}
+}
+
+// TestRouteReputation_CooldownExpiryRestoresSelectability —
+// applyCooldownExpiryLocked is the helper TickHealth calls every probe
+// cadence: an armed pair whose CooldownUntil has elapsed gets cleared
+// AND its ConsecutiveFailures reset to 0 (second chance). A pair whose
+// CooldownUntil is still in the future is left untouched.
+func TestRouteReputation_CooldownExpiryRestoresSelectability(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	armAt := base
+	cooledUntil := armAt.Add(BlackHoleCooldown)
+
+	// Still inside the cooldown window — no clear.
+	stillInside := &RouteHealthState{
+		Health:              HealthGood,
+		LastHopAck:          armAt,
+		TransitionAt:        armAt,
+		ConsecutiveFailures: BlackHoleThreshold,
+		CooldownUntil:       cooledUntil,
+	}
+	stillInside.applyCooldownExpiryLocked(cooledUntil.Add(-time.Second))
+	if stillInside.CooldownUntil.IsZero() {
+		t.Fatalf("CooldownUntil cleared before window elapsed")
+	}
+	if stillInside.ConsecutiveFailures != BlackHoleThreshold {
+		t.Fatalf("ConsecutiveFailures = %d during cooldown, want %d", stillInside.ConsecutiveFailures, BlackHoleThreshold)
+	}
+
+	// Past expiry — cleared and counter reset.
+	elapsed := &RouteHealthState{
+		Health:              HealthGood,
+		LastHopAck:          armAt,
+		TransitionAt:        armAt,
+		ConsecutiveFailures: BlackHoleThreshold,
+		CooldownUntil:       cooledUntil,
+	}
+	elapsed.applyCooldownExpiryLocked(cooledUntil.Add(time.Second))
+	if !elapsed.CooldownUntil.IsZero() {
+		t.Fatalf("CooldownUntil = %v after expiry, want zero", elapsed.CooldownUntil)
+	}
+	if elapsed.ConsecutiveFailures != 0 {
+		t.Fatalf("ConsecutiveFailures = %d after expiry, want 0", elapsed.ConsecutiveFailures)
+	}
+
+	// Defensive: no-op on never-armed pairs (CooldownUntil zero
+	// already).
+	never := &RouteHealthState{Health: HealthGood, LastHopAck: armAt, TransitionAt: armAt}
+	never.applyCooldownExpiryLocked(armAt.Add(time.Hour))
+	if !never.CooldownUntil.IsZero() {
+		t.Fatalf("applyCooldownExpiryLocked invented CooldownUntil on a fresh pair: %v", never.CooldownUntil)
+	}
+}
+
+// TestRouteReputation_SuccessDuringCooldownClearsCooldown — a late
+// hop_ack (organic relay traffic landing during the cooldown window)
+// is positive evidence and overrides the black-hole signal: the pair
+// is immediately selectable again. Documents §4.1 contract that
+// applyHopAckSuccess clears CooldownUntil.
+func TestRouteReputation_SuccessDuringCooldownClearsCooldown(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Health:              HealthGood,
+		LastHopAck:          base,
+		TransitionAt:        base,
+		ConsecutiveFailures: BlackHoleThreshold,
+		CooldownUntil:       base.Add(BlackHoleCooldown),
+	}
+	state.applyHopAckSuccess(base.Add(30 * time.Second))
+	if !state.CooldownUntil.IsZero() {
+		t.Fatalf("CooldownUntil = %v after success during cooldown, want zero", state.CooldownUntil)
+	}
+	if state.ConsecutiveFailures != 0 {
+		t.Fatalf("ConsecutiveFailures = %d, want 0 after success", state.ConsecutiveFailures)
+	}
+}
+
+// TestRouteReputation_ScoreClampedTo01 — ReliabilityScore must stay
+// within [0, 1]. Run an adversarial sequence of pure-failure inputs
+// to verify the EMA never goes negative, and pure-success inputs to
+// verify it never exceeds 1.
+func TestRouteReputation_ScoreClampedTo01(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	allFail := &RouteHealthState{Health: HealthGood, LastHopAck: base, TransitionAt: base, ReliabilityScore: 1.0}
+	for i := 1; i <= 50; i++ {
+		allFail.applyHopAckFailure(base.Add(time.Duration(i) * time.Second))
+		if allFail.ReliabilityScore < 0 || allFail.ReliabilityScore > 1 {
+			t.Fatalf("after %d failures: ReliabilityScore=%f, want [0,1]", i, allFail.ReliabilityScore)
+		}
+	}
+
+	allOK := &RouteHealthState{Health: HealthGood, LastHopAck: base, TransitionAt: base}
+	for i := 1; i <= 50; i++ {
+		allOK.applyHopAckSuccess(base.Add(time.Duration(i) * time.Second))
+		if allOK.ReliabilityScore < 0 || allOK.ReliabilityScore > 1 {
+			t.Fatalf("after %d successes: ReliabilityScore=%f, want [0,1]", i, allOK.ReliabilityScore)
+		}
+	}
+	if !almostEqual(allOK.ReliabilityScore, 1.0) {
+		t.Fatalf("after 50 successes: ReliabilityScore=%f, want 1.0", allOK.ReliabilityScore)
+	}
+}
+
+// TestRouteReputation_FreshFailureDoesNotArmCooldownBelowThreshold —
+// guards the threshold semantics specifically: 4 failures must leave
+// CooldownUntil zero. A small off-by-one in the apply method (>= vs >)
+// would arm cooldown one failure too early.
+func TestRouteReputation_FreshFailureDoesNotArmCooldownBelowThreshold(t *testing.T) {
+	if BlackHoleThreshold <= 1 {
+		t.Skipf("threshold %d makes below-threshold test meaningless", BlackHoleThreshold)
+	}
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{Health: HealthGood, LastHopAck: base, TransitionAt: base}
+	for i := 1; i < BlackHoleThreshold; i++ {
+		state.applyHopAckFailure(base.Add(time.Duration(i) * time.Second))
+	}
+	if !state.CooldownUntil.IsZero() {
+		t.Fatalf("CooldownUntil armed after %d failures: %v", BlackHoleThreshold-1, state.CooldownUntil)
+	}
+}
+
+// TestRouteReputation_ApplyHopAckSuccessLeavesHealthMachineUntouched —
+// reputation primitives are orthogonal to the Phase 2 state machine:
+// applyHopAckSuccess MUST NOT mutate Health / LastHopAck /
+// TransitionAt / ProbeFailures. The Phase 2 applyHopAck remains the
+// only path that touches those fields. PR 12.2 wires both together at
+// the Table level (MarkHopAck calls applyHopAck then
+// applyHopAckSuccess inside one t.mu.Lock).
+//
+// Without this separation a single failed PR 12.2 wire-up could let
+// reputation primitives drift the health state machine — guarding
+// the contract here means the test breaks loud if someone "helpfully"
+// merges the two.
+func TestRouteReputation_ApplyHopAckSuccessLeavesHealthMachineUntouched(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Health:        HealthQuestionable,
+		LastHopAck:    base,
+		TransitionAt:  base,
+		ProbeFailures: 2,
+	}
+	state.applyHopAckSuccess(base.Add(30 * time.Second))
+	if state.Health != HealthQuestionable {
+		t.Fatalf("Health = %s, want questionable (reputation primitives must not touch health state machine)", state.Health)
+	}
+	if !state.LastHopAck.Equal(base) {
+		t.Fatalf("LastHopAck moved: got %v, want %v", state.LastHopAck, base)
+	}
+	if !state.TransitionAt.Equal(base) {
+		t.Fatalf("TransitionAt moved: got %v, want %v", state.TransitionAt, base)
+	}
+	if state.ProbeFailures != 2 {
+		t.Fatalf("ProbeFailures = %d, want 2 (must be untouched)", state.ProbeFailures)
+	}
+}
+
+// TestRouteReputation_ApplyHopAckFailureLeavesHealthMachineUntouched —
+// symmetric guard for the failure path: reputation primitives must
+// not bump Health to Bad / Dead, nor touch ProbeFailures (which is
+// owned by the probe path).
+func TestRouteReputation_ApplyHopAckFailureLeavesHealthMachineUntouched(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Health:        HealthGood,
+		LastHopAck:    base,
+		TransitionAt:  base,
+		ProbeFailures: 1,
+	}
+	state.applyHopAckFailure(base.Add(30 * time.Second))
+	if state.Health != HealthGood {
+		t.Fatalf("Health = %s, want good (reputation primitives must not touch health state machine)", state.Health)
+	}
+	if state.ProbeFailures != 1 {
+		t.Fatalf("ProbeFailures = %d, want 1 (probe path owns this counter)", state.ProbeFailures)
+	}
+}
+
+// Compile-time sanity: the new fields are addressable as documented.
+// If the field set drifts (rename / removal), this test stops
+// compiling — useful as a quick canary in the otherwise behaviour-
+// only suite above. Uses domain.PeerIdentity to keep the import
+// honest after PR 12.1; remove if the import becomes unused in
+// future cleanups.
+func TestRouteReputation_FieldShapeCompiles(t *testing.T) {
+	_ = RouteHealthState{
+		Identity:            domain.PeerIdentity("id"),
+		Uplink:              domain.PeerIdentity("u"),
+		HopAckAttempts:      0,
+		HopAckSuccesses:     0,
+		ReliabilityScore:    0,
+		ConsecutiveFailures: 0,
+		CooldownUntil:       time.Time{},
+	}
+}

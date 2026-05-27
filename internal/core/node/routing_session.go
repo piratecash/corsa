@@ -20,6 +20,8 @@
 package node
 
 import (
+	"time"
+
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -143,6 +145,39 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 		return
 	}
 
+	// Phase 3 PR 12.5 — incremental sync on reconnect. If we cached a
+	// per-peer digest from the prior session AND the new session
+	// negotiated mesh_route_sync_v1, emit the digest so the peer can
+	// short-circuit the reconnect forced full sync on a match.
+	//
+	// Ordering matters: this block runs BEFORE TriggerUpdate so that
+	// MarkPeerDigestPending arms a short suppression window first. Without
+	// it the reconnect's own announce cycle (kicked by TriggerUpdate
+	// below) would full-sync this peer before the summary could possibly
+	// arrive — the race that previously made the digest exchange
+	// ineffective on its intended path. The pending window holds the
+	// forced full sync off just long enough for the round trip; a match
+	// summary extends it for one cadence, a mismatch / silence lets it
+	// elapse and the next cycle full-syncs (safe degradation).
+	//
+	// ConsumePeerDigestSnapshot is single-shot, so a future reconnect
+	// within the same TTL window does not re-emit a stale digest. Peers
+	// without the capability silently skip this path; sendFrameToIdentity
+	// inside emitRouteSyncDigest applies the capability gate too as
+	// defence in depth. When there is no cached digest we arm nothing and
+	// the cycle full-syncs normally — the correct behaviour when no prior
+	// view exists to compare against.
+	if sessionHasCap(caps, domain.CapMeshRouteSyncV1) {
+		now := time.Now().UTC()
+		if digest, count, generatedAt, ok := s.routingTable.ConsumePeerDigestSnapshot(peerIdentity, now); ok {
+			// Store the emitted digest as the correlation anchor: only a
+			// summary echoing exactly this value may later extend the
+			// suppression window (ConfirmPeerDigestMatch).
+			s.announceLoop.MarkPeerDigestPending(peerIdentity, now, digest)
+			s.emitRouteSyncDigest(peerIdentity, digest, count, generatedAt)
+		}
+	}
+
 	s.announceLoop.TriggerUpdate()
 }
 
@@ -193,6 +228,25 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("peer_mu_writer")
+
+	// Phase 3 PR 12.5 — record the per-peer digest snapshot BEFORE
+	// any storage-mutating cleanup below (RemoveDirectPeer /
+	// InvalidateTransitRoutes) so the cached digest reflects what
+	// we knew through the peer at the moment the session closed. A
+	// recording past the cleanup would observe an emptied bucket
+	// for this peer and stash a misleading digest that any
+	// reconnect within SessionDigestCacheTTL would compare against
+	// the peer's fresh full view and falsely mismatch.
+	//
+	// We record only on the last-total-session transition (peer
+	// truly disappeared) and only when the peer's negotiated set
+	// ever advertised mesh_route_sync_v1; without the capability
+	// any future emit would be silently dropped by
+	// sendFrameToIdentity's gate so the cache entry would never
+	// be consumed.
+	if isLastTotal && sessionHasCap(caps, domain.CapMeshRouteSyncV1) {
+		s.recordPeerDigestOnSessionClose(peerIdentity)
+	}
 
 	if !lastRelay {
 		// No relay sessions left (or never had one). If this is also the

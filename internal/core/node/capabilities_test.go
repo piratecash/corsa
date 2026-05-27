@@ -18,6 +18,10 @@ func TestLocalCapabilities(t *testing.T) {
 		domain.CapFileTransferV1,
 		domain.CapMeshRouteProbeV1,
 		domain.CapMeshRouteQueryV1,
+		// Phase 3 PR 12.5 — incremental-sync digest exchange.
+		// Added in lockstep with the localCapabilities() entry
+		// so the order-sensitive check below stays honest.
+		domain.CapMeshRouteSyncV1,
 	}
 	if len(caps) != len(expected) {
 		t.Fatalf("localCapabilities() = %v, want %v", caps, expected)
@@ -31,7 +35,16 @@ func TestLocalCapabilities(t *testing.T) {
 
 func TestLocalCapabilityStrings(t *testing.T) {
 	strs := localCapabilityStrings()
-	expected := []string{"mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "file_transfer_v1", "mesh_route_probe_v1", "mesh_route_query_v1"}
+	expected := []string{
+		"mesh_relay_v1",
+		"mesh_routing_v1",
+		"mesh_routing_v2",
+		"file_transfer_v1",
+		"mesh_route_probe_v1",
+		"mesh_route_query_v1",
+		// Phase 3 PR 12.5 — see TestLocalCapabilities above.
+		"mesh_route_sync_v1",
+	}
 	if len(strs) != len(expected) {
 		t.Fatalf("localCapabilityStrings() = %v, want %v", strs, expected)
 	}
