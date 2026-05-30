@@ -16,12 +16,17 @@ import (
 // the documented outcome.
 
 // TestClassifyDeltaMode_BothV1AndV2_ReturnsV2 pins the v2 path: when
-// both capability inputs carry mesh_routing_v1 and mesh_routing_v2, the
-// classifier picks the v2 delta wire frame.
+// both capability inputs carry the FULL v2 triplet
+// (mesh_routing_v1 + mesh_routing_v2 + mesh_relay_v1 — Round-21
+// alignment with hasCapV2Triplet), the classifier picks the v2 delta
+// wire frame. Relay is part of the triplet because the send-side
+// dispatch in node.dispatchAnnouncePlaneFrameWithCaps gates
+// SendRoutesUpdate on the same triplet — a relay-less v2 classification
+// would route to a sender that refuses the frame with no legacy fallback.
 func TestClassifyDeltaMode_BothV1AndV2_ReturnsV2(t *testing.T) {
-	caps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2}
+	caps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1}
 	if got := classifyDeltaMode(caps, caps); got != deltaModeV2 {
-		t.Fatalf("classifyDeltaMode({v1,v2}, {v1,v2}) = %v, want deltaModeV2", got)
+		t.Fatalf("classifyDeltaMode({v1,v2,relay}, {v1,v2,relay}) = %v, want deltaModeV2", got)
 	}
 }
 
@@ -64,23 +69,25 @@ func TestClassifyDeltaMode_V2WithoutV1_TreatedAsV1(t *testing.T) {
 // cycle-time UpdateCapabilities normally prevents the inputs from
 // disagreeing, but the function itself must still classify mismatched
 // inputs as deltaModeDivergence so the safety net works for any future
-// caller that does not run through the cycle-time sync.
+// caller that does not run through the cycle-time sync. Round-21:
+// state holds the full v2 triplet, target lacks v2 (and thus the
+// triplet) — divergence on the v2 axis.
 func TestClassifyDeltaMode_StateV2_TargetV1_Divergence(t *testing.T) {
-	stateCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2}
-	targetCaps := []PeerCapability{domain.CapMeshRoutingV1}
+	stateCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1}
+	targetCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1}
 	if got := classifyDeltaMode(stateCaps, targetCaps); got != deltaModeDivergence {
-		t.Fatalf("classifyDeltaMode({v1,v2}, {v1}) = %v, want deltaModeDivergence", got)
+		t.Fatalf("classifyDeltaMode({v1,v2,relay}, {v1,relay}) = %v, want deltaModeDivergence", got)
 	}
 }
 
 // TestClassifyDeltaMode_StateV1_TargetV2_Divergence is the symmetric
-// disagreement case: persistent state lacks v2, target advertises it.
-// Same outcome — the function does not pick a winner; it raises the
-// flag and lets the loop decide on a fallback.
+// disagreement case: persistent state lacks v2, target advertises the
+// full triplet. Same outcome — the function does not pick a winner;
+// it raises the flag and lets the loop decide on a fallback.
 func TestClassifyDeltaMode_StateV1_TargetV2_Divergence(t *testing.T) {
-	stateCaps := []PeerCapability{domain.CapMeshRoutingV1}
-	targetCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2}
+	stateCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1}
+	targetCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1}
 	if got := classifyDeltaMode(stateCaps, targetCaps); got != deltaModeDivergence {
-		t.Fatalf("classifyDeltaMode({v1}, {v1,v2}) = %v, want deltaModeDivergence", got)
+		t.Fatalf("classifyDeltaMode({v1,relay}, {v1,v2,relay}) = %v, want deltaModeDivergence", got)
 	}
 }

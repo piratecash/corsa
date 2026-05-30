@@ -328,7 +328,7 @@ func TestP2PWireCommands_IncludesRouteQueryTypes(t *testing.T) {
 // TestLocalCapabilities_AdvertisesRouteQueryV1 — local capability
 // advertisement must include mesh_route_query_v1.
 func TestLocalCapabilities_AdvertisesRouteQueryV1(t *testing.T) {
-	caps := localCapabilities()
+	caps := localCapabilities(false)
 	for _, c := range caps {
 		if c == domain.CapMeshRouteQueryV1 {
 			return

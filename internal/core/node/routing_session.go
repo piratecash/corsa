@@ -20,12 +20,15 @@
 package node
 
 import (
+	"context"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // inboundPeerIdentity returns the peer identity (Ed25519 fingerprint)
@@ -284,6 +287,16 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 		return
 	}
 
+	// Phase 4 13.3-B: snapshot the identities reachable via the
+	// lost uplink BEFORE RemoveDirectPeer invalidates the storage,
+	// so we can emit explicit route_poison_v1 to OTHER direct peers
+	// after the removal. The snapshot is taken under t.mu.RLock and
+	// the result carries value-typed PeerIdentity entries, so it
+	// remains safe to consume outside the lock after RemoveDirectPeer
+	// completes. See poisonReverseToOtherPeers below for the emit
+	// rationale.
+	poisonTargets := s.routingTable.IdentitiesViaUplink(routing.PeerIdentity(peerIdentity))
+
 	result, err := s.routingTable.RemoveDirectPeer(peerIdentity)
 	if err != nil {
 		log.Error().Err(err).Str("peer", string(peerIdentity)).Msg("routing_remove_direct_peer_failed")
@@ -325,4 +338,61 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 
 	s.announceLoop.TriggerUpdate()
 	s.triggerDrainForExposed(result.ExposedBackups)
+
+	// Phase 4 13.3-B: emit explicit route_poison_v1 to OTHER direct
+	// peers about every transit identity we used to reach via the
+	// disconnected peer. The legacy announce-plane already withdrew
+	// the lost peer's OWN identity (result.Withdrawals → fanout
+	// above); poison-reverse covers the transit set so downstream
+	// peers can drop claims[X][us] without waiting TTL — the
+	// count-to-infinity acceleration that motivates the capability
+	// (overview §7.7).
+	if len(poisonTargets) > 0 {
+		s.poisonReverseToOtherPeers(s.runCtx, peerIdentity, poisonTargets)
+	}
+}
+
+// poisonReverseToOtherPeers emits route_poison_v1 about each lost
+// transit identity to every direct peer EXCEPT lostUplink itself
+// (the lost peer is, by definition, gone). Reason is always
+// uplink_lost — the trigger that called this helper is the lost
+// session; the more granular health-dead / loop-detected reasons
+// have their own emit sites (see TODO in 13.3-B's phase-4 doc
+// entry). Capability gating happens inside SendRoutePoison; peers
+// without mesh_poison_reverse_v1 silently skip.
+//
+// Scaling: this emits len(targets) × len(other-peers) frames. For a
+// 100-identity, 8-peer mesh that is ~700 frames per disconnect —
+// each is small (<200B). A future batch-frame extension can
+// collapse this; current single-identity-per-frame matches the
+// spec.
+func (s *Service) poisonReverseToOtherPeers(ctx context.Context, lostUplink domain.PeerIdentity, targets []routing.PeerIdentity) {
+	// Snapshot the routing-capable peer set once; SendRoutePoison
+	// applies its own capability filter (v1 + poison_reverse) so
+	// peers without mesh_poison_reverse_v1 will see SendRoutePoison
+	// return false without enqueueing any frame.
+	peers := s.routingCapablePeers()
+	if len(peers) == 0 {
+		return
+	}
+	for _, target := range targets {
+		identity := domain.PeerIdentity(target)
+		// Skip the lost uplink's own identity — the legacy withdrawal
+		// path (fanoutAnnounceRoutes on result.Withdrawals above)
+		// already withdraws claims about the disconnected peer
+		// itself. Emitting poison about the same identity would be
+		// a redundant signal handled identically by the receiver
+		// (both end up withdrawing claims[lostUplink][us]); the
+		// transit-identity poisons are the unique value-add of this
+		// helper.
+		if identity == lostUplink {
+			continue
+		}
+		for _, peer := range peers {
+			if peer.Identity == lostUplink {
+				continue
+			}
+			s.SendRoutePoison(ctx, peer.Address, identity, protocol.RoutePoisonReasonUplinkLost)
+		}
+	}
 }

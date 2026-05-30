@@ -184,6 +184,19 @@ type Node struct {
 	// runtime.NumGoroutine() under normal load × 2-3 as the trip
 	// point.
 	OverloadGoroutineThreshold int
+
+	// EnableMeshRoutingV3 opts this node in to advertising the Phase 4
+	// compact-announce capability (env: CORSA_ENABLE_MESH_ROUTING_V3,
+	// default false). When true, the local capability set includes
+	// CapMeshRoutingV3, the announce loop emits route_announce_v3 to
+	// peers that also advertise it, and connect-time / forced-full syncs
+	// to those peers use the v3 kind="full" frame. Peers without the
+	// capability continue to receive legacy announce_routes /
+	// routes_update unchanged (overview §5.2 Phase B). The flag is
+	// opt-in by design so v3 rollout follows the same default-off→soak→
+	// flip-on cadence the v2 rollout used; see
+	// docs/cluster-mesh/phase-4-compact-wire-signed.md §7 PR 13.1 part 2c.
+	EnableMeshRoutingV3 bool
 }
 
 type RPC struct {
@@ -254,6 +267,7 @@ func Default() Config {
 	maxSaneHops := maxSaneHopsFromEnv()
 	announceInterval := announceIntervalFromEnv()
 	overloadGoroutineThreshold := overloadGoroutineThresholdFromEnv()
+	enableMeshRoutingV3 := enableMeshRoutingV3FromEnv()
 
 	return Config{
 		App: App{
@@ -287,6 +301,7 @@ func Default() Config {
 			MaxSaneHops:                maxSaneHops,
 			AnnounceInterval:           announceInterval,
 			OverloadGoroutineThreshold: overloadGoroutineThreshold,
+			EnableMeshRoutingV3:        enableMeshRoutingV3,
 		},
 		RPC: RPC{
 			Host:     envOrDefault("CORSA_RPC_HOST", "127.0.0.1"),
@@ -713,6 +728,25 @@ func overloadGoroutineThresholdFromEnv() int {
 		return 0
 	}
 	return value
+}
+
+// enableMeshRoutingV3FromEnv reads CORSA_ENABLE_MESH_ROUTING_V3 and
+// returns the boolean opt-in flag for the Phase 4 compact-announce wire
+// frame. Accepted truthy values are "1", "true", "yes", "on" (any case
+// after trimming). Any other value — including unset, empty, "0",
+// "false", or unparseable — yields false so legacy deployments stay on
+// the legacy announce_routes / routes_update wire path until operators
+// deliberately opt in. The opt-in shape mirrors the v2 rollout cadence
+// (see docs/cluster-mesh/phase-4-compact-wire-signed.md §7 PR 13.1 part
+// 2c).
+func enableMeshRoutingV3FromEnv() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENABLE_MESH_ROUTING_V3")))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func maxIncomingPeersFromEnv() int {

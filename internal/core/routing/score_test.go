@@ -117,9 +117,9 @@ func TestCompositeScore_NilHealthFallsBackToByHops(t *testing.T) {
 		{5, RouteSourceAnnouncement, 100 - 50 + 0},
 	}
 	for _, c := range cases {
-		got := CompositeScore(c.hops, c.source, nil)
+		got := CompositeScore(c.hops, c.source, nil, false)
 		if !almostEqual(got, c.want) {
-			t.Fatalf("CompositeScore(hops=%d, source=%s, nil) = %f, want %f", c.hops, c.source, got, c.want)
+			t.Fatalf("CompositeScore(hops=%d, source=%s, nil, false) = %f, want %f", c.hops, c.source, got, c.want)
 		}
 	}
 }
@@ -135,7 +135,7 @@ func TestCompositeScore_NilHealthFallsBackToByHops(t *testing.T) {
 // Dead apart from a legitimately-selectable last-resort claim.
 func TestCompositeScore_DeadExcluded(t *testing.T) {
 	health := &RouteHealthState{Health: HealthDead, RTT: 10 * time.Millisecond}
-	got := CompositeScore(1, RouteSourceDirect, health)
+	got := CompositeScore(1, RouteSourceDirect, health, false)
 	if !almostEqual(got, scoreExcluded) {
 		t.Fatalf("CompositeScore with HealthDead = %f, want %f (scoreExcluded sentinel)", got, scoreExcluded)
 	}
@@ -148,11 +148,11 @@ func TestCompositeScore_DeadExcluded(t *testing.T) {
 func TestCompositeScore_RTTBonusFavorsLocalPath(t *testing.T) {
 	// Path A: 3 hops, 10ms RTT, Good health, Announcement source.
 	healthA := &RouteHealthState{Health: HealthGood, RTT: 10 * time.Millisecond}
-	scoreA := CompositeScore(3, RouteSourceAnnouncement, healthA)
+	scoreA := CompositeScore(3, RouteSourceAnnouncement, healthA, false)
 
 	// Path B: 2 hops, 150ms RTT, Good health, Announcement source.
 	healthB := &RouteHealthState{Health: HealthGood, RTT: 150 * time.Millisecond}
-	scoreB := CompositeScore(2, RouteSourceAnnouncement, healthB)
+	scoreB := CompositeScore(2, RouteSourceAnnouncement, healthB, false)
 
 	if scoreA <= scoreB {
 		t.Fatalf("expected A (3hops/10ms) > B (2hops/150ms): scoreA=%f, scoreB=%f", scoreA, scoreB)
@@ -166,11 +166,11 @@ func TestCompositeScore_RTTBonusFavorsLocalPath(t *testing.T) {
 func TestCompositeScore_HealthPenaltyDeprioritizes(t *testing.T) {
 	// Healthy 2-hop announcement path.
 	healthGood := &RouteHealthState{Health: HealthGood, RTT: 30 * time.Millisecond}
-	scoreGood := CompositeScore(2, RouteSourceAnnouncement, healthGood)
+	scoreGood := CompositeScore(2, RouteSourceAnnouncement, healthGood, false)
 
 	// Bad 1-hop direct path.
 	healthBad := &RouteHealthState{Health: HealthBad, RTT: 30 * time.Millisecond}
-	scoreBad := CompositeScore(1, RouteSourceDirect, healthBad)
+	scoreBad := CompositeScore(1, RouteSourceDirect, healthBad, false)
 
 	if scoreGood <= scoreBad {
 		t.Fatalf("expected Good 2-hop > Bad 1-hop direct: scoreGood=%f, scoreBad=%f", scoreGood, scoreBad)
@@ -191,10 +191,10 @@ func TestCompositeScore_RTTBonusBoundaries(t *testing.T) {
 	healthAbove := &RouteHealthState{Health: HealthGood, RTT: 100 * time.Millisecond}
 	healthCold := &RouteHealthState{Health: HealthGood, RTT: 0}
 
-	scoreBelow := CompositeScore(1, RouteSourceAnnouncement, healthBelow)
-	scoreMid := CompositeScore(1, RouteSourceAnnouncement, healthMid)
-	scoreAbove := CompositeScore(1, RouteSourceAnnouncement, healthAbove)
-	scoreCold := CompositeScore(1, RouteSourceAnnouncement, healthCold)
+	scoreBelow := CompositeScore(1, RouteSourceAnnouncement, healthBelow, false)
+	scoreMid := CompositeScore(1, RouteSourceAnnouncement, healthMid, false)
+	scoreAbove := CompositeScore(1, RouteSourceAnnouncement, healthAbove, false)
+	scoreCold := CompositeScore(1, RouteSourceAnnouncement, healthCold, false)
 
 	// 1 hop = base 100 − 10 = 90, plus source 0 for Announcement.
 	const base = 90.0
@@ -218,9 +218,9 @@ func TestCompositeScore_RTTBonusBoundaries(t *testing.T) {
 // hierarchy used elsewhere in the codebase.
 func TestCompositeScore_SourceBonusOrdering(t *testing.T) {
 	health := &RouteHealthState{Health: HealthGood, RTT: 10 * time.Millisecond}
-	direct := CompositeScore(1, RouteSourceDirect, health)
-	hopAck := CompositeScore(1, RouteSourceHopAck, health)
-	announce := CompositeScore(1, RouteSourceAnnouncement, health)
+	direct := CompositeScore(1, RouteSourceDirect, health, false)
+	hopAck := CompositeScore(1, RouteSourceHopAck, health, false)
+	announce := CompositeScore(1, RouteSourceAnnouncement, health, false)
 
 	if !(direct > hopAck && hopAck > announce) {
 		t.Fatalf("expected direct > hopAck > announce, got %f %f %f", direct, hopAck, announce)
@@ -248,7 +248,7 @@ func TestCompositeScore_SourceBonusOrdering(t *testing.T) {
 // fresh just-learned uplink ranks the same way it did before PR 12.1.
 func TestCompositeScore_ReliabilityIgnoredDuringWarmup(t *testing.T) {
 	health := &RouteHealthState{Health: HealthGood, RTT: 30 * time.Millisecond}
-	phase2 := CompositeScore(2, RouteSourceAnnouncement, health)
+	phase2 := CompositeScore(2, RouteSourceAnnouncement, health, false)
 
 	// Same pair, fewer than the warmup attempts: ReliabilityScore is
 	// "set" but should be ignored.
@@ -256,7 +256,7 @@ func TestCompositeScore_ReliabilityIgnoredDuringWarmup(t *testing.T) {
 	healthSeeded.HopAckAttempts = ReliabilityWarmupSamples - 1
 	healthSeeded.HopAckSuccesses = ReliabilityWarmupSamples - 1
 	healthSeeded.ReliabilityScore = 1.0
-	phase3Warming := CompositeScore(2, RouteSourceAnnouncement, &healthSeeded)
+	phase3Warming := CompositeScore(2, RouteSourceAnnouncement, &healthSeeded, false)
 	if !almostEqual(phase2, phase3Warming) {
 		t.Fatalf("warmup reliability leaked into score: phase2=%f, warming=%f", phase2, phase3Warming)
 	}
@@ -276,8 +276,8 @@ func TestCompositeScore_ReliabilityBonusFavorsReliableUplink(t *testing.T) {
 			ReliabilityScore: ratio,
 		}
 	}
-	reliable := CompositeScore(2, RouteSourceAnnouncement, base(0.95))
-	flaky := CompositeScore(2, RouteSourceAnnouncement, base(0.40))
+	reliable := CompositeScore(2, RouteSourceAnnouncement, base(0.95), false)
+	flaky := CompositeScore(2, RouteSourceAnnouncement, base(0.40), false)
 	if reliable <= flaky {
 		t.Fatalf("expected reliable (.95) > flaky (.40): reliable=%f, flaky=%f", reliable, flaky)
 	}
@@ -298,8 +298,8 @@ func TestCompositeScore_ReliabilityBonusBoundedToReliabilityBonusMax(t *testing.
 	healthZero.HopAckSuccesses = 0
 	healthZero.ReliabilityScore = 0.0
 
-	full := CompositeScore(3, RouteSourceAnnouncement, healthFull)
-	zero := CompositeScore(3, RouteSourceAnnouncement, &healthZero)
+	full := CompositeScore(3, RouteSourceAnnouncement, healthFull, false)
+	zero := CompositeScore(3, RouteSourceAnnouncement, &healthZero, false)
 	delta := full - zero
 	// Bonus formula: (score - 0.5) * 2 * Max ⇒ ratio 1.0 = +Max,
 	// ratio 0.0 = −Max, total span = 2*Max.
@@ -330,9 +330,9 @@ func TestCompositeScore_ReliabilityBonusPreservesStrictTier_GoodVsQ(t *testing.T
 		RTT:              10 * time.Millisecond,
 	}
 	// Worst-case Good: 15 hops + Announcement + zero reliability.
-	worst := CompositeScore(15, RouteSourceAnnouncement, worstGood)
+	worst := CompositeScore(15, RouteSourceAnnouncement, worstGood, false)
 	// Best-case Q: 1 hop + Direct + full reliability + low RTT.
-	best := CompositeScore(1, RouteSourceDirect, bestQ)
+	best := CompositeScore(1, RouteSourceDirect, bestQ, false)
 	if worst <= best {
 		t.Fatalf("strict-tier invariant broken: worst Good %f <= best Q %f", worst, best)
 	}
@@ -355,8 +355,8 @@ func TestCompositeScore_ReliabilityBonusPreservesStrictTier_QVsBad(t *testing.T)
 		ReliabilityScore: 1.0,
 		RTT:              10 * time.Millisecond,
 	}
-	worst := CompositeScore(15, RouteSourceAnnouncement, worstQ)
-	best := CompositeScore(1, RouteSourceDirect, bestBad)
+	worst := CompositeScore(15, RouteSourceAnnouncement, worstQ, false)
+	best := CompositeScore(1, RouteSourceDirect, bestBad, false)
 	if worst <= best {
 		t.Fatalf("strict-tier invariant broken: worst Q %f <= best Bad %f", worst, best)
 	}
@@ -375,7 +375,7 @@ func TestCompositeScore_DeadStillReturnsSentinelEvenWithPerfectReliability(t *te
 		HopAckSuccesses:  100,
 		ReliabilityScore: 1.0,
 	}
-	got := CompositeScore(1, RouteSourceDirect, healthDead)
+	got := CompositeScore(1, RouteSourceDirect, healthDead, false)
 	if !almostEqual(got, scoreExcluded) {
 		t.Fatalf("CompositeScore for Dead+perfect-reliability = %f, want %f (sentinel)", got, scoreExcluded)
 	}
@@ -392,13 +392,13 @@ func TestCompositeScore_ReliabilitySymmetricAround05(t *testing.T) {
 		HopAckSuccesses:  ReliabilityWarmupSamples,
 		ReliabilityScore: 0.5,
 	}
-	withNeutral := CompositeScore(2, RouteSourceAnnouncement, base)
+	withNeutral := CompositeScore(2, RouteSourceAnnouncement, base, false)
 
 	noRep := *base
 	noRep.HopAckAttempts = 0
 	noRep.HopAckSuccesses = 0
 	noRep.ReliabilityScore = 0
-	withoutRep := CompositeScore(2, RouteSourceAnnouncement, &noRep)
+	withoutRep := CompositeScore(2, RouteSourceAnnouncement, &noRep, false)
 
 	if !almostEqual(withNeutral, withoutRep) {
 		t.Fatalf("ReliabilityScore=0.5 must yield zero bonus: got %f vs no-rep %f", withNeutral, withoutRep)

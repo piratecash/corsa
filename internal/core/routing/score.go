@@ -98,12 +98,39 @@ const (
 	// reliability term. See
 	// docs/cluster-mesh/phase-3-multipath-reputation.md §4.1.
 	ReliabilityBonusMax = 20.0
+
+	// scoreSignedBonus is the Phase 4 13.2-C trust-score boost a claim
+	// receives when its attested-links signature has been
+	// cryptographically verified by us at ingest (see
+	// docs/protocol/attested_links.md). Sized at 5 — small enough to
+	// stay strictly within-tier (it never rescues a Bad / Questionable
+	// pair against a Good alternative; nor does it overpower a single
+	// extra hop, scoreHopPenalty=10) so the strict-tier health
+	// invariant documented on CompositeScore is preserved. Acts as a
+	// tie-break: between otherwise-equal candidates, the verified-
+	// signature one wins. Mixed-version impact: legacy v1/v2 claims
+	// (which never carry a sig) and v3 claims whose signer's pubkey
+	// the receiver does not know all rank one tier below verified-
+	// signed claims, exactly the lenient-but-incentivising semantic
+	// the spec describes ("unsigned entries accepted but ranked lower
+	// in trust score").
+	scoreSignedBonus = 5.0
 )
 
 // CompositeScore ranks an uplink claim characterised by its hop count
 // and learning source against an optional health state. Pass health=nil
 // to fall back to the by-hops + source semantic used prior to Phase 2.
-func CompositeScore(hops uint8, source RouteSource, health *RouteHealthState) float64 {
+//
+// Phase 4 13.2-C trust-score axis: signedVerified=true adds the small
+// scoreSignedBonus tie-break so verified attested-links claims edge out
+// otherwise-equal unsigned / unverifiable claims. The bonus is
+// strictly within-tier (5 vs scoreHealthQPenalty=250, scoreHopPenalty=10)
+// so it never rescues a Bad / Questionable pair against a Good
+// alternative and never inverts a one-hop preference — the
+// strict-tier invariant documented above is preserved. See
+// docs/protocol/attested_links.md "Trust ladder" for the full
+// classification.
+func CompositeScore(hops uint8, source RouteSource, health *RouteHealthState, signedVerified bool) float64 {
 	if health != nil && health.Health == HealthDead {
 		return scoreExcluded
 	}
@@ -138,6 +165,10 @@ func CompositeScore(hops uint8, source RouteSource, health *RouteHealthState) fl
 
 	if health != nil {
 		score += reliabilityBonus(health)
+	}
+
+	if signedVerified {
+		score += scoreSignedBonus
 	}
 
 	return score

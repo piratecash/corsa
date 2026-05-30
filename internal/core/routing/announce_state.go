@@ -88,18 +88,20 @@ type AnnouncePeerState struct {
 	// per-peer goroutine that just synced the field.
 	capabilities []PeerCapability
 
-	// hasReceivedBaseline records whether this session has received the
-	// legacy announce_routes first-sync frame from the peer yet. Reset on
-	// every session boundary (MarkReconnected / MarkDisconnected) because a
-	// fresh session has no baseline regardless of whether the identity was
-	// known before.
+	// hasReceivedBaseline records whether this session has received a
+	// self-contained baseline frame from the peer yet — either legacy
+	// announce_routes (v1/v2 wire) or route_announce_v3 with kind="full"
+	// (Phase 4 v3 wire). Reset on every session boundary (MarkReconnected
+	// / MarkDisconnected) because a fresh session has no baseline
+	// regardless of whether the identity was known before.
 	//
-	// Read by the v2 routes_update receive path: if a peer sends a
-	// routes_update delta before any baseline arrived, the local state is
-	// desynced with respect to the peer's outgoing cache. The receiver
-	// replies with a request_resync wire frame and drops the delta — the
-	// peer's next cycle picks up the forced full via MarkInvalid on their
-	// side. Write via MarkBaselineReceived, read via HasReceivedBaseline.
+	// Read by both delta receive paths: if a peer sends a delta frame
+	// (v2 routes_update or v3 kind="delta") before any baseline arrived,
+	// the local state is desynced with respect to the peer's outgoing
+	// cache. The receiver replies with a request_resync wire frame and
+	// drops the delta — the peer's next cycle picks up the forced full
+	// via MarkInvalid on their side. Write via MarkBaselineReceived,
+	// read via HasReceivedBaseline.
 	hasReceivedBaseline bool
 
 	// wireBaselineSentToPeer is the send-side mirror of hasReceivedBaseline:
@@ -120,6 +122,43 @@ type AnnouncePeerState struct {
 	// non-empty, or any legacy delta — the flag flips and v2 deltas are
 	// permitted on subsequent cycles.
 	wireBaselineSentToPeer bool
+
+	// knownV3Epoch is the highest route_announce_v3 epoch observed from
+	// this peer in the current session; knownV3EpochSet distinguishes
+	// "no v3 frame seen yet" (false) from "epoch 0 observed" (true). The
+	// epoch is the sender's local table-generation counter: it increments
+	// when the peer resets its routing table (e.g. process restart). The
+	// v3 receive path (handleRouteAnnounceV3) reads these to detect a
+	// stale-process replay (incoming epoch < known → ignore the frame) vs
+	// a fresh table that invalidates our diff baseline (incoming epoch >
+	// known → force a fresh full resync from the peer). Reset on every
+	// session boundary (MarkDisconnected / MarkReconnected) because epoch
+	// counters are per-process and a new session may front a restarted
+	// peer whose epoch is unrelated to the previous session's value.
+	knownV3Epoch    uint64
+	knownV3EpochSet bool
+
+	// wireBaselineV3SentToPeer is the v3-generation analogue of
+	// wireBaselineSentToPeer: whether THIS node has emitted a
+	// route_announce_v3 frame with kind="full" to the peer in the
+	// current session. Reset on every session boundary
+	// (MarkDisconnected / MarkReconnected) for the same reason the
+	// legacy flag is: a fresh session has no observable v3 baseline on
+	// the wire even if a previous session emitted one. Flipped only
+	// after a real successful SendRouteAnnounceV3 call carrying a
+	// non-empty kind="full" frame — empty-snapshot short-circuits
+	// record the baseline locally without emitting anything, so the
+	// flag stays false and prevents a subsequent v3 kind="delta" from
+	// dispatching against a peer that never observed a v3 full.
+	//
+	// Read by the v3 mode selection in announceToAllPeers: a v3
+	// kind="delta" frame is gated on a previously transmitted v3
+	// kind="full" so the receiver's baseline gate
+	// (handleRouteAnnounceV3) accepts it. The legacy
+	// wireBaselineSentToPeer remains the v2-receive-gate signal and is
+	// orthogonal — a session that picks the v3 generation never
+	// touches the legacy flag, and vice versa.
+	wireBaselineV3SentToPeer bool
 }
 
 // PeerIdentity returns the immutable identity of this peer state.
@@ -147,6 +186,11 @@ type announcePeerStateView struct {
 	CapabilitiesSnapshot     []PeerCapability
 	HasReceivedBaseline      bool
 	HasSentWireBaseline      bool
+	// HasSentWireBaselineV3 is the v3-baseline analogue of
+	// HasSentWireBaseline — see AnnouncePeerState.wireBaselineV3SentToPeer
+	// for the gating contract. Read by the Phase 4 mode selection in
+	// announceToAllPeers to decide whether a v3 kind="delta" is safe.
+	HasSentWireBaselineV3 bool
 }
 
 // View returns a consistent read-only snapshot of the state fields needed
@@ -163,6 +207,7 @@ func (s *AnnouncePeerState) View() announcePeerStateView {
 		CapabilitiesSnapshot:     copyCapabilities(s.capabilities),
 		HasReceivedBaseline:      s.hasReceivedBaseline,
 		HasSentWireBaseline:      s.wireBaselineSentToPeer,
+		HasSentWireBaselineV3:    s.wireBaselineV3SentToPeer,
 	}
 }
 
@@ -225,11 +270,13 @@ func (s *AnnouncePeerState) CapabilitiesSnapshot() []PeerCapability {
 	return copyCapabilities(s.capabilities)
 }
 
-// MarkBaselineReceived records that the peer has delivered a legacy
-// announce_routes first-sync frame in this session. Subsequent
-// routes_update frames from the peer are now safe to apply against the
-// known-good baseline. See AnnouncePeerState.hasReceivedBaseline for the
-// session-boundary reset contract.
+// MarkBaselineReceived records that the peer has delivered a
+// self-contained baseline frame in this session — either legacy
+// announce_routes (v1/v2 wire) or route_announce_v3 with kind="full"
+// (Phase 4 v3 wire). Subsequent delta frames from the peer (v2
+// routes_update or v3 kind="delta") are now safe to apply against the
+// known-good baseline. See AnnouncePeerState.hasReceivedBaseline for
+// the session-boundary reset contract.
 func (s *AnnouncePeerState) MarkBaselineReceived() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -237,10 +284,11 @@ func (s *AnnouncePeerState) MarkBaselineReceived() {
 }
 
 // HasReceivedBaseline reports whether the current session has received
-// the legacy announce_routes first-sync frame from the peer. Used by the
-// v2 routes_update receive path to gate delta application: no baseline
-// means the local state is desynced and the receiver must request a
-// forced resync instead of silently accepting the delta.
+// a self-contained baseline frame from the peer (legacy announce_routes
+// OR route_announce_v3 kind="full"). Used by the delta receive paths
+// (v2 routes_update and v3 kind="delta") to gate delta application: no
+// baseline means the local state is desynced and the receiver must
+// request a forced resync instead of silently accepting the delta.
 func (s *AnnouncePeerState) HasReceivedBaseline() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -271,6 +319,86 @@ func (s *AnnouncePeerState) HasSentWireBaseline() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.wireBaselineSentToPeer
+}
+
+// V3EpochVerdict classifies an incoming route_announce_v3 epoch against the
+// highest epoch previously observed from the peer this session. The
+// decision logic lives in the node receive handler; AnnouncePeerState only
+// stores the watermark and reports the comparison so the gating policy and
+// the storage are testable in isolation.
+type V3EpochVerdict int
+
+const (
+	// V3EpochApply means the incoming epoch equals the known watermark (or
+	// this is the first v3 frame this session): apply the frame normally.
+	V3EpochApply V3EpochVerdict = iota
+	// V3EpochStale means the incoming epoch is below the known watermark —
+	// a replay from an older peer process. The frame must be ignored; the
+	// watermark is left untouched.
+	V3EpochStale
+	// V3EpochReset means the incoming epoch is above the known watermark —
+	// the peer reset its table (e.g. restart), so any diff baseline we hold
+	// for it is invalid. The watermark is advanced and the caller must force
+	// a fresh full resync from the peer before trusting deltas.
+	V3EpochReset
+)
+
+// ObserveV3Epoch compares incoming against the per-peer v3 epoch watermark
+// and advances it on first-sight or increase. It returns the verdict the
+// receive handler acts on. A stale epoch leaves the watermark unchanged so
+// a single late replay cannot rewind it.
+func (s *AnnouncePeerState) ObserveV3Epoch(incoming uint64) V3EpochVerdict {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.knownV3EpochSet {
+		s.knownV3Epoch = incoming
+		s.knownV3EpochSet = true
+		return V3EpochApply
+	}
+	switch {
+	case incoming < s.knownV3Epoch:
+		return V3EpochStale
+	case incoming > s.knownV3Epoch:
+		s.knownV3Epoch = incoming
+		return V3EpochReset
+	default:
+		return V3EpochApply
+	}
+}
+
+// KnownV3Epoch reports the highest v3 epoch observed from the peer this
+// session and whether any v3 frame has been seen at all. Exposed for tests
+// and diagnostics.
+func (s *AnnouncePeerState) KnownV3Epoch() (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.knownV3Epoch, s.knownV3EpochSet
+}
+
+// MarkWireBaselineV3Sent records that a non-empty route_announce_v3
+// kind="full" frame has gone out to the peer in the current session.
+// Symmetric counterpart of MarkWireBaselineSent on the legacy/v2 path,
+// flipped by SendRouteAnnounceV3 in the announce loop / connect-time
+// sync after a successful send. Callers MUST flip this flag only after
+// a real wire emit — empty-snapshot short-circuits record the baseline
+// locally without emitting anything and so must leave the flag false.
+func (s *AnnouncePeerState) MarkWireBaselineV3Sent() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wireBaselineV3SentToPeer = true
+}
+
+// HasSentWireBaselineV3 reports whether THIS node has emitted a v3
+// kind="full" frame to the peer in the current session. Read by the
+// announce loop's v3 mode selection: a v3 kind="delta" wire frame is
+// gated on a previously transmitted v3 kind="full" so the receiver's
+// baseline gate (handleRouteAnnounceV3) accepts it; until this flag
+// flips, even a v3-cap pair stays on the legacy / v2 wire path so the
+// peer's first v3 frame is always a self-contained baseline.
+func (s *AnnouncePeerState) HasSentWireBaselineV3() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wireBaselineV3SentToPeer
 }
 
 // AnnounceStateRegistry manages per-peer AnnouncePeerState instances.
@@ -390,6 +518,15 @@ func (r *AnnounceStateRegistry) MarkDisconnected(peerID PeerIdentity) {
 	// could pick the v2 wire frame against a peer that has never received
 	// announce_routes in that session.
 	s.wireBaselineSentToPeer = false
+	// A fresh session may front a restarted peer; its v3 epoch counter is
+	// per-process and unrelated to the previous session's value, so forget
+	// the watermark to avoid wrongly classifying the next frame as stale.
+	s.knownV3Epoch = 0
+	s.knownV3EpochSet = false
+	// Same session-boundary reset for the v3-baseline flag: a new session
+	// has no observable v3 baseline regardless of what the previous one
+	// emitted, so the first v3 cycle must re-send kind="full".
+	s.wireBaselineV3SentToPeer = false
 }
 
 // MarkReconnected resets a previously disconnected peer for a new announce
@@ -444,6 +581,16 @@ func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity, caps []Peer
 	// baseline state, which would unlock v2 delta sends without an
 	// observable baseline frame in the new session.
 	s.wireBaselineSentToPeer = false
+	// Same session-boundary reset as MarkDisconnected: a reconnect may
+	// front a restarted peer, so the v3 epoch watermark starts unset.
+	s.knownV3Epoch = 0
+	s.knownV3EpochSet = false
+	// Idempotent v3-baseline reset — mirrors the legacy
+	// wireBaselineSentToPeer reset above. A reconnect that skipped
+	// MarkDisconnected must not inherit a stale v3-baseline flag from
+	// the previous session, which would unlock v3 deltas without an
+	// observable kind="full" frame in the new session.
+	s.wireBaselineV3SentToPeer = false
 }
 
 // copyCapabilities returns an independent slice with the same contents so

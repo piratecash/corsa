@@ -178,6 +178,24 @@ type Table struct {
 	// RecordPeerDigestSnapshot to keep zero-allocation idle
 	// nodes cheap.
 	sessionDigestCache map[PeerIdentity]sessionDigestEntry
+
+	// epoch is the local route_announce_v3 epoch counter (Phase 4,
+	// overview §7.1). It identifies this Table's generation: it ships on
+	// every route_announce_v3 frame so a peer can distinguish a stale
+	// replay from a fresh table that has reset since the previous frame.
+	// The receiver's per-peer watermark advances on increase
+	// (V3EpochReset) and rejects strictly-lower frames (V3EpochStale) —
+	// see AnnouncePeerState.ObserveV3Epoch.
+	//
+	// Immutable after construction in this PR. Default 1 (WithEpoch
+	// overrides for deterministic tests). A future Phase 4 follow-up
+	// adds a Table.Reset / in-process epoch bump so a wiped-in-place
+	// table can signal the discontinuity without a process restart —
+	// today the implicit reset is the process restart itself, which
+	// also closes every session and resets the receive watermark via
+	// MarkReconnected, so the on-wire epoch value matters only within
+	// a session.
+	epoch uint64
 }
 
 // TableOption configures optional Table parameters.
@@ -187,6 +205,16 @@ type TableOption func(*Table)
 func WithClock(clock func() time.Time) TableOption {
 	return func(t *Table) {
 		t.clock = clock
+	}
+}
+
+// WithEpoch overrides the local route_announce_v3 epoch counter
+// (Phase 4, overview §7.1). The value is opaque to the routing core —
+// only the v3 send/receive path inspects it. Tests use this to pin a
+// deterministic epoch; production leaves the default of 1.
+func WithEpoch(epoch uint64) TableOption {
+	return func(t *Table) {
+		t.epoch = epoch
 	}
 }
 
@@ -352,6 +380,9 @@ func NewTable(opts ...TableOption) *Table {
 		clock:  time.Now,
 		flap:   newFlapDetector(),
 		health: newHealthStore(),
+		// Phase 4 v3 epoch default. WithEpoch overrides for tests. See
+		// the Table.epoch field doc for the immutability rationale.
+		epoch: 1,
 	}
 	// Link the FlapDetector into routeStore so Phase 1 P2 (SeqNo
 	// flap cap) helpers nextOutboundSeqLockedPerPeer /
@@ -385,6 +416,13 @@ func (t *Table) ActiveSize() int {
 // LocalOrigin returns this node's identity string.
 func (t *Table) LocalOrigin() PeerIdentity {
 	return t.localOrigin
+}
+
+// Epoch returns the local route_announce_v3 epoch counter (Phase 4,
+// overview §7.1). Immutable after construction; see Table.epoch for the
+// future-restart semantics.
+func (t *Table) Epoch() uint64 {
+	return t.epoch
 }
 
 // CapStats returns a value-copy of the MaxNextHopsPerOrigin admission

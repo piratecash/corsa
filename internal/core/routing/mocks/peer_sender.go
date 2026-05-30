@@ -16,7 +16,8 @@ import (
 func NewMockPeerSender(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *MockPeerSender {
+},
+) *MockPeerSender {
 	mock := &MockPeerSender{}
 	mock.Mock.Test(t)
 
@@ -97,6 +98,81 @@ func (_c *MockPeerSender_SendAnnounceRoutes_Call) Return(b bool) *MockPeerSender
 }
 
 func (_c *MockPeerSender_SendAnnounceRoutes_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, routes []routing.AnnounceEntry) bool) *MockPeerSender_SendAnnounceRoutes_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SendRouteAnnounceV3 provides a mock function for the type MockPeerSender
+func (_mock *MockPeerSender) SendRouteAnnounceV3(ctx context.Context, peerAddress routing.PeerAddress, kind string, epoch uint64, entries []routing.AnnounceEntry) bool {
+	ret := _mock.Called(ctx, peerAddress, kind, epoch, entries)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SendRouteAnnounceV3")
+	}
+
+	var r0 bool
+	if returnFunc, ok := ret.Get(0).(func(context.Context, routing.PeerAddress, string, uint64, []routing.AnnounceEntry) bool); ok {
+		r0 = returnFunc(ctx, peerAddress, kind, epoch, entries)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	return r0
+}
+
+// MockPeerSender_SendRouteAnnounceV3_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SendRouteAnnounceV3'
+type MockPeerSender_SendRouteAnnounceV3_Call struct {
+	*mock.Call
+}
+
+// SendRouteAnnounceV3 is a helper method to define mock.On call
+//   - ctx context.Context
+//   - peerAddress routing.PeerAddress
+//   - kind string
+//   - epoch uint64
+//   - entries []routing.AnnounceEntry
+func (_e *MockPeerSender_Expecter) SendRouteAnnounceV3(ctx interface{}, peerAddress interface{}, kind interface{}, epoch interface{}, entries interface{}) *MockPeerSender_SendRouteAnnounceV3_Call {
+	return &MockPeerSender_SendRouteAnnounceV3_Call{Call: _e.mock.On("SendRouteAnnounceV3", ctx, peerAddress, kind, epoch, entries)}
+}
+
+func (_c *MockPeerSender_SendRouteAnnounceV3_Call) Run(run func(ctx context.Context, peerAddress routing.PeerAddress, kind string, epoch uint64, entries []routing.AnnounceEntry)) *MockPeerSender_SendRouteAnnounceV3_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 routing.PeerAddress
+		if args[1] != nil {
+			arg1 = args[1].(routing.PeerAddress)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 uint64
+		if args[3] != nil {
+			arg3 = args[3].(uint64)
+		}
+		var arg4 []routing.AnnounceEntry
+		if args[4] != nil {
+			arg4 = args[4].([]routing.AnnounceEntry)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+		)
+	})
+	return _c
+}
+
+func (_c *MockPeerSender_SendRouteAnnounceV3_Call) Return(b bool) *MockPeerSender_SendRouteAnnounceV3_Call {
+	_c.Call.Return(b)
+	return _c
+}
+
+func (_c *MockPeerSender_SendRouteAnnounceV3_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, kind string, epoch uint64, entries []routing.AnnounceEntry) bool) *MockPeerSender_SendRouteAnnounceV3_Call {
 	_c.Call.Return(run)
 	return _c
 }

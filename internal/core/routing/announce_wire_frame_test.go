@@ -81,11 +81,15 @@ func newWireFramePeerSender(t *testing.T) (*routingmocks.MockPeerSender, *wireFr
 }
 
 // TestAnnounceLoop_FullSync_UsesLegacyFrame verifies that the first send
-// to a fresh peer — which is always a full sync — goes through the legacy
-// SendAnnounceRoutes method and never through SendRoutesUpdate. This is
-// the connect-time invariant encoded in the PeerSender interface:
-// initial sync is always legacy, regardless of any future v2 negotiated
-// state.
+// to a fresh peer — which is always a full sync — goes through a
+// self-contained baseline frame and never through a delta frame. For
+// a peer that has NOT negotiated the v3 triplet (the fixture here)
+// that frame is the legacy SendAnnounceRoutes; SendRouteAnnounceV3
+// with kind="full" is the symmetric baseline path for v3-triplet
+// peers (exercised in routing_integration_connect_sync_test.go). The
+// negative assertion is the load-bearing piece: SendRoutesUpdate must
+// NEVER fire on this path, regardless of any negotiated v2 state,
+// because the peer has no baseline a delta could diff against.
 func TestAnnounceLoop_FullSync_UsesLegacyFrame(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 	sender, counter := newWireFramePeerSender(t)
@@ -198,16 +202,26 @@ func TestAnnounceLoop_Delta_UsesLegacyFrame(t *testing.T) {
 	}
 }
 
-// TestAnnounceLoop_DoesNotReadCapabilities_Yet is a regression guard:
-// AnnounceTarget.Capabilities is plumbed into the announce cycle for a
-// future routing-announce v2 mode-selection path, but v1 must NOT branch on
-// it. Two peers — one with no capabilities, one with a speculative v2
-// capability — must both receive the same wire frame (SendAnnounceRoutes)
-// with the same payload shape. If a well-meaning change starts picking
-// SendRoutesUpdate based on Capabilities before the v2 wire frame actually
-// lands, this test fails and points directly at the commit that broke the
-// "initial sync is always legacy announce_routes" invariant documented on
-// the PeerSender interface.
+// TestAnnounceLoop_DoesNotReadCapabilities_Yet is a regression guard
+// for the v1-only fallback floor of the cap-driven dispatch matrix.
+// Wire-format selection in announceToAllPeers DOES branch on caps post-
+// Phase 4 (legacy / v2 routes_update / v3 route_announce_v3 — see
+// classifyDeltaMode and the HasSentWireBaseline* gates), but two
+// degenerate cap snapshots must still route to legacy SendAnnounceRoutes:
+//
+//   - empty caps (no v1, no v2, no v3): the peer can't accept any
+//     upgraded frame — only v1 fits;
+//   - caps with a SHIPPED upgrade cap (mesh_routing_v2) but WITHOUT
+//     v1 alongside it: same outcome — the classifier requires v1 as
+//     the floor for any upgrade (see hasCapV2Triplet /
+//     hasCapV3Triplet), so v2 / v3 stay off the wire even though the
+//     upgrade cap is real and recognised.
+//
+// Both peers must therefore see the legacy frame here. The test
+// name predates the Phase 4 dispatch — it is kept stable to preserve
+// CI history and the negative-assertion shape (zero SendRoutesUpdate
+// calls); the contract it pins today is "no-upgrade-cap fallback to
+// legacy", not the original "loop doesn't read caps yet".
 func TestAnnounceLoop_DoesNotReadCapabilities_Yet(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 	sender, counter := newWireFramePeerSender(t)
@@ -216,9 +230,14 @@ func TestAnnounceLoop_DoesNotReadCapabilities_Yet(t *testing.T) {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 
-	// Two peers with different capability snapshots. "mesh_routing_v2" is a
-	// deliberately speculative name — this test MUST stay v1-only, so the
-	// capability here is a sentinel that no v1 code path should recognise.
+	// Two peers with different capability snapshots. mesh_routing_v2
+	// IS a real shipped cap, but the second peer here intentionally
+	// declares ONLY mesh_routing_v2 without mesh_routing_v1. The
+	// classifier requires v1 alongside any upgrade (v2 or v3) — see
+	// hasCapV2Triplet / hasCapV3Triplet — so a v2-without-v1 peer falls
+	// through to the v1-only fallback and gets legacy SendAnnounceRoutes,
+	// same as the first peer with nil caps. The test pins this floor:
+	// no upgraded delta frame leaves on the wire for either peer.
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
 			{

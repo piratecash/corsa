@@ -524,8 +524,8 @@ func TestRouteReputation_ColdStartUntilWarmupSamples(t *testing.T) {
 		ReliabilityScore: 1.0,
 	}
 
-	coldScore := CompositeScore(1, RouteSourceAnnouncement, cold)
-	warmingScore := CompositeScore(1, RouteSourceAnnouncement, warming)
+	coldScore := CompositeScore(1, RouteSourceAnnouncement, cold, false)
+	warmingScore := CompositeScore(1, RouteSourceAnnouncement, warming, false)
 	if !almostEqual(coldScore, warmingScore) {
 		t.Fatalf("reliability bonus leaked during warmup: cold=%f, warming=%f", coldScore, warmingScore)
 	}
@@ -534,7 +534,7 @@ func TestRouteReputation_ColdStartUntilWarmupSamples(t *testing.T) {
 	warmed := *warming
 	warmed.HopAckAttempts = ReliabilityWarmupSamples
 	warmed.HopAckSuccesses = ReliabilityWarmupSamples
-	warmedScore := CompositeScore(1, RouteSourceAnnouncement, &warmed)
+	warmedScore := CompositeScore(1, RouteSourceAnnouncement, &warmed, false)
 	if warmedScore <= warmingScore {
 		t.Fatalf("crossing warmup threshold did not boost score: warming=%f, warmed=%f", warmingScore, warmedScore)
 	}

@@ -193,7 +193,14 @@ type Service struct {
 	//   • topics              — per-topic append-only message backlog used by
 	//                           fetch_messages / fetch_inbox / fetchDMHeaders
 	//                           / gossip relay of dm traffic
-	//   • seen                — dedup set of message IDs already observed
+	//   • seen                — dedup set of message IDs already observed,
+	//                           backed by a rotating Bloom filter (Phase 4
+	//                           13.4): two filters with a 5-minute rotation
+	//                           cap memory regardless of message volume,
+	//                           trading the legacy map's perfect recall
+	//                           for a <0.1% false-positive rate. Eviction
+	//                           window is [5, 10] minutes — see
+	//                           bloom_dedup.go for the full contract.
 	//   • subs                — recipient → subscriber map for push delivery
 	//                           via subscribe_inbox and hello node-routes
 	//   • notices             — gazeta notice cache keyed by ciphertext id
@@ -201,7 +208,7 @@ type Service struct {
 	//   • lastExpiredCleanup  — throttle timestamp for cleanupExpiredMessages
 	gossipMu sync.RWMutex
 	topics   map[string][]protocol.Envelope
-	seen     map[string]struct{}
+	seen     *rotatingBloomDedup
 	subs     map[string]map[string]*subscriber
 	notices  map[string]gazeta.Notice
 	events   map[chan protocol.LocalChangeEvent]struct{}
@@ -267,6 +274,7 @@ type Service struct {
 	router                    Router                                    // routing strategy for outbound message delivery
 	relayStates               *relayStateStore                          // hop-by-hop relay forwarding state (Iteration 1)
 	relayLimiter              *relayRateLimiter                         // per-peer token bucket for relay fan-out
+	announceLimiter           *announceRateLimiter                      // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
 	connLimiter               *connRateLimiter                          // per-IP connection rate limiter at accept level
 	cmdLimiter                *commandRateLimiter                       // per-connection command rate limiter for non-relay frames
 	inboundByIP               map[string]int                            // IP → active inbound connection count (per-IP cap)
@@ -896,11 +904,19 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	}
 
 	topics := make(map[string][]protocol.Envelope)
-	seen := make(map[string]struct{})
+	// Phase 4 13.4: dedup set is now a rotating Bloom filter. Seed it
+	// from the persisted message IDs so a restart preserves the
+	// already-seen contract within the [rotation, 2*rotation] eviction
+	// window. The bloom is sized via package-level constants
+	// (bloomDedupBits / bloomDedupHashes / bloomDedupRotation); the
+	// nil clock argument selects the production wall clock — tests
+	// build their own dedup with an injected clock via
+	// newRotatingBloomDedup directly.
+	seen := newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
 	for _, msg := range queueState.RelayMessages {
 		topics[msg.Topic] = append(topics[msg.Topic], msg)
 		if msg.ID != "" {
-			seen[string(msg.ID)] = struct{}{}
+			seen.Add(string(msg.ID))
 		}
 	}
 	if len(queueState.RelayMessages) > 0 {
@@ -1305,6 +1321,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	svc.relayStates = newRelayStateStore()
 	svc.relayStates.restore(queueState.RelayForwardStates)
 	svc.relayLimiter = newRelayRateLimiter()
+	svc.announceLimiter = newAnnounceRateLimiter()
 	svc.connLimiter = newConnRateLimiter()
 	svc.cmdLimiter = newCommandRateLimiter()
 	svc.inboundByIP = make(map[string]int)
@@ -2476,6 +2493,58 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		}
 		s.handleRouteSyncSummary(s.inboundPeerIdentity(connID), summaryFrame)
 		return true
+	case "route_poison_v1":
+		// Auth gate enforced above. Phase 4 single-hop poison-reverse
+		// signal gated by the pair mesh_routing_v1 +
+		// mesh_poison_reverse_v1. Relay cap NOT required — poison is a
+		// control signal scoped to the (identity, sender) storage slot,
+		// not a data-plane delivery, so a routing-capable-but-non-relay
+		// neighbour is a valid sender. Type string is the raw literal
+		// (kept in sync with protocol.RoutePoisonFrameType) so the
+		// command_scope_test AST inspector picks up the case label.
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV1) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(connID, domain.CapMeshPoisonReverseV1) {
+			accepted = false
+			return true
+		}
+		poison, err := protocol.UnmarshalRoutePoisonFrame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRoutePoison(s.inboundPeerIdentity(connID), poison)
+		return true
+	case "route_announce_v3":
+		// Auth gate enforced above. Phase 4 compact announce gated by the
+		// FULL triplet mesh_routing_v1 + mesh_routing_v3 + mesh_relay_v1,
+		// mirroring announce_routes / routes_update: v1 is the wire
+		// baseline a mixed-version fallback depends on, relay is the
+		// data-plane requirement (a non-relay neighbor yields unusable
+		// NextHops), and v3 is the compact-frame opt-in. Type string is the
+		// raw literal (kept in sync with protocol.RouteAnnounceV3FrameType)
+		// so the command_scope_test AST inspector picks up the case label.
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV1) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV3) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(connID, domain.CapMeshRelayV1) {
+			accepted = false
+			return true
+		}
+		v3, err := protocol.UnmarshalRouteAnnounceV3Frame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRouteAnnounceV3(s.inboundPeerIdentity(connID), s.inboundConnKeyForID(connID), v3)
+		return true
 	default:
 		accepted = false
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
@@ -2523,6 +2592,14 @@ var p2pWireCommands = map[string]bool{
 	// happy.
 	"route_sync_digest_v1":  true,
 	"route_sync_summary_v1": true,
+	// Phase 4 (mesh_routing_v3, additive). Compact announce frame that
+	// replaces announce_routes / routes_update for v3-capable pairs —
+	// same string-literal pattern so command_scope_test stays happy.
+	"route_announce_v3": true,
+	// Phase 4 (mesh_poison_reverse_v1, additive). Single-hop explicit
+	// poison-reverse signal for accelerated count-to-infinity
+	// convergence — same string-literal pattern.
+	"route_poison_v1": true,
 }
 
 // isP2PWireCommand returns true if the command name belongs to the
@@ -3237,7 +3314,7 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		BoxSig:                 s.selfBoxSig,
 		ObservedAddress:        observedAddr,
 		Challenge:              challenge,
-		Capabilities:           localCapabilityStrings(),
+		Capabilities:           localCapabilityStrings(s.cfg.EnableMeshRoutingV3),
 	}
 }
 
@@ -3507,7 +3584,7 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, t
 		Identity:        domain.PeerIdentity(strings.TrimSpace(hello.Address)),
 		LastActivity:    time.Now().UTC(),
 		Networks:        domain.ParseNetGroups(hello.Networks),
-		Caps:            intersectCapabilities(localCapabilities(), hello.Capabilities),
+		Caps:            intersectCapabilities(localCapabilities(s.cfg.EnableMeshRoutingV3), hello.Capabilities),
 		ProtocolVersion: domain.ProtocolVersion(hello.Version),
 	})
 }
@@ -4706,14 +4783,14 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
 	s.gossipMu.Lock()
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
-	if _, ok := s.seen[string(msg.ID)]; ok {
+	if s.seen.Has(string(msg.ID)) {
 		count := len(s.topics[msg.Topic])
 		s.gossipMu.Unlock()
 		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_dedup").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_dedup")
 		return false, count, ""
 	}
-	s.seen[string(msg.ID)] = struct{}{}
+	s.seen.Add(string(msg.ID))
 
 	envelope := protocol.Envelope{
 		ID:         msg.ID,
@@ -5680,7 +5757,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
 		BoxSig:        s.selfBoxSig,
-		Capabilities:  localCapabilityStrings(),
+		Capabilities:  localCapabilityStrings(s.cfg.EnableMeshRoutingV3),
 	})
 	if err != nil {
 		return ""
@@ -6272,6 +6349,7 @@ func expectedReplyType(requestType string) string {
 func isFireAndForgetFrame(frameType string) bool {
 	switch frameType {
 	case "announce_routes", "routes_update", "request_resync",
+		protocol.RouteAnnounceV3FrameType, protocol.RoutePoisonFrameType,
 		"push_message", "push_notice", "relay_delivery_receipt",
 		protocol.RouteSyncDigestFrameType, protocol.RouteSyncSummaryFrameType:
 		return true

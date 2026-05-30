@@ -9,8 +9,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-func TestLocalCapabilities(t *testing.T) {
-	caps := localCapabilities()
+func TestLocalCapabilities_DefaultExcludesV3(t *testing.T) {
+	caps := localCapabilities(false)
 	expected := []domain.Capability{
 		domain.CapMeshRelayV1,
 		domain.CapMeshRoutingV1,
@@ -24,17 +24,66 @@ func TestLocalCapabilities(t *testing.T) {
 		domain.CapMeshRouteSyncV1,
 	}
 	if len(caps) != len(expected) {
-		t.Fatalf("localCapabilities() = %v, want %v", caps, expected)
+		t.Fatalf("localCapabilities(false) = %v, want %v", caps, expected)
 	}
 	for i, c := range expected {
 		if caps[i] != c {
-			t.Fatalf("localCapabilities()[%d] = %q, want %q", i, caps[i], c)
+			t.Fatalf("localCapabilities(false)[%d] = %q, want %q", i, caps[i], c)
 		}
 	}
 }
 
-func TestLocalCapabilityStrings(t *testing.T) {
-	strs := localCapabilityStrings()
+// TestLocalCapabilities_V3OptInAppendsCap pins the Phase 4 opt-in
+// contract: when the operator sets EnableMeshRoutingV3, the v3 cap
+// and the poison-reverse cap are appended at the end of the advertise
+// list. attested-links is INTENTIONALLY ABSENT — the Round-7 review
+// found that the production emit path produces no real signatures
+// (signOwnOriginV3Entries only signs Identity == localIdentity
+// entries, but AnnounceProjectionFor never emits those), so the
+// advertise would promise a contract no v3 frame on the wire
+// fulfils. Phase 5 re-enables the advertise the day the self-
+// attestation entry stream lands — see capabilities.go for the
+// rationale and docs/protocol/attested_links.md "Production
+// advertisement status".
+func TestLocalCapabilities_V3OptInAppendsCap(t *testing.T) {
+	caps := localCapabilities(true)
+	want := []domain.Capability{
+		domain.CapMeshRelayV1,
+		domain.CapMeshRoutingV1,
+		domain.CapMeshRoutingV2,
+		domain.CapFileTransferV1,
+		domain.CapMeshRouteProbeV1,
+		domain.CapMeshRouteQueryV1,
+		domain.CapMeshRouteSyncV1,
+		domain.CapMeshRoutingV3,
+		domain.CapMeshPoisonReverseV1,
+	}
+	if len(caps) != len(want) {
+		t.Fatalf("localCapabilities(true) = %v, want %v", caps, want)
+	}
+	for i, c := range want {
+		if caps[i] != c {
+			t.Fatalf("localCapabilities(true)[%d] = %q, want %q", i, caps[i], c)
+		}
+	}
+}
+
+// TestLocalCapabilities_DoesNotAdvertiseAttestedLinks is the explicit
+// negative pin for the Round-7 unadvertise. A future change that
+// blindly re-adds CapMeshAttestedLinksV1 to localCapabilities would
+// fail this test before re-introducing the dishonest cap.
+func TestLocalCapabilities_DoesNotAdvertiseAttestedLinks(t *testing.T) {
+	for _, v3 := range []bool{false, true} {
+		for _, c := range localCapabilities(v3) {
+			if c == domain.CapMeshAttestedLinksV1 {
+				t.Fatalf("localCapabilities(%v) advertised mesh_attested_links_v1 — emit path produces no real signatures; re-enable only when the self-attestation entry stream lands (capabilities.go)", v3)
+			}
+		}
+	}
+}
+
+func TestLocalCapabilityStrings_DefaultExcludesV3(t *testing.T) {
+	strs := localCapabilityStrings(false)
 	expected := []string{
 		"mesh_relay_v1",
 		"mesh_routing_v1",
@@ -42,16 +91,31 @@ func TestLocalCapabilityStrings(t *testing.T) {
 		"file_transfer_v1",
 		"mesh_route_probe_v1",
 		"mesh_route_query_v1",
-		// Phase 3 PR 12.5 — see TestLocalCapabilities above.
+		// Phase 3 PR 12.5 — see TestLocalCapabilities_DefaultExcludesV3.
 		"mesh_route_sync_v1",
 	}
 	if len(strs) != len(expected) {
-		t.Fatalf("localCapabilityStrings() = %v, want %v", strs, expected)
+		t.Fatalf("localCapabilityStrings(false) = %v, want %v", strs, expected)
 	}
 	for i, s := range expected {
 		if strs[i] != s {
-			t.Fatalf("localCapabilityStrings()[%d] = %q, want %q", i, strs[i], s)
+			t.Fatalf("localCapabilityStrings(false)[%d] = %q, want %q", i, strs[i], s)
 		}
+	}
+}
+
+func TestLocalCapabilityStrings_V3OptInIncludesV3(t *testing.T) {
+	strs := localCapabilityStrings(true)
+	if len(strs) < 2 {
+		t.Fatalf("localCapabilityStrings(true) must include Phase 4 tail (v3 + poison-reverse); got %v", strs)
+	}
+	// attested-links is INTENTIONALLY absent — see the Round-7 finding
+	// pinned by TestLocalCapabilities_DoesNotAdvertiseAttestedLinks.
+	// Phase 5 re-enables the cap together with the self-attestation
+	// entry stream.
+	tail := strs[len(strs)-2:]
+	if tail[0] != "mesh_routing_v3" || tail[1] != "mesh_poison_reverse_v1" {
+		t.Fatalf("localCapabilityStrings(true) tail = %v, want [mesh_routing_v3 mesh_poison_reverse_v1]", tail)
 	}
 }
 

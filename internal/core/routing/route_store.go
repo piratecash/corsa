@@ -336,11 +336,29 @@ type outboundPeerKey struct {
 // field (via normalizeExtra in announce_builder.go) so json.RawMessage
 // becomes a comparable map-key-compatible value AND so that
 // equivalent JSON encodings collapse to the same sig.
+//
+// AttestedSig holds the raw attested-links signature bytes converted
+// to a string (Go allows []byte→string for arbitrary byte sequences;
+// the string just holds the byte sequence and stays
+// map-key-comparable). Including it here is the Round-14 fix: a
+// sig-only upgrade in storage (Phase 4 13.2-C reconfirmation path)
+// must produce a fresh outbound SeqNo so the receiver's per-peer
+// monotonicity check accepts the new wire content. Without
+// AttestedSig in the cache key, the cache would hit on the previous
+// (unsigned) emit, hand back the burnt SeqNo, and the downstream
+// peer would reject the new (signed) entry as stale-by-SeqNo —
+// stranding the attestation locally and breaking the rolling enable
+// of mesh_attested_links_v1. AttestedSigVerified is intentionally
+// NOT part of the cache key: it is a local-only observation, not
+// wire content, so a verified→verified flip with identical bytes
+// must NOT force a fresh SeqNo (the wire frame is byte-identical
+// and the receiver already has it).
 type outboundEmitSig struct {
-	Uplink    PeerIdentity
-	Hops      uint8
-	Withdrawn bool
-	ExtraSig  string
+	Uplink      PeerIdentity
+	Hops        uint8
+	Withdrawn   bool
+	ExtraSig    string
+	AttestedSig string
 }
 
 // newRouteStore returns an empty store with the package defaults.
@@ -387,6 +405,41 @@ func (s *routeStore) findByUplinkLocked(identity, uplink PeerIdentity) ([]Uplink
 		}
 	}
 	return bucket, -1
+}
+
+// peekLiveUplinkSeqLocked returns the SeqNo stored on the live
+// (identity, uplink) claim — non-withdrawn, non-expired against
+// `now`. The bool is false when no claim exists for the pair OR
+// when the claim is already a withdrawn tombstone OR has expired
+// past its TTL. Used by Table.InvalidateUplinkClaim (Phase 4 13.3
+// poison-reverse) to pick a strictly-newer SeqNo for the in-place
+// withdrawal — see that helper for the contract.
+//
+// Why "live only" rather than "any slot". An earlier version of
+// this helper returned the SeqNo of ANY slot, including already-
+// withdrawn tombstones, which made repeated route_poison_v1 frames
+// non-idempotent: every duplicate poison bumped the tombstone's
+// SeqNo by +1, published a fresh route-change event, and inflated
+// the SeqNo space against which a legitimate recovery announce
+// would be tested for monotonicity (the recovery announce uses
+// the origin's native SeqNo, which after enough duplicate poisons
+// could rank below the tombstone and be rejected). Treating
+// already-withdrawn / already-expired claims as "no live claim"
+// makes the second-and-later poison from the same peer a clean
+// no-op at the storage layer — the SeqNo stays put, no
+// route-change event fires, and recovery is unimpeded.
+//
+// Read-only; caller must hold t.mu (reader OK).
+func (s *routeStore) peekLiveUplinkSeqLocked(identity, uplink PeerIdentity, now time.Time) (uint64, bool) {
+	bucket, idx := s.findByUplinkLocked(identity, uplink)
+	if idx < 0 {
+		return 0, false
+	}
+	claim := bucket[idx]
+	if claim.IsWithdrawn() || claim.IsExpired(now) {
+		return 0, false
+	}
+	return claim.SeqNo, true
 }
 
 // Total returns the total number of claim entries across all

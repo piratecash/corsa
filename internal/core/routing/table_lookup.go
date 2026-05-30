@@ -208,7 +208,7 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 			adjusted.Health = HealthBad
 			h = &adjusted
 		}
-		return CompositeScore(uint8(claim.Hops), claim.Source, h)
+		return CompositeScore(uint8(claim.Hops), claim.Source, h, claim.AttestedSigVerified)
 	}
 	var liveWinner *UplinkClaim
 	var liveWinnerScore float64
@@ -259,6 +259,10 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 		Hops:      liveWinner.Hops,
 		Withdrawn: false,
 		ExtraSig:  string(normalizeExtra(liveWinner.Extra)),
+		// Round-14: include AttestedSig bytes in the targeted-
+		// projection content key — matches AnnounceProjectionFor's
+		// live emit branch. See outboundEmitSig type doc.
+		AttestedSig: string(liveWinner.AttestedSig),
 	}
 	wireSeqNo, armed := t.store.nextOutboundSeqLockedPerPeer(target, requester, sig, liveWinner.SeqNo, liveWinner.LastIngressOrigin, now)
 	if armed {
@@ -295,6 +299,11 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 		Hops:     int(liveWinner.Hops),
 		SeqNo:    wireSeqNo,
 		Extra:    liveWinner.Extra,
+		// Phase 4 13.2-A: targeted-projection mirror of
+		// AnnounceProjectionFor — forward the attested-links signature
+		// stored on the winning UplinkClaim.
+		AttestedSig:         liveWinner.AttestedSig,
+		AttestedSigVerified: liveWinner.AttestedSigVerified,
 	}, liveWinner.Uplink, true
 }
 
@@ -645,7 +654,7 @@ func sortRoutesByCompositeScoreLocked(routes []RouteEntry, health *healthStore, 
 			adjusted.Health = HealthBad
 			h = &adjusted
 		}
-		return CompositeScore(uint8(r.Hops), r.Source, h)
+		return CompositeScore(uint8(r.Hops), r.Source, h, r.AttestedSigVerified)
 	}
 	for i := 1; i < len(routes); i++ {
 		for j := i; j > 0 && scoreOf(routes[j]) > scoreOf(routes[j-1]); j-- {

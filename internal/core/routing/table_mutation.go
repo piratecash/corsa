@@ -198,6 +198,110 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	return status, nil
 }
 
+// IdentitiesViaUplink returns the destination identities that have
+// an active (non-withdrawn, non-expired) claim through the given
+// uplink. The result is a defensive copy — caller may mutate freely.
+//
+// Used by the Phase 4 13.3 poison-reverse emit hooks to snapshot
+// the set of identities reachable via a soon-to-be-removed uplink,
+// so the node can emit route_poison_v1 about each of them to its
+// OTHER direct peers immediately after the uplink loss. Without
+// this snapshot the post-removal storage no longer carries the
+// information (InvalidateAllVia marks claims withdrawn and the
+// caller has no list of affected identities — only a count).
+//
+// Locking: takes t.mu.RLock for the bucket walk; the result is
+// safe to use outside the lock because it carries value-typed
+// PeerIdentity entries (no aliasing into storage).
+func (t *Table) IdentitiesViaUplink(uplink PeerIdentity) []PeerIdentity {
+	if uplink == "" {
+		return nil
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	now := t.clock()
+	var out []PeerIdentity
+	for identity, bucket := range t.store.buckets {
+		for i := range bucket {
+			c := &bucket[i]
+			if c.Uplink != uplink {
+				continue
+			}
+			if c.IsWithdrawn() || c.IsExpired(now) {
+				continue
+			}
+			out = append(out, identity)
+			break // only need to add each identity once
+		}
+	}
+	return out
+}
+
+// InvalidateUplinkClaim is the Phase 4 13.3 poison-reverse
+// counterpart of WithdrawRoute: it withdraws the storage claim for
+// the (identity, uplink) pair without any origin or wire-SeqNo
+// plumbing. The receive handler for a route_poison_v1 frame knows
+// only the identity (from the frame payload) and the uplink (the
+// session-level peer that delivered the frame), so the SeqNo is
+// synthesised here as `current + 1` to keep the withdrawal
+// monotonic against the existing claim's resurrection guard.
+//
+// Idempotency. The lookup is "live claim only" (peekLiveUplinkSeqLocked
+// skips withdrawn tombstones and expired claims), so a duplicate
+// poison from the same peer for the same identity returns false
+// without touching storage, without bumping SeqNo, and without
+// publishing a fresh route-change event. This matters because a
+// non-idempotent poison would let any peer inflate the tombstone
+// SeqNo by sending the same frame repeatedly — the legitimate
+// recovery announce uses the origin's native SeqNo and could end
+// up ranking below the inflated tombstone and be rejected by the
+// resurrection-guard. The idempotent path keeps the SeqNo space
+// bounded by the actual claim lifecycle, not by how many duplicate
+// poison frames an upstream peer happens to emit.
+//
+// Trust budget (overview §4.2): poison invalidates ONLY the
+// (identity, uplink) slot the sender owns. Other uplinks for the
+// same identity are untouched (the route is still reachable through
+// them at their own claim's SeqNo), and the origin's claim — which
+// flows via per-Identity SeqNo monotonicity — is not affected. This
+// is the structural reason a misbehaving peer cannot use poison to
+// spoof an origin withdrawal.
+//
+// Returns whether the storage actually mutated. The Table.dirty
+// flag is flipped on success so the snapshot publisher refreshes
+// (a poisoned slot may expose a surviving backup uplink that the
+// next Lookup will now prefer).
+func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
+	if identity == "" || uplink == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.clock()
+	seqNo, ok := t.store.peekLiveUplinkSeqLocked(identity, uplink, now)
+	if !ok {
+		// No LIVE claim for this (identity, uplink) — either we
+		// never learned about it, it expired via TTL, or a prior
+		// poison already tombstoned it. Returning false short-
+		// circuits the side effects (drain, log, route-change
+		// event) for the no-op path, which makes repeated
+		// route_poison_v1 frames idempotent at the storage
+		// layer — see the idempotency note above.
+		return false
+	}
+	// Origin field on the WithdrawTriple key is preserved for
+	// LastIngressOrigin / SeenOriginSeqs bookkeeping only — storage
+	// dedup is per-(Identity, Uplink) after Phase A. Using uplink
+	// as origin matches the sender-originated semantic the poison
+	// sender attests to.
+	key := RouteTriple{Identity: identity, Origin: uplink, NextHop: uplink}
+	mutated := t.store.WithdrawTriple(key, seqNo+1, now)
+	if mutated {
+		t.dirty.Store(true)
+	}
+	return mutated
+}
+
 // WithdrawRoute marks a specific route as withdrawn by setting hops to
 // HopsInfinity. This should be called when processing an incoming withdrawal
 // from the wire (hops=16, incremented SeqNo). For local peer disconnects,

@@ -109,11 +109,13 @@ func caps(values ...domain.Capability) []routing.PeerCapability {
 
 // TestAnnounceLoop_DeltaModeV2_BothCapsAgree verifies the v2 happy path:
 // when both AnnouncePeerState.Capabilities (set via MarkReconnected) and the
-// per-cycle AnnounceTarget.Capabilities (returned by peersFn) advertise both
-// CapMeshRoutingV1 and CapMeshRoutingV2, the delta sent after the legacy
-// baseline is carried by SendRoutesUpdate. This is the only path on which
-// the v2 wire frame may fire — every other test in this file asserts the
-// negative shape of that path.
+// per-cycle AnnounceTarget.Capabilities (returned by peersFn) advertise the
+// FULL v2 triplet (CapMeshRoutingV1 + CapMeshRoutingV2 + CapMeshRelayV1 —
+// Round-21 alignment with hasCapV2Triplet and the SendRoutesUpdate
+// dispatch gate), the delta sent after the legacy baseline is carried by
+// SendRoutesUpdate. This is the only path on which the v2 wire frame
+// may fire — every other test in this file asserts the negative shape
+// of that path.
 func TestAnnounceLoop_DeltaModeV2_BothCapsAgree(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 	sender, rec := newV2WireSender(t)
@@ -123,7 +125,10 @@ func TestAnnounceLoop_DeltaModeV2_BothCapsAgree(t *testing.T) {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
-	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2)
+	// Round-21: v2 classifier requires the full triplet
+	// (v1+v2+relay) to match the send-side dispatch gate; the test
+	// fixture mirrors the production deployed shape.
+	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
@@ -287,15 +292,19 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
-	// Persistent state advertises v1+v2 (last MarkReconnected snapshot —
-	// imagine this was set by an earlier session that has since been
-	// replaced or de-selected by routingCapablePeers).
-	stateCaps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2)
+	// Persistent state advertises the full v2 triplet (last
+	// MarkReconnected snapshot — imagine this was set by an earlier
+	// session that has since been replaced or de-selected by
+	// routingCapablePeers). Round-21: the triplet is what counts as
+	// v2-capable for classifyDeltaMode.
+	stateCaps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	registry.MarkReconnected("peer-C", stateCaps)
 
-	// Per-cycle target snapshot only advertises v1 — the session
-	// routingCapablePeers picked this cycle does not have v2.
-	targetCaps := caps(domain.CapMeshRoutingV1)
+	// Per-cycle target snapshot drops v2 — the session
+	// routingCapablePeers picked this cycle does not have v2 (relay
+	// is retained so the divergence is strictly on the v2 axis, not
+	// on the relay axis).
+	targetCaps := caps(domain.CapMeshRoutingV1, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C", Capabilities: targetCaps},
@@ -319,8 +328,24 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 		t.Fatalf("peer-C state missing after first cycle")
 	}
 	post := state.View()
-	if len(post.CapabilitiesSnapshot) != 1 || post.CapabilitiesSnapshot[0] != domain.CapMeshRoutingV1 {
-		t.Fatalf("cycle-time sync must drop persistent caps to target {v1}, got %v", post.CapabilitiesSnapshot)
+	// Post-sync the persistent snapshot must equal targetCaps
+	// ({v1, relay}) — v2 was dropped from the persistent record.
+	if len(post.CapabilitiesSnapshot) != 2 {
+		t.Fatalf("cycle-time sync must drop persistent caps to target {v1, relay}, got %v", post.CapabilitiesSnapshot)
+	}
+	hasV1, hasRelay := false, false
+	for _, c := range post.CapabilitiesSnapshot {
+		switch c {
+		case domain.CapMeshRoutingV1:
+			hasV1 = true
+		case domain.CapMeshRelayV1:
+			hasRelay = true
+		case domain.CapMeshRoutingV2:
+			t.Fatalf("cycle-time sync must DROP v2 from persistent caps, got %v", post.CapabilitiesSnapshot)
+		}
+	}
+	if !hasV1 || !hasRelay {
+		t.Fatalf("post-sync caps must contain {v1, relay}, got %v", post.CapabilitiesSnapshot)
 	}
 
 	// Add a route so the next cycle takes the delta path.
@@ -347,9 +372,10 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 
 // TestAnnounceLoop_FirstSync_V2Capable_StillLegacy is the v2-aware
 // counterpart of TestAnnounceLoop_FullSync_UsesLegacyFrame: even when a peer
-// advertises full v1+v2 capability on both sources, the first sync (no
-// baseline yet) MUST go through SendAnnounceRoutes. This is the protocol-level
-// "First-sync wire-frame invariant" documented in docs/routing.md.
+// advertises the FULL v2 triplet (v1+v2+relay — Round-21) on both sources,
+// the first sync (no baseline yet) MUST go through SendAnnounceRoutes. This
+// is the protocol-level "First-sync wire-frame invariant" documented in
+// docs/routing.md.
 func TestAnnounceLoop_FirstSync_V2Capable_StillLegacy(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
 	sender, rec := newV2WireSender(t)
@@ -359,7 +385,8 @@ func TestAnnounceLoop_FirstSync_V2Capable_StillLegacy(t *testing.T) {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
-	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2)
+	// Round-21: v2 classifier requires the full triplet.
+	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
@@ -409,7 +436,8 @@ func TestAnnounceLoop_DeltaModeV2_DowngradedWithoutWireBaseline(t *testing.T) {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
-	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2)
+	// Round-21: v2 classifier requires v1+v2+relay (full triplet).
+	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
@@ -421,7 +449,7 @@ func TestAnnounceLoop_DeltaModeV2_DowngradedWithoutWireBaseline(t *testing.T) {
 		routing.WithStateRegistry(registry),
 	)
 
-	// Persistent caps via MarkReconnected — both sources agree on v1+v2.
+	// Persistent caps via MarkReconnected — both sources agree on v1+v2+relay.
 	registry.MarkReconnected("peer-C", v2Caps)
 
 	// Simulate the empty-baseline branch: a successful baseline was recorded
@@ -479,7 +507,8 @@ func TestAnnounceLoop_DeltaModeV2_ForcedFullEmptyBaseline_KeepsWireBaselineFalse
 	sender, _ := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry(routing.WithRegistryClock(clock))
 
-	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2)
+	// Round-21: v2 classifier requires the full triplet.
+	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
@@ -524,7 +553,8 @@ func TestAnnounceLoop_ForcedFull_V2Capable_StillLegacy(t *testing.T) {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
-	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2)
+	// Round-21: v2 classifier requires the full triplet.
+	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
 			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},

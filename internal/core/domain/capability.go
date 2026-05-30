@@ -94,7 +94,8 @@ const (
 	// announce cycle still emits a full snapshot.
 	//
 	// The capability is ORTHOGONAL to the announce-plane caps
-	// (mesh_routing_v1 / mesh_routing_v2 / future mesh_routing_v3).
+	// (mesh_routing_v1 / mesh_routing_v2 / mesh_routing_v3 — all
+	// shipped).
 	// Peers without it negotiate the digest exchange away and
 	// continue receiving the full announce stream unchanged; the
 	// suppression only applies between pairs that both negotiated
@@ -105,6 +106,111 @@ const (
 	// full protocol contract and §2.4 for the wire-vs-RPC
 	// separation invariant.
 	CapMeshRouteSyncV1 Capability = "mesh_route_sync_v1"
+
+	// CapMeshRoutingV3 gates the Phase 4 compact announce wire frame
+	// (route_announce_v3) introduced in
+	// docs/cluster-mesh/phase-4-compact-wire-signed.md §3.1 (overview
+	// §7.1). The v3 frame drops the redundant Origin field that legacy
+	// announce_routes / routes_update carry — the receiver derives the
+	// uplink from the sending session, so Origin conveys no
+	// routing-relevant information after the Phase 1 per-uplink storage
+	// refactor (overview §4.1). A single route_announce_v3 frame carries
+	// both full sync and delta via its kind discriminator, and a local
+	// epoch counter lets a receiver detect a peer table reset (process
+	// restart) and request a fresh baseline instead of diffing against a
+	// stale one.
+	//
+	// Mixed-version interop. v3 is preferred only when BOTH peers
+	// advertise it; otherwise the sender falls back to routes_update
+	// (mesh_routing_v2) or announce_routes (mesh_routing_v1) exactly as
+	// before — see classifyDeltaMode / the wire-format selection in
+	// internal/core/routing/announce.go and overview §5.2 Phase B. Like
+	// v2, v3 is meaningful only when v1 is also negotiated: v1 gates the
+	// receive path the legacy fallback depends on, and a peer advertising
+	// v3 without v1 is treated as legacy. v3 is additive — it never
+	// raises MinimumProtocolVersion; legacy ingest stays alive until the
+	// Phase 6 cleanup window (overview §5.2 Phase C).
+	CapMeshRoutingV3 Capability = "mesh_routing_v3"
+
+	// CapMeshAttestedLinksV1 gates Ed25519-signed route announcements
+	// (Phase 4) introduced in
+	// docs/cluster-mesh/phase-4-compact-wire-signed.md §3.2 (overview
+	// §7.1 "sig" field). When negotiated alongside CapMeshRoutingV3,
+	// each route_announce_v3 entry MAY carry the origin identity's
+	// signature over the entry's canonical bytes
+	// (RouteAnnounceV3Entry.CanonicalSigningBytes). The signature
+	// proves that the destination identity itself sanctioned the
+	// (Identity, Extra) shape of the announcement — hops, epoch, and
+	// seq_no are all per-emitter wire fields that transit restamp on
+	// re-emit and are therefore EXCLUDED from the canonical signing
+	// payload (see CanonicalSigningBytes doc for the multi-hop
+	// verification rationale). Transit nodes forward the sig bytes
+	// verbatim so the signature remains verifiable after the entry
+	// has crossed nodes that do not understand the payload.
+	//
+	// Verification is locally enforced (zero-trust budget, overview
+	// §4.2): a present-but-invalid signature is treated as evidence
+	// the entry must NOT be accepted; an absent signature is allowed
+	// at Tier 2 but ranked lower by the trust score, and is
+	// MANDATORY for entries that participate in Phase 5 anchor
+	// publication (identity_record_v1). This capability is the wire
+	// prerequisite that lets Phase 5 require attested links without
+	// breaking pre-existing peers.
+	//
+	// Mixed-version interop. Like every Phase 4 capability,
+	// CapMeshAttestedLinksV1 is additive. The wire-level treatment
+	// of the sig field is:
+	//
+	//   - The sig field on route_announce_v3 entries is forwarded
+	//     verbatim regardless of negotiation — transit nodes do not
+	//     strip sigs (they cannot know which downstream peers will
+	//     verify), and the origin emits sig whenever its store has
+	//     one. A peer without the capability simply observes the
+	//     extra field and ignores it.
+	//   - What the capability gates is RECEIVER-SIDE behaviour:
+	//     when negotiated, the receiver runs the ed25519 verifier
+	//     against the destination identity's public key and applies
+	//     the trust-score bonus (scoreSignedBonus) on success;
+	//     present-but-invalid signatures drop the entry. When NOT
+	//     negotiated, the receiver treats sig bytes as informational
+	//     only — no verification, no trust-score impact, the entry
+	//     ranks identically to an unsigned one.
+	//
+	// We never reject an unsigned announcement solely because the
+	// cap is absent (Tier 2 leniency). The capability is meaningful
+	// only when CapMeshRoutingV3 is also negotiated:
+	// route_announce_v3 is the only frame that carries the sig
+	// field. See docs/protocol/attested_links.md "Capability
+	// negotiation" for the wire contract.
+	CapMeshAttestedLinksV1 Capability = "mesh_attested_links_v1"
+
+	// CapMeshPoisonReverseV1 gates Phase 4 explicit poison-reverse
+	// signals (route_poison_v1 wire frame) introduced in
+	// docs/cluster-mesh/phase-4-compact-wire-signed.md §3.3 (overview
+	// §7.7). A transit node that loses its upstream for an identity
+	// — or whose health for that identity transitions to dead, or
+	// who detects a loop — emits route_poison_v1 to its direct
+	// neighbours, naming the lost identity and the reason. The
+	// neighbour receiver invalidates ONLY its claims[identity][sender]
+	// slot (not other uplinks for the same identity, and never the
+	// origin's own claim — overview §4.2 zero-trust budget).
+	//
+	// This replaces the implicit hops=N+1 oscillation a count-to-
+	// infinity scenario produces: instead of waiting TTL for stale
+	// claims to expire while routes bounce up the hop ladder, an
+	// explicit poison-reverse collapses the bad path in one
+	// announce cycle, sharply accelerating convergence.
+	//
+	// Mixed-version interop. Like every Phase 4 capability,
+	// CapMeshPoisonReverseV1 is additive — peers without it never
+	// see or emit route_poison_v1 frames, and the legacy convergence
+	// path (TTL expiry + announce cycles) remains unchanged for
+	// them. Single-hop only: route_poison_v1 is NEVER forwarded by
+	// the receiver; a transit node that wants to propagate the
+	// poison further must emit its own frame after invalidating
+	// its own claim (which then signals via the normal route_announce
+	// flow at hops=HopsInfinity).
+	CapMeshPoisonReverseV1 Capability = "mesh_poison_reverse_v1"
 )
 
 // String returns the stable string label for the capability.
@@ -116,7 +222,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1:
+	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1:
 		return c, true
 	default:
 		return "", false

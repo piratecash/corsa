@@ -20,6 +20,8 @@ package node
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"sync"
@@ -67,21 +69,111 @@ func (s *Service) routingTableTTLLoop(ctx context.Context) {
 }
 
 // isAnnouncePlaneFrameType reports whether a frame type belongs to the
-// announce plane (announce_routes, routes_update, request_resync).
-// These frames are subject to the strict 128 KiB MaxFrameLine budget
-// even when received over peer sessions whose generic line reader
-// accepts up to 8 MiB, because the writer side (chunkAnnounceEntriesBySize)
-// caps them at MaxFrameLine and a wider receive budget would let
-// sender and receiver diverge on which routes a peer is willing to
-// carry. Used by readPeerSession to drop oversize announce-plane
-// frames before they reach the routing table.
+// announce plane (announce_routes, routes_update, request_resync,
+// route_announce_v3, route_poison_v1). These frames are subject to the
+// strict 128 KiB MaxFrameLine budget even when received over peer
+// sessions whose generic line reader accepts up to 8 MiB, because the
+// writer side (chunkAnnounceEntriesBySize + the v3 chunker + the fixed-
+// size poison emitter) caps them at MaxFrameLine and a wider receive
+// budget would let sender and receiver diverge on which routes a peer
+// is willing to carry. route_poison_v1 is a fixed-size control signal
+// (~200B) so the cap is purely a defence: a peer that pads a poison
+// frame past 128 KiB is buggy or hostile, and bypassing the cap on
+// poison alone would leave us doing base64+ed25519 verify on a
+// multi-megabyte input the writer side could never legitimately emit.
+// Used by readPeerSession to drop oversize announce-plane frames
+// before they reach the routing table.
 func isAnnouncePlaneFrameType(frameType string) bool {
 	switch frameType {
-	case "announce_routes", "routes_update", "request_resync":
+	case "announce_routes", "routes_update", "request_resync",
+		protocol.RouteAnnounceV3FrameType,
+		protocol.RoutePoisonFrameType:
 		return true
 	default:
 		return false
 	}
+}
+
+// isRawLineBackedFrameType reports whether the frame type's dispatch
+// re-parses the payload from Frame.RawLine rather than the universal
+// Frame fields. This is the set of Phase 2+ / Phase 4 frames that use
+// the RawLine bypass pattern to keep capability-gated wire shapes
+// compile-time isolated from the universal Frame struct.
+//
+// Inbound (NetCore) dispatchers receive the raw `line` directly as a
+// parameter so they don't need RawLine on the parsed Frame. The
+// outbound peer-session reader, by contrast, parses each line via
+// protocol.ParseFrameLine — which intentionally does NOT populate
+// Frame.RawLine — then pushes the parsed Frame to session.inboxCh,
+// dropping the raw bytes on the floor. Dispatch later calls
+// Unmarshal*Frame([]byte(frame.RawLine)) and silently drops the frame
+// when RawLine is empty. Populating RawLine for these specific types
+// (and only these) right after ParseFrameLine in the session reader
+// closes the gap without changing the marshal short-circuit semantic
+// for frames that don't use the bypass.
+func isRawLineBackedFrameType(frameType string) bool {
+	switch frameType {
+	case "route_sync_digest_v1", "route_sync_summary_v1",
+		protocol.RouteAnnounceV3FrameType,
+		protocol.RoutePoisonFrameType:
+		return true
+	default:
+		return false
+	}
+}
+
+// maxRoutesPerAnnounceFrame is the Phase 4 13.5 hard cap on the
+// number of route entries any single announce-plane frame can carry,
+// independently of the byte-size budget (MaxFrameLine). The cap
+// bounds receive-side per-frame work (decode + per-entry trust
+// classification + UpdateRoute admission) so a peer cannot deliver
+// thousands of entries in a single oversized-but-still-under-128 KiB
+// frame and tie up the storage writer. Chunking continues to flush
+// on either the byte budget or this entry-count budget, whichever
+// fires first. Mirrored in the v3 chunker
+// (chunkRouteAnnounceV3EntriesBySize) so the cap applies uniformly
+// across wire generations.
+//
+// Receive-side enforcement. Send-side chunking guarantees this node
+// never emits a frame with more than maxRoutesPerAnnounceFrame
+// entries, but a remote peer is not bound by our chunker — a buggy
+// or hostile peer can pack thousands of entries into a single
+// announce_routes / routes_update / route_announce_v3 frame, then
+// hand us the work to decode and classify every one. The receive-
+// path handlers (handleAnnounceRoutes, handleRoutesUpdate,
+// handleRouteAnnounceV3) therefore drop any frame whose entry
+// count exceeds the cap BEFORE invoking applyAnnounceEntries, so
+// the bound is true on both ends of the wire (not just a polite
+// suggestion our chunker happens to follow).
+//
+// Fairness rotation note. The original phase-4 §3.5 also called
+// for fairness rotation (direct always included, offset rotation
+// for the rest) when a peer has more routes than fit in one frame.
+// In the current multi-frame-per-cycle send path the chunker emits
+// EVERY route in a cycle — just spread across multiple frames — so
+// no entry is "starved" and rotation is a no-op for the steady
+// state. Rotation becomes meaningful only if a future change adds
+// a single-frame-per-cycle truncation; that work lands as a fresh
+// PR with the rotation state on AnnouncePeerState alongside the
+// truncation knob.
+const maxRoutesPerAnnounceFrame = 100
+
+// announceCostForEntries returns the rate-limiter token cost for an
+// announce-plane frame that carries `n` route entries. Empty
+// announce frames (n == 0) still cost 1 token — the wire frame
+// itself consumes a small slice of work (parse + dispatch), and
+// charging 0 would let a hostile peer flood empty frames without
+// throttle. Non-empty frames cost exactly len(entries) tokens,
+// matching the per-entry trust-classification + UpdateRoute work
+// the receive path actually does. Used by handleAnnounceRoutes /
+// handleRoutesUpdate / handleRouteAnnounceV3 — see
+// announceRateLimiter.allow doc-comment for the Round-10 rationale
+// behind charging by route count rather than per-frame.
+func announceCostForEntries(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // chunkAnnounceEntriesBySize splits a route slice into wire-safe chunks.
@@ -119,6 +211,13 @@ func chunkAnnounceEntriesBySize(entries []routing.AnnounceEntry, kind announceWi
 		}
 	}
 	for i, entry := range entries {
+		// Phase 4 13.5 entry-count cap: flush the current chunk and
+		// start a new one when adding this entry would exceed
+		// maxRoutesPerAnnounceFrame. Independent of the byte-size
+		// branch below — either limit can fire first.
+		if len(current) >= maxRoutesPerAnnounceFrame {
+			flushCurrent()
+		}
 		candidate := append(current, entry)
 		frame := buildAnnounceFrame(kind, candidate)
 		if _, err := protocol.MarshalFrameLineWithLimit(frame, maxBytes); err != nil {
@@ -270,11 +369,16 @@ func (s *Service) SendRoutesUpdate(ctx context.Context, peerAddress domain.PeerA
 
 // SendRequestResync emits a request_resync wire frame to the peer so that
 // the peer clears its per-peer announce state and re-delivers a full
-// baseline via legacy announce_routes on its next cycle. Called by the
-// v2 receive path when routes_update arrives without a prior baseline in
-// this session — the forced-full path on the peer side honours the
-// first-sync invariant, so recovery walks back through legacy
-// announce_routes regardless of the peer's v2 status.
+// baseline on its next cycle. Called by the receive paths when a delta
+// arrives without a prior baseline in this session: the v2 path on a
+// routes_update without baseline (handleRoutesUpdate) AND the v3 path
+// on a kind="delta" without baseline (handleRouteAnnounceV3, including
+// the epoch-reset case where a prior baseline was invalidated). The
+// forced-full path on the peer side honours the first-sync invariant
+// (docs/routing.md): a v3-capable peer responds with
+// route_announce_v3 kind="full", a v1/v2-only peer responds with
+// legacy announce_routes — either way the recovery frame is a
+// self-contained baseline, never a delta.
 //
 // The frame carries no payload: its mere arrival is the signal. This
 // matches the single-writer invariant enforced by
@@ -342,6 +446,490 @@ func buildAnnounceFrame(kind announceWireType, entries []routing.AnnounceEntry) 
 		frame.Type = "announce_routes"
 	}
 	return frame
+}
+
+// buildRouteAnnounceV3Frame produces the Phase 4 compact wire frame for
+// the given AnnounceEntry slice (phase-4 §3.1, overview §7.1). Origin is
+// dropped (the receiver derives the uplink from the sender); Hops int is
+// converted to uint8 with HopsInfinity-aware clamping so a wire value of
+// 16 — the withdrawal marker — survives the type narrowing.
+//
+// The returned protocol.Frame carries Frame.Type plus a pre-marshalled
+// Frame.RawLine (with trailing newline). This is the RawLine bypass
+// pattern that route_sync / route_probe / route_query frames already use,
+// keeping the universal Frame struct free of v3-specific fields and
+// making a Phase 6 cleanup a file delete rather than a sweep through
+// shared types.
+//
+// Sig encoding (Phase 4 13.2-A, shipped): each entry's stored
+// AttestedSig is base64-encoded onto RouteAnnounceV3Entry.Sig when
+// non-empty (signer side: signOwnOriginV3Entries populates the
+// per-entry sig before this helper assembles the wire frame), and
+// omitted via the omitempty JSON tag when the origin did not sign
+// (Tier-2 unsigned entries continue to flow through this assembly
+// path unchanged). The canonical bytes the signature covers come
+// from RouteAnnounceV3Entry.CanonicalSigningBytes — identity and
+// extra only, see docs/protocol/attested_links.md "Canonical
+// signing bytes" for the multi-hop verification rationale.
+func buildRouteAnnounceV3Frame(kind string, epoch uint64, entries []routing.AnnounceEntry) (protocol.Frame, error) {
+	wireEntries := make([]protocol.RouteAnnounceV3Entry, len(entries))
+	for i, e := range entries {
+		wireEntries[i] = protocol.RouteAnnounceV3Entry{
+			Identity: string(e.Identity),
+			Hops:     hopsIntToUint8(e.Hops),
+			SeqNo:    e.SeqNo,
+			Extra:    e.Extra,
+		}
+		// Phase 4 13.2-A: encode the stored attested-links signature
+		// for the wire. Empty AttestedSig → omitted "sig" field on the
+		// wire (omitempty on RouteAnnounceV3Entry.Sig keeps the JSON
+		// shape clean for the Tier-2 unsigned case). Base64 std
+		// encoding mirrors the wire-format contract documented on
+		// RouteAnnounceV3Entry.Sig.
+		if len(e.AttestedSig) > 0 {
+			wireEntries[i].Sig = base64.StdEncoding.EncodeToString(e.AttestedSig)
+		}
+	}
+	v3 := protocol.RouteAnnounceV3Frame{
+		Type:  protocol.RouteAnnounceV3FrameType,
+		Kind:  kind,
+		Epoch: epoch,
+		// IssuedAt is a diagnostic freshness hint (see
+		// RouteAnnounceV3Frame.IssuedAt doc-comment) — receivers do
+		// NOT consult it for acceptance; per-(Identity, sender) SeqNo
+		// monotonicity governs that. Population is therefore allowed
+		// to use a direct time.Now() per CLAUDE.md "Время" — not
+		// participating in any business decision. Populated here so
+		// the wire payload matches the docs/protocol/route_announce_v3.md
+		// contract and so operators inspecting captured frames can
+		// correlate timing without consulting send-side telemetry.
+		IssuedAt: time.Now().UTC().Format(time.RFC3339),
+		Entries:  wireEntries,
+	}
+	raw, err := protocol.MarshalRouteAnnounceV3Frame(v3)
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	return protocol.Frame{
+		Type:    protocol.RouteAnnounceV3FrameType,
+		RawLine: string(raw) + "\n",
+	}, nil
+}
+
+// hopsIntToUint8 narrows the legacy int Hops field to the v3 wire uint8
+// while preserving the withdrawal marker. Negative values are clamped
+// to 0 (defensive — RouteEntry.Hops is non-negative by construction);
+// values >= HopsInfinity (16) are clamped to HopsInfinity so a
+// withdrawal stays a withdrawal even if upstream over-counted; values in
+// [0, 15] pass through.
+func hopsIntToUint8(hops int) uint8 {
+	switch {
+	case hops <= 0:
+		return 0
+	case hops >= int(routing.HopsInfinity):
+		return uint8(routing.HopsInfinity)
+	default:
+		return uint8(hops)
+	}
+}
+
+// chunkRouteAnnounceV3EntriesBySize splits a route slice into wire-safe
+// v3 chunks. Each chunk's marshalled route_announce_v3 frame fits within
+// maxBytes. Algorithm mirrors chunkAnnounceEntriesBySize: greedy pack,
+// flush when the candidate marshal exceeds the budget, skip and report
+// any single entry whose own marshal is oversize (Extra blob too large
+// to ever fit, no chunking can save it).
+//
+// kind and epoch are passed through to every chunk's frame so the size
+// probe is faithful to the actual wire bytes.
+func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind string, epoch uint64, maxBytes int) (chunks [][]routing.AnnounceEntry, skipped []int) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	measure := func(es []routing.AnnounceEntry) (int, error) {
+		f, err := buildRouteAnnounceV3Frame(kind, epoch, es)
+		if err != nil {
+			return 0, err
+		}
+		return len(f.RawLine), nil
+	}
+	var current []routing.AnnounceEntry
+	flushCurrent := func() {
+		if len(current) > 0 {
+			chunks = append(chunks, current)
+			current = nil
+		}
+	}
+	for i, entry := range entries {
+		// Phase 4 13.5 entry-count cap mirror of the legacy chunker —
+		// either limit fires first.
+		if len(current) >= maxRoutesPerAnnounceFrame {
+			flushCurrent()
+		}
+		candidate := append(current, entry)
+		size, err := measure(candidate)
+		if err != nil {
+			// Marshal failure — drop this entry, keep going so previously-
+			// accepted entries still ship. Matches chunkAnnounceEntriesBySize.
+			skipped = append(skipped, i)
+			continue
+		}
+		if size <= maxBytes {
+			current = candidate
+			continue
+		}
+		// Candidate would exceed the budget — close the current chunk and
+		// try the entry alone.
+		flushCurrent()
+		soloSize, soloErr := measure([]routing.AnnounceEntry{entry})
+		if soloErr != nil || soloSize > maxBytes {
+			skipped = append(skipped, i)
+			continue
+		}
+		current = []routing.AnnounceEntry{entry}
+	}
+	flushCurrent()
+	return chunks, skipped
+}
+
+// SendRouteAnnounceV3 emits the Phase 4 compact announce frame to peer.
+// kind is "full" or "delta" (RouteAnnounceV3KindFull / KindDelta); epoch
+// is the local route_announce_v3 epoch (Table.Epoch()); entries carry the
+// per-uplink claims with Origin dropped.
+//
+// Capability gate: mesh_routing_v1 + mesh_routing_v3 + mesh_relay_v1.
+// The triplet mirrors handleRouteAnnounceV3's receive gate: v1 is the
+// wire-baseline a legacy fallback depends on, v3 is the compact-frame
+// opt-in, relay is the data-plane requirement (a non-relay neighbor
+// yields unusable NextHops). Capture-and-write is atomic via
+// dispatchAnnouncePlaneFrameWithCaps, identical to SendRoutesUpdate, so a
+// session replacement at the same address cannot route bytes to a
+// narrower transport.
+//
+// Returns true only when every chunk shipped successfully — same truthful-
+// delivery contract as SendAnnounceRoutes / SendRoutesUpdate. A skipped
+// entry or any transport drop returns false so the caller's per-peer
+// cache stays untouched and the next cycle retries.
+func (s *Service) SendRouteAnnounceV3(ctx context.Context, peerAddress domain.PeerAddress, kind string, epoch uint64, entries []routing.AnnounceEntry) bool {
+	if len(entries) == 0 {
+		return true
+	}
+	// Phase 4 13.2-B: sign own-origin entries with the local identity
+	// private key before chunking. The signature covers
+	// CanonicalSigningBytes (identity || extra only — hops, epoch, and
+	// seq_no are ALL per-emitter wire fields that transit restamp on
+	// re-emit, so they are deliberately excluded so multi-hop transit
+	// verification works; see docs/protocol/attested_links.md
+	// "Canonical signing bytes" for the multi-hop rationale). Only
+	// entries whose Identity equals our local identity get signed;
+	// non-own entries either already carry a sig (forwarded verbatim
+	// from the original signer via the storage round-trip from 13.2-A)
+	// or stay unsigned. The per-call signing is cheap (ed25519.Sign is
+	// ~30µs and own-origin entries are few; one per cycle is typical),
+	// and the result is not cached back into storage — the per-emit
+	// recompute is a known-cost trade-off; sig caching in UplinkClaim
+	// is a follow-up. The slice is mutated in place because the caller
+	// (the AnnounceLoop / connect-time sync) has already materialised
+	// it for this send and we own it for the duration of the call.
+	entries = s.signOwnOriginV3Entries(entries, epoch)
+	chunks, skipped := chunkRouteAnnounceV3EntriesBySize(entries, kind, epoch, protocol.MaxFrameLine)
+	logSkippedAnnounceEntries(peerAddress, entries, skipped, "route_announce_v3")
+	for _, chunk := range chunks {
+		frame, err := buildRouteAnnounceV3Frame(kind, epoch, chunk)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("peer_address", string(peerAddress)).
+				Int("chunk_entries", len(chunk)).
+				Msg("route_announce_v3_build_failed")
+			return false
+		}
+		if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame,
+			domain.CapMeshRoutingV1,
+			domain.CapMeshRoutingV3,
+			domain.CapMeshRelayV1,
+		) {
+			log.Debug().
+				Str("peer_address", string(peerAddress)).
+				Str("kind", kind).
+				Int("entries", len(chunk)).
+				Msg("route_announce_v3_skipped_or_failed_at_send_time")
+			return false
+		}
+	}
+	return len(skipped) == 0
+}
+
+// signOwnOriginV3Entries signs in-place the own-origin AnnounceEntries
+// in the input slice with the local identity's Ed25519 private key. The
+// signature covers RouteAnnounceV3Entry.CanonicalSigningBytes() —
+// identity and extra ONLY. All three per-emitter wire fields — hops,
+// epoch, and seq_no — are deliberately EXCLUDED from the signed
+// payload (P1 fixes): each is restamped by transit on re-emit and
+// would break multi-hop verification if signed. The epoch parameter
+// is preserved on the Go signature for caller symmetry with the
+// verifier and for future logging hooks; it does NOT enter the
+// canonical bytes. See docs/protocol/attested_links.md
+// "Canonical signing bytes" for the full rationale.
+//
+// Selection rules (idempotent — repeated calls are no-ops):
+//   - Skip when the local identity has no PrivateKey wired (test
+//     fixtures that construct Service without a real identity).
+//   - Skip entries with AttestedSig already populated (transit entries
+//     re-emitted from storage carry the original signer's bytes; we
+//     never overwrite a sig produced by someone else).
+//   - Skip entries whose Identity is not our own (we cannot speak for
+//     another identity's announcements; that path is the verifier's
+//     job on the other side).
+//   - Withdrawals (Hops==HopsInfinity) ARE signed by the origin: a
+//     withdrawal is a legitimate own claim (Identity=self, Extra)
+//     and canonical bytes exclude hops AND seq_no, so the same
+//     signing path applies. No special-case branch needed.
+//
+// Production status (Round-7 finding). This signer is plumbed but
+// currently has no live input on the production emit path:
+// route_store.AnnounceProjectionFor iterates the stored bucket map
+// and never emits the local identity (the self-route is synthesised
+// in Lookup/Snapshot, not stored). The Identity == localIdentity
+// branch above therefore matches zero entries in production today,
+// and the function is a no-op on every v3 emit. The
+// mesh_attested_links_v1 capability is correspondingly unadvertised
+// (see localCapabilities). Phase 5 anchor publication wires the
+// self-attestation entry stream (Identity == localIdentity, per-
+// emitter SeqNo, anchor metadata in Extra) that gives this signer
+// real work — at which point the cap re-enables and this doc-comment
+// updates. The synthetic-entry tests in
+// routing_announce_v3_attest_test.go feed Identity == localIdentity
+// directly to exercise the signing path under unit-test conditions
+// independent of the emit-path gap.
+//
+// Returns the same slice (mutated in place). Callers must not retain
+// pre-call entry copies across this call boundary.
+func (s *Service) signOwnOriginV3Entries(entries []routing.AnnounceEntry, epoch uint64) []routing.AnnounceEntry {
+	_ = epoch // reserved for future logging / diagnostics; not in canonical bytes (P1)
+	if len(s.identity.PrivateKey) == 0 {
+		return entries
+	}
+	localIdentity := s.identity.Address
+	for i := range entries {
+		if len(entries[i].AttestedSig) > 0 {
+			continue
+		}
+		if string(entries[i].Identity) != localIdentity {
+			continue
+		}
+		v3e := protocol.RouteAnnounceV3Entry{
+			Identity: string(entries[i].Identity),
+			SeqNo:    entries[i].SeqNo,
+			Extra:    entries[i].Extra,
+		}
+		// Phase 4 P1 fix: canonical bytes do NOT include epoch —
+		// epoch is per-emitter (changes across transit nodes), so
+		// signing over it would break multi-hop verification (origin
+		// signs with origin's epoch; transit forwards verbatim; final
+		// receiver recomputes canonical bytes from the LAST emitter's
+		// frame epoch and the verification fails). See
+		// CanonicalSigningBytes doc-comment.
+		entries[i].AttestedSig = ed25519.Sign(s.identity.PrivateKey, v3e.CanonicalSigningBytes())
+	}
+	return entries
+}
+
+// SendRoutePoison emits the Phase 4 explicit poison-reverse signal
+// (route_poison_v1, overview §7.7) to peerAddress for identity. The
+// frame is signed with the local identity's Ed25519 key when
+// available (no-op short-circuit if the test fixture has no private
+// key wired), and dispatched via the cap-gated announce-plane path:
+// requires the peer to advertise mesh_routing_v1 +
+// mesh_poison_reverse_v1 (relay cap NOT required — poison is a
+// single-hop control signal, not a data-plane delivery, so a
+// routing-capable-but-non-relay peer is a valid recipient).
+//
+// reason is one of protocol.RoutePoisonReason* — caller bug if
+// arbitrary; the marshal step rejects unknown reasons. Returns true
+// when the frame was enqueued.
+func (s *Service) SendRoutePoison(ctx context.Context, peerAddress domain.PeerAddress, identity domain.PeerIdentity, reason string) bool {
+	if peerAddress == "" || identity == "" {
+		return false
+	}
+	frame := protocol.RoutePoisonFrame{
+		Type:     protocol.RoutePoisonFrameType,
+		Identity: string(identity),
+		Reason:   reason,
+		IssuedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(s.identity.PrivateKey) != 0 {
+		frame.SenderSig = base64.StdEncoding.EncodeToString(
+			ed25519.Sign(s.identity.PrivateKey, frame.CanonicalSenderSigBytes()),
+		)
+	}
+	raw, err := protocol.MarshalRoutePoisonFrame(frame)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("peer_address", string(peerAddress)).
+			Str("identity", string(identity)).
+			Str("reason", reason).
+			Msg("route_poison_marshal_failed")
+		return false
+	}
+	wireFrame := protocol.Frame{
+		Type:    protocol.RoutePoisonFrameType,
+		RawLine: string(raw) + "\n",
+	}
+	if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, wireFrame,
+		domain.CapMeshRoutingV1,
+		domain.CapMeshPoisonReverseV1,
+	) {
+		log.Debug().
+			Str("peer_address", string(peerAddress)).
+			Str("identity", string(identity)).
+			Str("reason", reason).
+			Msg("route_poison_skipped_or_failed_at_send_time")
+		return false
+	}
+	return true
+}
+
+// handleRoutePoison processes an incoming route_poison_v1 frame
+// (Phase 4 13.3, overview §7.7). The receiver verifies the
+// sender_sig if present (Tier-2 lenient: present-and-invalid
+// drops the frame; present-and-pubkey-unknown is accepted; absent
+// is accepted — sender identity is already bound by the
+// session-level handshake), then invalidates ONLY the
+// claims[identity][senderIdentity] storage slot via
+// Table.InvalidateUplinkClaim. Other uplinks for the same identity
+// and the origin's own SeqNo-governed claim are untouched.
+//
+// Poison is not relayed verbatim — receivers do not re-broadcast
+// the original frame as-is. Instead, this handler emits its OWN
+// route_poison_v1 to other direct peers via
+// poisonReverseToOtherPeers when the invalidation leaves us with
+// no surviving uplink to the target (Round-16 fan-out, see the
+// inline comment near the call site below for the gate rationale).
+// This is what propagates the count-to-infinity collapse beyond
+// the first receiver — relying on the next announce cycle to
+// surface a withdrawal does NOT work for transit routes, because
+// AnnounceProjectionFor only emits own-direct tombstones; transit
+// tombstones from InvalidateUplinkClaim are filtered out.
+func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame protocol.RoutePoisonFrame) {
+	if !identity.IsValidAddress(string(senderIdentity)) {
+		log.Warn().Str("sender", string(senderIdentity)).Msg("route_poison_malformed_sender")
+		return
+	}
+	// Phase 4 13.7 (Round-5 extension): shared per-peer announce-plane
+	// rate limit across ALL receive paths the announceLimiter protects
+	// (announce_routes / routes_update / route_announce_v3 /
+	// request_resync / route_poison_v1). Charged BEFORE the
+	// base64+ed25519 verify path and BEFORE Table.InvalidateUplinkClaim
+	// so a flood of poison frames cannot soak CPU on signature
+	// verification or storage-writer churn — same defence in depth
+	// the announce-plane handlers already get. Sharing the bucket with
+	// announce frames means a peer cannot flip wire types to dodge the
+	// throttle.
+	// Cost: 1 token. Poison is a single-identity control signal,
+	// not an entry-batch — sharing the bucket with announce frames
+	// at unit cost (Round-10) means a poison flood still consumes
+	// announce capacity but doesn't get artificially inflated.
+	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, 1) {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "route_poison_v1").
+			Str("identity", frame.Identity).
+			Str("reason", frame.Reason).
+			Msg("announce_rate_limit_drop")
+		return
+	}
+	if !identity.IsValidAddress(frame.Identity) {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_identity", frame.Identity).
+			Msg("route_poison_malformed_identity")
+		return
+	}
+	// Sig verification — same Tier-2 policy as mesh_attested_links_v1
+	// route_announce_v3: present-and-invalid drops; absent or
+	// pubkey-unknown accepts. A malformed base64 SenderSig counts as
+	// present-and-invalid (the sender claimed to sign but produced
+	// undecodable bytes — either a bug on their side or active
+	// corruption) and is dropped just like an ed25519 verification
+	// failure. Equivalent-to-absent treatment would silently turn any
+	// poison sender into an unauthenticated channel by shipping
+	// "sig=garbage".
+	if frame.SenderSig != "" {
+		sig, err := base64.StdEncoding.DecodeString(frame.SenderSig)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("from", string(senderIdentity)).
+				Str("identity", frame.Identity).
+				Str("reason", frame.Reason).
+				Msg("route_poison_sig_malformed_drop")
+			return
+		}
+		if pubkey, ok := s.publicKeyForIdentity(senderIdentity); ok {
+			if !ed25519.Verify(pubkey, frame.CanonicalSenderSigBytes(), sig) {
+				log.Warn().
+					Str("from", string(senderIdentity)).
+					Str("identity", frame.Identity).
+					Str("reason", frame.Reason).
+					Msg("route_poison_sig_invalid_drop")
+				return
+			}
+		}
+	}
+	target := domain.PeerIdentity(frame.Identity)
+	mutated := s.routingTable.InvalidateUplinkClaim(target, senderIdentity)
+	log.Debug().
+		Str("from", string(senderIdentity)).
+		Str("identity", frame.Identity).
+		Str("reason", frame.Reason).
+		Bool("mutated", mutated).
+		Msg("route_poison_applied")
+	if mutated {
+		s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+			Reason: domain.RouteChangeAnnouncement,
+			PeerID: senderIdentity,
+		})
+		// Two mutually-exclusive follow-ups based on whether ANY uplink
+		// to target survives the invalidation:
+		//
+		//   - remaining > 0: we still have a backup uplink, so our
+		//     claim to target is still live and downstream peers can
+		//     keep routing through us. The pending queue might now
+		//     be deliverable via the alternate path —
+		//     triggerDrainForExposed handles the empty-pending
+		//     fast-path internally.
+		//
+		//   - remaining == 0: we no longer have any path to target,
+		//     so downstream peers that were routing target through
+		//     us must be told to invalidate THEIR (target, us) slot
+		//     too. Round-16 fix: fan out our own route_poison_v1 to
+		//     all other direct peers via poisonReverseToOtherPeers.
+		//     Without this the wave stops at the first receiver
+		//     because transit tombstones (the storage residue of
+		//     InvalidateUplinkClaim) are NOT emitted by
+		//     AnnounceProjectionFor — only own-direct tombstones
+		//     are. Downstream peers would keep the stale claim
+		//     until TTL (≈ 2 min) and count-to-infinity would only
+		//     collapse one hop per cycle. poisonReverseToOtherPeers
+		//     already filters senderIdentity (passed as lostUplink)
+		//     so we don't echo the poison straight back; the helper
+		//     also charges through SendRoutePoison's cap gate so
+		//     peers without mesh_poison_reverse_v1 are silently
+		//     skipped. The (target == senderIdentity) corner — the
+		//     poison is about the sender itself — is handled by the
+		//     helper's identity == lostUplink skip; the legacy
+		//     session-close fanout (when the sender disconnects)
+		//     covers that case via the normal RemoveDirectPeer
+		//     withdrawal path.
+		remaining := s.routingTable.Lookup(target)
+		if len(remaining) > 0 {
+			s.triggerDrainForExposed([]routing.PeerIdentity{routing.PeerIdentity(target)})
+		} else {
+			s.poisonReverseToOtherPeers(s.runCtx, senderIdentity, []routing.PeerIdentity{routing.PeerIdentity(target)})
+		}
+	}
 }
 
 // sendAnnouncePlaneFrame dispatches a single announce-plane frame to the
@@ -733,25 +1321,30 @@ func (s *Service) sendOutboundFullTableSync(ctx context.Context, peerIdentity do
 
 // sendConnectTimeFullSync is the shared core for inbound and outbound
 // connect-time full table sync. It builds a canonical snapshot of routes
-// visible to the peer (split horizon applied), sends them via
-// SendAnnounceRoutes, and updates the per-peer announce cache on
+// visible to the peer (split horizon applied), dispatches to the
+// baseline sender selected from peer capabilities (SendRouteAnnounceV3
+// with kind="full" when the v3 triplet is negotiated, otherwise legacy
+// SendAnnounceRoutes), and updates the per-peer announce cache on
 // success. When the snapshot is empty, the empty baseline is recorded
 // without sending a wire frame — the protocol is additive so an empty
 // table needs no explicit announcement.
 //
 // First-sync wire-frame invariant: see the "First-sync wire-frame
 // invariant" section in docs/routing.md for the normative contract.
-// Connect-time sync MUST use SendAnnounceRoutes (legacy announce_routes
-// frame); the first sync after session establishment is always legacy
-// regardless of peer capabilities, because a v2 routes_update frame
-// carries an incremental delta against a baseline the peer does not yet
-// have. Any future change that inspects peer capabilities here and picks
-// SendRoutesUpdate breaks that contract — both because a fresh session
-// has no baseline and because the guard tests in
+// Connect-time sync MUST use a self-contained baseline frame — either
+// SendAnnounceRoutes (legacy announce_routes) for v1/v2 peers, or
+// SendRouteAnnounceV3 with kind="full" for peers that negotiated the
+// v3 triplet (v1+v3+relay). The v3 kind="full" frame is self-contained
+// (carries the peer's full snapshot + table epoch) and therefore
+// qualifies as a valid baseline alongside the legacy frame. Any future
+// change that picks SendRoutesUpdate or kind="delta" here breaks that
+// contract — both because a fresh session has no baseline a delta can
+// be applied against, and because the guard tests in
 // routing_integration_connect_sync_test.go will fail immediately. The
-// empty-baseline short-circuit below emits neither wire frame (legacy
-// nor v2) by design; see TestConnectTimeFullSync_EmptySnapshot_NoWireFrame
-// for the regression contract.
+// empty-baseline short-circuit below emits NO wire frame at all
+// (neither legacy, nor v2, nor v3) by design; see
+// TestConnectTimeFullSync_EmptySnapshot_NoWireFrame for the regression
+// contract.
 //
 // ctx flows down into SendAnnounceRoutes → writeFrameToInbound →
 // sendFrameBytesViaNetworkSync; cancelling ctx aborts the inbound
@@ -785,28 +1378,47 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 	peerState.RecordFullSyncAttempt(now)
 
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Int("routes", len(snapshot.Entries)).Msg("connect_time_full_sync_before_send")
-	// First-sync legacy path (see docs/routing.md §"First-sync wire-frame
-	// invariant"): always SendAnnounceRoutes, never SendRoutesUpdate — the
-	// peer has no baseline to diff against on a freshly established session.
-	sendOk := s.SendAnnounceRoutes(ctx, address, snapshot.Entries)
-	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Bool("sent", sendOk).Msg("connect_time_full_sync_after_send")
+	// Phase 4 wire selection. When the peer advertises the v3 triplet
+	// (v1+v3+relay), the very first session sync ships as
+	// route_announce_v3 kind="full" — the compact frame is self-
+	// contained (overview §7.1), so kind="full" correctly serves as
+	// the v3-side baseline without violating the legacy first-sync
+	// invariant (which applies specifically to v1/v2 because v2
+	// routes_update cannot bootstrap). For non-v3 peers the legacy
+	// announce_routes path stays unchanged per docs/routing.md
+	// §"First-sync wire-frame invariant": always SendAnnounceRoutes,
+	// never SendRoutesUpdate.
+	v3 := s.peerSupportsRoutingV3(address)
+	var sendOk bool
+	if v3 {
+		sendOk = s.SendRouteAnnounceV3(ctx, address, protocol.RouteAnnounceV3KindFull, s.routingTable.Epoch(), snapshot.Entries)
+	} else {
+		sendOk = s.SendAnnounceRoutes(ctx, address, snapshot.Entries)
+	}
+	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Bool("sent", sendOk).Bool("v3", v3).Msg("connect_time_full_sync_after_send")
 	if !sendOk {
 		log.Warn().
 			Str("peer", string(peerIdentity)).
 			Str("address", string(address)).
+			Bool("v3", v3).
 			Int("routes", len(snapshot.Entries)).
 			Msg("routing_connect_time_full_sync_failed")
 		return
 	}
 
-	// A non-empty connect-time announce_routes frame is the very first
-	// observable baseline on the wire for this session. Flip the send-side
-	// flag so AnnounceLoop's v2 mode selection knows the peer's v2 receive
-	// gate is open and subsequent deltas may use SendRoutesUpdate when caps
-	// agree. The empty-snapshot branch above intentionally does NOT flip
-	// this flag — it records a local baseline without emitting any wire
-	// frame, so the peer never observed one.
-	peerState.MarkWireBaselineSent()
+	// A non-empty connect-time frame is the very first observable
+	// baseline on the wire for this session — flip the matching
+	// send-side baseline flag so the AnnounceLoop's mode selection
+	// knows the peer's receive gate (v2 or v3) is open and subsequent
+	// deltas may use the upgraded wire frame. The empty-snapshot
+	// branch above intentionally does NOT flip either flag — it
+	// records a local baseline without emitting any wire frame, so the
+	// peer never observed one.
+	if v3 {
+		peerState.MarkWireBaselineV3Sent()
+	} else {
+		peerState.MarkWireBaselineSent()
+	}
 	peerState.RecordFullSyncSuccess(snapshot, now)
 	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Msg("connect_time_full_sync_end")
 }
@@ -828,7 +1440,39 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		log.Warn().Str("sender", string(senderIdentity)).Msg("announce_routes_malformed_sender")
 		return
 	}
-	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, announceReceiveLegacy)
+	// Phase 4 13.7: per-peer announce-plane rate limit. A flood from
+	// any single peer (legitimate-but-buggy or hostile) is throttled
+	// here BEFORE applyAnnounceEntries does the per-entry work, so a
+	// burst cannot tie up the storage writer. Round-10 fix: charge by
+	// route-entry count (min 1) so a legitimate chunked full-sync
+	// drains the bucket proportional to its real work, instead of
+	// being silently truncated past the previous 30-frame burst —
+	// see announceBurstRoutesPerPeer doc for the new sizing.
+	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.AnnounceRoutes))) {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "announce_routes").
+			Int("entries", len(frame.AnnounceRoutes)).
+			Msg("announce_rate_limit_drop")
+		return
+	}
+	// Phase 4 13.5 receive-side cap: drop the whole frame when its
+	// entry count exceeds maxRoutesPerAnnounceFrame. Our own chunker
+	// never produces such a frame; receiving one means the peer is
+	// either buggy or hostile. Truncating silently would let a peer
+	// hide entries past the cap; dropping the whole frame surfaces
+	// the misbehaviour in logs and falls back on the next periodic
+	// announce cycle.
+	if len(frame.AnnounceRoutes) > maxRoutesPerAnnounceFrame {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "announce_routes").
+			Int("entries", len(frame.AnnounceRoutes)).
+			Int("cap", maxRoutesPerAnnounceFrame).
+			Msg("announce_routes_entry_count_cap_exceeded")
+		return
+	}
+	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, nil, nil, announceReceiveLegacy)
 }
 
 // handleRoutesUpdate processes an incoming routes_update frame (v2 wire
@@ -845,6 +1489,33 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderAddress domain.PeerAddress, frame protocol.Frame) {
 	if !identity.IsValidAddress(string(senderIdentity)) {
 		log.Warn().Str("sender", string(senderIdentity)).Msg("routes_update_malformed_sender")
+		return
+	}
+	// Phase 4 13.7: shared per-peer announce rate limit. v2 delta
+	// frames count against the same budget as legacy / v3 frames so
+	// a peer flipping between wire generations cannot reset its
+	// throttle. Round-10 fix: charge by route-entry count — see
+	// the matching comment in handleAnnounceRoutes.
+	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.AnnounceRoutes))) {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "routes_update").
+			Int("entries", len(frame.AnnounceRoutes)).
+			Msg("announce_rate_limit_drop")
+		return
+	}
+	// Phase 4 13.5 receive-side cap (shared with handleAnnounceRoutes
+	// and handleRouteAnnounceV3). v2 delta frames carry the same
+	// AnnounceRouteFrame payload shape as legacy announce_routes, so
+	// the same per-frame entry-count bound applies — see
+	// maxRoutesPerAnnounceFrame doc-comment for the rationale.
+	if len(frame.AnnounceRoutes) > maxRoutesPerAnnounceFrame {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "routes_update").
+			Int("entries", len(frame.AnnounceRoutes)).
+			Int("cap", maxRoutesPerAnnounceFrame).
+			Msg("routes_update_entry_count_cap_exceeded")
 		return
 	}
 
@@ -874,21 +1545,35 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 		return
 	}
 
-	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, announceReceiveV2)
+	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, nil, nil, announceReceiveV2)
 }
 
 // handleRequestResync processes an incoming request_resync frame. The peer
-// has detected local state desync (e.g. it received a routes_update
-// without a baseline this session) and is asking us to re-deliver a full
-// baseline via legacy announce_routes. We fulfil the contract by marking
-// our per-peer announce state as NeedsFullResync and triggering an
-// immediate announce cycle — the forced-full branch of announceToAllPeers
-// takes over from there, and sendFullAnnounce honours the first-sync
-// invariant (legacy announce_routes wire frame) regardless of the peer's
-// negotiated capabilities.
+// has detected local state desync (e.g. it received a routes_update or a
+// route_announce_v3 kind="delta" without a baseline this session, or saw a
+// v3 epoch reset that invalidated the prior baseline) and is asking us to
+// re-deliver a full baseline. We fulfil the contract by marking our
+// per-peer announce state as NeedsFullResync and triggering an immediate
+// announce cycle — the forced-full branch of announceToAllPeers takes over
+// from there, and sendFullAnnounce honours the first-sync invariant:
+// SendAnnounceRoutes (legacy announce_routes) for v1/v2 peers, or
+// SendRouteAnnounceV3 with kind="full" for peers that negotiated the v3
+// triplet. Either way the recovery frame is a self-contained baseline,
+// never a delta.
 func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	if !identity.IsValidAddress(string(senderIdentity)) {
 		log.Warn().Str("sender", string(senderIdentity)).Msg("request_resync_malformed_sender")
+		return
+	}
+	// Phase 4 13.7: shared per-peer announce rate limit. A peer
+	// hammering request_resync would otherwise force this node into
+	// repeated forced-full-sync cycles, defeating the announce-plane
+	// throttle elsewhere. Cost 1 — control frame, not entry-bearing.
+	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, 1) {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "request_resync").
+			Msg("announce_rate_limit_drop")
 		return
 	}
 	log.Info().
@@ -898,16 +1583,340 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	s.announceLoop.TriggerUpdate()
 }
 
+// handleRouteAnnounceV3 processes an incoming route_announce_v3 frame (the
+// Phase 4 compact wire path, gated by mesh_routing_v3 — see overview §7.1
+// and docs/cluster-mesh/phase-4-compact-wire-signed.md §3.1). The frame
+// drops the Origin field: the receiver derives the uplink from the sending
+// session, so each entry is ingested under Origin == senderIdentity
+// (sender-originated semantic, identical to the Origin = localOrigin that
+// legacy v3 senders would otherwise put on the wire). Internal storage is
+// per-(Identity, Uplink) and Origin is not part of the dedup key, so this
+// reuses the exact entry-by-entry trust/withdrawal/UpdateRoute logic in
+// applyAnnounceEntries — only the Origin synthesis and the epoch/baseline
+// gating are v3-specific.
+//
+// Epoch handling (overview §7.1): the sender's local table epoch increments
+// on table reset (e.g. process restart). ObserveV3Epoch compares it against
+// the per-session watermark:
+//   - stale (incoming < known): a replay from an older peer process — drop
+//     the whole frame, do not touch storage.
+//   - reset (incoming > known): the peer's table is fresh, so any diff
+//     baseline we hold for it described the OLD table and is invalid. A
+//     kind="full" frame is self-contained and simply re-establishes the
+//     baseline for the new epoch (no resync needed). A kind="delta" frame
+//     after a reset has no valid baseline to diff against, so it is treated
+//     exactly like the delta-before-baseline desync below. Note: after a
+//     restart the peer's SeqNo counters restart low, so per-(Identity,
+//     Uplink) claims whose stored SeqNo now out-ranks the fresh value are
+//     rejected until TTL expiry; a full epoch-driven SeqNo reset is a
+//     documented Phase 4 follow-up (phase-4 §7).
+//   - apply (incoming == known, or first frame this session): normal path.
+//
+// Baseline gate: a kind="delta" frame before any baseline this session (or
+// after an epoch reset) is a desync — handled exactly like routes_update:
+// reply with request_resync and drop the delta. request_resync is the
+// v2-gated escape hatch; a v3 peer carries v2 in every real deployment
+// (localCapabilities advertises both), so the fast recovery works. A
+// hypothetical v3-only peer simply recovers on its next periodic kind=full
+// cycle, which re-baselines without any signal — request_resync is an
+// optimisation, not a correctness requirement. kind="full" is
+// self-contained and establishes the baseline.
+func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, senderAddress domain.PeerAddress, frame protocol.RouteAnnounceV3Frame) {
+	if !identity.IsValidAddress(string(senderIdentity)) {
+		log.Warn().Str("sender", string(senderIdentity)).Msg("route_announce_v3_malformed_sender")
+		return
+	}
+	// Phase 4 13.7: shared per-peer announce rate limit across all
+	// announce-plane wire generations (legacy v1, v2 delta, v3
+	// compact). Counts BEFORE epoch + baseline checks below so a
+	// flood of malformed-epoch frames still gets throttled. Round-10
+	// fix: charge by route-entry count — see the matching comment
+	// in handleAnnounceRoutes. A v3 kind="full" frame in a multi-
+	// chunk sync drains tokens proportional to its entries, so
+	// the legitimate full-sync of N routes consumes N tokens
+	// instead of getting silently truncated at the previous
+	// 30-frame burst.
+	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.Entries))) {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "route_announce_v3").
+			Str("kind", frame.Kind).
+			Int("entries", len(frame.Entries)).
+			Msg("announce_rate_limit_drop")
+		return
+	}
+	// Phase 4 13.5 receive-side cap (shared with handleAnnounceRoutes
+	// and handleRoutesUpdate). Applies before epoch / baseline gating
+	// so the heavy-weight verifyRouteAnnounceV3Sigs path never runs
+	// on a frame that already violates the per-frame entry-count
+	// bound — see maxRoutesPerAnnounceFrame doc-comment for rationale.
+	if len(frame.Entries) > maxRoutesPerAnnounceFrame {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "route_announce_v3").
+			Str("kind", frame.Kind).
+			Int("entries", len(frame.Entries)).
+			Int("cap", maxRoutesPerAnnounceFrame).
+			Msg("route_announce_v3_entry_count_cap_exceeded")
+		return
+	}
+
+	peerState := s.announceLoop.StateRegistry().GetOrCreate(senderIdentity)
+
+	verdict := peerState.ObserveV3Epoch(frame.Epoch)
+	if verdict == routing.V3EpochStale {
+		log.Debug().
+			Str("from", string(senderIdentity)).
+			Uint64("frame_epoch", frame.Epoch).
+			Msg("route_announce_v3_stale_epoch_dropped")
+		return
+	}
+
+	isFull := frame.Kind == protocol.RouteAnnounceV3KindFull
+	// A delta needs a baseline valid for the peer's CURRENT epoch. No
+	// baseline this session, or an epoch reset that invalidated the prior
+	// baseline, both force the resync recovery path.
+	if !isFull && (verdict == routing.V3EpochReset || !peerState.HasReceivedBaseline()) {
+		log.Warn().
+			Str("from", string(senderIdentity)).
+			Str("address", string(senderAddress)).
+			Uint64("frame_epoch", frame.Epoch).
+			Bool("epoch_reset", verdict == routing.V3EpochReset).
+			Int("delta_routes", len(frame.Entries)).
+			Msg("route_announce_v3_delta_needs_baseline_request_resync")
+		if senderAddress != "" {
+			s.SendRequestResync(s.runCtx, senderAddress)
+		}
+		return
+	}
+
+	if verdict == routing.V3EpochReset {
+		log.Info().
+			Str("from", string(senderIdentity)).
+			Uint64("frame_epoch", frame.Epoch).
+			Msg("route_announce_v3_epoch_advanced_full_rebaseline")
+	}
+
+	mode := announceReceiveV3Delta
+	if isFull {
+		mode = announceReceiveV3Full
+	}
+	frames, sigs := routeAnnounceV3EntriesToWire(senderIdentity, frame.Entries)
+	// Phase 4 13.2-B/C/P2: verify attested-links signatures before
+	// ingest and tag the verification outcome per entry so storage can
+	// rank verified claims above unsigned/unverifiable ones via the
+	// Phase 4 13.2-C trust-score bonus (CompositeScore). Verification
+	// is gated on the per-session mesh_attested_links_v1 capability
+	// negotiation: when the peer did NOT negotiate the cap, the sig
+	// bytes are forwarded through storage (so a downstream peer with
+	// the cap can still verify) but treated as informational only on
+	// our side — no ed25519.Verify, no entry drop on invalid, no
+	// trust-score bonus on success. When the cap IS negotiated:
+	// present-but-invalid signatures (sig included, pubkey known,
+	// ed25519.Verify failed) drop the offending entry; present-with-
+	// unknown-pubkey and absent signatures pass through with
+	// verified=false (Tier-2 leniency). See
+	// docs/protocol/attested_links.md "Capability negotiation" and
+	// "Receive contract" for the full trust ladder.
+	var verified []bool
+	if s.peerSupportsAttestedLinks(senderAddress) {
+		frames, sigs, verified = s.verifyRouteAnnounceV3Sigs(senderIdentity, frames, sigs, frame.Epoch)
+	} else {
+		// Cap not negotiated — sig bytes flow through unchanged for
+		// downstream forwarding, but we mark every entry verified=false
+		// so CompositeScore does not award the signed-route bonus
+		// based on locally-unverified sigs.
+		verified = make([]bool, len(frames))
+	}
+	s.applyAnnounceEntries(senderIdentity, frames, sigs, verified, mode)
+}
+
+// verifyRouteAnnounceV3Sigs filters frames+sigs by ed25519 signature
+// validity (Phase 4 13.2-B). Returns the surviving entries in parallel
+// slices preserving relative order; entries with a present sig that
+// fails verification are dropped with a warn log. Entries with no sig
+// or with a sig but unknown destination pubkey pass through unchanged.
+//
+// The verifier uses CanonicalSigningBytes() — identity and extra
+// ONLY. Hops, epoch, AND seq_no are all per-emitter wire fields
+// (hops by receiver +1 convention; epoch by each sender's local
+// table-generation counter; seq_no by the outbound SeqNo helpers
+// in route_store.go that can advance the wire value past the
+// origin's native seq on transit re-emit) and are deliberately
+// EXCLUDED from the signed payload — see
+// docs/protocol/attested_links.md "Canonical signing bytes" for
+// the multi-hop verification rationale. The epoch parameter is
+// preserved on the Go signature for diagnostic logging on invalid
+// signatures (so operators can correlate failures with the sending
+// peer's table generation) but does NOT enter the canonical bytes.
+// Canonical bytes are reconstructible from the wire entry's
+// identity and extra alone, so transit nodes that forwarded the
+// entry verbatim do not perturb the verification — exactly what
+// the Phase 5 anchor-published DHT lookup requires.
+func (s *Service) verifyRouteAnnounceV3Sigs(senderIdentity domain.PeerIdentity, frames []protocol.AnnounceRouteFrame, sigs [][]byte, epoch uint64) ([]protocol.AnnounceRouteFrame, [][]byte, []bool) {
+	if len(frames) == 0 {
+		return frames, sigs, nil
+	}
+	outFrames := frames[:0]
+	outSigs := sigs[:0]
+	verified := make([]bool, 0, len(frames))
+	for i, f := range frames {
+		var sig []byte
+		if i < len(sigs) {
+			sig = sigs[i]
+		}
+		if len(sig) == 0 {
+			// Unsigned entry — pass through with verified=false;
+			// Tier 2 accepts it, the 13.2-C trust-score rank penalty
+			// arbitrates the tie-break.
+			outFrames = append(outFrames, f)
+			outSigs = append(outSigs, sig)
+			verified = append(verified, false)
+			continue
+		}
+		pubkey, ok := s.publicKeyForIdentity(domain.PeerIdentity(f.Identity))
+		if !ok {
+			// Sig present but we cannot resolve the destination
+			// pubkey — treat as unverified (Tier-2 lenient: we cannot
+			// distinguish honest-with-unknown-key from malicious-
+			// with-fake-key, and dropping would prevent learning
+			// about identities we have not yet handshaked with). Log
+			// at debug so operators can correlate. The sig bytes
+			// still propagate so a peer with the pubkey can verify
+			// independently; locally the entry is ranked as
+			// unverified (verified=false) by CompositeScore.
+			log.Debug().
+				Str("from", string(senderIdentity)).
+				Str("entry_identity", f.Identity).
+				Msg("route_announce_v3_sig_pubkey_unknown_passthrough")
+			outFrames = append(outFrames, f)
+			outSigs = append(outSigs, sig)
+			verified = append(verified, false)
+			continue
+		}
+		v3e := protocol.RouteAnnounceV3Entry{
+			Identity: f.Identity,
+			SeqNo:    f.SeqNo,
+			Extra:    f.Extra,
+		}
+		if !ed25519.Verify(pubkey, v3e.CanonicalSigningBytes(), sig) {
+			// Present-but-invalid signature — concrete malicious or
+			// corrupted claim. Drop the entry; do NOT pass to storage.
+			log.Warn().
+				Str("from", string(senderIdentity)).
+				Str("entry_identity", f.Identity).
+				Uint64("seq_no", f.SeqNo).
+				Uint64("epoch", epoch).
+				Msg("route_announce_v3_sig_invalid_entry_dropped")
+			continue
+		}
+		// Verified — pass through with verified=true so the storage
+		// receives the trust-tier tag for CompositeScore.
+		outFrames = append(outFrames, f)
+		outSigs = append(outSigs, sig)
+		verified = append(verified, true)
+	}
+	return outFrames, outSigs, verified
+}
+
+// routeAnnounceV3EntriesToWire adapts compact v3 entries to the
+// AnnounceRouteFrame shape applyAnnounceEntries consumes, plus a
+// parallel attested-links signature slice (Phase 4 13.2-A,
+// mesh_attested_links_v1). The dropped Origin field is synthesised as
+// senderIdentity (sender-originated semantic): this satisfies the
+// own-origin forgery guard (Origin == self only if the sender is us,
+// which never happens) and the withdrawal authority guard (Origin ==
+// sender holds by construction, so a v3 withdrawal — Hops >=
+// HopsInfinity — from the announcing uplink is accepted). Extra is
+// forwarded verbatim.
+//
+// Sig handling: the v3 wire field carries the Ed25519 attestation as a
+// base64-encoded string (see RouteAnnounceV3Entry.Sig). The adapter
+// decodes each entry's sig into the parallel sigs slice; a malformed
+// base64 is treated as "no signature" (nil slot) with a debug log so a
+// hostile peer cannot crash ingest, and verification (13.2-B) will
+// surface the absent-sig case via the trust-score path. Empty Sig
+// strings produce nil slots without any log noise — that is the
+// normal Tier-2 unsigned-entry path. The returned slices are always
+// the same length; passing them in lockstep to applyAnnounceEntries
+// preserves per-entry index alignment.
+func routeAnnounceV3EntriesToWire(senderIdentity domain.PeerIdentity, entries []protocol.RouteAnnounceV3Entry) ([]protocol.AnnounceRouteFrame, [][]byte) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	frames := make([]protocol.AnnounceRouteFrame, len(entries))
+	sigs := make([][]byte, len(entries))
+	for i, e := range entries {
+		frames[i] = protocol.AnnounceRouteFrame{
+			Identity: e.Identity,
+			Origin:   string(senderIdentity),
+			Hops:     int(e.Hops),
+			SeqNo:    e.SeqNo,
+			Extra:    e.Extra,
+		}
+		if e.Sig != "" {
+			decoded, err := base64.StdEncoding.DecodeString(e.Sig)
+			if err != nil {
+				log.Debug().
+					Err(err).
+					Str("from", string(senderIdentity)).
+					Str("entry_identity", e.Identity).
+					Msg("route_announce_v3_sig_decode_failed")
+				// Leave sigs[i] nil — verification path treats this as
+				// unsigned. The entry itself still gets ingested.
+				continue
+			}
+			sigs[i] = decoded
+		}
+	}
+	return frames, sigs
+}
+
 // announceReceiveMode tags the wire path that delivered the announce-plane
 // entries. Used by applyAnnounceEntries to select the baseline-update side
-// effect (set only on legacy announce_routes — routes_update never
-// establishes a baseline by itself).
+// effect: set on baseline-class frames (legacy announce_routes, v3
+// kind="full") and NOT on delta-class frames (v2 routes_update, v3
+// kind="delta"). Delta frames are gated upstream by handleRoutesUpdate /
+// handleRouteAnnounceV3 against the same hasReceivedBaseline flag, so the
+// delta path can rely on the baseline already being established before
+// applyAnnounceEntries runs.
 type announceReceiveMode int
 
 const (
 	announceReceiveLegacy announceReceiveMode = iota
 	announceReceiveV2
+	// announceReceiveV3Full tags a route_announce_v3 frame with
+	// kind="full". Like legacy announce_routes it establishes the
+	// receive-side baseline for the session (MarkBaselineReceived), so a
+	// subsequent kind="delta" frame is safe to apply.
+	announceReceiveV3Full
+	// announceReceiveV3Delta tags a route_announce_v3 frame with
+	// kind="delta". Like routes_update it never establishes a baseline by
+	// itself — handleRouteAnnounceV3 gates it on HasReceivedBaseline.
+	announceReceiveV3Delta
 )
+
+// establishesBaseline reports whether a receive mode delivers a
+// self-contained first-sync snapshot that unlocks subsequent delta
+// application. Legacy announce_routes and v3 full do; v2 routes_update
+// and v3 delta do not.
+func (m announceReceiveMode) establishesBaseline() bool {
+	return m == announceReceiveLegacy || m == announceReceiveV3Full
+}
+
+// wireTypeLabel returns the structured-log wire_type string for the mode.
+func (m announceReceiveMode) wireTypeLabel() string {
+	switch m {
+	case announceReceiveV2:
+		return "routes_update"
+	case announceReceiveV3Full:
+		return "route_announce_v3:full"
+	case announceReceiveV3Delta:
+		return "route_announce_v3:delta"
+	default:
+		return "announce_routes"
+	}
+}
 
 // applyAnnounceEntries is the shared receive-side core for both the legacy
 // announce_routes and the v2 routes_update wire frames. The entry-by-entry
@@ -921,7 +1930,29 @@ const (
 // are safe to apply; the v2 path leaves the flag untouched because
 // routes_update never establishes a baseline by itself (see
 // handleRoutesUpdate for the gating contract).
-func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireRoutes []protocol.AnnounceRouteFrame, mode announceReceiveMode) {
+//
+// attestedSigs is the Phase 4 13.2-A parallel-slice of per-entry Ed25519
+// attestation signatures (mesh_attested_links_v1). When nil the entries
+// land in storage with empty AttestedSig — the legacy v1/v2 wire path
+// has no sig field, so its callers always pass nil. When non-nil the
+// slice MUST be the same length as wireRoutes; index i carries the sig
+// extracted from the corresponding v3 entry's "sig" field. A nil
+// element inside a non-nil slice means "this v3 entry was unsigned",
+// which is allowed at Tier 2 (rank penalty in 13.2-C; verification in
+// 13.2-B). The bytes are threaded opaquely into RouteEntry.AttestedSig
+// → UplinkClaim.AttestedSig so a re-announce on the v3 path can
+// forward them unchanged.
+//
+// attestedVerified is the Phase 4 13.2-C parallel-slice of per-entry
+// verification outcomes. When nil all entries land with verified=false
+// (legacy callers — no sigs, no verification). When non-nil it must be
+// the same length as wireRoutes; index i is true if and only if the
+// verifier successfully ed25519.Verify'd attestedSigs[i] against the
+// destination identity's public key. The flag is stored on
+// RouteEntry.AttestedSigVerified → UplinkClaim.AttestedSigVerified so
+// CompositeScore can apply the trust-score bonus at rank time without
+// re-verifying.
+func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireRoutes []protocol.AnnounceRouteFrame, attestedSigs [][]byte, attestedVerified []bool, mode announceReceiveMode) {
 	if senderIdentity == "" {
 		log.Warn().Msg("announce_routes_no_sender_identity")
 		return
@@ -932,7 +1963,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 	rejected := 0
 	drainIdentities := make(map[domain.PeerIdentity]struct{})
 
-	for _, wireRoute := range wireRoutes {
+	for i, wireRoute := range wireRoutes {
 		if wireRoute.Identity == "" || wireRoute.Origin == "" {
 			rejected++
 			continue
@@ -1038,6 +2069,20 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 			Source:   routing.RouteSourceAnnouncement,
 			Extra:    wireRoute.Extra,
 		}
+		// Phase 4 13.2-A: thread the parallel attested-links signature
+		// (extracted from the v3 wire entry by the caller) into the
+		// boundary RouteEntry so toUplinkClaim stores it for later
+		// re-emit. nil attestedSigs (legacy v1/v2 callers) or a nil
+		// element (unsigned v3 entry) both leave AttestedSig empty.
+		if i < len(attestedSigs) {
+			entry.AttestedSig = attestedSigs[i]
+		}
+		// Phase 4 13.2-C: thread the verification outcome into the
+		// boundary so CompositeScore can apply the trust-score bonus.
+		// nil attestedVerified (legacy callers) leaves verified=false.
+		if i < len(attestedVerified) {
+			entry.AttestedSigVerified = attestedVerified[i]
+		}
 
 		status, err := s.routingTable.UpdateRoute(entry)
 		if err != nil {
@@ -1085,10 +2130,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 		}
 	}
 
-	wireType := "announce_routes"
-	if mode == announceReceiveV2 {
-		wireType = "routes_update"
-	}
+	wireType := mode.wireTypeLabel()
 	log.Debug().
 		Str("from", string(senderIdentity)).
 		Str("wire_type", wireType).
@@ -1106,12 +2148,15 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 		})
 	}
 
-	// Baseline tracking: a legacy announce_routes arrival is the protocol
-	// signal that the peer has delivered the first-sync snapshot for this
-	// session. Subsequent routes_update deltas from the peer can now be
-	// applied safely. The routes_update wire path deliberately leaves the
-	// flag untouched — see handleRoutesUpdate for the gating contract.
-	if mode == announceReceiveLegacy {
+	// Baseline tracking: a baseline-class arrival (legacy announce_routes
+	// OR v3 route_announce_v3 kind="full") is the protocol signal that the
+	// peer has delivered the first-sync snapshot for this session.
+	// Subsequent delta frames from the peer (v2 routes_update or v3
+	// kind="delta") can now be applied safely. The delta wire paths
+	// deliberately leave the flag untouched — see handleRoutesUpdate and
+	// the kind="delta" branch of handleRouteAnnounceV3 for the gating
+	// contract.
+	if mode.establishesBaseline() {
 		s.announceLoop.StateRegistry().GetOrCreate(senderIdentity).MarkBaselineReceived()
 	}
 

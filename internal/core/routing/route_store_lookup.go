@@ -435,6 +435,14 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 				Hops:      liveWinner.Hops,
 				Withdrawn: false,
 				ExtraSig:  string(normalizeExtra(liveWinner.Extra)),
+				// Round-14 fix: include AttestedSig bytes in the
+				// content cache key so a sig-only upgrade in
+				// storage (reconfirmation path) produces a fresh
+				// outbound SeqNo. Without this the cache hits on
+				// the unsigned prior emit and the new signed
+				// content ships at the burnt SeqNo, which the
+				// receiver rejects as stale.
+				AttestedSig: string(liveWinner.AttestedSig),
 			}
 			// Per-peer emit: only excludeVia's receiver state
 			// advances on this AnnounceTo call. The per-peer
@@ -477,6 +485,13 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 				Hops:     int(liveWinner.Hops),
 				SeqNo:    wireSeqNo,
 				Extra:    liveWinner.Extra,
+				// Phase 4 13.2-A: carry the stored attested-links
+				// signature through the projection so a v3 re-emit
+				// forwards the original signer's bytes unchanged.
+				// Empty for legacy/unsigned claims — the v3 build path
+				// omits the wire "sig" field via omitempty.
+				AttestedSig:         liveWinner.AttestedSig,
+				AttestedSigVerified: liveWinner.AttestedSigVerified,
 			})
 			// Live winner suppresses own-direct tombstone emits
 			// for this Identity on the wire — see the live-vs-
@@ -494,6 +509,10 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 				Hops:      tomb.Hops,
 				Withdrawn: true,
 				ExtraSig:  string(normalizeExtra(tomb.Extra)),
+				// Round-14: same content-key contract as the live
+				// branch above — see liveWinner comment for the
+				// sig-upgrade fresh-SeqNo rationale.
+				AttestedSig: string(tomb.AttestedSig),
 			}
 			// Per-peer tombstone retry: announce-delta withdrawal
 			// redelivery to a peer where the original
@@ -526,6 +545,26 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 				Hops:     HopsInfinity,
 				SeqNo:    wireSeqNo,
 				Extra:    tomb.Extra,
+				// Round-13 fix: forward the stored attested-links
+				// signature on tombstone projections, mirroring
+				// the liveWinner branch above. Without this the
+				// per-peer tombstone retry (and the full-sync
+				// withdrawal redelivery this branch feeds) drops
+				// the sig that route_store_mutation.go::
+				// InvalidateAllVia carefully preserved on the
+				// live→tombstone transition. buildRouteAnnounceV3Frame
+				// would then emit the withdrawal with sig="" even
+				// though storage still held the destination
+				// identity's attestation — breaking the
+				// attested-links forwarding contract for the
+				// withdrawal half of the v3 wire stream. The
+				// canonical signing bytes are (identity ||
+				// extra) and exclude per-emitter wire fields
+				// (hops, epoch, seq_no), so the sig stays valid
+				// on the tombstone exactly the way it stayed
+				// valid across the live→withdrawn transition.
+				AttestedSig:         tomb.AttestedSig,
+				AttestedSigVerified: tomb.AttestedSigVerified,
 			})
 		}
 	}
@@ -535,22 +574,48 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 // isBetterLiveClaim returns true when `cand` should replace
 // `incumbent` as the per-Identity live winner during
 // AnnounceProjectionFor's collapse. Mirrors
-// isBetterAnnounceEntry's ordering in announce_builder.go:
-// min Hops → higher SeqNo → Extra tie-break (compareExtra >
-// 0 wins) → deterministic Uplink lex tie-break. Extra
-// participates because it is part of the wire content
+// isBetterAnnounceEntry's ordering in announce_builder.go,
+// Round-26 alignment:
+//
+//	min Hops → higher SeqNo → verified-sig (verified beats
+//	unsigned) → Extra tie-break (compareExtra > 0 wins) →
+//	deterministic Uplink lex tie-break.
+//
+// Extra participates because it is part of the wire content
 // (RouteEntry.Extra is forward-compatible relay data), and
 // different Extra values must produce a deterministic winner
 // so the assigned outbound SeqNo is stable across cycles.
 // Uplink takes the role of Origin in the AnnounceEntry-level
 // helper — both are deterministic stable identifiers of the
 // claim's source.
+//
+// Round-26: verified-sig participates AHEAD of compareExtra
+// (it was AHEAD of Uplink lex in Round-25, but that still let
+// an unsigned claim with lex-larger Extra beat a verified
+// claim with smaller Extra — the Extra tie fired first and
+// the verified comparator never ran). Lookup /
+// AnnounceTargetFor already prefer verified claims via
+// scoreSignedBonus (score.go) and do NOT consult Extra; the
+// announce projection MUST agree, otherwise the periodic
+// AnnounceTo cycle would emit the unsigned uplink purely on
+// Extra lex, dropping the destination identity's attestation
+// from the wire on every downstream re-emit. SeqNo stability
+// across cycles is preserved because outboundEmitSig keys on
+// (Uplink, Hops, Withdrawn, ExtraSig, AttestedSig): when the
+// winner switches due to verified-sig flipping, the content
+// key changes and a fresh SeqNo is assigned exactly as it
+// would for any other content change. Uplink lex stays as the
+// final deterministic tie so two equally-attested claims with
+// equal Extra still converge on a stable winner.
 func isBetterLiveClaim(cand, incumbent *UplinkClaim) bool {
 	if cand.Hops != incumbent.Hops {
 		return cand.Hops < incumbent.Hops
 	}
 	if cand.SeqNo != incumbent.SeqNo {
 		return cand.SeqNo > incumbent.SeqNo
+	}
+	if cand.AttestedSigVerified != incumbent.AttestedSigVerified {
+		return cand.AttestedSigVerified
 	}
 	if cmp := compareExtra(cand.Extra, incumbent.Extra); cmp != 0 {
 		return cmp > 0

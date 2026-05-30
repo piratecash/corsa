@@ -123,6 +123,23 @@ var requiredP2PWireCommands = map[string]bool{
 	// the wire contract.
 	"route_sync_digest_v1":  true,
 	"route_sync_summary_v1": true,
+
+	// Phase 4 cluster-mesh compact announce frame (mesh_routing_v3
+	// capability gate). route_announce_v3 replaces announce_routes /
+	// routes_update for v3-capable pairs: it drops the redundant Origin
+	// field and carries both full sync and delta via its kind field. See
+	// docs/cluster-mesh/phase-4-compact-wire-signed.md §3.1 and overview
+	// §7.1 for the wire contract.
+	"route_announce_v3": true,
+
+	// Phase 4 cluster-mesh single-hop poison-reverse signal
+	// (mesh_poison_reverse_v1 capability gate). route_poison_v1 lets a
+	// transit node explicitly invalidate a claim through itself,
+	// accelerating count-to-infinity convergence vs the implicit
+	// hops=N+1 oscillation. See
+	// docs/cluster-mesh/phase-4-compact-wire-signed.md §3.3 and
+	// overview §7.7 for the wire contract.
+	"route_poison_v1": true,
 }
 
 // extractSwitchCasesFromFunc parses service.go via go/ast and returns every

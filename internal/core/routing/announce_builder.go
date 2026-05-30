@@ -238,7 +238,20 @@ func ComputeDelta(oldSnap, newSnap *AnnounceSnapshot) []AnnounceEntry {
 		}
 		if old.SeqNo != e.SeqNo ||
 			old.Hops != e.Hops ||
-			!normalizedExtraEqual(old.Extra, e.Extra) {
+			!normalizedExtraEqual(old.Extra, e.Extra) ||
+			// Round-14: a sig-only upgrade in storage
+			// (reconfirmation path admitted a verified sig at the
+			// same SeqNo + same Hops + same Extra) changes only
+			// AttestedSig. Without including the bytes here the
+			// delta would be empty, the AnnounceLoop would
+			// suppress the cycle as a no-op, and the signed
+			// attestation would never reach the peer — leaving
+			// the destination identity unverified on the receiver
+			// forever. AttestedSigVerified is NOT compared: it
+			// is a local-only observation that never travels on
+			// the wire, so a local verify-flip without any wire-
+			// byte change must NOT manufacture a delta.
+			!bytes.Equal(old.AttestedSig, e.AttestedSig) {
 			delta = append(delta, e)
 		}
 	}
@@ -322,8 +335,11 @@ func trackKeyFor(e AnnounceEntry) announceTrackKey {
 // on the wire. Post-A1 the per-Identity collapse moved upstream
 // into `routeStore.AnnounceProjectionFor`: Table.AnnounceTo emits
 // one LIVE WINNER per Identity (selected inline by min Hops →
-// higher SeqNo → Extra tie-break → deterministic Uplink lex)
-// plus any own-direct tombstones in the no-live-alternative case.
+// higher SeqNo → verified-sig tie-break (Round-26:
+// AttestedSigVerified=true beats unsigned, mirrors
+// scoreSignedBonus in Lookup/AnnounceTargetFor) → Extra tie-break
+// → deterministic Uplink lex) plus any own-direct tombstones in
+// the no-live-alternative case.
 // BuildAnnounceSnapshot therefore runs as a thin defensive pass
 // on routing-driven inputs — the per-Identity stage below is a
 // no-op for AnnounceProjectionFor output and only fires on
@@ -341,17 +357,48 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 		SeqNo    uint64
 		Hops     int
 		Extra    string // normalized canonical bytes
+		// Round-19 alignment: include the attested-links signature
+		// in the dedup key, since Round-14 promoted AttestedSig to
+		// wire content (it now participates in ComputeDelta and the
+		// outboundEmitSig content cache). Treating two entries that
+		// differ only in sig as exact-duplicates here would silently
+		// drop one of them before the per-Identity collapse, which
+		// could lose a verified-bytes upgrade if the producer ever
+		// hands BuildAnnounceSnapshot two pre-collapse copies (one
+		// signed, one not). In production AnnounceProjectionFor
+		// always emits one entry per (Identity) winner so this case
+		// is degenerate, but aligning the key with the rest of the
+		// wire-content contract removes the foot-gun. Raw bytes →
+		// string conversion (Go allows []byte→string for arbitrary
+		// bytes; the string just holds the byte sequence) keeps
+		// wireKey map-comparable.
+		AttestedSig string
 	}
 	seen := make(map[wireKey]struct{}, len(raw))
 	deduped := make([]AnnounceEntry, 0, len(raw))
 	for _, e := range raw {
+		// normalizeExtra is used ONLY to build the dedup key — the
+		// emitted AnnounceEntry below carries e.Extra verbatim
+		// (Round-24 fix). The attested-links contract
+		// (RouteAnnounceV3Entry.CanonicalSigningBytes in
+		// internal/core/protocol/frame_route_announce_v3.go) hashes
+		// Extra dword-for-dword as it appears on the wire, and
+		// docs/protocol/attested_links.md "Canonical signing bytes"
+		// promises verbatim transit. If we stored the normalized
+		// bytes in the emitted entry, a transit re-emit of a signed
+		// frame would carry mutated Extra bytes alongside the
+		// original AttestedSig — every downstream peer with
+		// mesh_attested_links_v1 negotiated would fail verification
+		// and drop the entry. Normalization is fine in the dedup key
+		// because the key is internal-only — never touches the wire.
 		ne := normalizeExtra(e.Extra)
 		k := wireKey{
-			Identity: e.Identity,
-			Origin:   e.Origin,
-			SeqNo:    e.SeqNo,
-			Hops:     e.Hops,
-			Extra:    string(ne),
+			Identity:    e.Identity,
+			Origin:      e.Origin,
+			SeqNo:       e.SeqNo,
+			Hops:        e.Hops,
+			Extra:       string(ne),
+			AttestedSig: string(e.AttestedSig),
 		}
 		if _, dup := seen[k]; dup {
 			continue
@@ -362,7 +409,15 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 			Origin:   e.Origin,
 			Hops:     e.Hops,
 			SeqNo:    e.SeqNo,
-			Extra:    ne,
+			// Round-24: emit verbatim Extra bytes, not the
+			// normalized form — see the comment above for the
+			// attested-links pair-consistency contract.
+			Extra: e.Extra,
+			// Phase 4 13.2-A: carry the attested-links signature
+			// through the dedup stage so a v3 re-emit forwards the
+			// original signer's bytes unchanged.
+			AttestedSig:         e.AttestedSig,
+			AttestedSigVerified: e.AttestedSigVerified,
 		})
 	}
 
@@ -671,10 +726,18 @@ func compareExtra(a, b json.RawMessage) int {
 }
 
 // announceEntryEqual compares two AnnounceEntry values for canonical equality.
+// AttestedSig participates because Round-14 promoted it to wire content
+// (ComputeDelta + outboundEmitSig already key on the bytes), so two
+// entries that differ only in sig must NOT compare equal — otherwise
+// AnnounceSnapshot.Equal would treat a verified-bytes upgrade as the
+// same snapshot and any test or downstream check based on Equal would
+// silently miss the change. AttestedSigVerified is local-only and never
+// participates (matches the Round-14 ComputeDelta rule).
 func announceEntryEqual(a, b AnnounceEntry) bool {
 	return a.Identity == b.Identity &&
 		a.Origin == b.Origin &&
 		a.SeqNo == b.SeqNo &&
 		a.Hops == b.Hops &&
-		normalizedExtraEqual(a.Extra, b.Extra)
+		normalizedExtraEqual(a.Extra, b.Extra) &&
+		bytes.Equal(a.AttestedSig, b.AttestedSig)
 }

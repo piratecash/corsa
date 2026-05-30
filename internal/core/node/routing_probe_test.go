@@ -178,7 +178,7 @@ func TestP2PWireCommands_IncludesRouteProbeTypes(t *testing.T) {
 // remote lacks the cap) is in dispatchNetworkFrame, but the local
 // advertisement is the upstream contract that PR 11.1 already wired.
 func TestLocalCapabilities_AdvertisesRouteProbeV1(t *testing.T) {
-	caps := localCapabilities()
+	caps := localCapabilities(false)
 	for _, c := range caps {
 		if c == domain.CapMeshRouteProbeV1 {
 			return

@@ -5806,9 +5806,12 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 	}
 
 	// Clear s.seen so the node-level dedup doesn't catch it (simulates restart).
+	// s.seen is the Phase 4 13.4 rotating Bloom filter and does not
+	// support single-key delete; replacing it with a fresh instance is
+	// the semantic equivalent of the restart this test models.
 	// s.seen is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.Lock()
-	delete(svc.seen, string(msgID))
+	svc.seen = newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
 	svc.gossipMu.Unlock()
 
 	// Second store — StoreMessage returns StoreDuplicate.
@@ -5927,9 +5930,12 @@ func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
 	}
 
 	// Simulate restart: clear s.seen so the node-level dedup won't catch it.
+	// s.seen is the Phase 4 13.4 rotating Bloom filter and does not
+	// support single-key delete; replacing it with a fresh instance is
+	// the semantic equivalent of the restart this test models.
 	// s.seen is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.Lock()
-	delete(svc.seen, string(msgID))
+	svc.seen = newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
 	svc.gossipMu.Unlock()
 
 	// Second store — StoreDuplicate → must NOT add another copy to DMHeaders.

@@ -7,25 +7,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot is the
 // node-package guard for the first-sync wire-frame invariant documented in
-// the "First-sync wire-frame invariant" section of docs/routing.md.
+// the "First-sync wire-frame invariant" section of docs/routing.md, for
+// the v1/v2-peer half of the dispatch.
 //
 // sendConnectTimeFullSync — the shared core invoked from both
-// sendFullTableSyncToInbound and sendOutboundFullTableSync — MUST emit the
-// legacy announce_routes wire frame and MUST NOT route through the live
-// v2 routes_update delta path (Service.SendRoutesUpdate +
-// dispatchAnnouncePlaneFrameWithCaps), regardless of any capability the
-// peer may have advertised. A fresh session has no baseline to diff an
-// incremental routes_update against; sending one there would either be
-// rejected by the receiver dispatcher (which gates routes_update on
-// v1+v2+relay and on the per-peer baseline flag) or desynchronise
-// mixed-version networks where the peer expects an initial
-// announce_routes baseline.
+// sendFullTableSyncToInbound and sendOutboundFullTableSync — picks a
+// self-contained baseline frame based on the peer's negotiated caps:
+// legacy announce_routes for v1/v2 peers (this test) or
+// route_announce_v3 with kind="full" for v3-triplet peers (covered by
+// TestConnectTimeFullSync_UsesV3FullSender_NonEmptySnapshot below).
+// In either branch the dispatch MUST NOT route through a delta path
+// (Service.SendRoutesUpdate or SendRouteAnnounceV3 with kind="delta")
+// — a fresh session has no baseline to diff an incremental against;
+// sending one would either be rejected by the receiver dispatcher
+// (which gates deltas on v1+v2+relay / v1+v3+relay AND the per-peer
+// baseline flag) or desynchronise mixed-version networks where the
+// peer expects an initial baseline.
+//
+// This particular guard exercises the v1/v2-peer path by setting up
+// the inbound conn without the mesh_routing_v3 cap, so
+// peerSupportsRoutingV3 returns false and the dispatch falls into
+// SendAnnounceRoutes. The negative assertion (frame.Type ==
+// "announce_routes", NOT "routes_update", NOT "route_announce_v3")
+// fails loudly in any direction.
 //
 // The guard exercises the non-empty-snapshot branch: the routing table is
 // seeded with a direct peer so BuildAnnounceSnapshot produces at least one
@@ -91,14 +102,18 @@ func TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot(t *testing.T) {
 		}
 
 		// First-sync wire-frame invariant guard (see docs/routing.md):
-		// the first sync after session establishment is always legacy.
-		// A regression that routed this through the live v2 delta path
-		// (Service.SendRoutesUpdate + dispatchAnnouncePlaneFrameWithCaps)
-		// would either produce frame.Type == "routes_update" or — if the
-		// captured-handle gate dropped the send because the test fixture
-		// lacks the v2 cap on the conn — fail to emit any wire frame at
-		// all. Both regressions are caught here: the first by the type
-		// check, the second by the timeout arm below.
+		// for a peer WITHOUT the v3 triplet (this fixture's case —
+		// no caps wired on the conn so peerSupportsRoutingV3 returns
+		// false), the first sync after session establishment must
+		// land as legacy announce_routes. A regression that routed
+		// this through the live v2 delta path (Service.SendRoutesUpdate
+		// + dispatchAnnouncePlaneFrameWithCaps) would either produce
+		// frame.Type == "routes_update" or — if the captured-handle
+		// gate dropped the send because the test fixture lacks the
+		// v2 cap on the conn — fail to emit any wire frame at all.
+		// Both regressions are caught here: the first by the type
+		// check, the second by the timeout arm below. The v3-side
+		// guard is TestConnectTimeFullSync_UsesV3FullSender_NonEmptySnapshot.
 		if frame.Type == "routes_update" {
 			t.Fatalf("connect-time sync must not emit routes_update " +
 				"(first-sync wire-frame invariant, docs/routing.md): got v2 wire frame")
@@ -142,6 +157,121 @@ func TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot(t *testing.T) {
 	}
 	if view.NeedsFullResync {
 		t.Fatal("NeedsFullResync should clear after RecordFullSyncSuccess")
+	}
+}
+
+// TestConnectTimeFullSync_UsesV3FullSender_NonEmptySnapshot is the
+// node-package guard for the v3-peer half of the first-sync wire-frame
+// invariant: when the inbound peer's negotiated cap set includes the
+// v3 triplet (mesh_routing_v1 + mesh_routing_v3 + mesh_relay_v1),
+// sendConnectTimeFullSync MUST dispatch through SendRouteAnnounceV3
+// with kind="full" — NOT legacy SendAnnounceRoutes, NOT a delta of
+// any flavour (routes_update or kind="delta"). Mirrors the v1/v2 guard
+// above; together the two tests pin both halves of the dispatch.
+func TestConnectTimeFullSync_UsesV3FullSender_NonEmptySnapshot(t *testing.T) {
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
+
+	if _, err := svc.routingTable.AddDirectPeer(idPeerC); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+
+	pipeLocal, pipeRemote := net.Pipe()
+	defer func() { _ = pipeLocal.Close() }()
+	defer func() { _ = pipeRemote.Close() }()
+
+	conn := &fakeConn{
+		Conn:       pipeLocal,
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.11"), Port: 22001},
+	}
+	pc := netcore.New(netcore.ConnID(101), conn, netcore.Inbound, netcore.Options{})
+	defer pc.Close()
+	// v3-triplet caps on the inbound conn so peerSupportsRoutingV3
+	// returns true and sendConnectTimeFullSync picks the v3 baseline
+	// branch. Without these caps the dispatch falls back to legacy
+	// (covered by the v1/v2 test above).
+	pc.SetCapabilities([]domain.Capability{
+		domain.CapMeshRoutingV1,
+		domain.CapMeshRoutingV3,
+		domain.CapMeshRelayV1,
+	})
+
+	svc.peerMu.Lock()
+	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
+	svc.peerMu.Unlock()
+
+	received := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		n, _ := pipeRemote.Read(buf)
+		if n > 0 {
+			received <- buf[:n]
+		}
+	}()
+
+	id, _ := svc.connIDFor(conn)
+	svc.sendFullTableSyncToInbound(context.Background(), id, idPeerB)
+
+	select {
+	case data := <-received:
+		var frame protocol.Frame
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("unmarshal wire frame: %v (raw=%q)", err, string(data))
+		}
+		// Triple negative pin: v3 connect-time MUST emit
+		// route_announce_v3, NOT legacy announce_routes (would mean
+		// the v3 cap gate didn't fire), NOT routes_update (would
+		// mean a v2 delta path took over), NOT a v3 kind="delta"
+		// (would mean the kind discriminator slipped).
+		if frame.Type == "announce_routes" {
+			t.Fatalf("v3-triplet peer must NOT receive legacy announce_routes on connect-time; got legacy frame")
+		}
+		if frame.Type == "routes_update" {
+			t.Fatalf("v3-triplet peer must NOT receive routes_update on connect-time; got v2 delta")
+		}
+		if frame.Type != protocol.RouteAnnounceV3FrameType {
+			t.Fatalf("expected %q on the wire, got %q", protocol.RouteAnnounceV3FrameType, frame.Type)
+		}
+		// Parse the RawLine for kind / entries — Frame.RawLine holds
+		// the pre-marshalled JSON for the v3 frame (see
+		// buildRouteAnnounceV3Frame).
+		var v3 protocol.RouteAnnounceV3Frame
+		if err := json.Unmarshal(data, &v3); err != nil {
+			t.Fatalf("unmarshal v3 frame: %v", err)
+		}
+		if v3.Kind != protocol.RouteAnnounceV3KindFull {
+			t.Fatalf("connect-time v3 sync MUST be kind=%q, got %q (delta on a fresh session has no baseline to diff)", protocol.RouteAnnounceV3KindFull, v3.Kind)
+		}
+		if len(v3.Entries) == 0 {
+			t.Fatal("connect-time v3 sync must carry the non-empty snapshot, got 0 entries")
+		}
+		foundC := false
+		for _, e := range v3.Entries {
+			if e.Identity == string(idPeerC) {
+				foundC = true
+				break
+			}
+		}
+		if !foundC {
+			t.Fatalf("expected peer-C in the v3 full-sync payload, got entries=%+v", v3.Entries)
+		}
+
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for v3 connect-time full sync wire frame")
+	}
+
+	// Same peer-state side-effect contract as the legacy guard:
+	// RecordFullSyncSuccess must have fired so subsequent cycles can
+	// compute deltas against this baseline.
+	state := svc.announceLoop.StateRegistry().Get(idPeerB)
+	if state == nil {
+		t.Fatal("announce peer state not created for inbound peer")
+	}
+	view := state.View()
+	if view.LastSentSnapshot == nil {
+		t.Fatal("expected LastSentSnapshot to be recorded after successful v3 connect-time sync")
+	}
+	if !view.HasSentWireBaselineV3 {
+		t.Fatal("HasSentWireBaselineV3 must flip after a successful v3 kind=full send so subsequent cycles can pick v3 delta")
 	}
 }
 

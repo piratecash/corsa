@@ -89,10 +89,15 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 			{
 				Address:  "addr-C",
 				Identity: "peer-C",
-				// A speculative v2 capability on the target MUST NOT change
-				// the wire-frame choice for forced-full. The whole point
-				// of the first-sync wire-frame invariant (docs/routing.md)
-				// is that this field is not consulted on the legacy path.
+				// mesh_routing_v2 alone (no v1, no relay) on the target
+				// MUST NOT change the wire-frame choice for forced-full:
+				// the first-sync invariant (docs/routing.md) requires a
+				// self-contained baseline frame, never a delta — even
+				// when the peer carries a delta-upgrade cap. The
+				// classifier additionally requires v1 alongside any
+				// upgrade (see hasCapV2Triplet / hasCapV3Triplet), so a
+				// v2-without-v1 peer falls through to the v1-only
+				// fallback path here anyway.
 				Capabilities: []routing.PeerCapability{
 					routing.PeerCapability("mesh_routing_v2"),
 				},

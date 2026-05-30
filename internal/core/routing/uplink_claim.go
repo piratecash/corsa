@@ -121,12 +121,41 @@ type UplinkClaim struct {
 	// against resurrection from delayed lower-SeqNo announcements.
 	Withdrawn bool
 
-	// AttestedSig is an Ed25519 signature attesting to this
-	// particular (Identity, Hops, SeqNo) claim. Empty unless the
-	// mesh_attested_links_v1 capability is negotiated; reserved
-	// for Phase 4 (compact wire frames + signed announcements).
-	// Allocated lazily — nil on every A0/A1-shipped claim.
+	// AttestedSig is an Ed25519 signature by the destination identity
+	// attesting to its (Identity, Extra) claim — produced via
+	// protocol.RouteAnnounceV3Entry.CanonicalSigningBytes. Per-emitter
+	// wire fields (hops, epoch, seq_no) are deliberately excluded from
+	// the signed payload so transit re-emit does not invalidate the
+	// signature (see CanonicalSigningBytes doc for the full rationale).
+	// Shipped on the wire via route_announce_v3.entry.sig under
+	// mesh_attested_links_v1; receivers verify when the cap is
+	// negotiated and the destination pubkey is known. Allocated lazily
+	// — nil for legacy v1/v2 ingest, for unsigned v3 ingest, and for
+	// own-direct routes whose ingest path does not carry a signature.
 	AttestedSig []byte
+
+	// AttestedSigVerified records whether the receiver successfully
+	// ed25519.Verify'd AttestedSig against the destination identity's
+	// public key at ingest time (Phase 4 13.2-C). Three states are
+	// collapsed onto two booleans paired with AttestedSig:
+	//
+	//   - AttestedSig != nil && AttestedSigVerified == true:
+	//     signature present AND cryptographically verified by us.
+	//     Highest trust tier — CompositeScore applies the signed
+	//     bonus.
+	//   - AttestedSig != nil && AttestedSigVerified == false:
+	//     signature present BUT we could not verify (the destination
+	//     identity's pubkey was not in our knowledge store at
+	//     ingest). The bytes are still forwarded verbatim so a peer
+	//     with the pubkey CAN verify; locally treated as unsigned
+	//     for ranking.
+	//   - AttestedSig == nil: no signature. Tier-2 unsigned path.
+	//     Same ranking as the unverified case.
+	//
+	// Present-but-invalid signatures never reach storage — the
+	// receive-side verifier drops them in verifyRouteAnnounceV3Sigs
+	// before applyAnnounceEntries runs.
+	AttestedSigVerified bool
 
 	// Extra carries opaque JSON fields from the wire that this node
 	// does not understand. Preserved across storage operations so
@@ -390,6 +419,15 @@ func toUplinkClaim(entry RouteEntry, now time.Time) UplinkClaim {
 		Withdrawn:         entry.Hops >= HopsInfinity,
 		Extra:             entry.Extra,
 		LastIngressOrigin: entry.Origin,
+		// Phase 4 13.2-A: thread the attested-links signature opaquely
+		// through ingest into storage. Sign-at-emit (own-origin) and
+		// verify-on-receive land in 13.2-B; today the bytes are
+		// stashed verbatim so a re-announce can forward them
+		// unchanged. Nil for legacy v1/v2 ingest (no sig on the wire)
+		// and for own-direct routes whose ingest path does not carry
+		// a signature today.
+		AttestedSig:         entry.AttestedSig,
+		AttestedSigVerified: entry.AttestedSigVerified,
 	}
 }
 
@@ -438,5 +476,11 @@ func toRouteEntry(identity, localOrigin PeerIdentity, claim UplinkClaim) RouteEn
 		Source:    claim.Source,
 		ExpiresAt: claim.ExpiresAt,
 		Extra:     claim.Extra,
+		// Phase 4 13.2-A: return the stored attested-links signature on
+		// the boundary so the projection layer (BuildAnnounceSnapshot /
+		// AnnounceProjectionFor) and the wire emit (buildRouteAnnounceV3Frame)
+		// can forward it unchanged.
+		AttestedSig:         claim.AttestedSig,
+		AttestedSigVerified: claim.AttestedSigVerified,
 	}
 }

@@ -449,7 +449,7 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 					Source:     e.Source.String(),
 					TTLSeconds: ttl,
 				},
-				score: routing.CompositeScore(uint8(e.Hops), e.Source, h),
+				score: routing.CompositeScore(uint8(e.Hops), e.Source, h, e.AttestedSigVerified),
 			})
 		}
 

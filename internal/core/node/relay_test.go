@@ -456,7 +456,7 @@ func TestSessionHasCapabilityForRelay(t *testing.T) {
 }
 
 func TestLocalCapabilitiesIncludesRelay(t *testing.T) {
-	caps := localCapabilities()
+	caps := localCapabilities(false)
 	found := false
 	for _, c := range caps {
 		if c == domain.CapMeshRelayV1 {
@@ -465,12 +465,12 @@ func TestLocalCapabilitiesIncludesRelay(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("localCapabilities() = %v, should include %q", caps, domain.CapMeshRelayV1)
+		t.Fatalf("localCapabilities(false) = %v, should include %q", caps, domain.CapMeshRelayV1)
 	}
 }
 
 func TestIntersectCapabilitiesWithRelay(t *testing.T) {
-	local := localCapabilities()
+	local := localCapabilities(false)
 	remote := []string{"mesh_relay_v1", "mesh_routing_v1"}
 	result := intersectCapabilities(local, remote)
 
@@ -485,7 +485,7 @@ func TestIntersectCapabilitiesWithRelay(t *testing.T) {
 }
 
 func TestIntersectCapabilitiesLegacyPeer(t *testing.T) {
-	local := localCapabilities()
+	local := localCapabilities(false)
 	var remote []string // legacy peer sends no capabilities
 	result := intersectCapabilities(local, remote)
 

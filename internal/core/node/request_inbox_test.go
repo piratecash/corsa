@@ -250,7 +250,7 @@ func (s *Service) initMaps() {
 		s.runCtx = context.Background()
 	}
 	s.topics = make(map[string][]protocol.Envelope)
-	s.seen = make(map[string]struct{})
+	s.seen = newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
 	s.seenReceipts = make(map[string]struct{})
 	s.known = make(map[string]struct{})
 	s.sessions = make(map[domain.PeerAddress]*peerSession)

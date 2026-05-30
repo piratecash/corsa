@@ -394,6 +394,25 @@ type RouteEntry struct {
 	// understand. Preserved across table updates so that re-announced routes
 	// carry forward-compatible extensions unchanged.
 	Extra json.RawMessage
+
+	// AttestedSig is the Ed25519 attestation signature by the
+	// destination identity over its (Identity, Extra) claim — produced
+	// via protocol.RouteAnnounceV3Entry.CanonicalSigningBytes (hops,
+	// epoch, and seq_no are deliberately excluded because they are
+	// per-emitter wire fields; see CanonicalSigningBytes doc for the
+	// multi-hop verification rationale). Carried on route_announce_v3
+	// wire frames as the entry-level "sig" field (overview §7.1,
+	// docs/protocol/route_announce_v3.md). Empty for legacy v1/v2 wire
+	// frames (no sig field on the wire) and for locally originated
+	// routes whose ingest path does not carry a signature.
+	AttestedSig []byte
+
+	// AttestedSigVerified records whether the receiver successfully
+	// verified AttestedSig at ingest time. See the
+	// UplinkClaim.AttestedSigVerified doc-comment for the three-state
+	// trust ladder this boolean encodes alongside AttestedSig. Read by
+	// CompositeScore (Phase 4 13.2-C) to apply the signed-route bonus.
+	AttestedSigVerified bool
 }
 
 // Validate checks structural invariants of the entry. Returns an error
@@ -585,6 +604,23 @@ type AnnounceEntry struct {
 	// Extra holds unknown wire fields for forward-compatible relay.
 	// Nil for locally originated routes.
 	Extra json.RawMessage
+
+	// AttestedSig is the Phase 4 mesh_attested_links_v1 signature
+	// (Ed25519 over RouteAnnounceV3Entry.CanonicalSigningBytes) for
+	// this announcement. Carried only on route_announce_v3 wire
+	// frames; legacy v1/v2 emits never put it on the wire. Empty
+	// for unsigned announcements (the local node may not yet have
+	// signing wired in 13.2-A, and a transit route from a peer that
+	// did not sign carries nil here). The corresponding storage
+	// field is UplinkClaim.AttestedSig — see that field's doc-comment
+	// for the storage contract.
+	AttestedSig []byte
+
+	// AttestedSigVerified mirrors UplinkClaim.AttestedSigVerified at
+	// the boundary so the rank-time scoring path
+	// (CompositeScore in Phase 4 13.2-C) can read it without
+	// re-running verification.
+	AttestedSigVerified bool
 }
 
 // ToAnnounceEntry projects a RouteEntry into the wire format for
@@ -602,6 +638,13 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 		Hops:     e.Hops,
 		SeqNo:    e.SeqNo,
 		Extra:    e.Extra,
+		// Phase 4 13.2-A: carry the attested-links signature through
+		// projection so a re-announce on the v3 wire path forwards the
+		// original signer's bytes unchanged. Legacy v1/v2 emit ignores
+		// this field (no sig on the wire); only buildRouteAnnounceV3Frame
+		// consumes it.
+		AttestedSig:         e.AttestedSig,
+		AttestedSigVerified: e.AttestedSigVerified,
 	}
 }
 

@@ -59,10 +59,10 @@ import (
 // outbound path (legacy openPeerSession vs CM openPeerSessionForCM)
 // decides separately when to run those side-effects because the CM path
 // defers them until the generation check passes.
-func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame) {
+func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3 bool) {
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentity(welcome.Address)
-	session.capabilities = intersectCapabilities(localCapabilities(), welcome.Capabilities)
+	session.capabilities = intersectCapabilities(localCapabilities(enableV3), welcome.Capabilities)
 	if session.netCore == nil {
 		return
 	}
@@ -261,7 +261,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 			Msg("outbound_self_identity_rejected")
 		return false, s.newSelfIdentityError(address, welcome.Listen)
 	}
-	applyWelcomeMetadata(session, welcome)
+	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3)
 	s.learnIdentityFromWelcome(welcome, address)
 	// learnIdentityFromWelcome stores version/build keyed by the dial
 	// address (the only trusted host:port for the outbound side under
@@ -765,7 +765,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 			Msg("outbound_self_identity_rejected")
 		return nil, s.newSelfIdentityError(address, welcome.Listen)
 	}
-	applyWelcomeMetadata(session, welcome)
+	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3)
 
 	// Stash welcome metadata for deferred application in
 	// onCMSessionEstablished after the generation check passes.

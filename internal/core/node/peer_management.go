@@ -73,6 +73,16 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.evictStaleInboundConns()
 			s.retryRelayDeliveries()
 			s.relayLimiter.cleanup(5 * time.Minute)
+			if s.announceLimiter != nil {
+				// Phase 4 13.7: drop per-peer announce buckets for
+				// identities idle past the cleanup horizon. The
+				// idle window is longer than the relay limiter's
+				// because reconnect bursts to the same identity
+				// must keep accumulating abuse history (a peer
+				// flipping every 6 min would otherwise get a
+				// fresh bucket each time).
+				s.announceLimiter.cleanup(announceLimiterCleanupAge)
+			}
 			s.maybeSavePeerState()
 			s.refreshAggregateStatus()
 			s.emitTrafficDeltas()
@@ -1788,6 +1798,21 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			continue
 		}
 
+		// RawLine bypass preservation. protocol.ParseFrameLine does not
+		// populate Frame.RawLine, but Phase 2+ / Phase 4 frames
+		// (route_sync_digest_v1, route_sync_summary_v1,
+		// route_announce_v3, route_poison_v1) keep their wire payload
+		// out of the universal Frame struct and re-parse it from
+		// Frame.RawLine in the dispatcher. Without this assignment the
+		// dispatch calls Unmarshal*Frame([]byte("")) and silently drops
+		// the frame, which on the outbound session path means
+		// route_announce_v3 / route_poison_v1 effectively disappear in
+		// one direction of the wire. See isRawLineBackedFrameType for
+		// the explicit list of types that use the bypass.
+		if isRawLineBackedFrameType(frame.Type) {
+			frame.RawLine = trimmed
+		}
+
 		// Announce-plane receive guard: announce_routes / routes_update /
 		// request_resync are dispatched through the same code path as the
 		// inbound TCP plane on the remote side, so any peer must respect
@@ -2490,6 +2515,57 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		s.peerMu.RUnlock()
 		if session != nil {
 			s.handleRouteSyncSummary(session.peerIdentity, summaryFrame)
+		}
+	case "route_poison_v1":
+		// Phase 4 single-hop poison-reverse arriving on an outbound
+		// session. Same capability pair (v1 + poison_reverse) and
+		// RawLine parse pattern as the inbound dispatcher.
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+			return
+		}
+		if !s.sessionHasCapability(address, domain.CapMeshPoisonReverseV1) {
+			return
+		}
+		poison, err := protocol.UnmarshalRoutePoisonFrame([]byte(frame.RawLine))
+		if err != nil {
+			log.Debug().
+				Err(err).
+				Str("peer", string(address)).
+				Msg("peer_session: route_poison_v1 parse failed")
+			return
+		}
+		s.peerMu.RLock()
+		session := s.sessions[address]
+		s.peerMu.RUnlock()
+		if session != nil {
+			s.handleRoutePoison(session.peerIdentity, poison)
+		}
+	case "route_announce_v3":
+		// Phase 4 compact announce arriving on an outbound session. Same
+		// capability triplet as the inbound dispatcher (v1 + v3 + relay)
+		// and the same parse-from-RawLine pattern as the route_sync frames.
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+			return
+		}
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV3) {
+			return
+		}
+		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+			return
+		}
+		v3, err := protocol.UnmarshalRouteAnnounceV3Frame([]byte(frame.RawLine))
+		if err != nil {
+			log.Debug().
+				Err(err).
+				Str("peer", string(address)).
+				Msg("peer_session: route_announce_v3 parse failed")
+			return
+		}
+		s.peerMu.RLock()
+		session := s.sessions[address]
+		s.peerMu.RUnlock()
+		if session != nil {
+			s.handleRouteAnnounceV3(session.peerIdentity, address, v3)
 		}
 	case "error":
 		// Remote sent an explicit error frame before closing the connection.

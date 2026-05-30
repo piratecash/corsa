@@ -429,6 +429,24 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 
 	old := &bucket[idx]
 
+	// Phase 4 13.6 anti-poisoning rule analysis: the original spec
+	// ("announcement advisory-only, cannot override fresher
+	// direct/hop_ack") was drafted before the Phase 1 per-(Identity,
+	// Uplink) storage refactor. After the refactor, the per-uplink
+	// bucket structure already enforces the relevant guarantee:
+	// cross-uplink poisoning is impossible (a third-party peer's
+	// claim about Identity X lands in a SEPARATE bucket slot from
+	// our direct or hop_ack-confirmed claim through a different
+	// uplink), and same-uplink "downgrade" from HopAck/Direct →
+	// Announcement is the legitimate forced-full-sync TTL-refresh
+	// path (see weaker_source_refreshes_ttl_marks_dirty in
+	// table_dirty_test.go and TestUpdateRoute_HopAckPromotionPreservesWireLineage
+	// in table_test.go). No additional admission gate is required
+	// here — the (Identity, Uplink) keying + the
+	// HopAck-promotion-sticky reconfirmation already provide the
+	// poisoning resistance the phase doc targeted. See the Phase 4
+	// doc entry for §3.6 for the full finding.
+
 	// Cross-Origin stale-replay guard. Independent of the SeqNo
 	// comparison against the active lineage below, because pre-A1
 	// senders use per-Origin SeqNo counters and the active lineage
@@ -694,13 +712,95 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			if sameHopsReconfirmation && old.Source != RouteSourceDirect {
 				bucket[idx].ExpiresAt = now.Add(s.defaultTTL)
 				bucket[idx].UpdatedAt = now
+				// Round-11: upgrade attested-links signature
+				// metadata in the same-SeqNo reconfirmation path.
+				// Without this branch a legacy/unsigned claim
+				// stays unverified forever even after the same
+				// peer re-announces with a verified signed v3
+				// entry at the same seq/hops — the
+				// scoreSignedBonus trust upgrade in score.go
+				// reads AttestedSigVerified, so the rolling
+				// enable of mesh_attested_links_v1 / Phase 5
+				// anchor publication would never converge. Rules:
+				//
+				//   - Verified incoming UPGRADES the stored
+				//     state to verified=true and stores the
+				//     fresh sig bytes (most recent canonical
+				//     attestation). The Extra bytes the sig is
+				//     COMPUTED OVER are stored in the same
+				//     update — see Round-12 note below.
+				//   - Unverified incoming MUST NOT downgrade an
+				//     already-verified stored claim — the verify
+				//     was a local observation we still trust;
+				//     the peer may simply have stopped including
+				//     the sig (e.g. session lost the cap, or
+				//     forwarder stripped it). Keep the existing
+				//     bytes and the verified bit (and the Extra
+				//     they signed over).
+				//   - Both unverified, incoming has bytes,
+				//     stored does not: forward the bytes through
+				//     storage so a downstream peer that DOES
+				//     have the cap can verify on its side, even
+				//     though we never did locally. Extra is
+				//     copied alongside the bytes for the same
+				//     Round-12 pair-consistency reason.
+				//
+				// Round-12: Extra MUST be copied together with
+				// the sig in every upgrade branch. The
+				// attested-links signature covers
+				// `lenpfx(identity) || lenpfx(extra)` (see
+				// frame_route_announce_v3.go
+				// CanonicalSigningBytes — identity and extra
+				// only, no per-emitter wire fields). Updating
+				// AttestedSig / AttestedSigVerified without
+				// copying the matching Extra would decouple the
+				// pair: storage would carry the OLD Extra
+				// marked as verified by a sig computed over
+				// the NEW Extra, giving CompositeScore a
+				// bogus signed-route bonus AND making later
+				// re-emits of (old Extra, new sig) fail
+				// verification at downstream peers. Treating
+				// sig + extra as a transactional pair keeps
+				// storage internally consistent even if the
+				// origin (mis)behaves by emitting same-SeqNo
+				// frames with differing Extra payloads.
+				if incoming.AttestedSigVerified {
+					bucket[idx].AttestedSig = incoming.AttestedSig
+					bucket[idx].AttestedSigVerified = true
+					bucket[idx].Extra = incoming.Extra
+				} else if !bucket[idx].AttestedSigVerified && len(bucket[idx].AttestedSig) == 0 && len(incoming.AttestedSig) > 0 {
+					// Round-15: unverified forward-through is
+					// FIRST-OBSERVATION ONLY. Once we have stored any
+					// sig bytes for this slot (unverified or verified),
+					// subsequent unverified incoming with different
+					// bytes is IGNORED. Rationale: unverified bytes
+					// are not authenticated locally (no
+					// mesh_attested_links_v1 negotiation, OR the
+					// destination's pubkey isn't in our knowledge
+					// store), so trusting a peer to rotate them at
+					// will would let any neighbour churn our SeqNo
+					// space — Round-14 made AttestedSig part of the
+					// ComputeDelta + outboundEmitSig content keys, so
+					// rotating fake bytes at same-seq/same-hops would
+					// force fresh wire SeqNos and emit cycles with no
+					// verifiable benefit. First observation still
+					// stores so a downstream peer that DOES have the
+					// cap can verify; the churn surface is closed by
+					// refusing rewrites without a Verified upgrade.
+					bucket[idx].AttestedSig = incoming.AttestedSig
+					bucket[idx].Extra = incoming.Extra
+				}
 				// ExpiresAt is part of the published snapshot
 				// (drives IsExpired and the wire ttl_seconds
 				// field), so a TTL refresh must trigger a
 				// republish — otherwise the snapshot would
 				// prematurely report the route as expired up to
 				// one full announce cycle ahead of the actual
-				// lifetime.
+				// lifetime. The Round-11 sig-metadata upgrade
+				// also feeds CompositeScore directly, so a
+				// republish on upgrade is also required for the
+				// new bonus to surface to Lookup callers
+				// reading from the snapshot.
 				return RouteUnchanged, true
 			}
 			return RouteUnchanged, false
@@ -1099,6 +1199,12 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 					Hops:      c.Hops,
 					Withdrawn: true,
 					ExtraSig:  string(normalizeExtra(c.Extra)),
+					// Round-14: include AttestedSig bytes in the
+					// content cache key — matches the live + tombstone
+					// emit branches in route_store_lookup.go. See the
+					// outboundEmitSig type doc for the sig-upgrade
+					// fresh-SeqNo rationale.
+					AttestedSig: string(c.AttestedSig),
 				}
 				// The second return value (armed) is informational
 				// only here — InvalidateAllVia's caller
@@ -1113,6 +1219,23 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 					Hops:     HopsInfinity,
 					SeqNo:    wireSeqNo,
 					Extra:    c.Extra,
+					// Phase 4 13.2-A: forward the stored attested-links
+					// signature on the withdrawal as well. The Round-1
+					// canonical-bytes iterations dropped first hops, then
+					// epoch, then seq_no from the signed payload — the
+					// shipped contract is `(identity || extra)` ONLY (see
+					// RouteAnnounceV3Entry.CanonicalSigningBytes). The
+					// withdrawal carries the SAME identity and the same
+					// Extra bytes as the original announcement, so the
+					// stored signature stays valid verbatim across the
+					// live→tombstone transition: hops=HopsInfinity and the
+					// new SeqNo are per-emitter wire fields outside the
+					// canonical bytes. Forwarding the bytes here lets a
+					// downstream v3-aware peer verify the tombstone
+					// against the same destination-identity key the live
+					// announcement used.
+					AttestedSig:         c.AttestedSig,
+					AttestedSigVerified: c.AttestedSigVerified,
 				})
 			} else {
 				transitInvalidated++
