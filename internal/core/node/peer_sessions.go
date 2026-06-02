@@ -861,10 +861,18 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("cm_session_setup_failed")
 			// Session was never registered in s.sessions / s.upstream, so
 			// only dialOrigin (set by dialForCM for fallback ports) needs cleanup.
+			// Also record the setup failure in the local per-address counter so
+			// PeerProvider.SetupFailureBannedFn can mute the address once the
+			// threshold is reached — breaks the reconnect storm against peers
+			// whose handshake reply gets evicted by their own announce flush.
 			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 			s.peerMu.Lock()
 			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 			delete(s.dialOrigin, dialAddress)
+			// Record failure against the slot's canonical address (slotAddress)
+			// rather than dialAddress so siblings of a fallback-port peer share
+			// the cooldown — matches the per-slot semantics of CM retry budget.
+			s.recordSetupFailureLocked(slotAddress, time.Now())
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 			_ = session.Close()
@@ -878,6 +886,13 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			})
 			return
 		}
+
+		// Setup succeeded — clear the per-address failure counter so an
+		// earlier bad period does not pin a now-healthy peer in cooldown.
+		// Done under s.peerMu (same lock that protects setupFailures).
+		s.peerMu.Lock()
+		s.clearSetupFailuresLocked(slotAddress)
+		s.peerMu.Unlock()
 
 		// --- Phase 2: session is fully operational ---
 		// Promote CM slot from Initializing → Active so Slots(),

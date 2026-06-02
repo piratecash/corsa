@@ -154,28 +154,10 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	// short-circuit the reconnect forced full sync on a match.
 	//
 	// Ordering matters: this block runs BEFORE TriggerUpdate so that
-	// MarkPeerDigestPending arms a short suppression window first. Without
-	// it the reconnect's own announce cycle (kicked by TriggerUpdate
-	// below) would full-sync this peer before the summary could possibly
-	// arrive — the race that previously made the digest exchange
-	// ineffective on its intended path. The pending window holds the
-	// forced full sync off just long enough for the round trip; a match
-	// summary extends it for one cadence, a mismatch / silence lets it
-	// elapse and the next cycle full-syncs (safe degradation).
-	//
-	// ConsumePeerDigestSnapshot is single-shot, so a future reconnect
-	// within the same TTL window does not re-emit a stale digest. Peers
-	// without the capability silently skip this path; sendFrameToIdentity
-	// inside emitRouteSyncDigest applies the capability gate too as
-	// defence in depth. When there is no cached digest we arm nothing and
-	// the cycle full-syncs normally — the correct behaviour when no prior
-	// view exists to compare against.
+	// MarkPeerDigestPending arms a short suppression window first.
 	if sessionHasCap(caps, domain.CapMeshRouteSyncV1) {
 		now := time.Now().UTC()
 		if digest, count, generatedAt, ok := s.routingTable.ConsumePeerDigestSnapshot(peerIdentity, now); ok {
-			// Store the emitted digest as the correlation anchor: only a
-			// summary echoing exactly this value may later extend the
-			// suppression window (ConfirmPeerDigestMatch).
 			s.announceLoop.MarkPeerDigestPending(peerIdentity, now, digest)
 			s.emitRouteSyncDigest(peerIdentity, digest, count, generatedAt)
 		}

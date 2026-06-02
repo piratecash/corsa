@@ -172,6 +172,24 @@ type ConnectionManagerConfig struct {
 	// can re-pick the same peer we just gave up on.
 	OnDialFailed func(address domain.PeerAddress, err error, incompatible bool)
 
+	// IsSetupFailureBannedFn reports whether the address is currently
+	// inside a local setup-failure cooldown (see setup_failure.go).
+	// Consulted by handleActiveSessionLost on the WasHealthy=false path
+	// BEFORE the retry/backoff cycle: a banned address skips retry
+	// outright and goes straight to replaceSlotLocked + fill(), so the
+	// next candidate from PeerProvider gets the slot without waiting
+	// for reconnectMaxRetries failed retries to elapse.
+	//
+	// Without this gate the cooldown only takes effect when fill()
+	// picks a NEW candidate — but retryAfterBackoff bypasses
+	// PeerProvider entirely (it dials slot.DialAddresses directly), so
+	// a peer that just tripped the threshold keeps getting dialled for
+	// another reconnectMaxRetries cycle. The gate closes that gap.
+	//
+	// May be nil — callers that do not implement setup-failure
+	// tracking are unaffected.
+	IsSetupFailureBannedFn func(domain.PeerAddress) bool
+
 	// BackoffFn returns the backoff duration for the given retry attempt.
 	// When nil, exponential backoff with base 2s / max 10s is used.
 	// Injected for testability (zero backoff in tests).
@@ -183,6 +201,22 @@ type ConnectionManagerConfig struct {
 	// FillInterval overrides periodicFillInterval for testing.
 	// When zero, the default periodicFillInterval is used.
 	FillInterval time.Duration
+
+	// DialPacerInterval controls the global rate limit on outbound dial
+	// spawns. Each dial worker (except ManualPeerRequested) must acquire
+	// a token from the pacer before invoking DialFn. Zero disables the
+	// pacer entirely — the legacy "spawn all workers in a tight loop"
+	// behaviour is preserved so tests and configurations that do not
+	// opt in see no change.
+	//
+	// Production default is wired in Service.go (300ms / burst 3). See
+	// dial_pacer.go for the rationale.
+	DialPacerInterval time.Duration
+
+	// DialPacerBurst is the token bucket capacity (cold-start parallel
+	// dials allowed before pacing engages). Ignored when
+	// DialPacerInterval is zero. Negative values are normalised to 0.
+	DialPacerBurst int
 
 	// EventBus is used to publish TopicSlotStateChanged when a slot
 	// transitions between states. May be nil (tests, standalone usage).
@@ -240,6 +274,12 @@ type ConnectionManager struct {
 	// Callers that need to wait for the event loop to be ready can
 	// select on this channel. Used by tests and startup orchestration.
 	readyCh chan struct{}
+
+	// pacer rate-limits outbound dial spawns to protect CPU during
+	// reconnect storms. Nil when DialPacerInterval is zero.
+	// Acquired by dialWorker / retryAfterBackoff; bypassed by
+	// dialWorkerImmediate (ManualPeerRequested path).
+	pacer *dialPacer
 }
 
 // NewConnectionManager creates a ConnectionManager. Call Run(ctx) to start
@@ -259,6 +299,10 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		hintEvents:  make(chan HintEvent, hintEventBuffer),
 		bootstrapCh: make(chan struct{}),
 		readyCh:     make(chan struct{}),
+		// newDialPacer returns nil when interval <= 0; nil pacer is
+		// treated as "disabled" by Acquire-site nil checks below, so
+		// disabled mode pays no overhead on the hot path.
+		pacer: newDialPacer(cfg.DialPacerInterval, cfg.DialPacerBurst),
 	}
 }
 
@@ -635,8 +679,10 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 		Uint64("generation", gen).
 		Msg("cm: manual peer enqueued for immediate dial")
 
+	// Manual dials bypass the global pacer — operator intent overrides
+	// storm-protection. See dialWorkerImmediate / dial_pacer.go.
 	cm.dialWg.Add(1)
-	go cm.dialWorker(ctx, ev.Address, dialAddrs, gen)
+	go cm.dialWorkerImmediate(ctx, ev.Address, dialAddrs, gen)
 }
 
 // findLowestScoringSlotLocked returns the slot with the lowest score for eviction.
@@ -667,6 +713,20 @@ func (cm *ConnectionManager) findLowestScoringSlotLocked() *slot {
 }
 
 func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev ActiveSessionLost) {
+	// Pre-compute the setup-failure cooldown status BEFORE taking
+	// cm.mu — IsSetupFailureBannedFn is wired to Service.IsSetupFailureBanned
+	// in production, which takes peerMu.RLock. Calling it under cm.mu
+	// would introduce a cm.mu → peerMu edge in the storm hot path
+	// (every cm_session_setup_failed lands here). Computing the flag
+	// outside the lock keeps the edge family unchanged. The slot
+	// generation guard below still catches any race window between
+	// this lookup and the lock — a banned address that recently became
+	// unbanned would at worst replace a stale slot, which is harmless.
+	var setupBanned bool
+	if !ev.WasHealthy && cm.config.IsSetupFailureBannedFn != nil {
+		setupBanned = cm.config.IsSetupFailureBannedFn(ev.Address)
+	}
+
 	cm.mu.Lock()
 
 	s := cm.findSlotLocked(ev.Address)
@@ -697,12 +757,24 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 	//           against a permanently bad peer while starving candidates.
 	//           Route through the same retry/replace logic as DialFailed.
 	if !ev.WasHealthy {
+		// Setup-failure cooldown gate (B1 closing-the-gap).
+		// retryAfterBackoff dials slot.DialAddresses directly without
+		// consulting PeerProvider, so a peer that just tripped the
+		// setupFailureBanThreshold would keep getting dialled for
+		// another reconnectMaxRetries cycle (=14s of agitation at the
+		// default 2-4-8s backoff) before the cooldown can take effect
+		// via fill()->Candidates(). Short-circuit here: if the address
+		// is currently banned by the local setup-failure cooldown,
+		// skip the retry cycle entirely, replace the slot now, and let
+		// fill() pick a different candidate that the gate permits.
+		// setupBanned was computed at function entry (outside cm.mu).
 		s.RetryCount++
 
-		if s.RetryCount > reconnectMaxRetries {
+		if setupBanned || s.RetryCount > reconnectMaxRetries {
 			log.Info().
 				Str("address", string(ev.Address)).
 				Int("retries", s.RetryCount).
+				Bool("setup_banned", setupBanned).
 				Msg("cm: replacing slot after repeated setup failures")
 
 			replaceTeardown := cm.replaceSlotLocked(s)
@@ -1161,6 +1233,40 @@ func (cm *ConnectionManager) replaceSlotLocked(s *slot) *SessionInfo {
 func (cm *ConnectionManager) dialWorker(ctx context.Context, address domain.PeerAddress, dialAddresses []domain.PeerAddress, generation uint64) {
 	defer cm.dialWg.Done()
 
+	// Pacer gate: hold off the DialFn until a token is available so a
+	// thundering-herd fill or reconnect burst is smeared in time. Nil
+	// pacer (DialPacerInterval == 0) is the disabled-mode fast path.
+	if cm.pacer != nil {
+		if !cm.pacer.Acquire(ctx) {
+			// ctx cancelled before a token arrived — caller (event loop)
+			// is shutting down. Best-effort emit DialFailed so the slot
+			// transitions out of Dialing instead of dangling.
+			_ = cm.EmitSlot(DialFailed{
+				Address:        address,
+				Error:          ctx.Err(),
+				SlotGeneration: generation,
+			})
+			return
+		}
+	}
+
+	cm.dialWorkerBody(ctx, address, dialAddresses, generation)
+}
+
+// dialWorkerImmediate is the pacer-bypassing variant used by
+// handleManualPeer. Operator-driven actions (addpeer) must dial
+// immediately even when the global rate-limit would otherwise hold
+// them — the operator already accepted the cost by typing the command.
+// Apart from the missing Acquire, the body is identical.
+func (cm *ConnectionManager) dialWorkerImmediate(ctx context.Context, address domain.PeerAddress, dialAddresses []domain.PeerAddress, generation uint64) {
+	defer cm.dialWg.Done()
+	cm.dialWorkerBody(ctx, address, dialAddresses, generation)
+}
+
+// dialWorkerBody is the dial → result → emit logic shared by paced
+// and immediate workers. Factored out so the pacer gate sits in a
+// single, obvious location (dialWorker) rather than getting copy-pasted.
+func (cm *ConnectionManager) dialWorkerBody(ctx context.Context, address domain.PeerAddress, dialAddresses []domain.PeerAddress, generation uint64) {
 	result, err := cm.config.DialFn(ctx, dialAddresses)
 	if err != nil {
 		// Best-effort: ctx cancelled means no one is listening.
@@ -1193,6 +1299,21 @@ func (cm *ConnectionManager) retryAfterBackoff(ctx context.Context, address doma
 	case <-time.After(backoff):
 	case <-ctx.Done():
 		return
+	}
+
+	// Pacer gate after backoff so retries respect the same global rate
+	// limit as fill() — without this a burst of retries from many slots
+	// can fire simultaneously the instant their backoff elapses.
+	if cm.pacer != nil {
+		if !cm.pacer.Acquire(ctx) {
+			_ = cm.EmitSlot(DialFailed{
+				Address:        address,
+				Error:          ctx.Err(),
+				Attempt:        attempt,
+				SlotGeneration: generation,
+			})
+			return
+		}
 	}
 
 	result, err := cm.config.DialFn(ctx, dialAddresses)

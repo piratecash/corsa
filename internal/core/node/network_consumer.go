@@ -44,6 +44,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -268,6 +269,121 @@ func (s *Service) sendFrameViaNetworkSync(ctx context.Context, id domain.ConnID,
 		// Marshal / invalid-status / unknown sentinel — caller bug path.
 		return sendErr
 	}
+}
+
+// handshakeReplyTimeout caps how long sendHandshakeReplyViaNetwork will
+// wait for the writer to drain before giving up on a handshake-phase
+// reply. Long enough to absorb a transient peer-side broadcast burst
+// (initial announce_routes flush averages 100-300ms on full-routing-table
+// bootstraps), short enough that a wedged peer doesn't park the goroutine
+// forever. See sendHandshakeReplyViaNetwork docstring for the contract.
+const handshakeReplyTimeout = 2 * time.Second
+
+// sendHandshakeReplyViaNetwork is the no-eviction reply path for
+// session-setup control-plane frames (subscribed, peers, contacts,
+// auth_ok). Unlike sendFrameViaNetwork — which calls network.Close on
+// ErrSendBufferFull as the slow-peer eviction signal — this helper
+// NEVER closes the connection. Buffer pressure during session setup is
+// almost always caused by the peer's own initial announce_routes flush
+// saturating our outbound queue; evicting on the next reply guarantees
+// the handshake fails, which is precisely the cm_session_setup_failed
+// → reconnect storm pattern this helper exists to break.
+//
+// Mechanism (two-tier to preserve async semantics for the common case):
+//
+//  1. Async fast path: SendFrame (non-blocking enqueue), identical to
+//     sendFrameViaNetwork. On any outcome OTHER than ErrSendBufferFull,
+//     return the result verbatim — connection is never closed from
+//     this helper.
+//
+//  2. Backpressure path: ONLY when the fast path returned
+//     ErrSendBufferFull, fall back to SendFrameSync with an internal
+//     ctx timeout of handshakeReplyTimeout. The blocking variant
+//     absorbs a transient announce-flush burst; the timeout caps the
+//     wait so a permanently dead peer doesn't park the goroutine.
+//     If the blocking attempt also fails, return the underlying
+//     sentinel — still no Close (the heartbeat path owns eviction).
+//
+// Keeping the fast path async matches the runtime contract of every
+// pre-fix call-site (sendFrameViaNetwork was non-blocking), so tests
+// that drive the wire synchronously via net.Pipe see no change in
+// goroutine ordering.
+//
+// ctx is the caller's operation context. The internal timeout is
+// stacked on top of it via context.WithTimeout, so caller-side
+// cancellation still propagates promptly.
+func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.ConnID, frame protocol.Frame) error {
+	network := s.Network()
+	addr := network.RemoteAddr(id)
+
+	line, marshalErr := protocol.MarshalFrameLine(frame)
+	if marshalErr != nil {
+		// Caller-side encode bug. Best-effort fallback path mirrors
+		// sendFrameViaNetwork: attempt to deliver a structured
+		// encode-failed frame so the peer sees a reason code, but DO
+		// NOT close the connection on any send sentinel from the
+		// fallback either — same no-eviction contract applies.
+		fallback, _ := json.Marshal(protocol.Frame{
+			Type:  "error",
+			Code:  protocol.ErrCodeEncodeFailed,
+			Error: marshalErr.Error(),
+		})
+		data := append(fallback, '\n')
+		sendErr := network.SendFrame(ctx, id, data)
+		emitProtocolTrace(addr, frame, classifyNetworkSendResult(sendErr))
+		if sendErr != nil && errors.Is(sendErr, netcore.ErrUnknownConn) {
+			logUnregisteredWrite(addr, frame, "sendHandshakeReplyViaNetwork.marshal_fallback")
+			return ErrUnregisteredWrite
+		}
+		return sendErr
+	}
+
+	data := []byte(line)
+
+	// Tier 1: async enqueue (matches sendFrameViaNetwork timing).
+	sendErr := network.SendFrame(ctx, id, data)
+	if sendErr == nil {
+		emitProtocolTrace(addr, frame, enqueueSent)
+		return nil
+	}
+	if errors.Is(sendErr, netcore.ErrUnknownConn) {
+		emitProtocolTrace(addr, frame, enqueueUnregistered)
+		logUnregisteredWrite(addr, frame, "sendHandshakeReplyViaNetwork")
+		return ErrUnregisteredWrite
+	}
+
+	// Tier 2: backpressure fallback. ONLY on ErrSendBufferFull do we
+	// wait — every other sentinel (writer-done, chan-closed, ctx) is a
+	// terminal state and waiting will not help.
+	if !errors.Is(sendErr, netcore.ErrSendBufferFull) {
+		emitProtocolTrace(addr, frame, enqueueDropped)
+		log.Debug().
+			Str("addr", addr).
+			Str("type", frame.Type).
+			Err(sendErr).
+			Msg("handshake reply send failed (no eviction)")
+		return sendErr
+	}
+
+	// Buffer is full — wait for drain up to handshakeReplyTimeout
+	// without ever closing the connection.
+	sendCtx, cancel := context.WithTimeout(ctx, handshakeReplyTimeout)
+	defer cancel()
+	syncErr := network.SendFrameSync(sendCtx, id, data)
+	emitProtocolTrace(addr, frame, classifyNetworkSendResult(syncErr))
+	if syncErr == nil {
+		return nil
+	}
+	if errors.Is(syncErr, netcore.ErrUnknownConn) {
+		logUnregisteredWrite(addr, frame, "sendHandshakeReplyViaNetwork.sync")
+		return ErrUnregisteredWrite
+	}
+	log.Debug().
+		Str("addr", addr).
+		Str("type", frame.Type).
+		Err(syncErr).
+		Msg("handshake reply send failed after backpressure wait (no eviction)")
+	return syncErr
 }
 
 // sendFrameBytesViaNetwork is the raw-bytes companion of sendFrameViaNetwork.

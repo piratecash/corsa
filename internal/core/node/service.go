@@ -303,6 +303,14 @@ type Service struct {
 	connManager  *ConnectionManager              // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
 	bannedIPSet  map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
 
+	// setupFailures tracks consecutive cm_session_setup_failed events per
+	// dial-target address. Above setupFailureBanThreshold the address is
+	// pushed out of PeerProvider.Candidates() for setupFailureCooldown to
+	// break reconnect storms against peers whose handshake reply gets
+	// evicted by their own announce_routes flush. Lives in the peer
+	// domain — guarded by s.peerMu. See setup_failure.go.
+	setupFailures map[domain.PeerAddress]*setupFailureEntry
+
 	// remoteBannedIPs holds IP-wide bans communicated by remote responders
 	// via connection_notice{code=peer-banned, reason=blacklisted}. Separate
 	// from bannedIPSet (which is "we banned them") because the direction
@@ -1054,6 +1062,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		identityRelaySessions:   make(map[domain.PeerIdentity]int),
 		bannedIPSet:             make(map[string]domain.BannedIPEntry),
 		remoteBannedIPs:         make(map[string]remoteIPBanEntry),
+		setupFailures:           make(map[domain.PeerAddress]*setupFailureEntry),
 		aggregateStatus:         domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                    make(chan struct{}),
 	}
@@ -1158,6 +1167,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 			defer svc.ipStateMu.RUnlock()
 			return svc.isPeerRemoteBannedLocked(addr, time.Now().UTC())
 		},
+		SetupFailureBannedFn:   svc.IsSetupFailureBanned,
 		ListenAddr:             domain.ListenAddress(cfg.ListenAddress),
 		DefaultPort:            config.DefaultPeerPort,
 		AllowPrivateCandidates: cfg.AllowPrivatePeers,
@@ -1240,6 +1250,21 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		OnDialFailed: func(address domain.PeerAddress, err error, incompatible bool) {
 			svc.onCMDialFailed(address, err, incompatible)
 		},
+		// Setup-failure cooldown gate consulted in handleActiveSessionLost.
+		// Without it the cooldown only engaged when fill() picked a NEW
+		// candidate; retryAfterBackoff bypassed PeerProvider and kept
+		// dialling the same address for another reconnectMaxRetries
+		// cycle (~14s of agitation). With this callback the gate also
+		// short-circuits the retry path: a banned address goes straight
+		// to replaceSlotLocked + fill(). See setup_failure.go.
+		IsSetupFailureBannedFn: svc.IsSetupFailureBanned,
+		// Storm-protection pacer. The interval/burst pair caps outbound
+		// dial spawn rate so reconnect storms (e.g. cm_session_setup_failed
+		// cascades against bootstrap nodes) cannot peg CPU by launching
+		// every dial worker in the same tick. Manual addpeer bypasses
+		// the pacer — see ConnectionManager.handleManualPeer.
+		DialPacerInterval: dialPacerProductionInterval,
+		DialPacerBurst:    dialPacerProductionBurst,
 	})
 
 	// Initialize distance-vector routing table (Phase 1.2).
@@ -2114,7 +2139,58 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
 			return false
 		}
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
+		// Handshake-phase reply: auth_ok is the gate the dialler waits on
+		// before sending subscribe_inbox. Use the no-eviction path so a
+		// transient outbound burst (broadcast of our own announce_routes
+		// to the new peer kicked off by the auth_session handler) does
+		// not torpedo the connection right at the threshold of becoming
+		// usable. See network_consumer.go.
+		//
+		// Half-auth window contract: handleAuthSession has ALREADY
+		// committed local auth state (setConnAuthStateByID), learned
+		// the peer's hello, registered the hello route, fired the
+		// announce-to-sessions goroutine, and mirrored the identity
+		// into NetCore — see service.go::handleAuthSession. We do NOT
+		// roll those side effects back if the auth_ok ack fails to
+		// land: the rollback path is wide and concurrent
+		// (cross-domain locks, separate goroutines already started),
+		// and the failure mode is bounded.
+		//
+		// What actually happens when the ack is dropped:
+		//   1. Dialler side. authenticatePeerSession waits for auth_ok
+		//      via peerSessionRequest with peerRequestTimeout
+		//      (peer_sessions.go::authenticatePeerSession). It does
+		//      NOT reissue auth_session on the same TCP session —
+		//      timeout returns an error that bubbles up to
+		//      openPeerSessionForCM which closes the connection and
+		//      emits DialFailed.
+		//   2. CM side. DialFailed cycles through reconnectMaxRetries
+		//      with exponential backoff; each retry opens a fresh TCP
+		//      connection and a fresh connID. handleAuthSession runs
+		//      from scratch on the new connID — its Verified
+		//      fast-path applies only to repeat auth on the SAME
+		//      connID and does not carry across reconnects.
+		//   3. Local side. Our previous session's connID still carries
+		//      Verified=true and the side-effect chain (route entry,
+		//      announce goroutine output, hello cache). handleConn's
+		//      defer (clearConnAuth, removeSubscriberConnID,
+		//      trackInboundDisconnect) cleans those up when the peer
+		//      finally drops the dead TCP connection or when our own
+		//      read loop hits EOF.
+		//
+		// Window bound: from ack-drop to handleConn defer firing — at
+		// most one inbound read deadline (120s) on the failing socket,
+		// usually much less because the dialler closes promptly on its
+		// own peerRequestTimeout. If the outbound buffer NEVER drains,
+		// the heartbeat path (inboundHeartbeat) evicts us on its own
+		// schedule. A failed auth_ok is logged at WARN with conn_id
+		// for forensics. See docs/protocol/realtime.md § Handshake
+		// reply: no-eviction contract for the full discussion.
+		if err := s.sendHandshakeReplyViaNetwork(s.runCtx, connID, reply); err != nil {
+			log.Warn().Err(err).
+				Uint64("conn_id", uint64(connID)).
+				Msg("auth_ok ack failed — peer will close on its peerRequestTimeout and CM will redial (fresh connID, half-auth state cleared by handleConn defer)")
+		}
 		return true
 
 	default:
@@ -2168,7 +2244,13 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		for i, a := range exchanged {
 			peers[i] = string(a)
 		}
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{
+		// Handshake-phase reply: peers is one of the session-setup frames
+		// emitted while the peer is still inside initPeerSession on the
+		// other side. Use sendHandshakeReplyViaNetwork so a transient
+		// outbound-queue burst (our own announce_routes flush going to
+		// the same peer) does NOT trigger slow-peer eviction and
+		// torpedo the handshake. See network_consumer.go.
+		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, protocol.Frame{
 			Type:  "peers",
 			Count: len(peers),
 			Peers: peers,
@@ -2177,7 +2259,8 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 	case "fetch_contacts":
 		// P2P contact sync: authenticated peers fetch the contact list
 		// for key material synchronization (syncPeer, syncContactsViaSession).
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, s.contactsFrame())
+		// Session-setup phase — use the no-eviction handshake-reply path.
+		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, s.contactsFrame())
 		return true
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(connID, frame)
@@ -2206,7 +2289,38 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			return true
 		}
 		reply, sub := s.subscribeInboxFrame(connID, frame)
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
+		// Handshake-phase reply: the subscribed frame is the literal
+		// signal the dialler waits on inside initPeerSession before
+		// transitioning the slot to Active. The pre-fix bug was exactly
+		// here: sendFrameViaNetwork closed the conn on SendBufferFull,
+		// turning a transient overload into cm_session_setup_failed.
+		// sendHandshakeReplyViaNetwork blocks-with-timeout instead and
+		// never evicts. See network_consumer.go and the root-cause
+		// discussion in the cm_session_setup_failed analysis notes.
+		//
+		// Failure handling: subscribeInboxFrame has ALREADY registered
+		// the subscriber in s.subs and the cleanup path (handleConn
+		// defer) only triggers on connection close. With the no-eviction
+		// helper a wedged outbound buffer no longer tears down the
+		// connection, so when the ack itself does not reach the peer we
+		// must roll back the subscription manually — otherwise we would
+		// (a) push the backlog into a queue the dialler will never read,
+		// (b) emit a reverse subscribe_inbox the peer cannot consume,
+		// and (c) keep a phantom subscriber bucket alive until the
+		// connection eventually dies for other reasons.
+		ackErr := s.sendHandshakeReplyViaNetwork(s.runCtx, connID, reply)
+		if ackErr != nil {
+			log.Warn().Err(ackErr).
+				Uint64("conn_id", uint64(connID)).
+				Str("recipient", reply.Recipient).
+				Msg("subscribed reply failed — rolling back subscription, skipping backlog push + reverse subscribe")
+			if sub != nil {
+				s.gossipMu.Lock()
+				s.removeSubscriberConnIDLocked(sub.recipient, connID)
+				s.gossipMu.Unlock()
+			}
+			return true
+		}
 		if sub != nil {
 			s.goBackground(func() { s.pushBacklogToSubscriber(sub) })
 		}
@@ -2217,7 +2331,16 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// frame in each direction is sufficient for full bidirectional sync.
 		// Sent here (not after auth_ok) so that short-lived connections like
 		// syncPeer — which never send subscribe_inbox — are not affected.
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{
+		//
+		// Use the no-eviction handshake-reply helper: the reverse
+		// subscribe_inbox lands on the same outbound buffer as the
+		// subscribed ack above, and if that buffer is still saturated by
+		// the peer's announce_routes flush we must not close the
+		// connection. Closing here would torpedo the session right after
+		// we just spent effort keeping it alive through the ack path —
+		// exactly the cm_session_setup_failed cascade we are trying to
+		// break.
+		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, protocol.Frame{
 			Type:       "subscribe_inbox",
 			Topic:      "dm",
 			Recipient:  s.identity.Address,

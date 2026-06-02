@@ -254,6 +254,128 @@ This serialization ensures:
 4. **Live streaming:** Both peers receive live `push_message` and `push_delivery_receipt` updates
 5. **Acknowledgements:** Each peer sends `ack_delete` to confirm receipt and release backlog items
 
+### Handshake reply: no-eviction contract
+
+The replies that complete the session-setup handshake (`subscribed`,
+`peers`, `contacts`, `auth_ok`) travel through a dedicated send path
+(`sendHandshakeReplyViaNetwork`) that intentionally weakens the
+slow-peer eviction policy used by every other reply.
+
+**Why a separate path:** during the initial seconds of a connection the
+peer's writer queue is being drained by its own broadcast traffic —
+most notably the initial `announce_routes` flush sent to every freshly
+authenticated outbound peer. On a full-routing-table node this burst
+can fill the 128-slot outbound channel within ~100-300ms. The regular
+reply helper closes the connection on `ErrSendBufferFull` (the
+documented slow-peer eviction signal), which means the next handshake
+reply in line — almost always the `subscribed` that the dialler is
+waiting on — torpedoes the session before it ever reaches Active. The
+dialler observes a bare `EOF` on `subscribe_inbox` and emits
+`cm_session_setup_failed`; combined with the default 2-4-8s retry
+backoff, this fans out into a CPU-burning storm whenever a small set
+of bootstrap nodes is the only candidate pool.
+
+**Contract:**
+
+1. **Async fast path.** `sendHandshakeReplyViaNetwork` first attempts a
+   non-blocking `SendFrame`, exactly like the regular reply path. On
+   any outcome other than `ErrSendBufferFull` the result is returned
+   verbatim — the connection is never closed from this helper.
+2. **Bounded blocking fallback.** Only when the async send returned
+   `ErrSendBufferFull` does the helper fall back to `SendFrameSync`
+   with an internal timeout cap (`handshakeReplyTimeout = 2s`). The
+   blocking variant absorbs the transient broadcast burst; the timeout
+   stops a permanently dead peer from parking the goroutine. If the
+   blocking attempt also fails, the sentinel is returned without
+   closing the connection.
+3. **No eviction from this helper.** A wedged peer is still evicted —
+   but by the heartbeat path (`inboundHeartbeat`), which is the
+   documented owner of liveness-based eviction. The handshake-reply
+   helper is deliberately silent on buffer pressure so a transient
+   self-inflicted overload (peer broadcasts saturating its own writer)
+   cannot kill a session that is otherwise healthy.
+
+**Applies to:** `auth_ok` (replies to `auth_session`), `peers`
+(replies to `get_peers`), `contacts` (replies to `fetch_contacts`),
+`subscribed` (replies to `subscribe_inbox`), and the **reverse
+`subscribe_inbox`** the responder emits right after `subscribed`
+(both frames travel the same outbound buffer; sending the reverse
+through the regular helper would undo the protection on the very
+next line of the handler).
+
+**Does NOT apply to:** data-plane replies (`push_message`,
+`push_delivery_receipt`, `relay_*`, `announce_*`). These keep the
+original eviction-on-saturation contract — a peer that cannot keep up
+with live traffic IS a slow peer and should be replaced.
+
+**Subscriber rollback on failed ack.** The `subscribe_inbox` handler
+registers the subscriber in `s.subs` BEFORE attempting to send the
+`subscribed` ack — the order matters because `pushBacklogToSubscriber`
+needs the subscriber entry to exist. With the regular eviction-based
+helper the cleanup was automatic: a failed send closed the connection,
+the `handleConn` defer ran `removeSubscriberConnID`, and the gossip
+map stayed consistent. Under the no-eviction contract the connection
+survives, so the handler must roll back the registration manually
+when the ack does not land:
+
+1. Call `sendHandshakeReplyViaNetwork` for the `subscribed` frame.
+2. **On error** (timeout, unknown conn, drained writer): re-acquire
+   `gossipMu`, call `removeSubscriberConnIDLocked(recipient, connID)`,
+   then return without pushing the backlog or emitting the reverse
+   `subscribe_inbox`. The connection itself is left alive — the
+   heartbeat path will evict it if the peer is truly dead.
+3. **On success**: schedule `pushBacklogToSubscriber` on the
+   background pool, then emit the reverse `subscribe_inbox` through
+   the same no-eviction helper.
+
+Without step 2 the gossip map would accumulate phantom subscribers on
+every wedged-buffer subscribe attempt — invisible until the connection
+eventually died for an unrelated reason.
+
+**`auth_ok` half-auth window.** Unlike `subscribed` (which has a
+narrow rollback contract above), `auth_ok` is fired AFTER
+`handleAuthSession` has already committed substantial local state:
+`setConnAuthStateByID(Verified=true)`, hello learning, route
+registration, mirroring identity into NetCore, and a background
+`announcePeerToSessions` goroutine. Rolling those back on a failed
+ack is intentionally NOT attempted — the cleanup graph is wide,
+cross-domain (peer + ipState + gossip), and partially asynchronous
+(separate goroutines already running).
+
+Failure mode when the ack does not land:
+
+1. **Dialler side: no same-session retry.**
+   `authenticatePeerSession` waits for `auth_ok` via
+   `peerSessionRequest` bounded by `peerRequestTimeout`
+   (`peer_sessions.go::authenticatePeerSession`). It does NOT reissue
+   `auth_session` on the same TCP socket — on timeout it returns an
+   error that bubbles up to `openPeerSessionForCM`, which closes the
+   connection and emits `DialFailed` to the ConnectionManager.
+2. **CM-driven reconnect.** `DialFailed` cycles through
+   `reconnectMaxRetries` with exponential backoff. Each retry opens
+   a fresh TCP connection with a new `connID`. `handleAuthSession`
+   runs from scratch on the new `connID` — the `Verified` fast-path
+   applies only to repeat auth on the SAME `connID` and does not
+   carry across reconnects, so every redial pays the full
+   `auth_session` round-trip and re-fires the side-effect chain
+   (route registration is idempotent at the routing-table layer;
+   announce goroutine simply emits another announce; hello cache
+   re-learns the same values).
+3. **Local cleanup.** The previous session's `connID` still carries
+   `Verified=true` and the side-effect chain (route entry, announce
+   output, hello cache). `handleConn`'s defer
+   (`clearConnAuth`, `removeSubscriberConnID`,
+   `trackInboundDisconnect`) cleans those up when the peer finally
+   drops the dead TCP socket or when our own read loop hits EOF.
+
+Window bound: from ack-drop to `handleConn` defer firing. Usually
+short because the dialler closes promptly on its own
+`peerRequestTimeout`. Worst case is one inbound read deadline
+(`120s` `inboundReadTimeout`) on the failing socket. If the outbound
+buffer never drains, the heartbeat path (`inboundHeartbeat`) evicts
+us on its own schedule. A failed `auth_ok` is logged at WARN with
+`conn_id` for forensics.
+
 ## Message Delivery Flow
 
 The complete delivery flow from sender to receiver includes message delivery followed by receipt tracking:
@@ -549,6 +671,130 @@ signature = ed25519_sign(payload, private_key)
 3. **Обратная подписка:** Узел отвечает собственным `subscribe_inbox`, получает `subscribed` + историю
 4. **Потоковая передача в реальном времени:** Оба узла получают прямые обновления `push_message` и `push_delivery_receipt`
 5. **Подтверждения:** Каждый узел отправляет `ack_delete` для подтверждения получения и освобождения элементов истории
+
+### Handshake-ответ: контракт без eviction
+
+Ответы, завершающие session-setup handshake (`subscribed`, `peers`,
+`contacts`, `auth_ok`), идут через отдельный send-путь
+(`sendHandshakeReplyViaNetwork`), который намеренно ослабляет
+политику slow-peer eviction, применяемую ко всем остальным ответам.
+
+**Зачем отдельный путь.** В первые секунды соединения writer-очередь
+пира забивается его же собственным broadcast-трафиком — прежде всего
+начальным flush'ем `announce_routes`, отправляемым каждому свежее
+аутентифицированному outbound-пиру. На full-routing-table-ноде этот
+burst может заполнить 128-слотовый outbound-канал за ~100-300мс.
+Обычный helper закрывает соединение на `ErrSendBufferFull` (штатный
+сигнал slow-peer eviction), а это значит, что следующий handshake-
+ответ в очереди — почти всегда `subscribed`, которого ждёт дайлер —
+торпедирует сессию ещё до того, как она перешла в Active. Дайлер
+видит голый `EOF` на `subscribe_inbox` и эмитит
+`cm_session_setup_failed`; в сочетании с default 2-4-8с retry
+backoff это раскручивается в CPU-storm, когда единственный набор
+кандидатов — несколько bootstrap-нод.
+
+**Контракт:**
+
+1. **Async fast path.** `sendHandshakeReplyViaNetwork` сначала пробует
+   неблокирующий `SendFrame`, ровно как обычный reply-путь. При любом
+   исходе кроме `ErrSendBufferFull` результат возвращается как есть —
+   соединение никогда не закрывается из этого хелпера.
+2. **Ограниченный blocking fallback.** Только когда async-отправка
+   вернула `ErrSendBufferFull`, хелпер падает в `SendFrameSync` с
+   внутренним cap'ом таймаута (`handshakeReplyTimeout = 2s`).
+   Блокирующий вариант абсорбирует кратковременный broadcast-burst;
+   таймаут не даёт мёртвому пиру навсегда залипшить горутину. Если
+   и блокирующая попытка не прошла — sentinel возвращается без
+   закрытия соединения.
+3. **Никакого eviction из этого хелпера.** Залипший пир всё равно
+   будет эвиктнут — но через heartbeat-путь (`inboundHeartbeat`),
+   который является штатным владельцем liveness-eviction. Handshake-
+   reply хелпер сознательно молчит на buffer pressure, чтобы
+   кратковременная самонаведённая перегрузка (пир сам забил свой
+   writer broadcast'ом) не убила здоровую сессию.
+
+**Применяется к:** `auth_ok` (ответ на `auth_session`), `peers`
+(ответ на `get_peers`), `contacts` (ответ на `fetch_contacts`),
+`subscribed` (ответ на `subscribe_inbox`), а также **обратному
+`subscribe_inbox`**, который responder эмитит сразу после
+`subscribed` (оба фрейма используют один outbound buffer; отправка
+reverse через обычный helper отменит защиту на следующей же строке
+обработчика).
+
+**НЕ применяется к:** ответам data-plane (`push_message`,
+`push_delivery_receipt`, `relay_*`, `announce_*`). Они сохраняют
+исходный контракт eviction-on-saturation — пир, который не
+успевает за живым трафиком, ЯВЛЯЕТСЯ slow peer и должен быть
+заменён.
+
+**Rollback подписчика при failed ack.** Обработчик `subscribe_inbox`
+регистрирует подписчика в `s.subs` ДО отправки `subscribed` ack —
+порядок важен, потому что `pushBacklogToSubscriber` ожидает что
+запись подписчика уже есть. С обычным eviction-based helper'ом
+cleanup был автоматическим: failed send закрывал соединение, defer
+в `handleConn` вызывал `removeSubscriberConnID`, gossip map
+оставался консистентным. С no-eviction контрактом соединение
+выживает, поэтому handler обязан откатывать регистрацию вручную,
+когда ack не доходит:
+
+1. Вызвать `sendHandshakeReplyViaNetwork` для `subscribed`.
+2. **При ошибке** (timeout, unknown conn, дренированный writer):
+   взять `gossipMu`, вызвать
+   `removeSubscriberConnIDLocked(recipient, connID)`, затем выйти
+   не пушив backlog и не отправляя reverse `subscribe_inbox`. Само
+   соединение остаётся живым — heartbeat-путь эвиктит его, если
+   пир действительно мёртв.
+3. **При успехе**: запланировать `pushBacklogToSubscriber` в
+   background-пуле, затем эмитить reverse `subscribe_inbox` через
+   тот же no-eviction helper.
+
+Без шага 2 gossip map копил бы phantom-подписчиков на каждой
+попытке subscribe с забитым буфером — невидимых до тех пор пока
+соединение не умрёт по другой причине.
+
+**`auth_ok` half-auth window.** В отличие от `subscribed` (с узким
+rollback-контрактом выше), `auth_ok` отправляется ПОСЛЕ того как
+`handleAuthSession` уже закоммитил существенное локальное
+состояние: `setConnAuthStateByID(Verified=true)`, hello learning,
+route registration, mirroring identity в NetCore, и фоновую
+goroutine `announcePeerToSessions`. Откатывать всё это при failed
+ack СОЗНАТЕЛЬНО НЕ делается — cleanup-граф широкий, cross-domain
+(peer + ipState + gossip) и частично асинхронный (отдельные
+горутины уже запущены).
+
+Failure mode когда ack не доходит:
+
+1. **Dialler side: нет same-session retry.**
+   `authenticatePeerSession` ждёт `auth_ok` через
+   `peerSessionRequest`, ограниченный `peerRequestTimeout`
+   (`peer_sessions.go::authenticatePeerSession`). Он НЕ повторяет
+   `auth_session` на том же TCP-сокете — на timeout возвращает
+   error, который всплывает в `openPeerSessionForCM` и закрывает
+   соединение, эмитя `DialFailed` в ConnectionManager.
+2. **CM-driven reconnect.** `DialFailed` крутит
+   `reconnectMaxRetries` циклов с exponential backoff. Каждый
+   retry открывает свежий TCP с новым `connID`. `handleAuthSession`
+   на новой стороне запускается с нуля — `Verified` fast-path
+   применим только к повторному auth на ТОМ ЖЕ `connID` и не
+   переносится через reconnect. Каждый redial платит полный
+   `auth_session` round-trip и заново запускает side-effect chain
+   (route registration idempotent на уровне routing-table;
+   announce goroutine просто эмитит ещё один announce; hello
+   cache переучивается на те же значения).
+3. **Local cleanup.** Предыдущая сессия с тем же `connID` всё ещё
+   несёт `Verified=true` и side-effect chain (route entry,
+   announce output, hello cache). Defer в `handleConn`
+   (`clearConnAuth`, `removeSubscriberConnID`,
+   `trackInboundDisconnect`) очищает их когда peer окончательно
+   закрывает мёртвый TCP, или когда наш read loop ловит EOF.
+
+Window bound: от ack-drop до срабатывания defer в `handleConn`.
+Обычно короткий — dialler закрывает promptly по своему
+`peerRequestTimeout`. Worst case — один inbound read deadline
+(`120s` `inboundReadTimeout`) на залипшем сокете. Если outbound
+buffer никогда не дренируется, heartbeat-путь (`inboundHeartbeat`)
+эвиктит нас по своему расписанию. Failed `auth_ok` логируется на
+WARN с `conn_id` для forensics.
 
 ## Поток доставки сообщений
 

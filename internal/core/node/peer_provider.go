@@ -111,6 +111,17 @@ type PeerProviderConfig struct {
 	// separately.
 	RemoteBannedFn func(domain.PeerAddress) bool
 
+	// SetupFailureBannedFn reports whether the address is currently inside
+	// a local setup-failure cooldown. Unlike RemoteBannedFn (driven by an
+	// explicit peer-banned notice from the remote) this gate is purely
+	// local: we accumulated N consecutive cm_session_setup_failed events
+	// against the peer and chose to stop dialling it for a short window.
+	// Used to break the reconnect storm against full-routing-table
+	// bootstraps whose own announce_routes flush evicts our handshake
+	// reply (see setup_failure.go). Returns false when the callback is
+	// nil or when the cooldown has elapsed.
+	SetupFailureBannedFn func(domain.PeerAddress) bool
+
 	// ListenAddr is this node's own listen address (for self-filtering).
 	ListenAddr domain.ListenAddress
 
@@ -375,6 +386,16 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		// remote and recorded verbatim — a peer that asks for a long
 		// ban gets exactly that.
 		if cfg.RemoteBannedFn != nil && cfg.RemoteBannedFn(kp.Address) {
+			continue
+		}
+
+		// 6c.3: skip peers locally muted by the setup-failure cooldown.
+		// Sibling gate to 6c.2 but driven from our side: after N
+		// consecutive cm_session_setup_failed events against the same
+		// address we suppress dial attempts for setupFailureCooldown so
+		// the storm against full-routing-table bootstraps subsides
+		// even when the remote never sends a peer-banned notice.
+		if cfg.SetupFailureBannedFn != nil && cfg.SetupFailureBannedFn(kp.Address) {
 			continue
 		}
 
