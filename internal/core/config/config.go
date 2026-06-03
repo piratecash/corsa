@@ -225,14 +225,14 @@ const (
 	// correctly.
 	ClientVersionMajor = 1
 	ClientVersionMinor = 0
-	ClientVersionBuild = 48
+	ClientVersionBuild = 49
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
 	// change documented in docs/protocol/handshake.md. The current floor
 	// is well above v12, so this build does not carry any v10..v13
 	// compatibility paths.
-	ProtocolVersion        = 16
+	ProtocolVersion        = 17
 	MinimumProtocolVersion = 14
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
