@@ -6,6 +6,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,9 +22,19 @@ import (
 //   - While quarantined:
 //       * Inbound routing announcements from the peer are dropped
 //         (the peer's view of the network is not trusted).
-//       * Existing transit routes through the peer are skipped by
+//       * Transit routes learned through the peer are LOCALLY
+//         invalidated at arm time (tombstoned, no wire withdrawals
+//         — see invalidateTransitOnQuarantineLocked). Without this,
+//         claims with a TTL longer than the quarantine (route TTL
+//         120s vs 60s base cooldown) would silently become
+//         selectable again when the quarantine expires — including
+//         claims the peer tried to withdraw or correct DURING the
+//         quarantine, when we were dropping its frames. Post-expiry
+//         transit therefore resumes only from FRESH announcements.
+//       * Any residual transit claims are additionally skipped by
 //         the relay-forward path (we do not pick the peer as
-//         next-hop for indirect destinations).
+//         next-hop for indirect destinations) — defence in depth
+//         for claims admitted between the gate check and arm.
 //       * The direct route to the peer itself stays in the routing
 //         table — the peer is still reachable as itself, only its
 //         transit knowledge is muted.
@@ -279,6 +290,13 @@ func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time
 // in the future, ONLY the strike counter is bumped and the timer
 // is re-armed from `now` so a sustained problem cannot let the
 // quarantine elapse mid-storm.
+//
+// On the inactive→active transition the peer's transit claims are
+// locally invalidated (invalidateTransitOnQuarantineLocked) so they
+// cannot outlive the quarantine via TTL. Re-arms during an active
+// quarantine skip the invalidation: inbound announcements are being
+// dropped while quarantined, so no new transit claims can have been
+// admitted since the transition.
 func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason string, now time.Time) {
 	if peer == "" {
 		return
@@ -286,6 +304,7 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 	if s.peerQuarantine == nil {
 		s.peerQuarantine = make(map[domain.PeerIdentity]routeQuarantineEntry)
 	}
+	newlyActive := !s.isPeerInRouteQuarantineLocked(peer, now)
 	entry := s.peerQuarantine[peer]
 	entry.Strikes = nextStrikeCount(entry, now)
 	dur := computeQuarantineDuration(entry.Strikes)
@@ -300,6 +319,63 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 		Dur("duration", dur).
 		Int("strikes", entry.Strikes).
 		Msg("route_quarantine_armed")
+
+	if newlyActive {
+		s.invalidateTransitOnQuarantineLocked(peer)
+	}
+}
+
+// invalidateTransitOnQuarantineLocked tombstones every transit claim
+// whose NextHop is the freshly quarantined peer. Caller must hold
+// s.peerMu (lock order peerMu → routingTable.mu is the canonical
+// one — see executeDeferredWithdrawal).
+//
+// Why this exists: the quarantine gate in isPeerInRouteQuarantineLocked
+// only blocks while now < Until, but the route TTL (route claim
+// lifetime, 120s) is longer than the base cooldown (60s). Without
+// local invalidation, claims learned BEFORE the quarantine — stale
+// by definition, and possibly withdrawn or corrected by the peer
+// during the quarantine while we were dropping its frames — become
+// selectable again the moment Until passes, for up to another TTL.
+// Tombstoning at arm time guarantees post-quarantine transit resumes
+// only from announcements received AFTER the quarantine expired.
+//
+// What this deliberately does NOT do (consistent with the file-level
+// contract): no wire withdrawals, no seqno bump, no fanout, no
+// TriggerUpdate. InvalidateTransitRoutes is the silent local variant
+// (unlike RemoveDirectPeer) and does not touch the direct route —
+// the peer itself stays reachable. Neighbours simply stop seeing the
+// invalidated identities refreshed in our periodic announcements and
+// age them out via their own TTL — no withdrawal storm.
+//
+// The route-table-changed event and the pending-queue drain for
+// exposed backup routes run on a background goroutine: both touch
+// other lock domains (event subscribers, deliveryMu) and have no
+// ordering requirement against the quarantine state we just wrote.
+func (s *Service) invalidateTransitOnQuarantineLocked(peer domain.PeerIdentity) {
+	if s.routingTable == nil {
+		// Minimal test fixtures build &Service{} without a table.
+		return
+	}
+	invalidated, exposed := s.routingTable.InvalidateTransitRoutes(peer)
+	if invalidated == 0 && len(exposed) == 0 {
+		return
+	}
+	log.Info().
+		Str("peer", string(peer)).
+		Int("transit_invalidated", invalidated).
+		Msg("route_quarantine_transit_invalidated")
+
+	s.goBackground(func() {
+		if invalidated > 0 && s.eventBus != nil {
+			s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+				Reason:    domain.RouteChangeTransitInvalidated,
+				PeerID:    peer,
+				Withdrawn: invalidated,
+			})
+		}
+		s.triggerDrainForExposed(exposed)
+	})
 }
 
 // nextStrikeCount applies the recidivism rule: if the previous
@@ -444,7 +520,8 @@ func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.T
 // recordInboundAnnounceAndMaybeArm is the receive-handler entry
 // point for the chatty_routes quarantine trigger. Called from
 // handleAnnounceRoutes / handleRoutesUpdate / handleRouteAnnounceV3
-// for every WELL-FORMED inbound frame from a known sender. The
+// / handleRequestResync for every WELL-FORMED inbound frame from a
+// known sender. The
 // position is BEFORE the announceLimiter check, BEFORE the
 // quarantine gate, and BEFORE peerState.GetOrCreate — so the
 // signal counts every announce-plane frame the peer puts on the
@@ -598,9 +675,23 @@ func (s *Service) purgePeerDisconnectHistoryLocked(now time.Time) {
 	}
 }
 
+// purgeLastResyncAcceptedLocked drops request_resync debounce stamps
+// older than the debounce window — they can no longer influence the
+// accept decision. Caller must hold s.peerMu.
+func (s *Service) purgeLastResyncAcceptedLocked(now time.Time) {
+	if s.lastResyncAccepted == nil {
+		return
+	}
+	for peer, last := range s.lastResyncAccepted {
+		if now.Sub(last) >= requestResyncAcceptDebounce {
+			delete(s.lastResyncAccepted, peer)
+		}
+	}
+}
+
 // purgeRouteQuarantineState is the periodic-cleanup entry point
 // wired from bootstrapLoop's eviction-sweep tick. Takes peerMu.Lock
-// for a short window covering all three purge helpers — they touch
+// for a short window covering all four purge helpers — they touch
 // the same domain and are O(map size), which is bounded by the
 // number of peers we have ever observed.
 func (s *Service) purgeRouteQuarantineState() {
@@ -609,5 +700,6 @@ func (s *Service) purgeRouteQuarantineState() {
 	s.purgeExpiredQuarantineLocked(now)
 	s.purgePeerDisconnectHistoryLocked(now)
 	s.purgePeerAnnounceHistoryLocked(now)
+	s.purgeLastResyncAcceptedLocked(now)
 	s.peerMu.Unlock()
 }

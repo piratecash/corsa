@@ -34,15 +34,44 @@ import (
 // synchronously inline — every existing routing test that asserts
 // fanout-by-the-time-onPeerSessionClosed-returns relies on this.
 
+// cmReconnectRetryBudget is the total time the connection manager
+// spends in backoff across its full reconnect cycle:
+// reconnectMaxRetries attempts with exponential backoff
+// (backoffDuration: 2+4+8 = 14s with the current constants). The
+// withdrawal grace period is DERIVED from this value so the two
+// subsystems cannot silently drift apart — a previous revision
+// hard-coded 10s here while claiming to absorb the 14s retry cycle,
+// which let the deferred RemoveDirectPeer fire BEFORE the third
+// retry reconnected: seqno bump, withdrawal fanout, poison reverse,
+// then re-add traffic — the exact storm the grace period exists to
+// smooth.
+func cmReconnectRetryBudget() time.Duration {
+	var total time.Duration
+	for attempt := 1; attempt <= reconnectMaxRetries; attempt++ {
+		total += backoffDuration(attempt)
+	}
+	return total
+}
+
+// routeWithdrawalGraceSlack covers what the raw backoff sum does
+// not: per-attempt dial + handshake latency, the pacer gate that
+// each retry passes AFTER its backoff elapses (retryAfterBackoff),
+// and general scheduler jitter. Sized generously — a grace period
+// that is slightly too long only delays a genuine withdrawal by a
+// few seconds, while one that is too short re-introduces the
+// withdraw/re-add churn.
+const routeWithdrawalGraceSlack = 6 * time.Second
+
 // routeWithdrawalGracePeriod is how long onPeerSessionClosed waits
 // before actually removing the direct route and broadcasting the
 // withdrawal. A reconnect inside this window cancels the pending
-// withdrawal entirely — no seqno bump, no wire traffic. Sized to
-// absorb the default CM reconnect cycle (2+4+8 = 14s of agitation)
-// plus typical weak-WAN glitches. Sessions that stay closed for
-// longer are treated as genuinely lost and trigger the full
-// withdrawal path.
-const routeWithdrawalGracePeriod = 10 * time.Second
+// withdrawal entirely — no seqno bump, no wire traffic. Derived
+// from the CM reconnect retry budget (see cmReconnectRetryBudget)
+// plus slack for dial/pacer/scheduling latency, so a peer that
+// reconnects on the LAST retry of the CM cycle still lands inside
+// the window. Sessions that stay closed for longer are treated as
+// genuinely lost and trigger the full withdrawal path.
+var routeWithdrawalGracePeriod = cmReconnectRetryBudget() + routeWithdrawalGraceSlack
 
 // effectiveWithdrawalGracePeriod returns the active grace duration.
 //
@@ -56,7 +85,8 @@ const routeWithdrawalGracePeriod = 10 * time.Second
 //     &Service{...} literal (every routing test pre-grace). Treat
 //     as legacy sync — they assert fanout-by-the-time-close-returns
 //     and the grace map is the production-only initialisation signal.
-//  4. otherwise → use the production constant routeWithdrawalGracePeriod.
+//  4. otherwise → use the production value routeWithdrawalGracePeriod
+//     (derived from the CM retry budget at package init).
 func (s *Service) effectiveWithdrawalGracePeriod() time.Duration {
 	if s.routeWithdrawalGracePeriodTest > 0 {
 		return s.routeWithdrawalGracePeriodTest

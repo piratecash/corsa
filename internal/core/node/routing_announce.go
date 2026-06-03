@@ -1664,6 +1664,15 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 		log.Warn().Str("sender", string(senderIdentity)).Msg("request_resync_malformed_sender")
 		return
 	}
+	// Chatty-routes accounting — same position as handleAnnounceRoutes /
+	// handleRoutesUpdate / handleRouteAnnounceV3 (before every gate, so
+	// the signal counts every announce-plane frame the peer puts on
+	// the wire). request_resync did NOT pass through this accounting
+	// before: the dispatcher routes it straight here, so a peer
+	// hammering request_resync was invisible to the chatty_routes
+	// quarantine trigger while every other announce-plane frame type
+	// was counted.
+	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
 	// Route-quarantine gate (top-level) — symmetric with
 	// handleRoutesUpdate / handleRouteAnnounceV3. request_resync
 	// from a quarantined peer must be silently dropped: handling
@@ -1676,9 +1685,7 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	// announce loop spinning on forced-full cycles on demand.
 	// Position is BEFORE the announceLimiter charge so a
 	// quarantined peer's frames do not consume the per-peer
-	// announce token budget either; chatty_routes still
-	// accounts the frame at the wire-receive recordInbound*
-	// step earlier in the dispatcher.
+	// announce token budget either.
 	if s.IsPeerInRouteQuarantine(senderIdentity) {
 		log.Debug().
 			Str("from", string(senderIdentity)).
@@ -1686,10 +1693,8 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 			Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
-	// Phase 4 13.7: shared per-peer announce rate limit. A peer
-	// hammering request_resync would otherwise force this node into
-	// repeated forced-full-sync cycles, defeating the announce-plane
-	// throttle elsewhere. Cost 1 — control frame, not entry-bearing.
+	// Phase 4 13.7: shared per-peer announce rate limit. Cost 1 —
+	// control frame, not entry-bearing.
 	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, 1) {
 		log.Warn().
 			Str("from", string(senderIdentity)).
@@ -1697,11 +1702,62 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 			Msg("announce_rate_limit_drop")
 		return
 	}
+	// Dedicated accept-side debounce. The limiters above are generic
+	// frame-rate brakes (cmdLimiter 30/s at the dispatcher, announce
+	// limiter cost 1 here) — a peer sending request_resync at e.g.
+	// 10-20/s sails under both, yet each accepted frame flips
+	// NeedsFullResync and triggers an announce cycle: full-sync work
+	// amplified far beyond what any legitimate desync recovery needs.
+	// A peer legitimately needs at most ONE resync per desync event,
+	// and the forced-full announce it triggers completes well within
+	// the debounce window; a second desync inside the window is
+	// recovered by the next periodic full cycle anyway (request_resync
+	// is an optimisation, not a correctness requirement — see
+	// handleRouteAnnounceV3's baseline-gate notes). Excess requests
+	// are dropped without touching the state registry.
+	if !s.acceptRequestResyncDebounced(senderIdentity, time.Now()) {
+		log.Debug().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "request_resync").
+			Msg("request_resync_debounced_drop")
+		return
+	}
 	log.Info().
 		Str("from", string(senderIdentity)).
 		Msg("request_resync_received_forcing_full_sync")
 	s.announceLoop.StateRegistry().MarkInvalid(senderIdentity)
 	s.announceLoop.TriggerUpdate()
+}
+
+// requestResyncAcceptDebounce is the minimum spacing between two
+// ACCEPTED request_resync frames from the same peer. Sized to the
+// periodic announce cadence: a desync that strikes twice within one
+// window is healed by the next periodic full announce regardless,
+// so a tighter debounce buys nothing except more forced-full churn.
+const requestResyncAcceptDebounce = 30 * time.Second
+
+// acceptRequestResyncDebounced records and gates request_resync
+// acceptance per peer: returns true (and stamps the acceptance) when
+// no resync was accepted for the peer within
+// requestResyncAcceptDebounce, false otherwise. Guarded by peerMu —
+// same domain as the quarantine bookkeeping that shares the
+// handler's hot path. Stale entries are purged by
+// purgeRouteQuarantineState alongside the other per-peer sliding
+// windows.
+func (s *Service) acceptRequestResyncDebounced(peer domain.PeerIdentity, now time.Time) bool {
+	if peer == "" {
+		return false
+	}
+	s.peerMu.Lock()
+	defer s.peerMu.Unlock()
+	if last, ok := s.lastResyncAccepted[peer]; ok && now.Sub(last) < requestResyncAcceptDebounce {
+		return false
+	}
+	if s.lastResyncAccepted == nil {
+		s.lastResyncAccepted = make(map[domain.PeerIdentity]time.Time)
+	}
+	s.lastResyncAccepted[peer] = now
+	return true
 }
 
 // handleRouteAnnounceV3 processes an incoming route_announce_v3 frame (the

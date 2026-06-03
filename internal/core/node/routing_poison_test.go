@@ -250,6 +250,17 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
 	addDirectViaIdentity(t, svc, domain.PeerIdentity(peer.Address))
 
+	// Arm route quarantine for the sender FIRST. Arming now locally
+	// invalidates existing transit claims via the peer (see
+	// invalidateTransitOnQuarantineLocked), so the claim this test
+	// needs alive is seeded AFTER the arm, via the direct UpdateRoute
+	// API (which bypasses the receive-path quarantine gate by design
+	// — this test is about handleRoutePoison's gate, not the
+	// announce-ingest one).
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer.Address), "test", time.Now())
+	svc.peerMu.Unlock()
+
 	// Seed a transit claim through the sender so the poison frame
 	// has something to invalidate. Without the seed, InvalidateUplinkClaim
 	// is a no-op and the test would pass even without the gate.
@@ -276,11 +287,6 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 	if !preLive {
 		t.Fatalf("precondition: seeded claim must be live before poison")
 	}
-
-	// Arm route quarantine for the sender.
-	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer.Address), "test", time.Now())
-	svc.peerMu.Unlock()
 
 	// Build a properly signed poison frame the handler would
 	// otherwise accept. The point of the test is that the

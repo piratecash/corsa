@@ -476,3 +476,75 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 		t.Fatalf("reason = %q, want setup_failure_cycle", entry.Reason)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Transit invalidation on arm — stale claims must not outlive the
+// quarantine via TTL.
+// ---------------------------------------------------------------------------
+
+// TestQuarantine_ArmInvalidatesTransitRoutes pins the fix for the
+// TTL-vs-cooldown gap: route TTL (120s) exceeds the base quarantine
+// duration (60s), so without local invalidation at arm time the
+// peer's pre-quarantine transit claims — claims the peer may have
+// withdrawn or corrected DURING the quarantine while we were
+// dropping its frames — would become selectable again the moment
+// the quarantine expires. Arming must tombstone transit claims via
+// the peer (so post-expiry transit resumes only from fresh
+// announcements) while leaving the DIRECT route to the peer intact
+// (quarantine suppresses transit trust, not data-plane delivery).
+func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
+	t.Parallel()
+
+	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := table.UpdateRoute(routing.RouteEntry{
+		Identity: "target-Z",
+		Origin:   "peer-B",
+		NextHop:  "peer-B",
+		Hops:     2,
+		SeqNo:    1,
+		Source:   routing.RouteSourceAnnouncement,
+	})
+	if err != nil || status != routing.RouteAccepted {
+		t.Fatalf("UpdateRoute failed: status=%v err=%v", status, err)
+	}
+
+	svc := &Service{
+		routingTable:          table,
+		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
+		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+	}
+
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked("peer-B", "test", time.Now())
+	svc.peerMu.Unlock()
+
+	// Transit claim via the quarantined peer must be gone from the
+	// live lookup — this is what guarantees it cannot resurface
+	// after the quarantine expires (Lookup does not consult
+	// quarantine state; the tombstone is the protection).
+	if got := table.Lookup("target-Z"); len(got) != 0 {
+		t.Fatalf("transit route via quarantined peer still live after arm: %d entries", len(got))
+	}
+	// Direct route to the peer itself must survive.
+	if got := table.Lookup("peer-B"); len(got) == 0 {
+		t.Fatal("direct route to quarantined peer was removed — arm must invalidate transit only")
+	}
+
+	// Re-arm while already active must be a no-op for the table
+	// (no panic, no further mutation) — inbound announcements are
+	// dropped during quarantine, so there is nothing new to
+	// invalidate.
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked("peer-B", "test", time.Now())
+	svc.peerMu.Unlock()
+	if got := table.Lookup("peer-B"); len(got) == 0 {
+		t.Fatal("re-arm during active quarantine must not touch the direct route")
+	}
+
+	// Wait for the background drain/event goroutine (if any) so the
+	// race detector sees a clean shutdown.
+	svc.backgroundWg.Wait()
+}

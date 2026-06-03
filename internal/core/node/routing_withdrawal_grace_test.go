@@ -81,6 +81,69 @@ func TestWithdrawalGrace_ProductionDefault(t *testing.T) {
 	}
 }
 
+// TestWithdrawalGrace_PeriodCoversCMRetryBudget pins the contract
+// that motivated deriving the grace period from the CM constants:
+// the window MUST be strictly longer than the total backoff the
+// connection manager spends across its full retry cycle
+// (reconnectMaxRetries × backoffDuration), with non-trivial slack
+// for the pacer gate and dial latency that each retry incurs AFTER
+// its backoff elapses. A previous revision hard-coded 10s against a
+// 14s retry cycle — the deferred withdrawal fired before the third
+// retry could reconnect, producing the exact seqno-bump/fanout/
+// poison/re-add storm the grace period exists to absorb.
+func TestWithdrawalGrace_PeriodCoversCMRetryBudget(t *testing.T) {
+	t.Parallel()
+
+	budget := cmReconnectRetryBudget()
+	if routeWithdrawalGracePeriod <= budget {
+		t.Fatalf("grace period %v must exceed CM retry budget %v", routeWithdrawalGracePeriod, budget)
+	}
+	if slack := routeWithdrawalGracePeriod - budget; slack < 2*time.Second {
+		t.Fatalf("grace slack %v too small — pacer gate + dial latency after the last backoff need headroom", slack)
+	}
+}
+
+// TestWithdrawalGrace_ReconnectAfterThirdBackoffCancels simulates,
+// on a compressed timescale, the storm pattern from the field: the
+// peer's reconnect succeeds only on the LAST retry of the CM cycle
+// (after the full 2+4+8s backoff budget). The grace window — derived
+// as budget + slack — must still be open at that point, so the
+// reconnect cancels the pending withdrawal and no seqno bump /
+// fanout happens. With the old hard-coded 10s grace this scenario
+// fired the withdrawal at 10s while the reconnect landed at ~14s.
+//
+// Timescale: 1s of production time = 10ms of test time (compress
+// 100). The relative geometry (reconnect at budget, window at
+// budget+slack) is what is under test, not the absolute durations;
+// the resulting ~60ms margin between sleep target and window edge
+// absorbs scheduler overshoot on loaded CI.
+func TestWithdrawalGrace_ReconnectAfterThirdBackoffCancels(t *testing.T) {
+	t.Parallel()
+
+	const compress = 100 // 1s -> 10ms
+	scaledBudget := cmReconnectRetryBudget() / compress
+	scaledGrace := (cmReconnectRetryBudget() + routeWithdrawalGraceSlack) / compress
+
+	svc := newGraceFixture(t, scaledGrace)
+	peer := domain.PeerIdentity("test-peer-third-backoff")
+
+	svc.maybeScheduleDeferredWithdrawal(peer, nil)
+	if !peerInPendingMap(svc, peer) {
+		t.Fatal("schedule should have armed a timer")
+	}
+
+	// Reconnect lands after the FULL retry budget has elapsed —
+	// the moment the third retry's dial completes.
+	time.Sleep(scaledBudget)
+
+	if !svc.tryCancelPendingWithdrawal(peer) {
+		t.Fatalf("reconnect at retry-budget mark (%v) fell outside the grace window (%v) — grace no longer covers the CM retry cycle", scaledBudget, scaledGrace)
+	}
+	if peerInPendingMap(svc, peer) {
+		t.Fatal("pending entry should have been removed by tryCancel")
+	}
+}
+
 // TestWithdrawalGrace_NegativeOverrideDisablesGrace pins the
 // explicit-opt-out path: setting the test override to a negative
 // duration forces sync legacy behaviour even when the map is

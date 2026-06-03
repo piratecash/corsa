@@ -291,6 +291,7 @@ type Service struct {
 	peerQuarantine                 map[domain.PeerIdentity]routeQuarantineEntry // per-peer route quarantine: peer in quarantine has inbound routing announcements dropped and is skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
 	peerDisconnectHistory          map[domain.PeerIdentity][]time.Time          // sliding window of disconnect timestamps per peer, drives quarantine trigger detection. Guarded by peerMu.
 	peerAnnounceHistory            map[domain.PeerIdentity][]time.Time          // sliding window of inbound announce-frame arrival timestamps per peer, drives chatty_routes quarantine trigger. Guarded by peerMu.
+	lastResyncAccepted             map[domain.PeerIdentity]time.Time            // last ACCEPTED request_resync per peer — debounces forced full-sync cycles below the cmd/announce limiter thresholds; see handleRequestResync. Guarded by peerMu.
 	disableRateLimiting            bool                                         // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
 	markPeerStateIntervalTest      time.Duration                                // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
 	routeWithdrawalGracePeriodTest time.Duration                                // test hook: override routeWithdrawalGracePeriod (negative = disable grace, run withdrawals synchronously like the pre-grace legacy path; zero = use production default)
@@ -1069,6 +1070,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		peerQuarantine:          make(map[domain.PeerIdentity]routeQuarantineEntry),
 		peerDisconnectHistory:   make(map[domain.PeerIdentity][]time.Time),
 		peerAnnounceHistory:     make(map[domain.PeerIdentity][]time.Time),
+		lastResyncAccepted:      make(map[domain.PeerIdentity]time.Time),
 		bannedIPSet:             make(map[string]domain.BannedIPEntry),
 		remoteBannedIPs:         make(map[string]remoteIPBanEntry),
 		setupFailures:           make(map[domain.PeerAddress]*setupFailureEntry),

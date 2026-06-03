@@ -101,6 +101,99 @@ func TestHandleRequestResync_QuarantinedSender_DropsSilently(t *testing.T) {
 	}
 }
 
+// TestHandleRequestResync_DebouncesRepeatedRequests pins the
+// accept-side debounce: the generic limiters (cmdLimiter 30/s at the
+// dispatcher, announceLimiter cost 1 in the handler) let a peer send
+// request_resync at 10-20/s without tripping anything, yet every
+// accepted frame flips NeedsFullResync and triggers a forced-full
+// announce cycle. The dedicated per-peer debounce caps acceptance at
+// one per requestResyncAcceptDebounce: the first request is honoured,
+// an immediate repeat is dropped without touching the state registry
+// or the trigger channel, and a request arriving after the debounce
+// window is honoured again.
+func TestHandleRequestResync_DebouncesRepeatedRequests(t *testing.T) {
+	svc := newTestServiceWithRouting(t, idNodeA)
+
+	registry := svc.announceLoop.StateRegistry()
+	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
+	state := registry.Get(domain.PeerIdentity(idPeerB))
+	if state == nil {
+		t.Fatalf("per-peer state must exist after MarkReconnected")
+	}
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+
+	// First request: accepted.
+	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	if !state.View().NeedsFullResync {
+		t.Fatal("first request_resync must be honoured (MarkInvalid)")
+	}
+	if !svc.announceLoop.PendingTrigger() {
+		t.Fatal("first request_resync must TriggerUpdate")
+	}
+
+	// Reset the registry flag, then an immediate repeat: debounced —
+	// MarkInvalid must NOT fire. (The trigger channel is not asserted
+	// here: PendingTrigger is non-consuming, so the first call's
+	// token is still pending; the no-trigger side of the debounce is
+	// covered by the fresh-service test below.)
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	if state.View().NeedsFullResync {
+		t.Fatal("repeat request_resync inside the debounce window must NOT MarkInvalid")
+	}
+
+	// Age the acceptance stamp past the debounce window: honoured again.
+	svc.peerMu.Lock()
+	svc.lastResyncAccepted[domain.PeerIdentity(idPeerB)] =
+		time.Now().Add(-requestResyncAcceptDebounce - time.Second)
+	svc.peerMu.Unlock()
+	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	if !state.View().NeedsFullResync {
+		t.Fatal("request_resync after the debounce window must be honoured again")
+	}
+}
+
+// TestHandleRequestResync_DebouncedRequestDoesNotTrigger asserts the
+// trigger-channel side of the debounce on a fresh service (the
+// channel-token check needs a service whose announce loop has never
+// been triggered, because PendingTrigger is non-consuming): with a
+// fresh acceptance stamp already recorded for the peer, an inbound
+// request_resync must neither MarkInvalid nor TriggerUpdate.
+func TestHandleRequestResync_DebouncedRequestDoesNotTrigger(t *testing.T) {
+	svc := newTestServiceWithRouting(t, idNodeA)
+
+	registry := svc.announceLoop.StateRegistry()
+	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
+	state := registry.Get(domain.PeerIdentity(idPeerB))
+	if state == nil {
+		t.Fatalf("per-peer state must exist after MarkReconnected")
+	}
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	if svc.announceLoop.PendingTrigger() {
+		t.Fatalf("precondition: trigger channel must be empty")
+	}
+
+	// Pre-stamp a fresh acceptance so the handler's debounce gate
+	// rejects the request.
+	svc.peerMu.Lock()
+	if svc.lastResyncAccepted == nil {
+		svc.lastResyncAccepted = make(map[domain.PeerIdentity]time.Time)
+	}
+	svc.lastResyncAccepted[domain.PeerIdentity(idPeerB)] = time.Now()
+	svc.peerMu.Unlock()
+
+	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+
+	if state.View().NeedsFullResync {
+		t.Fatal("debounced request_resync must NOT MarkInvalid")
+	}
+	if svc.announceLoop.PendingTrigger() {
+		t.Fatal("debounced request_resync must NOT TriggerUpdate")
+	}
+}
+
 // TestHandleRequestResync_MalformedSenderIsRejected pins the input-validation
 // guard: an invalid identity (anything that fails identity.IsValidAddress)
 // must NOT touch state or trigger an announce cycle. Without this guard a
