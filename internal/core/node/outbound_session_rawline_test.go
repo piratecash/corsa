@@ -1,10 +1,14 @@
 package node
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -272,5 +276,245 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 		if r.NextHop == domain.PeerIdentity(idPeerB) {
 			t.Fatalf("poison via outbound session reader path must invalidate the (idTargetX, idPeerB) slot; live entry %+v survived", r)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Outbound control-frame cmd-rate limit (regression for the
+// inbound/outbound asymmetry: inbound cmd limiter covers
+// request_resync / route_poison_v1 but the outbound peer-session
+// dispatcher used to skip the limiter entirely, letting a peer
+// flood control frames over an established outbound session and
+// fall back only to the loose 200-tokens/s announceLimiter route
+// bucket).
+// ---------------------------------------------------------------------------
+
+// TestDropOutboundControlFrameBucket_ForcesFreshBudgetAfterRemoval
+// pins the lifecycle contract for dropOutboundControlFrameBucket:
+// after a session's bucket is exhausted, calling the helper to
+// drop it makes a subsequent allowCommand for the SAME connID key
+// observe a fresh burst budget — proving the underlying
+// removeConn ran. This is the property each session-removal site
+// relies on to prevent stale buckets from accumulating in the
+// cmdLimiter map (commandRateLimiter.cleanup is not wired
+// anywhere).
+//
+// The helper is also expected to no-op safely on connID==0 and
+// when cmdLimiter is nil — both are exercised here.
+func TestDropOutboundControlFrameBucket_ForcesFreshBudgetAfterRemoval(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{cmdLimiter: newCommandRateLimiter()}
+	const connID = domain.ConnID(31415)
+	session := &peerSession{connID: connID}
+
+	// Exhaust the bucket.
+	for i := 0; i < cmdBurstPerConn; i++ {
+		if !svc.outboundControlFrameAllowed(session) {
+			t.Fatalf("burst budget should cover %d calls; failed at i=%d", cmdBurstPerConn, i)
+		}
+	}
+	// Sanity: at least one immediate next call must be blocked.
+	blocked := false
+	for i := 0; i < 20; i++ {
+		if !svc.outboundControlFrameAllowed(session) {
+			blocked = true
+			break
+		}
+	}
+	if !blocked {
+		t.Fatal("post-burst call unexpectedly allowed; cmdLimiter never engaged")
+	}
+
+	// Drop the bucket — this is what every session-removal site
+	// now calls.
+	svc.dropOutboundControlFrameBucket(connID)
+
+	// A fresh bucket: the very first call after removal must
+	// succeed because removeConn deleted the per-conn entry and
+	// the next allowCommand re-creates it at full burst.
+	if !svc.outboundControlFrameAllowed(session) {
+		t.Fatal("after dropOutboundControlFrameBucket the connID's bucket was not actually removed — call still blocked")
+	}
+
+	// Helper must no-op safely on the two degenerate inputs that
+	// the cleanup fallback (ensurePeerSessions defer) can pass.
+	svc.dropOutboundControlFrameBucket(0)
+	svcNilLimiter := &Service{cmdLimiter: nil}
+	svcNilLimiter.dropOutboundControlFrameBucket(connID)
+}
+
+// TestOutboundControlFrameAllowed_PerSessionBucket pins the
+// predicate directly: the first cmdBurstPerConn calls return true,
+// then the bucket is exhausted and at least one subsequent call
+// returns false. This is the building block both outbound control-
+// frame cases rely on; the integration tests below add the
+// dispatcher layer on top.
+func TestOutboundControlFrameAllowed_PerSessionBucket(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{cmdLimiter: newCommandRateLimiter()}
+	session := &peerSession{connID: 9001}
+
+	for i := 0; i < cmdBurstPerConn; i++ {
+		if !svc.outboundControlFrameAllowed(session) {
+			t.Fatalf("first %d calls must be allowed (burst budget); failed at i=%d", cmdBurstPerConn, i)
+		}
+	}
+
+	// Bucket exhausted. Some immediate subsequent calls must fail.
+	// Refill rate is 30/s, so in a tight loop we deterministically
+	// see at least a handful of failures before any token recovers.
+	blocked := 0
+	for i := 0; i < 25; i++ {
+		if !svc.outboundControlFrameAllowed(session) {
+			blocked++
+		}
+	}
+	if blocked == 0 {
+		t.Fatal("post-burst calls all allowed; cmdLimiter did not engage on the outbound bucket")
+	}
+}
+
+// TestDispatchPeerSessionFrame_RequestResync_CmdLimited is the
+// end-to-end regression for the outbound side. It exhausts the
+// per-session control-frame bucket and then dispatches one more
+// request_resync; the handler MUST NOT fire. Without the
+// outboundControlFrameAllowed gate added to the dispatcher,
+// handleRequestResync would flip NeedsFullResync and call
+// TriggerUpdate regardless of bucket state.
+func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
+	svc := newTestServiceWithRouting(t, idNodeA)
+	svc.eventBus = newStormBus(t)
+	svc.cmdLimiter = newCommandRateLimiter()
+
+	senderAddr := domain.PeerAddress("addr-peerB")
+	const connID = domain.ConnID(424242)
+
+	svc.peerMu.Lock()
+	svc.sessions[senderAddr] = &peerSession{
+		address:      senderAddr,
+		peerIdentity: domain.PeerIdentity(idPeerB),
+		connID:       connID,
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
+	svc.peerMu.Unlock()
+
+	registry := svc.announceLoop.StateRegistry()
+	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
+	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	if state.View().NeedsFullResync {
+		t.Fatalf("precondition: NeedsFullResync must be cleared")
+	}
+	svc.announceLoop.PendingTrigger() // drain any spurious trigger
+
+	// Exhaust the per-session bucket so the dispatcher's gate
+	// fires deterministically.
+	key := outboundControlFrameLimitKey(connID)
+	for i := 0; i < cmdBurstPerConn; i++ {
+		svc.cmdLimiter.allowCommand(key)
+	}
+
+	// Dispatch request_resync — should be silently dropped.
+	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], protocol.Frame{
+		Type: "request_resync",
+	})
+
+	if state.View().NeedsFullResync {
+		t.Fatal("request_resync passed the outbound cmd-limit gate: handleRequestResync was called despite an exhausted bucket")
+	}
+	if svc.announceLoop.PendingTrigger() {
+		t.Fatal("request_resync bypassed the outbound cmd-limit gate: TriggerUpdate fired")
+	}
+}
+
+// TestDispatchPeerSessionFrame_RoutePoison_CmdLimited is the
+// route_poison_v1 counterpart. It seeds a transit claim, exhausts
+// the per-session bucket, and dispatches a properly-signed poison
+// frame; the uplink claim must SURVIVE because the gate aborts
+// dispatch before InvalidateUplinkClaim runs.
+func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
+	svc, _ := newTestServiceWithIdentity(t)
+	svc.eventBus = newStormBus(t)
+	svc.cmdLimiter = newCommandRateLimiter()
+
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
+	addDirectViaIdentity(t, svc, domain.PeerIdentity(peer.Address))
+
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: domain.PeerIdentity(idTargetX),
+		Origin:   domain.PeerIdentity(peer.Address),
+		NextHop:  domain.PeerIdentity(peer.Address),
+		Hops:     2,
+		SeqNo:    5,
+		Source:   routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("seed transit claim: %v", err)
+	}
+
+	const connID = domain.ConnID(727272)
+	senderAddr := domain.PeerAddress(peer.Address)
+	svc.peerMu.Lock()
+	svc.sessions[senderAddr] = &peerSession{
+		address:      senderAddr,
+		peerIdentity: domain.PeerIdentity(peer.Address),
+		connID:       connID,
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1},
+		sendCh:       make(chan protocol.Frame, 4),
+		authOK:       true,
+	}
+	if svc.health == nil {
+		svc.health = map[domain.PeerAddress]*peerHealth{}
+	}
+	svc.health[senderAddr] = &peerHealth{Connected: true}
+	svc.peerMu.Unlock()
+
+	// Build a properly signed poison frame the handler would
+	// otherwise accept — we are testing the gate, not sig checks.
+	poison := protocol.RoutePoisonFrame{
+		Type:     protocol.RoutePoisonFrameType,
+		Identity: idTargetX,
+		Reason:   protocol.RoutePoisonReasonHealthDead,
+		IssuedAt: "2026-05-28T12:00:00Z",
+	}
+	sig := ed25519.Sign(peer.PrivateKey, poison.CanonicalSenderSigBytes())
+	poison.SenderSig = base64.StdEncoding.EncodeToString(sig)
+	raw, err := protocol.MarshalRoutePoisonFrame(poison)
+	if err != nil {
+		t.Fatalf("MarshalRoutePoisonFrame: %v", err)
+	}
+	frame := protocol.Frame{
+		Type:    protocol.RoutePoisonFrameType,
+		RawLine: string(raw),
+	}
+
+	// Exhaust the per-session bucket.
+	key := outboundControlFrameLimitKey(connID)
+	for i := 0; i < cmdBurstPerConn; i++ {
+		svc.cmdLimiter.allowCommand(key)
+	}
+
+	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], frame)
+
+	// The claim must still be live — gate fired before
+	// InvalidateUplinkClaim ran.
+	stillLive := false
+	for _, r := range svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)) {
+		if r.NextHop == domain.PeerIdentity(peer.Address) {
+			stillLive = true
+			break
+		}
+	}
+	if !stillLive {
+		t.Fatal("route_poison_v1 passed the outbound cmd-limit gate: handleRoutePoison invalidated the claim despite an exhausted bucket")
 	}
 }

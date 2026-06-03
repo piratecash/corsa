@@ -2,6 +2,7 @@ package node
 
 import (
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -159,6 +160,97 @@ func TestFailoverRelay_FailoverOnHopAckTimeout(t *testing.T) {
 	}
 	if len(st.AbandonedForwardedTo) != 1 || st.AbandonedForwardedTo[0] != "addr-A" {
 		t.Fatalf("AbandonedForwardedTo = %v, want [addr-A]", st.AbandonedForwardedTo)
+	}
+}
+
+// TestFailoverRelay_SkipsQuarantinedTransitNextHop pins the
+// quarantine gate inside tryFailoverRelay. Without the gate the
+// failover path would pick the highest-ranked alternative (D, 2
+// hops) even though D is route-quarantined, undoing the "transit
+// through P is skipped" contract that the normal forwarding and
+// TableRouter paths uphold.
+//
+// Setup: A (1 hop, just failed), D (2 hops, quarantined),
+// C (3 hops, clean). Without the gate D would be the chosen
+// retry; with the gate D is skipped and C receives the retry.
+func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
+	svc.relayStates = newRelayStateStore()
+
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerA,
+		Hops: 1, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("UpdateRoute(A): %v", err)
+	}
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerD,
+		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("UpdateRoute(D): %v", err)
+	}
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerC,
+		Hops: 3, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("UpdateRoute(C): %v", err)
+	}
+
+	_ = installRelayCapableSession(t, svc, domain.PeerAddress("addr-A"), idPeerA)
+	sendChD := installRelayCapableSession(t, svc, domain.PeerAddress("addr-D"), idPeerD)
+	sendChC := installRelayCapableSession(t, svc, domain.PeerAddress("addr-C"), idPeerC)
+
+	// Arm route quarantine on D — failover MUST skip it as a transit
+	// next-hop (target identity is X, not D, so hops > 1 and the
+	// gate engages).
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked(idPeerD, "test", time.Now())
+	svc.peerMu.Unlock()
+
+	line := makeRelayFrameLine(t, "msg-failover-q", idTargetX)
+	svc.relayStates.store(&relayForwardState{
+		MessageID:            "msg-failover-q",
+		ForwardedTo:          domain.PeerAddress("addr-A"),
+		Recipient:            domain.PeerIdentity(idTargetX),
+		HopCount:             1,
+		RemainingTTL:         60,
+		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
+		FrameLine:            line,
+	})
+
+	snap := relayForwardState{
+		MessageID:            "msg-failover-q",
+		ForwardedTo:          domain.PeerAddress("addr-A"),
+		Recipient:            domain.PeerIdentity(idTargetX),
+		HopCount:             1,
+		RemainingTTL:         60,
+		HopAckRemainingTicks: 0,
+		HopAckObserved:       true,
+		FrameLine:            line,
+	}
+
+	svc.onRelayHopAckTimeout(snap)
+
+	// D must NOT receive the retry (quarantined transit).
+	if len(sendChD) != 0 {
+		t.Fatal("quarantined transit peer D received the failover retry; gate is missing or broken")
+	}
+	// C MUST receive the retry (next clean candidate).
+	select {
+	case frame := <-sendChC:
+		if frame.ID != "msg-failover-q" {
+			t.Fatalf("retried frame ID = %q, want msg-failover-q", frame.ID)
+		}
+	default:
+		t.Fatal("no retry frame landed on C's send channel — failover did not consider the clean alternative")
+	}
+
+	// State must point at C.
+	svc.relayStates.mu.Lock()
+	st := svc.relayStates.states["msg-failover-q"]
+	svc.relayStates.mu.Unlock()
+	if st.ForwardedTo != "addr-C" {
+		t.Fatalf("ForwardedTo = %q, want addr-C (D should have been skipped by quarantine gate)", st.ForwardedTo)
 	}
 }
 

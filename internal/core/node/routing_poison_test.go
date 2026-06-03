@@ -222,6 +222,96 @@ func TestHandleRoutePoison_InvalidSenderSigDropsFrame(t *testing.T) {
 	}
 }
 
+// TestHandleRoutePoison_QuarantinedSender_DropsSilently is the regression
+// for the quarantine-gate gap in handleRoutePoison. Without the top-level
+// gate, a quarantined peer can still send a properly-signed
+// route_poison_v1 frame and:
+//
+//  1. Mutate routingTable via InvalidateUplinkClaim (the quarantined
+//     peer's opinion that uplink X is dead overrides our state).
+//  2. When that uplink was the last one to the target, trigger
+//     poisonReverseToOtherPeers — outbound routing-control traffic
+//     that propagates the quarantined peer's untrusted view across
+//     the mesh.
+//
+// Both effects are exactly what quarantine is supposed to suppress.
+// This test arms quarantine for the sender, then sends a poison
+// frame the handler would normally honour (correctly signed,
+// session-known pubkey, valid identity), and asserts that the
+// uplink claim survives.
+func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
+	svc, _ := newTestServiceWithIdentity(t)
+	svc.eventBus = newStormBus(t)
+
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
+	addDirectViaIdentity(t, svc, domain.PeerIdentity(peer.Address))
+
+	// Seed a transit claim through the sender so the poison frame
+	// has something to invalidate. Without the seed, InvalidateUplinkClaim
+	// is a no-op and the test would pass even without the gate.
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: domain.PeerIdentity(idTargetX),
+		Origin:   domain.PeerIdentity(peer.Address),
+		NextHop:  domain.PeerIdentity(peer.Address),
+		Hops:     2,
+		SeqNo:    5,
+		Source:   routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("seed transit claim: %v", err)
+	}
+
+	// Sanity: the seeded claim is live before the handler call.
+	pre := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	preLive := false
+	for _, r := range pre {
+		if r.NextHop == domain.PeerIdentity(peer.Address) {
+			preLive = true
+			break
+		}
+	}
+	if !preLive {
+		t.Fatalf("precondition: seeded claim must be live before poison")
+	}
+
+	// Arm route quarantine for the sender.
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer.Address), "test", time.Now())
+	svc.peerMu.Unlock()
+
+	// Build a properly signed poison frame the handler would
+	// otherwise accept. The point of the test is that the
+	// quarantine gate fires BEFORE signature verification + storage
+	// mutation, so the frame's payload is correct on purpose.
+	frame := protocol.RoutePoisonFrame{
+		Type:     protocol.RoutePoisonFrameType,
+		Identity: idTargetX,
+		Reason:   protocol.RoutePoisonReasonHealthDead,
+		IssuedAt: "2026-05-28T12:00:00Z",
+	}
+	sig := ed25519.Sign(peer.PrivateKey, frame.CanonicalSenderSigBytes())
+	frame.SenderSig = base64.StdEncoding.EncodeToString(sig)
+
+	svc.handleRoutePoison(domain.PeerIdentity(peer.Address), frame)
+
+	// The claim must still be live — quarantine gate fired before
+	// InvalidateUplinkClaim.
+	post := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	stillLive := false
+	for _, r := range post {
+		if r.NextHop == domain.PeerIdentity(peer.Address) {
+			stillLive = true
+			break
+		}
+	}
+	if !stillLive {
+		t.Fatal("quarantined peer's poison frame was honoured: uplink claim invalidated — quarantine gate missing in handleRoutePoison")
+	}
+}
+
 func TestHandleRoutePoison_AbsentSigAccepted(t *testing.T) {
 	// Absent SenderSig is accepted (session-level identity binding is
 	// the primary trust anchor; sig is defence-in-depth). This mirrors

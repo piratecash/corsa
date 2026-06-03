@@ -660,3 +660,148 @@ func TestPeekFrameType_FileCommandExemptionMatch(t *testing.T) {
 			got, protocol.FileCommandFrameType)
 	}
 }
+
+// TestCmdLimiterExemption_BulkAnnounceFramesExempt pins the inbound
+// read-loop exemption contract for BULK announce-plane frames only:
+// announce_routes (v1) / routes_update (v2 delta) / route_announce_v3.
+// These chunk up to 100 route entries per frame, so a legitimate
+// full-sync of N routes ships as ceil(N/100) frames in a tight burst
+// — the cmd limiter's 100-burst / 30 cmd/s would silently truncate
+// that burst. Per-peer defence for these frames is owned by
+// announceLimiter (route-count) and chatty_routes quarantine
+// (frames/sec), NOT by the generic cmd limiter, so the design
+// contract "quarantine does NOT close TCP" holds.
+//
+// The exemption logic in service.go inbound read loop is:
+//
+//	frameType := peekFrameType(line)
+//	if frameType != protocol.FileCommandFrameType &&
+//	    !isAnnouncePlaneBulkFrameType(frameType) &&
+//	    !s.cmdLimiter.allowCommand(connKey) { close }
+//
+// We pin the wire-level part of that decision by feeding raw JSON
+// lines through peekFrameType + isAnnouncePlaneBulkFrameType and
+// asserting the exemption holds.
+func TestCmdLimiterExemption_BulkAnnounceFramesExempt(t *testing.T) {
+	t.Parallel()
+
+	exempt := []struct {
+		name string
+		line string
+	}{
+		{"announce_routes", `{"type":"announce_routes","routes":[]}`},
+		{"routes_update", `{"type":"routes_update","routes":[]}`},
+		{"route_announce_v3", `{"type":"` + protocol.RouteAnnounceV3FrameType + `","kind":"full","epoch":1,"entries":[]}`},
+	}
+
+	for _, tt := range exempt {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ft := peekFrameType(tt.line)
+			if ft == "" {
+				t.Fatalf("peekFrameType(%q) failed to parse a known bulk announce line", tt.line)
+			}
+			if !isAnnouncePlaneBulkFrameType(ft) {
+				t.Fatalf("isAnnouncePlaneBulkFrameType(%q) = false; cmd limiter would close inbound TCP before chatty_routes can arm during a legitimate full-sync", ft)
+			}
+		})
+	}
+
+	// Negative control — non-announce frame must NOT be exempt.
+	for _, line := range []string{
+		`{"type":"send_message","to":"abc"}`,
+		`{"type":"ping"}`,
+		`{"type":"hello","version":1}`,
+	} {
+		ft := peekFrameType(line)
+		if isAnnouncePlaneBulkFrameType(ft) {
+			t.Errorf("non-announce frame %q reported as bulk announce — over-broad exemption", ft)
+		}
+	}
+}
+
+// TestCmdLimiterExemption_ControlAnnounceFramesNOTExempt pins the
+// inverse: request_resync and route_poison_v1 are announce-plane
+// (they share announceLimiter, sender-identity gating, etc.) BUT
+// they MUST stay under cmd-limiter coverage. Their natural per-peer
+// rate is well under 1/s (request_resync: bounded by reconnect
+// cycles; route_poison_v1: bounded by route lifecycle), so the
+// 30 cmd/s budget never bites in normal operation. Exempting them
+// would leave only the 200-tokens/s route bucket as the per-peer
+// defence — at cost=1 per control frame that allows 200/s sustained,
+// far above legitimate use, AND chatty_routes does not count control
+// frames in its trigger window (it is wired only into the three
+// bulk handlers).
+//
+// This test guards against regression where someone widens the
+// exemption back to the full isAnnouncePlaneFrameType set.
+func TestCmdLimiterExemption_ControlAnnounceFramesNOTExempt(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"request_resync", `{"type":"request_resync"}`},
+		{"route_poison_v1", `{"type":"` + protocol.RoutePoisonFrameType + `","identity":"x","sig":"y"}`},
+	}
+
+	for _, tt := range cases {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ft := peekFrameType(tt.line)
+			if ft == "" {
+				t.Fatalf("peekFrameType(%q) failed to parse a known control line", tt.line)
+			}
+			// Sanity: control frames ARE announce-plane for the
+			// size-budget enforcement path (peer_management.go).
+			if !isAnnouncePlaneFrameType(ft) {
+				t.Fatalf("isAnnouncePlaneFrameType(%q) = false; size-budget enforcement would no longer cover this control frame", ft)
+			}
+			// Contract: but NOT bulk → cmd limiter still applies.
+			if isAnnouncePlaneBulkFrameType(ft) {
+				t.Fatalf("isAnnouncePlaneBulkFrameType(%q) = true; control frame wrongly exempted from cmd limiter — only the loose 200/s route bucket would remain as per-peer defence, and chatty_routes does NOT count control frames", ft)
+			}
+		})
+	}
+}
+
+// TestCmdLimiterExemption_InboundBulkFloodReachesChattyThreshold is
+// the end-to-end regression for the bulk-frame inbound direction:
+// simulate 600 announce_routes lines through the same exemption
+// predicate the inbound read loop uses, and verify NONE would be
+// closed by the cmd-limiter check. Without the bulk-announce
+// exemption, the 101st line would trip the burst (100) and a chatty
+// peer never reaches the 500-frame chatty_routes threshold.
+//
+// This is a logic-level test (we don't spin a real read loop or
+// TCP socket) — it pins the predicate that gates "would the cmd
+// limiter even be consulted?" against the design contract
+// "quarantine, not TCP close, owns the bulk-announce misbehaviour".
+func TestCmdLimiterExemption_InboundBulkFloodReachesChattyThreshold(t *testing.T) {
+	t.Parallel()
+
+	line := `{"type":"announce_routes","routes":[]}`
+	const floodFrames = chattyAnnounceThreshold + 100 // headroom past the trigger
+
+	closed := 0
+	for i := 0; i < floodFrames; i++ {
+		ft := peekFrameType(line)
+		// Exact predicate the inbound read loop uses to decide
+		// whether to even call cmdLimiter.allowCommand.
+		if ft != protocol.FileCommandFrameType && !isAnnouncePlaneBulkFrameType(ft) {
+			// In the real loop the next step is allowCommand;
+			// after burst exhaustion it returns false → close.
+			// For bulk announce-plane the branch never gets here,
+			// so "closed" stays 0.
+			closed++
+		}
+	}
+
+	if closed > 0 {
+		t.Fatalf("bulk announce_routes flood would be closed by cmd limiter %d/%d times; bulk exemption broken — inbound chatty peer never reaches chatty_routes quarantine",
+			closed, floodFrames)
+	}
+}

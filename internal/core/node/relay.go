@@ -1156,8 +1156,18 @@ func (s *Service) tryForwardToDirectPeer(recipient domain.PeerIdentity, frame pr
 // avoid sending the message back to where it came from. Per-peer rate
 // limiting is applied: if a target's token bucket is exhausted, the
 // frame is silently skipped for that target.
+//
+// Target selection: routingTargetsForRecipient(frame.Recipient) rather
+// than routingTargets() so the route-quarantine gate
+// (routingTargetsForRecipient) excludes any peer in quarantine UNLESS
+// they are the recipient themselves. Without this redirect the gossip
+// fallback re-opened the very transit path the table-route gate just
+// closed: TableRouter returns RelayNextHop=nil because the only
+// transit was quarantined, but relayViaGossip then forwards the same
+// relay_message back to the same quarantined full node as a gossip
+// target, using P as transit for someone else's recipient.
 func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.PeerAddress) domain.PeerAddress {
-	targets := s.routingTargets()
+	targets := s.routingTargetsForRecipient(string(frame.Recipient))
 	var forwardedTo domain.PeerAddress
 	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) || address == excludeAddress {

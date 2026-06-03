@@ -94,6 +94,49 @@ func isAnnouncePlaneFrameType(frameType string) bool {
 	}
 }
 
+// isAnnouncePlaneBulkFrameType is the narrower predicate used to
+// exempt frames from the inbound per-connection command rate
+// limiter (service.go inbound read loop). It covers ONLY the
+// bulk/chunked announce path:
+//
+//	announce_routes (legacy v1), routes_update (v2 delta),
+//	route_announce_v3 (v3 compact wire).
+//
+// These frames batch up to maxRoutesPerAnnounceFrame (100) entries
+// each, so a legitimate full-sync of N routes ships as ceil(N/100)
+// frames in a tight burst — the cmd limiter's 100-burst / 30 cmd/s
+// would silently truncate that burst. Their per-peer rate is
+// instead governed by:
+//
+//   - announceLimiter (route-count budget: 10k burst, 200/s refill)
+//   - chatty_routes quarantine trigger (50 frames/s × 10s = 500)
+//
+// IMPORTANT: this predicate DOES NOT include request_resync or
+// route_poison_v1. Those are single-message control frames — a
+// peer's natural rate for either is bounded by reconnect cycles
+// (request_resync) or route lifecycle events (route_poison_v1),
+// each well under 1/s. The cmd limiter's 30/s is plenty for them;
+// flooding them past that rate is protocol-level misbehaviour, not
+// chattiness, and the TCP close that cmd limit produces is the
+// appropriate response. Exempting control frames would also leave
+// only the (loose) per-route bucket as the per-peer defence — at
+// 200 tokens/s with cost=1 per control frame that is 200/s
+// sustained, far above legitimate use — without any chatty trigger
+// to compensate.
+//
+// The broader isAnnouncePlaneFrameType (above) still covers the
+// control types for SIZE-budget enforcement (peer_management.go's
+// MaxFrameLine check), which IS uniform across all five types.
+func isAnnouncePlaneBulkFrameType(frameType string) bool {
+	switch frameType {
+	case "announce_routes", "routes_update",
+		protocol.RouteAnnounceV3FrameType:
+		return true
+	default:
+		return false
+	}
+}
+
 // isRawLineBackedFrameType reports whether the frame type's dispatch
 // re-parses the payload from Frame.RawLine rather than the universal
 // Frame fields. This is the set of Phase 2+ / Phase 4 frames that use
@@ -817,6 +860,29 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 		log.Warn().Str("sender", string(senderIdentity)).Msg("route_poison_malformed_sender")
 		return
 	}
+	// Route-quarantine gate (top-level) — symmetric with
+	// handleRoutesUpdate / handleRouteAnnounceV3 / handleRequestResync.
+	// route_poison_v1 from a quarantined peer must be silently
+	// dropped: handling it mutates routingTable via
+	// InvalidateUplinkClaim (the peer's view of which uplinks are
+	// dead overrides our own table state) and, when the last
+	// uplink to the target dies, triggers poisonReverseToOtherPeers
+	// — outbound routing-control traffic that propagates the
+	// quarantined peer's (untrusted) opinion across the mesh.
+	// Both effects are exactly what quarantine is meant to
+	// suppress: the peer's routing knowledge is not trusted
+	// during the cooldown. Position is BEFORE the announceLimiter
+	// charge AND BEFORE the ed25519.Verify path so a hostile
+	// quarantined peer cannot soak CPU on signature work either.
+	if s.IsPeerInRouteQuarantine(senderIdentity) {
+		log.Debug().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "route_poison_v1").
+			Str("identity", frame.Identity).
+			Str("reason", frame.Reason).
+			Msg("routing_announce_drop_quarantined_sender")
+		return
+	}
 	// Phase 4 13.7 (Round-5 extension): shared per-peer announce-plane
 	// rate limit across ALL receive paths the announceLimiter protects
 	// (announce_routes / routes_update / route_announce_v3 /
@@ -1440,6 +1506,15 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		log.Warn().Str("sender", string(senderIdentity)).Msg("announce_routes_malformed_sender")
 		return
 	}
+	// chatty_routes quarantine trigger: every well-formed inbound
+	// announce-plane frame counts toward the per-peer chatty
+	// sliding window (see docs/refactoring/route-withdrawal-grace-period.md
+	// trigger table — "Inbound chatty routes | 50 announce/sec | 10s").
+	// Position is BEFORE the route-based rate limiter because the
+	// trigger is FRAME-rate, not entry-rate, and we want to count
+	// even tiny single-entry frames that pass the route-based
+	// budget. Idempotent on already-quarantined peers (re-arms).
+	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
 	// Phase 4 13.7: per-peer announce-plane rate limit. A flood from
 	// any single peer (legitimate-but-buggy or hostile) is throttled
 	// here BEFORE applyAnnounceEntries does the per-entry work, so a
@@ -1491,6 +1566,10 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 		log.Warn().Str("sender", string(senderIdentity)).Msg("routes_update_malformed_sender")
 		return
 	}
+	// chatty_routes quarantine trigger — see handleAnnounceRoutes
+	// for rationale. v2 deltas count toward the same per-peer
+	// frame-rate budget as legacy / v3 frames.
+	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
 	// Phase 4 13.7: shared per-peer announce rate limit. v2 delta
 	// frames count against the same budget as legacy / v3 frames so
 	// a peer flipping between wire generations cannot reset its
@@ -1516,6 +1595,26 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 			Int("entries", len(frame.AnnounceRoutes)).
 			Int("cap", maxRoutesPerAnnounceFrame).
 			Msg("routes_update_entry_count_cap_exceeded")
+		return
+	}
+	// Route-quarantine gate (top-level). Per
+	// docs/refactoring/route-withdrawal-grace-period.md a peer in route
+	// quarantine MUST be silently dropped from EVERY routing-plane
+	// receive path, not just from applyAnnounceEntries. The
+	// applyAnnounceEntries gate alone is insufficient here: if the
+	// quarantined peer reconnects, this session's
+	// HasReceivedBaseline() is false, so the baseline gate below
+	// would otherwise reply with SendRequestResync — that's outbound
+	// routing-control traffic toward a quarantined peer, which the
+	// design doc explicitly forbids. Drop the frame and DO NOT
+	// create AnnouncePeerState for the peer either, so quarantine
+	// produces a clean "as if peer was never heard from" state.
+	if s.IsPeerInRouteQuarantine(senderIdentity) {
+		log.Debug().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "routes_update").
+			Int("entries", len(frame.AnnounceRoutes)).
+			Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
 
@@ -1563,6 +1662,28 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	if !identity.IsValidAddress(string(senderIdentity)) {
 		log.Warn().Str("sender", string(senderIdentity)).Msg("request_resync_malformed_sender")
+		return
+	}
+	// Route-quarantine gate (top-level) — symmetric with
+	// handleRoutesUpdate / handleRouteAnnounceV3. request_resync
+	// from a quarantined peer must be silently dropped: handling
+	// it calls MarkInvalid(senderIdentity) + TriggerUpdate(),
+	// which would force the next announce cycle to ship a full
+	// baseline TO that peer. That is outbound routing-control
+	// traffic toward a quarantined peer — the exact thing the
+	// gates in handleRoutesUpdate / handleRouteAnnounceV3 close
+	// — and it would also let a quarantined peer keep our
+	// announce loop spinning on forced-full cycles on demand.
+	// Position is BEFORE the announceLimiter charge so a
+	// quarantined peer's frames do not consume the per-peer
+	// announce token budget either; chatty_routes still
+	// accounts the frame at the wire-receive recordInbound*
+	// step earlier in the dispatcher.
+	if s.IsPeerInRouteQuarantine(senderIdentity) {
+		log.Debug().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "request_resync").
+			Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
 	// Phase 4 13.7: shared per-peer announce rate limit. A peer
@@ -1626,6 +1747,10 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 		log.Warn().Str("sender", string(senderIdentity)).Msg("route_announce_v3_malformed_sender")
 		return
 	}
+	// chatty_routes quarantine trigger — see handleAnnounceRoutes
+	// for rationale. v3 frames count toward the same per-peer
+	// frame-rate budget.
+	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
 	// Phase 4 13.7: shared per-peer announce rate limit across all
 	// announce-plane wire generations (legacy v1, v2 delta, v3
 	// compact). Counts BEFORE epoch + baseline checks below so a
@@ -1658,6 +1783,24 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 			Int("entries", len(frame.Entries)).
 			Int("cap", maxRoutesPerAnnounceFrame).
 			Msg("route_announce_v3_entry_count_cap_exceeded")
+		return
+	}
+	// Route-quarantine gate (top-level) — symmetric with
+	// handleRoutesUpdate above. See that comment for the rationale:
+	// the delta/epoch baseline branch below can emit SendRequestResync
+	// back to the peer, which is outbound routing-control traffic
+	// toward a quarantined peer and explicitly forbidden by
+	// docs/refactoring/route-withdrawal-grace-period.md. We also do
+	// NOT touch AnnouncePeerState (no GetOrCreate, no ObserveV3Epoch)
+	// so the quarantine window leaves no per-peer routing state
+	// residue.
+	if s.IsPeerInRouteQuarantine(senderIdentity) {
+		log.Debug().
+			Str("from", string(senderIdentity)).
+			Str("frame_type", "route_announce_v3").
+			Str("kind", frame.Kind).
+			Int("entries", len(frame.Entries)).
+			Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
 
@@ -1955,6 +2098,20 @@ func (m announceReceiveMode) wireTypeLabel() string {
 func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireRoutes []protocol.AnnounceRouteFrame, attestedSigs [][]byte, attestedVerified []bool, mode announceReceiveMode) {
 	if senderIdentity == "" {
 		log.Warn().Msg("announce_routes_no_sender_identity")
+		return
+	}
+
+	// Per-peer route quarantine: if the sender is currently in
+	// quarantine because of repeated disconnect/reconnect cycles,
+	// silently drop their entire routing snapshot. We keep them as
+	// a direct peer in our table (push/relay to the sender still
+	// works), we just do not trust their view of the network until
+	// the quarantine window elapses. See routing_route_quarantine.go.
+	if s.IsPeerInRouteQuarantine(senderIdentity) {
+		log.Debug().
+			Str("from", string(senderIdentity)).
+			Int("entries", len(wireRoutes)).
+			Msg("announce_routes_dropped_quarantined_peer")
 		return
 	}
 

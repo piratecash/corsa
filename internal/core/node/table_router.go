@@ -101,6 +101,14 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 	// Capability requirements depend on hop count: direct destinations (hops=1)
 	// only need relay capability; transit nodes (hops>1) need both.
 	for _, route := range routes {
+		// Route quarantine: skip transit through quarantined peers
+		// (direct destinations pass — see routeIsBlockedByQuarantine).
+		// The two relay-selection sites (this one and
+		// tryForwardViaRoutingTable) share the helper so the
+		// "direct passes, transit blocked" rule cannot drift.
+		if r.svc != nil && r.svc.routeIsBlockedByQuarantine(domain.PeerIdentity(route.NextHop), route.Hops) {
+			continue
+		}
 		address := r.sessionChecker(route.NextHop, route.Hops)
 		if address == "" {
 			continue

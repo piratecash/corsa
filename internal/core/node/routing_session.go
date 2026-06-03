@@ -115,6 +115,23 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 		return
 	}
 
+	// Withdrawal grace probation: if the previous session for this
+	// identity closed within the grace window and the deferred
+	// withdrawal has not fired yet, the direct route is still in
+	// the routing table. Cancelling the timer leaves it there
+	// untouched — no AddDirectPeer call, no seqno bump, no announce
+	// trigger, no wire traffic. The peer is silently re-attached
+	// from the routing layer's point of view; everything else
+	// (session counters in identitySessions / identityRelaySessions)
+	// was updated above under peerMu.
+	//
+	// See routing_withdrawal_grace.go for the contract and
+	// docs/refactoring/route-withdrawal-grace-period.md for the
+	// design rationale.
+	if s.tryCancelPendingWithdrawal(peerIdentity) {
+		return
+	}
+
 	result, err := s.routingTable.AddDirectPeer(peerIdentity)
 	if err != nil {
 		log.Error().Err(err).Str("peer", string(peerIdentity)).Msg("routing_add_direct_peer_failed")
@@ -211,6 +228,14 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 			}
 		}
 	}
+	// Route quarantine trigger: on the last-relay transition (peer
+	// genuinely lost its relay capability for now), record the
+	// disconnect timestamp and arm quarantine if the rate exceeds
+	// the threshold. The quarantine map and history are guarded by
+	// the same peerMu we already hold.  See routing_route_quarantine.go.
+	if lastRelay {
+		s.maybeArmRouteQuarantineOnCloseLocked(peerIdentity, time.Now())
+	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("peer_mu_writer")
 
@@ -269,69 +294,16 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 		return
 	}
 
-	// Phase 4 13.3-B: snapshot the identities reachable via the
-	// lost uplink BEFORE RemoveDirectPeer invalidates the storage,
-	// so we can emit explicit route_poison_v1 to OTHER direct peers
-	// after the removal. The snapshot is taken under t.mu.RLock and
-	// the result carries value-typed PeerIdentity entries, so it
-	// remains safe to consume outside the lock after RemoveDirectPeer
-	// completes. See poisonReverseToOtherPeers below for the emit
-	// rationale.
-	poisonTargets := s.routingTable.IdentitiesViaUplink(routing.PeerIdentity(peerIdentity))
-
-	result, err := s.routingTable.RemoveDirectPeer(peerIdentity)
-	if err != nil {
-		log.Error().Err(err).Str("peer", string(peerIdentity)).Msg("routing_remove_direct_peer_failed")
-		return
-	}
-
-	// Mark per-peer announce state as disconnected. The next announce
-	// cycle for this peer (if it reconnects) will require a forced full sync.
-	s.announceLoop.StateRegistry().MarkDisconnected(peerIdentity)
-
-	// Send wire withdrawals to all routing-capable peers.
-	// This is the immediate own-origin withdrawal path — it bypasses the
-	// announce loop and per-peer cache intentionally (see section 8.2.1
-	// of the routing-announce-traffic-optimization plan).
-	//
-	// The fanout is parallel (one goroutine per peer) because
-	// SendAnnounceRoutes is bounded by syncFlushTimeout per inbound peer;
-	// any stuck peer would otherwise serialise the whole disconnect path
-	// and starve unrelated s.peerMu readers (the 2s bootstrapLoop ticker
-	// and the 1s metrics collector) for N * syncFlushTimeout seconds.
-	var sent, dropped int
-	if len(result.Withdrawals) > 0 {
-		sent, dropped = s.fanoutAnnounceRoutes(s.runCtx, s.routingCapablePeers(), result.Withdrawals)
-	}
-
-	log.Info().
-		Str("peer", string(peerIdentity)).
-		Int("withdrawals", len(result.Withdrawals)).
-		Int("transit_invalidated", result.TransitInvalidated).
-		Int("fanout_sent", sent).
-		Int("fanout_dropped", dropped).
-		Msg("routing_direct_peer_removed")
-
-	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
-		Reason:    domain.RouteChangeDirectPeerRemoved,
-		PeerID:    peerIdentity,
-		Withdrawn: len(result.Withdrawals),
-	})
-
-	s.announceLoop.TriggerUpdate()
-	s.triggerDrainForExposed(result.ExposedBackups)
-
-	// Phase 4 13.3-B: emit explicit route_poison_v1 to OTHER direct
-	// peers about every transit identity we used to reach via the
-	// disconnected peer. The legacy announce-plane already withdrew
-	// the lost peer's OWN identity (result.Withdrawals → fanout
-	// above); poison-reverse covers the transit set so downstream
-	// peers can drop claims[X][us] without waiting TTL — the
-	// count-to-infinity acceleration that motivates the capability
-	// (overview §7.7).
-	if len(poisonTargets) > 0 {
-		s.poisonReverseToOtherPeers(s.runCtx, peerIdentity, poisonTargets)
-	}
+	// B3-equivalent: route withdrawal grace period. The entire
+	// removal sequence (RemoveDirectPeer + fanout + trigger + poison
+	// reverse) is delegated to maybeScheduleDeferredWithdrawal which
+	// — depending on s.effectiveWithdrawalGracePeriod() — either
+	// fires it inline (legacy / test mode) or schedules it after the
+	// grace period. A reconnect inside the window cancels the timer
+	// (see tryCancelPendingWithdrawal in onPeerSessionEstablished),
+	// the direct route stays in the table, and no flap-signal frames
+	// reach the wire. See routing_withdrawal_grace.go.
+	s.maybeScheduleDeferredWithdrawal(peerIdentity, caps)
 }
 
 // poisonReverseToOtherPeers emits route_poison_v1 about each lost

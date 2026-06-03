@@ -71,6 +71,14 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.evictStalePeers()
 			s.evictOrphanedHealthEntries()
 			s.evictStaleInboundConns()
+			// Periodic cleanup for the route-quarantine state machine:
+			// drop expired peerQuarantine entries whose recidivism
+			// window has elapsed, and prune peerDisconnectHistory
+			// entries that no longer contain any in-window events.
+			// Without this, both maps slowly grow for long-running
+			// nodes (every observed peer leaves a residual record).
+			// See routing_route_quarantine.go.
+			s.purgeRouteQuarantineState()
 			s.retryRelayDeliveries()
 			s.relayLimiter.cleanup(5 * time.Minute)
 			if s.announceLimiter != nil {
@@ -585,11 +593,26 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 				s.peerMu.Lock()
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("peer_mu_writer")
 				s.deliveryMu.Lock()
+				// Best-effort cmdLimiter cleanup. Normally
+				// runPeerSession's error path (peer_sessions.go) has
+				// already deleted the session and dropped the bucket
+				// before we land here, so s.sessions[c.address] is
+				// usually nil. We still try in case a session was
+				// installed by a code path that never hit
+				// runPeerSession's cleanup (defence in depth — the
+				// helper no-ops on connID==0). All authoritative
+				// bucket drops live at the three session-removal
+				// sites; see dropOutboundControlFrameBucket.
+				var leftoverConnID domain.ConnID
+				if sess := s.sessions[c.address]; sess != nil {
+					leftoverConnID = sess.connID
+				}
 				delete(s.sessions, c.address)
 				delete(s.upstream, c.address)
 				delete(s.dialOrigin, c.address)
 				s.deliveryMu.Unlock()
 				s.peerMu.Unlock()
+				s.dropOutboundControlFrameBucket(leftoverConnID)
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_released").Str("address", string(c.address)).Msg("peer_mu_writer")
 			}()
 			s.runPeerSession(ctx, c.address)
@@ -1757,12 +1780,6 @@ func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
 	return s.peerTypeForAddress(address).IsClient()
 }
 
-func (s *Service) peerIdentityForAddress(address domain.PeerAddress) domain.PeerIdentity {
-	s.peerMu.RLock()
-	defer s.peerMu.RUnlock()
-	return s.peerIDs[address]
-}
-
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	defer crashlog.DeferRecover()
 	for {
@@ -2129,6 +2146,78 @@ func (s *Service) syncSenderKeys(ctx context.Context, senderAddress domain.PeerA
 	return s.syncPeer(dialCtx, senderAddress, false)
 }
 
+// outboundControlFrameLimitKey is the cmdLimiter bucket key used for
+// per-session command-rate limiting on the outbound peer-session
+// path. Inbound uses RemoteAddr().String(); outbound has no
+// equivalent because we initiated the connection, so we key by the
+// peer-session connID (monotonic, unique per session) under an
+// "outbound:" namespace to avoid collisions with inbound buckets.
+//
+// connID-keying means a peer that loses the session and reconnects
+// gets a fresh bucket. That's the same property the inbound key
+// (RemoteAddr) already has implicitly (new src port → new key);
+// matching it here keeps the contract symmetric.
+func outboundControlFrameLimitKey(connID domain.ConnID) string {
+	return "outbound:" + strconv.FormatUint(uint64(connID), 10)
+}
+
+// outboundControlFrameAllowed mirrors the inbound cmdLimiter
+// coverage for control-class announce-plane frames
+// (request_resync / route_poison_v1) on the outbound peer-session
+// dispatcher. Returns true when the frame may be handled, false
+// when the per-session bucket is exhausted and the frame must be
+// dropped.
+//
+// Why this exists: the inbound read loop (service.go) charges
+// cmdLimiter tokens for every non-exempt frame BEFORE dispatch, so
+// a peer flooding inbound TCP with request_resync / route_poison_v1
+// gets throttled at 100 burst / 30 cmd/s. The outbound peer-session
+// dispatcher had NO such throttle — a peer that waits for our
+// outbound dial could flood the same control frames over the
+// established session, bypass cmdLimiter entirely, and fall back
+// only to the loose 200-token/s announceLimiter route bucket. This
+// helper closes that asymmetry.
+//
+// Bulk announce frames (announce_routes / routes_update /
+// route_announce_v3) are deliberately NOT routed through this
+// helper: they are governed by announceLimiter (route-count) and
+// chatty_routes quarantine (frames/sec) on BOTH directions, which
+// jointly bound CPU without the cmd limiter's 100/30 cap that
+// would truncate a legitimate chunked full-sync. See
+// isAnnouncePlaneBulkFrameType in routing_announce.go.
+func (s *Service) outboundControlFrameAllowed(session *peerSession) bool {
+	if s.cmdLimiter == nil {
+		return true
+	}
+	return s.cmdLimiter.allowCommand(outboundControlFrameLimitKey(session.connID))
+}
+
+// dropOutboundControlFrameBucket drops the per-session cmdLimiter
+// bucket for the given connID. Called from every place that
+// removes an outbound session entry from s.sessions:
+//
+//   - runPeerSession error-cleanup (legacy non-CM path)
+//   - onCMSessionEstablished ownedCleanup (CM-managed path)
+//   - onCMSessionTeardown (CM-initiated close)
+//   - ensurePeerSessions outer defer (best-effort fallback)
+//
+// commandRateLimiter.cleanup is NOT wired to any periodic sweep,
+// so without an explicit removal at each site the bucket lives
+// forever — one entry per ever-opened outbound connection. A
+// long-running node would accumulate buckets at the rate of new
+// outbound sessions until restart, plus a stale connID could
+// shadow a future session that wraps to the same monotonic ID
+// (only theoretical at 64-bit, but free to defend against).
+//
+// Safe to call with connID == 0 or when cmdLimiter is nil
+// (test fixtures); both are no-ops.
+func (s *Service) dropOutboundControlFrameBucket(connID domain.ConnID) {
+	if s.cmdLimiter == nil || connID == 0 {
+		return
+	}
+	s.cmdLimiter.removeConn(outboundControlFrameLimitKey(connID))
+}
+
 func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *peerSession, frame protocol.Frame) {
 	// Respond to inbound pings on outbound sessions so the remote
 	// heartbeat monitor receives a timely pong. Without this the
@@ -2432,9 +2521,22 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		s.peerMu.RLock()
 		session := s.sessions[address]
 		s.peerMu.RUnlock()
-		if session != nil {
-			s.handleRequestResync(session.peerIdentity)
+		if session == nil {
+			return
 		}
+		// Per-session cmd-rate limit. Mirrors the inbound read-loop
+		// coverage so a peer flooding request_resync over an
+		// outbound session cannot bypass cmdLimiter via the
+		// dispatcher and fall back only to the loose route bucket.
+		// See outboundControlFrameAllowed for the rationale.
+		if !s.outboundControlFrameAllowed(session) {
+			log.Debug().
+				Str("peer", string(address)).
+				Str("frame_type", "request_resync").
+				Msg("outbound_session: control frame cmd rate limit exceeded")
+			return
+		}
+		s.handleRequestResync(session.peerIdentity)
 	case "route_sync_digest_v1":
 		// Phase 3 PR 12.5 — incremental-sync digest arriving on an
 		// outbound session. sendFrameToIdentity prefers outbound
@@ -2526,6 +2628,26 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if !s.sessionHasCapability(address, domain.CapMeshPoisonReverseV1) {
 			return
 		}
+		s.peerMu.RLock()
+		session := s.sessions[address]
+		s.peerMu.RUnlock()
+		if session == nil {
+			return
+		}
+		// Per-session cmd-rate limit BEFORE the Unmarshal +
+		// (downstream) base64+ed25519 verify path so a hostile
+		// peer cannot soak CPU on signature work via outbound
+		// flood. Mirrors the inbound read-loop coverage —
+		// without this, the loose 200-token/s announceLimiter
+		// route bucket was the only outbound defence. See
+		// outboundControlFrameAllowed for the rationale.
+		if !s.outboundControlFrameAllowed(session) {
+			log.Debug().
+				Str("peer", string(address)).
+				Str("frame_type", "route_poison_v1").
+				Msg("outbound_session: control frame cmd rate limit exceeded")
+			return
+		}
 		poison, err := protocol.UnmarshalRoutePoisonFrame([]byte(frame.RawLine))
 		if err != nil {
 			log.Debug().
@@ -2534,12 +2656,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("peer_session: route_poison_v1 parse failed")
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
-		if session != nil {
-			s.handleRoutePoison(session.peerIdentity, poison)
-		}
+		s.handleRoutePoison(session.peerIdentity, poison)
 	case "route_announce_v3":
 		// Phase 4 compact announce arriving on an outbound session. Same
 		// capability triplet as the inbound dispatcher (v1 + v3 + relay)

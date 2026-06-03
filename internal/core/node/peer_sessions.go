@@ -119,6 +119,17 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
+			// Drop the per-session cmdLimiter bucket. Without this
+			// the bucket lives forever (commandRateLimiter.cleanup is
+			// not wired anywhere) — and ensurePeerSessions' outer
+			// defer cannot reach the connID because we have just
+			// deleted s.sessions[address]. See
+			// dropOutboundControlFrameBucket for the full lifecycle
+			// contract across all session-removal sites.
+			if closedSession != nil {
+				s.dropOutboundControlFrameBucket(closedSession.connID)
+			}
+
 			// Routing table: deregister direct peer on session close.
 			// The capability slice must match what was passed to
 			// onPeerSessionEstablished for balanced accounting — the session
@@ -872,7 +883,21 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			// Record failure against the slot's canonical address (slotAddress)
 			// rather than dialAddress so siblings of a fallback-port peer share
 			// the cooldown — matches the per-slot semantics of CM retry budget.
-			s.recordSetupFailureLocked(slotAddress, time.Now())
+			now := time.Now()
+			s.recordSetupFailureLocked(slotAddress, now)
+			// Setup-failure quarantine trigger: when the per-address
+			// failure threshold is crossed AND we know the peer's
+			// identity (auth completed before initPeerSession failed),
+			// arm route quarantine on the identity. B1 already mutes
+			// outbound dial attempts to the address; quarantine
+			// additionally mutes inbound routing-snapshot trust and
+			// transit usage for the same peer. Two complementary
+			// brakes on the same root signal. See
+			// routing_route_quarantine.go and
+			// docs/refactoring/route-withdrawal-grace-period.md.
+			if session.peerIdentity != "" && s.setupFailureExceedsThresholdLocked(slotAddress) {
+				s.armRouteQuarantineLocked(session.peerIdentity, "setup_failure_cycle", now)
+			}
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 			_ = session.Close()
@@ -976,6 +1001,17 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 
+		// Drop the per-session cmdLimiter bucket on the CM-managed
+		// path. Only when we owned the cleanup — otherwise
+		// onCMSessionTeardown ran first and will (also) drop it
+		// against the same connID; the underlying removeConn is
+		// idempotent on a missing key, so a duplicate call is harmless.
+		// See dropOutboundControlFrameBucket for the lifecycle
+		// contract.
+		if ownedCleanup {
+			s.dropOutboundControlFrameBucket(session.connID)
+		}
+
 		// Routing table: deregister direct peer only if this goroutine
 		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
 		if ownedCleanup && session.peerIdentity != "" {
@@ -1044,6 +1080,17 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("peer_mu_writer")
+
+	// Drop the per-session cmdLimiter bucket on CM-initiated
+	// teardown. Guarded by ownedCleanup for symmetry with the
+	// onCMSessionEstablished cleanup path — we only own the
+	// bucket when we own the session entry. removeConn is
+	// idempotent on a missing key, so a double-call from the
+	// goroutine cleanup path (which only fires when ownedCleanup
+	// is true there) is harmless.
+	if ownedCleanup {
+		s.dropOutboundControlFrameBucket(info.Session.connID)
+	}
 
 	// Routing table: deregister direct peer only if we owned the entry.
 	// Pointer-compare ensures we don't accidentally delete or deregister

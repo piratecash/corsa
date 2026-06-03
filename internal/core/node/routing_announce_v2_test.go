@@ -53,6 +53,54 @@ func TestHandleRequestResync_MarksInvalidAndTriggersUpdate(t *testing.T) {
 	}
 }
 
+// TestHandleRequestResync_QuarantinedSender_DropsSilently is the
+// regression for the quarantine-gate gap in handleRequestResync.
+// The handler's normal effect — MarkInvalid(senderIdentity) +
+// TriggerUpdate — forces the next announce cycle to ship a FULL
+// baseline TO that peer, which is exactly the outbound
+// routing-control traffic the design contract (see
+// docs/refactoring/route-withdrawal-grace-period.md) bans for a
+// quarantined sender. Without the top-level gate, a quarantined
+// peer could send request_resync on demand and keep our announce
+// loop spinning on forced-full sync cycles.
+//
+// Test verifies: (a) NeedsFullResync stays cleared (no MarkInvalid),
+// (b) trigger channel stays empty (no TriggerUpdate), (c) the
+// announceLimiter token budget is untouched (gate runs before
+// allow() — covered indirectly via no state mutation).
+func TestHandleRequestResync_QuarantinedSender_DropsSilently(t *testing.T) {
+	svc := newTestServiceWithRouting(t, idNodeA)
+
+	registry := svc.announceLoop.StateRegistry()
+	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
+	state := registry.Get(domain.PeerIdentity(idPeerB))
+	if state == nil {
+		t.Fatalf("per-peer state must exist after MarkReconnected")
+	}
+	// Clear NeedsFullResync so the assertion below proves the
+	// handler did NOT re-set it (vs. leftover from MarkReconnected).
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	if state.View().NeedsFullResync {
+		t.Fatalf("precondition: NeedsFullResync must be cleared")
+	}
+	svc.announceLoop.PendingTrigger() // drain any spurious trigger
+
+	// Arm quarantine for idPeerB.
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked(domain.PeerIdentity(idPeerB), "test", time.Now())
+	svc.peerMu.Unlock()
+
+	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+
+	if state.View().NeedsFullResync {
+		t.Fatal("quarantined peer's request_resync was honoured: NeedsFullResync flipped (MarkInvalid leaked)")
+	}
+	if svc.announceLoop.PendingTrigger() {
+		t.Fatal("quarantined peer's request_resync triggered an announce cycle (TriggerUpdate leaked)")
+	}
+}
+
 // TestHandleRequestResync_MalformedSenderIsRejected pins the input-validation
 // guard: an invalid identity (anything that fails identity.IsValidAddress)
 // must NOT touch state or trigger an announce cycle. Without this guard a
@@ -234,6 +282,72 @@ func TestHandleAnnounceRoutes_LegacyEmptyFrame_StillFlipsBaseline(t *testing.T) 
 
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("legacy announce_routes (even empty) must flip baseline to true")
+	}
+}
+
+// TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync pins the
+// top-level quarantine gate in handleRoutesUpdate: a peer in route
+// quarantine must be silently dropped from the routing-plane receive
+// path, including (and especially) when the session has not yet
+// received a baseline. Without the top-level gate, the baseline
+// branch would emit SendRequestResync back to the peer — outbound
+// routing-control traffic toward a quarantined peer, which violates
+// the design contract in
+// docs/refactoring/route-withdrawal-grace-period.md. Also asserts
+// that AnnouncePeerState is NOT created so quarantine produces an
+// "as if peer was never heard from" state.
+func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T) {
+	svc := newTestServiceWithRouting(t, idNodeA)
+	svc.eventBus = newStormBus(t)
+
+	// Arm route quarantine for the sender BEFORE wiring the rest. The
+	// state must NOT exist in the registry beforehand — that's the
+	// invariant we will assert after the call (state must not be
+	// created by the handler when the sender is quarantined).
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked(domain.PeerIdentity(idPeerB), "test", time.Now())
+	svc.peerMu.Unlock()
+
+	// Wire a session so a SendRequestResync, if it slipped through,
+	// would land observably on the send channel.
+	senderAddr := domain.PeerAddress("addr-peerB")
+	sendCh := make(chan protocol.Frame, 4)
+	svc.peerMu.Lock()
+	svc.sessions[senderAddr] = &peerSession{
+		address:      senderAddr,
+		peerIdentity: domain.PeerIdentity(idPeerB),
+		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
+		sendCh:       sendCh,
+	}
+	svc.health = map[domain.PeerAddress]*peerHealth{
+		senderAddr: {Connected: true},
+	}
+	svc.peerMu.Unlock()
+
+	frame := protocol.Frame{
+		Type: "routes_update",
+		AnnounceRoutes: []protocol.AnnounceRouteFrame{
+			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		},
+	}
+
+	svc.handleRoutesUpdate(domain.PeerIdentity(idPeerB), senderAddr, frame)
+
+	// 1. Delta must NOT have been applied — table stays empty.
+	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+		t.Fatalf("quarantine gate failed: routes_update applied (entries=%d)", len(got))
+	}
+	// 2. No request_resync must have been emitted — that's the
+	//    specific leak this test guards against.
+	select {
+	case got := <-sendCh:
+		t.Fatalf("quarantined sender must not receive routing-control traffic, got %q", got.Type)
+	default:
+	}
+	// 3. AnnouncePeerState must NOT have been created (top-level
+	//    drop, before GetOrCreate).
+	if state := svc.announceLoop.StateRegistry().Get(domain.PeerIdentity(idPeerB)); state != nil {
+		t.Fatalf("quarantine gate must short-circuit before GetOrCreate; per-peer state was created")
 	}
 }
 

@@ -106,6 +106,59 @@ func TestHandleRouteAnnounceV3_DeltaBeforeBaselineRequestsResync(t *testing.T) {
 	}
 }
 
+// TestHandleRouteAnnounceV3_QuarantinedSender_DropsSilentlyNoResync is the
+// v3 counterpart of the v2 quarantine-gate regression test. The delta-
+// before-baseline branch would otherwise emit SendRequestResync back to
+// the quarantined peer (line ~1726 of routing_announce.go), violating
+// the "silently dropped" contract in
+// docs/refactoring/route-withdrawal-grace-period.md. Also asserts no
+// AnnouncePeerState is created (top-level gate runs before
+// GetOrCreate/ObserveV3Epoch).
+func TestHandleRouteAnnounceV3_QuarantinedSender_DropsSilentlyNoResync(t *testing.T) {
+	svc := newTestServiceWithRouting(t, idNodeA)
+	svc.eventBus = newStormBus(t)
+
+	// Arm route quarantine BEFORE state creation. Critical: we are
+	// asserting the handler does not even reach GetOrCreate, so the
+	// registry must start empty for this peer.
+	svc.peerMu.Lock()
+	svc.armRouteQuarantineLocked(domain.PeerIdentity(idPeerB), "test", time.Now())
+	svc.peerMu.Unlock()
+
+	senderAddr := domain.PeerAddress("addr-peerB")
+	sendCh := v3PeerSession(t, svc, senderAddr, domain.PeerIdentity(idPeerB))
+
+	// Delta frame — the worst-case for our gate. Without the top-level
+	// quarantine check, the baseline-gate branch would call
+	// SendRequestResync(senderAddr).
+	frame := protocol.RouteAnnounceV3Frame{
+		Kind:  protocol.RouteAnnounceV3KindDelta,
+		Epoch: 1,
+		Entries: []protocol.RouteAnnounceV3Entry{
+			{Identity: idTargetX, Hops: 1, SeqNo: 1},
+		},
+	}
+
+	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), senderAddr, frame)
+
+	// 1. Delta must NOT be applied.
+	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+		t.Fatalf("quarantined v3 sender bypassed gate; entries applied: %d", len(got))
+	}
+	// 2. No wire frame must have been emitted on the sender's send
+	//    channel — the leak we are guarding against.
+	select {
+	case got := <-sendCh:
+		t.Fatalf("quarantined v3 sender received routing-control traffic, got %q", got.Type)
+	default:
+	}
+	// 3. AnnouncePeerState must not exist — top-level gate fires
+	//    before GetOrCreate/ObserveV3Epoch.
+	if state := svc.announceLoop.StateRegistry().Get(domain.PeerIdentity(idPeerB)); state != nil {
+		t.Fatalf("quarantine gate must short-circuit before GetOrCreate; per-peer state was created")
+	}
+}
+
 func TestHandleRouteAnnounceV3_StaleEpochDropped(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.eventBus = newStormBus(t)

@@ -302,6 +302,21 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		if _, abandoned := abandonedIdentities[route.NextHop]; abandoned {
 			continue
 		}
+		// Route quarantine: skip transit through quarantined peers
+		// (direct destinations pass — see routeIsBlockedByQuarantine).
+		// Without this gate the failover path could re-pick a peer
+		// we already decided not to trust as transit and undo the
+		// "transit through P skipped" contract that the normal
+		// forwarding and TableRouter paths uphold.
+		if s.routeIsBlockedByQuarantine(route.NextHop, route.Hops) {
+			log.Debug().
+				Str("id", state.MessageID).
+				Str("recipient", string(state.Recipient)).
+				Str("next_hop", string(route.NextHop)).
+				Int("hops", route.Hops).
+				Msg("relay_failover_skip_quarantined_transit_next_hop")
+			continue
+		}
 		address := s.resolveRouteNextHopAddress(route.NextHop, route.Hops)
 		if address == "" {
 			continue
@@ -443,6 +458,17 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 	for _, route := range routes {
 		// Don't send back to where it came from.
 		if route.NextHop == excludeIdentity {
+			continue
+		}
+		// Route quarantine: skip transit through quarantined peers
+		// (direct destinations pass — see routeIsBlockedByQuarantine).
+		if s.routeIsBlockedByQuarantine(route.NextHop, route.Hops) {
+			log.Debug().
+				Str("id", frame.ID).
+				Str("recipient", string(recipient)).
+				Str("next_hop", string(route.NextHop)).
+				Int("hops", route.Hops).
+				Msg("relay_forward_skip_quarantined_transit_next_hop")
 			continue
 		}
 		// Direct destination (hops=1) only needs relay cap; transit needs both.
@@ -676,7 +702,7 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.P
 }
 
 func (s *Service) routingTargets() []domain.PeerAddress {
-	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, _ domain.PeerIdentity) bool {
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, _ domain.PeerIdentity, _ time.Time) bool {
 		return !peerType.IsClient()
 	})
 }
@@ -693,18 +719,65 @@ func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerA
 	if !protocol.IsDMTopic(msg.Topic) || msg.Recipient == "*" {
 		return s.routingTargets()
 	}
-	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool {
-		return !peerType.IsClient() || string(peerID) == msg.Recipient
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity, now time.Time) bool {
+		isRecipient := string(peerID) == msg.Recipient
+		if peerType.IsClient() && !isRecipient {
+			return false
+		}
+		// Route quarantine: skip a quarantined peer when it would
+		// be used as a TRANSIT hop for someone else. The recipient
+		// itself stays addressable — quarantine suppresses our
+		// trust in the peer's view of the network, not direct
+		// delivery to that peer. Without this gate, the gossip
+		// fallback would happily pick the quarantined peer and
+		// re-introduce the transit path the table-routing gate
+		// (routeIsBlockedByQuarantine) and failover gate just
+		// closed. See docs/refactoring/route-withdrawal-grace-period.md.
+		//
+		// MUST use the lock-held helper (isPeerInRouteQuarantineLocked)
+		// because routingTargetsFiltered already holds peerMu.RLock
+		// when invoking this callback. Calling the public
+		// IsPeerInRouteQuarantine here would take peerMu.RLock a
+		// second time on the same goroutine — Go's RWMutex is NOT
+		// recursive and the second RLock deadlocks if a writer is
+		// queued between the two acquisitions (writer starves the
+		// new RLock; the goroutine still holds the outer one).
+		if !isRecipient && s.isPeerInRouteQuarantineLocked(peerID, now) {
+			return false
+		}
+		return true
 	})
 }
 
 func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddress {
-	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool {
-		return !peerType.IsClient() || string(peerID) == recipient
+	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity, now time.Time) bool {
+		isRecipient := string(peerID) == recipient
+		if peerType.IsClient() && !isRecipient {
+			return false
+		}
+		// Route quarantine: same gate as routingTargetsForMessage.
+		// The recipient stays reachable; everyone else who is
+		// route-quarantined is excluded from being a transit hop.
+		// See the comment in routingTargetsForMessage above for why
+		// we MUST use isPeerInRouteQuarantineLocked here rather than
+		// the public IsPeerInRouteQuarantine.
+		if !isRecipient && s.isPeerInRouteQuarantineLocked(peerID, now) {
+			return false
+		}
+		return true
 	})
 }
 
-func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity) bool) []domain.PeerAddress {
+// routingTargetsFiltered builds the gossip/relay fanout target set
+// under peerMu.RLock. The `allow` callback is invoked WHILE the lock
+// is held, so callbacks MUST NOT acquire peerMu (any flavor) again —
+// Go's RWMutex is not recursive, and a writer queued between the
+// outer and inner Lock attempts will deadlock both sides. `now` is
+// passed in so callbacks can reuse the same wall-clock anchor the
+// scoring loop uses (consistency) and so callers don't have to
+// reach back into Service for time. Use the *Locked variants of any
+// helper the callback needs (e.g. isPeerInRouteQuarantineLocked).
+func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity, now time.Time) bool) []domain.PeerAddress {
 	s.peerMu.RLock()
 	now := time.Now().UTC()
 
@@ -733,7 +806,7 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 		}
 		peerType := s.peerTypeForAddressLocked(primaryAddr)
 		peerID := s.peerIDs[primaryAddr]
-		if !allow(address, peerType, peerID) {
+		if !allow(address, peerType, peerID, now) {
 			continue
 		}
 		health := s.health[primaryAddr]
@@ -756,7 +829,6 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 	// are up gets gossipped only to existing sessions (possibly back to the
 	// sender) and never reaches peers whose sessions haven't started yet.
 	peers := s.peersSnapshotLocked()
-	s.peerMu.RUnlock()
 
 	var pendingPeers []domain.PeerAddress
 	for _, peer := range peers {
@@ -766,11 +838,22 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 		if _, ok := sessionSeen[peer.Address]; ok {
 			continue
 		}
-		if !allow(peer.Address, s.peerTypeForAddress(peer.Address), s.peerIdentityForAddress(peer.Address)) {
+		// We keep peerMu.RLock held across this callback so that the
+		// quarantine/identity/type lookups all use *Locked helpers
+		// instead of re-taking RLock. The pre-quarantine version of
+		// this loop called peerTypeForAddress/peerIdentityForAddress
+		// (each of which takes peerMu.RLock internally) AFTER an
+		// explicit RUnlock; that worked when the callback never
+		// re-entered peerMu, but now the route-quarantine callback
+		// needs to consult s.peerQuarantine, which is also guarded
+		// by peerMu. Holding RLock through Phase 2 avoids both a
+		// recursive-RLock path AND the small TOCTOU between phases.
+		if !allow(peer.Address, s.peerTypeForAddressLocked(peer.Address), s.peerIDs[peer.Address], now) {
 			continue
 		}
 		pendingPeers = append(pendingPeers, peer.Address)
 	}
+	s.peerMu.RUnlock()
 
 	// Phase 3: merge — session targets first (scored), then pending peers
 	// (alphabetical, lower priority).

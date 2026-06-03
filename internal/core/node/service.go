@@ -258,40 +258,45 @@ type Service struct {
 	// the invariant is pinned by TestConnRegistry_InvalidationIsAtomic and
 	// TestConnRegistry_RegisterSyncsSecondaryIndex in
 	// conn_registry_lifecycle_test.go.
-	connIDByNetConn           map[net.Conn]netcore.ConnID
-	connIDCounter             uint64 // monotonic counter for connection IDs (protected by mu)
-	bans                      map[string]banEntry
-	listener                  net.Listener
-	lastSync                  time.Time
-	peersStatePath            string
-	lastPeerSave              time.Time
-	lastPeerEvict             time.Time
-	dialOrigin                map[domain.PeerAddress]domain.PeerAddress // dial address → primary peer address (for fallback port tracking)
-	persistedMeta             map[domain.PeerAddress]*peerEntry         // stable metadata from peers.json, keyed by address
-	observedAddrs             map[domain.PeerIdentity]string            // peer identity (fingerprint) → observed IP they reported for us
-	reachableGroups           map[domain.NetGroup]struct{}              // network groups this node can reach (computed at startup)
-	messageStore              MessageStore                              // optional: persistence handler registered by desktop layer
-	router                    Router                                    // routing strategy for outbound message delivery
-	relayStates               *relayStateStore                          // hop-by-hop relay forwarding state (Iteration 1)
-	relayLimiter              *relayRateLimiter                         // per-peer token bucket for relay fan-out
-	announceLimiter           *announceRateLimiter                      // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
-	connLimiter               *connRateLimiter                          // per-IP connection rate limiter at accept level
-	cmdLimiter                *commandRateLimiter                       // per-connection command rate limiter for non-relay frames
-	inboundByIP               map[string]int                            // IP → active inbound connection count (per-IP cap)
-	routingTable              *routing.Table                            // distance-vector routing table (Phase 1.2)
-	announceLoop              *routing.AnnounceLoop                     // periodic + triggered announce_routes sender (Phase 1.2)
-	overloadMonitor           *overloadMonitor                          // CPU/backlog backpressure gate for the announce loop (Phase 0)
-	probeRegistry             *probeRegistry                            // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
-	queryRateLimit            *queryRateLimit                           // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
-	queryIDCounter            atomic.Uint64                             // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
-	relayShapingHint          atomic.Uint64                             // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
-	identitySessions          map[domain.PeerIdentity]int               // peer identity → active session count (multi-session awareness)
-	identityRelaySessions     map[domain.PeerIdentity]int               // peer identity → relay-capable session count (direct-route lifecycle)
-	disableRateLimiting       bool                                      // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
-	markPeerStateIntervalTest time.Duration                             // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
-	drainDone                 func()                                    // test hook: called after drainPendingForIdentities completes; nil in production
-	done                      chan struct{}                             // closed when Run() exits; drain goroutines check this to avoid work after shutdown
-	primeBootstrapOnRun       bool                                      // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
+	connIDByNetConn                map[net.Conn]netcore.ConnID
+	connIDCounter                  uint64 // monotonic counter for connection IDs (protected by mu)
+	bans                           map[string]banEntry
+	listener                       net.Listener
+	lastSync                       time.Time
+	peersStatePath                 string
+	lastPeerSave                   time.Time
+	lastPeerEvict                  time.Time
+	dialOrigin                     map[domain.PeerAddress]domain.PeerAddress    // dial address → primary peer address (for fallback port tracking)
+	persistedMeta                  map[domain.PeerAddress]*peerEntry            // stable metadata from peers.json, keyed by address
+	observedAddrs                  map[domain.PeerIdentity]string               // peer identity (fingerprint) → observed IP they reported for us
+	reachableGroups                map[domain.NetGroup]struct{}                 // network groups this node can reach (computed at startup)
+	messageStore                   MessageStore                                 // optional: persistence handler registered by desktop layer
+	router                         Router                                       // routing strategy for outbound message delivery
+	relayStates                    *relayStateStore                             // hop-by-hop relay forwarding state (Iteration 1)
+	relayLimiter                   *relayRateLimiter                            // per-peer token bucket for relay fan-out
+	announceLimiter                *announceRateLimiter                         // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
+	connLimiter                    *connRateLimiter                             // per-IP connection rate limiter at accept level
+	cmdLimiter                     *commandRateLimiter                          // per-connection command rate limiter for non-relay frames
+	inboundByIP                    map[string]int                               // IP → active inbound connection count (per-IP cap)
+	routingTable                   *routing.Table                               // distance-vector routing table (Phase 1.2)
+	announceLoop                   *routing.AnnounceLoop                        // periodic + triggered announce_routes sender (Phase 1.2)
+	overloadMonitor                *overloadMonitor                             // CPU/backlog backpressure gate for the announce loop (Phase 0)
+	probeRegistry                  *probeRegistry                               // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
+	queryRateLimit                 *queryRateLimit                              // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
+	queryIDCounter                 atomic.Uint64                                // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
+	relayShapingHint               atomic.Uint64                                // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
+	identitySessions               map[domain.PeerIdentity]int                  // peer identity → active session count (multi-session awareness)
+	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
+	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
+	peerQuarantine                 map[domain.PeerIdentity]routeQuarantineEntry // per-peer route quarantine: peer in quarantine has inbound routing announcements dropped and is skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
+	peerDisconnectHistory          map[domain.PeerIdentity][]time.Time          // sliding window of disconnect timestamps per peer, drives quarantine trigger detection. Guarded by peerMu.
+	peerAnnounceHistory            map[domain.PeerIdentity][]time.Time          // sliding window of inbound announce-frame arrival timestamps per peer, drives chatty_routes quarantine trigger. Guarded by peerMu.
+	disableRateLimiting            bool                                         // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
+	markPeerStateIntervalTest      time.Duration                                // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
+	routeWithdrawalGracePeriodTest time.Duration                                // test hook: override routeWithdrawalGracePeriod (negative = disable grace, run withdrawals synchronously like the pre-grace legacy path; zero = use production default)
+	drainDone                      func()                                       // test hook: called after drainPendingForIdentities completes; nil in production
+	done                           chan struct{}                                // closed when Run() exits; drain goroutines check this to avoid work after shutdown
+	primeBootstrapOnRun            bool                                         // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
 
 	// runCtx is the context passed to Run(). Stored so that callbacks
 	// (e.g. onCMSessionEstablished) can start goroutines bound to the
@@ -1060,6 +1065,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		events:                  make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:        make(map[domain.PeerIdentity]int),
 		identityRelaySessions:   make(map[domain.PeerIdentity]int),
+		pendingWithdrawals:      make(map[domain.PeerIdentity]*pendingWithdrawal),
+		peerQuarantine:          make(map[domain.PeerIdentity]routeQuarantineEntry),
+		peerDisconnectHistory:   make(map[domain.PeerIdentity][]time.Time),
+		peerAnnounceHistory:     make(map[domain.PeerIdentity][]time.Time),
 		bannedIPSet:             make(map[string]domain.BannedIPEntry),
 		remoteBannedIPs:         make(map[string]remoteIPBanEntry),
 		setupFailures:           make(map[domain.PeerAddress]*setupFailureEntry),
@@ -1479,6 +1488,19 @@ func (s *Service) Run(ctx context.Context) error {
 		s.probeLoop(routingCtx)
 	}()
 
+	// On shutdown: cancel any pending route-withdrawal probation
+	// timers AFTER the closeAllInboundConns + connWg.Wait deferred
+	// below has completed (defers run LIFO, so this one runs LAST).
+	// Ordering rationale: while inbound goroutines are still alive
+	// they can call onPeerSessionClosed which schedules new pending
+	// timers via maybeScheduleDeferredWithdrawal. If we cancelled
+	// here too early, those late schedules would leak and could
+	// fire against a Service whose routing-layer state is already
+	// being torn down by the CM defer below. Running cancel as the
+	// LAST defer guarantees no new timers can be scheduled after we
+	// stop them.  See routing_withdrawal_grace.go.
+	defer s.cancelAllPendingWithdrawalsForShutdown()
+
 	// On shutdown: close all inbound connections so handleConn goroutines
 	// exit, wait for them to finish.
 	defer func() {
@@ -1805,12 +1827,46 @@ func (s *Service) handleConn(conn net.Conn) {
 		// Per-connection command rate limiting — prevents a single peer
 		// from flooding with valid commands to exhaust CPU.
 		//
-		// file_command frames are exempt: they are high-throughput data-plane
-		// frames (chunk_request / chunk_response) that easily exceed the
-		// control-plane rate (30 cmd/s). They are already gated behind
-		// authentication + file_transfer_v1 capability in dispatchNetworkFrame,
-		// so the attack surface is limited to authenticated peers.
-		if peekFrameType(line) != protocol.FileCommandFrameType &&
+		// EXEMPT classes:
+		//
+		//  1. file_command — high-throughput data-plane (chunk_request /
+		//     chunk_response) that easily exceeds the control-plane rate
+		//     (30 cmd/s). Gated behind auth + file_transfer_v1 capability
+		//     in dispatchNetworkFrame, so the attack surface is limited
+		//     to authenticated peers.
+		//
+		//  2. announce-plane BULK frames (announce_routes / routes_update /
+		//     route_announce_v3) — chunked route batches. A legitimate
+		//     full-sync of N routes ships as ceil(N/100) frames in a tight
+		//     burst, which the cmd limiter (100 burst, 30/s) would
+		//     silently truncate. These have their own per-peer route-based
+		//     budget in announceLimiter (10,000-route burst, 200 routes/s
+		//     refill) and the chatty_routes quarantine trigger (50 frames/s
+		//     × 10s = 500). Together those bound CPU AND let quarantine —
+		//     not TCP close — own the response to a misbehaving bulk-
+		//     announce sender, honouring the design contract
+		//     ("quarantine does NOT close TCP").
+		//
+		// NOT exempt (intentional, even though they ARE announce-plane):
+		// request_resync and route_poison_v1. Those are single-message
+		// control frames whose natural per-peer rate is well under 1/s
+		// (request_resync: bounded by reconnect cycles; route_poison_v1:
+		// bounded by route lifecycle). The cmd limiter (100 burst /
+		// 30 cmd/s) is the right defence — exempting them would leave
+		// only the loose 200-token-per-second route bucket, which permits
+		// 200 control frames/s sustained, and chatty_routes does NOT
+		// count control frames in its trigger window (it is wired only
+		// into the bulk handlers). For these types, "high-rate flood" is
+		// protocol misbehaviour rather than chattiness, and a TCP close
+		// is the appropriate response.
+		//
+		// See isAnnouncePlaneBulkFrameType (routing_announce.go) for
+		// the predicate boundary and the wider isAnnouncePlaneFrameType
+		// for the size-budget enforcement that still covers control
+		// frames.
+		frameType := peekFrameType(line)
+		if frameType != protocol.FileCommandFrameType &&
+			!isAnnouncePlaneBulkFrameType(frameType) &&
 			!s.cmdLimiter.allowCommand(connKey) {
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")

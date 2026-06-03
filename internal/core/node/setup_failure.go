@@ -122,3 +122,21 @@ func (s *Service) isSetupFailureBannedAt(addr domain.PeerAddress, now time.Time)
 	}
 	return now.Before(entry.CooldownUntil)
 }
+
+// setupFailureExceedsThresholdLocked reports whether the per-address
+// failure counter has crossed setupFailureBanThreshold. Used by
+// the routing-quarantine trigger in onCMSessionEstablished's
+// setup-failed branch to escalate from B1 (per-address cooldown for
+// dial attempts) to also marking the peer's identity as route-
+// quarantined. Caller must hold s.peerMu (the existing setup-failed
+// cleanup path already holds it).
+func (s *Service) setupFailureExceedsThresholdLocked(addr domain.PeerAddress) bool {
+	if s.setupFailures == nil {
+		return false
+	}
+	entry := s.setupFailures[addr]
+	if entry == nil {
+		return false
+	}
+	return entry.Consecutive >= setupFailureBanThreshold
+}
