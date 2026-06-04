@@ -1324,6 +1324,15 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	svc.overloadMonitor = newOverloadMonitor(cfg.OverloadGoroutineThreshold)
 	announceLoopOpts := []routing.AnnounceLoopOption{
 		routing.WithOverloadGate(svc.overloadMonitor),
+		// Trigger pacing: under a route-churn storm every table
+		// mutation (withdrawal, quarantine invalidation, MarkInvalid)
+		// calls TriggerUpdate, and without pacing each trigger runs a
+		// full per-peer delta pass immediately — a sustained CPU burn
+		// that also feeds churn back into the mesh. Pacing coalesces
+		// all triggers within the window into one deferred cycle;
+		// periodic and forced-full cadence are unaffected. See
+		// routing.DefaultTriggerMinSpacing.
+		routing.WithTriggerMinSpacing(routing.DefaultTriggerMinSpacing),
 	}
 	if cfg.AnnounceInterval > 0 {
 		announceLoopOpts = append(announceLoopOpts, routing.WithAnnounceInterval(cfg.AnnounceInterval))

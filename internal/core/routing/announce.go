@@ -45,6 +45,28 @@ const (
 	// repeatedly marked NeedsFullResync.
 	MinForcedFullSyncInterval = DefaultAnnounceInterval
 
+	// DefaultTriggerMinSpacing is the production minimum spacing
+	// between two TRIGGER-driven announce cycles (TriggerUpdate).
+	// Under a route-churn storm (peer flap, quarantine invalidation,
+	// withdrawal cascades) every table mutation calls TriggerUpdate;
+	// without pacing each trigger immediately runs announceToAllPeers
+	// — a full per-peer delta computation pass — many times per
+	// second, and the emitted deltas make every neighbour do the same
+	// and echo the churn back. Pacing coalesces all triggers inside
+	// the window into ONE deferred cycle at the window boundary: the
+	// local table is already updated (forwarding never uses the
+	// withdrawn route), neighbours learn at most
+	// DefaultTriggerMinSpacing later.
+	//
+	// The PERIODIC ticker and the forced-full-sync deadline machinery
+	// are deliberately untouched by pacing — the freshness invariant
+	// (forced full ≤ TTL/2) holds exactly as before. Zero disables
+	// pacing (legacy immediate behaviour; the routing-package tests
+	// that drive cycles via back-to-back TriggerUpdate calls rely on
+	// it, so NewAnnounceLoop defaults to 0 and production opts in via
+	// WithTriggerMinSpacing — see node.Service announce-loop wiring).
+	DefaultTriggerMinSpacing = 5 * time.Second
+
 	// DigestRoundTripGrace bounds how long the reconnect path defers the
 	// first forced full sync to a peer while a route_sync_digest_v1 is in
 	// flight awaiting its summary (Phase 3 §4.5). It must cover a
@@ -247,6 +269,17 @@ type AnnounceLoop struct {
 	// triggerCh receives signals to send an immediate update.
 	// Buffered to 1 so multiple rapid triggers coalesce.
 	triggerCh chan struct{}
+
+	// triggerMinSpacing is the minimum wall-clock spacing between two
+	// trigger-driven cycles. A trigger arriving earlier than
+	// triggerMinSpacing after the previous trigger-driven cycle is
+	// NOT dropped — it is deferred to the window boundary, and every
+	// further trigger inside the window coalesces into that one
+	// deferred cycle. Zero disables pacing (every trigger runs
+	// immediately — the pre-pacing behaviour). See
+	// DefaultTriggerMinSpacing for rationale; only the Run goroutine
+	// reads it after construction.
+	triggerMinSpacing time.Duration
 
 	// peersFn returns the current list of peers that support
 	// mesh_routing_v1. Each entry is (transport_address, identity).
@@ -754,6 +787,18 @@ func WithOverloadGate(g OverloadGate) AnnounceLoopOption {
 	}
 }
 
+// WithTriggerMinSpacing enables trigger pacing: at most one
+// trigger-driven announce cycle per d, with in-window triggers
+// deferred (not dropped) to the window boundary and coalesced.
+// d <= 0 keeps the legacy immediate behaviour. The periodic ticker
+// and forced-full deadlines are unaffected. See
+// DefaultTriggerMinSpacing for the production rationale.
+func WithTriggerMinSpacing(d time.Duration) AnnounceLoopOption {
+	return func(a *AnnounceLoop) {
+		a.triggerMinSpacing = d
+	}
+}
+
 // NewAnnounceLoop creates a new loop. peersFn is called on every tick to
 // discover which peers should receive announcements.
 func NewAnnounceLoop(
@@ -814,6 +859,64 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
+	// Trigger pacing state (all owned by this goroutine). When a
+	// trigger arrives less than triggerMinSpacing after the previous
+	// trigger-driven cycle, it is deferred: pacer is armed for the
+	// remainder of the window and every further trigger inside the
+	// window coalesces into that one pending cycle. The deferred
+	// cycle is byte-identical in effect to an immediate one — only
+	// its start time moves. See DefaultTriggerMinSpacing for why
+	// this exists (CPU churn under route-flap storms).
+	var (
+		lastTriggeredCycle time.Time
+		pacer              *time.Timer
+		pacerC             <-chan time.Time
+	)
+	stopPacer := func() {
+		if pacer != nil {
+			pacer.Stop()
+			pacer = nil
+			pacerC = nil
+		}
+	}
+	defer stopPacer()
+
+	// runTriggeredCycle is the body shared by the immediate and the
+	// deferred (pacer-fired) trigger paths.
+	//
+	// Triggered update is a "propagate now" signal — force this
+	// cycle to be a delta cycle regardless of how recently the
+	// previous one ran. Clearing lastDeltaCycleAt short-circuits the
+	// delta-suppression check in announceToAllPeers.
+	//
+	// The ticker is INTENTIONALLY NOT reset here. An earlier version
+	// called `ticker.Reset(tickInterval)` to coalesce "trigger then
+	// immediate periodic tick" pairs, but that silently broke the
+	// freshness invariant: with triggers arriving slightly faster
+	// than tickInterval, each Reset pushed the next periodic tick
+	// forward, and the periodic forced-full deadline check kept
+	// getting delayed until a trigger happened to land past the cap.
+	// Example with AnnounceInterval=60s, forcedCap=60s, triggers at
+	// 59s and 118s: the natural tick at 60s was reset to 119s; the
+	// trigger at 59s saw deadline-not-due; the trigger at 118s saw
+	// deadline-elapsed-by-58s and fired forced full at 118s — gap
+	// 118s, 2× the cap. Receivers in the single-dropped-sync
+	// scenario lost learned routes silently between these stretched
+	// syncs.
+	//
+	// With no Reset, the ticker fires on its natural schedule
+	// independently of triggers; back-to-back trigger+tick is
+	// harmlessly suppressed by per-peer state checks
+	// (lastDeltaCycleAt for delta, LastSuccessfulFullSyncAt for
+	// forced). The same argument covers trigger PACING: deferring a
+	// trigger never touches the ticker, so the forced-full cadence
+	// is provably unchanged by the pacing window.
+	runTriggeredCycle := func() {
+		a.lastDeltaCycleAt = time.Time{}
+		a.announceToAllPeers(ctx)
+		lastTriggeredCycle = time.Now()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -821,40 +924,43 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 		case <-ticker.C:
 			a.announceToAllPeers(ctx)
 		case <-a.triggerCh:
-			// Triggered update is a "propagate now" signal — force
-			// this cycle to be a delta cycle regardless of how
-			// recently the previous one ran. Clearing lastDeltaCycleAt
-			// short-circuits the delta-suppression check below.
-			//
-			// The ticker is INTENTIONALLY NOT reset here. An earlier
-			// version called `ticker.Reset(tickInterval)` to coalesce
-			// "trigger then immediate periodic tick" pairs, but that
-			// silently broke the freshness invariant: with
-			// triggers arriving slightly faster than tickInterval,
-			// each Reset pushed the next periodic tick forward, and
-			// the periodic forced-full deadline check kept getting
-			// delayed until a trigger happened to land past the cap.
-			// Example with AnnounceInterval=60s, forcedCap=60s,
-			// triggers at 59s and 118s: the natural tick at 60s was
-			// reset to 119s; the trigger at 59s saw deadline-not-due;
-			// the trigger at 118s saw deadline-elapsed-by-58s and
-			// fired forced full at 118s — gap 118s, 2× the cap.
-			// Receivers in the single-dropped-sync scenario lost
-			// learned routes silently between these stretched syncs.
-			//
-			// With no Reset, the ticker fires on its natural schedule
-			// independently of triggers; back-to-back trigger+tick is
-			// harmlessly suppressed by per-peer state checks
-			// (lastDeltaCycleAt for delta, LastSuccessfulFullSyncAt
-			// for forced).
-			a.lastDeltaCycleAt = time.Time{}
-			a.announceToAllPeers(ctx)
+			if a.triggerMinSpacing <= 0 {
+				// Pacing disabled — legacy immediate path.
+				runTriggeredCycle()
+				continue
+			}
+			if pacerC != nil {
+				// A deferred cycle is already pending; this trigger
+				// coalesces into it.
+				continue
+			}
+			if wait := a.triggerMinSpacing - time.Since(lastTriggeredCycle); !lastTriggeredCycle.IsZero() && wait > 0 {
+				// Inside the cooldown window — defer to the boundary.
+				pacer = time.NewTimer(wait)
+				pacerC = pacer.C
+				continue
+			}
+			runTriggeredCycle()
+		case <-pacerC:
+			stopPacer()
+			// Drain a trigger that may have queued while the pacer
+			// was pending — this cycle covers it (coalescing), and
+			// leaving it queued would immediately re-arm the pacer
+			// for a redundant follow-up cycle.
+			select {
+			case <-a.triggerCh:
+			default:
+			}
+			runTriggeredCycle()
 		}
 	}
 }
 
-// TriggerUpdate requests an immediate announcement cycle. Safe to call
-// from any goroutine. Multiple rapid calls coalesce into a single cycle.
+// TriggerUpdate requests an announcement cycle. Safe to call from any
+// goroutine. Multiple rapid calls coalesce into a single cycle. With
+// trigger pacing enabled (WithTriggerMinSpacing) the cycle may be
+// deferred by up to the pacing window — "propagate soon", not
+// "propagate now"; without pacing it runs immediately.
 func (a *AnnounceLoop) TriggerUpdate() {
 	select {
 	case a.triggerCh <- struct{}{}:
