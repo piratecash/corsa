@@ -88,6 +88,12 @@ type routeStore struct {
 		rejectedAllProtected atomic.Uint64
 		seqNoFlapHoldowns    atomic.Uint64
 		fastInvalidations    atomic.Uint64
+		// badHopsHoldowns counts bad-hops hysteresis engage events
+		// (recordBadHopsInvalidationLocked arming hold-down for an
+		// Identity whose accepted fast-invalidations exceeded the
+		// per-window budget). Paired 1:1 with the
+		// routing_bad_hops_hold_down_engaged warn log.
+		badHopsHoldowns atomic.Uint64
 	}
 
 	// maxSaneHops is the Phase 1 P3 fast-invalidation threshold —
@@ -502,7 +508,7 @@ func (s *routeStore) SnapshotRoutes(now time.Time) (routes map[PeerIdentity][]Ro
 
 // CapStats returns a value-copy of the monotonic counters
 // surfaced under the legacy `cap_admission` JSON envelope. The
-// envelope today carries THREE independent policies (see
+// envelope today carries FOUR independent policies (see
 // RouteCapStats in types.go for the per-field semantics):
 //
 //   - K-cap admission (Accepted / AcceptedReplaced / RejectedFull /
@@ -512,11 +518,15 @@ func (s *routeStore) SnapshotRoutes(now time.Time) (routes map[PeerIdentity][]Ro
 //     FlapDetector (Phase 1 P2).
 //   - Fast invalidation (FastInvalidations) — gated by
 //     maxSaneHops (Phase 1 P3).
+//   - Bad-hops hysteresis (BadHopsHoldowns) — gated by the
+//     maxBadHopsPerWindow + badHopsWindow knobs on FlapDetector
+//     AND transitively by maxSaneHops (reachable only from the P3
+//     branch).
 //
 // Callers may invoke this without t.mu — every counter is atomic
 // and the returned snapshot reflects each field's value at its
 // individual Load point. Cross-field consistency is best-effort:
-// under heavy churn the six counters can be observed at different
+// under heavy churn the seven counters can be observed at different
 // points along the timeline by at most one increment each, which
 // is fine for monitoring purposes.
 //
@@ -533,5 +543,6 @@ func (s *routeStore) CapStats() RouteCapStats {
 		RejectedAllProtected: s.capStats.rejectedAllProtected.Load(),
 		SeqNoFlapHoldowns:    s.capStats.seqNoFlapHoldowns.Load(),
 		FastInvalidations:    s.capStats.fastInvalidations.Load(),
+		BadHopsHoldowns:      s.capStats.badHopsHoldowns.Load(),
 	}
 }

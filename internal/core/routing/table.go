@@ -332,6 +332,38 @@ func WithMaxSaneHops(n int) TableOption {
 	}
 }
 
+// WithMaxBadHopsPerWindow overrides the bad-hops hysteresis budget:
+// more than n ACCEPTED fast-invalidations for one Identity within
+// the bad-hops window arm hold-down. Default
+// DefaultMaxBadHopsPerWindow (3). Zero (or negative) disables the
+// hysteresis while keeping the per-event P3 guard intact — the knob
+// per-event fast-invalidation tests use to opt out. Test-facing; no
+// env var.
+func WithMaxBadHopsPerWindow(n int) TableOption {
+	return func(t *Table) {
+		t.flap.maxBadHopsPerWindow = n
+	}
+}
+
+// WithBadHopsWindow overrides the bad-hops hysteresis sliding-window
+// length. Default DefaultBadHopsWindow (1 min). Test-facing; no env
+// var.
+func WithBadHopsWindow(d time.Duration) TableOption {
+	return func(t *Table) {
+		t.flap.badHopsWindow = d
+	}
+}
+
+// WithBadHopsHoldDown overrides the FIRST-strike bad-hops hold-down
+// duration (escalation still doubles per strike up to
+// DefaultBadHopsHoldDownMax). Default DefaultBadHopsHoldDownBase
+// (5 min). Test-facing; no env var.
+func WithBadHopsHoldDown(d time.Duration) TableOption {
+	return func(t *Table) {
+		t.flap.badHopsHoldDownBase = d
+	}
+}
+
 // WithMaxNextHopsPerOrigin caps the number of LIVE (non-withdrawn)
 // UplinkClaim rows the table will keep per Identity bucket. The
 // knob name preserves the pre-Phase-A "...PerOrigin" suffix for

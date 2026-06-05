@@ -271,7 +271,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		})
 
 		// Cap admission counters from the same atomic snapshot. The
-		// JSON envelope carries THREE independent policies with
+		// JSON envelope carries FOUR independent policies with
 		// SEPARATE kill switches:
 		//   - K-cap (`accepted` / `accepted_replaced` / `rejected_full`
 		//     / `rejected_all_protected`) — stays at zero only when
@@ -281,6 +281,12 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		//     `SeqAdvanceWindow <= 0`.
 		//   - Fast invalidation (`fast_invalidations`) — stays at
 		//     zero only when `MaxSaneHops <= 0`.
+		//   - Bad-hops hysteresis (`bad_hops_holdowns`) — stays at
+		//     zero when `MaxSaneHops <= 0` (the hysteresis is only
+		//     reachable from the fast-invalidation branch) OR when
+		//     its own budget/window is non-positive
+		//     (WithMaxBadHopsPerWindow / WithBadHopsWindow; both
+		//     positive by default).
 		// Disabling the K-cap does NOT silence the P2/P3 counters,
 		// and disabling either P2/P3 knob does NOT silence the K-cap
 		// counters. See routing.RouteCapStats for the per-field
@@ -300,6 +306,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"rejected_all_protected": snap.CapStats.RejectedAllProtected,
 			"seqno_flap_holdowns":    snap.CapStats.SeqNoFlapHoldowns,
 			"fast_invalidations":     snap.CapStats.FastInvalidations,
+			"bad_hops_holdowns":      snap.CapStats.BadHopsHoldowns,
 		}
 
 		// Phase 0 overload-gate counters. Stay at zero when the gate

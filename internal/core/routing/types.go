@@ -96,6 +96,37 @@ const (
 	DefaultSeqHoldDownDuration    = DefaultTTL / 2
 )
 
+// Bad-hops hysteresis (fast-invalidation recidivism hold-down).
+//
+// The P3 fast-invalidation guard tombstones any single claim with
+// Hops > MaxSaneHops, but a count-to-infinity loop in a remote mesh
+// segment regenerates such claims continuously: every new SeqNo
+// re-tombstones the (Identity, Uplink) slot — each one a storage
+// mutation, a dirty-snapshot rebuild, and a warn log. Field data
+// showed single Identities cycling invalidate→re-learn→invalidate
+// hundreds of times per hour, riding the node's CPU.
+//
+// The hysteresis layer tracks ACCEPTED fast-invalidations per
+// Identity in a sliding window. When the count exceeds
+// DefaultMaxBadHopsPerWindow, the Identity enters bad-hops hold-down:
+// further bad-hops claims for it are dropped at the top of the P3
+// branch — no tombstone churn, no dirty, no per-event log. Claims
+// with sane hops pass untouched, so the loop-free recovery path
+// (upstream converges, short route re-announced) is never delayed.
+// Repeat offenders escalate: each re-arm within
+// DefaultBadHopsRecidivismWindow doubles the hold-down up to
+// DefaultBadHopsHoldDownMax; a quiet Identity resets to base.
+//
+// Enabled together with the P3 guard itself (maxSaneHops > 0) —
+// bare Tables without WithMaxSaneHops never reach the branch.
+const (
+	DefaultMaxBadHopsPerWindow     = 3
+	DefaultBadHopsWindow           = time.Minute
+	DefaultBadHopsHoldDownBase     = 5 * time.Minute
+	DefaultBadHopsHoldDownMax      = 30 * time.Minute
+	DefaultBadHopsRecidivismWindow = 10 * time.Minute
+)
+
 // MaxSaneHops bounds the per-claim hop count above which a fresh
 // ingest is fast-invalidated locally (Phase 1 P3). DV protocols
 // self-bound at HopsInfinity (16); a claim approaching that bound is
@@ -648,7 +679,7 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 	}
 }
 
-// RouteCapStats captures monotonic counters for three INDEPENDENT
+// RouteCapStats captures monotonic counters for four INDEPENDENT
 // admission / invalidation policies that share a JSON envelope:
 //
 //  1. MaxNextHopsPerOrigin admission (Accepted, AcceptedReplaced,
@@ -666,6 +697,11 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 //     FlapDetector.
 //  3. Fast invalidation on hops > MaxSaneHops (FastInvalidations).
 //     Phase 1 P3; gated by the `maxSaneHops` knob on routeStore.
+//  4. Bad-hops hysteresis (BadHopsHoldowns). Recidivism hold-down on
+//     top of policy 3; gated by `maxBadHopsPerWindow` +
+//     `badHopsWindow` on FlapDetector AND transitively by
+//     `maxSaneHops` (the hysteresis is only reachable from the
+//     fast-invalidation branch).
 //
 // The struct is value-safe to copy — it is published as part of
 // routing.Snapshot and read lock-free by fetchRouteSummary.
@@ -682,6 +718,12 @@ func (e RouteEntry) ToAnnounceEntry() AnnounceEntry {
 //   - FastInvalidations stays at zero when maxSaneHops <= 0 (the
 //     ApplyUpdate fast-invalidation gate), independently of the
 //     K-cap and the P2 cap.
+//   - BadHopsHoldowns stays at zero when maxSaneHops <= 0 (never
+//     reaches the branch) OR when either hysteresis knob is
+//     non-positive (maxBadHopsPerWindow / badHopsWindow — the
+//     recordBadHopsInvalidationLocked short-circuit). Unlike the
+//     other three policies the hysteresis defaults to ENABLED;
+//     WithMaxBadHopsPerWindow(0) is the explicit opt-out.
 //
 // Operators reading the cap_admission JSON object must therefore
 // gate their dashboards / alerts on the relevant knob (NOT on
@@ -771,6 +813,17 @@ type RouteCapStats struct {
 	// split it into by_hop_limit / by_hop_ack_timeout sub-counters
 	// when the hop_ack timeout path lands.
 	FastInvalidations uint64
+
+	// BadHopsHoldowns counts bad-hops hysteresis engage events: an
+	// Identity exceeded DefaultMaxBadHopsPerWindow ACCEPTED
+	// fast-invalidations within DefaultBadHopsWindow and entered
+	// hold-down — its further bad-hops claims are dropped without
+	// tombstone churn until the hold-down (exponentially escalating
+	// for recidivists) expires. Paired 1:1 with the
+	// routing_bad_hops_hold_down_engaged warn log; drops during an
+	// active hold-down bump nothing (silent by design — the whole
+	// point is removing the per-event work).
+	BadHopsHoldowns uint64
 }
 
 // OverloadStats captures cumulative counters for the announce-loop

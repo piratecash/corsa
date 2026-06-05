@@ -113,6 +113,61 @@ type FlapDetector struct {
 	// override is genuinely needed, route it through config first
 	// so the invariant check has a single place to live.
 	seqHoldDown time.Duration
+
+	// badHops tracks per-Identity ACCEPTED fast-invalidation
+	// recidivism for the bad-hops hysteresis (see the constant block
+	// in types.go for the full rationale). Keyed by destination
+	// Identity — the same keying as seqVelocities, and a third
+	// independent decision tree on this detector: connection flap
+	// dampens direct-route churn, SeqNo flap dampens wire emit,
+	// bad-hops hysteresis dampens P3 tombstone churn. Lazy-allocated;
+	// mutated only under the owning Table's t.mu (writer).
+	badHops map[PeerIdentity]*badHopsState
+
+	// badHopsWindow / maxBadHopsPerWindow configure the recidivism
+	// detector: more than maxBadHopsPerWindow accepted
+	// fast-invalidations for one Identity within badHopsWindow arms
+	// hold-down. Either knob <= 0 disables the hysteresis (the P3
+	// guard itself keeps working per-event). Defaults
+	// DefaultBadHopsWindow / DefaultMaxBadHopsPerWindow; test
+	// overrides via WithBadHopsWindow / WithMaxBadHopsPerWindow.
+	badHopsWindow       time.Duration
+	maxBadHopsPerWindow int
+
+	// badHopsHoldDownBase is the first-strike hold-down duration;
+	// re-arms within DefaultBadHopsRecidivismWindow double it up to
+	// DefaultBadHopsHoldDownMax. Test override via
+	// WithBadHopsHoldDown.
+	badHopsHoldDownBase time.Duration
+}
+
+// badHopsState is the per-Identity record for the bad-hops
+// hysteresis: a sliding ring of accepted fast-invalidation
+// timestamps plus the hold-down / recidivism bookkeeping.
+type badHopsState struct {
+	// events is the ring of ACCEPTED fast-invalidation timestamps,
+	// trimmed to the trailing badHopsWindow on every record pass —
+	// bounded by maxBadHopsPerWindow+1 in steady state.
+	events []time.Time
+
+	// holdUntil is non-zero while the Identity is in bad-hops
+	// hold-down; ApplyUpdate's P3 branch drops bad-hops claims for
+	// the Identity without touching storage while now < holdUntil.
+	holdUntil time.Time
+
+	// trigger is the wire-frame Origin observed when hold-down was
+	// most recently armed — surfaced in the engage/release logs so
+	// operators can locate the looping segment.
+	trigger PeerIdentity
+
+	// strikes counts consecutive arms within the recidivism window;
+	// drives the exponential hold-down escalation. Reset to 1 when
+	// the Identity stays quiet past DefaultBadHopsRecidivismWindow.
+	strikes int
+
+	// lastArmed is the wall-clock of the most recent arm — the
+	// recidivism anchor.
+	lastArmed time.Time
 }
 
 // seqVelocity records the per-Identity outbound-SeqNo advance
@@ -171,6 +226,19 @@ func newFlapDetector() *FlapDetector {
 		seqAdvanceWindow:       DefaultSeqAdvanceWindow,
 		maxSeqAdvancePerWindow: 0,
 		seqHoldDown:            DefaultSeqHoldDownDuration,
+		// Bad-hops hysteresis defaults are ACTIVE (unlike the SeqNo
+		// flap cap, which defaults disabled): the hysteresis is
+		// reachable only from the P3 fast-invalidation branch, and
+		// that branch is itself gated on maxSaneHops > 0 — disabled
+		// on the bare Table. A Table that opted into fast
+		// invalidation (WithMaxSaneHops) gets the recidivism damping
+		// with it; the per-event P3 tests that need raw behaviour
+		// stay under the threshold or override via
+		// WithMaxBadHopsPerWindow(0).
+		badHops:             make(map[PeerIdentity]*badHopsState),
+		badHopsWindow:       DefaultBadHopsWindow,
+		maxBadHopsPerWindow: DefaultMaxBadHopsPerWindow,
+		badHopsHoldDownBase: DefaultBadHopsHoldDownBase,
 	}
 }
 
@@ -310,6 +378,10 @@ func (f *FlapDetector) tickLocked(now time.Time) bool {
 	// trim stale advance timestamps. Identical lock contract — t.mu
 	// (writer) — so the two sub-passes share a single tick cycle.
 	mutated := f.clearExpiredSeqHoldDownsLocked(now)
+	// Bad-hops hysteresis cleanup — same lock contract, same tick.
+	if f.clearExpiredBadHopsHoldDownsLocked(now) {
+		mutated = true
+	}
 	cutoff := now.Add(-f.window)
 	for peer, fs := range f.state {
 		if !now.Before(fs.holdDownUntil) {
@@ -534,6 +606,151 @@ func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) bool {
 		}
 	}
 	return mutated
+}
+
+// recordBadHopsInvalidationLocked feeds the bad-hops hysteresis with
+// one ACCEPTED fast-invalidation for the Identity. When the count
+// inside badHopsWindow exceeds maxBadHopsPerWindow, hold-down is
+// armed (edge-triggered — once per engage, not per event) with
+// exponential escalation for re-arms inside
+// DefaultBadHopsRecidivismWindow. The caller's counter (typically
+// &routeStore.capStats.badHopsHoldowns) is bumped on each arm so the
+// observability counter matches engage events 1:1.
+//
+// Caller must hold the owning Table's t.mu (writer). No-op when
+// either knob disables the hysteresis. Returns whether hold-down was
+// newly armed by this event.
+func (f *FlapDetector) recordBadHopsInvalidationLocked(identity, trigger PeerIdentity, now time.Time, holdownCounter *atomic.Uint64) bool {
+	if f == nil || f.maxBadHopsPerWindow <= 0 || f.badHopsWindow <= 0 || identity == "" {
+		return false
+	}
+
+	bs := f.badHops[identity]
+	if bs == nil {
+		bs = &badHopsState{}
+		f.badHops[identity] = bs
+	}
+
+	bs.events = append(bs.events, now)
+	cutoff := now.Add(-f.badHopsWindow)
+	trimmed := bs.events[:0]
+	for _, t := range bs.events {
+		if !t.Before(cutoff) {
+			trimmed = append(trimmed, t)
+		}
+	}
+	bs.events = trimmed
+
+	if len(bs.events) > f.maxBadHopsPerWindow && (bs.holdUntil.IsZero() || !now.Before(bs.holdUntil)) {
+		// Recidivism: strikes escalate while re-arms stay inside the
+		// window, reset to 1 after a quiet stretch — same shape as
+		// the node-layer quarantine escalation.
+		if bs.lastArmed.IsZero() || now.Sub(bs.lastArmed) > DefaultBadHopsRecidivismWindow || bs.strikes < 1 {
+			bs.strikes = 1
+		} else {
+			bs.strikes++
+		}
+		dur := badHopsHoldDownForStrikes(f.badHopsHoldDownBase, bs.strikes)
+		bs.holdUntil = now.Add(dur)
+		bs.lastArmed = now
+		bs.trigger = trigger
+		if holdownCounter != nil {
+			holdownCounter.Add(1)
+		}
+		log.Warn().
+			Str("identity", string(identity)).
+			Str("trigger_origin", string(trigger)).
+			Int("window_events", len(bs.events)).
+			Int("max_per_window", f.maxBadHopsPerWindow).
+			Dur("window", f.badHopsWindow).
+			Dur("hold_down", dur).
+			Int("strikes", bs.strikes).
+			Time("hold_until", bs.holdUntil).
+			Msg("routing_bad_hops_hold_down_engaged")
+		return true
+	}
+	return false
+}
+
+// isInBadHopsHoldDownLocked reports whether the Identity's bad-hops
+// claims are currently being dropped by the hysteresis. Consulted at
+// the top of ApplyUpdate's P3 branch. Caller must hold the owning
+// Table's t.mu (reader OK).
+func (f *FlapDetector) isInBadHopsHoldDownLocked(identity PeerIdentity, now time.Time) bool {
+	if f == nil || f.maxBadHopsPerWindow <= 0 || f.badHopsWindow <= 0 || identity == "" {
+		return false
+	}
+	bs := f.badHops[identity]
+	if bs == nil {
+		return false
+	}
+	return now.Before(bs.holdUntil)
+}
+
+// clearExpiredBadHopsHoldDownsLocked is the bad-hops sibling of
+// clearExpiredSeqHoldDownsLocked: zeroes expired hold-downs (with the
+// paired release log), trims stale event timestamps, and drops
+// entries that carry no signal anymore — empty ring, no active
+// hold-down, AND recidivism anchor colder than
+// DefaultBadHopsRecidivismWindow (kept until then so strikes survive
+// across consecutive hold-downs). Returns whether anything changed.
+// Caller must hold t.mu (writer).
+func (f *FlapDetector) clearExpiredBadHopsHoldDownsLocked(now time.Time) bool {
+	if f == nil {
+		return false
+	}
+	cutoff := now.Add(-f.badHopsWindow)
+	mutated := false
+	for id, bs := range f.badHops {
+		if !bs.holdUntil.IsZero() && !now.Before(bs.holdUntil) {
+			log.Warn().
+				Str("identity", string(id)).
+				Str("trigger_origin", string(bs.trigger)).
+				Int("strikes", bs.strikes).
+				Msg("routing_bad_hops_hold_down_released")
+			bs.holdUntil = time.Time{}
+			bs.trigger = ""
+			mutated = true
+		}
+
+		n := 0
+		for _, t := range bs.events {
+			if !t.Before(cutoff) {
+				bs.events[n] = t
+				n++
+			}
+		}
+		if n != len(bs.events) {
+			mutated = true
+		}
+		bs.events = bs.events[:n]
+
+		recidivismCold := bs.lastArmed.IsZero() ||
+			now.Sub(bs.lastArmed) > DefaultBadHopsRecidivismWindow
+		if n == 0 && bs.holdUntil.IsZero() && recidivismCold {
+			delete(f.badHops, id)
+			mutated = true
+		}
+	}
+	return mutated
+}
+
+// badHopsHoldDownForStrikes returns the hold-down duration for the
+// given strike count: base × 2^(strikes-1), capped at
+// DefaultBadHopsHoldDownMax. The shift is bounded by the cap check
+// inside the loop, so the multiplier cannot overflow.
+func badHopsHoldDownForStrikes(base time.Duration, strikes int) time.Duration {
+	if strikes <= 1 {
+		return base
+	}
+	d := base
+	for i := 1; i < strikes; i++ {
+		d *= 2
+		if d >= DefaultBadHopsHoldDownMax {
+			return DefaultBadHopsHoldDownMax
+		}
+	}
+	return d
 }
 
 // holdDownDurationForBurst returns the hold-down duration for the

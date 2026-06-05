@@ -230,6 +230,20 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// pure observability and lineage-tracking — no new storage
 	// state shape.
 	if s.maxSaneHops > 0 && int(incoming.Hops) > s.maxSaneHops {
+		// Bad-hops hysteresis gate (see types.go constant block): an
+		// Identity whose accepted fast-invalidations exceeded the
+		// per-window budget is in hold-down — drop the claim BEFORE
+		// any storage mutation. No tombstone rewrite, no dirty mark
+		// (snapshot publisher stays asleep), no per-event warn log:
+		// the engage/release logs plus the BadHopsHoldowns counter
+		// are the operator-facing signal. Claims with sane hops never
+		// reach this branch, so upstream recovery (loop converges,
+		// short route re-announced) is admitted normally even while
+		// hold-down is active.
+		if s.flap.isInBadHopsHoldDownLocked(entry.Identity, now) {
+			return RouteRejected, false
+		}
+
 		incoming.Withdrawn = true
 		incoming.Hops = HopsInfinity
 		incoming.ExpiresAt = now.Add(s.defaultTTL)
@@ -239,6 +253,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			s.buckets[entry.Identity] = append(bucket, incoming)
 			s.capStats.fastInvalidations.Add(1)
 			logFastInvalidation(entry, true, "")
+			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.Origin, now, &s.capStats.badHopsHoldowns)
 			return RouteAccepted, true
 		}
 
@@ -271,6 +286,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			bucket[idx] = incoming
 			s.capStats.fastInvalidations.Add(1)
 			logFastInvalidation(entry, true, "")
+			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.Origin, now, &s.capStats.badHopsHoldowns)
 			return RouteAccepted, true
 		}
 		// Stale bad-hops replay: the stored claim is already at a
