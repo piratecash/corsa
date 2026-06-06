@@ -97,6 +97,20 @@ type DMRouter struct {
 	snapGen   atomic.Uint64
 	snapCache atomic.Pointer[routerSnapshotCache]
 
+	// Cached snapshot halves. notify() refreshes ONLY the half whose
+	// domain actually changed and recomposes RouterSnapshot from both,
+	// so a status-only update (UIEventStatusUpdated — e.g. the 1s
+	// resource sample, peer-health deltas, aggregate counters) never
+	// re-copies the DM data (peers / activeMessages), and a DM update
+	// (messages / sidebar) never re-deep-copies the NodeStatus
+	// (PeerHealth slice + maps). Both halves are immutable once built;
+	// composeSnapshotLocked shares their backing arrays across snapshots
+	// (a refresh allocates a NEW half, leaving older snapshots' arrays
+	// untouched), so the lock-free reader contract holds without the
+	// previous full deep copy on every notify. Guarded by r.mu.
+	cachedDMPart dmSnapshotPart
+	cachedNS     NodeStatus
+
 	uiEvents        chan UIEvent
 	uiOverflowCount atomic.Int64  // number of active retry goroutines in notify()
 	startupDone     chan struct{} // closed after runStartup completes; used by external waiters
@@ -180,6 +194,23 @@ type DMRouter struct {
 type routerSnapshotCache struct {
 	gen  uint64
 	snap RouterSnapshot
+}
+
+// dmSnapshotPart caches the EXPENSIVE DMRouter-owned collections of a
+// RouterSnapshot — the sidebar peers map, the peer order, and the active
+// conversation messages. These change only on DM-data events (messages /
+// sidebar), so status-only notifies (the frequent ones: 1s resource
+// sample, 500ms peer-health deltas) reuse them without re-cloning. The
+// cheap scalar fields (ActivePeer, PeerClicked, SendStatus, MyAddress)
+// are NOT cached here — composeSnapshotLocked reads them live under
+// r.mu, so a status notify that flips only sendStatus is reflected
+// without touching the collections. Every reference field is freshly
+// cloned on refresh (including a per-entry *RouterPeerState clone),
+// making the value immutable and safe to share across snapshots.
+type dmSnapshotPart struct {
+	Peers          map[domain.PeerIdentity]*RouterPeerState
+	PeerOrder      []domain.PeerIdentity
+	ActiveMessages []DirectMessage
 }
 
 // PendingActions holds deferred widget mutations that must be applied
@@ -1848,39 +1879,81 @@ func (r *DMRouter) setSendStatusNotify(s string) {
 	r.notify(UIEventStatusUpdated)
 }
 
-// buildSnapshotLocked constructs an immutable RouterSnapshot from the
-// current mutable state. Must be called under r.mu (read or write lock).
+// RouterSnapshot is assembled from two independently-cached halves so a
+// notify only pays for the half that changed:
 //
-// The snapshot is a deep copy — all maps, slices, and pointers in
-// NodeStatus are cloned so the UI goroutine can read the snapshot
-// without any lock, even while ebus handlers mutate the live state.
-func (r *DMRouter) buildSnapshotLocked(gen uint64) RouterSnapshot {
+//   - the DM half (dmSnapshotPart: peers / peerOrder / activeMessages),
+//     refreshed by buildDMPartLocked on DM-data events;
+//   - the monitor-owned NodeStatus half (cachedNS), refreshed by
+//     refreshNodeStatusLocked on status events.
+//
+// composeSnapshotLocked stitches the cached halves with the live cheap
+// scalars into the immutable RouterSnapshot stored for lock-free UI
+// reads. The previous code deep-rebuilt BOTH halves on EVERY notify,
+// which profiling flagged as a major allocation source (status-only
+// updates re-copying activeMessages/peers; DM updates re-deep-copying
+// the whole NodeStatus).
+
+// buildDMPartLocked clones the DM-owned collections into an immutable
+// half. Allocates a fresh peers map (with per-entry *RouterPeerState
+// clones) + peerOrder + activeMessages slices; called only when DM data
+// actually changed.
+func (r *DMRouter) buildDMPartLocked() dmSnapshotPart {
 	peersCopy := make(map[domain.PeerIdentity]*RouterPeerState, len(r.peers))
 	for k, v := range r.peers {
 		clone := *v
 		peersCopy[k] = &clone
 	}
-
-	// NodeStatus is owned by the monitor; reading it here avoids
-	// duplicating the data inside DMRouter. The monitor returns a
-	// deep copy, so the snapshot is fully immutable.
-	var ns NodeStatus
-	if r.statusMonitor != nil {
-		ns = r.statusMonitor.NodeStatus()
-	}
-
-	return RouterSnapshot{
-		Generation:     gen,
-		ActivePeer:     r.activePeer,
-		PeerClicked:    r.peerClicked,
+	return dmSnapshotPart{
 		Peers:          peersCopy,
 		PeerOrder:      append([]domain.PeerIdentity(nil), r.peerOrder...),
 		ActiveMessages: append([]DirectMessage(nil), r.activeMessages...),
-		CacheReady:     r.activePeer != "" && r.cache.MatchesPeer(r.activePeer),
-		NodeStatus:     ns,
-		SendStatus:     r.sendStatus,
-		MyAddress:      r.client.Address(),
 	}
+}
+
+// refreshNodeStatusLocked re-reads the monitor-owned NodeStatus half.
+// The monitor returns a deep copy, so the cached value is independent
+// of live state and safe to share across composed snapshots. Called
+// only on status-domain notifies.
+func (r *DMRouter) refreshNodeStatusLocked() {
+	if r.statusMonitor != nil {
+		r.cachedNS = r.statusMonitor.NodeStatus()
+	}
+}
+
+// composeSnapshotLocked assembles a RouterSnapshot from the two cached
+// halves. Pure field assembly — it shares the halves' backing arrays
+// (both immutable) rather than deep-copying, so this is cheap regardless
+// of which half last changed. CacheReady is recomputed here because the
+// conversation cache is guarded by its own mutex.
+func (r *DMRouter) composeSnapshotLocked(gen uint64) RouterSnapshot {
+	dm := r.cachedDMPart
+	return RouterSnapshot{
+		Generation: gen,
+		// Cheap scalars read live under r.mu so a status-only notify
+		// (which refreshes neither half's collections) still reflects a
+		// sendStatus / selection flip.
+		ActivePeer:  r.activePeer,
+		PeerClicked: r.peerClicked,
+		SendStatus:  r.sendStatus,
+		MyAddress:   r.client.Address(),
+		// Expensive collections shared from the cached DM half.
+		Peers:          dm.Peers,
+		PeerOrder:      dm.PeerOrder,
+		ActiveMessages: dm.ActiveMessages,
+		CacheReady:     r.activePeer != "" && r.cache.MatchesPeer(r.activePeer),
+		// Monitor-owned half, refreshed only on status notifies.
+		NodeStatus: r.cachedNS,
+	}
+}
+
+// buildSnapshotLocked rebuilds BOTH halves and composes — the full
+// rebuild used at construction (initial seed). Per-event notifies use
+// the targeted single-half refresh in notify().
+func (r *DMRouter) buildSnapshotLocked(gen uint64) RouterSnapshot {
+	r.cachedDMPart = r.buildDMPartLocked()
+	r.refreshNodeStatusLocked()
+	return r.composeSnapshotLocked(gen)
 }
 
 // deepCopyNodeStatus creates an independent copy of NodeStatus with all
@@ -1967,12 +2040,27 @@ func deepCopyNodeStatus(src NodeStatus) NodeStatus {
 // backoff (50ms → 100ms → 200ms) ensures the event is eventually
 // delivered. Atomic counter caps concurrent retry goroutines at 8.
 func (r *DMRouter) notify(eventType UIEventType) {
-	// Build and cache the snapshot under Lock. The snapshot is an
-	// immutable deep copy — once stored via atomic.Pointer, the UI
-	// goroutine reads it without any lock.
+	// Refresh ONLY the snapshot half whose domain changed, then
+	// recompose. The previous code deep-rebuilt both halves on every
+	// notify; profiling showed that as a major allocation source
+	// (status-only updates re-copying activeMessages/peers, DM updates
+	// re-deep-copying the whole NodeStatus). Once composed the snapshot
+	// is immutable and stored via atomic.Pointer for lock-free UI reads.
 	r.mu.Lock()
 	gen := r.snapGen.Add(1)
-	snap := r.buildSnapshotLocked(gen)
+	switch eventType {
+	case UIEventStatusUpdated:
+		// NodeStatus-domain change (resource sample, peer-health delta,
+		// aggregate counters). DM data is unchanged — reuse cachedDMPart.
+		r.refreshNodeStatusLocked()
+	case UIEventBeep:
+		// Pure UI signal, no data change — reuse both cached halves.
+	default:
+		// DM-data change (UIEventMessagesUpdated / UIEventSidebarUpdated).
+		// NodeStatus is unchanged — reuse cachedNS.
+		r.cachedDMPart = r.buildDMPartLocked()
+	}
+	snap := r.composeSnapshotLocked(gen)
 	r.snapCache.Store(&routerSnapshotCache{gen: gen, snap: snap})
 	r.mu.Unlock()
 
