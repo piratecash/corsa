@@ -3535,6 +3535,13 @@ func (s *Service) emitPeerPendingChanged(address domain.PeerAddress, count int) 
 // this handler directly must prime the snapshots explicitly (mirrors the
 // pattern in peer_health_snapshot_test.go).
 func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
+	// Record that a consumer read peer-health now.  maybeRebuildPeerHealthSnapshot
+	// consults this so the periodic 500 ms rebuild — a top allocator on a
+	// headless server where nobody polls fetch_peer_health — is skipped while
+	// no reader is active and resumes the moment one returns.  See
+	// peerHealthRebuildIdleAfter.
+	s.peerHealthAccessNanos.Store(time.Now().UnixNano())
+
 	// Load the cached ConnectionManager slots view instead of calling
 	// cm.Slots() on the RPC path.  Slots() takes cm.mu.RLock which, under
 	// writer-preferring semantics, would queue behind any CM writer and

@@ -184,6 +184,58 @@ func TestPeerHealthSnapshotRefreshReflectsMutations(t *testing.T) {
 	}
 }
 
+// TestMaybeRebuildPeerHealthSnapshot_GatesOnRecentReader pins the headless-node
+// optimisation: the periodic refresher's gated entry point rebuilds only when
+// a consumer has read peer-health within peerHealthRebuildIdleAfter, and is a
+// no-op otherwise.  Rebuild publishes a fresh pointer, so a changed pointer
+// means a rebuild ran and an unchanged pointer means it was skipped.
+func TestMaybeRebuildPeerHealthSnapshot_GatesOnRecentReader(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	addr := domain.PeerAddress("gate-peer-1")
+	svc.peerMu.Lock()
+	svc.health[addr] = &peerHealth{Address: addr, Connected: true, Direction: peerDirectionOutbound}
+	svc.peerMu.Unlock()
+
+	// Prime once so there is a baseline snapshot pointer to compare against.
+	svc.rebuildPeerHealthSnapshot()
+	base := svc.loadPeerHealthSnapshot()
+	if base == nil {
+		t.Fatal("expected primed snapshot")
+	}
+
+	// No reader has ever called peerHealthFrames (access timestamp is zero):
+	// the gated rebuild must skip, leaving the pointer untouched.
+	svc.maybeRebuildPeerHealthSnapshot()
+	if svc.loadPeerHealthSnapshot() != base {
+		t.Fatal("gated rebuild ran despite no reader ever accessing the snapshot")
+	}
+
+	// Simulate a stale reader (last access well outside the idle window):
+	// still a no-op.
+	svc.peerHealthAccessNanos.Store(time.Now().Add(-2 * peerHealthRebuildIdleAfter).UnixNano())
+	svc.maybeRebuildPeerHealthSnapshot()
+	if svc.loadPeerHealthSnapshot() != base {
+		t.Fatal("gated rebuild ran for a reader outside the idle window")
+	}
+
+	// Simulate a fresh reader: the gated rebuild must now run and publish a
+	// new pointer.
+	svc.peerHealthAccessNanos.Store(time.Now().UnixNano())
+	svc.maybeRebuildPeerHealthSnapshot()
+	if svc.loadPeerHealthSnapshot() == base {
+		t.Fatal("gated rebuild skipped despite a recent reader")
+	}
+
+	// And peerHealthFrames itself must record access, re-arming the gate.
+	svc.peerHealthAccessNanos.Store(0)
+	_ = svc.peerHealthFrames()
+	if svc.peerHealthAccessNanos.Load() == 0 {
+		t.Fatal("peerHealthFrames must record reader access")
+	}
+}
+
 // TestPeerHealthSnapshotConcurrentLoadDoesNotRace runs the RPC path and the
 // refresher concurrently for a short burst.  Under the atomic.Pointer
 // contract this must not race; the -race detector will flag any accidental

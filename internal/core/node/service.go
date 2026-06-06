@@ -387,7 +387,14 @@ type Service struct {
 	// peers_exchange_snapshot.go for the per-path contract.
 	networkStatsSnap  networkStatsSnapPtr
 	peerHealthSnap    peerHealthSnapPtr
-	peersExchangeSnap peersExchangeSnapPtr
+	// peerHealthAccessNanos is the Unix-nanos timestamp of the last
+	// peerHealthFrames() (fetch_peer_health RPC) call.  Zero until the first
+	// read.  maybeRebuildPeerHealthSnapshot gates the periodic rebuild on it
+	// so a headless node with no UI polling stops paying for a 2×/s
+	// peer-domain snapshot — profiling's top single allocator on servers.
+	// Written on every RPC read (Store is cheap); read by the refresher tick.
+	peerHealthAccessNanos atomic.Int64
+	peersExchangeSnap     peersExchangeSnapPtr
 	// cmSlotsSnap caches ConnectionManager.Slots() so peerHealthFrames and
 	// buildPeerExchangeResponse do not call Slots() (which takes cm.mu.RLock)
 	// on the RPC path.  Without this cache those handlers would still stall
@@ -1107,6 +1114,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	svc.queuePersist = newQueueStatePersister(queueStatePersisterDeps{
 		Path:             queueStatePath,
 		DebounceInterval: defaultQueueStatePersistDebounce,
+		MinWriteInterval: defaultQueueStateMinWriteInterval,
 		Snapshot: func() queueStateFile {
 			// queueStateSnapshotLocked reads delivery-domain fields
 			// (pending, orphaned, relayRetry, receipts, outbound), so

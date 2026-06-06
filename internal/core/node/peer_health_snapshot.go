@@ -101,6 +101,44 @@ func (s *Service) loadPeerHealthSnapshot() *peerHealthSnapshot {
 // The per-peer live traffic delta is folded into record.health.BytesSent /
 // BytesReceived so the handler can emit the frame without revisiting
 // liveTraffic.
+// peerHealthRebuildIdleAfter is how long after the last fetch_peer_health
+// read the periodic refresher keeps rebuilding the snapshot.  Past this
+// window with no reader, maybeRebuildPeerHealthSnapshot turns the 500 ms
+// tick into a no-op — the dominant case on production masternodes, which
+// run headless and never poll fetch_peer_health, yet were paying for a full
+// peer-domain snapshot (caps + inbound-conn-id clones for every peer) twice
+// a second forever.  The first read after an idle period gets the last
+// snapshot (bounded-stale by however long the node was idle) and re-arms the
+// refresher, so a continuously-polling UI — even at a slow cadence well
+// inside this window — always sees fresh data within one tick.  Sized as a
+// comfortable multiple of networkStatsSnapshotInterval so brief gaps between
+// UI polls never stall the rebuild.
+const peerHealthRebuildIdleAfter = 5 * time.Second
+
+// maybeRebuildPeerHealthSnapshot is the gated entry point the periodic
+// refresher (hotReadsRefreshLoop) uses instead of rebuildPeerHealthSnapshot
+// directly.  It rebuilds only when a consumer has read the snapshot within
+// peerHealthRebuildIdleAfter; otherwise it returns immediately, skipping the
+// s.peerMu.RLock → s.deliveryMu.RLock window and the per-peer allocation.
+//
+// The eager paths — primeHotReadSnapshots (startup) and
+// refreshHotReadSnapshotsAfterPeerStateChange (peer connect/disconnect) —
+// deliberately keep calling rebuildPeerHealthSnapshot UNCONDITIONALLY: they
+// are event-driven, cheap, and must keep the snapshot correct for a reader
+// that polls immediately after a state change.  Only the unconditional 2×/s
+// clock tick is gated here.
+func (s *Service) maybeRebuildPeerHealthSnapshot() {
+	last := s.peerHealthAccessNanos.Load()
+	if last == 0 {
+		// Never read since process start — nobody is watching peer health.
+		return
+	}
+	if time.Since(time.Unix(0, last)) > peerHealthRebuildIdleAfter {
+		return
+	}
+	s.rebuildPeerHealthSnapshot()
+}
+
 func (s *Service) rebuildPeerHealthSnapshot() {
 	log.Trace().Msg("peer_health_snapshot_refresh_begin")
 

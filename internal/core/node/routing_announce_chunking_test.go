@@ -182,6 +182,129 @@ func TestChunkAnnounceEntriesBySize_SingleEntryTooLargeSkipped(t *testing.T) {
 	}
 }
 
+// TestAnnounceEntryWireEstimate_IsOverEstimate pins the safety invariant the
+// fast-accept gate in both chunkers depends on: announceEntryWireEstimate
+// must never under-estimate the bytes an entry actually adds to a frame.
+// If it did, a chunk accepted on the cheap estimate (curEst <= maxBytes/2)
+// could marshal past maxBytes and be rejected on the wire.  We measure the
+// real contribution as the marshalled-size delta of adding the entry to a
+// one-entry base frame (the delta includes the array comma) and require the
+// estimate to be >= that for a spread of entry shapes.
+func TestAnnounceEntryWireEstimate_IsOverEstimate(t *testing.T) {
+	base := routing.AnnounceEntry{
+		Identity: routing.PeerIdentity(strings.Repeat("a", 64)),
+		Origin:   routing.PeerIdentity(strings.Repeat("b", 64)),
+		Hops:     1,
+		SeqNo:    1,
+	}
+	baseLine, err := protocol.MarshalFrameLineWithLimit(
+		buildAnnounceFrame(announceWireLegacy, []routing.AnnounceEntry{base}),
+		protocol.MaxFrameLine,
+	)
+	if err != nil {
+		t.Fatalf("base frame marshal: %v", err)
+	}
+
+	smallExtra, _ := json.Marshal(map[string]string{"k": strings.Repeat("z", 200)})
+	bigExtra, _ := json.Marshal(map[string]string{"k": strings.Repeat("z", 4096)})
+	// escapeExtra carries LITERAL '<' bytes (a valid JSON string char). On
+	// re-encode each expands to "<" (1→6 bytes), so the entry's real
+	// wire contribution is ~6× its raw length.  This is the exact shape that
+	// can balloon past MaxFrameLine after a small raw Extra slips the gate —
+	// the case fails if announceEntryWireEstimate counts Extra at raw length
+	// instead of worst-case escape expansion.
+	escapeExtra := json.RawMessage(`{"k":"` + strings.Repeat("<", 500) + `"}`)
+	cases := []routing.AnnounceEntry{
+		{Identity: routing.PeerIdentity(strings.Repeat("c", 64)), Origin: routing.PeerIdentity(strings.Repeat("d", 64)), Hops: 15, SeqNo: 1 << 40},
+		{Identity: "short", Origin: "x", Hops: 0, SeqNo: 0},
+		{Identity: routing.PeerIdentity(strings.Repeat("e", 64)), Origin: routing.PeerIdentity(strings.Repeat("f", 64)), Hops: 3, SeqNo: 42, Extra: smallExtra},
+		{Identity: routing.PeerIdentity(strings.Repeat("g", 64)), Origin: routing.PeerIdentity(strings.Repeat("h", 64)), Hops: 7, SeqNo: 99, Extra: bigExtra},
+		{Identity: routing.PeerIdentity(strings.Repeat("i", 64)), Origin: routing.PeerIdentity(strings.Repeat("j", 64)), Hops: 2, SeqNo: 7, Extra: escapeExtra},
+		// Identity/Origin themselves carry literal '<'/'>'/'&' bytes — Validate
+		// does not enforce a hex shape, so these reach announce and must be
+		// covered by the per-field escape overhead, not just Extra.  Fails if
+		// the estimate counts identity/origin at raw length.
+		{Identity: routing.PeerIdentity("id" + strings.Repeat("<", 300)), Origin: routing.PeerIdentity("og" + strings.Repeat("&", 200)), Hops: 1, SeqNo: 1},
+	}
+	for i, e := range cases {
+		twoLine, err := protocol.MarshalFrameLineWithLimit(
+			buildAnnounceFrame(announceWireLegacy, []routing.AnnounceEntry{base, e}),
+			protocol.MaxFrameLine,
+		)
+		if err != nil {
+			t.Fatalf("case %d two-entry frame marshal: %v", i, err)
+		}
+		delta := len(twoLine) - len(baseLine)
+		if est := announceEntryWireEstimate(e); est < delta {
+			t.Fatalf("case %d: estimate %d UNDER real per-entry delta %d — fast-accept gate is unsafe", i, est, delta)
+		}
+	}
+}
+
+// TestAnnounceEntryWireEstimate_V3IsOverEstimate is the v3-wire twin of the
+// legacy check above.  The v3 frame has a different envelope (kind, epoch,
+// issued_at, RawLine + trailing newline) and a different per-entry shape
+// (Origin dropped, an optional base64 "sig" added), so the shared estimator
+// must over-cover this shape too — the v3 chunker's fast-accept gate relies
+// on it.  An entry carrying a non-empty AttestedSig is included so the
+// base64 sig term is exercised.  Pinned here so a future wire-shape change
+// (new per-entry field) is caught instead of silently letting an oversize
+// chunk past the gate.
+func TestAnnounceEntryWireEstimate_V3IsOverEstimate(t *testing.T) {
+	const kind = protocol.RouteAnnounceV3KindFull
+	const epoch = uint64(7)
+
+	base := routing.AnnounceEntry{
+		Identity: routing.PeerIdentity(strings.Repeat("a", 64)),
+		Hops:     1,
+		SeqNo:    1,
+	}
+	baseFrame, err := buildRouteAnnounceV3Frame(kind, epoch, []routing.AnnounceEntry{base})
+	if err != nil {
+		t.Fatalf("base v3 frame: %v", err)
+	}
+
+	smallExtra, _ := json.Marshal(map[string]string{"k": strings.Repeat("z", 200)})
+	// Literal '<' bytes that expand 6× on the v3 re-encode (same HTML-escape
+	// path as the legacy frame), proving the shared estimate's worst-case
+	// Extra factor covers the v3 wire too.
+	escapeExtra := json.RawMessage(`{"k":"` + strings.Repeat("<", 500) + `"}`)
+	cases := []routing.AnnounceEntry{
+		// Plain entry.
+		{Identity: routing.PeerIdentity(strings.Repeat("c", 64)), Hops: 15, SeqNo: 1 << 40},
+		// With Extra.
+		{Identity: routing.PeerIdentity(strings.Repeat("e", 64)), Hops: 3, SeqNo: 42, Extra: smallExtra},
+		// With a 64-byte attested signature (Ed25519 size) → base64 on the wire.
+		{Identity: routing.PeerIdentity(strings.Repeat("g", 64)), Hops: 7, SeqNo: 99, AttestedSig: bytesRepeat(0xAB, 64)},
+		// Extra + sig together.
+		{Identity: routing.PeerIdentity(strings.Repeat("h", 64)), Hops: 2, SeqNo: 5, Extra: smallExtra, AttestedSig: bytesRepeat(0xCD, 64)},
+		// Escapable Extra → exercises the escape overhead on the v3 path.
+		{Identity: routing.PeerIdentity(strings.Repeat("k", 64)), Hops: 1, SeqNo: 3, Extra: escapeExtra},
+		// Escapable Identity (Validate does not enforce hex) on the v3 path.
+		{Identity: routing.PeerIdentity("id" + strings.Repeat("<", 300)), Hops: 1, SeqNo: 4},
+	}
+	for i, e := range cases {
+		twoFrame, err := buildRouteAnnounceV3Frame(kind, epoch, []routing.AnnounceEntry{base, e})
+		if err != nil {
+			t.Fatalf("case %d two-entry v3 frame: %v", i, err)
+		}
+		delta := len(twoFrame.RawLine) - len(baseFrame.RawLine)
+		if est := announceEntryWireEstimate(e); est < delta {
+			t.Fatalf("case %d: estimate %d UNDER real v3 per-entry delta %d — v3 fast-accept gate is unsafe", i, est, delta)
+		}
+	}
+}
+
+// bytesRepeat returns a b-byte slice filled with v.  Local helper so the
+// estimate test does not pull in bytes just for one call.
+func bytesRepeat(v byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
+}
+
 // makeAnnounceEntries builds n distinct AnnounceEntry rows with stable
 // non-trivial Identity / Origin / Extra payloads so that the encoded
 // JSON has roughly the same shape as production routes — this keeps

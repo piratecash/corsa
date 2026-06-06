@@ -37,6 +37,10 @@ func (s *Service) primeHotReadSnapshots() {
 //
 //   - network_stats / peer_health — short s.peerMu.RLock (peer-domain
 //     placeholder during Phase 2 transition); no IP-state callbacks.
+//     peer_health additionally gates on recent-reader activity
+//     (maybeRebuildPeerHealthSnapshot): the periodic rebuild is skipped
+//     entirely while no consumer is polling fetch_peer_health, so a
+//     headless node does not pay for the snapshot at all.
 //   - peers_exchange — s.peerMu.RLock for persistedMeta/health, then
 //     peerProvider.Candidates() whose callbacks reach BannedIPsFn
 //     (ipStateMu.RLock) and RemoteBannedFn (s.peerMu.RLock → ipStateMu.RLock
@@ -100,7 +104,12 @@ func (s *Service) hotReadsRefreshLoop(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(5)
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildNetworkStatsSnapshot) }()
-	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildPeerHealthSnapshot) }()
+	// peer_health uses the reader-gated variant: the periodic tick rebuilds
+	// only while a consumer is actively polling fetch_peer_health, so a
+	// headless node stops paying for the 2×/s peer-domain snapshot.  Startup
+	// priming and peer-state-change eager rebuilds still call the
+	// unconditional rebuildPeerHealthSnapshot — see maybeRebuildPeerHealthSnapshot.
+	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.maybeRebuildPeerHealthSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildPeersExchangeSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildCMSlotsSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildRoutingSnapshot) }()

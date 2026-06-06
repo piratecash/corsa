@@ -252,6 +252,104 @@ func TestQueueStatePersister_MarkDirtyDuringWriteSchedulesNextWrite(t *testing.T
 	<-runDone
 }
 
+// TestQueueStatePersister_WriteCeilingSpacesWrites proves that with a
+// MinWriteInterval set, a second write that becomes due before the interval
+// has elapsed is held off by exactly the remaining time — the loop performs
+// a second Wait (the ceiling) after the debounce Wait, sized to
+// MinWriteInterval minus the elapsed time since the previous write.  The
+// clock is injected so the assertion on the ceiling duration is exact and
+// no wall-clock sleeping is involved.
+func TestQueueStatePersister_WriteCeilingSpacesWrites(t *testing.T) {
+	t.Parallel()
+
+	const debounce = 50 * time.Millisecond
+	const minInterval = 2 * time.Second
+
+	waitCh := make(chan time.Duration, 16)
+	waitReplyCh := make(chan bool, 16)
+	var clock atomic.Int64 // unix nanos, advanced only by the test.
+	clock.Store(time.Unix(1_700_000_000, 0).UnixNano())
+	var saves atomic.Int32
+
+	p := newQueueStatePersister(queueStatePersisterDeps{
+		Path:             "test.json",
+		DebounceInterval: debounce,
+		MinWriteInterval: minInterval,
+		Now:              func() time.Time { return time.Unix(0, clock.Load()) },
+		Snapshot:         func() queueStateFile { return queueStateFile{Version: queueStateVersion} },
+		Save: func(string, queueStateFile) error {
+			saves.Add(1)
+			return nil
+		},
+		Wait: func(ctx context.Context, d time.Duration) bool {
+			waitCh <- d
+			select {
+			case ok := <-waitReplyCh:
+				return ok
+			case <-ctx.Done():
+				return false
+			}
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan struct{})
+	go func() { p.Run(ctx); close(runDone) }()
+
+	recv := func() time.Duration {
+		select {
+		case d := <-waitCh:
+			return d
+		case <-time.After(time.Second):
+			t.Fatal("persister did not call Wait in time")
+			return 0
+		}
+	}
+	waitForSaves := func(n int32) {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if saves.Load() >= n {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("expected %d saves, got %d", n, saves.Load())
+	}
+
+	// First write: lastWrite is zero, so only the debounce Wait happens —
+	// no ceiling on the very first write.
+	p.MarkDirty()
+	if d := recv(); d != debounce {
+		t.Fatalf("first Wait = %s, want debounce %s", d, debounce)
+	}
+	waitReplyCh <- true
+	waitForSaves(1)
+
+	// Advance the clock 500ms past the first write, then dirty again.  The
+	// debounce Wait fires first, then the ceiling Wait sized to the
+	// remaining 1.5s (2s interval − 500ms elapsed).
+	clock.Add(int64(500 * time.Millisecond))
+	p.MarkDirty()
+	if d := recv(); d != debounce {
+		t.Fatalf("second debounce Wait = %s, want %s", d, debounce)
+	}
+	waitReplyCh <- true
+	if d := recv(); d != minInterval-500*time.Millisecond {
+		t.Fatalf("ceiling Wait = %s, want %s", d, minInterval-500*time.Millisecond)
+	}
+	waitReplyCh <- true
+	waitForSaves(2)
+
+	cancel()
+	// Drain any wake the cancel may race with so Run can observe ctx.Done.
+	select {
+	case waitReplyCh <- false:
+	default:
+	}
+	<-runDone
+}
+
 func TestQueueStatePersister_FinalFlushOnCtxCancel(t *testing.T) {
 	t.Parallel()
 

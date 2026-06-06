@@ -1,14 +1,50 @@
 package node
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
+
+// queueStateMarshalBufPool recycles the scratch buffer used to marshal the
+// queue-state file.  json.Marshal allocates a fresh, repeatedly-grown []byte
+// on every call; under sustained route churn this file is re-marshalled
+// often over a large pending queue, and profiling attributed a multi-GB
+// slice of cumulative alloc_space to bytes.growSlice on this exact path.
+// A pooled, reused buffer fed to json.Encoder amortises that growth across
+// writes, so steady-state marshals reuse already-sized backing storage and
+// stop churning the allocator / GC.  The pool is concurrency-safe, so the
+// rare overlap of a loop write with a FlushSync write each get their own
+// buffer.
+var queueStateMarshalBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+// queueStateBufRetainCap is the upper bound on a buffer's capacity that we
+// return to the pool.  A one-off enormous queue would otherwise pin its
+// oversized backing array in the pool indefinitely; buffers grown past this
+// are dropped for the GC to reclaim, while typical-sized ones are retained.
+//
+// Sizing: the whole point of the pool is to STOP re-growing the buffer on
+// every write, so the retain cap must sit above the real steady-state
+// payload — if it is below, the pool drops the buffer each time and we are
+// back to per-write bytes.growSlice (the cap would then only trade
+// allocation for the MinWriteInterval frequency cut, not eliminate it).
+// Production inuse_space profiling showed a ~24 MiB bytes.growSlice live on
+// this path, so an 8 MiB cap would have dropped the buffer every write on
+// those nodes.  64 MiB covers the observed payload with headroom while still
+// reclaiming a pathological one-off (a queue that momentarily ballooned far
+// past normal).  sync.Pool entries are GC-collectable under memory pressure,
+// so retaining a 64 MiB buffer does not permanently pin it.  If a node's
+// steady-state queue legitimately grows past this, revisit with an adaptive
+// retain (track a payload high-water mark) rather than a larger constant.
+const queueStateBufRetainCap = 64 << 20 // 64 MiB
 
 // ErrQueuePersistFailed is the sentinel wrapped around every non-nil error
 // returned from saveQueueState.  Callers must use errors.Is(err,
@@ -92,18 +128,33 @@ func saveQueueState(path string, state queueStateFile) error {
 		return wrapQueuePersistErr("create queue state directory", err)
 	}
 
-	// json.Marshal (compact), NOT MarshalIndent: the queue-state file is
+	// Compact encode (NOT MarshalIndent): the queue-state file is
 	// machine-read on restart, never by a human, so pretty-printing is
 	// pure overhead. Under sustained route churn this file is re-written
-	// every debounce window over a potentially large pending queue;
-	// MarshalIndent's whitespace roughly doubles both the allocation and
-	// the bytes written each time (profiling flagged this path at
-	// multi-GB cumulative alloc_space). Compact output is byte-for-byte
-	// loadable by the existing json.Unmarshal reader.
-	payload, err := json.Marshal(state)
-	if err != nil {
+	// often over a potentially large pending queue; MarshalIndent's
+	// whitespace roughly doubles both the allocation and the bytes
+	// written each time (profiling flagged this path at multi-GB
+	// cumulative alloc_space).
+	//
+	// Marshal through a pooled, reused buffer rather than json.Marshal so
+	// the per-write []byte growth is amortised instead of re-allocated
+	// every call (see queueStateMarshalBufPool). json.Encoder.Encode
+	// appends a single trailing newline, which the json.Unmarshal reader
+	// in loadQueueState ignores as trailing whitespace — the output stays
+	// byte-for-byte loadable.
+	buf := queueStateMarshalBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		// Drop pathologically large buffers instead of pinning them in the
+		// pool; retain typical-sized ones for reuse.
+		if buf.Cap() <= queueStateBufRetainCap {
+			queueStateMarshalBufPool.Put(buf)
+		}
+	}()
+	if err := json.NewEncoder(buf).Encode(state); err != nil {
 		return wrapQueuePersistErr("marshal queue state", err)
 	}
+	payload := buf.Bytes()
 
 	tmp, err := os.CreateTemp(dir, ".queue-state-*.tmp")
 	if err != nil {

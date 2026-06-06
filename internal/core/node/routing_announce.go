@@ -219,6 +219,90 @@ func announceCostForEntries(n int) int {
 	return n
 }
 
+// jsonStringEscapeOverhead returns an UPPER BOUND on the EXTRA bytes Go's JSON
+// encoder adds when it serialises v as (part of) a JSON string.  A byte is
+// guaranteed to be emitted 1:1 only when it is printable ASCII other than the
+// five characters the encoder escapes ('"', '\\', '<', '>', '&').  Every
+// other byte — ASCII control chars (→ "\uXXXX" or short escapes), the five
+// escaped characters, and all bytes ≥ 0x7F (UTF-8 lead/continuation, which
+// may encode the always-escaped U+2028 / U+2029 line/para separators) — is
+// charged the maximum single-byte expansion of +5 (one byte → a six-byte
+// "\uXXXX" escape).  That over-charges '"'/'\\' (really +1) and ordinary
+// UTF-8 (really +0), but over-estimating is exactly what the fast-accept gate
+// needs: it can never let an entry whose real wire form expands past the
+// budget slip through without a precise check.  Clean hex / base64url
+// fingerprints and ASCII Extra charge 0 (or near 0), so the hot path is
+// untouched.
+//
+// Generic over ~string | ~[]byte so it serves PeerIdentity (string) and
+// json.RawMessage ([]byte) without allocating a conversion.
+func jsonStringEscapeOverhead[T ~string | ~[]byte](v T) int {
+	const perByteEscape = 5 // one source byte → "\uXXXX" is +5 bytes.
+	n := 0
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c >= 0x20 && c < 0x7f && c != '"' && c != '\\' && c != '<' && c != '>' && c != '&' {
+			continue // emitted unchanged
+		}
+		n += perByteEscape
+	}
+	return n
+}
+
+// announceEntryWireEstimate returns a deliberate OVER-estimate of the JSON
+// bytes a single AnnounceEntry contributes to an announce frame (legacy/v2
+// AnnounceRouteFrame and the v3 RouteAnnounceV3Entry — whichever is larger,
+// so one estimate is safe for both chunkers).  It exists only so the
+// chunkers can decide when a chunk is comfortably under budget and SKIP the
+// expensive precise marshal; it must never under-estimate, or an oversize
+// chunk could slip past the cheap gate and the send path would then fail the
+// whole chunk WITHOUT the per-entry skip+report the precise path performs.
+//
+// Every variable-length string field is charged its raw length PLUS its
+// worst-case HTML-escape expansion (jsonStringEscapeOverhead).  This matters
+// because AnnounceRouteFrame.MarshalJSON (and the v3 marshaller) round-trips
+// the data through Go's encoder, whose post-Marshaler compaction re-escapes
+// '<', '>' and '&' (one byte → six) in both keys and values.  Crucially this
+// is applied to Identity and Origin as well as Extra: RouteEntry.Validate
+// does NOT enforce a hex/base64url shape, so a malicious or buggy route can
+// carry raw '<' bytes in its identity that balloon ~6× on re-announce.
+// Counting the escape overhead per-field keeps the estimate a true upper
+// bound for arbitrary content while charging clean fingerprints zero, so the
+// dominant hot path (small ASCII entries, nil Extra) still fast-accepts with
+// no marshal.  AttestedSig is base64 (escape-free alphabet), so it is charged
+// 1× plus its "sig" wrapper.
+//
+// The precise byte budget is still enforced by the real marshal at the
+// boundary — this estimate only governs the fast path, where its job is to
+// be conservatively large, not exact.
+func announceEntryWireEstimate(e routing.AnnounceEntry) int {
+	// fixedSlack covers: {"identity":"","origin":"","hops":N,"seq_no":N,
+	// "extra":}, the trailing comma, and worst-case 20-digit hops/seq_no.
+	const fixedSlack = 160
+	n := fixedSlack
+	n += len(e.Identity) + jsonStringEscapeOverhead(e.Identity)
+	n += len(e.Origin) + jsonStringEscapeOverhead(e.Origin)
+	n += len(e.Extra) + jsonStringEscapeOverhead(e.Extra)
+	if len(e.AttestedSig) > 0 {
+		// v3 only: base64 of the sig (~4/3 expansion) plus its "sig":"" wrapper.
+		n += (len(e.AttestedSig)+2)/3*4 + 12
+	}
+	return n
+}
+
+// announceFastAcceptBudget is the running-estimate ceiling below which an
+// entry is packed into the current chunk WITHOUT a precise marshal.  Set to
+// half the wire budget: with maxBytes = MaxFrameLine (128 KiB) and the
+// 100-entry count cap, a typical chunk of ~100 small entries lands near
+// ~25 KiB, far under 64 KiB, so the common path does zero per-entry
+// marshals (the old code marshalled the whole growing chunk on EVERY entry —
+// O(n²) bytes).  Only chunks whose entries carry large Extra/Sig blobs and
+// actually approach the byte limit fall through to the precise marshal,
+// where the exact boundary still decides.  The 2× headroom dwarfs the
+// constant frame-envelope overhead the per-entry estimate omits, so a
+// fast-accepted chunk can never exceed maxBytes.
+func announceFastAcceptBudget(maxBytes int) int { return maxBytes / 2 }
+
 // chunkAnnounceEntriesBySize splits a route slice into wire-safe chunks.
 // Each chunk's serialized announce frame fits within maxBytes.
 //
@@ -247,11 +331,14 @@ func chunkAnnounceEntriesBySize(entries []routing.AnnounceEntry, kind announceWi
 		return nil, nil
 	}
 	var current []routing.AnnounceEntry
+	curEst := 0 // running over-estimate of current's marshalled size.
+	fastBudget := announceFastAcceptBudget(maxBytes)
 	flushCurrent := func() {
 		if len(current) > 0 {
 			chunks = append(chunks, current)
 			current = nil
 		}
+		curEst = 0
 	}
 	for i, entry := range entries {
 		// Phase 4 13.5 entry-count cap: flush the current chunk and
@@ -261,6 +348,32 @@ func chunkAnnounceEntriesBySize(entries []routing.AnnounceEntry, kind announceWi
 		if len(current) >= maxRoutesPerAnnounceFrame {
 			flushCurrent()
 		}
+
+		// Fast path: if the running over-estimate plus this entry stays
+		// under half the budget, the chunk is provably under maxBytes —
+		// accept without marshalling. This is the common case (small
+		// route entries) and is what eliminates the per-entry O(n²)
+		// marshal of the whole growing chunk. The estimate charges every
+		// string field — identity, origin AND Extra — its worst-case
+		// HTML-escape expansion (announceEntryWireEstimate), so an entry
+		// whose '<'/'>'/'&' bytes balloon ~6× on re-encode cannot fast-pass
+		// the gate and then overflow the real frame on the send path.
+		//
+		// Caveat vs. the precise branch: skipping the marshal also skips
+		// the genuine-encode-error check that would otherwise drop a single
+		// entry whose Extra is malformed. Extra is valid-JSON-or-nil by
+		// construction (received Extra round-tripped through unmarshal;
+		// local routes carry nil), so this cannot fire in practice, and the
+		// send path re-marshals the assembled frame under the same limit —
+		// a corrupt entry would fail there, never ship malformed.
+		est := announceEntryWireEstimate(entry)
+		if curEst+est <= fastBudget {
+			current = append(current, entry)
+			curEst += est
+			continue
+		}
+
+		// Near the budget — fall back to the exact marshal to decide.
 		candidate := append(current, entry)
 		frame := buildAnnounceFrame(kind, candidate)
 		if _, err := protocol.MarshalFrameLineWithLimit(frame, maxBytes); err != nil {
@@ -282,9 +395,11 @@ func chunkAnnounceEntriesBySize(entries []routing.AnnounceEntry, kind announceWi
 				continue
 			}
 			current = []routing.AnnounceEntry{entry}
+			curEst = est
 			continue
 		}
 		current = candidate
+		curEst += est
 	}
 	flushCurrent()
 	return chunks, skipped
@@ -597,11 +712,14 @@ func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind str
 		return len(f.RawLine), nil
 	}
 	var current []routing.AnnounceEntry
+	curEst := 0 // running over-estimate of current's marshalled size.
+	fastBudget := announceFastAcceptBudget(maxBytes)
 	flushCurrent := func() {
 		if len(current) > 0 {
 			chunks = append(chunks, current)
 			current = nil
 		}
+		curEst = 0
 	}
 	for i, entry := range entries {
 		// Phase 4 13.5 entry-count cap mirror of the legacy chunker —
@@ -609,6 +727,18 @@ func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind str
 		if len(current) >= maxRoutesPerAnnounceFrame {
 			flushCurrent()
 		}
+
+		// Fast path: provably under budget by the over-estimate — accept
+		// without the per-entry measure() (which here also runs base64 +
+		// time formatting through buildRouteAnnounceV3Frame, so skipping
+		// it is doubly worth it). Mirrors chunkAnnounceEntriesBySize.
+		est := announceEntryWireEstimate(entry)
+		if curEst+est <= fastBudget {
+			current = append(current, entry)
+			curEst += est
+			continue
+		}
+
 		candidate := append(current, entry)
 		size, err := measure(candidate)
 		if err != nil {
@@ -619,6 +749,7 @@ func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind str
 		}
 		if size <= maxBytes {
 			current = candidate
+			curEst += est
 			continue
 		}
 		// Candidate would exceed the budget — close the current chunk and
@@ -630,6 +761,7 @@ func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind str
 			continue
 		}
 		current = []routing.AnnounceEntry{entry}
+		curEst = est
 	}
 	flushCurrent()
 	return chunks, skipped

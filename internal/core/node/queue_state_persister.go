@@ -18,6 +18,39 @@ import (
 // that interactive UI state changes don't appear lossy.
 const defaultQueueStatePersistDebounce = 200 * time.Millisecond
 
+// defaultQueueStateMinWriteInterval is the write-ceiling: the minimum
+// wall-clock gap the persister enforces between two full snapshot+marshal
+// writes.  The debounce window above collapses a burst into one write, but
+// under SUSTAINED churn (a 600-node mesh with continuous route flap fires
+// MarkDirty without ever going quiet) the debounce elapses every cycle and
+// the persister marshals the entire queue ~5×/s.  Profiling attributed the
+// single largest slice of process alloc_space and a third of CPU to this
+// path (encoding/json.Marshal + GC drain).
+//
+// The ceiling caps that to one full write per interval regardless of churn:
+// MarkDirty keeps setting the dirty flag, but the writer holds off until the
+// interval elapses, then captures the LATEST state in a single marshal.
+//
+// Durability trade-off (product-relevant — confirm before tuning):
+// raising the ceiling from the 200ms debounce to this value widens the
+// crash-recovery window from ~200ms to up to this interval.  Concretely,
+// pending and local outbound state that first appeared AFTER the most recent
+// write can be lost if the process dies before the next ceiling-gated write.
+// The exposure is narrow and asymmetric:
+//   - Graceful shutdown is NOT exposed: Run's ctx-cancel path and FlushSync
+//     both go through finalFlush, which BYPASSES the ceiling and writes the
+//     latest state synchronously.  Normal restarts/upgrades lose nothing.
+//   - Only an abrupt death loses the window: SIGKILL / kill -9, an OOM kill,
+//     a panic that skips graceful teardown, container/VM termination, or
+//     power loss.  In those cases the on-disk file can lag in-memory state by
+//     up to this interval.
+// That residual loss is acceptable for the queue-state file specifically: it
+// is a best-effort crash-recovery checkpoint, and the queue re-syncs from
+// peers on reconnect, so a couple of seconds of staleness costs at most a
+// re-request, never silent message loss.  Lower this constant if a tighter
+// hard-crash window is required and the extra write frequency is tolerable.
+const defaultQueueStateMinWriteInterval = 2 * time.Second
+
 // queueStatePersisterDeps bundles the collaborators required by
 // queueStatePersister.  The single opts struct is the contract between the
 // persister and whatever owns the on-disk file and the in-memory queue
@@ -34,6 +67,18 @@ type queueStatePersisterDeps struct {
 	// Save.  Zero collapses into no debouncing and is allowed but
 	// discouraged in production.
 	DebounceInterval time.Duration
+	// MinWriteInterval is the write-ceiling: the minimum gap enforced
+	// between two loop-driven Save calls so sustained churn cannot drive
+	// a full marshal every debounce window.  Zero (the default for the
+	// test fixtures and any caller that does not set it) disables the
+	// ceiling entirely, preserving the original debounce-only cadence.
+	// finalFlush / FlushSync ignore it so shutdown always persists.  See
+	// defaultQueueStateMinWriteInterval for the rationale and trade-off.
+	MinWriteInterval time.Duration
+	// Now returns the current wall-clock time.  Nil means time.Now; tests
+	// inject a controllable clock so the write-ceiling is exercised
+	// deterministically without sleeping.  Only the ceiling consults it.
+	Now func() time.Time
 	// Snapshot produces an immutable copy of the current queue state.
 	// Implementations must acquire any in-memory lock themselves (the
 	// Service wiring takes s.peerMu.RLock so UI-tickers and other readers
@@ -69,6 +114,12 @@ type queueStatePersister struct {
 	dirty  atomic.Int32
 	wakeCh chan struct{}
 	flushM sync.Mutex // serialises FlushSync against itself and the Run writer.
+	// lastWriteNanos is the Unix-nanos timestamp of the most recent Save
+	// attempt (success or failure), 0 until the first write.  Read by the
+	// Run loop's write-ceiling check and written under flushM by
+	// flushFromLoop / finalFlush; stored atomically so the loop's read in
+	// minWriteWait never needs flushM.
+	lastWriteNanos atomic.Int64
 }
 
 func newQueueStatePersister(deps queueStatePersisterDeps) *queueStatePersister {
@@ -129,8 +180,51 @@ func (p *queueStatePersister) Run(ctx context.Context) {
 			return
 		}
 
+		// Write-ceiling: under sustained churn the debounce above elapses
+		// every cycle, so without this the persister would marshal the whole
+		// queue on every window.  Hold off until MinWriteInterval has passed
+		// since the last write; the dirty flag stays set so the eventual
+		// write captures the latest state.  Wait is ctx-aware — a cancel mid
+		// hold-off drops to finalFlush (which ignores the ceiling) so the
+		// last state still reaches disk on shutdown.
+		if wait := p.minWriteWait(); wait > 0 {
+			if !p.deps.Wait(ctx, wait) {
+				p.finalFlush()
+				return
+			}
+		}
+
 		p.flushFromLoop()
 	}
+}
+
+// now returns the persister's clock, defaulting to time.Now when no clock
+// was injected.  Only the write-ceiling path consults it.
+func (p *queueStatePersister) now() time.Time {
+	if p.deps.Now != nil {
+		return p.deps.Now()
+	}
+	return time.Now()
+}
+
+// minWriteWait returns how long the loop must hold off before the next
+// full write so consecutive writes are spaced at least MinWriteInterval
+// apart.  Returns 0 when the ceiling is disabled (MinWriteInterval <= 0),
+// when no write has happened yet (lastWriteNanos == 0), or when the
+// interval has already elapsed.
+func (p *queueStatePersister) minWriteWait() time.Duration {
+	if p.deps.MinWriteInterval <= 0 {
+		return 0
+	}
+	last := p.lastWriteNanos.Load()
+	if last == 0 {
+		return 0
+	}
+	elapsed := p.now().Sub(time.Unix(0, last))
+	if elapsed >= p.deps.MinWriteInterval {
+		return 0
+	}
+	return p.deps.MinWriteInterval - elapsed
 }
 
 // flushFromLoop performs one dirty-guarded snapshot+save.  The dirty flag
@@ -143,6 +237,12 @@ func (p *queueStatePersister) flushFromLoop() {
 	if p.dirty.Swap(0) == 0 {
 		return
 	}
+	// Record the write attempt time before Save so the next loop iteration's
+	// write-ceiling measures from here.  Stamped on attempt (not just
+	// success) so a failing disk does not let the ceiling collapse into a
+	// retry-storm; the re-armed dirty flag below still schedules a retry,
+	// but no sooner than MinWriteInterval.
+	p.lastWriteNanos.Store(p.now().UnixNano())
 	snapshot := p.deps.Snapshot()
 	if err := p.deps.Save(p.deps.Path, snapshot); err != nil {
 		log.Error().
@@ -170,6 +270,10 @@ func (p *queueStatePersister) finalFlush() {
 	if p.dirty.Swap(0) == 0 {
 		return
 	}
+	// Stamp the write time here too so a finalFlush followed by a still-
+	// running loop (not possible today, but cheap to keep consistent)
+	// spaces correctly.  finalFlush itself ignores the ceiling.
+	p.lastWriteNanos.Store(p.now().UnixNano())
 	snapshot := p.deps.Snapshot()
 	if err := p.deps.Save(p.deps.Path, snapshot); err != nil {
 		log.Error().
