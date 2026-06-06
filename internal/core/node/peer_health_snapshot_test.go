@@ -1,12 +1,14 @@
 package node
 
 import (
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
 // TestPeerHealthFramesDoesNotBlockOnSMu is the regression test for the
@@ -233,6 +235,84 @@ func TestMaybeRebuildPeerHealthSnapshot_GatesOnRecentReader(t *testing.T) {
 	_ = svc.peerHealthFrames()
 	if svc.peerHealthAccessNanos.Load() == 0 {
 		t.Fatal("peerHealthFrames must record reader access")
+	}
+}
+
+// TestRebuildPeerHealthSnapshot_InboundIndexMatchesPerPeerScan verifies the
+// Level-1 churn fix: rebuildPeerHealthSnapshot now builds the inbound
+// address→{ids,caps} index ONCE and looks peers up in it, instead of a
+// per-peer inbound scan (each a full s.conns walk) for conn IDs and caps.
+// This pins that the indexed path still surfaces ALL inbound conn IDs
+// for an address and the inbound capabilities — i.e. the dedup did not drop
+// or reorder data relative to the per-peer scan contract.
+func TestRebuildPeerHealthSnapshot_InboundIndexMatchesPerPeerScan(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	addr := domain.PeerAddress("indexed-peer-1")
+	caps := []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1}
+
+	// Two inbound connections that both declared the same overlay address —
+	// inboundConnIDs must carry BOTH ids.
+	mk := func(id netcore.ConnID, ip string, port int) net.Conn {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
+		conn := &fakeConn{Conn: local, remoteAddr: &net.TCPAddr{IP: net.ParseIP(ip), Port: port}}
+		core := netcore.New(id, conn, netcore.Inbound, netcore.Options{})
+		t.Cleanup(func() { core.Close() })
+		core.SetAddress(addr)
+		core.SetCapabilities(caps)
+		svc.peerMu.Lock()
+		svc.setTestConnEntryLocked(conn, &connEntry{core: core, tracked: true})
+		svc.peerMu.Unlock()
+		return conn
+	}
+	mk(netcore.ConnID(101), "10.0.0.11", 30011)
+	mk(netcore.ConnID(102), "10.0.0.12", 30012)
+
+	svc.peerMu.Lock()
+	svc.health[addr] = &peerHealth{Address: addr, Connected: true, Direction: peerDirectionInbound}
+	svc.peerMu.Unlock()
+
+	svc.rebuildPeerHealthSnapshot()
+	snap := svc.loadPeerHealthSnapshot()
+	if snap == nil {
+		t.Fatal("expected snapshot")
+	}
+
+	var rec *peerHealthRecord
+	for i := range snap.records {
+		if snap.records[i].health.Address == addr {
+			rec = &snap.records[i]
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatalf("address %q missing from snapshot records", addr)
+	}
+
+	// Both inbound conn IDs present (order is non-deterministic — check as a set).
+	gotIDs := map[uint64]bool{}
+	for _, id := range rec.inboundConnIDs {
+		gotIDs[id] = true
+	}
+	if len(rec.inboundConnIDs) != 2 || !gotIDs[101] || !gotIDs[102] {
+		t.Fatalf("inboundConnIDs = %v, want {101,102}", rec.inboundConnIDs)
+	}
+
+	// Capabilities resolved through the index (no session → inbound fallback).
+	wantCaps := domain.CapabilityStrings(caps)
+	if len(rec.capabilities) != len(wantCaps) {
+		t.Fatalf("capabilities = %v, want %v", rec.capabilities, wantCaps)
+	}
+	gotCaps := map[string]bool{}
+	for _, c := range rec.capabilities {
+		gotCaps[c] = true
+	}
+	for _, c := range wantCaps {
+		if !gotCaps[c] {
+			t.Fatalf("capabilities = %v, missing %q (want %v)", rec.capabilities, c, wantCaps)
+		}
 	}
 }
 

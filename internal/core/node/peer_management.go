@@ -3720,27 +3720,23 @@ func enrichCaptureFields(phf *protocol.PeerHealthFrame, snaps map[domain.ConnID]
 	phf.RecordingDroppedEvents = snap.DroppedEvt
 }
 
-// peerCapabilitiesLocked returns the negotiated capabilities for a peer
-// as wire-format strings for PeerHealthFrame.  Checks outbound sessions
-// first, then falls back to inbound NetCores.
-// Reads s.sessions and peer-domain inbound-conn state — caller MUST
-// hold s.peerMu (read or write).
-func (s *Service) peerCapabilitiesLocked(address domain.PeerAddress) []string {
+// peerCapabilitiesFromIndexLocked returns the negotiated capabilities for a
+// peer as wire-format strings for PeerHealthFrame.  An active outbound
+// session's capabilities win; otherwise it falls back to the inbound
+// capabilities supplied via the pre-built address→caps index.
+//
+// The index is the point of this helper: rebuildPeerHealthSnapshot builds it
+// in a single s.conns pass and calls this per peer, so the inbound fallback
+// is an O(1) map lookup instead of a full forEachInboundConnLocked scan (with
+// a capability clone per entry) per peer — the old per-peer form was
+// O(peers × conns) and a top allocator in profiling.  Caller MUST hold
+// s.peerMu; the index MUST have been built under the same lock hold so the
+// session and inbound views are consistent.
+func (s *Service) peerCapabilitiesFromIndexLocked(address domain.PeerAddress, inboundCaps map[domain.PeerAddress][]string) []string {
 	if session := s.resolveSessionLocked(address); session != nil && len(session.capabilities) > 0 {
 		return domain.CapabilityStrings(session.capabilities)
 	}
-	var result []string
-	s.forEachInboundConnLocked(func(info connInfo) bool {
-		// Outbound NetCores surface their capabilities via s.sessions
-		// (checked above); skip them here so a pre-activation outbound
-		// entry cannot answer on the inbound fallback path.
-		if info.address == address && len(info.capabilities) > 0 {
-			result = domain.CapabilityStrings(info.capabilities)
-			return false // Stop iteration
-		}
-		return true
-	})
-	return result
+	return inboundCaps[address]
 }
 
 func (s *Service) computePeerStateAtLocked(health *peerHealth, now time.Time) string {

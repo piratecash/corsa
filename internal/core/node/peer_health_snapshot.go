@@ -91,12 +91,20 @@ func (s *Service) loadPeerHealthSnapshot() *peerHealthSnapshot {
 
 // rebuildPeerHealthSnapshot constructs a fresh snapshot under a short
 // s.peerMu.RLock → s.deliveryMu.RLock window, then stores it atomically.
-// All derived lookups (peerCapabilitiesLocked, inboundConnIDsLocked,
-// resolveHealthAddress, etc.) run inside the RLock window — they require
-// read access to peer-domain state (and pendingCount requires delivery-
-// domain state) — but no formatting, sorting or wire conversion happens
-// here.  The RPC handler performs those steps lock-free against the
-// cached records.
+// All derived lookups (the inbound address→{ids,caps} index built once up
+// front, peerCapabilitiesFromIndexLocked, resolveHealthAddress, etc.) run
+// inside the RLock window — they require read access to peer-domain state
+// (and pendingCount requires delivery-domain state) — but no formatting,
+// sorting or wire conversion happens here.  The RPC handler performs those
+// steps lock-free against the cached records.
+//
+// The inbound connection metadata (conn IDs and capabilities per address) is
+// gathered in a SINGLE s.conns pass into a local index, not via a per-peer
+// inbound scan (the shape inboundConnIDsLocked still uses for single-address
+// callers): with P peers and C inbound conns the per-peer form is O(P×C)
+// scans plus a capability clone per (peer, conn), which profiling flagged as
+// the dominant allocator left after the queue/announce fixes.  One pass makes
+// it O(C).
 //
 // The per-peer live traffic delta is folded into record.health.BytesSent /
 // BytesReceived so the handler can emit the frame without revisiting
@@ -154,6 +162,28 @@ func (s *Service) rebuildPeerHealthSnapshot() {
 
 	live := s.liveTrafficLocked()
 
+	// Build the inbound-connection index once for the whole rebuild. A
+	// per-peer inbound scan (forEachInboundConnLocked) walks all of s.conns,
+	// and snapshotEntryLocked clones the capability slice on every entry — so
+	// resolving conn IDs and caps per peer is O(peers × conns) scans and
+	// clones, the churn profiling flagged here (snapshotEntryLocked, cloneCaps,
+	// forEachInboundConnLocked). One pass collapses that to O(conns) here plus
+	// O(1) map lookups in the loops below. Built inside the same RLock window,
+	// so the view is identical to the old per-peer scans; map iteration order
+	// is non-deterministic in both, matching the prior "any inbound conn's
+	// caps" / "all inbound ids for the address" contracts.
+	inboundIDsByAddr := make(map[domain.PeerAddress][]uint64)
+	inboundCapsByAddr := make(map[domain.PeerAddress][]string)
+	s.forEachInboundConnLocked(func(info connInfo) bool {
+		inboundIDsByAddr[info.address] = append(inboundIDsByAddr[info.address], uint64(info.id))
+		if len(info.capabilities) > 0 {
+			if _, ok := inboundCapsByAddr[info.address]; !ok {
+				inboundCapsByAddr[info.address] = domain.CapabilityStrings(info.capabilities)
+			}
+		}
+		return true
+	})
+
 	records := make([]peerHealthRecord, 0, len(s.health))
 	for _, health := range s.health {
 		rec := peerHealthRecord{
@@ -162,9 +192,9 @@ func (s *Service) rebuildPeerHealthSnapshot() {
 			clientVersion:        s.peerVersions[health.Address],
 			clientBuild:          s.peerBuilds[health.Address],
 			pendingCount:         len(s.pending[health.Address]),
-			capabilities:         s.peerCapabilitiesLocked(health.Address),
+			capabilities:         s.peerCapabilitiesFromIndexLocked(health.Address, inboundCapsByAddr),
 			versionLockoutActive: s.isPeerVersionLockedOutLocked(health.Address),
-			inboundConnIDs:       s.inboundConnIDsLocked(health.Address),
+			inboundConnIDs:       inboundIDsByAddr[health.Address],
 		}
 		// Fold live traffic delta into the embedded health's byte counters
 		// so the RPC handler does not need a second lookup.  The underlying
@@ -198,10 +228,10 @@ func (s *Service) rebuildPeerHealthSnapshot() {
 			peerID:         s.peerIDs[addr],
 			clientVersion:  s.peerVersions[addr],
 			clientBuild:    s.peerBuilds[addr],
-			capabilities:   s.peerCapabilitiesLocked(addr),
+			capabilities:   s.peerCapabilitiesFromIndexLocked(addr, inboundCapsByAddr),
 			sent:           lv.sent,
 			received:       lv.received,
-			inboundConnIDs: s.inboundConnIDsLocked(addr),
+			inboundConnIDs: inboundIDsByAddr[addr],
 		}
 		if session, ok := s.sessions[addr]; ok {
 			ilr.sessionVersion = session.version
