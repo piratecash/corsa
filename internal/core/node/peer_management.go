@@ -3313,12 +3313,13 @@ func (s *Service) nextConnIDLocked() domain.ConnID {
 // (read or write).
 func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 	var ids []uint64
-	s.forEachInboundConnLocked(func(info connInfo) bool {
-		// The registry holds both directions. Outbound
-		// NetCores must stay invisible on inbound-only lookup paths —
-		// they are surfaced through s.sessions once activated.
-		if info.address == address {
-			ids = append(ids, uint64(info.id))
+	// Lightweight scan: connID-by-address needs no capabilities, so skip the
+	// snapshotEntryLocked cloneCaps copy (forEachInboundConnIDLocked). The
+	// registry holds both directions; outbound NetCores are filtered out by
+	// the helper (Dir != Inbound) and surface through s.sessions once active.
+	s.forEachInboundConnIDLocked(func(id domain.ConnID, addr domain.PeerAddress, _ bool) bool {
+		if addr == address {
+			ids = append(ids, uint64(id))
 		}
 		return true
 	})
@@ -3336,16 +3337,18 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 func (s *Service) inboundConnIDForAddressLocked(address domain.PeerAddress) (domain.ConnID, bool) {
 	var result domain.ConnID
 	var found bool
-	s.forEachInboundConnLocked(func(info connInfo) bool {
+	// Lightweight scan (no cloneCaps): this is the sendMessageToPeer relay hot
+	// path, called per message — it only needs id/address/tracked, never
+	// capabilities. See forEachInboundConnIDLocked.
+	s.forEachInboundConnIDLocked(func(id domain.ConnID, addr domain.PeerAddress, tracked bool) bool {
 		// Only return tracked connections for the given address.
-		if info.address != address {
+		if addr != address {
 			return true
 		}
-		// The walker already filters to inbound; the snapshot's tracked
-		// flag is the single source of truth here, no second registry
-		// hop required.
-		if info.tracked {
-			result = info.id
+		// The walker already filters to inbound; the tracked flag is the
+		// single source of truth here, no second registry hop required.
+		if tracked {
+			result = id
 			found = true
 			return false // Stop iteration
 		}

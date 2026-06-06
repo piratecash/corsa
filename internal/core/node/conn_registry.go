@@ -388,6 +388,31 @@ func (s *Service) forEachInboundConnLocked(fn func(connInfo) bool) {
 	}
 }
 
+// forEachInboundConnIDLocked is a LIGHTWEIGHT variant of
+// forEachInboundConnLocked for callers that only need to match or return
+// connection IDs by overlay address (inboundConnIDsLocked,
+// inboundConnIDForAddressLocked). It reads ONLY id / address / tracked and
+// deliberately does NOT build a connInfo via snapshotEntryLocked — that path
+// calls core.Capabilities(), whose per-call cloneCaps copy showed up as GC
+// churn on the sendMessageToPeer → inboundConnIDForAddressLocked hot path,
+// even though capabilities are irrelevant to a connID-by-address lookup.
+// fn is invoked once per inbound connection; iteration stops when fn returns
+// false. The caller must hold s.peerMu.
+func (s *Service) forEachInboundConnIDLocked(fn func(id domain.ConnID, address domain.PeerAddress, tracked bool) bool) {
+	for id, entry := range s.conns {
+		if entry == nil || entry.core == nil {
+			continue
+		}
+		core := entry.core
+		if core.Dir() != netcore.Inbound {
+			continue
+		}
+		if !fn(id, core.Address(), entry.tracked) {
+			return
+		}
+	}
+}
+
 // forEachTrackedInboundConnLocked iterates over all registered inbound
 // connections that are marked as tracked (i.e., have completed
 // authentication), calling fn with a connInfo snapshot per entry. Iteration

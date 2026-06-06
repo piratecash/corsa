@@ -731,3 +731,53 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 		t.Error("peer_address and remote_address should differ in fallback scenario")
 	}
 }
+
+// TestInboundConnIDLookups_LightweightScan pins the behaviour of the
+// cloneCaps-free connID-by-address lookups (forEachInboundConnIDLocked):
+// inboundConnIDsLocked returns every inbound conn ID for an address (and never
+// outbound ones), and inboundConnIDForAddressLocked returns a TRACKED inbound
+// conn (not an untracked one). This is the sendMessageToPeer relay hot path,
+// so it must stay correct after dropping the capability snapshot.
+func TestInboundConnIDLookups_LightweightScan(t *testing.T) {
+	svc := activeConnTestService(t)
+	addrA := domain.PeerAddress("10.0.0.1:64646")
+	addrB := domain.PeerAddress("10.0.0.2:64646")
+
+	c1, cl1 := testInboundCore(t, addrA, "idA1", domain.ConnID(1))
+	defer cl1()
+	c2, cl2 := testInboundCore(t, addrA, "idA2", domain.ConnID(2))
+	defer cl2()
+	c3, cl3 := testInboundCore(t, addrB, "idB", domain.ConnID(3))
+	defer cl3()
+	// Outbound conn for addrA — must be invisible to inbound lookups.
+	oserver, oclient := net.Pipe()
+	defer func() { _ = oclient.Close() }()
+	c4 := netcore.New(domain.ConnID(4), oserver, netcore.Outbound, netcore.Options{Address: addrA})
+	defer c4.Close()
+
+	svc.conns[domain.ConnID(1)] = &connEntry{core: c1, tracked: true}
+	svc.conns[domain.ConnID(2)] = &connEntry{core: c2, tracked: false}
+	svc.conns[domain.ConnID(3)] = &connEntry{core: c3, tracked: true}
+	svc.conns[domain.ConnID(4)] = &connEntry{core: c4, tracked: true}
+
+	// inboundConnIDsLocked(addrA) → both inbound IDs (1,2), never outbound 4.
+	ids := svc.inboundConnIDsLocked(addrA)
+	got := map[uint64]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if len(ids) != 2 || !got[1] || !got[2] {
+		t.Fatalf("inboundConnIDsLocked(addrA) = %v, want {1,2}", ids)
+	}
+
+	// inboundConnIDForAddressLocked prefers the TRACKED conn (1, not untracked 2).
+	if id, ok := svc.inboundConnIDForAddressLocked(addrA); !ok || id != domain.ConnID(1) {
+		t.Fatalf("inboundConnIDForAddressLocked(addrA) = (%d,%v), want (1,true)", id, ok)
+	}
+	if id, ok := svc.inboundConnIDForAddressLocked(addrB); !ok || id != domain.ConnID(3) {
+		t.Fatalf("inboundConnIDForAddressLocked(addrB) = (%d,%v), want (3,true)", id, ok)
+	}
+	if _, ok := svc.inboundConnIDForAddressLocked(domain.PeerAddress("nope:1")); ok {
+		t.Fatal("inboundConnIDForAddressLocked(unknown) should return ok=false")
+	}
+}
