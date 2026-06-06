@@ -125,28 +125,53 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	var extracted []pendingMatch
 	extractMeta := make(map[domain.PeerAddress]*addrExtractMeta)
 	for addr, frames := range s.pending {
-		var kept []pendingFrame
-		var meta *addrExtractMeta
-		for i, item := range frames {
+		// Cheap pre-scan: does this address hold ANY frame addressed to
+		// one of the drain identities? Drain is triggered on routing /
+		// announce churn, and the overwhelming majority of those
+		// triggers match NOTHING in a given address — the queue is
+		// dominated by recipientless frames (gossip / malformed) and
+		// frames for other recipients. The previous code rebuilt a fresh
+		// `kept` slice and copied every non-matching frame into it on
+		// EVERY trigger for EVERY address, which profiling flagged as the
+		// single largest allocation source (multi-GB alloc_space churn /
+		// GC pressure under sustained route churn). Skipping untouched
+		// addresses leaves their slice in place with zero allocation.
+		// recipientFromPendingFrame is a cheap field read, so the extra
+		// scan over matched addresses (recomputed below) is negligible
+		// next to the eliminated copies.
+		hasMatch := false
+		for _, item := range frames {
 			recipient := recipientFromPendingFrame(item.Frame)
 			if recipient == "" {
-				kept = append(kept, item)
 				continue
 			}
-			if _, ok := identities[domain.PeerIdentity(recipient)]; !ok {
-				kept = append(kept, item)
-				continue
+			if _, ok := identities[domain.PeerIdentity(recipient)]; ok {
+				hasMatch = true
+				break
 			}
-			if meta == nil {
-				meta = &addrExtractMeta{origLen: len(frames)}
+		}
+		if !hasMatch {
+			continue // address untouched — no allocation, no copy
+		}
+
+		// At least one match — compact survivors into a fresh slice.
+		// This allocation happens only for addresses that actually have
+		// work this cycle, not for the whole queue.
+		kept := make([]pendingFrame, 0, len(frames))
+		meta := &addrExtractMeta{origLen: len(frames)}
+		for i, item := range frames {
+			recipient := recipientFromPendingFrame(item.Frame)
+			if recipient != "" {
+				if _, ok := identities[domain.PeerIdentity(recipient)]; ok {
+					meta.extractedPos = append(meta.extractedPos, i)
+					extracted = append(extracted, pendingMatch{peerAddr: addr, item: item, origIdx: i})
+					delete(s.pendingKeys, pendingFrameKey(addr, item.Frame))
+					continue
+				}
 			}
-			meta.extractedPos = append(meta.extractedPos, i)
-			extracted = append(extracted, pendingMatch{peerAddr: addr, item: item, origIdx: i})
-			delete(s.pendingKeys, pendingFrameKey(addr, item.Frame))
+			kept = append(kept, item)
 		}
-		if meta != nil {
-			extractMeta[addr] = meta
-		}
+		extractMeta[addr] = meta
 		if len(kept) == 0 {
 			delete(s.pending, addr)
 		} else {

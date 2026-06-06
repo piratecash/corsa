@@ -92,7 +92,15 @@ func saveQueueState(path string, state queueStateFile) error {
 		return wrapQueuePersistErr("create queue state directory", err)
 	}
 
-	payload, err := json.MarshalIndent(state, "", "  ")
+	// json.Marshal (compact), NOT MarshalIndent: the queue-state file is
+	// machine-read on restart, never by a human, so pretty-printing is
+	// pure overhead. Under sustained route churn this file is re-written
+	// every debounce window over a potentially large pending queue;
+	// MarshalIndent's whitespace roughly doubles both the allocation and
+	// the bytes written each time (profiling flagged this path at
+	// multi-GB cumulative alloc_space). Compact output is byte-for-byte
+	// loadable by the existing json.Unmarshal reader.
+	payload, err := json.Marshal(state)
 	if err != nil {
 		return wrapQueuePersistErr("marshal queue state", err)
 	}

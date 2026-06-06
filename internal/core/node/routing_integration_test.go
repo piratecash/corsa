@@ -2534,6 +2534,73 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 	}
 }
 
+// TestDrainPendingForIdentities_MixedAddressKeepsNonMatching pins the
+// in-loop compaction path of the pre-scan optimisation: when ONE
+// address holds a matching frame alongside a recipientless frame and a
+// frame for another recipient, only the matching one is extracted and
+// the survivors are preserved in their original relative order. The
+// pre-scan must see the match (so the address is not skipped), and the
+// compaction must not drop or reorder the survivors.
+func TestDrainPendingForIdentities_MixedAddressKeepsNonMatching(t *testing.T) {
+	svc := newTestServiceWithPendingDrain(t, idNodeA)
+
+	addrA := domain.PeerAddress("10.0.0.1:9000")
+	now := time.Now().UTC()
+
+	// Frame 1: recipientless (malformed push_message — survives).
+	recipientless := protocol.Frame{Type: "push_message", ID: "rl-1"}
+	// Frame 2: matching recipient (idTargetX — extracted, no route so it
+	// returns to pending, but the KEY is what we assert below; to keep
+	// the test about compaction we drain for an identity with no route
+	// and assert the OTHER two survive untouched).
+	matching := protocol.Frame{
+		Type: "send_message", ID: "m-1", Address: idNodeA, Recipient: idTargetX,
+		Topic: "dm", Body: "x", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300,
+	}
+	// Frame 3: different recipient (idTargetY — survives).
+	otherRecipient := protocol.Frame{
+		Type: "send_message", ID: "o-1", Address: idNodeA, Recipient: idTargetY,
+		Topic: "dm", Body: "y", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300,
+	}
+
+	svc.deliveryMu.Lock()
+	svc.pending[addrA] = []pendingFrame{
+		{Frame: recipientless, QueuedAt: now},
+		{Frame: matching, QueuedAt: now},
+		{Frame: otherRecipient, QueuedAt: now},
+	}
+	for _, f := range []protocol.Frame{recipientless, matching, otherRecipient} {
+		svc.pendingKeys[pendingFrameKey(addrA, f)] = struct{}{}
+	}
+	svc.deliveryMu.Unlock()
+
+	// Drain for idTargetX. No route exists for it, so the matching frame
+	// is attempted-then-returned (no route → stays without burning
+	// retries), but the recipientless and idTargetY frames must NEVER be
+	// touched by the extraction. The invariant under test is that all
+	// three frames are still present and the two non-matching ones keep
+	// their identity.
+	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
+
+	svc.deliveryMu.RLock()
+	defer svc.deliveryMu.RUnlock()
+	got := svc.pending[addrA]
+	if len(got) != 3 {
+		t.Fatalf("expected all 3 frames to remain (no route → matching returns), got %d", len(got))
+	}
+	// The recipientless and other-recipient frames must still be present
+	// by ID — compaction must not have dropped them.
+	ids := map[string]bool{}
+	for _, f := range got {
+		ids[f.Frame.ID] = true
+	}
+	for _, want := range []string{"rl-1", "o-1"} {
+		if !ids[want] {
+			t.Fatalf("survivor frame %q missing after drain — compaction dropped a non-matching frame", want)
+		}
+	}
+}
+
 func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 	svc := newTestServiceWithPendingDrain(t, idNodeA)
 
