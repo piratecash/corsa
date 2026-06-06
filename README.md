@@ -112,10 +112,11 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_ADVERTISE_PORT` — self-reported listening port placed into `hello.advertise_port` / `welcome.advertise_port` and used on the receive side as the authoritative listening-port source when building an announce candidate from the observed TCP IP. Accepts an integer in the inclusive `1..65535` range; empty, non-numeric, or out-of-range values fall back to `64646`. Set this explicitly **whenever the externally dialable port is not `64646`** — the runtime never derives `advertise_port` from `CORSA_LISTEN_ADDRESS`, so a node bound to `:64647` (with no NAT in the loop) still advertises `64646` and is undialable until `CORSA_ADVERTISE_PORT=64647` is set. The same rule covers the NAT / port-forward / reverse-proxy case where the public dial port differs from the local bind port. The inbound TCP source port is NEVER reused as a listening port. There is no `CORSA_ADVERTISE_ADDRESS` env knob in this build: the host component of the local node's external endpoint is no longer wire-published. Each peer announces other peers using the **observed TCP source host** plus that peer's `advertise_port`, so the local node never has to declare its own external IP — neighbours learn it from the packets that actually arrive (see `docs/protocol/handshake.md` → "Advertise Convergence")
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
-- `CORSA_QUEUE_STATE_PATH` — persisted pending-delivery and relay-retry state
+- `CORSA_QUEUE_STATE_PATH` — **deprecated**: path of the legacy queue-state file. Queue-state disk persistence has been removed; this file is now only *deleted* on startup (one-shot migration). Pending delivery is an in-memory ring (`CORSA_PENDING_RING_SIZE`) and does not survive a restart.
 - `CORSA_NODE_TYPE` — `full` or `client`
 - `CORSA_MAX_OUTGOING_PEERS` — max outbound peer sessions, default `8`
 - `CORSA_MAX_INCOMING_PEERS` — optional inbound peer cap; `0` means no app-level cap
+- `CORSA_PENDING_RING_SIZE` — per-peer in-memory pending ring capacity (frames queued for a momentarily-offline peer), default `200`. Hard memory bound: at capacity the oldest frame for that peer is evicted (ring), never spilled to disk — the pending queue is no longer persisted to `queue-<port>.json` (that file is deleted on startup). Raising it lets a reconnecting peer receive more missed frames, at the cost of RAM.
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS` — allowed past/future clock drift for relayed messages, default `600`
 - `CORSA_PPROF_ADDR` — diagnostics only, **off by default**. When set to a loopback address (e.g. `127.0.0.1:6060`) the node starts Go's `net/http/pprof` server for memory/CPU profiling. A non-loopback host is refused at startup — the surface exposes process internals and must never face the network. Use during an active investigation, then unset:
   ```
@@ -138,7 +139,7 @@ Message metadata and relay rules:
 - `auto-delete-ttl` messages are removed automatically after `ttl-seconds`
 - nodes reject and do not forward messages that are too far in the past or future
 - for direct messages, `ttl-seconds` is optional and acts as delivery lifetime counted from `created_at`
-- pending direct-message delivery and delivery-receipt retry state are persisted on disk and survive node restarts
+- pending direct-message delivery and delivery-receipt retry state are held in memory only (a bounded per-peer ring) and do **not** survive a node restart; recovery relies on sender-side end-to-end retry, not on-disk queue state
 - desktop delivery lifecycle for outgoing direct messages is: `queued -> retrying -> failed/expired -> delivered/seen`
 
 Node roles:
@@ -327,10 +328,11 @@ CORSA_LISTEN_ADDRESS=127.0.0.1:64647 CORSA_ADVERTISE_PORT=64647 CORSA_BOOTSTRAP_
 - `CORSA_ADVERTISE_PORT` — self-reported слушающий порт, помещаемый в `hello.advertise_port` / `welcome.advertise_port` и используемый приёмной стороной как авторитетный источник listening-порта при построении announce-кандидата из observed TCP IP. Принимает целое число в диапазоне `1..65535` включительно; пустые, нечисловые или вне диапазона значения фолбэчат к `64646`. Задавайте явно **всегда, когда внешне-дайлабельный порт не равен `64646`** — runtime никогда не выводит `advertise_port` из `CORSA_LISTEN_ADDRESS`, поэтому нода с bind-ом на `:64647` (без NAT в цепочке) всё равно анонсирует `64646` и остаётся недостижимой, пока не выставлено `CORSA_ADVERTISE_PORT=64647`. То же правило покрывает NAT / port-forward / reverse-proxy случаи, когда публичный dial-порт отличается от локального bind-порта. Входящий TCP source port НИКОГДА не переиспользуется как listening-порт. В этом билде нет `CORSA_ADVERTISE_ADDRESS`: host-часть внешнего endpoint'а локальной ноды больше не публикуется на проводе. Каждый пир анонсирует других пиров парой **наблюдаемый TCP source host** + `advertise_port` этого пира, так что локальной ноде вообще не приходится сообщать свой внешний IP — соседи учат его из пакетов, которые реально приходят (см. `docs/protocol/handshake.md` → «Advertise Convergence»)
 - `CORSA_BOOTSTRAP_PEERS` — список seed-нод через запятую
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
-- `CORSA_QUEUE_STATE_PATH` — persisted-состояние очереди доставки и relay retry
+- `CORSA_QUEUE_STATE_PATH` — **устарело**: путь legacy queue-state файла. Дисковый персист queue-state убран; файл теперь только *удаляется* при старте (one-shot миграция). Pending-доставка — in-memory кольцо (`CORSA_PENDING_RING_SIZE`) и не переживает рестарт.
 - `CORSA_NODE_TYPE` — `full` или `client`
 - `CORSA_MAX_OUTGOING_PEERS` — максимум исходящих peer-session, по умолчанию `8`
 - `CORSA_MAX_INCOMING_PEERS` — опциональный лимит на входящие peer-соединения; `0` означает без app-level лимита
+- `CORSA_PENDING_RING_SIZE` — ёмкость in-memory пер-пирового кольца pending (фреймы в очереди для временно-офлайн пира), по умолчанию `200`. Жёсткий лимит памяти: при переполнении вытесняется самый старый фрейм этого пира (кольцо), на диск ничего не сбрасывается — pending-очередь больше не персистится в `queue-<port>.json` (файл удаляется при старте). Увеличение позволяет переподключившемуся пиру получить больше пропущенных фреймов ценой RAM.
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS` — допустимый дрейф времени для ретранслируемых сообщений, по умолчанию `600`
 
 Метаданные сообщений и правила relay:
@@ -346,7 +348,7 @@ CORSA_LISTEN_ADDRESS=127.0.0.1:64647 CORSA_ADVERTISE_PORT=64647 CORSA_BOOTSTRAP_
 - сообщения с `auto-delete-ttl` автоматически удаляются после `ttl-seconds`
 - ноды отклоняют и не форвардят сообщения, которые слишком далеко в прошлом или будущем
 - для direct message поле `ttl-seconds` опционально и задает срок доставки, считающийся от `created_at`
-- состояние очереди доставки direct message и retry delivery receipt сохраняется на диск и переживает рестарт ноды
+- состояние очереди доставки direct message и retry delivery receipt хранится только в памяти (ограниченное пер-пировое кольцо) и **не** переживает рестарт ноды; восстановление — через end-to-end retry на стороне отправителя, а не через on-disk queue state
 - desktop показывает жизненный цикл исходящего direct message как: `queued -> retrying -> failed/expired -> delivered/seen`
 - основной wire-format теперь: один JSON-объект на строку
 

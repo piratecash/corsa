@@ -2569,10 +2569,11 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// publishes on ebus and touches per-peer pending state under
 		// s.peerMu.  The per-peer writer contention alone stalls the read
 		// loop long enough to miss heartbeat pong replies and cause
-		// the remote side to disconnect on pong-stall timeout; with a
-		// fire-and-forget hop the disk write path never blocks here
-		// (the queue-state persister absorbs the MarkDirty into a
-		// coalesced background write).
+		// the remote side to disconnect on pong-stall timeout; a
+		// fire-and-forget hop keeps that per-peer write off the read loop.
+		// (The trailing queuePeerFrame → MarkDirty is now a no-op — queue
+		// state is in-memory only, no disk write — so it is the s.peerMu
+		// contention, not any disk path, that the fire-and-forget hop avoids.)
 		// Track via backgroundWg so WaitBackground() blocks until the
 		// gossip fan-out completes — prevents TempDir cleanup races
 		// in tests.
@@ -3805,6 +3806,119 @@ func (s *Service) enqueuePeerFrame(address domain.PeerAddress, frame protocol.Fr
 	}
 }
 
+// pendingRingSize resolves the per-peer pending ring capacity: the operator
+// override (CORSA_PENDING_RING_SIZE / config.Node.PendingRingSize) when
+// positive, otherwise the built-in maxPendingFramesPerPeer default.
+func (s *Service) pendingRingSize() int {
+	if n := s.cfg.PendingRingSize; n > 0 {
+		return n
+	}
+	return maxPendingFramesPerPeer
+}
+
+// capPendingRingLocked enforces the per-peer pending RING bound on
+// s.pending[primary]: if it holds more than ringSize frames, the OLDEST
+// excess (by QueuedAt) are evicted and their pendingKeys + outbound
+// bookkeeping released. This is the single chokepoint every write path into
+// s.pending must funnel through so the hard memory cap holds regardless of HOW
+// the queue grew — direct enqueue (queuePeerFrame), the flushPendingPeerFrames
+// re-queue of undelivered frames, and the drainPendingForIdentities merge-back
+// can each re-append frames past the bound, and without this they would let a
+// peer's queue grow unbounded across reconnect/route-churn cycles.
+//
+// Eviction is by QueuedAt (not slice position) because the re-queue / merge
+// paths do not preserve append-order==age; ties keep input order (stable) so
+// the choice is deterministic. Survivor order is preserved — delivery happens
+// in slice order — and survivors are copied into a fresh ringSize-capacity
+// slice so the larger old backing array is released to the GC instead of being
+// retained behind a reslice. Caller MUST hold s.deliveryMu.Lock. A ringSize of
+// 0 (or below) empties the peer's queue entirely.
+func (s *Service) capPendingRingLocked(primary domain.PeerAddress, ringSize int) {
+	if ringSize < 0 {
+		ringSize = 0
+	}
+	queue := s.pending[primary]
+	if len(queue) <= ringSize {
+		return
+	}
+	evictCount := len(queue) - ringSize
+
+	// Fast path — the hot one: enqueue into a full queue evicts EXACTLY one
+	// frame. queuePeerFrame hits this on every append into a full ring, so it
+	// must not allocate. Find the single oldest (by QueuedAt; ties → lowest
+	// index, matching the stable order of the bulk path) with a linear scan,
+	// then remove it in place (shift-left + zero tail). No index slice, no
+	// eviction map, no sort, no allocation.
+	if evictCount == 1 {
+		oldest := 0
+		for i := 1; i < len(queue); i++ {
+			if queue[i].QueuedAt.Before(queue[oldest].QueuedAt) {
+				oldest = i
+			}
+		}
+		s.releaseEvictedPendingLocked(primary, queue[oldest].Frame, ringSize)
+		copy(queue[oldest:], queue[oldest+1:])
+		queue[len(queue)-1] = pendingFrame{} // release the freed tail slot
+		if ringSize == 0 {
+			delete(s.pending, primary)
+			return
+		}
+		s.pending[primary] = queue[:len(queue)-1]
+		return
+	}
+
+	// Bulk path — restore trim / large re-queue overflow evicting many at once.
+	// Select the evictCount oldest by QueuedAt with a stable sort, then compact
+	// the survivors into a fresh ringSize-capacity slice (releasing the larger
+	// backing array). Not hot, so the extra allocation is acceptable here.
+	order := make([]int, len(queue))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return queue[order[a]].QueuedAt.Before(queue[order[b]].QueuedAt)
+	})
+	evicted := make(map[int]struct{}, evictCount)
+	for i := 0; i < evictCount; i++ {
+		idx := order[i]
+		evicted[idx] = struct{}{}
+		s.releaseEvictedPendingLocked(primary, queue[idx].Frame, ringSize)
+	}
+	if ringSize == 0 {
+		delete(s.pending, primary)
+		return
+	}
+	kept := make([]pendingFrame, 0, ringSize)
+	for i, item := range queue {
+		if _, drop := evicted[i]; drop {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	s.pending[primary] = kept
+}
+
+// releaseEvictedPendingLocked drops the bookkeeping for a pending frame the
+// ring is evicting: its dedup key and, ONLY for send_message frames, its
+// outbound delivery state. Other pending types (relay_delivery_receipt,
+// ack_delete, relay_message, push_message, announce_peer) carry an ID from a
+// DIFFERENT namespace, and noteOutboundQueuedLocked only creates s.outbound
+// entries for send_message — so deleting s.outbound by a non-send_message
+// frame's raw ID could wrongly drop the delivery state of an unrelated,
+// still-in-flight DM that happens to share the ID. Caller MUST hold
+// s.deliveryMu.Lock. ringSize is passed through for the diagnostic log only.
+func (s *Service) releaseEvictedPendingLocked(primary domain.PeerAddress, frame protocol.Frame, ringSize int) {
+	delete(s.pendingKeys, pendingFrameKey(primary, frame))
+	if frame.Type == "send_message" && frame.ID != "" {
+		delete(s.outbound, frame.ID)
+	}
+	log.Debug().
+		Str("address", string(primary)).
+		Str("evicted_id", frame.ID).
+		Int("ring_size", ringSize).
+		Msg("pending_ring_evicted_oldest")
+}
+
 // queuePeerFrame is cross-domain:
 //   - s.resolveHealthAddress touches peer-domain fields → s.peerMu.Lock.
 //   - s.pending / s.pendingKeys / noteOutboundQueuedLocked / outbound live in the
@@ -3850,14 +3964,21 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 		return true
 	}
 
-	// Enforce per-peer and global capacity limits.
-	if len(s.pending[primary]) >= maxPendingFramesPerPeer {
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_peerfull").Str("address", string(address)).Msg("delivery_mu_writer")
-		s.peerMu.Unlock()
-		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_peerfull").Str("address", string(address)).Msg("peer_mu_writer")
-		return false
-	}
+	// Per-peer RING (bounded, hard memory cap). At capacity we evict the
+	// OLDEST queued frame for this peer instead of rejecting the new one, so
+	// a reconnecting peer always receives the most RECENT pendingRingSize
+	// frames and RAM stays bounded at ~pendingRingSize × connected-peers
+	// regardless of churn. This replaced the old reject-when-full behaviour
+	// when queue-state disk persistence was removed — the ring IS the bound
+	// now (nothing spills to queue-<port>.json anymore). The shared helper
+	// capPendingRingLocked enforces the same bound on EVERY write-back path
+	// (here, flushPendingPeerFrames re-queue, drainPendingForIdentities
+	// merge); here we pre-trim to ringSize-1 so the append below lands exactly
+	// at the cap.
+	ringSize := s.pendingRingSize()
+	s.capPendingRingLocked(primary, ringSize-1)
+	// Global ceiling stays a hard reject: it is the absolute aggregate backstop
+	// across ALL peers (the per-peer ring only bounds one peer at a time).
 	if len(s.pendingKeys) >= maxPendingFramesTotal {
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_globalfull").Str("address", string(address)).Msg("delivery_mu_writer")
@@ -4010,6 +4131,11 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	for _, item := range remaining {
 		s.pendingKeys[pendingFrameKey(primary, item.Frame)] = struct{}{}
 	}
+	// Re-appending the undelivered frames on top of any frames that arrived
+	// during the unlocked delivery window can push the queue past the ring
+	// bound — enforce it here too (evict-oldest) so the re-queue path cannot
+	// grow s.pending unbounded across reconnect cycles.
+	s.capPendingRingLocked(primary, s.pendingRingSize())
 	pendingCount := len(s.pending[primary])
 	// statusMu is INNERMOST per canonical peerMu → deliveryMu → statusMu
 	// order — refreshAggregatePendingLocked writes s.aggregateStatus.

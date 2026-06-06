@@ -640,16 +640,15 @@ func (rs *relayStateStore) decrementTTLsAndReport() bool {
 	return removed
 }
 
-// persistRelayState takes a queue-state snapshot and persists it to disk.
-// Called after every relay state mutation (store, forward, deliver) to ensure
-// recently learned relay paths survive a restart. Without this, in-memory
-// mutations would only be persisted when some unrelated persistence event
-// happened to trigger a snapshot.
-//
-// Routed through the background persister so the relay TTL ticker (the only
-// infrastructure caller of this path) does not hold the eviction goroutine
-// on disk I/O — bursts of expired entries during a reconnect storm collapse
-// into a single write instead of one write per eviction.
+// persistRelayState is now a NO-OP, retained as a vestige of the removed
+// queue-state disk persistence. It still calls s.queuePersist.MarkDirty(),
+// but the persister's Run goroutine is no longer started, so MarkDirty only
+// sets a flag with no consumer — nothing is snapshotted or written to disk.
+// Relay state (paths, retry, receipts) is in-memory only and does NOT survive
+// a restart; recovery is sender-side end-to-end retry (see
+// docs/protocol/relay.md INV-8). The call sites are kept (and this helper with
+// them) so the dormant mechanism can be re-enabled or cleanly deleted in a
+// few releases — see the queue-persist deprecation notes in node/service.go.
 func (s *Service) persistRelayState() {
 	s.queuePersist.MarkDirty()
 }
@@ -1962,10 +1961,11 @@ func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time,
 	s.queuePersist.MarkDirty()
 }
 
-// markOutboundRetryingLocked updates outbound state to "retrying" without
-// persisting. Caller MUST hold s.deliveryMu.Lock and is responsible for
-// persisting afterwards. Used by drainPendingForIdentities to batch all
-// state changes into a single persist at the end of the drain cycle.
+// markOutboundRetryingLocked updates outbound state to "retrying" in memory.
+// Caller MUST hold s.deliveryMu.Lock. The -Locked variant does not call the
+// (now no-op) MarkDirty; drainPendingForIdentities collects these as deferred
+// actions and applies them with the pending-queue return as one atomic
+// in-memory update (queue-state is in-memory only — no disk persist).
 func (s *Service) markOutboundRetryingLocked(frame protocol.Frame, queuedAt time.Time, retries int, errText string) {
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
@@ -1998,10 +1998,11 @@ func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText str
 	s.queuePersist.MarkDirty()
 }
 
-// markOutboundTerminalLocked updates outbound state to a terminal status
-// without persisting. Caller MUST hold s.deliveryMu.Lock and is responsible
-// for persisting afterwards. Used by drainPendingForIdentities to batch all
-// state changes into a single persist at the end of the drain cycle.
+// markOutboundTerminalLocked updates outbound state to a terminal status in
+// memory. Caller MUST hold s.deliveryMu.Lock. The -Locked variant does not
+// call the (now no-op) MarkDirty; drainPendingForIdentities collects these as
+// deferred actions and applies them with the pending-queue return as one
+// atomic in-memory update (queue-state is in-memory only — no disk persist).
 func (s *Service) markOutboundTerminalLocked(frame protocol.Frame, status, errText string) {
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
@@ -2039,10 +2040,11 @@ func (s *Service) clearOutboundQueued(messageID string) {
 	s.queuePersist.MarkDirty()
 }
 
-// clearOutboundQueuedLocked removes outbound delivery state for a message
-// without persisting. Caller MUST hold s.deliveryMu.Lock and is responsible
-// for persisting afterwards. Used by drainPendingForIdentities to batch all
-// state changes into a single persist at the end of the drain cycle.
+// clearOutboundQueuedLocked removes outbound delivery state for a message in
+// memory. Caller MUST hold s.deliveryMu.Lock. The -Locked variant does not
+// call the (now no-op) MarkDirty; drainPendingForIdentities collects these as
+// deferred actions and applies them with the pending-queue return as one
+// atomic in-memory update (queue-state is in-memory only — no disk persist).
 func (s *Service) clearOutboundQueuedLocked(messageID string) {
 	if strings.TrimSpace(messageID) == "" {
 		return

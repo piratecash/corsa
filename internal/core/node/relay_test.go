@@ -1107,10 +1107,18 @@ func TestRejectedRelayStoredBranchReturnsEmptyStatus(t *testing.T) {
 	}
 }
 
-// TestRelayStatePersistenceAfterMutation verifies that handleRelayMessage
-// persists the queue state to disk after storing relay forward state.
-// This ensures recently learned relay paths survive a restart.
-func TestRelayStatePersistenceAfterMutation(t *testing.T) {
+// TestRelayState_DormantPersisterManualFlushStillWrites is a low-level test of
+// the DORMANT queue-state persister, NOT a runtime durability guarantee.
+//
+// At runtime the persister's Run goroutine is no longer started and
+// MarkDirty is a no-op, so relay forward state is in-memory only and does NOT
+// survive a restart (see docs/protocol/relay.md INV-8). This test bypasses
+// that by calling FlushSync() directly — the synchronous escape hatch on the
+// still-constructed persister — to confirm the retained mechanism can still
+// snapshot relay forward state to disk on demand. It exists to keep the
+// dormant mechanism exercised until it is removed; it must NOT be read as
+// proof that relay paths survive a restart in production.
+func TestRelayState_DormantPersisterManualFlushStillWrites(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
@@ -1136,11 +1144,14 @@ func TestRelayStatePersistenceAfterMutation(t *testing.T) {
 		t.Fatalf("expected \"delivered\", got %q", status)
 	}
 
-	// handleRelayMessage mutation sites call queuePersist.MarkDirty from
-	// fire-and-forget goroutines (emitDeliveryReceipt).  WaitBackground
-	// drains those goroutines so all MarkDirty calls have landed, then
-	// FlushSync forces the dirty snapshot to reach disk inline — the
-	// loadQueueState below observes the final state without a sleep race.
+	// handleRelayMessage mutation sites call MarkDirty from fire-and-forget
+	// goroutines. MarkDirty no longer has a background consumer (the Run loop
+	// is not started), but it still sets the persister's dirty flag — which
+	// FlushSync's finalFlush requires (it returns early when not dirty).
+	// WaitBackground drains those goroutines so the dirty flag is set, then
+	// FlushSync — the manual escape hatch on the dormant persister — forces an
+	// on-demand snapshot to disk inline (the only way the file is written now).
+	// loadQueueState below then observes that snapshot.
 	svc.WaitBackground()
 	svc.queuePersist.FlushSync()
 
@@ -1162,7 +1173,7 @@ func TestRelayStatePersistenceAfterMutation(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("relay forward state not persisted to queue state file after handleRelayMessage")
+		t.Fatal("dormant persister FlushSync did not snapshot relay forward state to the queue-state file")
 	}
 }
 

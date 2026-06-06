@@ -60,6 +60,18 @@ type Node struct {
 	MaxOutgoingPeers int
 	MaxIncomingPeers int
 
+	// PendingRingSize bounds the per-peer in-memory ring of frames queued
+	// for a directly-connected peer that is momentarily offline (env:
+	// CORSA_PENDING_RING_SIZE). This is a HARD memory bound: at capacity the
+	// oldest queued frame for that peer is evicted to make room for the new
+	// one (ring semantics), so RAM stays bounded at roughly PendingRingSize ×
+	// connected-peers regardless of churn. Zero (the default) means "use the
+	// built-in default" (node.maxPendingFramesPerPeer). The queue is no
+	// longer persisted to disk — see the queue-state deprecation in
+	// internal/core/node — so this knob only trades RAM for how far back a
+	// reconnecting peer can still receive missed frames within the uptime.
+	PendingRingSize int
+
 	// AllowPrivatePeers disables the private/loopback IP filter for peer
 	// addresses. Production nodes never set this — it exists solely for
 	// unit tests that use RFC 1918 addresses as fake peers.
@@ -281,6 +293,7 @@ func Default() Config {
 	announceInterval := announceIntervalFromEnv()
 	overloadGoroutineThreshold := overloadGoroutineThresholdFromEnv()
 	enableMeshRoutingV3 := enableMeshRoutingV3FromEnv()
+	pendingRingSize := pendingRingSizeFromEnv()
 
 	return Config{
 		App: App{
@@ -308,6 +321,7 @@ func Default() Config {
 			MaxClockDrift:              maxClockDrift,
 			MaxOutgoingPeers:           maxOutgoingPeers,
 			MaxIncomingPeers:           maxIncomingPeers,
+			PendingRingSize:            pendingRingSize,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
 			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
 			SeqAdvanceWindow:           seqAdvanceWindow,
@@ -774,6 +788,22 @@ func maxIncomingPeersFromEnv() int {
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+// pendingRingSizeFromEnv reads CORSA_PENDING_RING_SIZE — the per-peer
+// in-memory pending ring capacity. Returns 0 (meaning "use the built-in
+// default") when unset, empty, non-numeric, or <= 0; a positive value caps
+// the per-peer ring at exactly that many frames. See Node.PendingRingSize.
+func pendingRingSizeFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_PENDING_RING_SIZE"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
 		return 0
 	}
 	return value

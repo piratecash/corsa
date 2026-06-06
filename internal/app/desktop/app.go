@@ -75,14 +75,23 @@ func Run() error {
 	var statusMonitor *service.NodeStatusMonitor
 	var router *service.DMRouter
 
+	// Coalesce status-change notifications: NotifyStatusChanged deep-copies
+	// the whole NodeStatus, so on a large mesh where peer counts / health /
+	// traffic change continuously, forwarding every monitor change straight
+	// through would deep-copy on every event and stall the UI. The coalescer
+	// collapses a burst into at most one rebuild per window. Signal() is
+	// cheap/non-blocking; the actual NotifyStatusChanged runs on the
+	// coalescer's Run goroutine (started below).
+	statusNotifier := service.NewStatusNotifyCoalescer(0, func() {
+		if router != nil {
+			router.NotifyStatusChanged()
+		}
+	})
+
 	statusMonitor = service.NewNodeStatusMonitor(service.NodeStatusMonitorOpts{
-		EventBus: eventBus,
-		Client:   client,
-		OnChanged: func() {
-			if router != nil {
-				router.NotifyStatusChanged()
-			}
-		},
+		EventBus:  eventBus,
+		Client:    client,
+		OnChanged: statusNotifier.Signal,
 	})
 	statusMonitor.Start()
 
@@ -111,6 +120,11 @@ func Run() error {
 	// ticker is the resource-data analogue of the ebus deltas that keep
 	// the other status fields fresh. Runs for the app lifetime.
 	go statusMonitor.RunResourceSampler(ctx)
+
+	// Drive the coalesced status-notify loop for the app lifetime. Bounds the
+	// NodeStatus deep-copy rate under a status-event storm (see
+	// service.StatusNotifyCoalescer).
+	go statusNotifier.Run(ctx)
 
 	// Build command table — single source of truth for all RPC commands.
 	// Desktop UI calls this directly (no HTTP), HTTP server wraps it for external clients.

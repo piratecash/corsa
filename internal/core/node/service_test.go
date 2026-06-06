@@ -4792,6 +4792,211 @@ func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
 // TestQueueStateMigrationFallbackToPrimary verifies that pending frames
 // persisted under a fallback dial address (e.g. host:64646) are migrated
 // to the primary peer address (e.g. host:64647) on startup.
+// TestQueuePeerFrame_RingEvictsOldest pins the per-peer pending RING: once a
+// peer's queue reaches PendingRingSize, queuing a new frame evicts the OLDEST
+// (not rejects the new one), the per-peer count stays exactly at the cap, and
+// the evicted frame's pendingKeys + outbound bookkeeping are cleaned up. This
+// is the hard memory bound that replaced the disk-backed queue.
+func TestQueuePeerFrame_RingEvictsOldest(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	tempDir := t.TempDir()
+	svc := NewService(config.Node{
+		ListenAddress:   "127.0.0.1:64646",
+		Type:            domain.NodeTypeFull,
+		TrustStorePath:  filepath.Join(tempDir, "trust.json"),
+		QueueStatePath:  filepath.Join(tempDir, "queue.json"),
+		PendingRingSize: 3,
+	}, id, nil)
+
+	addr := domain.PeerAddress("127.0.0.1:65001")
+	mk := func(msgID string) protocol.Frame {
+		return protocol.Frame{
+			Type: "send_message", Topic: "dm", ID: msgID,
+			Address: id.Address, Recipient: "recipient-1", Body: "body-" + msgID,
+		}
+	}
+	// Queue five distinct frames into a ring of 3 — m1/m2 must be evicted.
+	for _, msgID := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		if ok := svc.queuePeerFrame(addr, mk(msgID)); !ok {
+			t.Fatalf("queuePeerFrame(%s) rejected; ring must evict, not reject", msgID)
+		}
+	}
+
+	svc.deliveryMu.RLock()
+	defer svc.deliveryMu.RUnlock()
+
+	total := 0
+	present := map[string]bool{}
+	for _, items := range svc.pending {
+		total += len(items)
+		for _, it := range items {
+			present[it.Frame.ID] = true
+		}
+	}
+	if total != 3 {
+		t.Fatalf("ring not capped: total pending = %d, want 3", total)
+	}
+	for _, want := range []string{"m3", "m4", "m5"} {
+		if !present[want] {
+			t.Fatalf("newest frame %s missing from ring (present=%v)", want, present)
+		}
+	}
+	for _, gone := range []string{"m1", "m2"} {
+		if present[gone] {
+			t.Fatalf("oldest frame %s should have been evicted", gone)
+		}
+	}
+	if len(svc.pendingKeys) != 3 {
+		t.Fatalf("pendingKeys not reconciled with ring: got %d, want 3", len(svc.pendingKeys))
+	}
+	for _, gone := range []string{"m1", "m2"} {
+		if _, ok := svc.outbound[gone]; ok {
+			t.Fatalf("evicted frame %s left a dangling outbound entry", gone)
+		}
+	}
+}
+
+// TestCapPendingRingLocked_EvictsOldestByQueuedAt pins the shared bound helper
+// that EVERY s.pending write path funnels through (queuePeerFrame,
+// flushPendingPeerFrames re-queue, drainPendingForIdentities merge): when a
+// peer queue exceeds the ring size, the OLDEST frames by QueuedAt are evicted
+// — regardless of their slice position, since the merge/re-queue paths do not
+// keep position == age — survivor order is preserved, and the evicted frames'
+// pendingKeys + outbound bookkeeping are released.
+func TestCapPendingRingLocked_EvictsOldestByQueuedAt(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	tempDir := t.TempDir()
+	svc := NewService(config.Node{
+		ListenAddress:  "127.0.0.1:64646",
+		Type:           domain.NodeTypeFull,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+	}, id, nil)
+
+	addr := domain.PeerAddress("127.0.0.1:65010")
+	base := time.Now().UTC()
+	mkFrame := func(msgID string) protocol.Frame {
+		return protocol.Frame{Type: "send_message", Topic: "dm", ID: msgID, Address: id.Address, Recipient: "r", Body: "b-" + msgID}
+	}
+	// Seed in NON-time order so the test proves eviction keys on QueuedAt, not
+	// on slice index. Ages: f1 oldest … f5 newest.
+	seeded := []struct {
+		id  string
+		off time.Duration
+	}{
+		{"f3", 3 * time.Second}, {"f1", 1 * time.Second}, {"f5", 5 * time.Second}, {"f2", 2 * time.Second}, {"f4", 4 * time.Second},
+	}
+	svc.deliveryMu.Lock()
+	for _, s := range seeded {
+		fr := mkFrame(s.id)
+		svc.pending[addr] = append(svc.pending[addr], pendingFrame{Frame: fr, QueuedAt: base.Add(s.off)})
+		svc.pendingKeys[pendingFrameKey(addr, fr)] = struct{}{}
+		svc.outbound[s.id] = outboundDelivery{MessageID: s.id, Status: "queued"}
+	}
+	svc.capPendingRingLocked(addr, 3)
+	got := append([]pendingFrame(nil), svc.pending[addr]...)
+	keysLeft := len(svc.pendingKeys)
+	_, f1Out := svc.outbound["f1"]
+	_, f2Out := svc.outbound["f2"]
+	_, f4Out := svc.outbound["f4"]
+	svc.deliveryMu.Unlock()
+
+	// Newest three by QueuedAt (f3,f4,f5) survive in their ORIGINAL slice
+	// order: seeded order was f3,f1,f5,f2,f4 → minus evicted f1,f2 → f3,f5,f4.
+	wantOrder := []string{"f3", "f5", "f4"}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("ring size = %d, want %d (%v)", len(got), len(wantOrder), frameIDs(got))
+	}
+	for i, want := range wantOrder {
+		if got[i].Frame.ID != want {
+			t.Fatalf("survivor order = %v, want %v", frameIDs(got), wantOrder)
+		}
+	}
+	if keysLeft != 3 {
+		t.Fatalf("pendingKeys after cap = %d, want 3", keysLeft)
+	}
+	if f1Out || f2Out {
+		t.Fatal("evicted frames f1/f2 left dangling outbound entries")
+	}
+	if !f4Out {
+		t.Fatal("surviving frame f4 lost its outbound entry")
+	}
+}
+
+// TestCapPendingRingLocked_DoesNotDropForeignOutbound pins the type guard:
+// s.outbound is keyed by send_message ID, but pending also holds frames of
+// other types whose Frame.ID lives in a different namespace. Evicting a
+// non-send_message frame must NOT delete an s.outbound entry that happens to
+// share its ID — that entry belongs to an unrelated, still-in-flight DM.
+func TestCapPendingRingLocked_DoesNotDropForeignOutbound(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate identity failed: %v", err)
+	}
+	tempDir := t.TempDir()
+	svc := NewService(config.Node{
+		ListenAddress:  "127.0.0.1:64646",
+		Type:           domain.NodeTypeFull,
+		TrustStorePath: filepath.Join(tempDir, "trust.json"),
+		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+	}, id, nil)
+
+	addr := domain.PeerAddress("127.0.0.1:65011")
+	base := time.Now().UTC()
+	// A real in-flight DM's delivery state, keyed by its send_message ID.
+	svc.deliveryMu.Lock()
+	svc.outbound["msgA"] = outboundDelivery{MessageID: "msgA", Status: "retrying"}
+	// Pending queue: a relay_delivery_receipt that REUSES ID "msgA" (older, so
+	// it is the one evicted) plus a newer send_message that survives.
+	receipt := protocol.Frame{Type: "relay_delivery_receipt", ID: "msgA", Recipient: "r", Status: "delivered"}
+	keep := protocol.Frame{Type: "send_message", Topic: "dm", ID: "msgB", Address: id.Address, Recipient: "r", Body: "b"}
+	svc.pending[addr] = []pendingFrame{
+		{Frame: receipt, QueuedAt: base},
+		{Frame: keep, QueuedAt: base.Add(time.Second)},
+	}
+	svc.pendingKeys[pendingFrameKey(addr, receipt)] = struct{}{}
+	svc.pendingKeys[pendingFrameKey(addr, keep)] = struct{}{}
+	svc.outbound["msgB"] = outboundDelivery{MessageID: "msgB", Status: "queued"}
+
+	svc.capPendingRingLocked(addr, 1) // evict the oldest (the receipt)
+
+	survivors := frameIDs(svc.pending[addr])
+	_, msgAStillTracked := svc.outbound["msgA"]
+	_, msgBStillTracked := svc.outbound["msgB"]
+	svc.deliveryMu.Unlock()
+
+	if len(survivors) != 1 || survivors[0] != "msgB" {
+		t.Fatalf("expected only send_message msgB to survive, got %v", survivors)
+	}
+	if !msgAStillTracked {
+		t.Fatal("evicting a relay_delivery_receipt wrongly dropped send_message msgA's outbound state")
+	}
+	if !msgBStillTracked {
+		t.Fatal("surviving send_message msgB lost its outbound state")
+	}
+}
+
+// frameIDs extracts the Frame.ID of each pending frame for test diagnostics.
+func frameIDs(items []pendingFrame) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.Frame.ID
+	}
+	return out
+}
+
 func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
 	t.Parallel()
 
@@ -9710,11 +9915,16 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 	}
 }
 
-// TestDeleteTrustedContactPersistsOutboundOnly verifies that deleting a contact
-// persists the queue state even when only outbound delivery entries (no pending
-// frames) exist for the deleted recipient. Without this, stale outbound rows
-// would survive a restart.
-func TestDeleteTrustedContactPersistsOutboundOnly(t *testing.T) {
+// TestDeleteTrustedContactClearsOutboundWithNoPending verifies that deleting a
+// contact clears its outbound delivery entries even when NO pending frames
+// exist for the recipient (the dropped==0 path). The clearing is in-memory;
+// the FlushSync + reload below is the dormant queue-state persister's manual
+// snapshot escape hatch used purely to OBSERVE the in-memory clear on disk —
+// it is NOT a runtime restart-survival guarantee (the persister Run loop no
+// longer starts and the file is deleted on startup; see docs/protocol/relay.md
+// INV-8). It confirms the delete path also wipes outbound bookkeeping, not
+// just pending frames.
+func TestDeleteTrustedContactClearsOutboundWithNoPending(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
@@ -9750,9 +9960,11 @@ func TestDeleteTrustedContactPersistsOutboundOnly(t *testing.T) {
 	svc.outbound["ob-1"] = outboundDelivery{MessageID: "ob-1", Recipient: peerID.Address, Status: "delivered"}
 	svc.deliveryMu.Unlock()
 
-	// Persist initial state so the outbound entry is on disk.  MarkDirty
-	// signals the background writer, FlushSync forces the snapshot to reach
-	// disk inline so the disk file reflects the outbound entry before the
+	// Snapshot the initial state to disk via the dormant persister's manual
+	// escape hatch. MarkDirty no longer has a background consumer (the Run
+	// loop is not started), but it still sets the persister's dirty flag —
+	// which FlushSync's finalFlush requires (it returns early when not dirty),
+	// so it is needed here to force the on-demand snapshot inline before the
 	// delete below runs.
 	svc.queuePersist.MarkDirty()
 	svc.queuePersist.FlushSync()

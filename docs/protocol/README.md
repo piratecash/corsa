@@ -103,7 +103,7 @@ Environment variables:
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated bootstrap list (overrides `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — path to identity key file
 - `CORSA_TRUST_STORE_PATH` — path to trust store
-- `CORSA_QUEUE_STATE_PATH` — path to pending queue state
+- `CORSA_QUEUE_STATE_PATH` — **deprecated**: legacy queue-state file path (now only deleted on startup; queue-state disk persistence removed)
 - `CORSA_PEERS_PATH` — path to persisted peer list
 - `CORSA_PROXY` — SOCKS5 proxy for Tor/overlay networks
 - `CORSA_NODE_TYPE` — `full` (relay) or `client` (no relay)
@@ -118,7 +118,7 @@ Defaults:
 - default port: `64646`
 - `full` nodes listen for inbound peers; `client` nodes do not
 - `listener` controls inbound reachability only, not the relay role
-- pending outbound frames and relay-retry state survive restarts via queue-state file
+- pending outbound frames and relay-retry state are in-memory only (bounded per-peer ring) and do NOT survive restarts; recovery is sender-side end-to-end retry (queue-state disk persistence was removed — see [relay.md](relay.md) INV-8)
 
 ### Message lifecycle (high-level)
 
@@ -267,7 +267,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 - `CORSA_BOOTSTRAP_PEERS` — список через запятую (имеет приоритет над `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — путь к файлу identity key
 - `CORSA_TRUST_STORE_PATH` — путь к trust store
-- `CORSA_QUEUE_STATE_PATH` — путь к состоянию pending-очереди
+- `CORSA_QUEUE_STATE_PATH` — **устарело**: путь legacy queue-state файла (теперь только удаляется при старте; дисковый персист queue-state убран)
 - `CORSA_PEERS_PATH` — путь к персистированному списку пиров
 - `CORSA_PROXY` — SOCKS5-прокси для Tor/overlay сетей
 - `CORSA_NODE_TYPE` — `full` (relay) или `client` (без relay)
@@ -282,7 +282,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 - порт по умолчанию: `64646`
 - `full`-ноды слушают входящие; `client`-ноды — нет
 - `listener` управляет только входящей доступностью, не relay-ролью
-- pending-фреймы и relay-retry состояние переживают рестарт через queue-state файл
+- pending-фреймы и relay-retry состояние только в памяти (ограниченное пер-пировое кольцо) и НЕ переживают рестарт; восстановление — end-to-end retry на стороне отправителя (дисковый персист queue-state убран — см. [relay.md](relay.md) INV-8)
 
 ### Жизненный цикл сообщения (верхнеуровневый)
 

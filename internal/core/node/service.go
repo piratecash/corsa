@@ -567,15 +567,17 @@ type Service struct {
 	// Protected by s.statusMu.
 	lastVersionPolicyPublishAt time.Time
 
-	// queuePersist is the single background writer for the on-disk queue
-	// state file. Every mutation site inside the Service must call
-	// s.queuePersist.MarkDirty() instead of the pre-existing synchronous
-	// persistQueueState helper — the persister debounces bursts into a
-	// single write and takes its snapshot under s.deliveryMu.RLock so reader
-	// callers (notably the Desktop fetch_network_stats tick) are never
-	// blocked by a queued writer during a reconnect storm. Created in
-	// NewService; the background goroutine starts in Run and is drained
-	// with a final flush on clean shutdown.
+	// queuePersist is the DEPRECATED, now-DORMANT on-disk queue-state writer.
+	// queue-state disk persistence has been removed: the persister is still
+	// constructed in NewService (so its unit-tested mechanism and the ~20
+	// s.queuePersist.MarkDirty() mutation-site calls stay valid), but its
+	// background goroutine is NO LONGER STARTED in Run. With no consumer,
+	// MarkDirty only sets a flag and a non-blocking wake on a capacity-1
+	// channel — a complete no-op. Nothing is written to queue-<port>.json
+	// anymore (the file is deleted on startup); pending frames are bounded by
+	// an in-memory per-peer ring instead. Retained for a few releases before
+	// full removal — see the queue-persist deprecation notes in NewService /
+	// Run and docs/protocol/relay.md INV-8.
 	queuePersist *queueStatePersister
 }
 
@@ -882,6 +884,23 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 			OutboundState: map[string]outboundDelivery{},
 		}
 	}
+	// DEPRECATED queue-state persistence — one-shot migration + removal.
+	// The runtime no longer writes queue-<port>.json: pending is now an
+	// in-memory per-peer ring (see queuePeerFrame) and the background
+	// persister is constructed but never started (see Run). We still LOADED
+	// the file once above so an in-flight queue survives this upgrade, then
+	// delete it here so it is never read or written again. The persister
+	// mechanism (queue_state_persister.go, saveQueueState) is intentionally
+	// retained-but-dormant for a few releases before full removal.
+	// TODO(queue-persist-removal): delete the persister mechanism, the
+	// queue-state file handling, and EffectiveQueueStatePath once shipped.
+	if queueStatePath != "" {
+		if rmErr := os.Remove(queueStatePath); rmErr == nil {
+			log.Warn().Str("path", queueStatePath).Msg("queue_state_file_removed_deprecated: queue persistence disabled; pending is now an in-memory ring")
+		} else if !os.IsNotExist(rmErr) {
+			log.Warn().Str("path", queueStatePath).Err(rmErr).Msg("queue_state_file_remove_failed")
+		}
+	}
 	// One-time migration: pending queue entries written by pre-v1 code may be
 	// keyed by fallback dial addresses instead of the canonical primary.  The
 	// runtime only drains primary-keyed entries, so legacy keys must be
@@ -934,6 +953,11 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		queueState.Version = queueStateVersion
 	}
 
+	// NOTE: the one-shot migration trim of restored pending queues to the ring
+	// size happens AFTER svc is constructed (see capPendingRingLocked call
+	// below) so it reuses the exact runtime eviction rule (oldest-by-QueuedAt)
+	// instead of a parallel tail-trim — a pre-upgrade file's append order is
+	// not guaranteed to equal frame age.
 	pendingKeys := make(map[string]struct{})
 	for address, items := range queueState.Pending {
 		for _, item := range items {
@@ -1104,13 +1128,13 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		done:                    make(chan struct{}),
 	}
 
-	// Queue-state persister: single background writer for the on-disk
-	// queue state file.  MarkDirty from any mutation site coalesces with
-	// other calls inside the debounce window; the RLock-only snapshot
-	// runs under s.deliveryMu so it never blocks UI-readers behind a
-	// writer-preference queue on s.peerMu during a reconnect storm.  The
-	// goroutine is started in Run; until then MarkDirty is a no-op as far
-	// as disk is concerned.
+	// Queue-state persister: DEPRECATED and DORMANT. Disk persistence has been
+	// removed — this is constructed (so its mechanism and the MarkDirty call
+	// sites stay valid, and the deps below keep saveQueueState /
+	// queueStateSnapshotLocked referenced) but its Run goroutine is NOT started
+	// (see Run), so MarkDirty is a no-op and nothing reaches disk. The Save /
+	// Snapshot wiring below is retained-but-inert for a few releases before the
+	// whole mechanism is deleted (TODO(queue-persist-removal)).
 	svc.queuePersist = newQueueStatePersister(queueStatePersisterDeps{
 		Path:             queueStatePath,
 		DebounceInterval: defaultQueueStatePersistDebounce,
@@ -1128,6 +1152,26 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		Save: saveQueueState,
 		Wait: realQueueStatePersistWait,
 	})
+
+	// One-shot migration trim of the restored pending queues. The pre-upgrade
+	// queue file predates the in-memory per-peer ring and may hold more than
+	// the configured ring size per peer (a large legacy file, or the operator
+	// lowered CORSA_PENDING_RING_SIZE below the old disk cap). Reuse the runtime
+	// ring cap so the eviction rule is IDENTICAL to steady state — oldest by
+	// QueuedAt (NOT slice position; a pre-upgrade file's append order is not
+	// guaranteed to equal frame age), type-gated outbound cleanup, dedup-key
+	// reconciliation — instead of a parallel tail-trim that could drop newer
+	// frames and keep older ones. Single-threaded here (no readers/writers
+	// yet); the lock only satisfies capPendingRingLocked's contract. Removable
+	// with the rest of the queue-file migration.
+	{
+		ringSize := svc.pendingRingSize()
+		svc.deliveryMu.Lock()
+		for addr := range svc.pending {
+			svc.capPendingRingLocked(addr, ringSize)
+		}
+		svc.deliveryMu.Unlock()
+	}
 
 	// Initialize PeerProvider (Stage 3: connection management integration).
 	svc.peerProvider = NewPeerProvider(PeerProviderConfig{
@@ -1465,29 +1509,28 @@ func (s *Service) Run(ctx context.Context) error {
 	// against a half-torn-down Service during shutdown.
 	defer close(s.done)
 
-	// Queue-state persister: start the single background writer early and
-	// tear it down last (after every mutation path has drained) so the
-	// final flush captures the end-state before Run returns.  The
-	// persister owns its own cancellation context detached from ctx so
-	// final flush can complete even if ctx is already Done.
-	persisterCtx, persisterCancel := context.WithCancel(context.Background())
-	persisterDone := make(chan struct{})
-	go func() {
-		defer crashlog.DeferRecover()
-		defer close(persisterDone)
-		s.queuePersist.Run(persisterCtx)
-	}()
-	defer func() {
-		persisterCancel()
-		<-persisterDone
-	}()
+	// DEPRECATED queue-state persistence: the background writer is NO LONGER
+	// STARTED. queue-<port>.json is not written anymore — pending lives in an
+	// in-memory per-peer ring (see queuePeerFrame) and the file is deleted at
+	// startup (see NewService). The persister is still constructed (so the
+	// ~20 s.queuePersist.MarkDirty() mutation-site calls remain valid no-ops:
+	// MarkDirty only sets a flag + a non-blocking wake on a channel that now
+	// has no consumer) and its unit-tested mechanism is retained-but-dormant
+	// for a few releases. Removing the Run goroutine eliminates the periodic
+	// snapshot deep-copy + JSON marshal that profiling flagged as the top
+	// allocation-churn source.
+	// TODO(queue-persist-removal): delete the persister, MarkDirty calls, and
+	// saveQueueState once the deprecation window closes.
 
 	// Traffic capture manager — diagnostic feature (plan §4.5).
 	s.initCaptureManager()
 	defer s.captureManager.Close()
 
-	// Wire relay state persistence: when the TTL ticker evicts expired
-	// entries, persist the updated state so disk stays in sync with memory.
+	// Relay-state TTL-evict hook. Historically this persisted the updated
+	// state to disk; queue-state disk persistence has been removed, so
+	// persistRelayState() → MarkDirty() is now a no-op and relay state is
+	// in-memory only. The hook is kept (vestigial) alongside the dormant
+	// persister for a few releases; it neither writes disk nor blocks.
 	s.relayStates.onEvict = func() { s.persistRelayState() }
 	// Phase 3 PR 12.2 — wire the hop-ack budget timeout callback so the
 	// routing.Table reputation primitive learns about (Recipient,
@@ -1554,11 +1597,14 @@ func (s *Service) Run(ctx context.Context) error {
 		s.connManager.Run(ctx)
 		close(cmDone)
 	}()
-	// Ensure the CM event loop has fully drained before the persister's
-	// final flush runs — CM emits last-chance MarkDirty calls while
-	// tearing down outbound sessions, and losing those would leave the
-	// on-disk queue state one mutation behind the in-memory truth.  This
-	// defer is a no-op in the listener-disabled branch because that
+	// Ensure the CM event loop has fully drained before Run returns. (This
+	// used to also gate the persister's final flush so a last-chance MarkDirty
+	// during outbound teardown still reached disk — but queue-state disk
+	// persistence has been removed: the persister is never started, MarkDirty
+	// is a no-op, and nothing is flushed on shutdown. In-memory pending/relay
+	// state is intentionally NOT recovered across a restart; the sender retries
+	// end-to-end.) The drain is still needed for clean goroutine teardown.
+	// This defer is a no-op in the listener-disabled branch because that
 	// branch already awaits cmDone synchronously before returning.
 	defer func() { <-cmDone }()
 	// Wait for CM event loop to be ready before starting bootstrap.
@@ -1706,12 +1752,13 @@ func (s *Service) WaitBackground() {
 
 // goBackground runs fn in a new goroutine that is tracked by
 // backgroundWg, so WaitBackground observes it on shutdown. Use this
-// helper for every fire-and-forget goroutine that may transitively
-// touch persistent state (queuePeerFrame → queuePersist.MarkDirty,
-// trust store writes, etc.) — without it, the MarkDirty signal
-// (and the eventual debounced Save) can race with TempDir cleanup
-// in tests and with process exit in production, silently corrupting
-// or losing queue/peer state.
+// helper for every fire-and-forget goroutine that mutates shared
+// state or performs still-durable writes (e.g. trust-store / peers.json
+// writes), so the work cannot race with TempDir cleanup in tests or with
+// process exit in production. (The queuePeerFrame → queuePersist.MarkDirty
+// path no longer writes disk — queue state is in-memory only — but these
+// goroutines still mutate in-memory pending/relay state and other
+// persisted subsystems, so tracking them remains required.)
 //
 // Add(1) is called on the caller's goroutine before the spawn so
 // WaitBackground cannot observe the zero counter between spawn
@@ -4442,8 +4489,10 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 
 // dropPendingForRecipient removes all pending send_message frames addressed
 // to the given recipient across every peer queue. It also clears the
-// corresponding outbound delivery tracking entries and pending dedup keys,
-// then persists the updated queue state to disk.
+// corresponding outbound delivery tracking entries and pending dedup keys.
+// All of this is in-memory only — the trailing MarkDirty is a no-op (queue
+// state is no longer persisted to disk; see the queue-persist deprecation in
+// NewService / Run).
 //
 // Cross-domain: writes s.pending / s.pendingKeys / s.outbound
 // (delivery-domain, s.deliveryMu) and recomputes the aggregate-status
@@ -5024,9 +5073,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 
 	// Only messages that belong to this node (sender or recipient) get
 	// persisted to chatlog, emit UI events, and push to local subscribers.
-	// Transit messages (relayed DMs where neither party is us) have their
-	// own persistence via queue-<port>.json / relayRetry and must NOT
-	// pollute the local chat history or wake up the desktop UI.
+	// Transit messages (relayed DMs where neither party is us) are held only
+	// in memory (s.topics + relayRetry) for gossip/relay — they are NOT
+	// persisted to disk (queue-state persistence was removed; they do not
+	// survive a restart) and must NOT pollute the local chat history or wake
+	// up the desktop UI.
 	isLocal := s.isLocalMessage(msg)
 
 	// Persist message via the registered MessageStore (owned by the desktop
@@ -5169,12 +5220,13 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		s.trackRelayMessage(envelope)
 
 		// Gossip is the baseline delivery mechanism — always runs.
-		// It ensures store-and-forward (transit DMs stored on relay
-		// nodes for offline recipients), push delivery to connected
-		// clients, and backlog drain. Never skip or filter gossip.
-		// Tracked: executeGossipTargets → sendMessageToPeer →
-		// queuePeerFrame → queuePersist.MarkDirty schedules a
-		// debounced background disk write.
+		// It ensures store-and-forward (transit DMs held IN MEMORY on relay
+		// nodes for offline recipients — bounded by the per-peer ring and
+		// NOT durable across restart), push delivery to connected clients,
+		// and backlog drain. Never skip or filter gossip. Tracked:
+		// executeGossipTargets → sendMessageToPeer → queuePeerFrame; the
+		// trailing queuePersist.MarkDirty is now a no-op (the persister is
+		// dormant — no disk write is scheduled).
 		s.goBackground(func() { s.executeGossipTargets(envelope, decision.GossipTargets) })
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
@@ -5212,7 +5264,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 // (sender or recipient), meaning the message should be persisted locally.
 // Broadcast messages (recipient="*") and global topics are always local.
 // Transit DMs — where this node is merely relaying between two other parties —
-// return false; their persistence is handled by queue-<port>.json / relayRetry.
+// return false; they are held in memory only (s.topics + relayRetry) for
+// gossip/relay and are NOT persisted to disk (no restart survival).
 //
 // Control DMs (TopicControlDM) follow the same point-to-point semantics
 // as data DMs: only the sender or the recipient should treat them as

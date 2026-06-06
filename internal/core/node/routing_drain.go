@@ -5,8 +5,10 @@
 // queue, attempts delivery via the routing table, and merges failed frames
 // back into their original positions under the canonical
 // peerMu → deliveryMu → statusMu order. The extract-attempt-return pattern
-// and its retry/crash-loss contract are specified in the
-// "Event-driven pending queue drain" section of docs/routing.md.
+// and its retry / in-memory-consistency contract are specified in the
+// "Event-driven pending queue drain" section of docs/routing.md. (Pending
+// state is in-memory only — no disk persistence — so a crash/restart loses it
+// and the sender retries end-to-end.)
 //
 // Companion files: announce-plane wire path in routing_announce.go,
 // relay-plane forwarding in routing_relay.go, address↔identity resolution
@@ -52,12 +54,14 @@ import (
 // sending the same frame twice. Frames that fail delivery are returned to
 // pending so the normal retry mechanisms can pick them up.
 //
-// Crash safety: all outbound state changes (markOutboundTerminalLocked,
+// In-memory consistency: all outbound state changes (markOutboundTerminalLocked,
 // markOutboundRetryingLocked, clearOutboundQueuedLocked) are collected as
 // deferred actions during the delivery loop and applied under the lock
-// together with the pending queue return in a single persist. No
-// intermediate writes to queue-*.json occur while extracted frames are
-// absent from s.pending.
+// together with the pending queue return, so a concurrent reader never sees
+// outbound state mutated while the extracted frames are still absent from
+// s.pending. (There is no disk persistence anymore — queue-state is in-memory
+// only; a crash/restart loses pending state and the sender retries
+// end-to-end. This batching is purely about cross-goroutine consistency.)
 //
 // recipientFromPendingFrame extracts the recipient from a queued frame.
 // send_message uses flat Frame.Recipient; push_message keeps it in Item.
@@ -116,9 +120,11 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	// Removing them under the lock prevents concurrent drain goroutines
 	// from processing the same frame (double-send prevention).
 	//
-	// No persist happens here — the on-disk state still contains the
-	// extracted frames. If the process crashes before we persist below,
-	// frames survive in queue-*.json and will be retried on restart.
+	// Pending state is in-memory only (queue-state disk persistence was
+	// removed). A crash during the drain loses any not-yet-delivered frames —
+	// there is no on-disk queue to recover from; the sender retries
+	// end-to-end. The extract/merge-back dance below is purely about
+	// in-memory consistency across concurrent drains, not crash durability.
 	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_wait").Int("identities", len(identities)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_held").Int("identities", len(identities)).Msg("delivery_mu_writer")
@@ -190,9 +196,12 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	//
 	// Outbound state changes (terminal, retrying, cleared) are collected
 	// as deferred actions and applied under the lock in a single batch
-	// at the end. This eliminates intermediate persists that would
-	// snapshot s.pending without the extracted frames, creating a
-	// crash-loss window.
+	// at the end, together with the pending-queue return — so a concurrent
+	// reader never observes outbound state mutated while the extracted frames
+	// are absent from s.pending. (Queue-state is in-memory only now; there is
+	// no disk write to snapshot, so this is about cross-goroutine consistency,
+	// not crash durability — a crash loses pending state and the sender
+	// retries end-to-end.)
 	type deferredOutbound struct {
 		action string // "terminal", "retrying", "clear"
 		frame  protocol.Frame
@@ -210,9 +219,12 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 
 	for i, m := range extracted {
 		// Re-check shutdown before each delivery attempt. If the service
-		// is shutting down, return all remaining extracted frames to
-		// pending without attempting delivery — the next startup will
-		// retry them from the persisted queue state.
+		// is shutting down, return all remaining extracted frames to the
+		// in-memory pending queue without attempting delivery. These are NOT
+		// persisted (queue-state disk persistence was removed), so they are
+		// lost on process exit; the sender is responsible for end-to-end
+		// retry. Returning them keeps in-memory state consistent for any
+		// late drain/flush before the process actually stops.
 		select {
 		case <-s.done:
 			failed = append(failed, extracted[i:]...)
@@ -331,6 +343,12 @@ returnFrames:
 		})
 		s.pendingKeys[key] = struct{}{}
 	}
+	// Merging returned frames back on top of frames that arrived during the
+	// unlocked delivery window can push a peer's queue past the ring bound.
+	// The per-addr cap is applied AFTER the deferred outbound actions below
+	// (not here) so a deferred "retrying" cannot re-create an outbound entry
+	// for a frame the cap then evicts.
+	ringSize := s.pendingRingSize()
 	for addr, rets := range returningByAddr {
 		meta := extractMeta[addr]
 		if meta == nil {
@@ -405,6 +423,16 @@ returnFrames:
 		case "clear":
 			s.clearOutboundQueuedLocked(d.frame.ID)
 		}
+	}
+	// Enforce the per-peer ring bound on every queue we merged returns into —
+	// the merge can re-append undelivered frames on top of frames that arrived
+	// during the unlocked window, exceeding ringSize. Runs AFTER the deferred
+	// outbound actions so evicting a frame here also removes any outbound entry
+	// a deferred "retrying" just wrote for it (capPendingRingLocked deletes the
+	// evicted frames' pendingKeys + outbound). Addresses with no returns were
+	// only ever grown via queuePeerFrame, which already caps on enqueue.
+	for addr := range returningByAddr {
+		s.capPendingRingLocked(addr, ringSize)
 	}
 	// Collect final pending counts for all addresses that were touched during
 	// the extract/re-insert cycle so the UI pending badge updates immediately.

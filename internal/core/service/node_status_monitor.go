@@ -713,9 +713,13 @@ func (m *NodeStatusMonitor) applySlotStateDelta(address domain.PeerAddress, slot
 	m.mu.Lock()
 	addr := string(address)
 	found := false
+	changed := false
 	for i := range m.status.PeerHealth {
 		if m.status.PeerHealth[i].Address == addr {
-			m.status.PeerHealth[i].SlotState = slotState
+			if m.status.PeerHealth[i].SlotState != slotState {
+				m.status.PeerHealth[i].SlotState = slotState
+				changed = true
+			}
 			found = true
 		}
 	}
@@ -726,10 +730,18 @@ func (m *NodeStatusMonitor) applySlotStateDelta(address domain.PeerAddress, slot
 			Address:   addr,
 			SlotState: slotState,
 		})
+		changed = true
 	}
 	m.mu.Unlock()
 
-	m.onChanged()
+	// Only wake the UI on a real change. A no-op delta (the same slot state
+	// re-reported) must NOT trigger a status notify — that path deep-copies
+	// the whole NodeStatus and an event storm of no-op deltas was a top
+	// allocator / UI-freeze source in profiling. Mirrors applyTrafficBatch's
+	// `updated` gate.
+	if changed {
+		m.onChanged()
+	}
 }
 
 // applyPeerPendingDelta updates the PendingCount field in PeerHealth.
@@ -739,9 +751,13 @@ func (m *NodeStatusMonitor) applyPeerPendingDelta(delta ebus.PeerPendingDelta) {
 	m.mu.Lock()
 	addr := string(delta.Address)
 	found := false
+	changed := false
 	for i := range m.status.PeerHealth {
 		if m.status.PeerHealth[i].Address == addr {
-			m.status.PeerHealth[i].PendingCount = delta.Count
+			if m.status.PeerHealth[i].PendingCount != delta.Count {
+				m.status.PeerHealth[i].PendingCount = delta.Count
+				changed = true
+			}
 			found = true
 		}
 	}
@@ -752,10 +768,18 @@ func (m *NodeStatusMonitor) applyPeerPendingDelta(delta ebus.PeerPendingDelta) {
 			Address:      addr,
 			PendingCount: delta.Count,
 		})
+		changed = true
 	}
 	m.mu.Unlock()
 
-	m.onChanged()
+	// Only wake the UI on a real change. A no-op delta (the same pending count
+	// re-reported, very common under route churn / drain cycles) must NOT
+	// trigger a status notify — that path deep-copies the whole NodeStatus and
+	// was the top allocator / UI-freeze source in profiling. Mirrors
+	// applyTrafficBatch's `updated` gate.
+	if changed {
+		m.onChanged()
+	}
 }
 
 // applyTrafficBatch applies byte counters from a periodic batch snapshot.

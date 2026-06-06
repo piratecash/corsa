@@ -97,6 +97,27 @@ func TestEnableMeshRoutingV3FromEnv(t *testing.T) {
 	}
 }
 
+// TestPendingRingSizeFromEnv pins the per-peer pending ring size knob:
+// unset/empty/non-numeric/<=0 → 0 ("use built-in default"); a positive
+// integer is taken as-is.
+func TestPendingRingSizeFromEnv(t *testing.T) {
+	for _, v := range []string{"", "  ", "abc", "0", "-5"} {
+		t.Setenv("CORSA_PENDING_RING_SIZE", v)
+		if got := pendingRingSizeFromEnv(); got != 0 {
+			t.Fatalf("CORSA_PENDING_RING_SIZE=%q: want 0 (default sentinel), got %d", v, got)
+		}
+	}
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{{"1", 1}, {"256", 256}, {" 1000 ", 1000}} {
+		t.Setenv("CORSA_PENDING_RING_SIZE", tc.raw)
+		if got := pendingRingSizeFromEnv(); got != tc.want {
+			t.Fatalf("CORSA_PENDING_RING_SIZE=%q: got %d, want %d", tc.raw, got, tc.want)
+		}
+	}
+}
+
 func TestProxyAddressFromEnv(t *testing.T) {
 	t.Setenv("CORSA_PROXY", "127.0.0.1:9050")
 

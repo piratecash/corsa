@@ -107,9 +107,12 @@ const maxRelayStatesPerPeer = 500
 // 5 000 entries keeps the queue-{port}.json file under reasonable size.
 const maxRelayRetryEntries = 5_000
 
-// maxPendingFramesPerPeer limits the number of queued frames for any single
-// peer address. Prevents a single unreachable peer from consuming all
-// pending queue memory.
+// maxPendingFramesPerPeer is the DEFAULT per-peer pending ring capacity —
+// the bound on frames queued for any single peer address, preventing one
+// unreachable peer from consuming all pending memory. It is the fallback
+// when CORSA_PENDING_RING_SIZE / config.Node.PendingRingSize is unset; the
+// queuePeerFrame ring evicts the oldest frame at this cap rather than
+// rejecting new ones (see queuePeerFrame).
 const maxPendingFramesPerPeer = 200
 
 // maxPendingFramesTotal caps the total pending frame count across all peers.

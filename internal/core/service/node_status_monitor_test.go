@@ -297,6 +297,56 @@ func TestApplyPeerPendingDeltaZeroCountUnknownPeerIsNoOp(t *testing.T) {
 	}
 }
 
+// TestApplyPeerPendingDeltaOnlyNotifiesOnRealChange pins the UI-freeze fix:
+// a no-op pending delta (same count re-reported, common under route churn)
+// must NOT fire onChanged — that path deep-copies the whole NodeStatus and an
+// event storm of no-op deltas was the top allocator / freeze source. Only a
+// real value change or a new entry may notify.
+func TestApplyPeerPendingDeltaOnlyNotifiesOnRealChange(t *testing.T) {
+	var calls int
+	m := NewNodeStatusMonitor(NodeStatusMonitorOpts{
+		OnChanged: func() { calls++ },
+	})
+	m.status.PeerHealth = []PeerHealth{{Address: "1.2.3.4:9999", PendingCount: 5}}
+
+	// Same count → no change → no notify.
+	m.applyPeerPendingDelta(ebus.PeerPendingDelta{Address: "1.2.3.4:9999", Count: 5})
+	if calls != 0 {
+		t.Fatalf("no-op pending delta fired onChanged %d times, want 0", calls)
+	}
+
+	// Real change → notify once.
+	m.applyPeerPendingDelta(ebus.PeerPendingDelta{Address: "1.2.3.4:9999", Count: 7})
+	if calls != 1 {
+		t.Fatalf("changed pending delta: onChanged calls = %d, want 1", calls)
+	}
+
+	// New peer with positive count → new entry → notify.
+	m.applyPeerPendingDelta(ebus.PeerPendingDelta{Address: "new:1", Count: 2})
+	if calls != 2 {
+		t.Fatalf("new-peer pending delta: onChanged calls = %d, want 2 total", calls)
+	}
+}
+
+// TestApplySlotStateDeltaOnlyNotifiesOnRealChange is the slot-state twin of
+// the pending-delta dedup test above.
+func TestApplySlotStateDeltaOnlyNotifiesOnRealChange(t *testing.T) {
+	var calls int
+	m := NewNodeStatusMonitor(NodeStatusMonitorOpts{
+		OnChanged: func() { calls++ },
+	})
+	m.status.PeerHealth = []PeerHealth{{Address: "1.2.3.4:9999", SlotState: "active"}}
+
+	m.applySlotStateDelta("1.2.3.4:9999", "active") // no change
+	if calls != 0 {
+		t.Fatalf("no-op slot-state delta fired onChanged %d times, want 0", calls)
+	}
+	m.applySlotStateDelta("1.2.3.4:9999", "probation") // real change
+	if calls != 1 {
+		t.Fatalf("changed slot-state delta: onChanged calls = %d, want 1", calls)
+	}
+}
+
 // ── applyTrafficBatch ──
 
 func TestApplyTrafficBatchUpdatesExistingPeers(t *testing.T) {
