@@ -288,7 +288,11 @@ func (c *ConsoleWindow) Open() {
 func (c *ConsoleWindow) layout(gtx layout.Context) layout.Dimensions {
 	c.handleActions(gtx)
 	fill(gtx, colorBackground())
-	inset := layout.UniformInset(unit.Dp(24))
+	// Tight outer margin matching the main window (window.go layout:
+	// Top/Bottom 4dp, Left/Right 6dp) so the content frame sits a few
+	// pixels from the window edge rather than the previous wide 24dp
+	// border.
+	inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}
 	return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(c.layoutTabs),
@@ -487,8 +491,24 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 		c.parent.t("node.connected", status.Connected),
 		c.parent.t("node.known_peers", countUniquePeers(status)),
 		c.parent.t("node.connected_peers", connectedPeers),
-		c.parent.localNodeErrorRow(),
 	}
+
+	// Process memory + uptime — read from status.ResourceUsage, the
+	// same NodeStatus snapshot every other Info-tab field comes from.
+	// The figure is sampled off the render path by the monitor's
+	// resource ticker (NodeStatusMonitor.RunResourceSampler) once a
+	// second and pushed in via onChanged, so it ticks live without
+	// this layout doing any work. nil before the first sample or on a
+	// node too old to support the command, in which case the rows are
+	// omitted.
+	if usage := status.ResourceUsage; usage != nil {
+		rows = append(rows,
+			c.parent.t("node.memory_usage", usage.MemSysHuman, usage.MemHeapAllocHuman),
+			c.parent.t("node.uptime", usage.UptimeHuman),
+		)
+	}
+
+	rows = append(rows, c.parent.localNodeErrorRow())
 
 	if !status.CheckedAt.IsZero() {
 		rows = append(rows, c.parent.t("node.checked", status.CheckedAt.Format(time.RFC3339)))
@@ -980,10 +1000,10 @@ func (c *ConsoleWindow) syncHistoryNavigation() {
 	c.resetHistoryNavigation()
 }
 
-// scheduleUptimeInvalidate coalesces per-second redraw requests for the Peers
-// tab uptime counter. Only one timer goroutine is in flight at a time — the
-// atomic flag prevents unbounded goroutine spawning when layoutPeersTab runs
-// at 60 fps while peers are connected.
+// scheduleUptimeInvalidate coalesces per-second redraw requests for the
+// Peers tab uptime counter. Only one timer goroutine is in flight at a
+// time — the atomic flag prevents unbounded goroutine spawning when
+// layoutPeersTab runs at 60 fps while peers are connected.
 func (c *ConsoleWindow) scheduleUptimeInvalidate() {
 	if !atomic.CompareAndSwapInt32(&c.uptimeInvalidating, 0, 1) {
 		return

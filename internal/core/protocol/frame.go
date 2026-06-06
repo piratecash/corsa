@@ -86,6 +86,7 @@ type Frame struct {
 	Conversations   []ConversationFrame   `json:"conversations,omitempty"`
 	NetworkStats    *NetworkStatsFrame    `json:"network_stats,omitempty"`
 	AggregateStatus *AggregateStatusFrame `json:"aggregate_status,omitempty"`
+	ResourceUsage   *ResourceUsageFrame   `json:"resource_usage,omitempty"`
 	TrafficHistory  *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
 	Capabilities    []string              `json:"capabilities,omitempty"`
 
@@ -243,6 +244,24 @@ type AggregateStatusFrame struct {
 	// MaxObservedPeerVersion is the highest protocol version among incompatible
 	// peers (runtime reporters + persisted lockouts). See domain.VersionPolicySnapshot.
 	MaxObservedPeerVersion int `json:"max_observed_peer_version,omitempty"`
+}
+
+// ResourceUsageFrame is the wire representation of the node's process
+// memory footprint and uptime, returned by the fetch_resource_usage
+// local RPC command. Desktop consumes this frame (via the prober) to
+// render the console Info-tab Memory / Uptime rows, mirroring how it
+// consumes fetch_aggregate_status — i.e. through the local-frame
+// dispatch, NOT a direct method call into the node. Both machine
+// (bytes / seconds) and human (pre-formatted) fields are carried so
+// the consumer renders without re-deriving units.
+type ResourceUsageFrame struct {
+	MemSysBytes       uint64 `json:"mem_sys_bytes"`
+	MemSysHuman       string `json:"mem_sys_human"`
+	MemHeapAllocBytes uint64 `json:"mem_heap_alloc_bytes"`
+	MemHeapAllocHuman string `json:"mem_heap_alloc_human"`
+	UptimeSeconds     int64  `json:"uptime_seconds"`
+	UptimeHuman       string `json:"uptime_human"`
+	SampledAt         string `json:"sampled_at"` // RFC3339Nano UTC
 }
 
 // TrafficHistoryFrame holds a rolling window of per-second traffic samples.

@@ -70,6 +70,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.cleanupExpiredNotices()
 			s.evictStalePeers()
 			s.evictOrphanedHealthEntries()
+			s.evictOrphanedPeerMetadata()
 			s.evictStaleInboundConns()
 			// Periodic cleanup for the route-quarantine state machine:
 			// drop expired peerQuarantine entries whose recidivism
@@ -310,6 +311,7 @@ func (s *Service) evictStalePeers() {
 				delete(s.peerVersions, peer.Address)
 				delete(s.peerBuilds, peer.Address)
 				delete(s.persistedMeta, peer.Address)
+				delete(s.metaOrphanFirstSeen, peer.Address)
 				evicted = append(evicted, peer.Address)
 				continue
 			}
@@ -319,6 +321,19 @@ func (s *Service) evictStalePeers() {
 	s.peers = kept
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_released").Msg("peer_mu_writer")
+
+	// Observed-IP hint history is ipState-domain — drop the evicted
+	// addresses' entries under a standalone ipStateMu hold (taken
+	// after peerMu is released; never the reverse order). Without
+	// this the hint history outlived every other per-address record
+	// (memory-leak audit, 2026-06).
+	if len(evicted) > 0 {
+		s.ipStateMu.Lock()
+		for _, addr := range evicted {
+			delete(s.observedIPHistoryByPeer, addr)
+		}
+		s.ipStateMu.Unlock()
+	}
 
 	// Remove evicted peers from PeerProvider so they no longer
 	// appear in Candidates() and stop consuming dial attempts.
@@ -400,7 +415,7 @@ func (s *Service) evictOrphanedHealthEntries() {
 		peerAddrs[p.Address] = struct{}{}
 	}
 
-	var evicted int
+	var evictedAddrs []domain.PeerAddress
 	for _, addr := range candidates {
 		health := s.health[addr]
 		if health == nil || health.Connected {
@@ -422,8 +437,10 @@ func (s *Service) evictOrphanedHealthEntries() {
 		delete(s.peerBuilds, addr)
 		delete(s.persistedMeta, addr)
 		delete(s.pending, addr)
-		evicted++
+		delete(s.metaOrphanFirstSeen, addr)
+		evictedAddrs = append(evictedAddrs, addr)
 	}
+	evicted := len(evictedAddrs)
 	if evicted > 0 {
 		s.statusMu.Lock()
 		s.refreshAggregateStatusLocked()
@@ -434,8 +451,160 @@ func (s *Service) evictOrphanedHealthEntries() {
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("peer_mu_writer")
 
+	// Observed-IP hint history is ipState-domain — standalone hold
+	// AFTER peerMu/deliveryMu are released (canonical order keeps
+	// ipStateMu innermost; a standalone acquisition avoids adding a
+	// deliveryMu↔ipStateMu edge entirely). See the memory-leak audit
+	// note on evictOrphanedPeerMetadata.
+	if evicted > 0 {
+		s.ipStateMu.Lock()
+		for _, addr := range evictedAddrs {
+			delete(s.observedIPHistoryByPeer, addr)
+		}
+		s.ipStateMu.Unlock()
+	}
+
 	if evicted > 0 {
 		log.Info().Int("evicted", evicted).Int("candidates", len(candidates)).Msg("evicted_orphaned_health_entries")
+	}
+}
+
+// evictOrphanedPeerMetadata sweeps the per-address metadata maps
+// (peerTypes / peerIDs / peerVersions / peerBuilds /
+// observedIPHistoryByPeer) for entries whose address has NO owning
+// lifecycle anchor anywhere: not in s.peers (evictStalePeers owns
+// those), no health row (evictOrphanedHealthEntries owns those), no
+// active inbound refs, no outbound session, no persisted row
+// (version-lockout and other persisted metadata must survive).
+//
+// Why this exists (memory-leak audit, 2026-06): the metadata maps
+// gain entries on paths that never create a health row — inbound
+// hello rejected for version incompatibility, handshake failures
+// after the version was already learned, CM dial failures that
+// stored the remote version. Inbound addresses carry an EPHEMERAL
+// source port, so every reconnect mints a fresh key; on a node that
+// has lived through tens of thousands of connections these maps
+// grow monotonically and nothing ever deletes the entries.
+//
+// Deletion uses a two-phase grace via metaOrphanFirstSeen: an
+// address must be CONTINUOUSLY orphaned for at least
+// orphanedHealthEvictWindow before its metadata is dropped. The
+// grace protects the in-flight handshake window where peerIDs /
+// peerVersions are written moments before trackInboundConnect
+// creates the health row — losing those entries mid-handshake would
+// be harmless but noisy (version re-learned from the next frame),
+// and the grace removes the race entirely. An address that regains
+// any anchor drops its orphan mark.
+//
+// Lock contract: peerMu (writer) for the peer-domain maps;
+// observedIPHistoryByPeer is ipState-domain and is touched under
+// ipStateMu nested inside peerMu (canonical peerMu → ipStateMu
+// order, same as applyAdvertiseValidationResultLocked). Runs from
+// bootstrapLoop next to evictOrphanedHealthEntries.
+func (s *Service) evictOrphanedPeerMetadata() {
+	now := time.Now().UTC()
+
+	log.Trace().Str("site", "evictOrphanedPeerMetadata").Str("phase", "lock_wait").Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	defer func() {
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "evictOrphanedPeerMetadata").Str("phase", "lock_released").Msg("peer_mu_writer")
+	}()
+
+	// Throttle: the bootstrapLoop tick is 2 s, the grace window is
+	// minutes — a once-a-minute union-scan loses nothing. The
+	// metaOrphanSweepInterval also defines the MINIMUM spacing
+	// between the marking pass and the deleting pass, on top of the
+	// orphanedHealthEvictWindow grace.
+	if !s.lastMetaOrphanSweep.IsZero() && now.Sub(s.lastMetaOrphanSweep) < metaOrphanSweepInterval {
+		return
+	}
+	s.lastMetaOrphanSweep = now
+
+	peerAddrs := make(map[domain.PeerAddress]struct{}, len(s.peers))
+	for _, p := range s.peers {
+		peerAddrs[p.Address] = struct{}{}
+	}
+
+	// Candidate set: union of every metadata map's keys.
+	candidates := make(map[domain.PeerAddress]struct{})
+	for a := range s.peerTypes {
+		candidates[a] = struct{}{}
+	}
+	for a := range s.peerIDs {
+		candidates[a] = struct{}{}
+	}
+	for a := range s.peerVersions {
+		candidates[a] = struct{}{}
+	}
+	for a := range s.peerBuilds {
+		candidates[a] = struct{}{}
+	}
+	s.ipStateMu.Lock()
+	for a := range s.observedIPHistoryByPeer {
+		candidates[a] = struct{}{}
+	}
+	s.ipStateMu.Unlock()
+
+	if s.metaOrphanFirstSeen == nil {
+		s.metaOrphanFirstSeen = make(map[domain.PeerAddress]time.Time)
+	}
+
+	var evictObserved []domain.PeerAddress
+	evicted := 0
+	for addr := range candidates {
+		anchored := false
+		if _, ok := peerAddrs[addr]; ok {
+			anchored = true
+		} else if s.health[addr] != nil {
+			anchored = true
+		} else if s.inboundHealthRefs[addr] > 0 {
+			anchored = true
+		} else if s.sessions[addr] != nil {
+			anchored = true
+		} else if s.persistedMeta[addr] != nil {
+			anchored = true
+		}
+		if anchored {
+			delete(s.metaOrphanFirstSeen, addr)
+			continue
+		}
+		first, seen := s.metaOrphanFirstSeen[addr]
+		if !seen {
+			s.metaOrphanFirstSeen[addr] = now
+			continue
+		}
+		if now.Sub(first) < orphanedHealthEvictWindow {
+			continue
+		}
+		delete(s.peerTypes, addr)
+		delete(s.peerIDs, addr)
+		delete(s.peerVersions, addr)
+		delete(s.peerBuilds, addr)
+		delete(s.metaOrphanFirstSeen, addr)
+		evictObserved = append(evictObserved, addr)
+		evicted++
+	}
+	if len(evictObserved) > 0 {
+		s.ipStateMu.Lock()
+		for _, addr := range evictObserved {
+			delete(s.observedIPHistoryByPeer, addr)
+		}
+		s.ipStateMu.Unlock()
+	}
+
+	// Drop stale orphan marks for addresses whose metadata is already
+	// gone (e.g. deleted by the health-driven sweeps between our
+	// passes) — without this the tracker itself would leak the very
+	// keys it exists to reclaim.
+	for addr := range s.metaOrphanFirstSeen {
+		if _, ok := candidates[addr]; !ok {
+			delete(s.metaOrphanFirstSeen, addr)
+		}
+	}
+
+	if evicted > 0 {
+		log.Info().Int("evicted", evicted).Msg("evicted_orphaned_peer_metadata")
 	}
 }
 

@@ -23,6 +23,13 @@ type NodeProvider interface {
 	// is a typed point-in-time view — callers should not assume any
 	// field is stable across calls.
 	NodeStatus() domain.NodeStatus
+
+	// ResourceUsage returns a point-in-time snapshot of the process
+	// memory footprint (runtime.MemStats) and uptime, with both
+	// machine-readable integers and human-formatted strings. Returned
+	// by the getResourceUsage RPC command and surfaced in the desktop
+	// console Info tab.
+	ResourceUsage() domain.ResourceUsage
 	// FetchFileTransfers returns a JSON-encoded list of active and pending
 	// sender/receiver file transfers. Terminal states are excluded.
 	FetchFileTransfers() (json.RawMessage, error)

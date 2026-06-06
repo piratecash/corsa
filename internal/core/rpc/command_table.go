@@ -360,9 +360,12 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		// would otherwise miss every resolveHandler branch and get a
 		// 404. The PIP doc and the snake-case-alias test both promise
 		// this spelling works, so an explicit alias is the only fix.
-		"nodestatus":      "getNodeStatus",
-		"node_status":     "getNodeStatus",
-		"get_node_status": "getNodeStatus",
+		"nodestatus":         "getNodeStatus",
+		"node_status":        "getNodeStatus",
+		"get_node_status":    "getNodeStatus",
+		"resourceusage":      "getResourceUsage",
+		"resource_usage":     "getResourceUsage",
+		"get_resource_usage": "getResourceUsage",
 	}
 	for old, canonical := range aliases {
 		t.RegisterAlias(old, canonical)
@@ -553,6 +556,16 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 				return r
 			}
 			return jsonResponse(node.NodeStatus())
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "getResourceUsage", Description: "Get process memory usage and uptime (machine-readable bytes/seconds plus human-formatted strings)", Category: "system"},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			return jsonResponse(node.ResourceUsage())
 		},
 	)
 }

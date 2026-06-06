@@ -99,3 +99,40 @@ type NodeStatus struct {
 	// this to detect drift between its own clock and the masternode's.
 	CurrentTime time.Time `json:"current_time"`
 }
+
+// ResourceUsage is a point-in-time snapshot of the process's memory
+// footprint and uptime, returned by the getResourceUsage RPC command
+// and surfaced in the desktop console's Info tab. Both machine-
+// readable (raw integers) and human-readable (pre-formatted strings)
+// representations are included so dashboards can consume the numbers
+// while operators reading the JSON or the UI get sensible units.
+//
+// Memory is sourced from runtime.MemStats (the Go standard-library
+// mechanism). MemSysBytes is the total obtained from the OS — the
+// closest runtime-visible proxy for process footprint / RSS;
+// MemHeapAllocBytes is the live (in-use) heap, the figure that grows
+// under a leak.
+type ResourceUsage struct {
+	// MemSysBytes is runtime.MemStats.Sys — total bytes of memory
+	// obtained from the OS. Best single proxy for process footprint.
+	MemSysBytes uint64 `json:"mem_sys_bytes"`
+	// MemSysHuman is MemSysBytes formatted with a B/KB/MB/GB/TB unit.
+	MemSysHuman string `json:"mem_sys_human"`
+
+	// MemHeapAllocBytes is runtime.MemStats.HeapAlloc — bytes of
+	// live (reachable + not-yet-collected) heap objects. The figure
+	// that climbs steadily under a memory leak.
+	MemHeapAllocBytes uint64 `json:"mem_heap_alloc_bytes"`
+	// MemHeapAllocHuman is MemHeapAllocBytes formatted with a unit.
+	MemHeapAllocHuman string `json:"mem_heap_alloc_human"`
+
+	// UptimeSeconds is whole seconds since process start.
+	UptimeSeconds int64 `json:"uptime_seconds"`
+	// UptimeHuman is the uptime rendered in the largest of three
+	// tiers — seconds (< 1 h), hours (< 1 day), or days.
+	UptimeHuman string `json:"uptime_human"`
+
+	// SampledAt is the wall-clock instant the sample was taken
+	// (RFC3339Nano, UTC).
+	SampledAt time.Time `json:"sampled_at"`
+}

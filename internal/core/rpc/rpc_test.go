@@ -40,6 +40,18 @@ func defaultTestNodeStatus() domain.NodeStatus {
 	}
 }
 
+func defaultTestResourceUsage() domain.ResourceUsage {
+	return domain.ResourceUsage{
+		MemSysBytes:       62390272,
+		MemSysHuman:       "59.50 MB",
+		MemHeapAllocBytes: 41943040,
+		MemHeapAllocHuman: "40.00 MB",
+		UptimeSeconds:     192600,
+		UptimeHuman:       "2.23 d",
+		SampledAt:         time.Date(2026, time.April, 30, 0, 0, 0, 0, time.UTC),
+	}
+}
+
 // ---------------------------------------------------------------------------
 // MockNodeProvider helpers
 // ---------------------------------------------------------------------------
@@ -61,6 +73,7 @@ func newDefaultNodeProvider(t *testing.T) *rpcmocks.MockNodeProvider {
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
 	m.On("NodeStatus").Return(defaultTestNodeStatus()).Maybe()
+	m.On("ResourceUsage").Return(defaultTestResourceUsage()).Maybe()
 	return m
 }
 
@@ -81,6 +94,7 @@ func newNodeProviderWithHandler(t *testing.T, fn func(protocol.Frame) protocol.F
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
 	m.On("NodeStatus").Return(defaultTestNodeStatus()).Maybe()
+	m.On("ResourceUsage").Return(defaultTestResourceUsage()).Maybe()
 	return m
 }
 
@@ -101,6 +115,7 @@ func newNodeProviderWithMeta(t *testing.T, address, version string) *rpcmocks.Mo
 	m.On("RestartFileDownload", mock.Anything).Return(nil).Maybe()
 	m.On("ExplainFileRoute", mock.Anything).Return(json.RawMessage("[]"), nil).Maybe()
 	m.On("NodeStatus").Return(defaultTestNodeStatus()).Maybe()
+	m.On("ResourceUsage").Return(defaultTestResourceUsage()).Maybe()
 	return m
 }
 

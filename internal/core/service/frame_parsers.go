@@ -236,6 +236,24 @@ func aggregateStatusFromFrame(frame protocol.Frame) *AggregateStatus {
 	}
 }
 
+// resourceUsageFromFrame maps a fetch_resource_usage reply onto the
+// service-layer ResourceUsage view. Returns nil when the frame carries
+// no payload (older node that does not support the command yet), so
+// the Info tab degrades gracefully to omitting the rows.
+func resourceUsageFromFrame(frame protocol.Frame) *ResourceUsage {
+	if frame.ResourceUsage == nil {
+		return nil
+	}
+	return &ResourceUsage{
+		MemSysBytes:       frame.ResourceUsage.MemSysBytes,
+		MemSysHuman:       frame.ResourceUsage.MemSysHuman,
+		MemHeapAllocBytes: frame.ResourceUsage.MemHeapAllocBytes,
+		MemHeapAllocHuman: frame.ResourceUsage.MemHeapAllocHuman,
+		UptimeSeconds:     frame.ResourceUsage.UptimeSeconds,
+		UptimeHuman:       frame.ResourceUsage.UptimeHuman,
+	}
+}
+
 // resolveAggregateStatus interprets the fetch_aggregate_status RPC result
 // and classifies it into one of four outcomes:
 //

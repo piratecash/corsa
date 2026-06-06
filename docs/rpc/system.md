@@ -107,6 +107,43 @@ Security guarantees enforced by tests:
   artifact rather than retrofitted onto this snapshot, so health-check
   loops stay cheap.
 
+### POST /rpc/v1/exec — `getResourceUsage`
+
+Process memory footprint and uptime. Both machine-readable integers
+and human-formatted strings are returned so dashboards consume the raw
+numbers while operators reading the JSON get sensible units. Snake_case
+aliases `resource_usage` and `get_resource_usage` resolve to the same
+handler.
+
+Response:
+```json
+{
+  "mem_sys_bytes": 62390272,
+  "mem_sys_human": "59.50 MB",
+  "mem_heap_alloc_bytes": 41943040,
+  "mem_heap_alloc_human": "40.00 MB",
+  "uptime_seconds": 192600,
+  "uptime_human": "2.23 d",
+  "sampled_at": "2026-06-06T05:15:47.123456789Z"
+}
+```
+
+Field notes:
+
+- `mem_sys_bytes` / `mem_sys_human` — total memory obtained from the OS
+  (`runtime.MemStats.Sys`), the closest runtime-visible proxy for the
+  process footprint / RSS. The headline "memory used" figure.
+- `mem_heap_alloc_bytes` / `mem_heap_alloc_human` — live (in-use) heap
+  (`runtime.MemStats.HeapAlloc`). This is the figure that climbs
+  steadily under a memory leak — watch it across calls.
+- `uptime_seconds` / `uptime_human` — seconds since process start, plus
+  a human string in the largest of three tiers: seconds (< 1 h), hours
+  (< 1 day), or days.
+- `sampled_at` — RFC3339Nano UTC instant the sample was taken.
+
+The same figures are shown in the desktop console **Info** tab
+(`Memory` / `Uptime` rows).
+
 ---
 
 ## Русский
@@ -220,3 +257,39 @@ challenge-и.
   v21 proof-of-service будет отдельным подписанным артефактом, а не
   довеском к этому снапшоту, чтобы health-check loop оставался
   дешёвым.
+
+### POST /rpc/v1/exec — `getResourceUsage`
+
+Потребление памяти процессом и аптайм. Возвращаются и машинночитаемые
+целые, и человекочитаемые строки — дашборды берут сырые числа, а
+оператор, читающий JSON, видит удобные единицы. Snake_case алиасы
+`resource_usage` и `get_resource_usage` ведут к тому же обработчику.
+
+Ответ:
+```json
+{
+  "mem_sys_bytes": 62390272,
+  "mem_sys_human": "59.50 MB",
+  "mem_heap_alloc_bytes": 41943040,
+  "mem_heap_alloc_human": "40.00 MB",
+  "uptime_seconds": 192600,
+  "uptime_human": "2.23 d",
+  "sampled_at": "2026-06-06T05:15:47.123456789Z"
+}
+```
+
+Описание полей:
+
+- `mem_sys_bytes` / `mem_sys_human` — всего памяти, взятой у ОС
+  (`runtime.MemStats.Sys`), ближайший к RSS показатель из рантайма.
+  Заголовочная цифра «сколько памяти юзает приложение».
+- `mem_heap_alloc_bytes` / `mem_heap_alloc_human` — живая (in-use) куча
+  (`runtime.MemStats.HeapAlloc`). Именно она монотонно растёт при
+  утечке — её и стоит отслеживать между вызовами.
+- `uptime_seconds` / `uptime_human` — секунды с момента старта плюс
+  человекочитаемая строка в наибольшем из трёх ярусов: секунды (< 1 ч),
+  часы (< 1 суток) или дни.
+- `sampled_at` — момент снятия сэмпла, RFC3339Nano UTC.
+
+Те же значения показываются в десктоп-консоли на вкладке **Инфо**
+(строки `Память` / `Аптайм`).

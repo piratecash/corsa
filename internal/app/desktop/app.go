@@ -86,6 +86,13 @@ func Run() error {
 
 	go metricsCollector.Run(ctx)
 
+	// Resource sampler — refreshes node memory + uptime into
+	// service.NodeStatus once a second so the Info tab ticks live.
+	// There is no ebus event for resource usage, so this dedicated
+	// ticker is the resource-data analogue of the ebus deltas that keep
+	// the other status fields fresh. Runs for the app lifetime.
+	go statusMonitor.RunResourceSampler(ctx)
+
 	// Build command table — single source of truth for all RPC commands.
 	// Desktop UI calls this directly (no HTTP), HTTP server wraps it for external clients.
 	cmdTable := rpc.NewCommandTable()

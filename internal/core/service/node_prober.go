@@ -128,6 +128,11 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 		return status
 	}
 	aggregateStatusReply, aggregateStatusErr := p.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_aggregate_status"})
+	// Resource usage (memory + uptime) — non-fatal, like aggregate
+	// status. Seeds status.ResourceUsage on the initial probe; the
+	// monitor's resource ticker (RunResourceSampler) keeps it fresh
+	// afterwards. Reuses the shared FetchResourceUsage helper.
+	resourceUsage := p.FetchResourceUsage(ctx)
 	dmHeadersReply, err := p.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_dm_headers"})
 	if err != nil {
 		status.Error = err.Error()
@@ -172,11 +177,26 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 		log.Warn().Msg(resolveWarn)
 	}
 	status.AggregateStatus = resolvedStatus
+	status.ResourceUsage = resourceUsage
 	status.ReachableIDs = p.BuildReachableIDs()
 	status.DMHeaders = dmHeaders
 	status.DeliveryReceipts = deliveryReceipts
 	status.CheckedAt = time.Now()
 	return status
+}
+
+// FetchResourceUsage queries the node for its current process memory +
+// uptime via the fetch_resource_usage local frame. Used by ProbeNode
+// for the initial seed and by NodeStatusMonitor's resource ticker to
+// keep status.ResourceUsage fresh between full probes. Returns nil on a
+// node that does not support the command (older build) or on RPC error,
+// so callers degrade gracefully to omitting the Info-tab rows.
+func (p *NodeProber) FetchResourceUsage(ctx context.Context) *ResourceUsage {
+	reply, err := p.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_resource_usage"})
+	if err != nil {
+		return nil
+	}
+	return resourceUsageFromFrame(reply)
 }
 
 // FetchContacts queries the node for the current trusted contacts map.

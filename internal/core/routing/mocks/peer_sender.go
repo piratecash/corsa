@@ -16,8 +16,7 @@ import (
 func NewMockPeerSender(t interface {
 	mock.TestingT
 	Cleanup(func())
-},
-) *MockPeerSender {
+}) *MockPeerSender {
 	mock := &MockPeerSender{}
 	mock.Mock.Test(t)
 

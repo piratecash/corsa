@@ -239,6 +239,7 @@ type NodeStatus struct {
 	PeerHealth       []PeerHealth
 	CaptureSessions  map[domain.ConnID]CaptureSession // active + recently-stopped capture sessions keyed by ConnID
 	AggregateStatus  *AggregateStatus                 // node-computed aggregate network health; nil when node does not support the command yet
+	ResourceUsage    *ResourceUsage                   // node process memory + uptime; nil until first sample / when node does not support the command
 	ReachableIDs     map[domain.PeerIdentity]bool     // identity reachable via routing table (at least one live route exists)
 	Stored           string
 	Messages         []string
@@ -271,6 +272,24 @@ type AggregateStatus struct {
 	MaxObservedPeerBuild         int
 	MaxObservedPeerVersion       int
 }
+
+// ResourceUsage is the service-layer view of the node process memory
+// footprint and uptime, parsed from a fetch_resource_usage reply.
+// Both machine-readable numbers and the node's human-formatted strings
+// are carried so the desktop renders without re-deriving units. Flows
+// through NodeStatus like every other probe/monitor field; sampled by
+// NodeStatusMonitor's resource ticker (see RunResourceSampler) so the
+// stop-the-world runtime.MemStats read happens at a controlled cadence
+// off the UI render path.
+type ResourceUsage struct {
+	MemSysBytes       uint64
+	MemSysHuman       string
+	MemHeapAllocBytes uint64
+	MemHeapAllocHuman string
+	UptimeSeconds     int64
+	UptimeHuman       string
+}
+
 
 // NewDesktopClient wires the composition root: opens (or attaches to) the
 // chatlog, builds every sub-service, and registers the MessageStoreAdapter
@@ -465,6 +484,15 @@ func (c *DesktopClient) ProbeNode(ctx context.Context) NodeStatus {
 // in the routing table.
 func (c *DesktopClient) BuildReachableIDs() map[domain.PeerIdentity]bool {
 	return c.prober.BuildReachableIDs()
+}
+
+// FetchResourceUsage queries the node for its current process memory +
+// uptime — the lightweight single-fetch the NodeStatusMonitor resource
+// ticker uses to keep status.ResourceUsage fresh between full probes.
+// Thin delegator to NodeProber.FetchResourceUsage, matching the other
+// read-side helpers (FetchContacts, FetchKnownIDs, …).
+func (c *DesktopClient) FetchResourceUsage(ctx context.Context) *ResourceUsage {
+	return c.prober.FetchResourceUsage(ctx)
 }
 
 // FetchContacts queries the node for the current trusted contacts map.

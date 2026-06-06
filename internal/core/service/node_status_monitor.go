@@ -125,6 +125,45 @@ func (m *NodeStatusMonitor) Start() {
 	m.subscribeEvents()
 }
 
+// resourceSampleInterval is the cadence at which RunResourceSampler
+// refreshes status.ResourceUsage. One second gives a live-ticking
+// uptime / memory readout in the Info tab while keeping the
+// stop-the-world runtime.MemStats read (performed node-side inside
+// fetch_resource_usage) to once per second — controlled, off the UI
+// render path, and independent of how often the window redraws.
+const resourceSampleInterval = time.Second
+
+// RunResourceSampler periodically samples the node's process memory +
+// uptime through the fetch_resource_usage local frame and publishes it
+// into status.ResourceUsage, firing onChanged() so subscribers redraw.
+// Unlike peer health / aggregate status there is no ebus event that
+// carries resource usage, so this dedicated ticker is what keeps the
+// figure fresh between full probes — the resource-data analogue of the
+// ebus deltas that drive the other status fields. Blocks until ctx is
+// cancelled; intended to be launched as a goroutine from app startup
+// (mirrors metrics.Collector.Run).
+func (m *NodeStatusMonitor) RunResourceSampler(ctx context.Context) {
+	ticker := time.NewTicker(resourceSampleInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fetchCtx, cancel := context.WithTimeout(ctx, resourceSampleInterval)
+			usage := m.client.FetchResourceUsage(fetchCtx)
+			cancel()
+			if usage == nil {
+				continue
+			}
+			m.mu.Lock()
+			m.status.ResourceUsage = usage
+			m.mu.Unlock()
+			m.onChanged()
+		}
+	}
+}
+
 // NodeStatus returns a deep copy of the current aggregated status.
 func (m *NodeStatusMonitor) NodeStatus() NodeStatus {
 	m.mu.RLock()
@@ -867,6 +906,12 @@ func (m *NodeStatusMonitor) mergeNodeStatusLocked(s NodeStatus) {
 	m.status.Gazeta = s.Gazeta
 	m.status.Error = s.Error
 	m.status.CheckedAt = s.CheckedAt
+	// ResourceUsage is sampled by the resource ticker (RunResourceSampler)
+	// and seeded by the probe. Preserve the previous non-nil value when a
+	// probe transiently omits it so the Info-tab rows do not flicker out.
+	if s.ResourceUsage != nil {
+		m.status.ResourceUsage = s.ResourceUsage
+	}
 
 	// Ebus-managed fields: merge probe data into existing state.
 	// A single early delta (TopicContactAdded, TopicIdentityAdded,

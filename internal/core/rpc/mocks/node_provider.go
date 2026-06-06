@@ -500,6 +500,50 @@ func (_c *MockNodeProvider_NodeStatus_Call) RunAndReturn(run func() domain.NodeS
 	return _c
 }
 
+// ResourceUsage provides a mock function for the type MockNodeProvider
+func (_mock *MockNodeProvider) ResourceUsage() domain.ResourceUsage {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ResourceUsage")
+	}
+
+	var r0 domain.ResourceUsage
+	if returnFunc, ok := ret.Get(0).(func() domain.ResourceUsage); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.ResourceUsage)
+	}
+	return r0
+}
+
+// MockNodeProvider_ResourceUsage_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ResourceUsage'
+type MockNodeProvider_ResourceUsage_Call struct {
+	*mock.Call
+}
+
+// ResourceUsage is a helper method to define mock.On call
+func (_e *MockNodeProvider_Expecter) ResourceUsage() *MockNodeProvider_ResourceUsage_Call {
+	return &MockNodeProvider_ResourceUsage_Call{Call: _e.mock.On("ResourceUsage")}
+}
+
+func (_c *MockNodeProvider_ResourceUsage_Call) Run(run func()) *MockNodeProvider_ResourceUsage_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockNodeProvider_ResourceUsage_Call) Return(resourceUsage domain.ResourceUsage) *MockNodeProvider_ResourceUsage_Call {
+	_c.Call.Return(resourceUsage)
+	return _c
+}
+
+func (_c *MockNodeProvider_ResourceUsage_Call) RunAndReturn(run func() domain.ResourceUsage) *MockNodeProvider_ResourceUsage_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // RestartFileDownload provides a mock function for the type MockNodeProvider
 func (_mock *MockNodeProvider) RestartFileDownload(fileID domain.FileID) error {
 	ret := _mock.Called(fileID)

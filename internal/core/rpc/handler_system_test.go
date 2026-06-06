@@ -192,6 +192,67 @@ func TestSystemGetNodeStatusNeverLeaksPrivateKeys(t *testing.T) {
 	}
 }
 
+// TestSystemGetResourceUsageViaExecEndpoint pins the public RPC
+// contract for getResourceUsage over the canonical exec envelope:
+// both machine-readable and human-formatted fields must be present
+// with their documented JSON tags.
+func TestSystemGetResourceUsageViaExecEndpoint(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	expected := domain.ResourceUsage{
+		MemSysBytes:       62390272,
+		MemSysHuman:       "59.50 MB",
+		MemHeapAllocBytes: 41943040,
+		MemHeapAllocHuman: "40.00 MB",
+		UptimeSeconds:     192600,
+		UptimeHuman:       "2.23 d",
+		SampledAt:         time.Date(2026, time.June, 6, 5, 15, 47, 0, time.UTC),
+	}
+	node.ExpectedCalls = filterCalls(node.ExpectedCalls, "ResourceUsage")
+	node.On("ResourceUsage").Return(expected)
+
+	server := setupTestServer(t, node, nil)
+
+	code, result := postJSON(t, server, "/rpc/v1/exec", map[string]interface{}{
+		"command": "getResourceUsage",
+		"args":    map[string]interface{}{},
+	})
+	expectStatusCode(t, code, 200)
+
+	expectField(t, result, "mem_sys_bytes", float64(expected.MemSysBytes))
+	expectField(t, result, "mem_sys_human", expected.MemSysHuman)
+	expectField(t, result, "mem_heap_alloc_bytes", float64(expected.MemHeapAllocBytes))
+	expectField(t, result, "mem_heap_alloc_human", expected.MemHeapAllocHuman)
+	expectField(t, result, "uptime_seconds", float64(expected.UptimeSeconds))
+	expectField(t, result, "uptime_human", expected.UptimeHuman)
+	expectFieldExists(t, result, "sampled_at")
+}
+
+// TestSystemGetResourceUsageAliases guards the snake_case aliases —
+// drift here would silently break dashboards / CLI callers that use
+// either spelling. All must resolve to the same handler and payload.
+func TestSystemGetResourceUsageAliases(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	table := rpc.NewCommandTable()
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
+
+	for _, name := range []string{"getResourceUsage", "resource_usage", "get_resource_usage", "resourceusage"} {
+		resp := table.Execute(rpc.CommandRequest{Name: name})
+		if resp.Error != nil {
+			t.Fatalf("%s: unexpected error: %v", name, resp.Error)
+		}
+		var got domain.ResourceUsage
+		if err := json.Unmarshal(resp.Data, &got); err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		if got.MemSysHuman != defaultTestResourceUsage().MemSysHuman {
+			t.Errorf("%s: mem_sys_human = %q, want %q", name, got.MemSysHuman, defaultTestResourceUsage().MemSysHuman)
+		}
+		if got.UptimeSeconds != defaultTestResourceUsage().UptimeSeconds {
+			t.Errorf("%s: uptime_seconds = %d, want %d", name, got.UptimeSeconds, defaultTestResourceUsage().UptimeSeconds)
+		}
+	}
+}
+
 func TestSystemPing(t *testing.T) {
 	expectedPeers := []interface{}{"peer1", "peer2", "peer3"}
 	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {

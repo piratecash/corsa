@@ -1920,12 +1920,18 @@ func deepCopyNodeStatus(src NodeStatus) NodeStatus {
 		}
 	}
 
-	// Pointer — clone the pointed-to struct. AggregateStatus is the only
-	// pointer field that remains intentionally heap-bound (nil = "node
-	// does not support this command yet").
+	// Pointers — clone the pointed-to struct (nil = "node does not
+	// support this command yet" / "not sampled yet"). The sampler/probe
+	// always assign a fresh pointer rather than mutating in place, but
+	// cloning keeps the snapshot fully independent and matches the
+	// AggregateStatus contract.
 	if src.AggregateStatus != nil {
 		clone := *src.AggregateStatus
 		dst.AggregateStatus = &clone
+	}
+	if src.ResourceUsage != nil {
+		clone := *src.ResourceUsage
+		dst.ResourceUsage = &clone
 	}
 
 	// Slices — append(nil, src...) creates an independent backing array.

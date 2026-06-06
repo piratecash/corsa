@@ -188,6 +188,14 @@ const (
 	// never be dialled. A shorter window than peerEvictStaleWindow is used
 	// because there is no outbound dial target to preserve.
 	orphanedHealthEvictWindow = 10 * time.Minute
+
+	// metaOrphanSweepInterval throttles evictOrphanedPeerMetadata
+	// (the per-address metadata orphan sweep — see the function's
+	// doc-comment in peer_management.go). The bootstrapLoop tick is
+	// 2 s; union-scanning five metadata maps that often is wasted
+	// work when the deletion grace is orphanedHealthEvictWindow
+	// anyway.
+	metaOrphanSweepInterval = time.Minute
 )
 
 func peerCooldownDuration(consecutiveFailures int) time.Duration {

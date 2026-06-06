@@ -243,6 +243,25 @@ type Service struct {
 	peerVersions      map[domain.PeerAddress]string
 	peerBuilds        map[domain.PeerAddress]int
 	inboundHealthRefs map[domain.PeerAddress]int // resolved overlay address → active inbound connection count
+	// metaOrphanFirstSeen tracks when an address keyed in the per-peer
+	// metadata maps (peerTypes/peerIDs/peerVersions/peerBuilds/
+	// observedIPHistoryByPeer) was FIRST observed orphaned — no s.peers
+	// row, no health entry, no inbound refs, no session, no
+	// persistedMeta. evictOrphanedPeerMetadata deletes the metadata
+	// once an address stays orphaned for a full
+	// orphanedHealthEvictWindow; the grace protects entries written
+	// during an in-flight handshake (metadata lands before the health
+	// row exists). Without this sweep, entries written on pre-auth /
+	// failed-handshake paths are keyed by ephemeral ip:port and leak
+	// one set per reconnect forever (memory-leak audit, 2026-06).
+	// Guarded by peerMu (writer). Lazy-allocated.
+	metaOrphanFirstSeen map[domain.PeerAddress]time.Time
+	// lastMetaOrphanSweep throttles evictOrphanedPeerMetadata: the
+	// bootstrapLoop tick fires every 2 s, but a full union-scan of
+	// five metadata maps that often is wasted work — the grace window
+	// is orphanedHealthEvictWindow (minutes), so a once-a-minute scan
+	// loses nothing. Guarded by peerMu.
+	lastMetaOrphanSweep time.Time
 	connWg            sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
 	backgroundWg      sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
 	// conns is the single source of truth for live connection state (core,
@@ -2859,6 +2878,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.networkStatsFrame()
 	case "fetch_aggregate_status":
 		return s.aggregateStatusFrame()
+	case "fetch_resource_usage":
+		return s.resourceUsageFrame()
 	case "fetch_pending_messages":
 		return s.pendingMessagesFrame(frame.Topic)
 	case "import_contacts":

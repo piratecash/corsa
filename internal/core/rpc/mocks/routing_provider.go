@@ -15,8 +15,7 @@ import (
 func NewMockRoutingProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
-},
-) *MockRoutingProvider {
+}) *MockRoutingProvider {
 	mock := &MockRoutingProvider{}
 	mock.Mock.Test(t)
 
