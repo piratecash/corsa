@@ -198,14 +198,30 @@ func TestSystemGetNodeStatusNeverLeaksPrivateKeys(t *testing.T) {
 // with their documented JSON tags.
 func TestSystemGetResourceUsageViaExecEndpoint(t *testing.T) {
 	node := newDefaultNodeProvider(t)
+	// Every field is seeded with a DISTINCT non-zero value so a broken
+	// mapper or a mismatched JSON tag (which would serialise the zero
+	// value) is caught — a presence-only check would pass even then.
 	expected := domain.ResourceUsage{
-		MemSysBytes:       62390272,
-		MemSysHuman:       "59.50 MB",
-		MemHeapAllocBytes: 41943040,
-		MemHeapAllocHuman: "40.00 MB",
-		UptimeSeconds:     192600,
-		UptimeHuman:       "2.23 d",
-		SampledAt:         time.Date(2026, time.June, 6, 5, 15, 47, 0, time.UTC),
+		MemSysBytes:         62390272,
+		MemSysHuman:         "59.50 MB",
+		MemHeapAllocBytes:   41943040,
+		MemHeapAllocHuman:   "40.00 MB",
+		HeapInuseBytes:      45088768,
+		HeapInuseHuman:      "43.00 MB",
+		HeapIdleBytes:       12582912,
+		HeapIdleHuman:       "12.00 MB",
+		HeapReleasedBytes:   8388608,
+		HeapReleasedHuman:   "8.00 MB",
+		GCSysBytes:          4194304,
+		GCSysHuman:          "4.00 MB",
+		CgroupMemLimitBytes: 536870912,
+		CgroupMemLimitHuman: "512.00 MB",
+		CgroupMemUsageBytes: 157286400,
+		CgroupMemUsageHuman: "150.00 MB",
+		ConnectionCount:     12,
+		UptimeSeconds:       192600,
+		UptimeHuman:         "2.23 d",
+		SampledAt:           time.Date(2026, time.June, 6, 5, 15, 47, 0, time.UTC),
 	}
 	node.ExpectedCalls = filterCalls(node.ExpectedCalls, "ResourceUsage")
 	node.On("ResourceUsage").Return(expected)
@@ -218,10 +234,26 @@ func TestSystemGetResourceUsageViaExecEndpoint(t *testing.T) {
 	})
 	expectStatusCode(t, code, 200)
 
+	// Exact value assertions — every numeric field arrives as float64
+	// from encoding/json, every string verbatim. A wrong tag would
+	// surface here as a missing key (zero) rather than the seeded value.
 	expectField(t, result, "mem_sys_bytes", float64(expected.MemSysBytes))
 	expectField(t, result, "mem_sys_human", expected.MemSysHuman)
 	expectField(t, result, "mem_heap_alloc_bytes", float64(expected.MemHeapAllocBytes))
 	expectField(t, result, "mem_heap_alloc_human", expected.MemHeapAllocHuman)
+	expectField(t, result, "heap_inuse_bytes", float64(expected.HeapInuseBytes))
+	expectField(t, result, "heap_inuse_human", expected.HeapInuseHuman)
+	expectField(t, result, "heap_idle_bytes", float64(expected.HeapIdleBytes))
+	expectField(t, result, "heap_idle_human", expected.HeapIdleHuman)
+	expectField(t, result, "heap_released_bytes", float64(expected.HeapReleasedBytes))
+	expectField(t, result, "heap_released_human", expected.HeapReleasedHuman)
+	expectField(t, result, "gc_sys_bytes", float64(expected.GCSysBytes))
+	expectField(t, result, "gc_sys_human", expected.GCSysHuman)
+	expectField(t, result, "cgroup_mem_limit_bytes", float64(expected.CgroupMemLimitBytes))
+	expectField(t, result, "cgroup_mem_limit_human", expected.CgroupMemLimitHuman)
+	expectField(t, result, "cgroup_mem_usage_bytes", float64(expected.CgroupMemUsageBytes))
+	expectField(t, result, "cgroup_mem_usage_human", expected.CgroupMemUsageHuman)
+	expectField(t, result, "connection_count", float64(expected.ConnectionCount))
 	expectField(t, result, "uptime_seconds", float64(expected.UptimeSeconds))
 	expectField(t, result, "uptime_human", expected.UptimeHuman)
 	expectFieldExists(t, result, "sampled_at")

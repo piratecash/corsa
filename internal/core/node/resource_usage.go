@@ -16,9 +16,10 @@ import (
 // getResourceUsage RPC command and the desktop console Info tab.
 //
 // runtime.ReadMemStats triggers a brief stop-the-world; at a per-RPC
-// / once-per-render call rate that cost is negligible. Takes no
-// domain mutex — startedAt is immutable after construction and
-// MemStats is global runtime state.
+// / once-per-second call rate that cost is negligible. Takes no domain
+// mutex — startedAt is immutable, MemStats / cgroup files are global
+// process state, and the connection count comes from the lock-free
+// peerHealthFrames snapshot.
 func (s *Service) ResourceUsage() domain.ResourceUsage {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -31,14 +32,42 @@ func (s *Service) ResourceUsage() domain.ResourceUsage {
 		uptime = 0
 	}
 
+	// Container memory (best-effort; 0 when not under a cgroup).
+	cgLimit, cgUsage := readCgroupMemory()
+	cgLimitHuman := "unlimited"
+	if cgLimit > 0 {
+		cgLimitHuman = formatBytes(cgLimit)
+	}
+
+	// Live connection count — identical set to getActiveConnections
+	// (shared isActiveConnectionFrame filter over the lock-free
+	// peerHealthFrames snapshot).
+	connCount := s.activeConnectionCount()
+
 	return domain.ResourceUsage{
 		MemSysBytes:       m.Sys,
 		MemSysHuman:       formatBytes(m.Sys),
 		MemHeapAllocBytes: m.HeapAlloc,
 		MemHeapAllocHuman: formatBytes(m.HeapAlloc),
-		UptimeSeconds:     int64(uptime / time.Second),
-		UptimeHuman:       formatUptime(uptime),
-		SampledAt:         now,
+		HeapInuseBytes:    m.HeapInuse,
+		HeapInuseHuman:    formatBytes(m.HeapInuse),
+		HeapIdleBytes:     m.HeapIdle,
+		HeapIdleHuman:     formatBytes(m.HeapIdle),
+		HeapReleasedBytes: m.HeapReleased,
+		HeapReleasedHuman: formatBytes(m.HeapReleased),
+		GCSysBytes:        m.GCSys,
+		GCSysHuman:        formatBytes(m.GCSys),
+
+		CgroupMemLimitBytes: cgLimit,
+		CgroupMemLimitHuman: cgLimitHuman,
+		CgroupMemUsageBytes: cgUsage,
+		CgroupMemUsageHuman: formatBytes(cgUsage),
+
+		ConnectionCount: connCount,
+
+		UptimeSeconds: int64(uptime / time.Second),
+		UptimeHuman:   formatUptime(uptime),
+		SampledAt:     now,
 	}
 }
 
@@ -52,13 +81,26 @@ func (s *Service) resourceUsageFrame() protocol.Frame {
 	return protocol.Frame{
 		Type: "resource_usage",
 		ResourceUsage: &protocol.ResourceUsageFrame{
-			MemSysBytes:       ru.MemSysBytes,
-			MemSysHuman:       ru.MemSysHuman,
-			MemHeapAllocBytes: ru.MemHeapAllocBytes,
-			MemHeapAllocHuman: ru.MemHeapAllocHuman,
-			UptimeSeconds:     ru.UptimeSeconds,
-			UptimeHuman:       ru.UptimeHuman,
-			SampledAt:         ru.SampledAt.Format(time.RFC3339Nano),
+			MemSysBytes:         ru.MemSysBytes,
+			MemSysHuman:         ru.MemSysHuman,
+			MemHeapAllocBytes:   ru.MemHeapAllocBytes,
+			MemHeapAllocHuman:   ru.MemHeapAllocHuman,
+			HeapInuseBytes:      ru.HeapInuseBytes,
+			HeapInuseHuman:      ru.HeapInuseHuman,
+			HeapIdleBytes:       ru.HeapIdleBytes,
+			HeapIdleHuman:       ru.HeapIdleHuman,
+			HeapReleasedBytes:   ru.HeapReleasedBytes,
+			HeapReleasedHuman:   ru.HeapReleasedHuman,
+			GCSysBytes:          ru.GCSysBytes,
+			GCSysHuman:          ru.GCSysHuman,
+			CgroupMemLimitBytes: ru.CgroupMemLimitBytes,
+			CgroupMemLimitHuman: ru.CgroupMemLimitHuman,
+			CgroupMemUsageBytes: ru.CgroupMemUsageBytes,
+			CgroupMemUsageHuman: ru.CgroupMemUsageHuman,
+			ConnectionCount:     ru.ConnectionCount,
+			UptimeSeconds:       ru.UptimeSeconds,
+			UptimeHuman:         ru.UptimeHuman,
+			SampledAt:           ru.SampledAt.Format(time.RFC3339Nano),
 		},
 	}
 }

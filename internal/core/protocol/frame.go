@@ -247,21 +247,40 @@ type AggregateStatusFrame struct {
 }
 
 // ResourceUsageFrame is the wire representation of the node's process
-// memory footprint and uptime, returned by the fetch_resource_usage
-// local RPC command. Desktop consumes this frame (via the prober) to
-// render the console Info-tab Memory / Uptime rows, mirroring how it
-// consumes fetch_aggregate_status — i.e. through the local-frame
-// dispatch, NOT a direct method call into the node. Both machine
-// (bytes / seconds) and human (pre-formatted) fields are carried so
-// the consumer renders without re-deriving units.
+// memory footprint, cgroup memory, connection count, and uptime,
+// returned by the fetch_resource_usage local RPC command. Desktop
+// consumes this frame (via the prober) the same way it consumes
+// fetch_aggregate_status — through the local-frame dispatch, NOT a
+// direct method call into the node. It carries the FULL field set
+// (machine + human) so the embedded path is byte-for-byte equivalent to
+// the public getResourceUsage RPC; the Info tab renders only the Memory
+// / Uptime subset but the rest is available to any frame consumer. Field
+// semantics mirror domain.ResourceUsage.
 type ResourceUsageFrame struct {
 	MemSysBytes       uint64 `json:"mem_sys_bytes"`
 	MemSysHuman       string `json:"mem_sys_human"`
 	MemHeapAllocBytes uint64 `json:"mem_heap_alloc_bytes"`
 	MemHeapAllocHuman string `json:"mem_heap_alloc_human"`
-	UptimeSeconds     int64  `json:"uptime_seconds"`
-	UptimeHuman       string `json:"uptime_human"`
-	SampledAt         string `json:"sampled_at"` // RFC3339Nano UTC
+
+	HeapInuseBytes    uint64 `json:"heap_inuse_bytes"`
+	HeapInuseHuman    string `json:"heap_inuse_human"`
+	HeapIdleBytes     uint64 `json:"heap_idle_bytes"`
+	HeapIdleHuman     string `json:"heap_idle_human"`
+	HeapReleasedBytes uint64 `json:"heap_released_bytes"`
+	HeapReleasedHuman string `json:"heap_released_human"`
+	GCSysBytes        uint64 `json:"gc_sys_bytes"`
+	GCSysHuman        string `json:"gc_sys_human"`
+
+	CgroupMemLimitBytes uint64 `json:"cgroup_mem_limit_bytes"`
+	CgroupMemLimitHuman string `json:"cgroup_mem_limit_human"`
+	CgroupMemUsageBytes uint64 `json:"cgroup_mem_usage_bytes"`
+	CgroupMemUsageHuman string `json:"cgroup_mem_usage_human"`
+
+	ConnectionCount int `json:"connection_count"`
+
+	UptimeSeconds int64  `json:"uptime_seconds"`
+	UptimeHuman   string `json:"uptime_human"`
+	SampledAt     string `json:"sampled_at"` // RFC3339Nano UTC
 }
 
 // TrafficHistoryFrame holds a rolling window of per-second traffic samples.

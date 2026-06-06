@@ -244,13 +244,28 @@ func resourceUsageFromFrame(frame protocol.Frame) *ResourceUsage {
 	if frame.ResourceUsage == nil {
 		return nil
 	}
+	f := frame.ResourceUsage
 	return &ResourceUsage{
-		MemSysBytes:       frame.ResourceUsage.MemSysBytes,
-		MemSysHuman:       frame.ResourceUsage.MemSysHuman,
-		MemHeapAllocBytes: frame.ResourceUsage.MemHeapAllocBytes,
-		MemHeapAllocHuman: frame.ResourceUsage.MemHeapAllocHuman,
-		UptimeSeconds:     frame.ResourceUsage.UptimeSeconds,
-		UptimeHuman:       frame.ResourceUsage.UptimeHuman,
+		MemSysBytes:         f.MemSysBytes,
+		MemSysHuman:         f.MemSysHuman,
+		MemHeapAllocBytes:   f.MemHeapAllocBytes,
+		MemHeapAllocHuman:   f.MemHeapAllocHuman,
+		HeapInuseBytes:      f.HeapInuseBytes,
+		HeapInuseHuman:      f.HeapInuseHuman,
+		HeapIdleBytes:       f.HeapIdleBytes,
+		HeapIdleHuman:       f.HeapIdleHuman,
+		HeapReleasedBytes:   f.HeapReleasedBytes,
+		HeapReleasedHuman:   f.HeapReleasedHuman,
+		GCSysBytes:          f.GCSysBytes,
+		GCSysHuman:          f.GCSysHuman,
+		CgroupMemLimitBytes: f.CgroupMemLimitBytes,
+		CgroupMemLimitHuman: f.CgroupMemLimitHuman,
+		CgroupMemUsageBytes: f.CgroupMemUsageBytes,
+		CgroupMemUsageHuman: f.CgroupMemUsageHuman,
+		ConnectionCount:     f.ConnectionCount,
+		UptimeSeconds:       f.UptimeSeconds,
+		UptimeHuman:         f.UptimeHuman,
+		SampledAt:           f.SampledAt,
 	}
 }
 

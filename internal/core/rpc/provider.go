@@ -25,10 +25,12 @@ type NodeProvider interface {
 	NodeStatus() domain.NodeStatus
 
 	// ResourceUsage returns a point-in-time snapshot of the process
-	// memory footprint (runtime.MemStats) and uptime, with both
-	// machine-readable integers and human-formatted strings. Returned
-	// by the getResourceUsage RPC command and surfaced in the desktop
-	// console Info tab.
+	// memory footprint (runtime.MemStats: sys, heap alloc/inuse/idle/
+	// released, GC metadata), the cgroup memory limit + usage, the live
+	// connection count, and uptime — each with both machine-readable
+	// integers and human-formatted strings. Returned by the
+	// getResourceUsage RPC command; the desktop console Info tab renders
+	// the memory/uptime subset.
 	ResourceUsage() domain.ResourceUsage
 	// FetchFileTransfers returns a JSON-encoded list of active and pending
 	// sender/receiver file transfers. Terminal states are excluded.

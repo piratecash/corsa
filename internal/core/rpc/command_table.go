@@ -560,7 +560,7 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 	)
 
 	t.Register(
-		CommandInfo{Name: "getResourceUsage", Description: "Get process memory usage and uptime (machine-readable bytes/seconds plus human-formatted strings)", Category: "system"},
+		CommandInfo{Name: "getResourceUsage", Description: "Get process memory (sys/heap alloc/inuse/idle/released, GC metadata), cgroup memory limit+usage, live connection count, and uptime (machine-readable bytes/seconds plus human-formatted strings)", Category: "system"},
 		func(req CommandRequest) CommandResponse {
 			if r, done := ctxDone(req); done {
 				return r

@@ -109,11 +109,11 @@ Security guarantees enforced by tests:
 
 ### POST /rpc/v1/exec — `getResourceUsage`
 
-Process memory footprint and uptime. Both machine-readable integers
-and human-formatted strings are returned so dashboards consume the raw
-numbers while operators reading the JSON get sensible units. Snake_case
-aliases `resource_usage` and `get_resource_usage` resolve to the same
-handler.
+Process memory footprint, cgroup (container) memory, live connection
+count, and uptime. Both machine-readable integers and human-formatted strings are
+returned so dashboards consume the raw numbers while operators reading
+the JSON get sensible units. Snake_case aliases `resource_usage` and
+`get_resource_usage` resolve to the same handler.
 
 Response:
 ```json
@@ -122,6 +122,19 @@ Response:
   "mem_sys_human": "59.50 MB",
   "mem_heap_alloc_bytes": 41943040,
   "mem_heap_alloc_human": "40.00 MB",
+  "heap_inuse_bytes": 45088768,
+  "heap_inuse_human": "43.00 MB",
+  "heap_idle_bytes": 12582912,
+  "heap_idle_human": "12.00 MB",
+  "heap_released_bytes": 8388608,
+  "heap_released_human": "8.00 MB",
+  "gc_sys_bytes": 4194304,
+  "gc_sys_human": "4.00 MB",
+  "cgroup_mem_limit_bytes": 536870912,
+  "cgroup_mem_limit_human": "512.00 MB",
+  "cgroup_mem_usage_bytes": 157286400,
+  "cgroup_mem_usage_human": "150.00 MB",
+  "connection_count": 12,
   "uptime_seconds": 192600,
   "uptime_human": "2.23 d",
   "sampled_at": "2026-06-06T05:15:47.123456789Z"
@@ -136,13 +149,42 @@ Field notes:
 - `mem_heap_alloc_bytes` / `mem_heap_alloc_human` — live (in-use) heap
   (`runtime.MemStats.HeapAlloc`). This is the figure that climbs
   steadily under a memory leak — watch it across calls.
+- `heap_inuse_bytes` / `heap_inuse_human` — bytes in in-use heap spans
+  (`HeapInuse`, ≥ HeapAlloc). The gap over HeapAlloc is heap
+  fragmentation.
+- `heap_idle_bytes` / `heap_idle_human` — idle (unused) heap spans
+  (`HeapIdle`) available for reuse or release. Large idle after a spike =
+  the runtime holding reclaimed memory it hasn't returned yet.
+- `heap_released_bytes` / `heap_released_human` — idle heap returned to
+  the OS (`HeapReleased`). `heap_idle - heap_released` is
+  reclaimed-but-still-held.
+- `gc_sys_bytes` / `gc_sys_human` — memory used by the GC's own metadata
+  (`GCSys`); grows with heap size and churn.
+- `cgroup_mem_limit_bytes` / `cgroup_mem_limit_human` — memory limit read
+  from the **root of the mounted cgroup hierarchy** (cgroup v2
+  `memory.max`, v1 `memory.limit_in_bytes`); the process's own cgroup is
+  not resolved via `/proc/self/cgroup`. `0` / `"unlimited"` when no cgroup
+  memory controller is mounted or the limit is `max`. An unlimited limit
+  zeroes only this field — usage is still reported.
+- `cgroup_mem_usage_bytes` / `cgroup_mem_usage_human` — current usage of
+  that same cgroup-hierarchy root (`memory.current` /
+  `memory.usage_in_bytes`). **Scope caveat:** accurate for Docker/k8s
+  private cgroup namespaces, where the mount root IS the container's
+  cgroup (its memory and the limit the OOM killer enforces). On a bare
+  host / systemd service / non-private cgroup namespace the mount root is
+  a broad / machine-root cgroup, so the figure describes that wider scope,
+  **not** this process or service — do not read it as the corsa process's
+  memory there. `0` off-cgroup. Pair with the limit to see headroom.
+- `connection_count` — number of live peer connections (inbound +
+  outbound), the same liveness set as `getActiveConnections`. A footprint
+  growing in lock-step with this is working set, not a leak.
 - `uptime_seconds` / `uptime_human` — seconds since process start, plus
   a human string in the largest of three tiers: seconds (< 1 h), hours
   (< 1 day), or days.
 - `sampled_at` — RFC3339Nano UTC instant the sample was taken.
 
-The same figures are shown in the desktop console **Info** tab
-(`Memory` / `Uptime` rows).
+The desktop console **Info** tab shows the headline `Memory` / `Uptime`
+rows from this command.
 
 ---
 
@@ -260,10 +302,11 @@ challenge-и.
 
 ### POST /rpc/v1/exec — `getResourceUsage`
 
-Потребление памяти процессом и аптайм. Возвращаются и машинночитаемые
-целые, и человекочитаемые строки — дашборды берут сырые числа, а
-оператор, читающий JSON, видит удобные единицы. Snake_case алиасы
-`resource_usage` и `get_resource_usage` ведут к тому же обработчику.
+Потребление памяти процессом, память cgroup (контейнера), число живых
+соединений и аптайм. Возвращаются и машинночитаемые целые, и человекочитаемые
+строки — дашборды берут сырые числа, а оператор, читающий JSON, видит
+удобные единицы. Snake_case алиасы `resource_usage` и
+`get_resource_usage` ведут к тому же обработчику.
 
 Ответ:
 ```json
@@ -272,6 +315,19 @@ challenge-и.
   "mem_sys_human": "59.50 MB",
   "mem_heap_alloc_bytes": 41943040,
   "mem_heap_alloc_human": "40.00 MB",
+  "heap_inuse_bytes": 45088768,
+  "heap_inuse_human": "43.00 MB",
+  "heap_idle_bytes": 12582912,
+  "heap_idle_human": "12.00 MB",
+  "heap_released_bytes": 8388608,
+  "heap_released_human": "8.00 MB",
+  "gc_sys_bytes": 4194304,
+  "gc_sys_human": "4.00 MB",
+  "cgroup_mem_limit_bytes": 536870912,
+  "cgroup_mem_limit_human": "512.00 MB",
+  "cgroup_mem_usage_bytes": 157286400,
+  "cgroup_mem_usage_human": "150.00 MB",
+  "connection_count": 12,
   "uptime_seconds": 192600,
   "uptime_human": "2.23 d",
   "sampled_at": "2026-06-06T05:15:47.123456789Z"
@@ -286,10 +342,38 @@ challenge-и.
 - `mem_heap_alloc_bytes` / `mem_heap_alloc_human` — живая (in-use) куча
   (`runtime.MemStats.HeapAlloc`). Именно она монотонно растёт при
   утечке — её и стоит отслеживать между вызовами.
+- `heap_inuse_bytes` / `heap_inuse_human` — байты в in-use heap-спанах
+  (`HeapInuse`, ≥ HeapAlloc). Зазор над HeapAlloc — фрагментация кучи.
+- `heap_idle_bytes` / `heap_idle_human` — простаивающие heap-спаны
+  (`HeapIdle`), доступные для переиспользования или возврата ОС. Большой
+  idle после пика = рантайм держит reclaimed-память, ещё не вернув её.
+- `heap_released_bytes` / `heap_released_human` — idle-куча, возвращённая
+  ОС (`HeapReleased`). `heap_idle - heap_released` — reclaimed, но ещё
+  удерживается.
+- `gc_sys_bytes` / `gc_sys_human` — память под собственные метаданные GC
+  (`GCSys`); растёт с размером кучи и churn.
+- `cgroup_mem_limit_bytes` / `cgroup_mem_limit_human` — лимит памяти,
+  прочитанный из **корня смонтированной cgroup-иерархии** (cgroup v2
+  `memory.max`, v1 `memory.limit_in_bytes`); собственная cgroup процесса
+  через `/proc/self/cgroup` не резолвится. `0` / `"unlimited"` когда
+  cgroup memory-контроллер не смонтирован или лимит `max`. Безлимитный
+  лимит обнуляет только это поле — usage всё равно отдаётся.
+- `cgroup_mem_usage_bytes` / `cgroup_mem_usage_human` — текущее
+  потребление того же корня cgroup-иерархии (`memory.current` /
+  `memory.usage_in_bytes`). **Оговорка по области видимости:** точно для
+  private cgroup namespace в Docker/k8s, где mount-root = cgroup
+  контейнера (его память и лимит, который форсит OOM-killer). На голом
+  хосте / systemd-сервисе / non-private namespace mount-root — широкая /
+  root cgroup машины, и цифра описывает этот более широкий scope, **а не**
+  процесс/сервис corsa — не принимайте её там за память процесса. `0` вне
+  cgroup. В паре с лимитом показывает запас.
+- `connection_count` — число живых peer-соединений (входящие + исходящие),
+  тот же набор, что у `getActiveConnections`. Footprint, растущий в такт
+  с этим числом, — рабочий набор, а не утечка.
 - `uptime_seconds` / `uptime_human` — секунды с момента старта плюс
   человекочитаемая строка в наибольшем из трёх ярусов: секунды (< 1 ч),
   часы (< 1 суток) или дни.
 - `sampled_at` — момент снятия сэмпла, RFC3339Nano UTC.
 
-Те же значения показываются в десктоп-консоли на вкладке **Инфо**
-(строки `Память` / `Аптайм`).
+В десктоп-консоли на вкладке **Инфо** показываются заголовочные строки
+`Память` / `Аптайм` из этой команды.

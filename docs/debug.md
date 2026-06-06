@@ -143,6 +143,10 @@ corsa-cli getResourceUsage
 {
   "mem_sys_bytes": 148859176,  "mem_sys_human": "141.96 MB",
   "mem_heap_alloc_bytes": 97664104, "mem_heap_alloc_human": "93.14 MB",
+  "heap_inuse_human": "98.00 MB", "heap_idle_human": "40.00 MB",
+  "heap_released_human": "30.00 MB", "gc_sys_human": "5.00 MB",
+  "cgroup_mem_limit_human": "512.00 MB", "cgroup_mem_usage_human": "150.00 MB",
+  "connection_count": 12,
   "uptime_seconds": 538, "uptime_human": "538 s",
   "sampled_at": "2026-06-06T06:07:54Z"
 }
@@ -150,6 +154,9 @@ corsa-cli getResourceUsage
 
 - `mem_sys_*` — total memory obtained from the OS (`runtime.MemStats.Sys`), the closest proxy for RSS / process footprint.
 - `mem_heap_alloc_*` — **live (in-use) heap** — the figure that climbs steadily under a leak. Watch this across calls.
+- `heap_idle_*` vs `heap_released_*` — reclaimed heap the runtime holds vs the part it returned to the OS; a large idle/small released gap explains why RSS stays high after a spike.
+- `cgroup_mem_usage_*` / `cgroup_mem_limit_*` — memory + limit read from the root of the mounted cgroup hierarchy (`/proc/self/cgroup` is not resolved). Accurate for Docker/k8s private cgroup namespaces (the container's figures the OOM killer watches); on a bare host / systemd service it is a broad/root cgroup, **not** the process. `unlimited` off-cgroup.
+- `connection_count` — live peer connections; a footprint that tracks this is working set, not a leak.
 
 The same two figures are shown on the desktop console **Info** tab (Memory / Uptime rows), live-ticked once a second.
 
@@ -326,6 +333,10 @@ corsa-cli getResourceUsage
 {
   "mem_sys_bytes": 148859176,  "mem_sys_human": "141.96 MB",
   "mem_heap_alloc_bytes": 97664104, "mem_heap_alloc_human": "93.14 MB",
+  "heap_inuse_human": "98.00 MB", "heap_idle_human": "40.00 MB",
+  "heap_released_human": "30.00 MB", "gc_sys_human": "5.00 MB",
+  "cgroup_mem_limit_human": "512.00 MB", "cgroup_mem_usage_human": "150.00 MB",
+  "connection_count": 12,
   "uptime_seconds": 538, "uptime_human": "538 s",
   "sampled_at": "2026-06-06T06:07:54Z"
 }
@@ -333,6 +344,9 @@ corsa-cli getResourceUsage
 
 - `mem_sys_*` — всего памяти, взятой у ОС (`runtime.MemStats.Sys`), ближайший к RSS / footprint процесса показатель.
 - `mem_heap_alloc_*` — **живая (in-use) куча** — именно она монотонно растёт при утечке. Её и отслеживать между вызовами.
+- `heap_idle_*` vs `heap_released_*` — reclaimed-куча, которую держит рантайм, против возвращённой ОС; большой зазор idle/released объясняет, почему RSS остаётся высоким после пика.
+- `cgroup_mem_usage_*` / `cgroup_mem_limit_*` — память и лимит, прочитанные из корня смонтированной cgroup-иерархии (`/proc/self/cgroup` не резолвится). Точно для private cgroup namespace в Docker/k8s (цифры контейнера, за которыми следит OOM-killer); на голом хосте / systemd-сервисе это широкая / root cgroup, **а не** процесс. `unlimited` вне cgroup.
+- `connection_count` — живые peer-соединения; footprint, растущий в такт с этим числом, — рабочий набор, а не утечка.
 
 Те же две цифры показаны в десктоп-консоли на вкладке **Инфо** (строки Память / Аптайм), с обновлением раз в секунду.
 

@@ -274,20 +274,42 @@ type AggregateStatus struct {
 }
 
 // ResourceUsage is the service-layer view of the node process memory
-// footprint and uptime, parsed from a fetch_resource_usage reply.
-// Both machine-readable numbers and the node's human-formatted strings
-// are carried so the desktop renders without re-deriving units. Flows
-// through NodeStatus like every other probe/monitor field; sampled by
-// NodeStatusMonitor's resource ticker (see RunResourceSampler) so the
-// stop-the-world runtime.MemStats read happens at a controlled cadence
-// off the UI render path.
+// footprint, cgroup memory, connection count, and uptime, parsed from a
+// fetch_resource_usage reply — the full field set the wire frame and
+// public RPC carry. Both machine-readable numbers and the node's
+// human-formatted strings are kept so the desktop renders without
+// re-deriving units. Flows through NodeStatus like every other
+// probe/monitor field; sampled by NodeStatusMonitor's resource ticker
+// (see RunResourceSampler) so the stop-the-world runtime.MemStats read
+// happens at a controlled cadence off the UI render path.
 type ResourceUsage struct {
 	MemSysBytes       uint64
 	MemSysHuman       string
 	MemHeapAllocBytes uint64
 	MemHeapAllocHuman string
-	UptimeSeconds     int64
-	UptimeHuman       string
+
+	HeapInuseBytes    uint64
+	HeapInuseHuman    string
+	HeapIdleBytes     uint64
+	HeapIdleHuman     string
+	HeapReleasedBytes uint64
+	HeapReleasedHuman string
+	GCSysBytes        uint64
+	GCSysHuman        string
+
+	CgroupMemLimitBytes uint64
+	CgroupMemLimitHuman string
+	CgroupMemUsageBytes uint64
+	CgroupMemUsageHuman string
+
+	ConnectionCount int
+
+	UptimeSeconds int64
+	UptimeHuman   string
+
+	// SampledAt is the RFC3339Nano UTC instant the node took the sample,
+	// carried verbatim from the wire frame (empty when absent).
+	SampledAt string
 }
 
 

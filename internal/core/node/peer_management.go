@@ -4862,6 +4862,48 @@ func (s *Service) ListBannedJSON() (json.RawMessage, error) {
 	return json.Marshal(resp)
 }
 
+// isActiveConnectionFrame is the single source of truth for "this peer
+// health frame represents a live, established connection" — the exact
+// filter ActiveConnectionsJSON (getActiveConnections) applies. Shared so
+// the connection COUNT (activeConnectionCount, surfaced by
+// getResourceUsage) and the connection LIST cannot drift apart.
+//
+// A frame counts when: Connected, a non-zero ConnID, a health state in
+// {healthy, degraded, stalled} (reconnecting means Connected==false in
+// practice), and a slot state that is empty / active / initializing
+// (queued / dialing / retry_wait / reconnecting mean no established
+// transport). PeerID is deliberately NOT required — an authenticated
+// transport without a completed handshake is still a live connection;
+// that matches getActiveConnections (which lists it) and differs from
+// connectedPeerCount (which counts distinct relay-ready identities).
+func isActiveConnectionFrame(f protocol.PeerHealthFrame) bool {
+	if !f.Connected || f.ConnID == 0 {
+		return false
+	}
+	if f.State != peerStateHealthy && f.State != peerStateDegraded && f.State != peerStateStalled {
+		return false
+	}
+	slotState := domain.SlotState(f.SlotState)
+	if slotState != "" && slotState != domain.SlotStateActive && slotState != domain.SlotStateInitializing {
+		return false
+	}
+	return true
+}
+
+// activeConnectionCount returns the number of live peer connections —
+// the same set getActiveConnections lists (see isActiveConnectionFrame),
+// counted from the lock-free peerHealthFrames snapshot. Surfaced by
+// getResourceUsage as connection_count.
+func (s *Service) activeConnectionCount() int {
+	n := 0
+	for _, f := range s.peerHealthFrames() {
+		if isActiveConnectionFrame(f) {
+			n++
+		}
+	}
+	return n
+}
+
 // ActiveConnectionsJSON returns a JSON-encoded snapshot of all currently
 // live peer connections (both inbound and outbound).
 // Implements rpc.ConnectionDiagnosticProvider.
@@ -4900,30 +4942,15 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 
 	var connections []activeConnection
 	for _, f := range frames {
-		if !f.Connected {
+		// Shared predicate — keeps the connection LIST and the
+		// connection COUNT (activeConnectionCount / connection_count)
+		// filtering identically. See isActiveConnectionFrame for the
+		// rationale behind each clause.
+		if !isActiveConnectionFrame(f) {
 			continue
 		}
-		if f.ConnID == 0 {
-			continue
-		}
-
 		state := f.State
-		// Only healthy/degraded/stalled are valid for active connections.
-		// reconnecting means Connected==false in practice, but guard anyway.
-		if state != peerStateHealthy && state != peerStateDegraded && state != peerStateStalled {
-			continue
-		}
-
-		// Filter slot_state: only active and initializing are allowed for
-		// live connections. Other slot states (queued, dialing, retry_wait,
-		// reconnecting) mean no established transport.  The wire field is
-		// a raw string (protocol.PeerHealthFrame) — lift it into the typed
-		// domain.SlotState at the decoding boundary so downstream callers
-		// compile-compare against the enum constants instead of literals.
 		slotState := domain.SlotState(f.SlotState)
-		if slotState != "" && slotState != domain.SlotStateActive && slotState != domain.SlotStateInitializing {
-			continue
-		}
 
 		addr := domain.PeerAddress(f.Address)
 		remoteAddr := addr

@@ -101,11 +101,14 @@ type NodeStatus struct {
 }
 
 // ResourceUsage is a point-in-time snapshot of the process's memory
-// footprint and uptime, returned by the getResourceUsage RPC command
-// and surfaced in the desktop console's Info tab. Both machine-
+// footprint (runtime.MemStats: sys, heap alloc/inuse/idle/released, GC
+// metadata), the cgroup memory limit + usage, the live connection
+// count, and uptime — returned by the getResourceUsage RPC command. The
+// desktop console's Info tab renders the headline memory/uptime subset;
+// the rest is for dashboards and leak/OOM diagnostics. Both machine-
 // readable (raw integers) and human-readable (pre-formatted strings)
-// representations are included so dashboards can consume the numbers
-// while operators reading the JSON or the UI get sensible units.
+// representations are included so dashboards consume the numbers while
+// operators reading the JSON or the UI get sensible units.
 //
 // Memory is sourced from runtime.MemStats (the Go standard-library
 // mechanism). MemSysBytes is the total obtained from the OS — the
@@ -125,6 +128,67 @@ type ResourceUsage struct {
 	MemHeapAllocBytes uint64 `json:"mem_heap_alloc_bytes"`
 	// MemHeapAllocHuman is MemHeapAllocBytes formatted with a unit.
 	MemHeapAllocHuman string `json:"mem_heap_alloc_human"`
+
+	// HeapInuseBytes is runtime.MemStats.HeapInuse — bytes in in-use
+	// heap spans (>= HeapAlloc; includes free slots within spans that
+	// still hold live objects). Gap vs HeapAlloc indicates fragmentation.
+	HeapInuseBytes uint64 `json:"heap_inuse_bytes"`
+	HeapInuseHuman string `json:"heap_inuse_human"`
+
+	// HeapIdleBytes is runtime.MemStats.HeapIdle — bytes in idle (unused)
+	// heap spans, available for reuse or eventual release to the OS. Large
+	// idle after a memory spike means the runtime is holding reclaimed
+	// memory it hasn't returned yet (HeapReleased is the released subset).
+	HeapIdleBytes uint64 `json:"heap_idle_bytes"`
+	HeapIdleHuman string `json:"heap_idle_human"`
+
+	// HeapReleasedBytes is runtime.MemStats.HeapReleased — bytes of idle
+	// heap returned to the OS. Rising HeapReleased after a spike is the
+	// runtime giving memory back; the difference HeapIdle-HeapReleased is
+	// reclaimed-but-still-held.
+	HeapReleasedBytes uint64 `json:"heap_released_bytes"`
+	HeapReleasedHuman string `json:"heap_released_human"`
+
+	// GCSysBytes is runtime.MemStats.GCSys — bytes of memory used by the
+	// garbage collector's own metadata. Grows with heap size and churn.
+	GCSysBytes uint64 `json:"gc_sys_bytes"`
+	GCSysHuman string `json:"gc_sys_human"`
+
+	// CgroupMemLimitBytes / CgroupMemUsageBytes are the memory limit and
+	// current usage read from the ROOT of the mounted cgroup hierarchy —
+	// the fixed paths /sys/fs/cgroup/memory.{max,current} (v2) or
+	// /sys/fs/cgroup/memory/memory.{limit_in_bytes,usage_in_bytes} (v1).
+	// The process's own cgroup is NOT resolved via /proc/self/cgroup.
+	//
+	// Scope caveat — this is container-oriented best-effort, NOT a
+	// guaranteed per-process reading:
+	//   - Inside a container with a private cgroup namespace (Docker/k8s
+	//     default) the mount root IS the container's cgroup, so the
+	//     figures are the container's memory and the limit the OOM killer
+	//     enforces — exactly the intended use.
+	//   - On a bare host, a systemd service, or a non-private cgroup
+	//     namespace, the mount root is a broad / machine-root cgroup, so
+	//     the figures describe that wider scope, NOT this process or
+	//     service. Do not read them as the corsa process's memory there.
+	// Accurate for Docker/k8s private cgroup namespaces; broad/root scope
+	// elsewhere.
+	//
+	// CgroupMemLimitBytes is 0 (CgroupMemLimitHuman "unlimited") when no
+	// cgroup memory controller is mounted at the root, the files are
+	// unreadable, or the limit is "max"/unbounded. An unlimited limit
+	// zeroes only the LIMIT — CgroupMemUsageBytes is still read and
+	// reported. CgroupMemUsageBytes is 0 only when usage is genuinely
+	// unreadable / no controller mounted.
+	CgroupMemLimitBytes uint64 `json:"cgroup_mem_limit_bytes"`
+	CgroupMemLimitHuman string `json:"cgroup_mem_limit_human"`
+	CgroupMemUsageBytes uint64 `json:"cgroup_mem_usage_bytes"`
+	CgroupMemUsageHuman string `json:"cgroup_mem_usage_human"`
+
+	// ConnectionCount is the number of live peer connections (inbound +
+	// outbound) the node currently holds — the same liveness set as
+	// getActiveConnections. A footprint that grows in lock-step with this
+	// is working set, not a leak.
+	ConnectionCount int `json:"connection_count"`
 
 	// UptimeSeconds is whole seconds since process start.
 	UptimeSeconds int64 `json:"uptime_seconds"`
