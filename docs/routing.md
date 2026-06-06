@@ -714,7 +714,7 @@ Duplicate baseline arrivals are harmless: the flag is already set and is simply 
 
 ### Phase 4 — Compact wire frames, attested links, poison-reverse
 
-Phase 4 (shipped 2026-05) ships a compact announce wire frame, signed announcements, an explicit single-hop poison-reverse signal, and three local-only safety primitives. Every wire-protocol addition is additive and gated behind a single operator opt-in flag (`CORSA_ENABLE_MESH_ROUTING_V3`) so the default-off path leaves legacy v1/v2 behaviour unchanged.
+Phase 4 (shipped 2026-05) ships a compact announce wire frame, signed announcements, an explicit single-hop poison-reverse signal, and three local-only safety primitives. Every wire-protocol addition is additive and gated behind a single flag (`CORSA_ENABLE_MESH_ROUTING_V3`). After the soak period this flag now defaults to **on**; operators can opt out with `CORSA_ENABLE_MESH_ROUTING_V3=0` (or `false`/`no`/`off`) to drop the node back to the legacy v1/v2 wire path. Negotiation stays backward compatible either way — v3 frames are only sent to peers that also advertise the capability.
 
 Wire-protocol additions (capability-gated, opt-in via the flag above):
 
@@ -1459,7 +1459,7 @@ Delta-фрейм (v2 `routes_update` ИЛИ v3 `route_announce_v3` с `kind="del
 
 ### Phase 4 — Компактные wire-фреймы, attested links, poison-reverse
 
-Phase 4 (shipped 2026-05) добавила компактный announce wire-фрейм, signed-анонсы, explicit single-hop poison-reverse сигнал и три local-only safety-примитива. Все wire-протокольные добавления additive и гейтятся за единственным operator opt-in флагом (`CORSA_ENABLE_MESH_ROUTING_V3`), поэтому default-off путь оставляет legacy v1/v2 поведение нетронутым.
+Phase 4 (shipped 2026-05) добавила компактный announce wire-фрейм, signed-анонсы, explicit single-hop poison-reverse сигнал и три local-only safety-примитива. Все wire-протокольные добавления additive и гейтятся за единственным флагом (`CORSA_ENABLE_MESH_ROUTING_V3`). После soak-периода флаг по умолчанию **включён**; оператор может отключить через `CORSA_ENABLE_MESH_ROUTING_V3=0` (или `false`/`no`/`off`), вернув ноду на legacy v1/v2 wire-путь. Переговоры остаются backward compatible в любом случае — v3-фреймы шлются только пирам, которые тоже анонсируют capability.
 
 Wire-протокольные добавления (capability-gated, opt-in через флаг выше):
 

@@ -185,17 +185,19 @@ type Node struct {
 	// point.
 	OverloadGoroutineThreshold int
 
-	// EnableMeshRoutingV3 opts this node in to advertising the Phase 4
+	// EnableMeshRoutingV3 controls whether this node advertises the Phase 4
 	// compact-announce capability (env: CORSA_ENABLE_MESH_ROUTING_V3,
-	// default false). When true, the local capability set includes
+	// default TRUE). When true, the local capability set includes
 	// CapMeshRoutingV3, the announce loop emits route_announce_v3 to
 	// peers that also advertise it, and connect-time / forced-full syncs
 	// to those peers use the v3 kind="full" frame. Peers without the
 	// capability continue to receive legacy announce_routes /
-	// routes_update unchanged (overview §5.2 Phase B). The flag is
-	// opt-in by design so v3 rollout follows the same default-off→soak→
-	// flip-on cadence the v2 rollout used; see
-	// docs/cluster-mesh/phase-4-compact-wire-signed.md §7 PR 13.1 part 2c.
+	// routes_update unchanged (overview §5.2 Phase B), so a default-on node
+	// stays backward compatible with opted-out or older peers. The v3 path
+	// has completed the default-off→soak→flip-on rollout cadence the v2
+	// rollout used; operators can still opt out via
+	// CORSA_ENABLE_MESH_ROUTING_V3=0 (or false/no/off). See
+	// docs/cluster-mesh/phase-4-compact-wire-signed.md §7.
 	EnableMeshRoutingV3 bool
 
 	// PprofAddr enables Go's net/http/pprof profiling server on the
@@ -243,7 +245,7 @@ const (
 	// change documented in docs/protocol/handshake.md. The current floor
 	// is well above v12, so this build does not carry any v10..v13
 	// compatibility paths.
-	ProtocolVersion        = 17
+	ProtocolVersion        = 18
 	MinimumProtocolVersion = 14
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
@@ -742,22 +744,26 @@ func overloadGoroutineThresholdFromEnv() int {
 	return value
 }
 
-// enableMeshRoutingV3FromEnv reads CORSA_ENABLE_MESH_ROUTING_V3 and
-// returns the boolean opt-in flag for the Phase 4 compact-announce wire
-// frame. Accepted truthy values are "1", "true", "yes", "on" (any case
-// after trimming). Any other value — including unset, empty, "0",
-// "false", or unparseable — yields false so legacy deployments stay on
-// the legacy announce_routes / routes_update wire path until operators
-// deliberately opt in. The opt-in shape mirrors the v2 rollout cadence
-// (see docs/cluster-mesh/phase-4-compact-wire-signed.md §7 PR 13.1 part
-// 2c).
+// enableMeshRoutingV3FromEnv reads CORSA_ENABLE_MESH_ROUTING_V3 and returns
+// whether this node advertises the Phase 4 compact-announce wire frame.
+//
+// The Phase 4 v3 path has soaked and is now ENABLED BY DEFAULT: an unset,
+// empty, or unrecognised value yields true. Operators retain an explicit
+// escape hatch — "0", "false", "no", or "off" (any case after trimming)
+// turns it back off, dropping the node to the legacy announce_routes /
+// routes_update wire path. Negotiation stays backward compatible regardless:
+// v3 frames are only sent to peers that also advertise CapMeshRoutingV3, so a
+// default-on node still talks legacy to any peer that opted out or runs an
+// older build (overview §5.2 Phase B;
+// docs/cluster-mesh/phase-4-compact-wire-signed.md §7).
 func enableMeshRoutingV3FromEnv() bool {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENABLE_MESH_ROUTING_V3")))
 	switch raw {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		// Unset, empty, truthy, or unrecognised → enabled (the new default).
+		return true
 	}
 }
 

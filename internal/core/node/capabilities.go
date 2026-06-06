@@ -50,13 +50,12 @@ import (
 //     docs/cluster-mesh/phase-3-multipath-reputation.md §4.5.
 //   - mesh_routing_v3: Phase 4 compact announce wire frame
 //     (route_announce_v3). Conditionally added when enableV3 is true
-//     (operator opt-in via CORSA_ENABLE_MESH_ROUTING_V3, default
-//     false). The flag is threaded as a parameter rather than read
-//     from a package-level global so a Service constructed with v3
-//     disabled never accidentally advertises v3 because some other
-//     Service in the same process flipped a global. See
-//     docs/cluster-mesh/phase-4-compact-wire-signed.md §7 PR 13.1
-//     part 2c.
+//     (CORSA_ENABLE_MESH_ROUTING_V3, default TRUE; operators opt out
+//     with =0/false/no/off). The flag is threaded as a parameter
+//     rather than read from a package-level global so a Service
+//     constructed with v3 disabled never accidentally advertises v3
+//     because some other Service in the same process flipped a global.
+//     See docs/cluster-mesh/phase-4-compact-wire-signed.md §7.
 func localCapabilities(enableV3 bool) []domain.Capability {
 	caps := []domain.Capability{
 		domain.CapMeshRelayV1,

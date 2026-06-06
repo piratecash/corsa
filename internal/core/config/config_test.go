@@ -68,6 +68,35 @@ func TestPeersPathFromEnv(t *testing.T) {
 	}
 }
 
+// TestEnableMeshRoutingV3FromEnv pins the post-soak default: v3 is ON unless
+// the operator explicitly opts out. Unset/empty/truthy/unrecognised → true;
+// only the falsey set ("0","false","no","off", any case) → false.
+func TestEnableMeshRoutingV3FromEnv(t *testing.T) {
+	// Default-on: unset and empty both enable.
+	for _, v := range []string{"", "  "} {
+		t.Setenv("CORSA_ENABLE_MESH_ROUTING_V3", v)
+		if !enableMeshRoutingV3FromEnv() {
+			t.Fatalf("CORSA_ENABLE_MESH_ROUTING_V3=%q: want default true", v)
+		}
+	}
+
+	// Explicit opt-out set.
+	for _, v := range []string{"0", "false", "no", "off", "OFF", " False "} {
+		t.Setenv("CORSA_ENABLE_MESH_ROUTING_V3", v)
+		if enableMeshRoutingV3FromEnv() {
+			t.Fatalf("CORSA_ENABLE_MESH_ROUTING_V3=%q: want false (opt-out)", v)
+		}
+	}
+
+	// Truthy and unrecognised both stay enabled.
+	for _, v := range []string{"1", "true", "yes", "on", "ON", "wat"} {
+		t.Setenv("CORSA_ENABLE_MESH_ROUTING_V3", v)
+		if !enableMeshRoutingV3FromEnv() {
+			t.Fatalf("CORSA_ENABLE_MESH_ROUTING_V3=%q: want true", v)
+		}
+	}
+}
+
 func TestProxyAddressFromEnv(t *testing.T) {
 	t.Setenv("CORSA_PROXY", "127.0.0.1:9050")
 

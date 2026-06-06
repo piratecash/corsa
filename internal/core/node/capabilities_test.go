@@ -9,7 +9,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-func TestLocalCapabilities_DefaultExcludesV3(t *testing.T) {
+// TestLocalCapabilities_OptOutExcludesV3 pins the opt-out shape:
+// localCapabilities(false) is what an operator who set
+// CORSA_ENABLE_MESH_ROUTING_V3=0 advertises. Since the env flag now defaults
+// to ON, false is the explicit opt-out config, not the default — the v3 and
+// poison-reverse caps must be absent here.
+func TestLocalCapabilities_OptOutExcludesV3(t *testing.T) {
 	caps := localCapabilities(false)
 	expected := []domain.Capability{
 		domain.CapMeshRelayV1,
@@ -33,11 +38,11 @@ func TestLocalCapabilities_DefaultExcludesV3(t *testing.T) {
 	}
 }
 
-// TestLocalCapabilities_V3OptInAppendsCap pins the Phase 4 opt-in
-// contract: when the operator sets EnableMeshRoutingV3, the v3 cap
-// and the poison-reverse cap are appended at the end of the advertise
-// list. attested-links is INTENTIONALLY ABSENT — the Round-7 review
-// found that the production emit path produces no real signatures
+// TestLocalCapabilities_EnabledAppendsV3 pins the Phase 4 enabled shape —
+// now the DEFAULT (CORSA_ENABLE_MESH_ROUTING_V3 defaults to on): when v3 is
+// enabled the v3 cap and the poison-reverse cap are appended at the end of
+// the advertise list. attested-links is INTENTIONALLY ABSENT — the Round-7
+// review found that the production emit path produces no real signatures
 // (signOwnOriginV3Entries only signs Identity == localIdentity
 // entries, but AnnounceProjectionFor never emits those), so the
 // advertise would promise a contract no v3 frame on the wire
@@ -45,7 +50,7 @@ func TestLocalCapabilities_DefaultExcludesV3(t *testing.T) {
 // attestation entry stream lands — see capabilities.go for the
 // rationale and docs/protocol/attested_links.md "Production
 // advertisement status".
-func TestLocalCapabilities_V3OptInAppendsCap(t *testing.T) {
+func TestLocalCapabilities_EnabledAppendsV3(t *testing.T) {
 	caps := localCapabilities(true)
 	want := []domain.Capability{
 		domain.CapMeshRelayV1,
@@ -82,7 +87,7 @@ func TestLocalCapabilities_DoesNotAdvertiseAttestedLinks(t *testing.T) {
 	}
 }
 
-func TestLocalCapabilityStrings_DefaultExcludesV3(t *testing.T) {
+func TestLocalCapabilityStrings_OptOutExcludesV3(t *testing.T) {
 	strs := localCapabilityStrings(false)
 	expected := []string{
 		"mesh_relay_v1",
@@ -91,7 +96,7 @@ func TestLocalCapabilityStrings_DefaultExcludesV3(t *testing.T) {
 		"file_transfer_v1",
 		"mesh_route_probe_v1",
 		"mesh_route_query_v1",
-		// Phase 3 PR 12.5 — see TestLocalCapabilities_DefaultExcludesV3.
+		// Phase 3 PR 12.5 — see TestLocalCapabilities_OptOutExcludesV3.
 		"mesh_route_sync_v1",
 	}
 	if len(strs) != len(expected) {
@@ -104,7 +109,7 @@ func TestLocalCapabilityStrings_DefaultExcludesV3(t *testing.T) {
 	}
 }
 
-func TestLocalCapabilityStrings_V3OptInIncludesV3(t *testing.T) {
+func TestLocalCapabilityStrings_EnabledIncludesV3(t *testing.T) {
 	strs := localCapabilityStrings(true)
 	if len(strs) < 2 {
 		t.Fatalf("localCapabilityStrings(true) must include Phase 4 tail (v3 + poison-reverse); got %v", strs)
