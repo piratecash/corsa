@@ -130,6 +130,57 @@ When a capture is active, the Desktop Console shows a red recording dot on the p
 
 Capture state is surfaced to the UI through `NodeStatus.CaptureSessions`, a map keyed by `domain.ConnID`. Active entries drive the dot / info row / banner; stopped entries linger for a TTL (60 seconds by default) so terminal diagnostics such as the writer error or the `DroppedEvents` count remain visible after the session ends. The map is completely independent of `PeerHealth`: capture-start never creates a peer row, and capture-stop never modifies one. See [ui.md](ui.md#console-window--traffic-recording-indicators) for the full UI wiring.
 
+### Memory & CPU profiling (pprof)
+
+When a node's memory or CPU looks wrong (steadily climbing RSS, sustained high CPU), two tools answer two different questions.
+
+**Quick totals — `getResourceUsage` RPC.** Cheap, always available, safe to poll. Returns the process memory footprint and uptime in both machine and human form:
+
+```bash
+corsa-cli getResourceUsage
+```
+```json
+{
+  "mem_sys_bytes": 148859176,  "mem_sys_human": "141.96 MB",
+  "mem_heap_alloc_bytes": 97664104, "mem_heap_alloc_human": "93.14 MB",
+  "uptime_seconds": 538, "uptime_human": "538 s",
+  "sampled_at": "2026-06-06T06:07:54Z"
+}
+```
+
+- `mem_sys_*` — total memory obtained from the OS (`runtime.MemStats.Sys`), the closest proxy for RSS / process footprint.
+- `mem_heap_alloc_*` — **live (in-use) heap** — the figure that climbs steadily under a leak. Watch this across calls.
+
+The same two figures are shown on the desktop console **Info** tab (Memory / Uptime rows), live-ticked once a second.
+
+**Triage by trend, not by one reading.** A single sample never tells you whether there is a leak. On a large mesh (hundreds of nodes) a routing table, the per-peer announce snapshots, and the dedup caches legitimately add up to tens of MB. Sample `getResourceUsage` every 15 / 30 / 60 minutes:
+
+- `mem_heap_alloc` plateaus (e.g. settles around 100–250 MB) → working set, not a leak.
+- `mem_heap_alloc` climbs monotonically and never drops after GC → a real leak; profile it.
+
+**Root cause — pprof heap/CPU profile.** `getResourceUsage` shows *how much*; pprof shows *what*. Go's standard `net/http/pprof` server is **off by default** and started only when `CORSA_PPROF_ADDR` is set. For safety it refuses to bind anything but a loopback address — the surface exposes process internals (heap, CPU, goroutine dumps) and must never face the network.
+
+```bash
+# Enable on the affected node only, during the investigation:
+CORSA_PPROF_ADDR=127.0.0.1:6060 ./corsa-node
+
+# Remote node — tunnel the loopback port over SSH first:
+ssh -L 6060:127.0.0.1:6060 user@host
+
+# What is using memory right now (live heap, ranked by type/function):
+go tool pprof -top -inuse_space http://127.0.0.1:6060/debug/pprof/heap
+
+# CPU profile over a 30s window (answers "why is CPU high"):
+go tool pprof -top http://127.0.0.1:6060/debug/pprof/profile?seconds=30
+
+# All goroutine stacks (leaked goroutines, blocked workers):
+curl -s http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 | less
+```
+
+`-inuse_space` ranks by live bytes (the leak view); add `-alloc_space` to see cumulative allocation churn (the GC-pressure view). For a visual call graph, drop the `-top` flag and run `go tool pprof -http=:8080 http://127.0.0.1:6060/debug/pprof/heap` to open the web UI.
+
+**Unset `CORSA_PPROF_ADDR` once the investigation is done** — leave it off in production. A non-loopback value (`0.0.0.0:6060`, `:6060`, a public IP) is rejected at startup with an error rather than silently exposing the endpoint.
+
 ---
 
 ## Русский
@@ -261,3 +312,54 @@ stateDiagram-v2
 Когда запись активна, Desktop Console показывает красную точку записи на заголовке peer-карточки и строку с информацией о записи: scope, путь к файлу, время старта и количество потерянных событий. Глобальный баннер "Stop all recording" появляется вверху вкладки peers при любой активной записи и отправляет `stopPeerTrafficRecording scope=all`.
 
 Состояние записи отдаётся в UI через `NodeStatus.CaptureSessions` — карту по ключу `domain.ConnID`. Активные записи управляют точкой / строкой информации / баннером; остановленные записи живут TTL (по умолчанию 60 секунд), чтобы терминальная диагностика — ошибка writer'а, счётчик `DroppedEvents` — оставалась видимой после завершения сессии. Карта полностью независима от `PeerHealth`: capture-start никогда не создаёт peer-строку, а capture-stop никогда её не модифицирует. Полная схема UI-wiring — см. [ui.md](ui.md#окно-консоли--индикаторы-записи-трафика).
+
+### Профилирование памяти и CPU (pprof)
+
+Когда с памятью или CPU узла что-то не так (постоянно растущий RSS, устойчиво высокий CPU), есть два инструмента под два разных вопроса.
+
+**Быстрые тоталы — RPC `getResourceUsage`.** Дёшево, всегда доступно, безопасно опрашивать. Отдаёт потребление памяти процессом и аптайм машинно и для человека:
+
+```bash
+corsa-cli getResourceUsage
+```
+```json
+{
+  "mem_sys_bytes": 148859176,  "mem_sys_human": "141.96 MB",
+  "mem_heap_alloc_bytes": 97664104, "mem_heap_alloc_human": "93.14 MB",
+  "uptime_seconds": 538, "uptime_human": "538 s",
+  "sampled_at": "2026-06-06T06:07:54Z"
+}
+```
+
+- `mem_sys_*` — всего памяти, взятой у ОС (`runtime.MemStats.Sys`), ближайший к RSS / footprint процесса показатель.
+- `mem_heap_alloc_*` — **живая (in-use) куча** — именно она монотонно растёт при утечке. Её и отслеживать между вызовами.
+
+Те же две цифры показаны в десктоп-консоли на вкладке **Инфо** (строки Память / Аптайм), с обновлением раз в секунду.
+
+**Диагностируй по тренду, а не по одному замеру.** Один сэмпл никогда не скажет, есть ли утечка. На большом меше (сотни нод) маршрутная таблица, announce-снапшоты по пирам и dedup-кэши законно дают десятки MB. Снимай `getResourceUsage` через 15 / 30 / 60 минут:
+
+- `mem_heap_alloc` выходит на плато (например, ~100–250 MB) → рабочий набор, не утечка.
+- `mem_heap_alloc` монотонно растёт и не падает после GC → реальная утечка; профилируй.
+
+**Root cause — heap/CPU профиль pprof.** `getResourceUsage` показывает *сколько*; pprof показывает *что именно*. Стандартный для Go сервер `net/http/pprof` **по умолчанию выключен** и стартует только когда задан `CORSA_PPROF_ADDR`. Ради безопасности он отказывается биндиться куда-либо, кроме loopback-адреса — поверхность раскрывает внутренности процесса (heap, CPU, дампы горутин) и не должна смотреть в сеть.
+
+```bash
+# Включить только на проблемном узле, на время разбора:
+CORSA_PPROF_ADDR=127.0.0.1:6060 ./corsa-node
+
+# Удалённый узел — сначала проброс loopback-порта через SSH:
+ssh -L 6060:127.0.0.1:6060 user@host
+
+# Что прямо сейчас занимает память (живая куча, ранжировано по типу/функции):
+go tool pprof -top -inuse_space http://127.0.0.1:6060/debug/pprof/heap
+
+# CPU-профиль за окно 30с (отвечает на «почему высокий CPU»):
+go tool pprof -top http://127.0.0.1:6060/debug/pprof/profile?seconds=30
+
+# Все стеки горутин (утёкшие горутины, заблокированные воркеры):
+curl -s http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 | less
+```
+
+`-inuse_space` ранжирует по живым байтам (вид утечки); `-alloc_space` — по кумулятивным аллокациям (вид нагрузки на GC). Для визуального call-graph убери `-top` и запусти `go tool pprof -http=:8080 http://127.0.0.1:6060/debug/pprof/heap` — откроется веб-интерфейс.
+
+**Сними `CORSA_PPROF_ADDR` после разбора** — в проде держи выключенным. Не-loopback значение (`0.0.0.0:6060`, `:6060`, публичный IP) отклоняется на старте с ошибкой, а не молча открывает endpoint.

@@ -2,10 +2,13 @@ package node
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/debugserver"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/metrics"
@@ -35,6 +38,22 @@ func (a *App) Run(ctx context.Context) error {
 		Str("version", config.CorsaVersion).
 		Str("listen", a.service.ListenAddress()).
 		Msg("starting node")
+
+	// Opt-in pprof profiling server (CORSA_PPROF_ADDR). Off by default;
+	// loopback-only when set. See internal/core/debugserver. Empty addr
+	// is a no-op (nil error); a non-empty addr that fails to start
+	// (invalid / non-loopback / port in use) is fatal — the operator
+	// explicitly asked for profiling, so silently continuing without it
+	// would leave them debugging against a server that never came up.
+	pprofShutdown, err := debugserver.Start(a.cfg.Node.PprofAddr)
+	if err != nil {
+		return fmt.Errorf("pprof debug server (CORSA_PPROF_ADDR=%q): %w", a.cfg.Node.PprofAddr, err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = pprofShutdown(ctx)
+	}()
 
 	// Metrics collector — samples node traffic every second, keeps 1 hour history.
 	// Seed the baseline from current totals before Run so the first Record

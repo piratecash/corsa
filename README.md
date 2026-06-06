@@ -117,6 +117,12 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_MAX_OUTGOING_PEERS` — max outbound peer sessions, default `8`
 - `CORSA_MAX_INCOMING_PEERS` — optional inbound peer cap; `0` means no app-level cap
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS` — allowed past/future clock drift for relayed messages, default `600`
+- `CORSA_PPROF_ADDR` — diagnostics only, **off by default**. When set to a loopback address (e.g. `127.0.0.1:6060`) the node starts Go's `net/http/pprof` server for memory/CPU profiling. A non-loopback host is refused at startup — the surface exposes process internals and must never face the network. Use during an active investigation, then unset:
+  ```
+  CORSA_PPROF_ADDR=127.0.0.1:6060 ./corsa-node
+  go tool pprof http://127.0.0.1:6060/debug/pprof/heap          # what is using memory now
+  go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=30   # CPU
+  ```
 
 Message metadata and relay rules:
 

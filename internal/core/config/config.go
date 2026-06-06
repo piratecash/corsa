@@ -197,6 +197,17 @@ type Node struct {
 	// flip-on cadence the v2 rollout used; see
 	// docs/cluster-mesh/phase-4-compact-wire-signed.md §7 PR 13.1 part 2c.
 	EnableMeshRoutingV3 bool
+
+	// PprofAddr enables Go's net/http/pprof profiling server on the
+	// given address when non-empty (env: CORSA_PPROF_ADDR). Default
+	// empty = OFF: no listener, no debug surface, zero overhead. Intended
+	// strictly for diagnosing memory/CPU on a single node — set e.g.
+	// "127.0.0.1:6060", then `go tool pprof http://127.0.0.1:6060/debug/
+	// pprof/heap`. For safety the listener MUST bind to a loopback
+	// address; a non-loopback host is rejected at startup (the pprof
+	// surface exposes process internals and must never face the network).
+	// Leave unset in production except during an active investigation.
+	PprofAddr string
 }
 
 type RPC struct {
@@ -302,6 +313,7 @@ func Default() Config {
 			AnnounceInterval:           announceInterval,
 			OverloadGoroutineThreshold: overloadGoroutineThreshold,
 			EnableMeshRoutingV3:        enableMeshRoutingV3,
+			PprofAddr:                  envOrDefault("CORSA_PPROF_ADDR", ""),
 		},
 		RPC: RPC{
 			Host:     envOrDefault("CORSA_RPC_HOST", "127.0.0.1"),
