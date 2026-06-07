@@ -2442,7 +2442,7 @@ func newTestServiceWithPendingDrain(t *testing.T, localIdentity string) *Service
 	t.Helper()
 	svc := newTestServiceWithRouting(t, localIdentity)
 	svc.pending = make(map[domain.PeerAddress][]pendingFrame)
-	svc.pendingKeys = make(map[string]struct{})
+	svc.pendingKeys = make(map[pendingKey]struct{})
 	svc.outbound = make(map[string]outboundDelivery)
 	svc.relayRetry = make(map[string]relayAttempt)
 	svc.topics = make(map[string][]protocol.Envelope)
@@ -3386,7 +3386,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		connIDByNetConn:       make(map[net.Conn]netcore.ConnID),
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
-		pendingKeys:           make(map[string]struct{}),
+		pendingKeys:           make(map[pendingKey]struct{}),
 		outbound:              make(map[string]outboundDelivery),
 		relayRetry:            make(map[string]relayAttempt),
 		topics:                make(map[string][]protocol.Envelope),
@@ -3546,7 +3546,7 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 		connIDByNetConn:       make(map[net.Conn]netcore.ConnID),
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
-		pendingKeys:           make(map[string]struct{}),
+		pendingKeys:           make(map[pendingKey]struct{}),
 		outbound:              make(map[string]outboundDelivery),
 	}
 	svc.routingTable = routing.NewTable(

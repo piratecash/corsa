@@ -3,8 +3,20 @@ version: "2"
 run:
   timeout: 7m
 
-exclusions:
-  # generated: strict is the default — files with "// Code generated ... DO NOT EDIT."
-  # (all mockery output) are automatically excluded.
-  paths:
-    - "mocks/"
+linters:
+  exclusions:
+    # generated: strict is the default — files with "// Code generated ... DO NOT EDIT."
+    # (all mockery output) are automatically excluded.
+    paths:
+      - "mocks/"
+    rules:
+      # golangci-lint's bundled staticcheck does not load the testing package's
+      # no-return facts, so it does not know t.Fatal / t.Fatalf / FailNow
+      # terminate the test goroutine. That produces false SA5011 "possible nil
+      # dereference" warnings after the idiomatic `if x == nil { t.Fatalf(...) }`
+      # guard followed by a deref of x. The code is correct — t.Fatal does not
+      # return — so suppress this tooling false positive in test files only.
+      - linters:
+          - staticcheck
+        text: "SA5011"
+        path: '_test\.go'

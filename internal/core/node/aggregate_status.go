@@ -161,16 +161,16 @@ func (s *Service) refreshAggregateStatusLocked() {
 //
 // Canonical order: peerMu → deliveryMu → statusMu with statusMu INNERMOST.
 func (s *Service) refreshAggregatePendingLocked() {
-	var pending int
-	healthAddrs := make(map[domain.PeerAddress]struct{}, len(s.health))
-	for _, health := range s.health {
-		healthAddrs[health.Address] = struct{}{}
-		pending += len(s.pending[health.Address])
-	}
-	for addr, frames := range s.pending {
-		if _, ok := healthAddrs[addr]; !ok {
-			pending += len(frames)
-		}
+	// s.health is keyed by address (one entry per address), so the old
+	// health-then-non-health two-pass with a healthAddrs dedup map counted
+	// each pending address exactly once — which is identical to simply summing
+	// every pending queue plus every orphaned queue. This runs on every queue
+	// mutation (enqueue / flush / drain), so the previous per-call
+	// map[address]struct{} allocation (sized to len(s.health)) was a top
+	// allocation-churn source in profiling. Direct iteration is allocation-free.
+	pending := 0
+	for _, frames := range s.pending {
+		pending += len(frames)
 	}
 	for _, frames := range s.orphaned {
 		pending += len(frames)

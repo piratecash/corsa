@@ -1540,11 +1540,16 @@ func (s *Service) retryRelayDeliveries() {
 	for _, msg := range s.retryableRelayMessages(now) {
 		attempts := s.noteRelayAttempt(relayMessageKey(msg.ID), now)
 		decision := s.router.Route(msg)
-		targets := make([]string, len(decision.GossipTargets))
-		for i, t := range decision.GossipTargets {
-			targets[i] = string(t)
+		// Build the gossip-target string slice ONLY when debug logging is
+		// enabled — it is purely for the log line, and at production log levels
+		// this per-message allocation was pure churn on the 2s retry loop.
+		if e := log.Debug(); e.Enabled() {
+			targets := make([]string, len(decision.GossipTargets))
+			for i, t := range decision.GossipTargets {
+				targets[i] = string(t)
+			}
+			e.Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", attempts).Strs("gossip_targets", targets).Msg("relay_retry_message")
 		}
-		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", attempts).Strs("gossip_targets", targets).Msg("relay_retry_message")
 		s.goBackground(func() { s.executeGossipTargets(msg, decision.GossipTargets) })
 		// Table-directed relay (Phase 1.2): mirror the logic in
 		// storeIncomingMessage — use the routing table when a next-hop
@@ -1574,7 +1579,21 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	log.Trace().Str("site", "retryableRelayMessages").Str("phase", "lock_held").Msg("delivery_mu_writer")
 
 	s.gossipMu.RLock()
-	items := append([]protocol.Envelope(nil), s.topics["dm"]...)
+	// Reuse the per-Service scratch buffer instead of allocating a fresh copy
+	// of the whole topics["dm"] slice every 2s cycle (see relayRetryScratch).
+	// Safe: held under s.deliveryMu.Lock and never returned (out is separate).
+	dm := s.topics["dm"]
+	// Drop an oversized scratch left by a one-off retry spike so its backing
+	// array — and the Envelopes/payloads it pins — is not retained forever.
+	if cap(s.relayRetryScratch) > 2*len(dm)+64 {
+		s.relayRetryScratch = nil
+	}
+	s.relayRetryScratch = append(s.relayRetryScratch[:0], dm...)
+	// Release any Envelopes left in the backing array beyond the new length so
+	// a shrunk topics["dm"] does not keep their (possibly large) payloads alive
+	// until the next, larger, retry cycle.
+	clear(s.relayRetryScratch[len(s.relayRetryScratch):cap(s.relayRetryScratch)])
+	items := s.relayRetryScratch
 	s.gossipMu.RUnlock()
 	out := make([]protocol.Envelope, 0)
 	beforeLen := len(s.relayRetry)

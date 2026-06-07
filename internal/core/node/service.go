@@ -121,15 +121,22 @@ type Service struct {
 	//   • receipts      — recipient → persisted DeliveryReceipt batches
 	//   • upstream      — peer address → upstream-subscription marker; set of
 	//                     peers that have subscribed to our outbox
-	deliveryMu   sync.RWMutex
-	pending      map[domain.PeerAddress][]pendingFrame
-	pendingKeys  map[string]struct{}
-	orphaned     map[domain.PeerAddress][]pendingFrame // legacy fallback-keyed frames that could not be migrated
-	outbound     map[string]outboundDelivery
-	relayRetry   map[string]relayAttempt
-	seenReceipts map[string]struct{}
-	receipts     map[string][]protocol.DeliveryReceipt
-	upstream     map[domain.PeerAddress]struct{}
+	deliveryMu  sync.RWMutex
+	pending     map[domain.PeerAddress][]pendingFrame
+	pendingKeys map[pendingKey]struct{}
+	orphaned    map[domain.PeerAddress][]pendingFrame // legacy fallback-keyed frames that could not be migrated
+	outbound    map[string]outboundDelivery
+	relayRetry  map[string]relayAttempt
+	// relayRetryScratch is a reusable buffer for the topics["dm"] snapshot
+	// taken on each 2s relay-retry cycle (retryableRelayMessages). Copying the
+	// whole topics["dm"] slice into a fresh allocation every cycle was a steady
+	// allocation-churn source; the scratch is reused via append(...[:0], ...).
+	// Only ever touched by retryableRelayMessages under s.deliveryMu.Lock, and
+	// never returned to callers, so reuse is race-free.
+	relayRetryScratch []protocol.Envelope
+	seenReceipts      map[string]struct{}
+	receipts          map[string][]protocol.DeliveryReceipt
+	upstream          map[domain.PeerAddress]struct{}
 
 	// knowledgeMu guards the "cryptographic-knowledge" domain: the set of
 	// identities we have ever heard about and the public keys we have
@@ -262,8 +269,8 @@ type Service struct {
 	// is orphanedHealthEvictWindow (minutes), so a once-a-minute scan
 	// loses nothing. Guarded by peerMu.
 	lastMetaOrphanSweep time.Time
-	connWg            sync.WaitGroup             // tracks active handleConn goroutines for graceful shutdown
-	backgroundWg      sync.WaitGroup             // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
+	connWg              sync.WaitGroup // tracks active handleConn goroutines for graceful shutdown
+	backgroundWg        sync.WaitGroup // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
 	// conns is the single source of truth for live connection state (core,
 	// metered counters, tracked flag). It is keyed by netcore.ConnID so the
 	// key is a domain identifier, not a raw net.Conn handle. All reads and
@@ -385,8 +392,8 @@ type Service struct {
 	// caller saw during a 0-peer startup window.  See
 	// network_stats_snapshot.go / peer_health_snapshot.go /
 	// peers_exchange_snapshot.go for the per-path contract.
-	networkStatsSnap  networkStatsSnapPtr
-	peerHealthSnap    peerHealthSnapPtr
+	networkStatsSnap networkStatsSnapPtr
+	peerHealthSnap   peerHealthSnapPtr
 	// peerHealthAccessNanos is the Unix-nanos timestamp of the last
 	// peerHealthFrames() (fetch_peer_health RPC) call.  Zero until the first
 	// read.  maybeRebuildPeerHealthSnapshot gates the periodic rebuild on it
@@ -395,6 +402,11 @@ type Service struct {
 	// Written on every RPC read (Store is cheap); read by the refresher tick.
 	peerHealthAccessNanos atomic.Int64
 	peersExchangeSnap     peersExchangeSnapPtr
+	// peersExchangeAccessNanos mirrors peerHealthAccessNanos for the
+	// peers-exchange snapshot: the Unix-nanos timestamp of the last get_peers
+	// read, gating the periodic rebuild (persistedMeta/health maps +
+	// peerProvider.Candidates(), a top allocator) on recent reader activity.
+	peersExchangeAccessNanos atomic.Int64
 	// cmSlotsSnap caches ConnectionManager.Slots() so peerHealthFrames and
 	// buildPeerExchangeResponse do not call Slots() (which takes cm.mu.RLock)
 	// on the RPC path.  Without this cache those handlers would still stall
@@ -958,10 +970,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// below) so it reuses the exact runtime eviction rule (oldest-by-QueuedAt)
 	// instead of a parallel tail-trim — a pre-upgrade file's append order is
 	// not guaranteed to equal frame age.
-	pendingKeys := make(map[string]struct{})
+	pendingKeys := make(map[pendingKey]struct{})
 	for address, items := range queueState.Pending {
 		for _, item := range items {
-			if key := pendingFrameKey(domain.PeerAddress(address), item.Frame); key != "" {
+			if key := pendingFrameKey(domain.PeerAddress(address), item.Frame); key.IsValid() {
 				pendingKeys[key] = struct{}{}
 			}
 		}
@@ -5224,7 +5236,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// nodes for offline recipients — bounded by the per-peer ring and
 		// NOT durable across restart), push delivery to connected clients,
 		// and backlog drain. Never skip or filter gossip. Tracked:
-		// executeGossipTargets → sendMessageToPeer → queuePeerFrame; the
+		// executeGossipTargets → sendGossipFrameToPeer → queuePeerFrame; the
 		// trailing queuePersist.MarkDirty is now a no-op (the persister is
 		// dormant — no disk write is scheduled).
 		s.goBackground(func() { s.executeGossipTargets(envelope, decision.GossipTargets) })

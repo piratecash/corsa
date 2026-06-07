@@ -732,11 +732,33 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 	}
 }
 
+// TestNonRoutableBlocks_PrecomputeMatchesList guards the allocation-free
+// isNonRoutableIP optimisation: every nonRoutableCIDRs entry must parse into a
+// precomputed block (no range silently dropped), and the predicate must still
+// classify private vs public IPs correctly.
+func TestNonRoutableBlocks_PrecomputeMatchesList(t *testing.T) {
+	if len(nonRoutableBlocks) != len(nonRoutableCIDRs) {
+		t.Fatalf("nonRoutableBlocks parsed %d ranges, want %d (a CIDR failed to parse)",
+			len(nonRoutableBlocks), len(nonRoutableCIDRs))
+	}
+	nonRoutable := []string{"127.0.0.1", "10.1.2.3", "192.168.0.5", "172.16.9.9", "100.64.0.1", "169.254.1.1", "::1", "fe80::1", "fc00::1"}
+	for _, s := range nonRoutable {
+		if ip := net.ParseIP(s); ip == nil || !isNonRoutableIP(ip) {
+			t.Fatalf("isNonRoutableIP(%s) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"} {
+		if ip := net.ParseIP(s); ip == nil || isNonRoutableIP(ip) {
+			t.Fatalf("isNonRoutableIP(%s) = true, want false", s)
+		}
+	}
+}
+
 // TestInboundConnIDLookups_LightweightScan pins the behaviour of the
 // cloneCaps-free connID-by-address lookups (forEachInboundConnIDLocked):
 // inboundConnIDsLocked returns every inbound conn ID for an address (and never
 // outbound ones), and inboundConnIDForAddressLocked returns a TRACKED inbound
-// conn (not an untracked one). This is the sendMessageToPeer relay hot path,
+// conn (not an untracked one). This is the gossip-relay send hot path,
 // so it must stay correct after dropping the capability snapshot.
 func TestInboundConnIDLookups_LightweightScan(t *testing.T) {
 	svc := activeConnTestService(t)

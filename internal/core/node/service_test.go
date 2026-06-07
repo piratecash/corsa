@@ -7378,14 +7378,14 @@ func TestAnnouncePeerPendingQueue(t *testing.T) {
 	// Verify pendingFrameKey returns a valid key for announce_peer.
 	frame := protocol.Frame{Type: "announce_peer", Peers: []string{"5.5.5.5:64646"}}
 	key := pendingFrameKey(domain.PeerAddress("1.1.1.1:64646"), frame)
-	if key == "" {
-		t.Fatal("expected non-empty pending key for announce_peer")
+	if !key.IsValid() {
+		t.Fatal("expected valid pending key for announce_peer")
 	}
 
 	// Verify deduplication: same peer address should produce the same key.
 	key2 := pendingFrameKey(domain.PeerAddress("1.1.1.1:64646"), frame)
 	if key != key2 {
-		t.Errorf("expected identical keys, got %q and %q", key, key2)
+		t.Errorf("expected identical keys, got %+v and %+v", key, key2)
 	}
 
 	// Different peer addresses should produce different keys.

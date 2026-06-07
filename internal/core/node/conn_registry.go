@@ -394,7 +394,7 @@ func (s *Service) forEachInboundConnLocked(fn func(connInfo) bool) {
 // inboundConnIDForAddressLocked). It reads ONLY id / address / tracked and
 // deliberately does NOT build a connInfo via snapshotEntryLocked — that path
 // calls core.Capabilities(), whose per-call cloneCaps copy showed up as GC
-// churn on the sendMessageToPeer → inboundConnIDForAddressLocked hot path,
+// churn on the sendGossipFrameToPeer → inboundConnIDForAddressLocked hot path,
 // even though capabilities are irrelevant to a connID-by-address lookup.
 // fn is invoked once per inbound connection; iteration stops when fn returns
 // false. The caller must hold s.peerMu.

@@ -110,7 +110,12 @@ func (s *Service) hotReadsRefreshLoop(ctx context.Context) {
 	// priming and peer-state-change eager rebuilds still call the
 	// unconditional rebuildPeerHealthSnapshot — see maybeRebuildPeerHealthSnapshot.
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.maybeRebuildPeerHealthSnapshot) }()
-	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildPeersExchangeSnapshot) }()
+	// peers_exchange is likewise reader-gated (maybeRebuildPeersExchangeSnapshot):
+	// its rebuild allocates persistedMeta/health maps and calls
+	// peerProvider.Candidates(), so a node nobody is calling get_peers on stops
+	// paying for the 2×/s rebuild. Startup priming still calls the unconditional
+	// rebuildPeersExchangeSnapshot.
+	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.maybeRebuildPeersExchangeSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildCMSlotsSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildRoutingSnapshot) }()
 	wg.Wait()

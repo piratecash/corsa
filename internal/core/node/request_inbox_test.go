@@ -260,7 +260,7 @@ func (s *Service) initMaps() {
 	s.conns = make(map[netcore.ConnID]*connEntry)
 	s.connIDByNetConn = make(map[net.Conn]netcore.ConnID)
 	s.pending = make(map[domain.PeerAddress][]pendingFrame)
-	s.pendingKeys = make(map[string]struct{})
+	s.pendingKeys = make(map[pendingKey]struct{})
 	s.orphaned = make(map[domain.PeerAddress][]pendingFrame)
 	s.relayRetry = make(map[string]relayAttempt)
 	s.outbound = make(map[string]outboundDelivery)

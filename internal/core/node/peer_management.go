@@ -3337,7 +3337,7 @@ func (s *Service) inboundConnIDsLocked(address domain.PeerAddress) []uint64 {
 func (s *Service) inboundConnIDForAddressLocked(address domain.PeerAddress) (domain.ConnID, bool) {
 	var result domain.ConnID
 	var found bool
-	// Lightweight scan (no cloneCaps): this is the sendMessageToPeer relay hot
+	// Lightweight scan (no cloneCaps): this is the gossip-relay send hot
 	// path, called per message — it only needs id/address/tracked, never
 	// capabilities. See forEachInboundConnIDLocked.
 	s.forEachInboundConnIDLocked(func(id domain.ConnID, addr domain.PeerAddress, tracked bool) bool {
@@ -3941,7 +3941,7 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("delivery_mu_writer")
 
 	key := pendingFrameKey(primary, frame)
-	if key == "" {
+	if !key.IsValid() {
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_nokey").Str("address", string(address)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -4014,37 +4014,57 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	return true
 }
 
-func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) string {
+// pendingKey is the comparable struct key for the s.pendingKeys dedup set.
+// Using a value struct as the map key instead of a concatenated string
+// eliminates the per-call string allocation that the old pendingFrameKey
+// produced on the queue / flush / drain hot paths — a top allocation-churn
+// source in profiling. Map lookup / insert / delete with a struct key does not
+// allocate. The zero value (Type == "") means "not a queueable frame" — the
+// analogue of the old empty-string return; use IsValid to test it.
+//
+// A, B, C hold the type-specific key fields (their meaning varies by Type —
+// see pendingFrameKey). All fields are strings/PeerAddress so the struct stays
+// comparable and usable as a map key.
+type pendingKey struct {
+	Address domain.PeerAddress
+	Type    string
+	A, B, C string
+}
+
+// IsValid reports whether the key identifies a queueable frame (non-zero).
+func (k pendingKey) IsValid() bool { return k.Type != "" }
+
+func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) pendingKey {
 	switch frame.Type {
 	case "send_message":
-		return string(address) + "|send_message|" + frame.ID + "|" + frame.Recipient
+		return pendingKey{Address: address, Type: "send_message", A: frame.ID, B: frame.Recipient}
 	case "push_message":
 		// Gossip path: fields live in Item, not flat Frame fields.
 		if frame.Item == nil {
-			return ""
+			return pendingKey{}
 		}
-		return string(address) + "|push_message|" + frame.Item.ID + "|" + frame.Item.Recipient
+		return pendingKey{Address: address, Type: "push_message", A: frame.Item.ID, B: frame.Item.Recipient}
 	case "relay_delivery_receipt":
-		return string(address) + "|relay_delivery_receipt|" + frame.ID + "|" + frame.Recipient + "|" + frame.Status
+		return pendingKey{Address: address, Type: "relay_delivery_receipt", A: frame.ID, B: frame.Recipient, C: frame.Status}
 	case "ack_delete":
 		// ack_delete must be queueable so that sendAckDeleteToPeer's
 		// fallback to queuePeerFrame works when the session's sendCh is
 		// full. Without this, a transient channel back-pressure silently
 		// drops the ack, the remote peer never clears its backlog, and
 		// the receipt is re-pushed on every reconnect.
-		return string(address) + "|ack_delete|" + frame.AckType + "|" + frame.ID + "|" + frame.Status
+		return pendingKey{Address: address, Type: "ack_delete", A: frame.AckType, B: frame.ID, C: frame.Status}
 	case "announce_peer":
 		if len(frame.Peers) > 0 {
-			return string(address) + "|announce_peer|" + frame.Peers[0]
+			return pendingKey{Address: address, Type: "announce_peer", A: frame.Peers[0]}
 		}
-		return ""
+		return pendingKey{}
 	case "relay_message":
 		// relay_message must be queueable so sendRelayMessage's fallback
 		// to queuePeerFrame actually works when the session is unavailable.
 		// Keyed by message ID + recipient to dedupe identical relay attempts.
-		return string(address) + "|relay_message|" + frame.ID + "|" + frame.Recipient
+		return pendingKey{Address: address, Type: "relay_message", A: frame.ID, B: frame.Recipient}
 	default:
-		return ""
+		return pendingKey{}
 	}
 }
 
@@ -4567,6 +4587,23 @@ var nonRoutableCIDRs = []string{
 	"fe80::/10", // link-local
 }
 
+// nonRoutableBlocks is nonRoutableCIDRs parsed ONCE at process start.
+// isNonRoutableIP is a hot predicate (PeerProvider.Candidates per candidate,
+// announce filtering per route entry, peer normalize, dial-side forbidden
+// checks), and re-parsing the constant CIDR strings via net.ParseCIDR on every
+// call allocated ~one *net.IPNet per range per call — a top allocation-churn
+// source in profiling. Parsing into *net.IPNet once and using block.Contains
+// makes the predicate allocation-free.
+var nonRoutableBlocks = func() []*net.IPNet {
+	blocks := make([]*net.IPNet, 0, len(nonRoutableCIDRs))
+	for _, cidr := range nonRoutableCIDRs {
+		if _, block, err := net.ParseCIDR(cidr); err == nil && block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}()
+
 // canonicalIPFromHost returns the canonical textual form of an IP
 // address for compare/storage purposes. IPv4-mapped IPv6 such as
 // ::ffff:1.2.3.4 collapses to the bare IPv4 form so observed vs
@@ -4604,8 +4641,8 @@ func isNonRoutableIP(ip net.IP) bool {
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	for _, cidr := range nonRoutableCIDRs {
-		if inCIDR(ip, cidr) {
+	for _, block := range nonRoutableBlocks {
+		if block.Contains(ip) {
 			return true
 		}
 	}
@@ -4663,14 +4700,6 @@ func isIPHost(host string) bool {
 // `net` import stays contained.
 func joinHostPort(host, port string) string {
 	return net.JoinHostPort(host, port)
-}
-
-func inCIDR(ip net.IP, cidr string) bool {
-	_, block, err := net.ParseCIDR(cidr)
-	if err != nil || block == nil {
-		return false
-	}
-	return block.Contains(ip)
 }
 
 func (s *Service) isForbiddenDialIP(ip net.IP) bool {
@@ -5168,6 +5197,11 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	// Peers without any persistedMeta row fall back to "allow" so
 	// bootstrap/manual peers that have never been through a handshake
 	// still propagate (snap.isAnnounceable encodes this fallback).
+	// Record that a consumer read peers-exchange now so the periodic rebuild
+	// (a top allocator: persistedMeta/health maps + peerProvider.Candidates())
+	// is skipped while no one is calling get_peers — see
+	// maybeRebuildPeersExchangeSnapshot.
+	s.peersExchangeAccessNanos.Store(time.Now().UnixNano())
 	pxSnap := s.loadPeersExchangeSnapshot()
 	isAnnounceable := func(addr domain.PeerAddress) bool {
 		if pxSnap == nil {

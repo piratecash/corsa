@@ -2,7 +2,7 @@
 // tryForwardViaRoutingTable / sendTableDirectedRelay / sendRelayToAddress
 // for table-directed relay forwarding; sendFrameToAddress as the unified
 // inbound/outbound send dispatch; executeGossipTargets / routingTargets*
-// for gossip fanout target selection; sendMessageToPeer / gossipNotice /
+// for gossip fanout target selection; sendGossipFrameToPeer / gossipNotice /
 // sendNoticeToPeer for push_message and push_notice delivery;
 // resolveRouteNextHopAddress as the hop-role-aware resolver wrapper.
 //
@@ -693,11 +693,40 @@ func (s *Service) resolveRouteNextHopAddress(peerIdentity domain.PeerIdentity, h
 // recomputed here.
 func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.PeerAddress) {
 	defer crashlog.DeferRecover()
+	// Build the push_message frame ONCE and share it (read-only) across every
+	// gossip target instead of rebuilding it — and re-copying the ciphertext
+	// into a fresh MessageFrame — per target. Gossip fan-out recreating the
+	// identical frame N times was the top allocation-churn source in profiling
+	// (the per-target sends). The frame value is copied at each channel send /
+	// call, so only the *MessageFrame is shared, and it is never mutated on any
+	// send path (session marshal, queue store, inbound write are all reads).
+	frame := gossipPushFrame(msg)
+	msgID := string(msg.ID)
+	recipient := msg.Recipient
 	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		s.goBackground(func() { s.sendMessageToPeer(address, msg) })
+		s.goBackground(func() { s.sendGossipFrameToPeer(address, frame, msgID, recipient) })
+	}
+}
+
+// gossipPushFrame builds the push_message wire frame for a gossiped DM. The
+// returned frame is safe to share read-only across the per-target send
+// goroutines (its *MessageFrame is never mutated downstream).
+func gossipPushFrame(msg protocol.Envelope) protocol.Frame {
+	return protocol.Frame{
+		Type:  "push_message",
+		Topic: msg.Topic,
+		Item: &protocol.MessageFrame{
+			ID:         string(msg.ID),
+			Sender:     msg.Sender,
+			Recipient:  msg.Recipient,
+			Flag:       string(msg.Flag),
+			CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
+			TTLSeconds: msg.TTLSeconds,
+			Body:       string(msg.Payload),
+		},
 	}
 }
 
@@ -823,7 +852,7 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 	}
 
 	// Phase 2: collect non-session peers that pass the filter. These peers
-	// don't have an active outbound session yet, but sendMessageToPeer can
+	// don't have an active outbound session yet, but sendGossipFrameToPeer can
 	// still reach them via queuePeerFrame → pending queue → drain on session
 	// establishment. Without this, a message arriving before all sessions
 	// are up gets gossipped only to existing sessions (possibly back to the
@@ -897,23 +926,18 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 	return targets
 }
 
-func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Envelope) {
+// sendGossipFrameToPeer delivers a pre-built gossip push_message frame to one
+// peer: outbound session first, then a direct write to an authenticated
+// inbound connection, then the pending ring. The frame is shared read-only
+// with the other per-target send goroutines (see executeGossipTargets);
+// msgID/recipient are passed separately only for the log lines so the shared
+// frame's Item need not be re-read. push_message is fire-and-forget gossip
+// relay — no outbound delivery tracking (that lives on the local send_message
+// path via markOutboundTerminal/clearOutboundQueued).
+func (s *Service) sendGossipFrameToPeer(address domain.PeerAddress, frame protocol.Frame, msgID, recipient string) {
 	defer crashlog.DeferRecover()
-	frame := protocol.Frame{
-		Type:  "push_message",
-		Topic: msg.Topic,
-		Item: &protocol.MessageFrame{
-			ID:         string(msg.ID),
-			Sender:     msg.Sender,
-			Recipient:  msg.Recipient,
-			Flag:       string(msg.Flag),
-			CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
-			TTLSeconds: msg.TTLSeconds,
-			Body:       string(msg.Payload),
-		},
-	}
 	if s.enqueuePeerFrame(address, frame) {
-		log.Info().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "session").Msg("gossip_message_attempt")
+		log.Info().Str("node", s.identity.Address).Str("id", msgID).Str("recipient", recipient).Str("peer", string(address)).Str("mode", "session").Msg("gossip_message_attempt")
 		return
 	}
 
@@ -930,18 +954,15 @@ func (s *Service) sendMessageToPeer(address domain.PeerAddress, msg protocol.Env
 		// Fire-and-forget gossip inbound-direct fallback — Network-routed
 		// so a test backend can intercept it; ctx is Service lifecycle.
 		_ = s.sendFrameViaNetwork(s.runCtx, inboundID, frame)
-		log.Info().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "inbound_direct").Msg("gossip_message_attempt")
+		log.Info().Str("node", s.identity.Address).Str("id", msgID).Str("recipient", recipient).Str("peer", string(address)).Str("mode", "inbound_direct").Msg("gossip_message_attempt")
 		return
 	}
 
 	if s.queuePeerFrame(address, frame) {
-		log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "queued").Msg("gossip_message_attempt")
+		log.Debug().Str("id", msgID).Str("recipient", recipient).Str("peer", string(address)).Str("mode", "queued").Msg("gossip_message_attempt")
 		return
 	}
-	// No outbound delivery tracking for gossip: push_message is fire-and-forget
-	// relay, not a locally initiated send. The local send_message path has its
-	// own outbound tracking via markOutboundTerminal/clearOutboundQueued.
-	log.Debug().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Str("peer", string(address)).Str("mode", "dropped").Msg("gossip_message_attempt")
+	log.Debug().Str("id", msgID).Str("recipient", recipient).Str("peer", string(address)).Str("mode", "dropped").Msg("gossip_message_attempt")
 }
 
 func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {

@@ -9,6 +9,55 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
+// TestMaybeRebuildPeersExchangeSnapshot_GatesOnRecentReader pins the
+// reader-gated rebuild WITH the staleness floor: the periodic refresher
+// rebuilds when a consumer has called get_peers within the idle window, AND it
+// rebuilds an idle snapshot once it ages past peersExchangeMaxStale so a
+// post-idle get_peers can never observe an unbounded-old peer list. It is a
+// no-op only while there is no recent reader AND the cached snapshot is still
+// within the floor. (A new snapshot pointer means a rebuild ran; an unchanged
+// pointer means it skipped.)
+func TestMaybeRebuildPeersExchangeSnapshot_GatesOnRecentReader(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.rebuildPeersExchangeSnapshot()
+	base := svc.loadPeersExchangeSnapshot()
+	if base == nil {
+		t.Fatal("expected primed snapshot")
+	}
+
+	// No reader ever (access == 0) and a FRESH snapshot (within the floor) → skip.
+	svc.maybeRebuildPeersExchangeSnapshot()
+	if svc.loadPeersExchangeSnapshot() != base {
+		t.Fatal("gated rebuild ran despite no reader access and a fresh snapshot")
+	}
+
+	// Stale reader (outside the idle window) but still a fresh snapshot → skip.
+	svc.peersExchangeAccessNanos.Store(time.Now().Add(-2 * peerHealthRebuildIdleAfter).UnixNano())
+	svc.maybeRebuildPeersExchangeSnapshot()
+	if svc.loadPeersExchangeSnapshot() != base {
+		t.Fatal("gated rebuild ran for a reader outside the idle window with a fresh snapshot")
+	}
+
+	// Fresh reader → rebuild publishes a new pointer.
+	svc.peersExchangeAccessNanos.Store(time.Now().UnixNano())
+	svc.maybeRebuildPeersExchangeSnapshot()
+	if svc.loadPeersExchangeSnapshot() == base {
+		t.Fatal("gated rebuild skipped despite a recent reader")
+	}
+
+	// Staleness floor: no recent reader, but a snapshot older than
+	// peersExchangeMaxStale must still be rebuilt (else an idle node serves an
+	// unbounded-old peer list to the first post-idle get_peers).
+	staleSnap := &peersExchangeSnapshot{generatedAt: time.Now().Add(-2 * peersExchangeMaxStale)}
+	svc.peersExchangeSnap.Store(staleSnap)
+	svc.peersExchangeAccessNanos.Store(time.Now().Add(-2 * peerHealthRebuildIdleAfter).UnixNano()) // no recent reader
+	svc.maybeRebuildPeersExchangeSnapshot()
+	if svc.loadPeersExchangeSnapshot() == staleSnap {
+		t.Fatal("snapshot older than the staleness floor must be rebuilt even with no recent reader")
+	}
+}
+
 // TestBuildPeerExchangeResponseDoesNotBlockOnSMu is the regression test for
 // the get_peers hang described in §B.6 of the bug postmortem.  Before the
 // atomic snapshot fix, buildPeerExchangeResponse() acquired s.peerMu.RLock() to

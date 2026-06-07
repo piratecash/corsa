@@ -912,13 +912,13 @@ func TestPendingFrameKeySupportsRelayMessage(t *testing.T) {
 	}
 
 	key := pendingFrameKey(domain.PeerAddress("10.0.0.1:64646"), frame)
-	if key == "" {
-		t.Fatal("pendingFrameKey returned empty for relay_message — queuePeerFrame will silently drop it")
+	if !key.IsValid() {
+		t.Fatal("pendingFrameKey returned invalid key for relay_message — queuePeerFrame will silently drop it")
 	}
 
-	expected := "10.0.0.1:64646|relay_message|relay-queue-test-1|some-recipient"
+	expected := pendingKey{Address: "10.0.0.1:64646", Type: "relay_message", A: "relay-queue-test-1", B: "some-recipient"}
 	if key != expected {
-		t.Fatalf("pendingFrameKey = %q, want %q", key, expected)
+		t.Fatalf("pendingFrameKey = %+v, want %+v", key, expected)
 	}
 
 	// Verify uniqueness: different ID → different key.

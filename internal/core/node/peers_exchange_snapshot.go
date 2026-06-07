@@ -73,6 +73,46 @@ func (s *Service) loadPeersExchangeSnapshot() *peersExchangeSnapshot {
 // s.peerMu.RLock and stores the resulting snapshot atomically.  The RPC handler
 // runs its filtering logic (shouldHidePeerExchangeAddress, isAnnounceable,
 // splitHostPort) on the snapshot without touching s.peerMu.
+// peersExchangeMaxStale bounds how stale the peers-exchange snapshot may get
+// while no consumer is calling get_peers. Unlike peer_health (which feeds a UI
+// poller that self-corrects on the next tick), peers-exchange feeds gossip /
+// peer-discovery, so the FIRST get_peers after a long idle must not return an
+// arbitrarily old peer list. The reader-gate below therefore keeps a staleness
+// FLOOR: when idle it rebuilds at most once per this window instead of skipping
+// forever. That still cuts the rebuild rate ~60× when idle (2×/s → 1×/30s)
+// while capping the worst-case staleness any consumer can observe.
+const peersExchangeMaxStale = 30 * time.Second
+
+// maybeRebuildPeersExchangeSnapshot is the gated entry point the periodic
+// refresher uses instead of rebuildPeersExchangeSnapshot directly. It rebuilds
+// when EITHER a consumer has read the snapshot (called get_peers) within
+// peerHealthRebuildIdleAfter, OR the cached snapshot has aged past
+// peersExchangeMaxStale (the staleness floor); otherwise it returns
+// immediately, skipping the persistedMeta/health map allocations and the
+// peerProvider.Candidates() call that profiling flagged as a top allocator.
+//
+// Contract: get_peers is bounded-stale. While readers are active the snapshot
+// is ≤ one refresh tick old; while idle it is ≤ peersExchangeMaxStale old. The
+// RPC handler intentionally never rebuilds synchronously — that would re-couple
+// get_peers to s.peerMu / the peerProvider locks, the exact starvation shape
+// this atomic snapshot exists to eliminate. primeHotReadSnapshots still calls
+// rebuildPeersExchangeSnapshot unconditionally so a reader never sees nil.
+func (s *Service) maybeRebuildPeersExchangeSnapshot() {
+	last := s.peersExchangeAccessNanos.Load()
+	if last != 0 && time.Since(time.Unix(0, last)) <= peerHealthRebuildIdleAfter {
+		s.rebuildPeersExchangeSnapshot()
+		return
+	}
+	// No recent reader — rebuild only if the cached snapshot has gone stale
+	// past the floor (or does not exist yet), so an idle node still refreshes
+	// occasionally and a post-idle get_peers cannot observe an unbounded-old
+	// peer list.
+	snap := s.peersExchangeSnap.Load()
+	if snap == nil || time.Since(snap.generatedAt) > peersExchangeMaxStale {
+		s.rebuildPeersExchangeSnapshot()
+	}
+}
+
 func (s *Service) rebuildPeersExchangeSnapshot() {
 	log.Trace().Msg("peers_exchange_snapshot_refresh_begin")
 
