@@ -250,7 +250,7 @@ const (
 	// correctly.
 	ClientVersionMajor = 1
 	ClientVersionMinor = 0
-	ClientVersionBuild = 55
+	ClientVersionBuild = 56
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
