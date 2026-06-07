@@ -851,36 +851,53 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 		})
 	}
 
+	// maxTargets is the gossip fanout cap applied in Phase 3 when scored
+	// session targets exist.
+	const maxTargets = 3
+
 	// Phase 2: collect non-session peers that pass the filter. These peers
 	// don't have an active outbound session yet, but sendGossipFrameToPeer can
 	// still reach them via queuePeerFrame → pending queue → drain on session
 	// establishment. Without this, a message arriving before all sessions
 	// are up gets gossipped only to existing sessions (possibly back to the
 	// sender) and never reaches peers whose sessions haven't started yet.
-	peers := s.peersSnapshotLocked()
-
+	//
+	// SKIP this entirely when the scored session targets already fill the
+	// fanout cap: Phase 3 would discard every pending peer we collect here, so
+	// peersSnapshotLocked() (a full peer-list copy) and the scan below are pure
+	// waste on a connected node that steady-state has >= maxTargets healthy
+	// sessions — profiling flagged both as top allocators. When there are NO
+	// sessions (len(scored)==0 < maxTargets) Phase 2 still runs and returns the
+	// full peer set uncapped (bootstrap).
 	var pendingPeers []domain.PeerAddress
-	for _, peer := range peers {
-		if peer.Address == "" || s.isSelfAddress(peer.Address) {
-			continue
+	if len(scored) < maxTargets {
+		// Iterate s.peers directly under the RLock we already hold (this loop
+		// runs BEFORE the RUnlock below) instead of peersSnapshotLocked()'s
+		// defensive copy — the copy only exists for callers that iterate after
+		// unlocking, and copying the whole peer list per call was a top
+		// allocation source.
+		for _, peer := range s.peers {
+			if peer.Address == "" || s.isSelfAddress(peer.Address) {
+				continue
+			}
+			if _, ok := sessionSeen[peer.Address]; ok {
+				continue
+			}
+			// We keep peerMu.RLock held across this callback so that the
+			// quarantine/identity/type lookups all use *Locked helpers
+			// instead of re-taking RLock. The pre-quarantine version of
+			// this loop called peerTypeForAddress/peerIdentityForAddress
+			// (each of which takes peerMu.RLock internally) AFTER an
+			// explicit RUnlock; that worked when the callback never
+			// re-entered peerMu, but now the route-quarantine callback
+			// needs to consult s.peerQuarantine, which is also guarded
+			// by peerMu. Holding RLock through Phase 2 avoids both a
+			// recursive-RLock path AND the small TOCTOU between phases.
+			if !allow(peer.Address, s.peerTypeForAddressLocked(peer.Address), s.peerIDs[peer.Address], now) {
+				continue
+			}
+			pendingPeers = append(pendingPeers, peer.Address)
 		}
-		if _, ok := sessionSeen[peer.Address]; ok {
-			continue
-		}
-		// We keep peerMu.RLock held across this callback so that the
-		// quarantine/identity/type lookups all use *Locked helpers
-		// instead of re-taking RLock. The pre-quarantine version of
-		// this loop called peerTypeForAddress/peerIdentityForAddress
-		// (each of which takes peerMu.RLock internally) AFTER an
-		// explicit RUnlock; that worked when the callback never
-		// re-entered peerMu, but now the route-quarantine callback
-		// needs to consult s.peerQuarantine, which is also guarded
-		// by peerMu. Holding RLock through Phase 2 avoids both a
-		// recursive-RLock path AND the small TOCTOU between phases.
-		if !allow(peer.Address, s.peerTypeForAddressLocked(peer.Address), s.peerIDs[peer.Address], now) {
-			continue
-		}
-		pendingPeers = append(pendingPeers, peer.Address)
 	}
 	s.peerMu.RUnlock()
 
@@ -901,9 +918,9 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 	})
 
 	if len(scored) > 0 {
-		// Session targets exist — cap at gossip fanout limit, fill remaining
-		// slots with pending peers so messages reach not-yet-connected nodes.
-		const maxTargets = 3
+		// Session targets exist — cap at gossip fanout limit (maxTargets),
+		// fill remaining slots with pending peers so messages reach
+		// not-yet-connected nodes.
 		targets := make([]domain.PeerAddress, 0, maxTargets)
 		for _, item := range scored {
 			if len(targets) >= maxTargets {

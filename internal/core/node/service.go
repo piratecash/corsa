@@ -69,8 +69,18 @@ type Service struct {
 	identity   *identity.Identity
 	selfBoxSig string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
 	cfg        config.Node
-	eventBus   *ebus.Bus
-	trust      *trustStore
+	// externalListenCached memoises externalListenAddress(). cfg is immutable
+	// after construction, but isSelfAddress (and thus externalListenAddress) is
+	// called per candidate in every routing/gossip target-selection loop, and
+	// the ":port" wildcard branch synthesises "127.0.0.1"+ListenAddress on each
+	// call — profiling showed hundreds of millions of these one-off string
+	// allocations. Computed lazily once and stored as an atomic pointer so the
+	// hot path is an atomic load + deref with no allocation; lazy (not set in
+	// NewService) so the many struct-literal *Service test fixtures that bypass
+	// NewService still get the correct value from their cfg.
+	externalListenCached atomic.Pointer[string]
+	eventBus             *ebus.Bus
+	trust                *trustStore
 	// startedAt is the wall-clock time NewService was called, captured
 	// once and read without a lock from the NodeStatus RPC handler. It
 	// powers the uptime_seconds field of the PIP-0001 integration

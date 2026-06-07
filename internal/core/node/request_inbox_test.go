@@ -1160,8 +1160,8 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 	svc.identity = &identity.Identity{Address: "sendfail-inbound-local"}
 
 	// Create a gossip target with a sendCh of capacity 1, pre-filled so
-	// the next non-blocking send fails. Also fill the pending queue to
-	// maxPendingFramesPerPeer so queuePeerFrame also fails.
+	// the next non-blocking send fails. Also saturate the GLOBAL pending
+	// ceiling so queuePeerFrame's fallback also fails (see below).
 	gossipTarget := domain.PeerAddress("sendfail-gossip-target:9999")
 	fullCh := make(chan protocol.Frame, 1)
 	fullCh <- protocol.Frame{Type: "filler"}
@@ -1175,12 +1175,22 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 		Connected:  true,
 		LastPongAt: time.Now().UTC(),
 	}
-	// Fill the pending queue so queuePeerFrame also returns false.
-	fillerFrames := make([]pendingFrame, maxPendingFramesPerPeer)
-	for i := range fillerFrames {
-		fillerFrames[i] = pendingFrame{Frame: protocol.Frame{Type: "filler", ID: fmt.Sprintf("filler-%d", i)}}
+	// Saturate the GLOBAL pending ceiling so queuePeerFrame also returns
+	// false. The per-peer queue is a RING that evicts its OLDEST frame instead
+	// of rejecting a new one (see capPendingRingLocked), so filling a single
+	// peer's queue no longer forces a queue failure — only the absolute
+	// aggregate backstop (maxPendingFramesTotal) still hard-rejects. The filler
+	// keys live on an UNRELATED peer so the gossipTarget ring eviction inside
+	// queuePeerFrame cannot drop the global count back below the ceiling.
+	svc.deliveryMu.Lock()
+	for i := 0; i < maxPendingFramesTotal; i++ {
+		svc.pendingKeys[pendingKey{
+			Address: "ceiling-filler:1",
+			Type:    "relay_message",
+			A:       fmt.Sprintf("ceil-%d", i),
+		}] = struct{}{}
 	}
-	svc.pending[gossipTarget] = fillerFrames
+	svc.deliveryMu.Unlock()
 
 	receipt := protocol.DeliveryReceipt{
 		MessageID:   "msg-sendfail-1",
@@ -1203,11 +1213,12 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 		t.Fatal("receipt must NOT be marked as seen when all sends failed")
 	}
 
-	// Simulate recovery: drain the filler frame to free sendCh capacity,
-	// and clear the pending queue so queuePeerFrame can also succeed.
+	// Simulate recovery: drain the filler frame to free sendCh capacity, and
+	// clear the global pending backlog so the aggregate ceiling no longer
+	// rejects (the session path will be taken first now that sendCh has room).
 	<-svc.sessions[gossipTarget].sendCh
 	svc.deliveryMu.Lock()
-	svc.pending[gossipTarget] = nil
+	clear(svc.pendingKeys)
 	svc.deliveryMu.Unlock()
 
 	// Retry — pre-mark again, capacity recovered. Must deliver and stay marked.

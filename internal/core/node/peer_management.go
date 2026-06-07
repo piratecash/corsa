@@ -4420,14 +4420,31 @@ func (s *Service) touchConnActivity(id domain.ConnID) {
 	}
 }
 
+// externalListenAddress returns the loopback-reachable form of our listen
+// address, memoised. cfg is immutable after construction, so the value is
+// computed once on first call and cached in an atomic pointer — every later
+// call (this runs per candidate in the routing/gossip target-selection loops
+// via isSelfAddress) is an atomic load + deref with no allocation, instead of
+// re-synthesising "127.0.0.1"+ListenAddress each time. See externalListenCached.
 func (s *Service) externalListenAddress() string {
-	if !s.cfg.EffectiveListenerEnabled() {
+	if p := s.externalListenCached.Load(); p != nil {
+		return *p
+	}
+	v := computeExternalListenAddress(s.cfg)
+	// Idempotent: concurrent first-callers all compute the same value; the
+	// atomic store makes the publication race-free (last writer wins).
+	s.externalListenCached.Store(&v)
+	return v
+}
+
+func computeExternalListenAddress(cfg config.Node) string {
+	if !cfg.EffectiveListenerEnabled() {
 		return ""
 	}
-	if strings.HasPrefix(s.cfg.ListenAddress, ":") {
-		return "127.0.0.1" + s.cfg.ListenAddress
+	if strings.HasPrefix(cfg.ListenAddress, ":") {
+		return "127.0.0.1" + cfg.ListenAddress
 	}
-	return s.cfg.ListenAddress
+	return cfg.ListenAddress
 }
 
 func (s *Service) isSelfAddress(address domain.PeerAddress) bool {
