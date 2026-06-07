@@ -257,7 +257,17 @@ const (
 	// change documented in docs/protocol/handshake.md. The current floor
 	// is well above v12, so this build does not carry any v10..v13
 	// compatibility paths.
-	ProtocolVersion        = 19
+	//
+	// v20: subscribe_inbox deprecation rollout. A v20 responder auto-registers
+	// the peer's inbox subscription AND replays the backlog at auth time (see
+	// handleAuthSession → registerHelloRoute), so the explicit
+	// subscribe_inbox/subscribed round-trip is redundant. A v20 initiator
+	// therefore SKIPS subscribe_inbox when the peer advertises version >= 20
+	// and still sends it to older peers (see peer_sessions.go). The
+	// subscribe_inbox command itself stays wired for backward compatibility and
+	// for client-role (non-node) subscribers; it will be removed only once
+	// MinimumProtocolVersion reaches 20.
+	ProtocolVersion        = 20
 	MinimumProtocolVersion = 16
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"

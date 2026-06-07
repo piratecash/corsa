@@ -310,16 +310,24 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.markPeerConnected(address, peerDirectionOutbound)
 
-	if _, err := s.peerSessionRequest(session, protocol.Frame{
-		Type:       "subscribe_inbox",
-		Topic:      "dm",
-		Recipient:  s.identity.Address,
-		Subscriber: s.identity.Address,
-	}, "subscribed", false); err != nil {
-		return true, err
+	// subscribe_inbox deprecation (v20): a v20+ responder auto-subscribes our
+	// inbox and replays the backlog at auth (see handleAuthSession), so the
+	// explicit subscribe_inbox round-trip is redundant — skip it and rely on
+	// the auth-time registration. Older peers still need it: their auth path
+	// installs the push route but does NOT replay the backlog, so we keep
+	// sending subscribe_inbox to peers below the threshold.
+	if session.version < subscribeInboxAutoAtAuthVersion {
+		if _, err := s.peerSessionRequest(session, protocol.Frame{
+			Type:       "subscribe_inbox",
+			Topic:      "dm",
+			Recipient:  s.identity.Address,
+			Subscriber: s.identity.Address,
+		}, "subscribed", false); err != nil {
+			return true, err
+		}
+		log.Info().Str("peer", string(address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 	}
 	_ = conn.SetDeadline(time.Time{})
-	log.Info().Str("peer", string(address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 
 	if err := s.syncPeerSession(session, requestPeers, peerExchangePathSessionOutbound); err != nil {
 		return true, err
@@ -1122,16 +1130,23 @@ func (s *Service) initPeerSession(session *peerSession) error {
 		s.logPeerExchangeSkipped(peerExchangePathSessionCM, session.address, peerExchangeSkipByAggregateHealthy)
 	}
 
-	if _, err := s.peerSessionRequest(session, protocol.Frame{
-		Type:       "subscribe_inbox",
-		Topic:      "dm",
-		Recipient:  s.identity.Address,
-		Subscriber: s.identity.Address,
-	}, "subscribed", false); err != nil {
-		return fmt.Errorf("subscribe_inbox: %w", err)
+	// subscribe_inbox deprecation (v20): skip the explicit round-trip for v20+
+	// peers — their auth path auto-subscribes us and replays the backlog (see
+	// handleAuthSession). Older peers still need it (their auth installs the
+	// push route but does not replay the backlog), so keep sending below the
+	// threshold. See subscribeInboxAutoAtAuthVersion.
+	if session.version < subscribeInboxAutoAtAuthVersion {
+		if _, err := s.peerSessionRequest(session, protocol.Frame{
+			Type:       "subscribe_inbox",
+			Topic:      "dm",
+			Recipient:  s.identity.Address,
+			Subscriber: s.identity.Address,
+		}, "subscribed", false); err != nil {
+			return fmt.Errorf("subscribe_inbox: %w", err)
+		}
+		log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 	}
 	_ = session.conn.SetDeadline(time.Time{})
-	log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
 
 	if err := s.syncPeerSession(session, requestPeers, peerExchangePathSessionCM); err != nil {
 		return fmt.Errorf("sync: %w", err)

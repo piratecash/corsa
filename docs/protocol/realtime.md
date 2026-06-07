@@ -2,20 +2,54 @@
 
 ## Overview
 
-The realtime delivery system enables low-latency message and receipt delivery between peers in the Corsa network. Peers establish bidirectional subscriptions after authentication, allowing both sides to receive messages and delivery receipts in real-time while maintaining a backlog for offline scenarios.
+The realtime delivery system enables low-latency message and receipt delivery between peers in the Corsa network. Peers establish inbox subscriptions around authentication, allowing both sides to receive messages and delivery receipts in real-time while maintaining a backlog for offline scenarios. From **ProtocolVersion 20** a node↔node subscription is folded into authentication (registered + backlog-replayed at `auth_ok`); the explicit symmetric `subscribe_inbox` exchange described below is the legacy path for sub-v20 peers and client-role subscribers.
 
 ## Core Concepts
 
 ### Subscription Model
 
-After successful authentication (auth_ok), both peers establish symmetric subscriptions to each other's inboxes. This bidirectional model ensures that messages and receipts can flow in both directions with guaranteed delivery through backlog replay.
+> **Scope.** The symmetric `subscribe_inbox` model described in this section is
+> the **legacy path** — it is the active wire flow only for peers **below
+> ProtocolVersion 20** and for **client-role (non-node) subscribers**. For
+> **v20+ node↔node** sessions the subscription is folded into authentication
+> (see the deprecation note below): after `auth_ok` the responder has already
+> registered the initiator's inbox and replayed its backlog, with **no**
+> `subscribe_inbox`/`subscribed` exchange and **no** reverse subscription.
 
-**Key principles:**
+After successful authentication (auth_ok), two legacy/client peers establish symmetric subscriptions to each other's inboxes. This bidirectional model lets messages and receipts flow in both directions, with backlog replay covering reconnects during node uptime (see *Backlog Guarantee* for the durability scope).
+
+**Key principles (legacy <20 / client-role path):**
 - Subscriptions are registered **after authentication**, not during it
 - Both caller and responder send subscribe_inbox requests
 - Each subscription triggers immediate backlog replay followed by live streaming
 - Backlog replay is serialized per connection to ensure ordering
 - Acknowledgements (ack_delete) remove items from backlog after delivery
+
+> **DEPRECATION — ProtocolVersion 20.** The explicit `subscribe_inbox`
+> round-trip between **node** peers is being retired because it is redundant
+> with authentication: the `auth_session` already proves the initiator's
+> identity, and a node responder installs the inbox subscription
+> (`registerHelloRoute`) plus replays the backlog (`pushBacklogToSubscriber`)
+> at auth time. From v20 on:
+> - A v20+ **initiator** does **not** send `subscribe_inbox` to a peer that
+>   advertises version ≥ 20; it still sends it to older peers.
+> - A v20+ **responder** auto-subscribes the authenticated node identity and
+>   replays its backlog at auth (gated on the peer being ≥ 20 to avoid a
+>   double replay with older initiators that still send the frame).
+> - The **reverse** `subscribe_inbox` (responder → initiator, direction #2
+>   below) is consequently not exchanged between two v20 peers. This is
+>   intentional: every node receives its own inbox over **its own** outbound
+>   sessions (where it is the authenticating initiator), and gossip guarantees
+>   mesh-wide propagation regardless — the reverse subscription was only a
+>   latency/redundancy optimisation, never a delivery guarantee. NAT'd nodes
+>   are always initiators, so they are unaffected.
+> - `request_inbox` (the legacy pull-backlog command superseded by
+>   `subscribe_inbox`) is likewise deprecated; current code never sends it.
+>
+> The `subscribe_inbox` / `request_inbox` handlers stay wired for backward
+> compatibility and for client-role (non-node) subscribers, which the auth
+> path does not cover. They will be removed once `MinimumProtocolVersion`
+> reaches 20.
 
 ### Topics
 
@@ -24,7 +58,9 @@ After successful authentication (auth_ok), both peers establish symmetric subscr
 
 ### Backlog Guarantee
 
-Messages and receipts are persisted and replayed to subscribers, ensuring no data loss even if a peer is temporarily offline. Once a subscriber acknowledges receipt via `ack_delete`, the item is removed from the backlog.
+Messages and receipts are held in the node's **runtime backlog during node uptime** and replayed to subscribers when they (re)connect, covering a peer being temporarily offline. Once a subscriber acknowledges receipt via `ack_delete`, the item is removed from the backlog.
+
+This is **not a restart-durable guarantee for relay-only nodes**: the backlog and relay/queue state are in-memory and are **lost on process restart** (the `queue-<port>.json` disk persistence was removed — see *Pending frame queue* in `docs/mesh.md`). Durable, restart-surviving storage exists only where a `MessageStore` is present — i.e. the recipient's own messages on a node that stores them, and the desktop `chatlog.db`. For relay/transit traffic, recovery across a restart is sender-side end-to-end retry; the forthcoming delivery-status layer will close the remaining gap.
 
 ## Protocol Messages
 
@@ -67,7 +103,11 @@ The response echoes the resolved `subscriber` value (which may differ from the r
 - Initiated by the outbound peer first
 - Inbound peer responds with `subscribe_inbox` after responding with `subscribed`
 
-### Bidirectional Subscription Flow
+### Bidirectional Subscription Flow (legacy <20 / client-role)
+
+> This symmetric exchange applies only to peers below ProtocolVersion 20 and to
+> client-role subscribers. Two v20 nodes do NOT perform it — backlog and live
+> push are established at auth (see the Scope note under *Subscription Model*).
 
 The subscription exchange is symmetric to support low-latency delivery in both directions:
 
@@ -249,8 +289,8 @@ This serialization ensures:
 ### Connection Lifecycle
 
 1. **Authentication:** Peer authenticates via `auth_session` signature
-2. **First subscription:** Authenticated peer sends `subscribe_inbox`, receives `subscribed` + backlog
-3. **Reverse subscription:** Peer responds with own `subscribe_inbox`, receives `subscribed` + backlog
+2. **First subscription** *(legacy <20 / client-role)*: authenticated peer sends `subscribe_inbox`, receives `subscribed` + backlog. **v20 node↔node:** skipped — the responder auto-registers the inbox and replays the backlog at `auth_ok` (no `subscribe_inbox`).
+3. **Reverse subscription** *(legacy <20 / client-role)*: peer responds with own `subscribe_inbox`, receives `subscribed` + backlog. **v20 node↔node:** not performed — each node receives its own inbox over its own outbound (authenticating) session.
 4. **Live streaming:** Both peers receive live `push_message` and `push_delivery_receipt` updates
 5. **Acknowledgements:** Each peer sends `ack_delete` to confirm receipt and release backlog items
 
@@ -408,10 +448,10 @@ sequenceDiagram
 8. **Push seen to sender:** Full node pushes the seen receipt to subscribed sender client
 9. **Acknowledge seen:** Sender client acknowledges the seen receipt via `ack_delete(receipt seen)`
 
-**Guarantees:**
-- Messages and receipts are persisted until acknowledged
+**Guarantees (within node uptime):**
+- Messages and receipts are retained in the runtime backlog until acknowledged (in-memory; not restart-durable for relay-only nodes — see *Backlog Guarantee*)
 - If a peer disconnects, all unacknowledged items are replayed on reconnection
-- Each ack removes an item from backlog, freeing storage
+- Each ack removes an item from backlog, freeing memory
 - Receipt tracking enables progressive confirmation (delivered → seen)
 
 ---
@@ -420,20 +460,52 @@ sequenceDiagram
 
 ## Обзор
 
-Система доставки в реальном времени обеспечивает низколатентную доставку сообщений и подтверждений между узлами сети Corsa. Узлы устанавливают двусторонние подписки после аутентификации, позволяя обеим сторонам получать сообщения и подтверждения доставки в реальном времени с сохранением истории для оффлайн-сценариев.
+Система доставки в реальном времени обеспечивает низколатентную доставку сообщений и подтверждений между узлами сети Corsa. Узлы устанавливают подписки на inbox вокруг аутентификации, позволяя обеим сторонам получать сообщения и подтверждения доставки в реальном времени с сохранением истории для оффлайн-сценариев. С **ProtocolVersion 20** подписка node↔node сворачивается в аутентификацию (регистрируется и реплеит историю на `auth_ok`); явный симметричный обмен `subscribe_inbox` ниже — легаси-путь для пиров ниже v20 и client-role подписчиков.
 
 ## Основные концепции
 
 ### Модель подписки
 
-После успешной аутентификации (auth_ok) оба узла устанавливают симметричные подписки на входящие сообщения друг друга. Эта двусторонняя модель гарантирует, что сообщения и подтверждения могут течь в обоих направлениях с гарантированной доставкой через механизм истории.
+> **Область применения.** Симметричная модель `subscribe_inbox`, описанная в
+> этом разделе, — **легаси-путь**: это активный wire-flow только для пиров
+> **ниже ProtocolVersion 20** и для **client-role (не-node) подписчиков**. Для
+> **v20+ node↔node** подписка сворачивается в аутентификацию (см.
+> deprecation-блок ниже): после `auth_ok` отвечающая сторона уже зарегистрировала
+> inbox инициатора и реплеила его историю — **без** обмена
+> `subscribe_inbox`/`subscribed` и **без** обратной подписки.
 
-**Ключевые принципы:**
+После успешной аутентификации (auth_ok) два легаси/client-пира устанавливают симметричные подписки на входящие сообщения друг друга. Эта двусторонняя модель позволяет сообщениям и подтверждениям течь в обоих направлениях, а replay истории покрывает переподключения в пределах работы ноды (область durability — см. *Гарантия истории*).
+
+**Ключевые принципы (легаси <20 / client-role путь):**
 - Подписки регистрируются **после аутентификации**, не во время неё
 - Оба узла отправляют запросы subscribe_inbox
 - Каждая подписка запускает немедленное воспроизведение истории, за которым следует потоковая передача в реальном времени
 - Воспроизведение истории сериализуется для каждого соединения для обеспечения порядка
 - Подтверждения (ack_delete) удаляют элементы из истории после доставки
+
+> **DEPRECATION — ProtocolVersion 20.** Явный round-trip `subscribe_inbox`
+> между **node**-узлами выводится из обращения как избыточный с
+> аутентификацией: `auth_session` уже доказывает identity инициатора, а
+> отвечающая нода на auth ставит подписку (`registerHelloRoute`) и реплеит
+> историю (`pushBacklogToSubscriber`). С v20:
+> - v20+ **инициатор** НЕ шлёт `subscribe_inbox` пиру с версией ≥ 20; старым
+>   пирам шлёт по-прежнему.
+> - v20+ **отвечающая** сторона авто-подписывает аутентифицированную
+>   node-identity и реплеит её историю на auth (с гейтом по версии пира ≥ 20,
+>   чтобы не было двойного реплея со старыми инициаторами, которые ещё шлют
+>   фрейм).
+> - **Обратная** подписка (отвечающий → инициатор, направление #2) между двумя
+>   v20-нодами поэтому не выполняется. Это намеренно: каждый узел получает свой
+>   inbox через СОБСТВЕННЫЕ исходящие сессии (где он — аутентифицирующийся
+>   инициатор), а gossip гарантирует распространение по mesh — обратная подписка
+>   была лишь оптимизацией латентности, а не гарантией доставки. NAT-узлы всегда
+>   инициаторы и не затронуты.
+> - `request_inbox` (легаси pull-команда истории, вытесненная `subscribe_inbox`)
+>   тоже deprecated; текущий код её никогда не шлёт.
+>
+> Хендлеры `subscribe_inbox` / `request_inbox` остаются ради обратной
+> совместимости и client-role (не-node) подписчиков, которых auth-путь не
+> покрывает. Будут удалены, когда `MinimumProtocolVersion` достигнет 20.
 
 ### Топики
 
@@ -442,7 +514,9 @@ sequenceDiagram
 
 ### Гарантия истории
 
-Сообщения и подтверждения сохраняются и воспроизводятся для подписчиков, обеспечивая отсутствие потери данных, даже если узел временно находится в оффлайне. После того как подписчик подтвердит получение через `ack_delete`, элемент удаляется из истории.
+Сообщения и подтверждения держатся в **runtime-бэклоге ноды на время её работы** и воспроизводятся подписчикам при их (пере)подключении — это покрывает случай, когда пир временно в оффлайне. После того как подписчик подтвердит получение через `ack_delete`, элемент удаляется из истории.
+
+Это **не restart-durable гарантия для relay-only нод**: бэклог и relay/queue state живут в памяти и **теряются при рестарте процесса** (дисковая персистентность `queue-<port>.json` удалена — см. *Очередь pending-фреймов* в `docs/mesh.md`). Долговременное, переживающее рестарт хранилище есть только там, где присутствует `MessageStore` — то есть собственные сообщения получателя на ноде, которая их хранит, и desktop `chatlog.db`. Для relay/транзитного трафика восстановление после рестарта — это end-to-end retry на стороне отправителя; будущий слой статусов доставки закроет оставшийся пробел.
 
 ## Протокольные сообщения
 
@@ -485,7 +559,11 @@ sequenceDiagram
 - Инициируется исходящим узлом первым
 - Входящий узел отвечает через `subscribe_inbox` после ответа с `subscribed`
 
-### Двусторонняя подписка
+### Двусторонняя подписка (легаси <20 / client-role)
+
+> Этот симметричный обмен применяется только к пирам ниже ProtocolVersion 20 и к
+> client-role подписчикам. Две v20-ноды его НЕ выполняют — история и live-push
+> устанавливаются на auth (см. блок «Область применения» в §Модель подписки).
 
 Обмен подписками является симметричным для поддержки низколатентной доставки в обоих направлениях:
 
@@ -667,8 +745,8 @@ signature = ed25519_sign(payload, private_key)
 ### Жизненный цикл соединения
 
 1. **Аутентификация:** Узел аутентифицируется через подпись `auth_session`
-2. **Первая подписка:** Аутентифицированный узел отправляет `subscribe_inbox`, получает `subscribed` + историю
-3. **Обратная подписка:** Узел отвечает собственным `subscribe_inbox`, получает `subscribed` + историю
+2. **Первая подписка** *(легаси <20 / client-role)*: аутентифицированный узел отправляет `subscribe_inbox`, получает `subscribed` + историю. **v20 node↔node:** пропускается — отвечающая сторона авто-регистрирует inbox и реплеит историю на `auth_ok` (без `subscribe_inbox`).
+3. **Обратная подписка** *(легаси <20 / client-role)*: узел отвечает собственным `subscribe_inbox`, получает `subscribed` + историю. **v20 node↔node:** не выполняется — каждый узел получает свой inbox через собственную исходящую (аутентифицирующуюся) сессию.
 4. **Потоковая передача в реальном времени:** Оба узла получают прямые обновления `push_message` и `push_delivery_receipt`
 5. **Подтверждения:** Каждый узел отправляет `ack_delete` для подтверждения получения и освобождения элементов истории
 
@@ -828,8 +906,8 @@ sequenceDiagram
 8. **Отправить просмотр отправителю:** Полный узел отправляет подтверждение просмотра подписанному клиенту отправителя
 9. **Подтвердить просмотр:** Клиент отправителя подтверждает подтверждение просмотра через `ack_delete(receipt seen)`
 
-**Гарантии:**
-- Сообщения и подтверждения сохраняются до момента их подтверждения
+**Гарантии (в пределах работы ноды):**
+- Сообщения и подтверждения удерживаются в runtime-бэклоге до момента их подтверждения (в памяти; не restart-durable для relay-only нод — см. *Гарантия истории*)
 - При отключении узла все неподтвержденные элементы воспроизводятся при переподключении
-- Каждое подтверждение удаляет элемент из истории, освобождая хранилище
+- Каждое подтверждение удаляет элемент из истории, освобождая память
 - Отслеживание подтверждений обеспечивает прогрессивное подтверждение (delivered → seen)

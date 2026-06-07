@@ -2587,8 +2587,17 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	case "push_notice":
 		s.handleInboundPushNotice(frame)
 	case "request_inbox":
+		// DEPRECATED (v20): legacy pull-backlog command, superseded long ago by
+		// subscribe_inbox and no longer SENT by any current code path (no
+		// Type:"request_inbox" is constructed anywhere). Kept only to answer
+		// pre-historic peers. Remove together with subscribe_inbox once
+		// MinimumProtocolVersion reaches subscribeInboxAutoAtAuthVersion.
 		s.respondToInboxRequest(session)
 	case "subscribe_inbox":
+		// DEPRECATED (v20): kept for older node peers and client-role
+		// subscribers; v20+ node peers rely on auto-subscribe + backlog replay
+		// at auth (handleAuthSession). Remove once MinimumProtocolVersion
+		// reaches subscribeInboxAutoAtAuthVersion.
 		if session != nil {
 			reply, sub := s.subscribeInboxFrame(session.connID, frame)
 			// Session-local reply: route through the injected Network

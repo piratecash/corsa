@@ -288,6 +288,20 @@ sequenceDiagram
 ```
 *Diagram 4 — Peer session lifecycle: handshake → auth → sync → steady-state*
 
+> **ProtocolVersion 20 — Phase 3 (Subscription) folds into authentication.**
+> `subscribe_inbox` is redundant: `auth_session` already proves the initiator's
+> identity, and a node responder installs the subscription
+> (`registerHelloRoute`) and replays the backlog (`pushBacklogToSubscriber`) at
+> auth. So from v20 the initiator does NOT send `subscribe_inbox` to a peer
+> advertising version ≥ 20 (older peers still get it). The reverse subscription
+> between two v20 nodes is intentionally not exchanged: every node receives its
+> own inbox over ITS OWN outbound sessions (where it is the authenticating
+> initiator), and gossip guarantees mesh-wide propagation — the reverse
+> subscription was only a latency optimisation. NAT'd nodes are always
+> initiators and unaffected. The `subscribe_inbox` / `request_inbox` commands
+> remain wired for older peers and client-role subscribers; they will be removed
+> when `MinimumProtocolVersion = 20`.
+
 ### Health monitoring
 
 - **Heartbeat** — both sides of a connection independently send pings
@@ -502,15 +516,21 @@ sequenceDiagram
 Messages where neither sender nor recipient is this node are relayed:
 
 - Stored in `relayRetry` with a 3-minute TTL.
-- Persisted across restarts in `queue-{port}.json`.
+- Held **in memory only** — relay/queue state is **not** persisted and does
+  **not** survive a process restart (the `queue-{port}.json` disk persistence
+  was removed; the file is deleted on startup). Recovery after a restart is
+  sender-side end-to-end retry, and the forthcoming delivery-status layer will
+  close the remaining reliability gap.
 - Retried on reconnect via `retryRelayDeliveries()`.
 
 ### Pending frame queue
 
 Outbound frames that cannot be sent immediately are queued per peer address in
 `pending[address]`. Each entry records the frame, queue time, and retry count.
-On reconnect, `flushPendingPeerFrames()` drains the queue. The queue is
-persisted in `queue-{port}.json` and survives restarts.
+On reconnect, `flushPendingPeerFrames()` drains the queue. The queue is a
+bounded **in-memory per-peer ring** (`CORSA_PENDING_RING_SIZE`, default 200)
+that evicts the oldest frame at capacity; it is **not** persisted and is **lost
+on process restart** — recovery is sender-side end-to-end retry.
 
 Legacy entries keyed by fallback-port addresses are migrated on load; entries
 that cannot be resolved to a primary address move to the `"orphaned"` section.
@@ -725,7 +745,7 @@ only goroutine that blocks on a slow peer.
 |---|---|
 | `peers-{port}.json` | Known peer addresses, scores, metadata |
 | `trust-{port}.json` | TOFU-pinned contacts and conflict log |
-| `queue-{port}.json` | Pending outbound frames, relay retry state |
+| ~~`queue-{port}.json`~~ | **Removed.** Pending/relay state is now an in-memory ring — not persisted, lost on restart. The file is loaded once for a one-shot migration on upgrade, then deleted. |
 | `chatlog.db` (SQLite) | Message history, delivery status (desktop only) |
 
 ---
@@ -1020,6 +1040,20 @@ sequenceDiagram
 ```
 *Диаграмма 4 — Жизненный цикл peer-сессии: хендшейк → аутентификация → синхронизация → steady-state*
 
+> **ProtocolVersion 20 — Фаза 3 (Подписка) сворачивается в аутентификацию.**
+> `subscribe_inbox` избыточен: `auth_session` уже доказывает identity
+> инициатора, а отвечающая нода на auth ставит подписку
+> (`registerHelloRoute`) и реплеит backlog (`pushBacklogToSubscriber`).
+> Поэтому с v20 инициатор НЕ шлёт `subscribe_inbox` пиру с версией ≥ 20
+> (старым пирам — шлёт по-прежнему). Обратная подписка между двумя v20-нодами
+> не выполняется намеренно: каждый узел получает свой inbox через
+> СОБСТВЕННЫЕ исходящие сессии (где он — аутентифицирующийся инициатор), а
+> gossip гарантирует распространение по mesh; reverse-подписка была лишь
+> оптимизацией латентности. NAT-узлы всегда инициаторы и не затронуты.
+> Команды `subscribe_inbox` / `request_inbox` остаются рабочими для старых
+> пиров и client-role подписчиков; будут удалены при
+> `MinimumProtocolVersion = 20`.
+
 ### Мониторинг здоровья
 
 - **Heartbeat** — обе стороны соединения независимо шлют пинги каждые ~2 мин
@@ -1240,7 +1274,11 @@ sequenceDiagram
 Сообщения, где ни sender, ни recipient не являются этой нодой, ретранслируются:
 
 - Хранятся в `relayRetry` с TTL 3 минуты.
-- Персистятся в `queue-{port}.json` между рестартами.
+- Держатся **только в памяти** — relay/queue state **не** персистится и **не**
+  переживает рестарт процесса (дисковая персистентность `queue-{port}.json`
+  удалена; файл удаляется при старте). Восстановление после рестарта — это
+  end-to-end retry на стороне отправителя; будущий слой статусов доставки
+  закроет оставшийся пробел в надёжности.
 - Повторяются при переподключении через `retryRelayDeliveries()`.
 
 ### Очередь pending-фреймов
@@ -1248,8 +1286,10 @@ sequenceDiagram
 Исходящие фреймы, которые не могут быть отправлены сразу, ставятся в очередь
 по адресу peer'а в `pending[address]`. Каждая запись хранит фрейм, время
 постановки и счётчик повторов. При переподключении `flushPendingPeerFrames()`
-дренирует очередь. Очередь персистится в `queue-{port}.json` и переживает
-рестарты.
+дренирует очередь. Очередь — это ограниченное **in-memory кольцо на пира**
+(`CORSA_PENDING_RING_SIZE`, по умолчанию 200), вытесняющее самый старый фрейм
+при заполнении; она **не** персистится и **теряется при рестарте процесса** —
+восстановление через end-to-end retry на стороне отправителя.
 
 Legacy-записи с ключами по fallback-портам мигрируются при загрузке;
 неразрешимые записи перемещаются в секцию `"orphaned"`.
@@ -1465,7 +1505,7 @@ TCP-сокет закрылся бы до того, как writer горутин
 |---|---|
 | `peers-{port}.json` | Известные адреса peer'ов, скоры, метаданные |
 | `trust-{port}.json` | TOFU-pinned контакты и лог конфликтов |
-| `queue-{port}.json` | Pending исходящие фреймы, состояние retry relay |
+| ~~`queue-{port}.json`~~ | **Удалён.** Pending/relay state теперь in-memory кольцо — не персистится, теряется при рестарте. Файл загружается один раз для миграции при апгрейде, затем удаляется. |
 | `chatlog.db` (SQLite) | История сообщений, статусы доставки (только desktop) |
 
 ---

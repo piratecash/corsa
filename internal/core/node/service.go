@@ -2296,7 +2296,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame("", remoteIPFromString(addr)))
 		return true
 	case "auth_session":
-		reply, ok := s.handleAuthSession(connID, frame)
+		reply, ok, backlogSub := s.handleAuthSession(connID, frame)
 		if !ok {
 			accepted = false
 			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
@@ -2353,6 +2353,17 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			log.Warn().Err(err).
 				Uint64("conn_id", uint64(connID)).
 				Msg("auth_ok ack failed — peer will close on its peerRequestTimeout and CM will redial (fresh connID, half-auth state cleared by handleConn defer)")
+			// auth_ok did not land — do NOT replay the backlog: the peer is
+			// about to be redialed on a fresh connID, and pushing onto a wedged
+			// buffer would be wasted work the peer never reads.
+			return true
+		}
+		// v20 auto-subscribe backlog replay — strictly AFTER auth_ok has been
+		// enqueued into the writer (sendHandshakeReplyViaNetwork returned nil),
+		// so push_message/push_delivery_receipt frames are ordered behind auth_ok
+		// on the connection. Fire-and-forget like the subscribe_inbox path.
+		if backlogSub != nil {
+			s.goBackground(func() { s.pushBacklogToSubscriber(backlogSub) })
 		}
 		return true
 
@@ -2435,6 +2446,15 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
 		return true
 	case "subscribe_inbox":
+		// DEPRECATED (v20): node peers running >= subscribeInboxAutoAtAuthVersion
+		// no longer send this frame — handleAuthSession auto-registers the
+		// subscription and replays the backlog at auth (registerHelloRoute +
+		// pushBacklogToSubscriber). This handler stays wired for (a) older node
+		// peers still in the mesh and (b) client-role (non-node) subscribers,
+		// which the auth path does not cover. Remove this case, the send sites
+		// in peer_sessions.go, and subscribeInboxFrame once MinimumProtocolVersion
+		// reaches subscribeInboxAutoAtAuthVersion.
+		//
 		// Auth gate enforced above. Identity binding: the authenticated
 		// peer may only subscribe to
 		// its own identity. Without this check, an authenticated peer could
@@ -3650,7 +3670,15 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 // string consumed by learnPeerFromFrame is resolved via the Network
 // surface (RemoteAddr(id) returns "" for an unregistered ConnID, which is
 // what learnPeerFromFrame already tolerates).
-func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (protocol.Frame, bool) {
+//
+// The third return value is the v20 auto-subscribe backlog subscriber (or nil).
+// The caller MUST replay it via pushBacklogToSubscriber ONLY AFTER the auth_ok
+// reply has been enqueued into the writer — replaying it here would race the
+// push_message/push_delivery_receipt frames ahead of auth_ok, and a v20
+// initiator treats auth_ok as the handshake boundary (it no longer waits for a
+// subscribed frame), so a backlog frame arriving first would break its
+// post-handshake framing expectations.
+func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (protocol.Frame, bool, *subscriber) {
 	// Trace checkpoints along this function share conn_id as the
 	// correlation key so the inbound-auth arc can be reconstructed from
 	// interleaved goroutine logs (announce + full-sync are spawned async).
@@ -3663,12 +3691,12 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 			s.addBanScore(id, banIncrementInvalidSig)
 		}
 		log.Trace().Uint64("conn_id", uint64(id)).Str("reply_code", reply.Code).Msg("handle_auth_session_verify_failed")
-		return reply, false
+		return reply, false, nil
 	}
 	// Already verified — idempotent re-auth returns success immediately.
 	if state != nil && state.Verified {
 		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_idempotent")
-		return reply, true
+		return reply, true, nil
 	}
 
 	s.setConnAuthStateByID(id, verified)
@@ -3682,8 +3710,25 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	s.learnPeerFromFrame(remoteAddr, verified.Hello)
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_after_learn")
 
-	s.registerHelloRoute(id, verified.Hello)
+	helloSub := s.registerHelloRoute(id, verified.Hello)
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_after_register_route")
+
+	// subscribe_inbox deprecation (v20): the node-route subscriber installed by
+	// registerHelloRoute already makes us push this peer's inbox to it, so the
+	// only thing the explicit subscribe_inbox round-trip still did — replay the
+	// stored backlog — is moved to auth instead. Gated on the peer being v20+:
+	// older peers still SEND subscribe_inbox (its handler replays the backlog
+	// for them), and replaying here too would just duplicate-push frames the
+	// peer already dedups. Non-node / client-role subscribers get nil here and
+	// keep using subscribe_inbox unchanged.
+	//
+	// We do NOT spawn the replay here: it is returned to the caller, which runs
+	// it strictly AFTER the auth_ok reply is enqueued, so backlog frames cannot
+	// race ahead of auth_ok on the writer (see the function doc).
+	var backlogSub *subscriber
+	if helloSub != nil && verified.Hello.Version >= subscribeInboxAutoAtAuthVersion {
+		backlogSub = helloSub
+	}
 
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
@@ -3750,7 +3795,7 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	}
 
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_end")
-	return reply, true
+	return reply, true, backlogSub
 }
 
 // authenticatedAddressForConn returns the verified hello frame for a
@@ -4744,6 +4789,15 @@ func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol
 	}
 }
 
+// subscribeInboxAutoAtAuthVersion is the protocol version from which a
+// responder auto-registers the peer's inbox subscription and replays its
+// backlog at auth time (handleAuthSession), making the explicit
+// subscribe_inbox/subscribed round-trip redundant. A v20+ initiator skips
+// subscribe_inbox when the peer advertises >= this version and still sends it
+// to older peers. The command stays wired until MinimumProtocolVersion reaches
+// this value. See config.ProtocolVersion (v20) for the rollout note.
+const subscribeInboxAutoAtAuthVersion = 20
+
 // subscribeInboxFrame registers a live subscriber for the recipient carried
 // by the frame and returns the acknowledgement plus the created subscriber
 // so the caller can push the backlog. The remote address string used as a
@@ -4800,18 +4854,24 @@ func (s *Service) subscribeInboxFrame(connID domain.ConnID, frame protocol.Frame
 // ConnID is not registered, in which case the route would be unanchored
 // and the function silently no-ops — same semantic as the previous
 // nil-NetCore guard.
-func (s *Service) registerHelloRoute(connID domain.ConnID, frame protocol.Frame) {
+//
+// Returns the installed (or pre-existing) node-route subscriber so the caller
+// (handleAuthSession) can replay the inbox backlog to it at auth time — this is
+// what makes the explicit subscribe_inbox round-trip redundant from v20 on.
+// Returns nil when no route is installed (non-node client, empty address, or
+// unregistered conn).
+func (s *Service) registerHelloRoute(connID domain.ConnID, frame protocol.Frame) *subscriber {
 	if strings.TrimSpace(frame.Client) != "node" {
-		return
+		return nil
 	}
 
 	recipient := strings.TrimSpace(frame.Address)
 	if recipient == "" {
-		return
+		return nil
 	}
 	addr := s.Network().RemoteAddr(connID)
 	if addr == "" {
-		return
+		return nil
 	}
 	subID := "node-route:" + addr
 
@@ -4833,15 +4893,17 @@ func (s *Service) registerHelloRoute(connID domain.ConnID, frame protocol.Frame)
 
 	existing, exists := s.subs[recipient][subID]
 	if exists && existing.connID == connID && connID != 0 {
-		return
+		return existing
 	}
 
-	s.subs[recipient][subID] = &subscriber{
+	sub := &subscriber{
 		id:        subID,
 		recipient: recipient,
 		connID:    connID,
 	}
+	s.subs[recipient][subID] = sub
 	log.Debug().Str("recipient", recipient).Str("subscriber", subID).Int("active", len(s.subs[recipient])).Msg("route_via_hello")
+	return sub
 }
 
 // removeSubscriberConnIDLocked removes every subscriber under the given

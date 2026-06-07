@@ -8829,12 +8829,12 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 		t.Fatalf("expected auth_ok (2nd), got %s", f.Type)
 	}
 
-	writeJSONFrame(t, recipConn2, protocol.Frame{
-		Type: "subscribe_inbox", Topic: "dm", Recipient: recipientAddr, Subscriber: "recip-sub-2",
-	})
-	if f := readJSONTestFrame(t, recipReader2); f.Type != "subscribed" {
-		t.Fatalf("expected subscribed (2nd), got %s", f.Type)
-	}
+	// v20: the responder auto-registers this node's inbox and replays the
+	// backlog at auth (handleAuthSession), so a v20 peer no longer sends
+	// subscribe_inbox — the backlog push_message arrives right after auth_ok.
+	// We therefore do NOT expect a subscribed frame here; we just drain frames
+	// below and look for the backlog message (which may now precede anything
+	// else on the wire). See subscribeInboxAutoAtAuthVersion.
 
 	// Read all frames — expect the backlog message to arrive.
 	_ = recipConn2.SetDeadline(time.Now().Add(3 * time.Second))
