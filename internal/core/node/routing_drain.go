@@ -129,7 +129,16 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_held").Int("identities", len(identities)).Msg("delivery_mu_writer")
 	var extracted []pendingMatch
-	extractMeta := make(map[domain.PeerAddress]*addrExtractMeta)
+	// Lazily allocated on the FIRST matching address only. drainPendingForIdentities
+	// fires on every route/announce churn event and — per the pre-scan comment
+	// below — the overwhelming majority of triggers match NOTHING, in which case
+	// the whole extract phase is alloc-free (the scan only reads frame fields) and
+	// the function returns at the len(extracted)==0 guard before extractMeta is
+	// ever read. Allocating the map unconditionally here was a per-call heap
+	// allocation on that dominant no-match path (multi-GB alloc_space churn under
+	// sustained churn). Reading/ranging a nil map in the return phase is safe, and
+	// that phase only runs when len(extracted) > 0, which implies a match set it.
+	var extractMeta map[domain.PeerAddress]*addrExtractMeta
 	for addr, frames := range s.pending {
 		// Cheap pre-scan: does this address hold ANY frame addressed to
 		// one of the drain identities? Drain is triggered on routing /
@@ -163,6 +172,9 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 		// At least one match — compact survivors into a fresh slice.
 		// This allocation happens only for addresses that actually have
 		// work this cycle, not for the whole queue.
+		if extractMeta == nil {
+			extractMeta = make(map[domain.PeerAddress]*addrExtractMeta)
+		}
 		kept := make([]pendingFrame, 0, len(frames))
 		meta := &addrExtractMeta{origLen: len(frames)}
 		for i, item := range frames {
