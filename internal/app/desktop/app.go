@@ -92,23 +92,14 @@ func Run() error {
 		EventBus:  eventBus,
 		Client:    client,
 		OnChanged: statusNotifier.Signal,
-		// Resource-only tick (memory + uptime, once per second) takes the
-		// lightweight path: patch just ResourceUsage on the cached snapshot
-		// instead of deep-copying the whole NodeStatus. Cheap and bounded
-		// (1/sec), so it runs inline on the sampler goroutine rather than
-		// through the coalescer.
-		OnResourceChanged: func() {
+		// Single-domain mutations (resource sample, traffic batch, route /
+		// identity / aggregate change) take the lightweight path: patch just
+		// the changed field on the cached snapshot instead of deep-copying
+		// the whole NodeStatus. Cheap and bounded, so it runs inline on the
+		// emitting goroutine rather than through the coalescer.
+		OnPartialChanged: func(d service.NodeStatusDomain) {
 			if router != nil {
-				router.NotifyResourceUsageChanged()
-			}
-		},
-		// Traffic-only batch (per-peer byte counters, ~every 2s) takes the
-		// lightweight path: patch just the PeerHealth slice. Closes the
-		// indirect loop where the resource sampler's loopback RPC traffic
-		// re-triggered a full NodeStatus deep-copy via TopicPeerTrafficUpdated.
-		OnTrafficChanged: func() {
-			if router != nil {
-				router.NotifyPeerTrafficChanged()
+				router.NotifyStatusDomainChanged(d)
 			}
 		},
 	})

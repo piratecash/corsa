@@ -109,18 +109,11 @@ func New(cfg Config) (*Runtime, error) {
 				router.NotifyStatusChanged()
 			}
 		},
-		// Resource-only tick takes the lightweight path (patch just
-		// ResourceUsage) instead of a full NodeStatus deep copy each second.
-		OnResourceChanged: func() {
+		// Single-domain mutations take the lightweight path (patch just the
+		// changed field) instead of a full NodeStatus deep copy.
+		OnPartialChanged: func(d service.NodeStatusDomain) {
 			if router != nil {
-				router.NotifyResourceUsageChanged()
-			}
-		},
-		// Traffic-only batch takes the lightweight path (patch just the
-		// PeerHealth slice) instead of a full NodeStatus deep copy.
-		OnTrafficChanged: func() {
-			if router != nil {
-				router.NotifyPeerTrafficChanged()
+				router.NotifyStatusDomainChanged(d)
 			}
 		},
 	})

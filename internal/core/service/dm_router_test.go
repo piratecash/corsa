@@ -4722,6 +4722,39 @@ func (p *testStatusProvider) PeerHealthSnapshot() []PeerHealth {
 	return append([]PeerHealth(nil), p.Status.PeerHealth...)
 }
 
+func (p *testStatusProvider) ReachableIDsSnapshot() map[domain.PeerIdentity]bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Status.ReachableIDs == nil {
+		return nil
+	}
+	clone := make(map[domain.PeerIdentity]bool, len(p.Status.ReachableIDs))
+	for k, v := range p.Status.ReachableIDs {
+		clone[k] = v
+	}
+	return clone
+}
+
+func (p *testStatusProvider) KnownIDsSnapshot() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Status.KnownIDs == nil {
+		return nil
+	}
+	return append([]string(nil), p.Status.KnownIDs...)
+}
+
+func (p *testStatusProvider) AggregateStatusSnapshot() (*AggregateStatus, time.Time) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var clone *AggregateStatus
+	if p.Status.AggregateStatus != nil {
+		c := *p.Status.AggregateStatus
+		clone = &c
+	}
+	return clone, p.Status.CheckedAt
+}
+
 func (p *testStatusProvider) Contacts() map[string]Contact {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

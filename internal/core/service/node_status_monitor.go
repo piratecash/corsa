@@ -32,6 +32,21 @@ type NodeStatusProvider interface {
 	// copy KnownIDs / ReachableIDs / contacts / messages to refresh them.
 	PeerHealthSnapshot() []PeerHealth
 
+	// ReachableIDsSnapshot returns an independent copy of just the
+	// ReachableIDs map. Cheap counterpart to NodeStatus() for route-table
+	// changes, which only rebuild reachability.
+	ReachableIDsSnapshot() map[domain.PeerIdentity]bool
+
+	// KnownIDsSnapshot returns an independent copy of just the KnownIDs
+	// slice. Cheap counterpart to NodeStatus() for identity-added events.
+	KnownIDsSnapshot() []string
+
+	// AggregateStatusSnapshot returns an independent clone of the
+	// AggregateStatus pointer plus the CheckedAt timestamp (the two fields
+	// the aggregate-status / version-policy events own). Cheap counterpart
+	// to NodeStatus() for those events.
+	AggregateStatusSnapshot() (*AggregateStatus, time.Time)
+
 	// Contacts returns a shallow copy of the current contact map.
 	Contacts() map[string]Contact
 
@@ -43,6 +58,28 @@ type NodeStatusProvider interface {
 	// starts from a clean baseline. Called on identity reset.
 	Reset()
 }
+
+// NodeStatusDomain identifies which slice of NodeStatus a lightweight
+// notify touched. The monitor passes it to OnPartialChanged so the
+// subscriber (DMRouter) can patch just that field on its cached snapshot
+// instead of deep-copying the whole NodeStatus. Events whose handler
+// mutates several unrelated fields (or fields without a dedicated patch)
+// keep using the full OnChanged path.
+type NodeStatusDomain int
+
+const (
+	// NodeStatusDomainResourceUsage — process memory + uptime (1s sampler).
+	NodeStatusDomainResourceUsage NodeStatusDomain = iota
+	// NodeStatusDomainPeerHealth — per-peer rows (periodic traffic batch).
+	NodeStatusDomainPeerHealth
+	// NodeStatusDomainReachableIDs — routing reachability (route-table change).
+	NodeStatusDomainReachableIDs
+	// NodeStatusDomainKnownIDs — discovered identity list (identity added).
+	NodeStatusDomainKnownIDs
+	// NodeStatusDomainAggregate — AggregateStatus + CheckedAt (aggregate
+	// status / version policy).
+	NodeStatusDomainAggregate
+)
 
 // defaultCaptureRetention is the default TTL for stopped CaptureSessions —
 // long enough that the user notices a "stop with error" toast before the
@@ -57,19 +94,13 @@ type NodeStatusMonitorOpts struct {
 	EventBus  *ebus.Bus
 	Client    *DesktopClient
 	OnChanged func() // called after every status mutation (must not block)
-	// OnResourceChanged is called after a ResourceUsage-only sample (the
-	// once-per-second memory + uptime tick). Optional: when nil the
-	// monitor falls back to OnChanged. Wiring this lets the subscriber
-	// patch just ResourceUsage instead of deep-copying the whole
-	// NodeStatus every second (see DMRouter.NotifyResourceUsageChanged).
-	OnResourceChanged func()
-	// OnTrafficChanged is called after a traffic-batch-only update (per-peer
-	// byte counters, ~every 2s). Optional: when nil the monitor falls back
-	// to OnChanged. Wiring this lets the subscriber patch just the
-	// PeerHealth slice instead of deep-copying the whole NodeStatus (see
-	// DMRouter.NotifyPeerTrafficChanged). Without it the resource sampler's
-	// own loopback RPC traffic re-triggers the full deep-copy indirectly.
-	OnTrafficChanged func()
+	// OnPartialChanged is called after a single-domain mutation (resource
+	// sample, traffic batch, route-table/identity/aggregate change) with the
+	// domain that changed. Optional: when nil the monitor falls back to
+	// OnChanged. Wiring it lets the subscriber patch just that field instead
+	// of deep-copying the whole NodeStatus — the dominant allocator under a
+	// status-event storm. Must not block (see DMRouter.NotifyStatusDomainChanged).
+	OnPartialChanged func(NodeStatusDomain)
 	Clock            func() time.Time
 	CaptureRetention time.Duration
 }
@@ -90,11 +121,10 @@ type NodeStatusMonitorOpts struct {
 //   - ProbeNode merge logic (mergeNodeStatusLocked, mergePeerHealth,
 //     mergeAggregateStatus)
 type NodeStatusMonitor struct {
-	eventBus          *ebus.Bus
-	client            *DesktopClient
-	onChanged         func()
-	onResourceChanged func()
-	onTrafficChanged  func()
+	eventBus         *ebus.Bus
+	client           *DesktopClient
+	onChanged        func()
+	onPartialChanged func(NodeStatusDomain)
 
 	mu     sync.RWMutex
 	status NodeStatus
@@ -139,13 +169,12 @@ func NewNodeStatusMonitor(opts NodeStatusMonitorOpts) *NodeStatusMonitor {
 		retention = defaultCaptureRetention
 	}
 	return &NodeStatusMonitor{
-		eventBus:          opts.EventBus,
-		client:            opts.Client,
-		onChanged:         opts.OnChanged,
-		onResourceChanged: opts.OnResourceChanged,
-		onTrafficChanged:  opts.OnTrafficChanged,
-		clock:             clock,
-		captureRetention:  retention,
+		eventBus:         opts.EventBus,
+		client:           opts.Client,
+		onChanged:        opts.OnChanged,
+		onPartialChanged: opts.OnPartialChanged,
+		clock:            clock,
+		captureRetention: retention,
 	}
 }
 
@@ -189,20 +218,20 @@ func (m *NodeStatusMonitor) RunResourceSampler(ctx context.Context) {
 			m.mu.Lock()
 			m.status.ResourceUsage = usage
 			m.mu.Unlock()
-			m.notifyResourceChanged()
+			m.notifyPartial(NodeStatusDomainResourceUsage)
 		}
 	}
 }
 
-// notifyResourceChanged fires the dedicated resource-only subscriber when
-// one is wired, otherwise falls back to the generic onChanged. The
-// dedicated callback path lets subscribers patch just ResourceUsage
-// (memory + uptime) instead of deep-copying the entire NodeStatus on every
-// one-second tick — profiling flagged deepCopyNodeStatus as the dominant
-// allocator precisely because this sampler drove it once per second.
-func (m *NodeStatusMonitor) notifyResourceChanged() {
-	if m.onResourceChanged != nil {
-		m.onResourceChanged()
+// notifyPartial fires the single-domain subscriber when one is wired,
+// otherwise falls back to the generic onChanged (full rebuild). The
+// dedicated path lets subscribers patch just the changed field instead of
+// deep-copying the entire NodeStatus — profiling flagged deepCopyNodeStatus
+// as the dominant allocator under a status-event storm (resource sampler,
+// traffic batches, route/identity/aggregate churn on a large mesh).
+func (m *NodeStatusMonitor) notifyPartial(d NodeStatusDomain) {
+	if m.onPartialChanged != nil {
+		m.onPartialChanged(d)
 		return
 	}
 	if m.onChanged != nil {
@@ -248,6 +277,55 @@ func (m *NodeStatusMonitor) PeerHealthSnapshot() []PeerHealth {
 		return nil
 	}
 	return append([]PeerHealth(nil), m.status.PeerHealth...)
+}
+
+// ReachableIDsSnapshot returns an independent copy of just the ReachableIDs
+// map. Cheap counterpart to NodeStatus() for route-table changes: the
+// subscriber patches this single map instead of deep-copying PeerHealth /
+// KnownIDs / contacts / messages the route change never touched. The values
+// are bools, so the per-entry copy is fully independent of monitor-owned
+// memory, matching the deepCopyNodeStatus contract.
+func (m *NodeStatusMonitor) ReachableIDsSnapshot() map[domain.PeerIdentity]bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.status.ReachableIDs == nil {
+		return nil
+	}
+	clone := make(map[domain.PeerIdentity]bool, len(m.status.ReachableIDs))
+	for k, v := range m.status.ReachableIDs {
+		clone[k] = v
+	}
+	return clone
+}
+
+// KnownIDsSnapshot returns an independent copy of just the KnownIDs slice.
+// Cheap counterpart to NodeStatus() for identity-added events: the
+// subscriber patches this single slice instead of deep-copying PeerHealth /
+// ReachableIDs / contacts / messages. Elements are strings (immutable), so
+// the append-copy is fully independent of monitor-owned memory.
+func (m *NodeStatusMonitor) KnownIDsSnapshot() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.status.KnownIDs == nil {
+		return nil
+	}
+	return append([]string(nil), m.status.KnownIDs...)
+}
+
+// AggregateStatusSnapshot returns an independent clone of the AggregateStatus
+// pointer plus the CheckedAt timestamp — the two fields the aggregate-status
+// and version-policy events own. Cheap counterpart to NodeStatus() for those
+// events. AggregateStatus is a pure value struct, so cloning the pointee
+// keeps the result independent of monitor-owned memory.
+func (m *NodeStatusMonitor) AggregateStatusSnapshot() (*AggregateStatus, time.Time) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var clone *AggregateStatus
+	if m.status.AggregateStatus != nil {
+		c := *m.status.AggregateStatus
+		clone = &c
+	}
+	return clone, m.status.CheckedAt
 }
 
 // Contacts returns a copy of the contact map.
@@ -332,7 +410,7 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		}
 		m.mu.Unlock()
 
-		m.onChanged()
+		m.notifyPartial(NodeStatusDomainAggregate)
 	})
 
 	// Version policy recomputed — update the cached version-update signal.
@@ -349,7 +427,7 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		m.ebusVersionPolicySeeded = true
 		m.mu.Unlock()
 
-		m.onChanged()
+		m.notifyPartial(NodeStatusDomainAggregate)
 	})
 
 	// Routing table changed — rebuild ReachableIDs from the authoritative
@@ -362,7 +440,7 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		m.status.ReachableIDs = fresh
 		m.mu.Unlock()
 
-		m.onChanged()
+		m.notifyPartial(NodeStatusDomainReachableIDs)
 	})
 
 	// Individual peer health changed — apply state delta directly.
@@ -421,12 +499,17 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 				break
 			}
 		}
-		if !found {
+		changed := !found
+		if changed {
 			m.status.KnownIDs = append(m.status.KnownIDs, address)
 		}
 		m.mu.Unlock()
 
-		m.onChanged()
+		// Only notify when the identity was actually new — a duplicate add
+		// must not fire a redundant snapshot rebuild.
+		if changed {
+			m.notifyPartial(NodeStatusDomainKnownIDs)
+		}
 	})
 
 	// Capture session started — flip Recording* on the matching row so the
@@ -885,25 +968,12 @@ func (m *NodeStatusMonitor) applyTrafficBatch(batch ebus.PeerTrafficBatch) {
 	m.mu.Unlock()
 
 	if updated {
-		m.notifyTrafficChanged()
-	}
-}
-
-// notifyTrafficChanged fires the dedicated traffic-only subscriber when one
-// is wired, otherwise falls back to the generic onChanged. A traffic batch
-// mutates only per-peer byte counters, so the dedicated path lets the
-// subscriber patch just the PeerHealth slice instead of deep-copying the
-// whole NodeStatus. This matters because the resource sampler's own
-// loopback RPC generates traffic deltas — without this path "measure
-// memory" indirectly re-triggers the full deepCopyNodeStatus every couple
-// of seconds via TopicPeerTrafficUpdated.
-func (m *NodeStatusMonitor) notifyTrafficChanged() {
-	if m.onTrafficChanged != nil {
-		m.onTrafficChanged()
-		return
-	}
-	if m.onChanged != nil {
-		m.onChanged()
+		// Traffic batch touched only per-peer byte counters → PeerHealth
+		// domain. This matters because the resource sampler's own loopback
+		// RPC generates traffic deltas: without the lightweight path "measure
+		// memory" indirectly re-triggers the full deepCopyNodeStatus every
+		// couple of seconds via TopicPeerTrafficUpdated.
+		m.notifyPartial(NodeStatusDomainPeerHealth)
 	}
 }
 
