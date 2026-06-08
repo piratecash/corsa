@@ -26,6 +26,12 @@ type NodeStatusProvider interface {
 	// collection merely to refresh two scalars.
 	ResourceUsageSnapshot() *ResourceUsage
 
+	// PeerHealthSnapshot returns an independent copy of just the PeerHealth
+	// slice. Cheap counterpart to NodeStatus() for the periodic traffic
+	// batch, which only mutates per-peer byte counters and must not deep-
+	// copy KnownIDs / ReachableIDs / contacts / messages to refresh them.
+	PeerHealthSnapshot() []PeerHealth
+
 	// Contacts returns a shallow copy of the current contact map.
 	Contacts() map[string]Contact
 
@@ -57,8 +63,15 @@ type NodeStatusMonitorOpts struct {
 	// patch just ResourceUsage instead of deep-copying the whole
 	// NodeStatus every second (see DMRouter.NotifyResourceUsageChanged).
 	OnResourceChanged func()
-	Clock             func() time.Time
-	CaptureRetention  time.Duration
+	// OnTrafficChanged is called after a traffic-batch-only update (per-peer
+	// byte counters, ~every 2s). Optional: when nil the monitor falls back
+	// to OnChanged. Wiring this lets the subscriber patch just the
+	// PeerHealth slice instead of deep-copying the whole NodeStatus (see
+	// DMRouter.NotifyPeerTrafficChanged). Without it the resource sampler's
+	// own loopback RPC traffic re-triggers the full deep-copy indirectly.
+	OnTrafficChanged func()
+	Clock            func() time.Time
+	CaptureRetention time.Duration
 }
 
 // NodeStatusMonitor aggregates network-layer state from ebus events and
@@ -81,6 +94,7 @@ type NodeStatusMonitor struct {
 	client            *DesktopClient
 	onChanged         func()
 	onResourceChanged func()
+	onTrafficChanged  func()
 
 	mu     sync.RWMutex
 	status NodeStatus
@@ -129,6 +143,7 @@ func NewNodeStatusMonitor(opts NodeStatusMonitorOpts) *NodeStatusMonitor {
 		client:            opts.Client,
 		onChanged:         opts.OnChanged,
 		onResourceChanged: opts.OnResourceChanged,
+		onTrafficChanged:  opts.OnTrafficChanged,
 		clock:             clock,
 		captureRetention:  retention,
 	}
@@ -217,6 +232,22 @@ func (m *NodeStatusMonitor) ResourceUsageSnapshot() *ResourceUsage {
 	}
 	clone := *m.status.ResourceUsage
 	return &clone
+}
+
+// PeerHealthSnapshot returns an independent copy of just the PeerHealth
+// slice. Cheap counterpart to NodeStatus() for the periodic traffic batch:
+// the subscriber patches this single slice on the cached snapshot instead
+// of deep-copying KnownIDs / ReachableIDs / contacts / messages that the
+// traffic update never touched. PeerHealth elements are value types
+// (scalars + domain.OptionalTime), so the append-copy is fully independent
+// of monitor-owned memory, matching the deepCopyNodeStatus contract.
+func (m *NodeStatusMonitor) PeerHealthSnapshot() []PeerHealth {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.status.PeerHealth == nil {
+		return nil
+	}
+	return append([]PeerHealth(nil), m.status.PeerHealth...)
 }
 
 // Contacts returns a copy of the contact map.
@@ -854,6 +885,24 @@ func (m *NodeStatusMonitor) applyTrafficBatch(batch ebus.PeerTrafficBatch) {
 	m.mu.Unlock()
 
 	if updated {
+		m.notifyTrafficChanged()
+	}
+}
+
+// notifyTrafficChanged fires the dedicated traffic-only subscriber when one
+// is wired, otherwise falls back to the generic onChanged. A traffic batch
+// mutates only per-peer byte counters, so the dedicated path lets the
+// subscriber patch just the PeerHealth slice instead of deep-copying the
+// whole NodeStatus. This matters because the resource sampler's own
+// loopback RPC generates traffic deltas — without this path "measure
+// memory" indirectly re-triggers the full deepCopyNodeStatus every couple
+// of seconds via TopicPeerTrafficUpdated.
+func (m *NodeStatusMonitor) notifyTrafficChanged() {
+	if m.onTrafficChanged != nil {
+		m.onTrafficChanged()
+		return
+	}
+	if m.onChanged != nil {
 		m.onChanged()
 	}
 }

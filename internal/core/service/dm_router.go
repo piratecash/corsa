@@ -2076,18 +2076,59 @@ func (r *DMRouter) notify(eventType UIEventType) {
 // pointer (rather than mutating it) cannot alias monitor-owned memory: the
 // monitor hands back an independent clone via ResourceUsageSnapshot.
 //
-// snapGen + the in-lock snapCache.Store keep this ordered against the full
-// NotifyStatusChanged path; both serialise on r.mu, so a status rebuild that
-// lands between two resource ticks is never clobbered by a stale snapshot.
+// The monitor snapshot is taken INSIDE r.mu so the read + patch + store are
+// one atomic update ordered against the full NotifyStatusChanged path. Both
+// take r.mu first and the monitor lock second (NodeStatus / *Snapshot), so a
+// fresher cachedNS published by a full rebuild between the snapshot and the
+// patch can never be clobbered by a stale resource sample. The lock order
+// (r.mu outer, monitor lock inner) matches the full path, so no inversion —
+// the monitor never holds its lock while calling back into the router.
 func (r *DMRouter) NotifyResourceUsageChanged() {
 	if r.statusMonitor == nil {
 		return
 	}
-	usage := r.statusMonitor.ResourceUsageSnapshot()
 
 	r.mu.Lock()
 	gen := r.snapGen.Add(1)
-	r.cachedNS.ResourceUsage = usage
+	r.cachedNS.ResourceUsage = r.statusMonitor.ResourceUsageSnapshot()
+	snap := r.composeSnapshotLocked(gen)
+	r.snapCache.Store(&routerSnapshotCache{gen: gen, snap: snap})
+	r.mu.Unlock()
+
+	r.emitUIEvent(UIEventStatusUpdated)
+}
+
+// NotifyPeerTrafficChanged is the lightweight analogue of
+// NotifyStatusChanged for the periodic traffic batch (~every 2s). Only
+// per-peer byte counters change, so this patches just the PeerHealth slice
+// on the cached NodeStatus half and recomposes — avoiding deepCopyNodeStatus
+// re-cloning KnownIDs, ReachableIDs, contacts, messages and receipts that
+// the traffic update never touched. The slice copy comes pre-cloned from
+// the monitor (PeerHealthSnapshot), so replacing the slice header cannot
+// alias monitor-owned memory or mutate any already-composed snapshot's
+// backing array (copy-on-write).
+//
+// Whenever the peer SET changes (peer-health / slot deltas) the monitor
+// fires the full onChanged path, so during a traffic-only tick the patched
+// slice has the same addresses as the rest of cachedNS — no cross-field skew.
+//
+// The PeerHealthSnapshot is taken INSIDE r.mu so the read + patch + store are
+// one atomic update ordered against the full NotifyStatusChanged path. If it
+// were read before the lock, a full rebuild could publish a fresher cachedNS
+// in the gap and this fast path would then overwrite PeerHealth with the
+// stale slice — rolling back not just byte counters but State/Connected/conn
+// rows, since the snapshot copies the whole slice. Taking r.mu first (then
+// the monitor lock, via PeerHealthSnapshot) matches the full path's lock
+// order, so there is no inversion: the monitor never holds its lock while
+// calling back into the router.
+func (r *DMRouter) NotifyPeerTrafficChanged() {
+	if r.statusMonitor == nil {
+		return
+	}
+
+	r.mu.Lock()
+	gen := r.snapGen.Add(1)
+	r.cachedNS.PeerHealth = r.statusMonitor.PeerHealthSnapshot()
 	snap := r.composeSnapshotLocked(gen)
 	r.snapCache.Store(&routerSnapshotCache{gen: gen, snap: snap})
 	r.mu.Unlock()

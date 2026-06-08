@@ -4713,6 +4713,15 @@ func (p *testStatusProvider) ResourceUsageSnapshot() *ResourceUsage {
 	return &clone
 }
 
+func (p *testStatusProvider) PeerHealthSnapshot() []PeerHealth {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Status.PeerHealth == nil {
+		return nil
+	}
+	return append([]PeerHealth(nil), p.Status.PeerHealth...)
+}
+
 func (p *testStatusProvider) Contacts() map[string]Contact {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

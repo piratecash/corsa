@@ -116,6 +116,13 @@ func New(cfg Config) (*Runtime, error) {
 				router.NotifyResourceUsageChanged()
 			}
 		},
+		// Traffic-only batch takes the lightweight path (patch just the
+		// PeerHealth slice) instead of a full NodeStatus deep copy.
+		OnTrafficChanged: func() {
+			if router != nil {
+				router.NotifyPeerTrafficChanged()
+			}
+		},
 	})
 	statusMonitor.Start()
 

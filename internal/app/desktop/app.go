@@ -102,6 +102,15 @@ func Run() error {
 				router.NotifyResourceUsageChanged()
 			}
 		},
+		// Traffic-only batch (per-peer byte counters, ~every 2s) takes the
+		// lightweight path: patch just the PeerHealth slice. Closes the
+		// indirect loop where the resource sampler's loopback RPC traffic
+		// re-triggered a full NodeStatus deep-copy via TopicPeerTrafficUpdated.
+		OnTrafficChanged: func() {
+			if router != nil {
+				router.NotifyPeerTrafficChanged()
+			}
+		},
 	})
 	statusMonitor.Start()
 
