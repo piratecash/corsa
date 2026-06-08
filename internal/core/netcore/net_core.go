@@ -96,6 +96,16 @@ type NetCore struct {
 	rawConn   net.Conn
 	closeOnce sync.Once
 
+	// remoteAddrStr is the cached string form of rawConn.RemoteAddr(),
+	// computed once at construction. The remote address of an established
+	// connection never changes, but net.(*TCPAddr).String() re-runs
+	// JoinHostPort + IP.String on every call — RemoteAddr() sits on the
+	// snapshotEntryLocked / sendGossipFrameToPeer hot path and showed up as
+	// ~21M allocations (net.(*TCPAddr).String) in alloc_objects. Caching the
+	// string here makes RemoteAddr() allocation-free. Immutable after
+	// construction, so no lock is required.
+	remoteAddrStr string
+
 	// Immutable after construction.
 	connIDNum uint64
 
@@ -168,6 +178,15 @@ type Options struct {
 func New(id ConnID, rawConn net.Conn, dir Direction, opts Options) *NetCore {
 	metered, _ := rawConn.(*MeteredConn)
 
+	// Resolve the remote address string once. Guard against a nil net.Addr
+	// (some conn implementations return nil before the peer is known) so the
+	// cached form degrades to "" instead of panicking — the previous lazy
+	// pc.rawConn.RemoteAddr().String() would have panicked in that case.
+	var remoteAddrStr string
+	if addr := rawConn.RemoteAddr(); addr != nil {
+		remoteAddrStr = addr.String()
+	}
+
 	pc := &NetCore{
 		id:              id,
 		direction:       dir,
@@ -180,6 +199,7 @@ func New(id ConnID, rawConn net.Conn, dir Direction, opts Options) *NetCore {
 		sendCh:          make(chan sendItem, sendChBuffer),
 		writerDone:      make(chan struct{}),
 		rawConn:         rawConn,
+		remoteAddrStr:   remoteAddrStr,
 		metered:         metered,
 		connIDNum:       uint64(id),
 		writeDeadline:   writeDeadlineFor(dir),
@@ -703,8 +723,11 @@ func cloneNetworks(src map[domain.NetGroup]struct{}) map[domain.NetGroup]struct{
 }
 
 // RemoteAddr returns the remote address string (for logging only).
+// The value is cached at construction (remoteAddrStr) because the remote
+// address of an established connection is immutable and net.Addr.String()
+// allocates on every call. No lock required — the field is write-once.
 func (pc *NetCore) RemoteAddr() string {
-	return pc.rawConn.RemoteAddr().String()
+	return pc.remoteAddrStr
 }
 
 // Dir returns the connection direction.

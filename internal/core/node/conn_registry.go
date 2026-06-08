@@ -62,11 +62,17 @@ func snapshotEntryLocked(id domain.ConnID, entry *connEntry) (connInfo, bool) {
 		return connInfo{}, false
 	}
 	core := entry.core
+	// core.Capabilities() already returns a fresh, caller-owned copy of the
+	// capability slice (its contract guarantees the result is safe to retain),
+	// so the previous second make+copy into capsCopy was a redundant per-entry
+	// allocation. snapshotEntryLocked is the dominant cloneCaps caller
+	// (forEachInboundConnLocked / sendGossipFrameToPeer hot path), so the
+	// duplicate copy doubled this allocation source for no benefit. Reuse the
+	// owned slice directly; normalise an empty (possibly non-nil) slice back to
+	// nil to preserve the previous nil-for-empty connInfo.capabilities semantics.
 	caps := core.Capabilities()
-	var capsCopy []domain.Capability
-	if len(caps) > 0 {
-		capsCopy = make([]domain.Capability, len(caps))
-		copy(capsCopy, caps)
+	if len(caps) == 0 {
+		caps = nil
 	}
 	return connInfo{
 		id:              id,
@@ -74,7 +80,7 @@ func snapshotEntryLocked(id domain.ConnID, entry *connEntry) (connInfo, bool) {
 		remoteIP:        coreRemoteIP(core),
 		address:         core.Address(),
 		identity:        core.Identity(),
-		capabilities:    capsCopy,
+		capabilities:    caps,
 		dir:             core.Dir(),
 		peerDir:         coreToPeerDirection(core.Dir()),
 		lastActivity:    core.LastActivity(),

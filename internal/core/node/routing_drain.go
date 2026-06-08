@@ -80,6 +80,20 @@ func recipientFromPendingFrame(frame protocol.Frame) string {
 	}
 }
 
+// frameDrainEligible reports whether a pending frame may be taken by the
+// event-driven drain fast path right now. A frame whose NextDrainAt is in the
+// future was stamped by a prior drain attempt that found no usable route; it
+// is skipped here so a churn storm cannot re-extract and re-copy an unroutable
+// frame on every event. The gate only rate-limits this optimization — the
+// per-frame-type backstops still deliver once a route exists: send_message via
+// the relay retry loop (retryRelayDeliveries), fire-and-forget push_message via
+// the reconnect outbound flush (flushPendingPeerFrames) and the inbound pending
+// flush (flushPendingFireAndForget). None of those backstops consult
+// NextDrainAt, so gating the fast path never delays delivery beyond them.
+func frameDrainEligible(item pendingFrame, now time.Time) bool {
+	return !item.NextDrainAt.After(now)
+}
+
 // Called from servePeerSession (direct peer connect, inboxCh is actively
 // read so Lock contention cannot cause overflow) and handleAnnounceRoutes
 // (transit route learned) to minimize delivery latency.
@@ -100,6 +114,10 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 		return
 	default:
 	}
+
+	// Single wall-clock read reused by the drain-eligibility gate (extract
+	// phase) and the TTL/expiry checks (delivery phase) below.
+	now := time.Now().UTC()
 
 	type pendingMatch struct {
 		peerAddr domain.PeerAddress
@@ -160,10 +178,18 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			if recipient == "" {
 				continue
 			}
-			if _, ok := identities[domain.PeerIdentity(recipient)]; ok {
-				hasMatch = true
-				break
+			if _, ok := identities[domain.PeerIdentity(recipient)]; !ok {
+				continue
 			}
+			// A matching recipient still under drain backoff (no route on a
+			// prior attempt) is NOT a reason to pull the whole address into
+			// the allocate-and-compact path — skip it so an address holding
+			// only gated frames stays untouched with zero allocation.
+			if !frameDrainEligible(item, now) {
+				continue
+			}
+			hasMatch = true
+			break
 		}
 		if !hasMatch {
 			continue // address untouched — no allocation, no copy
@@ -180,7 +206,11 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 		for i, item := range frames {
 			recipient := recipientFromPendingFrame(item.Frame)
 			if recipient != "" {
-				if _, ok := identities[domain.PeerIdentity(recipient)]; ok {
+				// Extract only eligible matches; a matching-but-gated frame
+				// falls through to kept so it stays queued (same predicate as
+				// the pre-scan above — the two MUST agree or a gated frame
+				// could be counted as a match yet never extracted).
+				if _, ok := identities[domain.PeerIdentity(recipient)]; ok && frameDrainEligible(item, now) {
 					meta.extractedPos = append(meta.extractedPos, i)
 					extracted = append(extracted, pendingMatch{peerAddr: addr, item: item, origIdx: i})
 					delete(s.pendingKeys, pendingFrameKey(addr, item.Frame))
@@ -225,7 +255,8 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 		status string
 	}
 
-	now := time.Now().UTC()
+	// now was captured once at function entry (shared with the extract-phase
+	// drain-eligibility gate) and is reused here for TTL/expiry checks.
 	var failed []pendingMatch
 	var deferred []deferredOutbound
 
@@ -276,6 +307,17 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			// another drain cycle.
 			if attempted {
 				m.item.Retries++
+			} else {
+				// No usable route. Stamp a short drain backoff on the frame so
+				// the next routing/announce churn event for this recipient does
+				// NOT immediately re-extract and re-copy it (the dominant
+				// alloc_space source). The stamped value travels back into
+				// s.pending via the position-preserving merge below. Delivery
+				// still occurs once a route exists, via the type-appropriate
+				// backstop: send_message through the relay retry loop, push_message
+				// through the reconnect / inbound pending flush. Retry budget is
+				// deliberately untouched.
+				m.item.NextDrainAt = now.Add(drainNoRouteBackoff)
 			}
 			if m.item.Retries >= maxPendingFrameRetries {
 				deferred = append(deferred, deferredOutbound{

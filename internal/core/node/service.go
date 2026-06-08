@@ -761,6 +761,20 @@ type pendingFrame struct {
 	Frame    protocol.Frame
 	QueuedAt time.Time
 	Retries  int
+
+	// NextDrainAt gates the event-driven drain fast path
+	// (drainPendingForIdentities). When a drain delivery attempt finds no
+	// usable route, the frame is stamped with a short backoff so the next
+	// routing/announce churn event for the same recipient does NOT re-extract
+	// and re-copy it immediately. Without this gate a permanently unroutable
+	// frame was re-extracted and re-merged (two full slice copies) on every
+	// churn event — profiling flagged drainPendingForIdentities as the single
+	// largest alloc_space source under sustained churn. The per-frame-type
+	// backstops remain the real delivery path (send_message via the relay retry
+	// loop, push_message via the reconnect / inbound pending flush), so gating
+	// the fast path only rate-limits an optimization, it never drops a frame.
+	// Ephemeral / in-memory only — excluded from queue-state marshaling.
+	NextDrainAt time.Time `json:"-"`
 }
 
 type relayAttempt struct {
@@ -795,6 +809,16 @@ const (
 	pendingFrameTTL        = 5 * time.Minute
 	relayRetryTTL          = 3 * time.Minute
 	maxPendingFrameRetries = 5
+	// drainNoRouteBackoff is how long a pending frame is excluded from the
+	// event-driven drain fast path after a drain attempt found no usable
+	// route. Sized at the relay-retry-loop cadence so the gate never delays
+	// delivery beyond the existing backstops: a gated send_message is still
+	// picked up by retryRelayDeliveries (every ~2s), and a gated push_message
+	// by the reconnect outbound flush (flushPendingPeerFrames) / inbound pending
+	// flush (flushPendingFireAndForget). The gate only stops
+	// drainPendingForIdentities from re-extracting and re-copying the same
+	// unroutable frame on every churn event. See pendingFrame.NextDrainAt.
+	drainNoRouteBackoff    = 2 * time.Second
 	banThreshold           = 1000
 	banIncrementInvalidSig = 100
 	// banIncrementIncompatibleVersion stays below banThreshold on purpose: a
