@@ -403,7 +403,12 @@ type Service struct {
 	// network_stats_snapshot.go / peer_health_snapshot.go /
 	// peers_exchange_snapshot.go for the per-path contract.
 	networkStatsSnap networkStatsSnapPtr
-	peerHealthSnap   peerHealthSnapPtr
+	// networkStatsAccessNanos mirrors peerHealthAccessNanos for the
+	// network_stats snapshot: the Unix-nanos timestamp of the last
+	// fetch_network_stats read, gating the periodic rebuild on recent
+	// reader activity. Startup priming still publishes an initial snapshot.
+	networkStatsAccessNanos atomic.Int64
+	peerHealthSnap          peerHealthSnapPtr
 	// peerHealthAccessNanos is the Unix-nanos timestamp of the last
 	// peerHealthFrames() (fetch_peer_health RPC) call.  Zero until the first
 	// read.  maybeRebuildPeerHealthSnapshot gates the periodic rebuild on it

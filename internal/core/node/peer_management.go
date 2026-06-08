@@ -5064,28 +5064,65 @@ func (s *Service) ListBannedJSON() (json.RawMessage, error) {
 // that matches getActiveConnections (which lists it) and differs from
 // connectedPeerCount (which counts distinct relay-ready identities).
 func isActiveConnectionFrame(f protocol.PeerHealthFrame) bool {
-	if !f.Connected || f.ConnID == 0 {
+	return isActiveConnectionState(f.Connected, f.ConnID, f.State, domain.SlotState(f.SlotState))
+}
+
+func isActiveConnectionState(connected bool, connID uint64, state string, slotState domain.SlotState) bool {
+	if !connected || connID == 0 {
 		return false
 	}
-	if f.State != peerStateHealthy && f.State != peerStateDegraded && f.State != peerStateStalled {
+	if state != peerStateHealthy && state != peerStateDegraded && state != peerStateStalled {
 		return false
 	}
-	slotState := domain.SlotState(f.SlotState)
 	if slotState != "" && slotState != domain.SlotStateActive && slotState != domain.SlotStateInitializing {
 		return false
 	}
 	return true
 }
 
-// activeConnectionCount returns the number of live peer connections —
-// the same set getActiveConnections lists (see isActiveConnectionFrame),
-// counted from the lock-free peerHealthFrames snapshot. Surfaced by
-// getResourceUsage as connection_count.
+// activeConnectionCount returns the number of live peer connections — the same
+// set getActiveConnections lists (see isActiveConnectionFrame), counted from
+// the lock-free peer-health / CM-slots snapshots. Surfaced by getResourceUsage
+// as connection_count.
+//
+// This intentionally does NOT call peerHealthFrames(): getResourceUsage is
+// commonly polled by headless monitoring, and calling peerHealthFrames would
+// record a fetch_peer_health reader access, re-arming the expensive
+// peer-health periodic rebuild even when nobody is actually viewing that
+// diagnostic panel.
 func (s *Service) activeConnectionCount() int {
+	snap := s.loadPeerHealthSnapshot()
+	if snap == nil {
+		return 0
+	}
+	slotsSnap := s.loadCMSlotsSnapshot()
+
 	n := 0
-	for _, f := range s.peerHealthFrames() {
-		if isActiveConnectionFrame(f) {
-			n++
+	for _, rec := range snap.records {
+		h := rec.health
+		slotState := domain.SlotState("")
+		if slotsSnap != nil {
+			if sl, ok := slotsSnap.byAddress[h.Address]; ok {
+				slotState = sl.State
+			}
+		}
+		if rec.sessionConnID != 0 {
+			if isActiveConnectionState(h.Connected, uint64(rec.sessionConnID), h.State, slotState) {
+				n++
+			}
+			continue
+		}
+		for _, cid := range rec.inboundConnIDs {
+			if isActiveConnectionState(h.Connected, cid, h.State, slotState) {
+				n++
+			}
+		}
+	}
+	for _, ilr := range snap.inboundOnly {
+		for _, cid := range ilr.inboundConnIDs {
+			if isActiveConnectionState(true, cid, peerStateHealthy, "") {
+				n++
+			}
 		}
 	}
 	return n

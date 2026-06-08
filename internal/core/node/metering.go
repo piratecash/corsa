@@ -1,6 +1,8 @@
 package node
 
 import (
+	"time"
+
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -142,14 +144,14 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 
 // networkStatsFrame returns the cached network_stats snapshot.
 //
-// The frame is rebuilt in the background by hotReadsRefreshLoop every
-// networkStatsSnapshotInterval under a short s.peerMu.RLock and primed
-// synchronously by primeHotReadSnapshots() from Run() before the listener
-// opens; the RPC path here performs a single atomic load and no locking
-// at all.  This statically decouples fetch_network_stats from every
-// writer holding s.peerMu — previously a burst of writers on s.peerMu.Lock
-// (bootstrapLoop eviction, announce_routes fanout, inbound connect path)
-// starved the RPC's RLock until the command timeout.
+// The frame is rebuilt in the background by hotReadsRefreshLoop while a recent
+// fetch_network_stats reader is active, and primed synchronously by
+// primeHotReadSnapshots() from Run() before the listener opens; the RPC path
+// here performs a single atomic load and no locking at all.  This statically
+// decouples fetch_network_stats from every writer holding s.peerMu —
+// previously a burst of writers on s.peerMu.Lock (bootstrapLoop eviction,
+// announce_routes fanout, inbound connect path) starved the RPC's RLock until
+// the command timeout.
 //
 // If the atomic load returns nil (a unit test that bypasses Run() and
 // does not prime), toFrame() emits an empty-but-valid network_stats
@@ -158,6 +160,7 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 // lock-free contract the snapshot infrastructure enforces.
 func (s *Service) networkStatsFrame() protocol.Frame {
 	log.Trace().Msg("network_stats_frame_begin")
+	s.networkStatsAccessNanos.Store(time.Now().UnixNano())
 	snap := s.loadNetworkStatsSnapshot()
 	frame := snap.toFrame()
 	if snap != nil && frame.NetworkStats != nil {

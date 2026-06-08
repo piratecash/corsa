@@ -37,10 +37,10 @@ func (s *Service) primeHotReadSnapshots() {
 //
 //   - network_stats / peer_health — short s.peerMu.RLock (peer-domain
 //     placeholder during Phase 2 transition); no IP-state callbacks.
-//     peer_health additionally gates on recent-reader activity
-//     (maybeRebuildPeerHealthSnapshot): the periodic rebuild is skipped
-//     entirely while no consumer is polling fetch_peer_health, so a
-//     headless node does not pay for the snapshot at all.
+//     Both snapshots gate the periodic rebuild on recent-reader activity
+//     (maybeRebuildNetworkStatsSnapshot / maybeRebuildPeerHealthSnapshot):
+//     while no consumer is polling the corresponding RPC, a headless node
+//     stops paying for the 2x/s per-peer copies.
 //   - peers_exchange — s.peerMu.RLock for persistedMeta/health, then
 //     peerProvider.Candidates() whose callbacks reach BannedIPsFn
 //     (ipStateMu.RLock) and RemoteBannedFn (s.peerMu.RLock → ipStateMu.RLock
@@ -103,12 +103,13 @@ func (s *Service) primeHotReadSnapshots() {
 func (s *Service) hotReadsRefreshLoop(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(5)
-	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildNetworkStatsSnapshot) }()
-	// peer_health uses the reader-gated variant: the periodic tick rebuilds
-	// only while a consumer is actively polling fetch_peer_health, so a
-	// headless node stops paying for the 2×/s peer-domain snapshot.  Startup
-	// priming and peer-state-change eager rebuilds still call the
-	// unconditional rebuildPeerHealthSnapshot — see maybeRebuildPeerHealthSnapshot.
+	// network_stats and peer_health use reader-gated variants: the periodic
+	// tick rebuilds only while a consumer is actively polling the matching
+	// RPC, so a headless node stops paying for 2x/s peer-domain snapshots.
+	// Startup priming still publishes initial snapshots unconditionally.
+	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.maybeRebuildNetworkStatsSnapshot) }()
+	// peer-state-change eager rebuilds still call the unconditional
+	// rebuildPeerHealthSnapshot — see maybeRebuildPeerHealthSnapshot.
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.maybeRebuildPeerHealthSnapshot) }()
 	// peers_exchange is likewise reader-gated (maybeRebuildPeersExchangeSnapshot):
 	// its rebuild allocates persistedMeta/health maps and calls

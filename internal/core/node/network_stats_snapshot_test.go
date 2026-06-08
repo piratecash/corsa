@@ -203,6 +203,54 @@ func TestNetworkStatsSnapshotRefreshReflectsMutations(t *testing.T) {
 	}
 }
 
+// TestMaybeRebuildNetworkStatsSnapshot_GatesOnRecentReader mirrors the
+// peer-health reader gate for network_stats: a headless node should not keep
+// rebuilding the per-peer traffic snapshot twice a second when nobody is
+// polling fetch_network_stats.
+func TestMaybeRebuildNetworkStatsSnapshot_GatesOnRecentReader(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	addr := domain.PeerAddress("gate-network-peer-1")
+	svc.peerMu.Lock()
+	svc.health[addr] = &peerHealth{
+		Address:       addr,
+		BytesSent:     100,
+		BytesReceived: 200,
+		Connected:     true,
+	}
+	svc.peerMu.Unlock()
+
+	svc.rebuildNetworkStatsSnapshot()
+	base := svc.loadNetworkStatsSnapshot()
+	if base == nil {
+		t.Fatal("expected primed snapshot")
+	}
+
+	svc.maybeRebuildNetworkStatsSnapshot()
+	if svc.loadNetworkStatsSnapshot() != base {
+		t.Fatal("gated rebuild ran despite no network_stats reader")
+	}
+
+	svc.networkStatsAccessNanos.Store(time.Now().Add(-2 * networkStatsRebuildIdleAfter).UnixNano())
+	svc.maybeRebuildNetworkStatsSnapshot()
+	if svc.loadNetworkStatsSnapshot() != base {
+		t.Fatal("gated rebuild ran for a stale network_stats reader")
+	}
+
+	svc.networkStatsAccessNanos.Store(time.Now().UnixNano())
+	svc.maybeRebuildNetworkStatsSnapshot()
+	if svc.loadNetworkStatsSnapshot() == base {
+		t.Fatal("gated rebuild skipped despite a recent network_stats reader")
+	}
+
+	svc.networkStatsAccessNanos.Store(0)
+	_ = svc.networkStatsFrame()
+	if svc.networkStatsAccessNanos.Load() == 0 {
+		t.Fatal("networkStatsFrame must record reader access")
+	}
+}
+
 // TestNetworkStatsSnapshotConcurrentLoadDoesNotRace runs the RPC path and
 // the refresher concurrently for a short burst.  Under the atomic.Pointer
 // contract this must not race; the -race detector will flag any accidental

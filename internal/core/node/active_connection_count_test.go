@@ -61,3 +61,34 @@ func TestActiveConnectionCount_BareFixtureZero(t *testing.T) {
 		t.Fatalf("activeConnectionCount on bare fixture = %d, want 0", got)
 	}
 }
+
+func TestActiveConnectionCountDoesNotRecordPeerHealthAccess(t *testing.T) {
+	t.Parallel()
+
+	addr := domain.PeerAddress("active-count-peer")
+	svc := &Service{}
+	svc.peerHealthSnap.Store(&peerHealthSnapshot{
+		records: []peerHealthRecord{
+			{
+				health: peerHealth{
+					Address:   addr,
+					Connected: true,
+					State:     peerStateHealthy,
+				},
+				sessionConnID: domain.ConnID(42),
+			},
+		},
+	})
+	svc.cmSlotsSnap.Store(&cmSlotsSnapshot{
+		byAddress: map[domain.PeerAddress]cmSlotRecord{
+			addr: {Address: addr, State: domain.SlotStateActive},
+		},
+	})
+
+	if got := svc.activeConnectionCount(); got != 1 {
+		t.Fatalf("activeConnectionCount = %d, want 1", got)
+	}
+	if got := svc.peerHealthAccessNanos.Load(); got != 0 {
+		t.Fatalf("activeConnectionCount must not record peer-health reader access, got %d", got)
+	}
+}

@@ -11,15 +11,24 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// networkStatsSnapshotInterval is how often the background refresher rebuilds
-// the cached network_stats snapshot.
+// networkStatsSnapshotInterval is how often the background refresher checks
+// whether the cached hot-read snapshots need rebuilding.
 //
-// Trade-off: shorter interval → fresher RPC answers but more s.peerMu.RLock
-// acquisitions per second from the refresher; longer interval → bounded
-// staleness (users see numbers up to this old).  500 ms is responsive enough
-// for the desktop UI polling cycle and short enough to feel real-time without
-// inducing a measurable readers-per-second load on s.peerMu.
+// For reader-gated snapshots (network_stats, peer_health, peers_exchange),
+// the tick becomes a no-op when no matching RPC was read recently.  While a
+// reader is active, shorter interval means fresher RPC answers but more
+// refresher work; longer interval means bounded staleness. 500 ms is
+// responsive enough for the desktop UI polling cycle.
 const networkStatsSnapshotInterval = 500 * time.Millisecond
+
+// networkStatsRebuildIdleAfter is how long after the last fetch_network_stats
+// read the periodic refresher keeps rebuilding the snapshot. Past this window
+// with no reader, maybeRebuildNetworkStatsSnapshot skips the 500 ms
+// peer-domain copy/sort/map allocation. Startup priming remains
+// unconditional, and the first reader after an idle period re-arms the
+// refresher; it may receive the last snapshot once, then freshness resumes on
+// the next tick.
+const networkStatsRebuildIdleAfter = 5 * time.Second
 
 // networkStatsSnapshot holds a fully materialised protocol.NetworkStatsFrame
 // plus the timestamp at which it was built.  Stored in an atomic.Pointer
@@ -79,6 +88,21 @@ func (snap *networkStatsSnapshot) toFrame() protocol.Frame {
 // emitting an empty-but-valid network_stats frame.
 func (s *Service) loadNetworkStatsSnapshot() *networkStatsSnapshot {
 	return s.networkStatsSnap.Load()
+}
+
+// maybeRebuildNetworkStatsSnapshot is the reader-gated entry point used by
+// the periodic refresher. It rebuilds only while fetch_network_stats has been
+// read recently; otherwise a headless node does not pay for the per-peer
+// traffic aggregation twice a second.
+func (s *Service) maybeRebuildNetworkStatsSnapshot() {
+	last := s.networkStatsAccessNanos.Load()
+	if last == 0 {
+		return
+	}
+	if time.Since(time.Unix(0, last)) > networkStatsRebuildIdleAfter {
+		return
+	}
+	s.rebuildNetworkStatsSnapshot()
 }
 
 // rebuildNetworkStatsSnapshot constructs a fresh snapshot under a short
