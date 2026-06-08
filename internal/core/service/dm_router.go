@@ -2064,6 +2064,42 @@ func (r *DMRouter) notify(eventType UIEventType) {
 	r.snapCache.Store(&routerSnapshotCache{gen: gen, snap: snap})
 	r.mu.Unlock()
 
+	r.emitUIEvent(eventType)
+}
+
+// NotifyResourceUsageChanged is the lightweight analogue of
+// NotifyStatusChanged for the once-per-second resource sample. Only
+// ResourceUsage (process memory + uptime) changes on that tick, so this
+// patches just that pointer on the cached NodeStatus half and recomposes —
+// avoiding the full deepCopyNodeStatus that profiling flagged as the
+// dominant allocator when fired every second on a large mesh. Replacing the
+// pointer (rather than mutating it) cannot alias monitor-owned memory: the
+// monitor hands back an independent clone via ResourceUsageSnapshot.
+//
+// snapGen + the in-lock snapCache.Store keep this ordered against the full
+// NotifyStatusChanged path; both serialise on r.mu, so a status rebuild that
+// lands between two resource ticks is never clobbered by a stale snapshot.
+func (r *DMRouter) NotifyResourceUsageChanged() {
+	if r.statusMonitor == nil {
+		return
+	}
+	usage := r.statusMonitor.ResourceUsageSnapshot()
+
+	r.mu.Lock()
+	gen := r.snapGen.Add(1)
+	r.cachedNS.ResourceUsage = usage
+	snap := r.composeSnapshotLocked(gen)
+	r.snapCache.Store(&routerSnapshotCache{gen: gen, snap: snap})
+	r.mu.Unlock()
+
+	r.emitUIEvent(UIEventStatusUpdated)
+}
+
+// emitUIEvent delivers a UIEvent to the UI channel, falling back to a
+// bounded set of deferred retry goroutines when the channel is momentarily
+// full so no event type is silently lost. Shared by notify() and the
+// resource-only fast path.
+func (r *DMRouter) emitUIEvent(eventType UIEventType) {
 	ev := UIEvent{Type: eventType}
 	select {
 	case r.uiEvents <- ev:

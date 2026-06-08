@@ -92,6 +92,16 @@ func Run() error {
 		EventBus:  eventBus,
 		Client:    client,
 		OnChanged: statusNotifier.Signal,
+		// Resource-only tick (memory + uptime, once per second) takes the
+		// lightweight path: patch just ResourceUsage on the cached snapshot
+		// instead of deep-copying the whole NodeStatus. Cheap and bounded
+		// (1/sec), so it runs inline on the sampler goroutine rather than
+		// through the coalescer.
+		OnResourceChanged: func() {
+			if router != nil {
+				router.NotifyResourceUsageChanged()
+			}
+		},
 	})
 	statusMonitor.Start()
 

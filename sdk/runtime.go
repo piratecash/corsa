@@ -109,6 +109,13 @@ func New(cfg Config) (*Runtime, error) {
 				router.NotifyStatusChanged()
 			}
 		},
+		// Resource-only tick takes the lightweight path (patch just
+		// ResourceUsage) instead of a full NodeStatus deep copy each second.
+		OnResourceChanged: func() {
+			if router != nil {
+				router.NotifyResourceUsageChanged()
+			}
+		},
 	})
 	statusMonitor.Start()
 

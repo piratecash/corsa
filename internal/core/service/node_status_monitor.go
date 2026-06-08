@@ -19,6 +19,13 @@ type NodeStatusProvider interface {
 	// Safe to call from any goroutine.
 	NodeStatus() NodeStatus
 
+	// ResourceUsageSnapshot returns an independent copy of just the
+	// process memory + uptime field, or nil if not yet sampled. It is the
+	// cheap counterpart to NodeStatus() for the once-per-second resource
+	// tick, which must not deep-copy every peer-health / route-derived
+	// collection merely to refresh two scalars.
+	ResourceUsageSnapshot() *ResourceUsage
+
 	// Contacts returns a shallow copy of the current contact map.
 	Contacts() map[string]Contact
 
@@ -41,11 +48,17 @@ const defaultCaptureRetention = 60 * time.Second
 // a NodeStatusMonitor. EventBus, Client, and OnChanged are mandatory;
 // Clock and CaptureRetention are optional (defaults applied when zero).
 type NodeStatusMonitorOpts struct {
-	EventBus         *ebus.Bus
-	Client           *DesktopClient
-	OnChanged        func() // called after every status mutation (must not block)
-	Clock            func() time.Time
-	CaptureRetention time.Duration
+	EventBus  *ebus.Bus
+	Client    *DesktopClient
+	OnChanged func() // called after every status mutation (must not block)
+	// OnResourceChanged is called after a ResourceUsage-only sample (the
+	// once-per-second memory + uptime tick). Optional: when nil the
+	// monitor falls back to OnChanged. Wiring this lets the subscriber
+	// patch just ResourceUsage instead of deep-copying the whole
+	// NodeStatus every second (see DMRouter.NotifyResourceUsageChanged).
+	OnResourceChanged func()
+	Clock             func() time.Time
+	CaptureRetention  time.Duration
 }
 
 // NodeStatusMonitor aggregates network-layer state from ebus events and
@@ -64,9 +77,10 @@ type NodeStatusMonitorOpts struct {
 //   - ProbeNode merge logic (mergeNodeStatusLocked, mergePeerHealth,
 //     mergeAggregateStatus)
 type NodeStatusMonitor struct {
-	eventBus  *ebus.Bus
-	client    *DesktopClient
-	onChanged func()
+	eventBus          *ebus.Bus
+	client            *DesktopClient
+	onChanged         func()
+	onResourceChanged func()
 
 	mu     sync.RWMutex
 	status NodeStatus
@@ -111,11 +125,12 @@ func NewNodeStatusMonitor(opts NodeStatusMonitorOpts) *NodeStatusMonitor {
 		retention = defaultCaptureRetention
 	}
 	return &NodeStatusMonitor{
-		eventBus:         opts.EventBus,
-		client:           opts.Client,
-		onChanged:        opts.OnChanged,
-		clock:            clock,
-		captureRetention: retention,
+		eventBus:          opts.EventBus,
+		client:            opts.Client,
+		onChanged:         opts.OnChanged,
+		onResourceChanged: opts.OnResourceChanged,
+		clock:             clock,
+		captureRetention:  retention,
 	}
 }
 
@@ -159,8 +174,24 @@ func (m *NodeStatusMonitor) RunResourceSampler(ctx context.Context) {
 			m.mu.Lock()
 			m.status.ResourceUsage = usage
 			m.mu.Unlock()
-			m.onChanged()
+			m.notifyResourceChanged()
 		}
+	}
+}
+
+// notifyResourceChanged fires the dedicated resource-only subscriber when
+// one is wired, otherwise falls back to the generic onChanged. The
+// dedicated callback path lets subscribers patch just ResourceUsage
+// (memory + uptime) instead of deep-copying the entire NodeStatus on every
+// one-second tick — profiling flagged deepCopyNodeStatus as the dominant
+// allocator precisely because this sampler drove it once per second.
+func (m *NodeStatusMonitor) notifyResourceChanged() {
+	if m.onResourceChanged != nil {
+		m.onResourceChanged()
+		return
+	}
+	if m.onChanged != nil {
+		m.onChanged()
 	}
 }
 
@@ -169,6 +200,23 @@ func (m *NodeStatusMonitor) NodeStatus() NodeStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return deepCopyNodeStatus(m.status)
+}
+
+// ResourceUsageSnapshot returns an independent copy of just the
+// ResourceUsage field (process memory + uptime), or nil if not yet
+// sampled. Cheap counterpart to NodeStatus() for the once-per-second
+// resource tick: the subscriber patches this single pointer instead of
+// deep-copying every peer-health / route-derived collection. The clone
+// keeps the returned value independent of monitor-owned memory, matching
+// the deepCopyNodeStatus contract.
+func (m *NodeStatusMonitor) ResourceUsageSnapshot() *ResourceUsage {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.status.ResourceUsage == nil {
+		return nil
+	}
+	clone := *m.status.ResourceUsage
+	return &clone
 }
 
 // Contacts returns a copy of the contact map.

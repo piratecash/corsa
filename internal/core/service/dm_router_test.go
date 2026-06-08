@@ -4703,6 +4703,16 @@ func (p *testStatusProvider) NodeStatus() NodeStatus {
 	return deepCopyNodeStatus(p.Status)
 }
 
+func (p *testStatusProvider) ResourceUsageSnapshot() *ResourceUsage {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Status.ResourceUsage == nil {
+		return nil
+	}
+	clone := *p.Status.ResourceUsage
+	return &clone
+}
+
 func (p *testStatusProvider) Contacts() map[string]Contact {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
