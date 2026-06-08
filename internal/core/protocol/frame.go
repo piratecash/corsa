@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -435,12 +436,40 @@ func IsJSONLine(line string) bool {
 // to amplify memory allocation in the JSON tokenizer.
 const maxJSONDepth = 10
 
+// frameLineBufPool recycles the scratch []byte that backs json.Unmarshal's
+// input. Previously ParseFrameLine allocated a fresh []byte(line) copy on every
+// inbound frame — on the route-announce churn path (one ParseFrameLine per
+// frame line, scaling with route flap volume) that single copy was the largest
+// line item in the alloc_space profile. encoding/json never retains a reference
+// to its input buffer: every string field is freshly allocated and every
+// json.RawMessage field (including AnnounceRouteFrame.Extra) is copied out via
+// append, so the scratch buffer is safe to reuse the instant Unmarshal returns.
+var frameLineBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1024)
+		return &b
+	},
+}
+
+// maxPooledFrameLineCap bounds the capacity we are willing to retain in the
+// pool. Command-plane frames are <128 KiB; response-plane lines can legally
+// reach MaxResponseLine (8 MiB). Returning an 8 MiB buffer to the pool would
+// pin that memory indefinitely, so oversized scratch buffers are dropped on the
+// floor (GC reclaims them) instead of being recycled.
+const maxPooledFrameLineCap = 128 * 1024
+
 func ParseFrameLine(line string) (Frame, error) {
 	if err := checkJSONDepth(line, maxJSONDepth); err != nil {
 		return Frame{}, err
 	}
+	bufp := frameLineBufPool.Get().(*[]byte)
+	buf := append((*bufp)[:0], line...)
 	var frame Frame
-	err := json.Unmarshal([]byte(line), &frame)
+	err := json.Unmarshal(buf, &frame)
+	if cap(buf) <= maxPooledFrameLineCap {
+		*bufp = buf
+		frameLineBufPool.Put(bufp)
+	}
 	return frame, err
 }
 

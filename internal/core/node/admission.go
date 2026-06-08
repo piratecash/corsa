@@ -213,11 +213,37 @@ var errFrameTooLarge = fmt.Errorf("frame line exceeds size limit")
 // and reject as soon as the running total exceeds limitBytes — before
 // copying the oversized chunk.
 func readFrameLine(reader *bufio.Reader, limitBytes int) (string, error) {
-	var total int
-	var parts [][]byte
+	// Fast path: the overwhelming majority of frames fit inside bufio's
+	// buffer, so the very first ReadSlice returns the whole line. In that
+	// case a single string() conversion is the only allocation needed — the
+	// previous unconditional saved-copy + bytes.Join + string sequence cost
+	// three copies of every line on this hottest of receive paths.
+	chunk, err := reader.ReadSlice('\n')
+	total := len(chunk)
+	if total > limitBytes {
+		return "", errFrameTooLarge
+	}
+	if err == nil {
+		// chunk is a view into bufio's internal buffer; string() copies it
+		// out before any subsequent read can overwrite it.
+		return string(chunk), nil
+	}
+	if !errors.Is(err, bufio.ErrBufferFull) {
+		// Real I/O error (including io.EOF) before the delimiter was seen.
+		if total > 0 && errors.Is(err, io.EOF) {
+			return string(chunk), err
+		}
+		return "", err
+	}
+
+	// Slow path: the line spans multiple buffer fills. Preserve the first
+	// chunk (it will be overwritten on the next read) and keep reading.
+	first := make([]byte, total)
+	copy(first, chunk)
+	parts := [][]byte{first}
 
 	for {
-		chunk, err := reader.ReadSlice('\n')
+		chunk, err = reader.ReadSlice('\n')
 
 		// Check limit BEFORE copying — reject without allocating the
 		// oversized chunk into our result buffer.
