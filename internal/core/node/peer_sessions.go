@@ -904,7 +904,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			// routing_route_quarantine.go and
 			// docs/refactoring/route-withdrawal-grace-period.md.
 			if session.peerIdentity != "" && s.setupFailureExceedsThresholdLocked(slotAddress) {
-				s.armRouteQuarantineLocked(session.peerIdentity, "setup_failure_cycle", now)
+				s.armRouteQuarantineLocked(session.peerIdentity, quarantineReasonSetupFailureCycle, now)
 			}
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")

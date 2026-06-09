@@ -66,7 +66,7 @@ func TestQuarantine_TableRouterSkipsTransitViaQuarantinedNextHop(t *testing.T) {
 	}
 	// Put peer-B in quarantine.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", "test", time.Now())
+	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
@@ -109,7 +109,7 @@ func TestQuarantine_TableRouterDirectRouteToQuarantinedPeerStillReachable(t *tes
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
 	}
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-Q", "test", time.Now())
+	svc.armRouteQuarantineLocked("peer-Q", quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
@@ -163,7 +163,7 @@ func TestQuarantine_TableRouterFallsBackWhenOnlyTransitIsQuarantined(t *testing.
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
 	}
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", "test", time.Now())
+	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
@@ -253,7 +253,7 @@ func TestRouteIsBlockedByQuarantine_DirectPasses(t *testing.T) {
 
 	svc := &Service{
 		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			"peer-Q": {Until: time.Now().Add(time.Hour), Reason: "test", LastArmed: time.Now(), Strikes: 1},
+			"peer-Q": {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
 		},
 	}
 	if svc.routeIsBlockedByQuarantine("peer-Q", 1) {
@@ -266,7 +266,7 @@ func TestRouteIsBlockedByQuarantine_TransitBlocked(t *testing.T) {
 
 	svc := &Service{
 		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			"peer-Q": {Until: time.Now().Add(time.Hour), Reason: "test", LastArmed: time.Now(), Strikes: 1},
+			"peer-Q": {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
 		},
 	}
 	if !svc.routeIsBlockedByQuarantine("peer-Q", 2) {
@@ -347,7 +347,7 @@ func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T
 	svc.health[cleanAddr] = &peerHealth{Address: cleanAddr, Connected: true}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(quarantinedID, "test", time.Now())
+	svc.armRouteQuarantineLocked(quarantinedID, quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	targets := svc.routingTargetsForMessage(protocol.Envelope{
@@ -399,7 +399,7 @@ func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *
 	svc.health[quarantinedAddr] = &peerHealth{Address: quarantinedAddr, Connected: true}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(quarantinedID, "test", time.Now())
+	svc.armRouteQuarantineLocked(quarantinedID, quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	// Message recipient is the quarantined peer itself.
@@ -460,7 +460,7 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 		svc.peerMu.Unlock()
 		t.Fatal("threshold should be reported as exceeded after Nth failure")
 	}
-	svc.armRouteQuarantineLocked(identity, "setup_failure_cycle", now)
+	svc.armRouteQuarantineLocked(identity, quarantineReasonSetupFailureCycle, now)
 	// Same controlled `now` for the check — see
 	// TestQuarantine_NoTriggerBelowThreshold for why the public
 	// IsPeerInRouteQuarantine helper would silently start to fail
@@ -472,8 +472,8 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 	if !banned {
 		t.Fatal("identity should be route-quarantined after setup_failure_cycle trigger")
 	}
-	if entry.Reason != "setup_failure_cycle" {
-		t.Fatalf("reason = %q, want setup_failure_cycle", entry.Reason)
+	if entry.Reason != quarantineReasonSetupFailureCycle {
+		t.Fatalf("reason = %q, want %q", entry.Reason, quarantineReasonSetupFailureCycle)
 	}
 }
 
@@ -488,10 +488,14 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 // peer's pre-quarantine transit claims — claims the peer may have
 // withdrawn or corrected DURING the quarantine while we were
 // dropping its frames — would become selectable again the moment
-// the quarantine expires. Arming must tombstone transit claims via
-// the peer (so post-expiry transit resumes only from fresh
+// the quarantine expires. Arming for a session-instability reason
+// (disconnect_storm / setup_failure_cycle) must tombstone transit
+// claims via the peer (so post-expiry transit resumes only from fresh
 // announcements) while leaving the DIRECT route to the peer intact
 // (quarantine suppresses transit trust, not data-plane delivery).
+// chatty_routes does NOT invalidate transit — see
+// quarantineReasonInvalidatesTransit and the dedicated
+// routing_route_quarantine_transit_test.go.
 func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 	t.Parallel()
 
@@ -517,8 +521,12 @@ func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
 	}
 
+	// disconnect_storm (a session-instability reason) is what arms
+	// transit invalidation — see quarantineReasonInvalidatesTransit.
+	// A chatty_routes arm deliberately leaves transit in place (covered
+	// by routing_route_quarantine_transit_test.go).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", "test", time.Now())
+	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	// Transit claim via the quarantined peer must be gone from the
@@ -538,7 +546,7 @@ func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 	// dropped during quarantine, so there is nothing new to
 	// invalidate.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", "test", time.Now())
+	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 	if got := table.Lookup("peer-B"); len(got) == 0 {
 		t.Fatal("re-arm during active quarantine must not touch the direct route")

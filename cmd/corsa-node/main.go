@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,6 +30,8 @@ func main() {
 	cleanup := crashlog.Setup()
 	defer cleanup()
 
+	configureMemoryLimit()
+
 	log.Info().Msg("corsa-node starting")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -40,6 +43,45 @@ func main() {
 		cleanup()
 		os.Exit(1)
 	}
+}
+
+// configureMemoryLimit applies a soft heap limit (Go's GOMEMLIMIT)
+// from CORSA_MEM_LIMIT_BYTES so the runtime keeps the live+idle heap
+// bounded and returns memory to the OS under pressure, instead of
+// letting RSS ratchet up after transient allocation spikes (large
+// per-cycle routing snapshots/deltas) and never come back down.
+//
+// Opt-in by design. A hard-coded default would be dangerous on a P2P
+// node that runs on wildly heterogeneous hosts: too low and the GC
+// thrashes. So:
+//   - If GOMEMLIMIT is already set in the environment, the runtime
+//     honours it on its own — defer to the operator and do nothing.
+//   - Otherwise, apply CORSA_MEM_LIMIT_BYTES when present and valid.
+//
+// Recommended starting point for the ~1000-node mesh seen in the
+// field (heap_alloc ~130MB, but RSS climbing past 700MB): set
+// CORSA_MEM_LIMIT_BYTES=536870912 (512 MiB) or GOMEMLIMIT=512MiB and
+// tune from there.
+func configureMemoryLimit() {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		// Runtime already reads GOMEMLIMIT directly; don't override.
+		return
+	}
+	raw := strings.TrimSpace(os.Getenv("CORSA_MEM_LIMIT_BYTES"))
+	if raw == "" {
+		return
+	}
+	limit, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || limit <= 0 {
+		log.Warn().
+			Str("value", raw).
+			Msg("ignoring invalid CORSA_MEM_LIMIT_BYTES (want a positive byte count)")
+		return
+	}
+	debug.SetMemoryLimit(limit)
+	log.Info().
+		Int64("bytes", limit).
+		Msg("soft memory limit configured via CORSA_MEM_LIMIT_BYTES (GOMEMLIMIT)")
 }
 
 func versionRequested(args []string) bool {

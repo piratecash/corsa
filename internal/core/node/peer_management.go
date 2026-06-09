@@ -2382,11 +2382,14 @@ func outboundControlFrameLimitKey(connID domain.ConnID) string {
 //
 // Bulk announce frames (announce_routes / routes_update /
 // route_announce_v3) are deliberately NOT routed through this
-// helper: they are governed by announceLimiter (route-count) and
-// chatty_routes quarantine (frames/sec) on BOTH directions, which
-// jointly bound CPU without the cmd limiter's 100/30 cap that
-// would truncate a legitimate chunked full-sync. See
-// isAnnouncePlaneBulkFrameType in routing_announce.go.
+// helper: they are governed by announceLimiter (route-count, all
+// bulk frames) and — for DELTA frames only (routes_update / v3
+// kind="delta") — the chatty_routes quarantine (frames/sec). Full
+// baselines are bounded by the route bucket, not chatty (see
+// recordInboundAnnounceAndMaybeArm). Together they bound CPU without
+// the cmd limiter's 100/30 cap that would truncate a legitimate
+// chunked full-sync. See isAnnouncePlaneBulkFrameType in
+// routing_announce.go.
 func (s *Service) outboundControlFrameAllowed(session *peerSession) bool {
 	if s.cmdLimiter == nil {
 		return true

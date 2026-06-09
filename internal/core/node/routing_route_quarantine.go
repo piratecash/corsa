@@ -101,27 +101,32 @@ const (
 	quarantineRecidivismWindow = 10 * time.Minute
 
 	// chattyAnnounceWindow is the sliding window over which inbound
-	// announce-plane frames are counted toward the chatty_routes
+	// DELTA announce-plane frames are counted toward the chatty_routes
 	// quarantine trigger. Matches the design doc table
 	// (docs/refactoring/route-withdrawal-grace-period.md): "Inbound
-	// chatty routes | 50 announce/sec | 10s".
+	// chatty routes | 50 announce/sec | 10s". Only delta frames feed
+	// this window — see recordInboundAnnounceAndMaybeArm; full
+	// baselines and request_resync are excluded.
 	chattyAnnounceWindow = 10 * time.Second
 
-	// chattyAnnounceThreshold is the number of inbound announce
+	// chattyAnnounceThreshold is the number of inbound DELTA announce
 	// frames in chattyAnnounceWindow that arms chatty_routes
 	// quarantine. Encodes the 50 announce/sec target rate over the
-	// 10s window: 50 * 10 = 500 frames. Tuned so a legitimate
-	// chunked full-sync (a few dozen frames at peer connect) is
-	// well under the line, while a peer that re-announces every
-	// few ms crosses it within a second of starting the flood.
+	// 10s window: 50 * 10 = 500 frames. Tuned so a legitimate burst
+	// of route deltas stays under the line, while a peer that
+	// re-announces deltas every few ms crosses it within a second of
+	// starting the flood. Full baselines (announce_routes, v3
+	// kind="full") do NOT count, so a legitimate chunked full-sync —
+	// however large — can never arm chatty_routes; it is bounded
+	// instead by the route-based limiter below.
 	//
 	// NOTE: the announce-route rate limiter (announce_ratelimit.go)
 	// is route-based (routes/sec), not frame-based, so this is an
-	// orthogonal signal: a peer can send 500 single-entry frames
-	// per 10s without tripping the route-based limiter (which
+	// orthogonal signal: a peer can send 500 single-entry delta
+	// frames per 10s without tripping the route-based limiter (which
 	// would allow 200 ROUTES/sec = much higher entry budget) yet
 	// still arm chatty_routes here. That's by design — many small
-	// announce frames are the "chatty" pattern the doc targets.
+	// delta frames are the "chatty" pattern the doc targets.
 	chattyAnnounceThreshold = 500
 
 	// chattyReArmDebounce throttles the chatty_routes re-arm path
@@ -147,6 +152,46 @@ const (
 	// (one bump per debounce instead of one per frame).
 	chattyReArmDebounce = chattyAnnounceWindow
 )
+
+// Quarantine reason labels. Kept as named constants (rather than bare
+// string literals at the arm call-sites) so the transit-invalidation
+// predicate below cannot drift away from the strings actually passed
+// to armRouteQuarantineLocked.
+const (
+	quarantineReasonDisconnectStorm   = "disconnect_storm"
+	quarantineReasonSetupFailureCycle = "setup_failure_cycle"
+	quarantineReasonChattyRoutes      = "chatty_routes"
+)
+
+// quarantineReasonInvalidatesTransit reports whether a quarantine
+// armed for the given reason should ALSO locally tombstone every
+// transit claim whose next-hop is the quarantined peer
+// (invalidateTransitOnQuarantineLocked).
+//
+// Only session-instability reasons invalidate transit. A peer whose
+// TCP session keeps dropping (disconnect_storm) or keeps failing
+// setup (setup_failure_cycle) cannot be trusted to carry relay
+// traffic, so the routes behind it must go immediately.
+//
+// chatty_routes is deliberately excluded: there the session is ALIVE
+// and the peer is merely over-talkative on the announce plane. Muting
+// its (untrusted) opinions via the IsPeerInRouteQuarantine gate is
+// sufficient. Tearing down every transit route behind a still-
+// connected, often high-degree hub on a chatty signal is what
+// collapses normal multi-hop delivery mesh-wide — and because the
+// quarantine then drops the peer's inbound announcements, the routes
+// cannot be relearned until it expires, so the outage is sticky and
+// self-reinforcing. Chatty quarantine therefore drops the peer's
+// announcements WITHOUT invalidating the transit it already provides;
+// stale claims age out on their own TTL.
+func quarantineReasonInvalidatesTransit(reason string) bool {
+	switch reason {
+	case quarantineReasonDisconnectStorm, quarantineReasonSetupFailureCycle:
+		return true
+	default:
+		return false
+	}
+}
 
 // ---------------------------------------------------------------------------
 // State types (stored on Service, all guarded by s.peerMu)
@@ -209,10 +254,49 @@ func (s *Service) isPeerInRouteQuarantineLocked(peer domain.PeerIdentity, now ti
 	return now.Before(entry.Until)
 }
 
+// IsPeerTransitQuarantined reports whether the peer must be excluded
+// from DATA-PLANE transit selection (relay next-hop / gossip
+// fallback). This is the reason-aware companion to
+// IsPeerInRouteQuarantine: a peer is transit-blocked only when it is
+// quarantined for a session-instability reason
+// (quarantineReasonInvalidatesTransit) — disconnect_storm /
+// setup_failure_cycle — where the transport itself is unreliable and
+// forwarding through it would drop traffic.
+//
+// chatty_routes is deliberately NOT transit-blocked: the session is
+// alive and only the peer's announce-plane VERBOSITY is the problem.
+// We mute its routing opinions (IsPeerInRouteQuarantine still drops
+// its inbound announcements) but keep using it to carry data. Blocking
+// a still-connected, often high-degree hub from transit on a chatty
+// signal — for 60s up to the 30m cap — is what collapsed normal
+// multi-hop delivery mesh-wide; this split is the fix. Safe for
+// concurrent readers — takes the peer-domain read lock.
+func (s *Service) IsPeerTransitQuarantined(peer domain.PeerIdentity) bool {
+	if peer == "" {
+		return false
+	}
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	return s.isPeerTransitQuarantinedLocked(peer, time.Now())
+}
+
+// isPeerTransitQuarantinedLocked is the lock-already-held variant of
+// IsPeerTransitQuarantined, for callers (gossip-fallback target
+// filters) that already hold peerMu.RLock — peerMu is not recursive,
+// so they must not call the public RLock-taking variant.
+func (s *Service) isPeerTransitQuarantinedLocked(peer domain.PeerIdentity, now time.Time) bool {
+	if !s.isPeerInRouteQuarantineLocked(peer, now) {
+		return false
+	}
+	entry := s.peerQuarantine[peer]
+	return quarantineReasonInvalidatesTransit(entry.Reason)
+}
+
 // routeIsBlockedByQuarantine is the shared gate used by every relay
 // next-hop selection site (tryForwardViaRoutingTable, TableRouter.Route).
 // Returns true when the route MUST be skipped because the next-hop
-// is route-quarantined as a transit peer.
+// is route-quarantined for a TRANSIT-blocking reason (see
+// IsPeerTransitQuarantined — chatty_routes does not qualify).
 //
 // Direct destinations (hops == 1) ALWAYS pass — recipient is the
 // quarantined peer itself, and quarantine deliberately suppresses
@@ -229,7 +313,7 @@ func (s *Service) routeIsBlockedByQuarantine(nextHop domain.PeerIdentity, hops i
 	if hops <= 1 {
 		return false
 	}
-	return s.IsPeerInRouteQuarantine(nextHop)
+	return s.IsPeerTransitQuarantined(nextHop)
 }
 
 // ---------------------------------------------------------------------------
@@ -291,12 +375,33 @@ func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time
 // is re-armed from `now` so a sustained problem cannot let the
 // quarantine elapse mid-storm.
 //
-// On the inactive→active transition the peer's transit claims are
-// locally invalidated (invalidateTransitOnQuarantineLocked) so they
-// cannot outlive the quarantine via TTL. Re-arms during an active
-// quarantine skip the invalidation: inbound announcements are being
-// dropped while quarantined, so no new transit claims can have been
-// admitted since the transition.
+// Transit invalidation fires on the transition INTO a transit-blocking
+// quarantine (invalidateTransitOnQuarantineLocked), so the peer's
+// pre-quarantine transit claims cannot outlive the cooldown via TTL.
+// "Into a transit-blocking quarantine" means EITHER:
+//   - first arm from "not quarantined" with a transit-blocking reason
+//     (disconnect_storm / setup_failure_cycle), OR
+//   - an ESCALATION of an active but non-transit-blocking quarantine
+//     (chatty_routes) to a transit-blocking reason.
+//
+// The escalation case matters: a peer can be chatty (session alive,
+// transit kept) and then start flapping. The moment the reason becomes
+// transit-blocking we must tombstone the stale transit behind it, even
+// though the quarantine was already active for chatty_routes. chatty
+// muted the peer's announcements but deliberately did NOT invalidate
+// transit, so claims admitted before the chatty arm are still live and
+// must be tombstoned now.
+//
+// A re-arm that does NOT change the transit-blocking status is a no-op
+// for the table: if it was already transit-blocking, announcements
+// have been dropped since that transition so no new transit could have
+// been admitted; if it stays non-blocking (chatty re-arm), there is
+// nothing to invalidate by contract.
+//
+// Reason never DOWNGRADES while active: an unstable peer that also
+// turns chatty keeps its transit-blocking reason. Otherwise a chatty
+// re-arm of a disconnect_storm peer would silently un-block transit
+// through a still-flapping next-hop.
 func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason string, now time.Time) {
 	if peer == "" {
 		return
@@ -304,23 +409,44 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 	if s.peerQuarantine == nil {
 		s.peerQuarantine = make(map[domain.PeerIdentity]routeQuarantineEntry)
 	}
-	newlyActive := !s.isPeerInRouteQuarantineLocked(peer, now)
+
+	// Capture the PRIOR active reason before we overwrite it. An
+	// inactive/absent entry contributes prevReason "" (not
+	// transit-blocking), which collapses the first-arm case into the
+	// same transition test below.
+	prevReason := ""
+	if s.isPeerInRouteQuarantineLocked(peer, now) {
+		prevReason = s.peerQuarantine[peer].Reason
+	}
+
+	// No-downgrade: keep the stronger (transit-blocking) reason if an
+	// active transit-blocking quarantine is being re-armed with a
+	// non-blocking reason (e.g. chatty re-arm of a disconnect_storm peer).
+	effectiveReason := reason
+	if quarantineReasonInvalidatesTransit(prevReason) &&
+		!quarantineReasonInvalidatesTransit(reason) {
+		effectiveReason = prevReason
+	}
+
 	entry := s.peerQuarantine[peer]
 	entry.Strikes = nextStrikeCount(entry, now)
 	dur := computeQuarantineDuration(entry.Strikes)
 	entry.Until = now.Add(dur)
 	entry.LastArmed = now
-	entry.Reason = reason
+	entry.Reason = effectiveReason
 	s.peerQuarantine[peer] = entry
 
 	log.Warn().
 		Str("peer", string(peer)).
-		Str("reason", reason).
+		Str("reason", effectiveReason).
 		Dur("duration", dur).
 		Int("strikes", entry.Strikes).
 		Msg("route_quarantine_armed")
 
-	if newlyActive {
+	// Invalidate on the transition into a transit-blocking state:
+	// new reason blocks transit AND the prior active reason did not.
+	if quarantineReasonInvalidatesTransit(effectiveReason) &&
+		!quarantineReasonInvalidatesTransit(prevReason) {
 		s.invalidateTransitOnQuarantineLocked(peer)
 	}
 }
@@ -418,7 +544,7 @@ func computeQuarantineDuration(strikes int) time.Duration {
 func (s *Service) maybeArmRouteQuarantineOnCloseLocked(peer domain.PeerIdentity, now time.Time) {
 	s.recordPeerDisconnectLocked(peer, now)
 	if s.disconnectRateExceedsLocked(peer, now) {
-		s.armRouteQuarantineLocked(peer, "disconnect_storm", now)
+		s.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, now)
 	}
 }
 
@@ -518,15 +644,25 @@ func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.T
 }
 
 // recordInboundAnnounceAndMaybeArm is the receive-handler entry
-// point for the chatty_routes quarantine trigger. Called from
-// handleAnnounceRoutes / handleRoutesUpdate / handleRouteAnnounceV3
-// / handleRequestResync for every WELL-FORMED inbound frame from a
-// known sender. The
-// position is BEFORE the announceLimiter check, BEFORE the
-// quarantine gate, and BEFORE peerState.GetOrCreate — so the
-// signal counts every announce-plane frame the peer puts on the
-// wire (matching the doc's "inbound announce_routes per second"
-// definition).
+// point for the chatty_routes quarantine trigger. Called only for
+// DELTA frames — handleRoutesUpdate (v2 delta) and handleRouteAnnounceV3
+// when frame.Kind == "delta" — from a known sender. Full baselines
+// (handleAnnounceRoutes, v3 kind="full") and the request_resync
+// control frame deliberately do NOT call it:
+//   - The trigger targets DELTA churn, which cascades work (UpdateRoute
+//     → TriggerUpdate → an announce cycle → mesh-wide propagation); a
+//     delta flood is what "chattiness" means.
+//   - A full baseline is idempotent (re-applying the same table is
+//     near-free) and a baseline flood is bounded by the announceLimiter
+//     route bucket — counting it only fired the quarantine on recovery
+//     and large legitimate full-syncs.
+//   - request_resync is a control frame owned by the cmd limiter +
+//     acceptRequestResyncDebounced; counting it made the quarantine
+//     self-reinforcing during recovery.
+//
+// The position is BEFORE the announceLimiter check, BEFORE the
+// quarantine gate, and BEFORE peerState.GetOrCreate — so the signal
+// counts every delta frame the peer puts on the wire.
 //
 // Lock contract: a single peerMu.Lock spans recordPeerAnnounceLocked,
 // the shouldArmChattyLocked decision, and — when the gate allows —
@@ -556,7 +692,7 @@ func (s *Service) recordInboundAnnounceAndMaybeArm(peer domain.PeerIdentity, now
 	s.peerMu.Lock()
 	s.recordPeerAnnounceLocked(peer, now)
 	if s.shouldArmChattyLocked(peer, now) {
-		s.armRouteQuarantineLocked(peer, "chatty_routes", now)
+		s.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, now)
 	}
 	s.peerMu.Unlock()
 }

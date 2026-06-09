@@ -326,7 +326,7 @@ type Service struct {
 	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
 	peerQuarantine                 map[domain.PeerIdentity]routeQuarantineEntry // per-peer route quarantine: peer in quarantine has inbound routing announcements dropped and is skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
 	peerDisconnectHistory          map[domain.PeerIdentity][]time.Time          // sliding window of disconnect timestamps per peer, drives quarantine trigger detection. Guarded by peerMu.
-	peerAnnounceHistory            map[domain.PeerIdentity][]time.Time          // sliding window of inbound announce-frame arrival timestamps per peer, drives chatty_routes quarantine trigger. Guarded by peerMu.
+	peerAnnounceHistory            map[domain.PeerIdentity][]time.Time          // sliding window of inbound DELTA announce-frame arrival timestamps per peer (routes_update / v3 kind="delta" only; baselines and request_resync excluded), drives chatty_routes quarantine trigger. Guarded by peerMu. See recordInboundAnnounceAndMaybeArm.
 	lastResyncAccepted             map[domain.PeerIdentity]time.Time            // last ACCEPTED request_resync per peer — debounces forced full-sync cycles below the cmd/announce limiter thresholds; see handleRequestResync. Guarded by peerMu.
 	disableRateLimiting            bool                                         // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
 	markPeerStateIntervalTest      time.Duration                                // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
@@ -1982,10 +1982,14 @@ func (s *Service) handleConn(conn net.Conn) {
 		//     burst, which the cmd limiter (100 burst, 30/s) would
 		//     silently truncate. These have their own per-peer route-based
 		//     budget in announceLimiter (10,000-route burst, 200 routes/s
-		//     refill) and the chatty_routes quarantine trigger (50 frames/s
-		//     × 10s = 500). Together those bound CPU AND let quarantine —
-		//     not TCP close — own the response to a misbehaving bulk-
-		//     announce sender, honouring the design contract
+		//     refill, ALL bulk frames). DELTA frames (routes_update / v3
+		//     kind="delta") additionally feed the chatty_routes quarantine
+		//     trigger (50 frames/s × 10s = 500); full baselines do NOT —
+		//     a baseline is idempotent and bounded by the route bucket,
+		//     while chatty targets delta churn (see
+		//     recordInboundAnnounceAndMaybeArm). Together those bound CPU
+		//     AND let quarantine — not TCP close — own the response to a
+		//     misbehaving delta sender, honouring the design contract
 		//     ("quarantine does NOT close TCP").
 		//
 		// NOT exempt (intentional, even though they ARE announce-plane):

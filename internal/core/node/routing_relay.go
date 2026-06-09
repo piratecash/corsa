@@ -753,25 +753,28 @@ func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerA
 		if peerType.IsClient() && !isRecipient {
 			return false
 		}
-		// Route quarantine: skip a quarantined peer when it would
-		// be used as a TRANSIT hop for someone else. The recipient
-		// itself stays addressable — quarantine suppresses our
+		// Route quarantine: skip a peer when it would be used as a
+		// TRANSIT hop for someone else AND it is quarantined for a
+		// transit-blocking reason (disconnect_storm /
+		// setup_failure_cycle). A chatty_routes peer stays usable as
+		// transit — see isPeerTransitQuarantinedLocked. The recipient
+		// itself always stays addressable — quarantine suppresses our
 		// trust in the peer's view of the network, not direct
 		// delivery to that peer. Without this gate, the gossip
-		// fallback would happily pick the quarantined peer and
-		// re-introduce the transit path the table-routing gate
-		// (routeIsBlockedByQuarantine) and failover gate just
-		// closed. See docs/refactoring/route-withdrawal-grace-period.md.
+		// fallback would happily pick the peer and re-introduce the
+		// transit path the table-routing gate (routeIsBlockedByQuarantine)
+		// and failover gate just closed. See
+		// docs/refactoring/route-withdrawal-grace-period.md.
 		//
-		// MUST use the lock-held helper (isPeerInRouteQuarantineLocked)
+		// MUST use the lock-held helper (isPeerTransitQuarantinedLocked)
 		// because routingTargetsFiltered already holds peerMu.RLock
 		// when invoking this callback. Calling the public
-		// IsPeerInRouteQuarantine here would take peerMu.RLock a
+		// IsPeerTransitQuarantined here would take peerMu.RLock a
 		// second time on the same goroutine — Go's RWMutex is NOT
 		// recursive and the second RLock deadlocks if a writer is
 		// queued between the two acquisitions (writer starves the
 		// new RLock; the goroutine still holds the outer one).
-		if !isRecipient && s.isPeerInRouteQuarantineLocked(peerID, now) {
+		if !isRecipient && s.isPeerTransitQuarantinedLocked(peerID, now) {
 			return false
 		}
 		return true
@@ -785,12 +788,12 @@ func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddr
 			return false
 		}
 		// Route quarantine: same gate as routingTargetsForMessage.
-		// The recipient stays reachable; everyone else who is
-		// route-quarantined is excluded from being a transit hop.
-		// See the comment in routingTargetsForMessage above for why
-		// we MUST use isPeerInRouteQuarantineLocked here rather than
-		// the public IsPeerInRouteQuarantine.
-		if !isRecipient && s.isPeerInRouteQuarantineLocked(peerID, now) {
+		// The recipient stays reachable; a peer quarantined for a
+		// transit-blocking reason (NOT chatty_routes) is excluded from
+		// being a transit hop. See the comment in routingTargetsForMessage
+		// above for why we MUST use isPeerTransitQuarantinedLocked here
+		// rather than the public IsPeerTransitQuarantined.
+		if !isRecipient && s.isPeerTransitQuarantinedLocked(peerID, now) {
 			return false
 		}
 		return true

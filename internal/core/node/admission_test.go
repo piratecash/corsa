@@ -668,9 +668,11 @@ func TestPeekFrameType_FileCommandExemptionMatch(t *testing.T) {
 // full-sync of N routes ships as ceil(N/100) frames in a tight burst
 // — the cmd limiter's 100-burst / 30 cmd/s would silently truncate
 // that burst. Per-peer defence for these frames is owned by
-// announceLimiter (route-count) and chatty_routes quarantine
-// (frames/sec), NOT by the generic cmd limiter, so the design
-// contract "quarantine does NOT close TCP" holds.
+// announceLimiter (route-count, all bulk frames) and — for DELTA
+// frames only — the chatty_routes quarantine (frames/sec), NOT by
+// the generic cmd limiter, so the design contract "quarantine does
+// NOT close TCP" holds. (Full baselines are bounded by the route
+// bucket; chatty targets delta churn — see recordInboundAnnounceAndMaybeArm.)
 //
 // The exemption logic in service.go inbound read loop is:
 //
@@ -703,7 +705,15 @@ func TestCmdLimiterExemption_BulkAnnounceFramesExempt(t *testing.T) {
 				t.Fatalf("peekFrameType(%q) failed to parse a known bulk announce line", tt.line)
 			}
 			if !isAnnouncePlaneBulkFrameType(ft) {
-				t.Fatalf("isAnnouncePlaneBulkFrameType(%q) = false; cmd limiter would close inbound TCP before chatty_routes can arm during a legitimate full-sync", ft)
+				// Two distinct reasons the exemption matters, depending
+				// on frame kind:
+				//   - baseline (announce_routes, v3 kind="full"): the cmd
+				//     limiter would truncate a legitimate chunked full-sync
+				//     burst; the route bucket, not chatty, bounds baselines.
+				//   - delta (routes_update, v3 kind="delta"): the cmd limiter
+				//     would close the TCP before a delta flood can reach the
+				//     chatty_routes threshold that is meant to own it.
+				t.Fatalf("isAnnouncePlaneBulkFrameType(%q) = false; cmd limiter would either truncate a legitimate full-sync burst (baseline) or close inbound TCP before chatty_routes can arm on a delta flood", ft)
 			}
 		})
 	}
@@ -769,21 +779,28 @@ func TestCmdLimiterExemption_ControlAnnounceFramesNOTExempt(t *testing.T) {
 }
 
 // TestCmdLimiterExemption_InboundBulkFloodReachesChattyThreshold is
-// the end-to-end regression for the bulk-frame inbound direction:
-// simulate 600 announce_routes lines through the same exemption
-// predicate the inbound read loop uses, and verify NONE would be
-// closed by the cmd-limiter check. Without the bulk-announce
+// the end-to-end regression for the bulk-DELTA inbound direction:
+// simulate 600 routes_update (v2 delta) lines through the same
+// exemption predicate the inbound read loop uses, and verify NONE
+// would be closed by the cmd-limiter check. Without the bulk-announce
 // exemption, the 101st line would trip the burst (100) and a chatty
 // peer never reaches the 500-frame chatty_routes threshold.
+//
+// Delta frames are the example here on purpose: under the
+// deltas-only chatty contract (see recordInboundAnnounceAndMaybeArm)
+// only routes_update / v3 kind="delta" feed the chatty trigger, so a
+// delta flood is the path that must stay cmd-exempt AND reach chatty.
+// Full baselines (announce_routes, v3 kind="full") are also cmd-exempt
+// but are bounded by the announceLimiter route bucket, not chatty.
 //
 // This is a logic-level test (we don't spin a real read loop or
 // TCP socket) — it pins the predicate that gates "would the cmd
 // limiter even be consulted?" against the design contract
-// "quarantine, not TCP close, owns the bulk-announce misbehaviour".
+// "quarantine, not TCP close, owns the bulk-delta misbehaviour".
 func TestCmdLimiterExemption_InboundBulkFloodReachesChattyThreshold(t *testing.T) {
 	t.Parallel()
 
-	line := `{"type":"announce_routes","routes":[]}`
+	line := `{"type":"routes_update","routes":[]}`
 	const floodFrames = chattyAnnounceThreshold + 100 // headroom past the trigger
 
 	closed := 0
@@ -801,7 +818,7 @@ func TestCmdLimiterExemption_InboundBulkFloodReachesChattyThreshold(t *testing.T
 	}
 
 	if closed > 0 {
-		t.Fatalf("bulk announce_routes flood would be closed by cmd limiter %d/%d times; bulk exemption broken — inbound chatty peer never reaches chatty_routes quarantine",
+		t.Fatalf("bulk routes_update delta flood would be closed by cmd limiter %d/%d times; bulk exemption broken — inbound chatty peer never reaches chatty_routes quarantine",
 			closed, floodFrames)
 	}
 }

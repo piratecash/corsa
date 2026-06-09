@@ -108,8 +108,14 @@ func isAnnouncePlaneFrameType(frameType string) bool {
 // would silently truncate that burst. Their per-peer rate is
 // instead governed by:
 //
-//   - announceLimiter (route-count budget: 10k burst, 200/s refill)
-//   - chatty_routes quarantine trigger (50 frames/s × 10s = 500)
+//   - announceLimiter (route-count budget: 10k burst, 200/s refill) —
+//     applies to ALL bulk frames, baselines included.
+//   - chatty_routes quarantine trigger (50 frames/s × 10s = 500) —
+//     applies to DELTA frames only (routes_update, v3 kind="delta").
+//     Full baselines (announce_routes, v3 kind="full") are excluded:
+//     a baseline is idempotent and bounded by the route bucket, while
+//     the chatty trigger targets the cascading work of delta churn.
+//     See handleAnnounceRoutes / recordInboundAnnounceAndMaybeArm.
 //
 // IMPORTANT: this predicate DOES NOT include request_resync or
 // route_poison_v1. Those are single-message control frames — a
@@ -1638,15 +1644,18 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 		log.Warn().Str("sender", string(senderIdentity)).Msg("announce_routes_malformed_sender")
 		return
 	}
-	// chatty_routes quarantine trigger: every well-formed inbound
-	// announce-plane frame counts toward the per-peer chatty
-	// sliding window (see docs/refactoring/route-withdrawal-grace-period.md
-	// trigger table — "Inbound chatty routes | 50 announce/sec | 10s").
-	// Position is BEFORE the route-based rate limiter because the
-	// trigger is FRAME-rate, not entry-rate, and we want to count
-	// even tiny single-entry frames that pass the route-based
-	// budget. Idempotent on already-quarantined peers (re-arms).
-	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
+	// chatty_routes accounting is DELIBERATELY skipped: announce_routes
+	// is a full BASELINE (the v2 delta path is routes_update), and the
+	// chatty trigger targets DELTA churn, not baselines. The rationale
+	// is that a delta mutates state and cascades work (UpdateRoute →
+	// TriggerUpdate → an announce cycle → mesh-wide propagation), so a
+	// delta flood is what "chattiness" means and what must be
+	// quarantined. A full baseline, by contrast, is idempotent — re-
+	// applying the same table is near-free — and a baseline flood is
+	// already bounded by the announceLimiter route bucket below
+	// (200 routes/s). Counting baselines toward chatty only made the
+	// quarantine fire on recovery/large full-syncs. (request_resync, a
+	// control frame, is likewise excluded — see handleRequestResync.)
 	// Phase 4 13.7: per-peer announce-plane rate limit. A flood from
 	// any single peer (legitimate-but-buggy or hostile) is throttled
 	// here BEFORE applyAnnounceEntries does the per-entry work, so a
@@ -1698,9 +1707,12 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 		log.Warn().Str("sender", string(senderIdentity)).Msg("routes_update_malformed_sender")
 		return
 	}
-	// chatty_routes quarantine trigger — see handleAnnounceRoutes
-	// for rationale. v2 deltas count toward the same per-peer
-	// frame-rate budget as legacy / v3 frames.
+	// chatty_routes quarantine trigger. routes_update is the v2 DELTA
+	// path, so it DOES count: delta churn (each delta cascades an
+	// announce cycle + mesh-wide propagation) is exactly the pattern
+	// the trigger targets. Full baselines (announce_routes, v3
+	// kind="full") and the request_resync control frame are excluded —
+	// see handleAnnounceRoutes for the baseline-vs-delta rationale.
 	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
 	// Phase 4 13.7: shared per-peer announce rate limit. v2 delta
 	// frames count against the same budget as legacy / v3 frames so
@@ -1796,15 +1808,18 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 		log.Warn().Str("sender", string(senderIdentity)).Msg("request_resync_malformed_sender")
 		return
 	}
-	// Chatty-routes accounting — same position as handleAnnounceRoutes /
-	// handleRoutesUpdate / handleRouteAnnounceV3 (before every gate, so
-	// the signal counts every announce-plane frame the peer puts on
-	// the wire). request_resync did NOT pass through this accounting
-	// before: the dispatcher routes it straight here, so a peer
-	// hammering request_resync was invisible to the chatty_routes
-	// quarantine trigger while every other announce-plane frame type
-	// was counted.
-	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
+	// chatty_routes accounting is DELIBERATELY skipped for
+	// request_resync — and this is now consistent with the bulk-frame
+	// contract (isAnnouncePlaneBulkFrameType): request_resync is a
+	// CONTROL frame, not bulk, so the cmd limiter (30/s → TCP close)
+	// plus acceptRequestResyncDebounced own a request_resync flood,
+	// NOT the chatty trigger. The earlier code counted it here anyway,
+	// which both contradicted that contract and created a self-
+	// reinforcing loop: once a peer was quarantined we dropped its
+	// announcements, it desynced, it sent request_resync, and that
+	// very recovery attempt re-armed the quarantine (escalating
+	// strikes up to the 30m cap). Excluding it is what lets a desynced
+	// hub actually recover.
 	// Route-quarantine gate (top-level) — symmetric with
 	// handleRoutesUpdate / handleRouteAnnounceV3. request_resync
 	// from a quarantined peer must be silently dropped: handling
@@ -1935,10 +1950,17 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 		log.Warn().Str("sender", string(senderIdentity)).Msg("route_announce_v3_malformed_sender")
 		return
 	}
-	// chatty_routes quarantine trigger — see handleAnnounceRoutes
-	// for rationale. v3 frames count toward the same per-peer
-	// frame-rate budget.
-	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
+	// chatty_routes quarantine trigger — only v3 kind="delta" counts.
+	// kind="full" is a self-contained BASELINE and is excluded for the
+	// same reason as legacy announce_routes: the trigger targets delta
+	// churn (which cascades announce cycles + propagation), while a
+	// baseline is idempotent and bounded by the announceLimiter route
+	// bucket below. See handleAnnounceRoutes for the full rationale.
+	// (request_resync, a control frame, is likewise excluded — see
+	// handleRequestResync.)
+	if frame.Kind == protocol.RouteAnnounceV3KindDelta {
+		s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
+	}
 	// Phase 4 13.7: shared per-peer announce rate limit across all
 	// announce-plane wire generations (legacy v1, v2 delta, v3
 	// compact). Counts BEFORE epoch + baseline checks below so a

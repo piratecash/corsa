@@ -200,11 +200,13 @@ func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
 	sendChD := installRelayCapableSession(t, svc, domain.PeerAddress("addr-D"), idPeerD)
 	sendChC := installRelayCapableSession(t, svc, domain.PeerAddress("addr-C"), idPeerC)
 
-	// Arm route quarantine on D — failover MUST skip it as a transit
-	// next-hop (target identity is X, not D, so hops > 1 and the
-	// gate engages).
+	// Arm route quarantine on D for a transit-blocking reason —
+	// failover MUST skip it as a transit next-hop (target identity is
+	// X, not D, so hops > 1 and the gate engages). disconnect_storm is
+	// what blocks transit; chatty_routes deliberately would not (see
+	// isPeerTransitQuarantinedLocked).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(idPeerD, "test", time.Now())
+	svc.armRouteQuarantineLocked(idPeerD, quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	line := makeRelayFrameLine(t, "msg-failover-q", idTargetX)
