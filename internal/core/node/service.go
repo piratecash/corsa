@@ -828,6 +828,14 @@ type outboundDelivery struct {
 type banEntry struct {
 	Score       int
 	Blacklisted time.Time
+
+	// LastScored is the instant of the most recent addBanScore hit.
+	// Sub-threshold entries (Score > 0, no blacklist yet) carry no other
+	// timestamp, so without it they could never be aged out and s.bans
+	// grew monotonically with every misbehaving transient IP. Used by
+	// purgeExpiredBansLocked (ban_purge.go) to drop entries idle past
+	// banScoreIdleTTL.
+	LastScored time.Time
 }
 
 const (
@@ -4448,11 +4456,13 @@ func (s *Service) addBanScore(id domain.ConnID, delta int) {
 	log.Trace().Str("site", "addBanScore").Str("phase", "lock_wait").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
 	s.ipStateMu.Lock()
 	log.Trace().Str("site", "addBanScore").Str("phase", "lock_held").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
+	now := time.Now().UTC()
 	entry := s.bans[ip]
 	previouslyBlacklisted := !entry.Blacklisted.IsZero()
 	entry.Score += delta
+	entry.LastScored = now
 	if entry.Score >= banThreshold {
-		entry.Blacklisted = time.Now().UTC().Add(banDuration)
+		entry.Blacklisted = now.Add(banDuration)
 	}
 	s.bans[ip] = entry
 	justBlacklisted := !previouslyBlacklisted && !entry.Blacklisted.IsZero()

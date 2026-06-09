@@ -68,6 +68,14 @@ type setupFailureEntry struct {
 	// additional failure inside the cooldown re-anchors this to
 	// now + setupFailureCooldown.
 	CooldownUntil time.Time
+
+	// LastFailure is the instant of the most recent recordSetupFailureLocked
+	// hit. Entries were previously removed ONLY by clearSetupFailuresLocked
+	// (successful setup), so an address that never recovered — typical for
+	// peers that vanished from the network — pinned its entry in
+	// s.setupFailures forever. purgeStaleSetupFailuresLocked (ban_purge.go)
+	// uses this to age out entries idle past setupFailureIdleTTL.
+	LastFailure time.Time
 }
 
 // recordSetupFailureLocked increments the per-address counter and arms
@@ -84,6 +92,7 @@ func (s *Service) recordSetupFailureLocked(addr domain.PeerAddress, now time.Tim
 		s.setupFailures[addr] = entry
 	}
 	entry.Consecutive++
+	entry.LastFailure = now
 	if entry.Consecutive >= setupFailureBanThreshold {
 		entry.CooldownUntil = now.Add(setupFailureCooldown)
 	}

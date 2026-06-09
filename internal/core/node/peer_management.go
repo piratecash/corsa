@@ -80,6 +80,14 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			// nodes (every observed peer leaves a residual record).
 			// See routing_route_quarantine.go.
 			s.purgeRouteQuarantineState()
+			// Same hygiene for the ban/blacklist domain: expired
+			// local IP bans (s.bans), IP-wide bans (bannedIPSet),
+			// remote IP bans (remoteBannedIPs) and stale setup-
+			// failure counters previously shrank only lazily — on
+			// reconnect of the same IP or recovery of the same
+			// peer — so every transient offender left a permanent
+			// residue. See ban_purge.go.
+			s.purgeExpiredBanState()
 			s.retryRelayDeliveries()
 			s.relayLimiter.cleanup(5 * time.Minute)
 			if s.announceLimiter != nil {
