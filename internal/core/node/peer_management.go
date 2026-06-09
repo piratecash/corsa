@@ -720,6 +720,20 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.VersionLockout.IsActive() {
 			entry.VersionLockout = pm.VersionLockout
 		}
+		// Preserve a still-active per-peer remote ban from persistedMeta
+		// (set by recordRemoteBanLocked when a peer-banned notice scoped to
+		// this address arrives). Without this copy the ban would be
+		// in-memory only — buildPeerEntriesLocked rebuilds each entry from
+		// scratch, so the next flush would rewrite peers.json without the
+		// window and a restart would forget the ban, resuming the retry
+		// storm the notice was meant to end. Expired windows are NOT copied
+		// (so stale rows do not accumulate); clearRemoteBanLocked's nil-out
+		// on successful-handshake recovery is reflected by the same absence.
+		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.RemoteBannedUntil != nil && pm.RemoteBannedUntil.After(now) {
+			t := *pm.RemoteBannedUntil
+			entry.RemoteBannedUntil = &t
+			entry.RemoteBanReason = pm.RemoteBanReason
+		}
 		// Fall back to runtime classification only when persisted Network
 		// is absent (new peer or pre-Network peers.json). Persisted value
 		// takes priority — it may have been set by PeerProvider or restored
@@ -1271,23 +1285,29 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	// a stale suppression indistinguishable from the ebus storm the ban
 	// window was introduced to end.
 	//
-	// The clear is symmetric with record. handlePeerBannedNotice writes
-	// into exactly one table per notice (scope driven by reason), so
-	// recovery touches exactly two tables:
+	// The clear is symmetric with record. A blacklisted notice may touch
+	// the per-peer row (offender), the volatile remoteIPBanOffenders set,
+	// and — once enough distinct live offenders accumulate — the IP-wide
+	// row; peer-ban touches only the per-peer row. Recovery only needs to
+	// unwind the two PERSISTED tables (the offender set is volatile and
+	// dropped as a side effect of clearRemoteIPBanLocked):
 	//   (a) clearRemoteBanLocked(peerAddress) drops THIS peer's own
 	//       per-peer record unconditionally — the handshake itself is
 	//       direct proof this address accepts us again, regardless of
 	//       which reason wrote the record;
 	//   (b) clearRemoteIPBanLocked(dialedIP) drops the IP-wide entry so
 	//       every sibling behind that egress IP is dialable again.
-	// No mirror walk is needed: reason=blacklisted writes ONLY the
-	// IP-wide entry, so there is no per-peer blacklisted row on other
-	// siblings to keep in sync. Per-peer rows with reason=peer-ban on
-	// other siblings are standalone responder decisions on specific
-	// addresses and must stay untouched — a handshake with a sibling
-	// is not proof the responder has forgiven them. dialedIP is the
-	// canonical form used by recordRemoteIPBanLocked, so (b) hashes
-	// into the same map key as the original write.
+	// No mirror walk is needed: a reason=blacklisted notice now writes a
+	// per-peer row for the OFFENDER that carried it (cleared by (a)
+	// above, unconditionally) plus the IP-wide escalation counter — it
+	// does NOT write per-peer rows on OTHER siblings, so there is none to
+	// keep in sync. Per-peer rows with reason=peer-ban on other siblings
+	// are standalone responder decisions on specific addresses and must
+	// stay untouched — a handshake with a sibling is not proof the
+	// responder has forgiven them. dialedIP is the canonical form used by
+	// recordRemoteIPBanLocked, so (b) hashes into the same map key as the
+	// original write and also drops the pre-escalation offender set
+	// (clearRemoteIPBanLocked).
 	// Cross-domain write: peer-domain (persistedMeta via clearRemoteBan)
 	// + ipState-domain (remoteBannedIPs via clearRemoteIPBanLocked).
 	// Canonical lock order per docs/locking.md: s.peerMu → s.ipStateMu.
@@ -1295,9 +1315,28 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
-	remoteBanCleared := s.clearRemoteBanLocked(peerAddress)
+	// Resolve a generated fallback dial address to its canonical primary
+	// before clearing the per-peer ban: the ban was recorded against the
+	// primary (handlePeerBannedNotice resolves the same way), so clearing
+	// the raw fallback — which has no persistedMeta row — would be a no-op
+	// and leave a stale primary RemoteBannedUntil that re-suppresses the
+	// peer after this session closes. Symmetric with the record side.
+	canonical := s.resolveHealthAddress(peerAddress)
+	remoteBanCleared := s.clearRemoteBanLocked(canonical)
 	s.ipStateMu.Lock()
+	// Clear the IP-wide scope under BOTH keys: the resolved TCP IP
+	// (dialedIP) and the key the notice was actually recorded under
+	// (remoteIPBanKey of the canonical address). For an IP-literal peer
+	// these coincide; for a DNS / manual peer the ban is keyed on the
+	// hostname, which dialedIP (a numeric IP) would never match — so
+	// without the second clear a hostname-keyed IP-wide ban (and its
+	// volatile offender bucket) would survive a successful handshake.
 	remoteIPBanCleared := s.clearRemoteIPBanLocked(dialedIP)
+	if key, ok := remoteIPBanKey(canonical); ok && key != dialedIP {
+		if s.clearRemoteIPBanLocked(key) {
+			remoteIPBanCleared = true
+		}
+	}
 	s.ipStateMu.Unlock()
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
@@ -4937,21 +4976,39 @@ func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress)
 	primary := addresses[0]
 	var lastErr error
 	for _, address := range addresses {
-		session, err := s.openPeerSessionForCM(ctx, address)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		// Register fallback→primary mapping so that resolveHealthAddress
-		// collapses health updates onto one entry regardless of which port
-		// the TCP connection used.
+		// Register the fallback→primary mapping BEFORE the handshake, not
+		// after success. A connection_notice{peer-banned} can arrive
+		// DURING the handshake (runPeerSession's read loop), and its
+		// handler resolves the notice address to its canonical primary via
+		// resolveHealthAddress (which reads dialOrigin). Without the
+		// pre-registration, a blacklisted/peer-ban notice that lands on a
+		// generated fallback variant would record against an address with
+		// no persistedMeta row — recordRemoteBanLocked ignores unknown
+		// addresses — and the per-peer remote-ban window would be lost
+		// (the old "first notice = whole IP" behaviour used to mask this;
+		// the scoped contract no longer does). The mapping also collapses
+		// health/metering onto the single canonical entry regardless of
+		// which port the TCP connection used.
 		if address != primary {
-			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 			s.peerMu.Lock()
-			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 			s.dialOrigin[address] = primary
 			s.peerMu.Unlock()
-			log.Trace().Str("site", "dialForCM_registerOrigin").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+		}
+		session, err := s.openPeerSessionForCM(ctx, address)
+		if err != nil {
+			// Drop the speculative alias if this fallback never produced a
+			// live session, so a failed dial does not leave a stale
+			// fallback→primary mapping behind. Guarded on s.sessions so a
+			// concurrently-established session (same key) is never orphaned.
+			if address != primary {
+				s.peerMu.Lock()
+				if s.sessions[address] == nil {
+					delete(s.dialOrigin, address)
+				}
+				s.peerMu.Unlock()
+			}
+			lastErr = err
+			continue
 		}
 		return DialResult{
 			Session:          session,

@@ -521,10 +521,12 @@ func (s *Service) observedIPHistoryForPeer(peerAddress domain.PeerAddress) []dom
 // governs the side effect:
 //   - ErrCodePeerBanned: record the remote ban window — scope is driven
 //     by details.Reason (peer-ban → this PeerAddress only; blacklisted
-//     → every sibling PeerAddress behind the same egress IP). The dial
-//     gate then suppresses the appropriate addresses until the window
-//     elapses, ending the cm_session_setup_failed cascade that would
-//     otherwise feed the ebus storm.
+//     → this PeerAddress per-peer PLUS an IP-wide escalation counter
+//     that only promotes to a sibling-wide ban after enough distinct
+//     live offenders behind the IP — see handlePeerBannedNotice). The
+//     dial gate then suppresses the appropriate addresses until the
+//     window elapses, ending the cm_session_setup_failed cascade that
+//     would otherwise feed the ebus storm.
 //
 // peerAddress identifies the dial target — required for peer-banned so
 // the handler can attach the per-peer record AND extract the server IP
@@ -539,29 +541,34 @@ func (s *Service) handleConnectionNotice(peerAddress domain.PeerAddress, frame p
 }
 
 // handlePeerBannedNotice records the remote ban window communicated by
-// a connection_notice{code=peer-banned} frame. Scope is strictly driven
-// by details.Reason, matching the wire contract in
-// docs/protocol/errors.md: every notice lands in exactly one of two
-// tables, never both. Keeping the scope single-source means the dial
-// gate's read-side helpers stay authoritative and the recovery path on
-// successful handshake has nothing to keep in sync across tables.
+// a connection_notice{code=peer-banned} frame. Scope is driven by
+// details.Reason, matching the wire contract in docs/protocol/errors.md:
+// peer-ban / self-identity write a per-peer record; blacklisted writes a
+// per-peer record for the offender AND feeds the IP-wide escalation
+// counter, promoting to an IP-wide record only after enough distinct
+// live offenders behind the egress accumulate. Only the per-peer and
+// IP-wide records persist (the offender counter is volatile), so the
+// recovery path on successful handshake has at most those two scopes to
+// reconcile.
 //
 //   - reason=peer-ban     → per-peer record on peerEntry.RemoteBannedUntil.
 //     The dial gate suppresses this PeerAddress only. Applies only to
 //     peers we already know about; unknown addresses are ignored so a
 //     hostile peer cannot grow our state by inventing names.
 //
-//   - reason=blacklisted  → IP-wide record on Service.remoteBannedIPs,
-//     keyed on the canonical host part of peerAddress. The dial gate
-//     suppresses every sibling PeerAddress behind that egress IP — NAT
-//     gateway, VPN exit, Tor exit, multi-homed host — because the
-//     responder's ban applies to the whole IP, not just the single
-//     peer that happened to carry the notice. Recorded regardless of
-//     whether the peer is known so a later discovery of a sibling peer
-//     on the same IP still hits the gate. No per-peer row is written —
-//     isPeerRemoteBannedLocked already consults the IP-wide table on
-//     read, so the sender is suppressed through the IP-wide gate
-//     without duplicating state into the per-peer map.
+//   - reason=blacklisted  → per-peer record on the offender PLUS an
+//     escalation counter toward an IP-wide record on
+//     Service.remoteBannedIPs (keyed on the canonical host of
+//     peerAddress). A SINGLE blacklisted notice suppresses only the
+//     offending peer (per-peer row), exactly like reason=peer-ban —
+//     it is not enough evidence to undial every innocent sibling
+//     sharing the egress (NAT / VPN / Tor exit / multi-homed host).
+//     Only once ipWideRemoteBanMinOffenders DISTINCT peers behind the
+//     same IP have independently sent blacklisted does the IP-wide gate
+//     engage, suppressing every sibling — including peers discovered
+//     later via peer exchange. This trades the old "first notice = whole
+//     IP" blast radius for a "the whole egress is hostile" signal; see
+//     noteRemoteIPOffenderLocked.
 //
 // Degenerate address form (peerAddress without a host:port split) is
 // the one exception: reason=blacklisted falls back to the per-peer
@@ -586,12 +593,12 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 	reason := details.Reason
 	now := time.Now().UTC()
 
-	ip, _, hasIP := splitHostPort(string(peerAddress))
-	if hasIP {
-		if canon := canonicalIPFromHost(ip); canon != "" {
-			ip = canon
-		}
-	}
+	// Key the IP-wide scope the same way recovery clears it
+	// (remoteIPBanKey): IP-literal hosts collapse to canonical form,
+	// hostnames are kept verbatim. hasIP is "address has host:port", not
+	// "host is a numeric IP" — a hostname still selects the IP-wide
+	// escalation branch, keyed on the hostname.
+	ip, hasIP := remoteIPBanKey(peerAddress)
 
 	recorded := false
 	// Cross-domain: peer-domain (persistedMeta via recordRemoteBanLocked)
@@ -602,15 +609,44 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	// Resolve a generated fallback dial address to its canonical primary
+	// (the address that owns the persistedMeta row). A connection_notice
+	// can land on a fallback variant during the handshake; recording the
+	// per-peer ban AND counting the offender against the canonical address
+	// keeps the ban window from being lost (recordRemoteBanLocked ignores
+	// unknown addresses) and stops multiple dial variants of ONE peer from
+	// inflating the distinct-offender count toward IP-wide escalation. For
+	// a known primary or an address with no alias, resolveHealthAddress is
+	// the identity. IP extraction stays on the raw address (a fallback is a
+	// port variant of the same host, so the IP key is unchanged).
+	resolved := s.resolveHealthAddress(peerAddress)
 	switch {
 	case reason == protocol.PeerBannedReasonBlacklisted && hasIP:
-		// Pure ipState write: nest ipStateMu inside the already-held
-		// s.peerMu (canonical peerMu → ipStateMu order) so any
-		// concurrent peer-domain writer still sees a consistent
-		// snapshot of the blacklisted event ordering.
-		s.ipStateMu.Lock()
-		if !s.recordRemoteIPBanLocked(ip, reason, until, now).IsZero() {
+		// Always suppress the specific offender immediately via a
+		// per-peer record (known peers only — recordRemoteBanLocked
+		// ignores unknown addresses to bound state growth).
+		if !s.recordRemoteBanLocked(resolved, reason, until, now).IsZero() {
 			recorded = true
+		}
+		// Escalate to the IP-WIDE gate — which ALSO suppresses innocent
+		// siblings behind this egress (NAT / VPN / Tor exit) — only once
+		// ipWideRemoteBanMinOffenders DISTINCT peers behind the IP have
+		// banned us. A lone offender stays per-peer-only so a legitimate
+		// neighbour sharing an egress with one hostile node is not
+		// collaterally undiallable. Pure ipState write: nest ipStateMu
+		// inside the already-held s.peerMu (canonical peerMu → ipStateMu
+		// order).
+		s.ipStateMu.Lock()
+		// noteRemoteIPOffenderLocked returns the IP-wide horizon to record
+		// (the instant the live-offender count would drop below the
+		// escalation threshold), or zero when escalation is not warranted.
+		// Recording THAT horizon — rather than this notice's own until —
+		// keeps the IP-wide ban from outliving the "enough live offenders"
+		// condition that justified it.
+		if horizon := s.noteRemoteIPOffenderLocked(ip, resolved, until, now); !horizon.IsZero() {
+			if !s.recordRemoteIPBanLocked(ip, reason, horizon, now).IsZero() {
+				recorded = true
+			}
 		}
 		s.ipStateMu.Unlock()
 	case reason == protocol.PeerBannedReasonBlacklisted && !hasIP:
@@ -621,13 +657,13 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 			Str("peer", string(peerAddress)).
 			Str("reason", string(reason)).
 			Msg("peer_banned_notice_blacklisted_no_ip_fallback_per_peer")
-		if !s.recordRemoteBanLocked(peerAddress, reason, until, now).IsZero() {
+		if !s.recordRemoteBanLocked(resolved, reason, until, now).IsZero() {
 			recorded = true
 		}
 	default:
 		// reason=peer-ban (and any forward-compatible reason that has
 		// per-peer blast radius): write only the per-peer row.
-		if !s.recordRemoteBanLocked(peerAddress, reason, until, now).IsZero() {
+		if !s.recordRemoteBanLocked(resolved, reason, until, now).IsZero() {
 			recorded = true
 		}
 	}
@@ -635,9 +671,15 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 	log.Trace().Str("site", "handlePeerBannedNotice").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
 	if !recorded {
-		// Nothing recorded — reason=peer-ban on an unknown peer, or
-		// reason=blacklisted with no IP to key on. recordRemoteBanLocked
-		// already logged the unknown-peer case.
+		// No PERSISTED mutation — reason=peer-ban on an unknown peer,
+		// reason=blacklisted with no IP to key on, or a blacklisted
+		// notice for an unknown peer that is still below the IP-wide
+		// escalation threshold. recordRemoteBanLocked already logged the
+		// unknown-peer case. Note `recorded` tracks only persisted state:
+		// a sub-threshold blacklisted notice may still have updated the
+		// VOLATILE remoteIPBanOffenders set (it counts toward a future
+		// escalation), and that correctly needs no flushPeerState because
+		// the offender set is never persisted.
 		return
 	}
 	// Flush immediately so the remote-ban gate survives a crash and the

@@ -364,8 +364,30 @@ type Service struct {
 	// of host:port). Persisted to peers.json (remote_banned_ips) so the
 	// IP-wide gate survives restart; without persistence a crash would
 	// reintroduce the retry storm the notice was supposed to end.
-	// Protected by s.peerMu.
+	// Protected by s.ipStateMu (the IP/advertise domain), NOT s.peerMu —
+	// see recordRemoteIPBanLocked / isRemoteIPBannedLocked, whose
+	// contracts require ipStateMu, and the canonical peerMu → ipStateMu
+	// lock order in docs/locking.md. Reads that also touch peer-domain
+	// state (isPeerRemoteBannedLocked) hold BOTH in that order.
 	remoteBannedIPs map[string]remoteIPBanEntry
+
+	// remoteIPBanOffenders tracks, per egress IP, the DISTINCT peer
+	// addresses that have delivered a blacklisted-reason peer-banned
+	// notice, each with the effective expiry of THAT notice. The IP-wide
+	// entry in remoteBannedIPs is escalated only once
+	// ipWideRemoteBanMinOffenders distinct offenders whose windows have
+	// NOT elapsed agree — a single offender records only a per-peer ban,
+	// so an innocent sibling sharing a NAT/VPN/Tor exit is not
+	// collaterally suppressed. Storing each offender's expiry (rather
+	// than a bare set) is what prevents two long-stale notices from
+	// silently combining with a third notice days later to escalate to
+	// an IP-wide ban: expired offenders are pruned before counting.
+	// Pre-escalation, in-memory only (not persisted): the count is a
+	// transient escalation signal, and a restored active IP-wide ban
+	// already carries its own Until. Bounded by ipWideRemoteBanMaxOffenders
+	// per IP and ipWideRemoteBanMaxTrackedIPs overall; cleared alongside
+	// the IP-wide entry. Guarded by s.ipStateMu.
+	remoteIPBanOffenders map[string]map[domain.PeerAddress]time.Time
 
 	// peerActivityNanos is an atomic per-peer tracker that lives outside
 	// s.peerMu so markPeerWrite/markPeerRead can skip s.peerMu.Lock() entirely
@@ -1179,6 +1201,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		lastResyncAccepted:      make(map[domain.PeerIdentity]time.Time),
 		bannedIPSet:             make(map[string]domain.BannedIPEntry),
 		remoteBannedIPs:         make(map[string]remoteIPBanEntry),
+		remoteIPBanOffenders:    make(map[string]map[domain.PeerAddress]time.Time),
 		setupFailures:           make(map[domain.PeerAddress]*setupFailureEntry),
 		aggregateStatus:         domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                    make(chan struct{}),

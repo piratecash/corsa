@@ -140,7 +140,7 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	//      ticker (which iterates HealthSnapshot for Questionable
 	//      pairs). The documented verify-before-trust contract
 	//      (docs/routing.md "Capability gating") reduces to "the
-	//      pair waits in Questionable for the next 15s probe tick"
+	//      pair waits in Questionable for the next 30s probe tick"
 	//      once the entry exists.
 	//
 	// PR 11.21 P2#1 gate: liveness reconfirmation runs only when
@@ -181,7 +181,7 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 			// score bonus for up to one passive idle window
 			// (60s) without any probe round-trip. Starting at
 			// Questionable means the probe loop picks the pair
-			// up on its next 15 s tick, sends a probe, and
+			// up on its next 30 s tick, sends a probe, and
 			// either confirms (→ Good) or escalates failures
 			// (→ Bad). The Questionable ranking penalty
 			// (scoreHealthQPenalty) is intentional: it ensures an

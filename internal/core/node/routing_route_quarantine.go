@@ -127,7 +127,30 @@ const (
 	// would allow 200 ROUTES/sec = much higher entry budget) yet
 	// still arm chatty_routes here. That's by design — many small
 	// delta frames are the "chatty" pattern the doc targets.
+	//
+	// This 500 is the BASE/floor of an adaptive threshold (see
+	// chattyThresholdLocked): the effective trigger grows with the
+	// local node's relay-peer degree, because a high-degree hub sits
+	// in a busier part of the mesh where each neighbour legitimately
+	// forwards more route-delta churn during convergence. The floor
+	// applies to a leaf node with no relay peers.
 	chattyAnnounceThreshold = 500
+
+	// chattyAnnounceThresholdPerRelayPeer is the per-relay-peer
+	// headroom added to the base threshold. A node with N relay-capable
+	// direct peers tolerates base + N*this delta frames per window from
+	// any single sender before arming chatty_routes. 25/peer keeps a
+	// small leaf strict while giving a 40-peer hub ~1500 of slack on
+	// top of the base — comfortably above legitimate convergence churn,
+	// still far below a real re-announce-every-few-ms flood.
+	chattyAnnounceThresholdPerRelayPeer = 25
+
+	// chattyAnnounceThresholdCap is the hard ceiling on the effective
+	// threshold AND on the per-peer history slice length. It bounds the
+	// worst-case per-peer memory (24-byte time.Time × 5000 = ~120 KB)
+	// regardless of relay degree, and stops a pathological degree count
+	// from disabling the trigger entirely.
+	chattyAnnounceThresholdCap = 5000
 
 	// chattyReArmDebounce throttles the chatty_routes re-arm path
 	// so a sustained flood does NOT bump Strikes / extend Until /
@@ -548,9 +571,30 @@ func (s *Service) maybeArmRouteQuarantineOnCloseLocked(peer domain.PeerIdentity,
 	}
 }
 
+// chattyThresholdLocked returns the EFFECTIVE chatty_routes trigger
+// for the current node: the base floor (chattyAnnounceThreshold) plus
+// per-relay-peer headroom, clamped to chattyAnnounceThresholdCap.
+//
+// Adaptive rationale: the trigger is per-SENDER (delta frames from one
+// peer in the window), but the legitimate per-sender delta rate scales
+// with how busy the local mesh neighbourhood is — a high relay degree
+// means more convergence churn flowing through each neighbour. A fixed
+// 500 that is safe for a leaf can mute a legitimate neighbour of a
+// 1000-node hub during a convergence burst, so the threshold grows with
+// len(identityRelaySessions) (distinct relay-capable direct peers).
+//
+// Caller must hold s.peerMu (reads identityRelaySessions, peer-domain).
+func (s *Service) chattyThresholdLocked() int {
+	eff := chattyAnnounceThreshold + chattyAnnounceThresholdPerRelayPeer*len(s.identityRelaySessions)
+	if eff > chattyAnnounceThresholdCap {
+		return chattyAnnounceThresholdCap
+	}
+	return eff
+}
+
 // recordPeerAnnounceLocked appends an inbound-announce timestamp
 // to the peer's sliding-window history, prunes ageouts from the
-// front, and clamps the slice length to chattyAnnounceThreshold.
+// front, and clamps the slice length to chattyAnnounceThresholdCap.
 // Caller must hold s.peerMu.
 //
 // Bounded history (chattyAnnounceThreshold cap):
@@ -565,13 +609,15 @@ func (s *Service) maybeArmRouteQuarantineOnCloseLocked(peer domain.PeerIdentity,
 //	peerMu. Once we have threshold in-window timestamps, additional
 //	timestamps don't change the boolean "exceeds threshold"
 //	decision; the oldest can safely be dropped. Capping at
-//	threshold turns the steady-state cost into O(1) per frame
-//	(front-trim 0, append, copy-down by 1).
+//	chattyAnnounceThresholdCap turns the steady-state cost into O(1)
+//	per frame (front-trim 0, append, copy-down by 1). The cap is the
+//	fixed ceiling, not the adaptive effective threshold, so the bound
+//	holds regardless of relay degree (see chattyThresholdLocked).
 //
-//	The 24-byte time.Time × 500 = ~12 KB worst case per peer is a
-//	predictable memory footprint, and the ring-buffer-like
-//	cap-eviction reuses the underlying array (copy then re-slice)
-//	to keep allocations off the hot path.
+//	The 24-byte time.Time × chattyAnnounceThresholdCap (5000) = ~120 KB
+//	worst case per peer is a predictable memory footprint, and the
+//	ring-buffer-like cap-eviction reuses the underlying array (copy
+//	then re-slice) to keep allocations off the hot path.
 //
 // Pruning order:
 //
@@ -610,27 +656,33 @@ func (s *Service) recordPeerAnnounceLocked(peer domain.PeerIdentity, now time.Ti
 	// Append the new event.
 	hist = append(hist, now)
 
-	// Bounded-cap eviction: keep only the most recent threshold
-	// entries. copy-down preserves the underlying array (no
-	// per-frame allocation) and re-slices the length.
-	if len(hist) > chattyAnnounceThreshold {
-		excess := len(hist) - chattyAnnounceThreshold
+	// Bounded-cap eviction: keep only the most recent
+	// chattyAnnounceThresholdCap entries. The cap is the fixed CEILING
+	// (not the adaptive effective threshold) so the slice length — and
+	// thus per-peer memory — stays bounded regardless of relay degree,
+	// while still holding enough samples for the largest effective
+	// threshold chattyThresholdLocked can return. copy-down preserves
+	// the underlying array (no per-frame allocation) and re-slices.
+	if len(hist) > chattyAnnounceThresholdCap {
+		excess := len(hist) - chattyAnnounceThresholdCap
 		copy(hist, hist[excess:])
-		hist = hist[:chattyAnnounceThreshold]
+		hist = hist[:chattyAnnounceThresholdCap]
 	}
 
 	s.peerAnnounceHistory[peer] = hist
 }
 
 // announceRateExceedsLocked returns true when the per-peer sliding
-// window contains at least chattyAnnounceThreshold events. Caller
-// must hold s.peerMu.
+// window contains at least the EFFECTIVE chatty threshold
+// (chattyThresholdLocked) of in-window events. Caller must hold
+// s.peerMu.
 func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.Time) bool {
 	if peer == "" {
 		return false
 	}
+	threshold := s.chattyThresholdLocked()
 	hist := s.peerAnnounceHistory[peer]
-	if len(hist) < chattyAnnounceThreshold {
+	if len(hist) < threshold {
 		return false
 	}
 	cutoff := now.Add(-chattyAnnounceWindow)
@@ -640,7 +692,7 @@ func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.T
 			count++
 		}
 	}
-	return count >= chattyAnnounceThreshold
+	return count >= threshold
 }
 
 // recordInboundAnnounceAndMaybeArm is the receive-handler entry

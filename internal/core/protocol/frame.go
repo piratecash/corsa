@@ -367,10 +367,16 @@ const (
 // PeerBannedDetails is the schema for Frame.Details when
 // Code == ErrCodePeerBanned. Until is the wall-clock time the ban lifts,
 // encoded as UTC RFC3339 so the dialler can parse without ambiguity.
-// Reason is advisory diagnostics for logs/UI; the dialler must not gate
-// behaviour on it (the ban is honoured regardless). Fields are omitempty
-// so a minimal notice ({code:"peer-banned"}) is valid — a dialler that
-// receives no Until falls back to a conservative local default. A
+// Reason selects the dialler's persistence SCOPE: `peer-ban` /
+// `self-identity` suppress only this PeerAddress, while `blacklisted`
+// additionally counts toward an IP-wide escalation that, past a
+// distinct-offender threshold, suppresses every sibling behind the
+// egress (see node.handlePeerBannedNotice and docs/protocol/errors.md).
+// A dialler MUST still honour the ban regardless of reason — the reason
+// only widens or narrows the blast radius, it never makes the notice a
+// no-op. Fields are omitempty so a minimal notice ({code:"peer-banned"})
+// is valid — a dialler that receives no Until falls back to a
+// conservative local default. A
 // dialler-supplied remote Until is trusted verbatim: if the responder
 // declares a ten-year ban, the dialler records ten years. The peer has
 // authority over its own refusal window, and argument with that decision

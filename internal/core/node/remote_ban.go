@@ -1,6 +1,7 @@
 package node
 
 import (
+	"sort"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -18,22 +19,31 @@ import (
 // peerEntry.BannedUntil (which is "we banned them") because the two
 // directions have different reconciliation semantics.
 //
-// Each notice lands in exactly one table — never both — driven by
-// details.Reason. The read side (isPeerRemoteBannedLocked) consults
-// both tables on every dial, so a record in either one is enough to
-// suppress a candidate. Sender-side duplication would add no coverage
+// Notice handling is driven by details.Reason (see the per-reason
+// breakdown below): peer-ban writes a per-peer row; blacklisted writes a
+// per-peer row for the offender AND feeds the remoteIPBanOffenders
+// escalation set, promoting to an IP-wide row only after enough distinct
+// live offenders accumulate. The read side (isPeerRemoteBannedLocked)
+// consults both the per-peer and IP-wide tables on every dial, so a
+// record in either one is enough to suppress a candidate. Sender-side
+// duplication would add no coverage
 // and only create drift between the two tables.
 //
 //   reason=peer-ban     → per-peer record on peerEntry.RemoteBannedUntil
 //                          (applies only to known peers; unknown
 //                          addresses are ignored so a hostile peer
 //                          cannot grow our state by inventing names).
-//   reason=blacklisted  → IP-wide record on Service.remoteBannedIPs,
-//                          keyed on the canonical host of peerAddress
-//                          (applies to every sibling behind that
-//                          egress — NAT gateway, VPN exit, Tor exit,
-//                          multi-homed host — including peers
-//                          discovered later via peer exchange).
+//   reason=blacklisted  → per-peer record on the offender, PLUS an
+//                          escalation counter (noteRemoteIPOffenderLocked).
+//                          Only once ipWideRemoteBanMinOffenders DISTINCT
+//                          peers behind the same egress have sent
+//                          blacklisted does an IP-wide record land on
+//                          Service.remoteBannedIPs (keyed on the canonical
+//                          host of peerAddress) and suppress every sibling
+//                          behind that egress — NAT gateway, VPN exit, Tor
+//                          exit, multi-homed host — including peers
+//                          discovered later via peer exchange. A lone
+//                          blacklisted notice stays per-peer-only.
 //
 // The expiration is trusted as-is from the remote: if a peer refuses us
 // for ten years, we record ten years and leave it alone — there is no
@@ -54,6 +64,143 @@ import (
 type remoteIPBanEntry struct {
 	Until  time.Time
 	Reason string
+}
+
+const (
+	// ipWideRemoteBanMinOffenders is the number of DISTINCT peer
+	// addresses behind one egress IP that must independently deliver a
+	// connection_notice{peer-banned, reason=blacklisted} before we
+	// escalate from a per-peer remote ban to an IP-WIDE dial
+	// suppression.
+	//
+	// Rationale (blast-radius control): a single blacklisted notice
+	// proves only that ONE peer refuses us — but an IP-wide ban also
+	// suppresses every innocent sibling sharing that egress (NAT
+	// gateway, VPN exit, Tor exit, multi-homed host). Requiring several
+	// distinct peers behind the IP to agree is the "the whole egress is
+	// hostile" signal that justifies the wider blast radius; until then
+	// only the offending peer itself is suppressed (per-peer record).
+	ipWideRemoteBanMinOffenders = 3
+
+	// ipWideRemoteBanMaxOffenders caps the per-IP offender set so a peer
+	// rotating source addresses behind one egress cannot grow our state
+	// without bound. Well above the escalation threshold.
+	ipWideRemoteBanMaxOffenders = 16
+
+	// ipWideRemoteBanMaxTrackedIPs bounds the total number of egress IPs
+	// for which we keep a pre-escalation offender set. At the cap we
+	// stop tracking NEW IPs (they degrade to per-peer-only suppression,
+	// the safe direction) so the map cannot grow without bound over a
+	// long uptime.
+	ipWideRemoteBanMaxTrackedIPs = 4096
+)
+
+// noteRemoteIPOffenderLocked records that `offender` (a distinct peer
+// address behind egress `ip`) delivered a blacklisted notice whose
+// effective window ends at `until`, and returns the IP-WIDE ban horizon
+// the caller should record — or the zero time when escalation is not
+// (yet) warranted.
+//
+// Escalation requires at least ipWideRemoteBanMinOffenders offenders
+// behind the IP whose windows have NOT elapsed at `now`. When that holds
+// the returned horizon is the ipWideRemoteBanMinOffenders-th LARGEST live
+// expiry: the IP-wide ban must lapse the moment fewer than the required
+// number of distinct offenders remain. Taking the current offender's own
+// `until` would let one long-lived notice (e.g. a decade) pin an IP-wide
+// ban even after the other offenders that justified the wider blast
+// radius have expired — re-introducing exactly the over-suppression the
+// per-IP escalation was added to contain.
+//
+// Expired offenders are pruned BEFORE the per-IP cap is applied, so a
+// bucket full of stale entries cannot reject a fresh, valid offender
+// (which would delay a legitimate escalation under churn).
+//
+// Pure IP-domain mutation: caller MUST hold s.ipStateMu write lock.
+func (s *Service) noteRemoteIPOffenderLocked(ip string, offender domain.PeerAddress, until, now time.Time) time.Time {
+	if ip == "" {
+		return time.Time{}
+	}
+	if s.remoteIPBanOffenders == nil {
+		s.remoteIPBanOffenders = make(map[string]map[domain.PeerAddress]time.Time)
+	}
+	set, tracked := s.remoteIPBanOffenders[ip]
+	if !tracked {
+		// Bound the number of distinct IPs we track. At the cap, first
+		// sweep buckets whose offenders have all elapsed — otherwise the
+		// cap becomes sticky forever: stale buckets are normally pruned
+		// only when their own IP is touched again, so on a long-running
+		// node 4096 long-expired buckets would permanently reject every
+		// new IP and disable IP-wide escalation. After the sweep, if we
+		// are still at the cap the new IP is left untracked (per-peer-only
+		// suppression — the safe default).
+		if len(s.remoteIPBanOffenders) >= ipWideRemoteBanMaxTrackedIPs {
+			s.sweepExpiredRemoteIPOffendersLocked(now)
+			if len(s.remoteIPBanOffenders) >= ipWideRemoteBanMaxTrackedIPs {
+				return time.Time{}
+			}
+		}
+		set = make(map[domain.PeerAddress]time.Time)
+		s.remoteIPBanOffenders[ip] = set
+	}
+
+	// Prune elapsed offenders FIRST, so the cap below reflects only live
+	// entries and a stale-full bucket cannot reject a fresh offender.
+	for addr, exp := range set {
+		if !now.Before(exp) {
+			delete(set, addr)
+		}
+	}
+
+	// Record/refresh this offender's expiry (normalised the same way as
+	// the ban records so the windows line up). The cap applies to the
+	// live set; refreshing an already-tracked offender is always allowed.
+	expiry := normalizeRemoteBanUntil(until, now)
+	if offender != "" {
+		if _, exists := set[offender]; exists || len(set) < ipWideRemoteBanMaxOffenders {
+			set[offender] = expiry
+		}
+	}
+
+	if len(set) == 0 {
+		delete(s.remoteIPBanOffenders, ip)
+		return time.Time{}
+	}
+	if len(set) < ipWideRemoteBanMinOffenders {
+		return time.Time{}
+	}
+
+	// Horizon = the ipWideRemoteBanMinOffenders-th largest live expiry,
+	// i.e. the instant the live-offender count drops below the threshold.
+	// The set is bounded by ipWideRemoteBanMaxOffenders so the sort is
+	// cheap.
+	exps := make([]time.Time, 0, len(set))
+	for _, exp := range set {
+		exps = append(exps, exp)
+	}
+	sort.Slice(exps, func(i, j int) bool { return exps[i].After(exps[j]) })
+	return exps[ipWideRemoteBanMinOffenders-1]
+}
+
+// sweepExpiredRemoteIPOffendersLocked prunes elapsed offenders from
+// every tracked IP bucket and deletes buckets left empty. Used to keep
+// the ipWideRemoteBanMaxTrackedIPs cap from becoming permanently sticky:
+// without it, buckets are pruned only when their own IP is touched
+// again, so a long-running node could fill the cap with long-expired
+// buckets and reject all new IPs forever. Cost is O(total tracked
+// offenders); called only on the rare at-cap path.
+//
+// Pure IP-domain mutation: caller MUST hold s.ipStateMu write lock.
+func (s *Service) sweepExpiredRemoteIPOffendersLocked(now time.Time) {
+	for ip, set := range s.remoteIPBanOffenders {
+		for addr, exp := range set {
+			if !now.Before(exp) {
+				delete(set, addr)
+			}
+		}
+		if len(set) == 0 {
+			delete(s.remoteIPBanOffenders, ip)
+		}
+	}
 }
 
 // recordRemoteBanLocked stores the remote-reported ban window on the
@@ -147,8 +294,14 @@ func (s *Service) isPeerRemoteBannedLocked(address domain.PeerAddress, now time.
 	if s.isPeerAddressRemoteBannedLocked(address, now) {
 		return true
 	}
-	if host, _, ok := splitHostPort(string(address)); ok {
-		if s.isRemoteIPBannedLocked(host, now) {
+	// Derive the IP-wide lookup key the SAME way record (handlePeerBannedNotice)
+	// and clear (recordOutboundAuthSuccess) do — via remoteIPBanKey, which
+	// canonicalizes IP literals (e.g. ::ffff:203.0.113.5 → 203.0.113.5).
+	// Using the raw splitHostPort host here would miss a ban stored under
+	// the canonical key for a candidate whose address carries a non-canonical
+	// IP form.
+	if key, ok := remoteIPBanKey(address); ok {
+		if s.isRemoteIPBannedLocked(key, now) {
 			return true
 		}
 	}
@@ -232,19 +385,47 @@ func (s *Service) isRemoteIPBannedLocked(ip string, now time.Time) bool {
 }
 
 // clearRemoteIPBanLocked drops the IP-wide remote ban for ip. Returns
-// true when a record was actually removed so the caller can decide
-// whether to flush to disk — mirrors the pattern in clearRemoteBanLocked.
+// true ONLY when a PERSISTED record (remoteBannedIPs) was removed, so
+// the caller knows a peers.json flush is actually warranted.
+//
+// The volatile pre-escalation offender set (remoteIPBanOffenders) is
+// always dropped for ip too — a recovered IP should start fresh — but
+// because that state is in-memory-only (never persisted), clearing it
+// alone does NOT return true: signalling a persisted mutation there
+// would trigger a wasteful peers.json flush on every recovery of a peer
+// that had only pre-escalation tracking and no active IP-wide ban.
 //
 // Pure IP-domain mutation: caller MUST hold ipStateMu write lock.
 func (s *Service) clearRemoteIPBanLocked(ip string) bool {
 	if ip == "" {
 		return false
 	}
-	if _, ok := s.remoteBannedIPs[ip]; !ok {
-		return false
-	}
+	_, hadPersisted := s.remoteBannedIPs[ip]
 	delete(s.remoteBannedIPs, ip)
-	return true
+	delete(s.remoteIPBanOffenders, ip) // volatile; not a persisted mutation
+	return hadPersisted
+}
+
+// remoteIPBanKey derives the remoteBannedIPs / remoteIPBanOffenders map
+// key from a peer address, matching how handlePeerBannedNotice keys an
+// inbound peer-banned notice: an IP-literal host collapses to its
+// canonical form; a hostname (DNS / manual peer) is kept verbatim. The
+// bool is false when the address has no host:port split.
+//
+// Recovery (recordOutboundAuthSuccess) MUST derive the clear key with
+// THIS function, not from the resolved TCP RemoteAddr() IP: a hostname-
+// keyed ban (e.g. "peer.example") would otherwise never be cleared by a
+// handshake whose RemoteAddr resolved to a numeric IP (203.0.113.x),
+// leaving the dial gate suppressing the peer until the window expires.
+func remoteIPBanKey(peerAddress domain.PeerAddress) (string, bool) {
+	host, _, ok := splitHostPort(string(peerAddress))
+	if !ok {
+		return "", false
+	}
+	if canon := canonicalIPFromHost(host); canon != "" {
+		return canon, true
+	}
+	return host, true
 }
 
 // normalizeRemoteBanUntil trusts a remote-supplied expiration as-is, with

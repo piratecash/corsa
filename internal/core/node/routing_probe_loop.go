@@ -55,6 +55,14 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
+// maxProbesPerTick bounds how many route_probe_v1 frames a single
+// probeTick may emit. With HealthProbeInterval at 30s, a node holding
+// many thousands of Questionable pairs would otherwise emit one
+// thousands-frame burst every 30s; the budget spreads that across ticks
+// so probe load is bounded by burst size as well as rate. Sized well
+// above a healthy node's steady-state Questionable set.
+const maxProbesPerTick = 64
+
 // outstandingProbe records the bookkeeping for a probe that has been
 // sent but whose ack has not yet arrived.
 type outstandingProbe struct {
@@ -312,7 +320,9 @@ func (s *Service) probeLoop(ctx context.Context) {
 //
 // Routes accumulating failures during overload converge to Bad
 // via the passive 122 s hop_ack timeline instead of the active
-// probe path (45 s) — graceful degradation by design.
+// probe path (3 × 30 s = 90 s) — graceful degradation by design.
+// The same passive fallback covers pairs shed by the per-tick probe
+// budget (maxProbesPerTick): see probeTick's send loop.
 func (s *Service) probeTick() {
 	if s.probeRegistry == nil || s.routingTable == nil {
 		return
@@ -336,14 +346,40 @@ func (s *Service) probeTick() {
 	if len(snap) == 0 {
 		return
 	}
+	// Per-tick probe budget: cap how many probes a single tick may put
+	// on the wire so a node holding thousands of Questionable pairs
+	// (large mesh, post-partition churn) cannot emit a thousands-frame
+	// burst every HealthProbeInterval. Only frames that actually crossed
+	// the wire (sendProbe == true) charge the budget, so capability-less
+	// pairs do not starve capable ones.
+	//
+	// Invariant caveat: the fast active-detection path (3 × 30s = 90s to
+	// Bad) holds only for pairs that are actually probed each tick — i.e.
+	// when the live Questionable set is at or below maxProbesPerTick.
+	// Beyond the budget, the EXCESS pairs are deferred and converge via
+	// the slower passive hop_ack timeline (122s) instead — the same
+	// graceful-degradation fallback the overload gate uses. Selection of
+	// which pairs get deferred is best-effort (map iteration order), NOT
+	// a stable round-robin: there is no fairness cursor, so a given pair
+	// is not guaranteed a probe slot on any particular tick. This is an
+	// accepted trade-off (active probing is an optimisation over the
+	// always-present passive timeline); a stable round-robin cursor is a
+	// possible future refinement if active coverage of very large
+	// Questionable sets becomes important.
+	sent := 0
 	for _, state := range snap {
+		if sent >= maxProbesPerTick {
+			break
+		}
 		if state.Health != routing.HealthQuestionable {
 			continue
 		}
 		if s.probeRegistry.HasOutstanding(state.Identity, state.Uplink) {
 			continue
 		}
-		s.sendProbe(state.Identity, state.Uplink)
+		if s.sendProbe(state.Identity, state.Uplink) {
+			sent++
+		}
 	}
 }
 
@@ -366,7 +402,12 @@ func (s *Service) probeTick() {
 // next probeTick and continues to age through the passive hop_ack
 // timeline (Good→Questionable→Bad→Dead) — that path remains
 // unaffected by capability negotiation.
-func (s *Service) sendProbe(target, uplink domain.PeerIdentity) {
+// sendProbe returns true when a route_probe_v1 frame actually crossed
+// the wire (and an outstanding entry was registered), false on any
+// bail-out (no capable uplink, marshal failure, send failure). The
+// boolean lets probeTick charge its per-tick budget only for probes
+// that genuinely went out.
+func (s *Service) sendProbe(target, uplink domain.PeerIdentity) bool {
 	// Capability check BEFORE Register. peerSendableConnectionsLocked
 	// returns the same candidate set sendFrameToIdentity itself would
 	// use, filtered by the required capability — so a bail-out here
@@ -383,7 +424,7 @@ func (s *Service) sendProbe(target, uplink domain.PeerIdentity) {
 			Str("target_identity", string(target)).
 			Str("uplink", string(uplink)).
 			Msg("route_probe_skipped_no_capability")
-		return
+		return false
 	}
 
 	probeID := s.probeRegistry.Register(target, uplink)
@@ -405,7 +446,7 @@ func (s *Service) sendProbe(target, uplink domain.PeerIdentity) {
 		// entry so its timeout watcher does not later fire
 		// MarkProbeFailure on a probe that never went on the wire.
 		s.probeRegistry.Cancel(probeID)
-		return
+		return false
 	}
 	frame := protocol.Frame{
 		Type:    protocol.RouteProbeFrameType,
@@ -426,5 +467,7 @@ func (s *Service) sendProbe(target, uplink domain.PeerIdentity) {
 	// reflects only probes that genuinely crossed the wire.
 	if !s.sendFrameToIdentity(uplink, frame, domain.CapMeshRouteProbeV1) {
 		s.probeRegistry.Cancel(probeID)
+		return false
 	}
+	return true
 }

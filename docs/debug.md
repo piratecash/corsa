@@ -186,6 +186,22 @@ curl -s http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 | less
 
 `-inuse_space` ranks by live bytes (the leak view); add `-alloc_space` to see cumulative allocation churn (the GC-pressure view). For a visual call graph, drop the `-top` flag and run `go tool pprof -http=:8080 http://127.0.0.1:6060/debug/pprof/heap` to open the web UI.
 
+**Lock contention — mutex / block profiles.** The `/debug/pprof/mutex` and `/debug/pprof/block` endpoints exist whenever the pprof server is on, but they return **empty** profiles unless the runtime sampling rates are non-zero — and the Go default is zero (both profiles off). To diagnose contention — e.g. `peerMu` stalls under a route-update storm — set the rates via env when starting the node (both default OFF because they add per-operation overhead):
+
+```bash
+# Sample ~1/5 of mutex contention events and a blocking event ~per 10us blocked:
+CORSA_PPROF_ADDR=127.0.0.1:6060 \
+CORSA_PPROF_MUTEX_FRACTION=5 \
+CORSA_PPROF_BLOCK_RATE=10000 \
+  ./corsa-node
+
+# Then, against the running node:
+go tool pprof -top http://127.0.0.1:6060/debug/pprof/mutex
+go tool pprof -top http://127.0.0.1:6060/debug/pprof/block
+```
+
+`CORSA_PPROF_MUTEX_FRACTION=N` reports 1/N of mutex contention events; `CORSA_PPROF_BLOCK_RATE=N` samples one blocking event per N nanoseconds spent blocked. Leave both unset in production — they are only useful during an active contention investigation.
+
 **Unset `CORSA_PPROF_ADDR` once the investigation is done** — leave it off in production. A non-loopback value (`0.0.0.0:6060`, `:6060`, a public IP) is rejected at startup with an error rather than silently exposing the endpoint.
 
 ---
@@ -375,5 +391,21 @@ curl -s http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 | less
 ```
 
 `-inuse_space` ранжирует по живым байтам (вид утечки); `-alloc_space` — по кумулятивным аллокациям (вид нагрузки на GC). Для визуального call-graph убери `-top` и запусти `go tool pprof -http=:8080 http://127.0.0.1:6060/debug/pprof/heap` — откроется веб-интерфейс.
+
+**Контеншн локов — mutex / block профили.** Endpoint'ы `/debug/pprof/mutex` и `/debug/pprof/block` существуют, когда pprof-сервер включён, но возвращают **пустые** профили, пока runtime sampling-rate нулевой (дефолт Go). Чтобы диагностировать контеншн — например, залипания `peerMu` под штормом route-update — задай rate'ы через env при старте ноды (оба по умолчанию ВЫКЛЮЧЕНЫ, т.к. дают пер-операционный оверхед):
+
+```bash
+# Сэмплировать ~1/5 событий контеншна mutex и блокировку ~раз в 10us блокировки:
+CORSA_PPROF_ADDR=127.0.0.1:6060 \
+CORSA_PPROF_MUTEX_FRACTION=5 \
+CORSA_PPROF_BLOCK_RATE=10000 \
+  ./corsa-node
+
+# Затем против запущенной ноды:
+go tool pprof -top http://127.0.0.1:6060/debug/pprof/mutex
+go tool pprof -top http://127.0.0.1:6060/debug/pprof/block
+```
+
+`CORSA_PPROF_MUTEX_FRACTION=N` репортит 1/N событий контеншна mutex; `CORSA_PPROF_BLOCK_RATE=N` сэмплирует одно событие блокировки на каждые N наносекунд, проведённых в блокировке. В проде оба держи незаданными — они нужны только во время активного разбора контеншна.
 
 **Сними `CORSA_PPROF_ADDR` после разбора** — в проде держи выключенным. Не-loopback значение (`0.0.0.0:6060`, `:6060`, публичный IP) отклоняется на старте с ошибкой, а не молча открывает endpoint.

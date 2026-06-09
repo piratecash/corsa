@@ -513,12 +513,13 @@ func TestChattyRoutes_SustainedFloodDoesNotBumpStrikesPerFrame(t *testing.T) {
 
 // TestChattyRoutes_HistoryBoundedAtThreshold pins the bounded-cap
 // contract on peerAnnounceHistory: a sustained flood of N >>
-// chattyAnnounceThreshold frames must NOT grow the per-peer slice
-// beyond chattyAnnounceThreshold. Without the cap, the slice
-// grows to rate * window timestamps and every subsequent record
-// call pays O(n) prune + O(n) scan in announceRateExceedsLocked —
-// debounce stopped the arm/log storm but the CPU/lock storm on
-// the history bookkeeping would remain.
+// chattyAnnounceThresholdCap frames must NOT grow the per-peer slice
+// beyond chattyAnnounceThresholdCap (the fixed ceiling, independent of
+// the adaptive effective threshold). Without the cap, the slice grows
+// to rate * window timestamps and every subsequent record call pays
+// O(n) prune + O(n) scan in announceRateExceedsLocked — debounce
+// stopped the arm/log storm but the CPU/lock storm on the history
+// bookkeeping would remain.
 func TestChattyRoutes_HistoryBoundedAtThreshold(t *testing.T) {
 	t.Parallel()
 
@@ -526,9 +527,9 @@ func TestChattyRoutes_HistoryBoundedAtThreshold(t *testing.T) {
 	peer := domain.PeerIdentity("bounded-history-peer")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
-	// Drive 10x the threshold tightly inside the window. Without
-	// the cap, len(peerAnnounceHistory[peer]) would be 5000+.
-	const floodFrames = 10 * chattyAnnounceThreshold
+	// Drive past the cap tightly inside the window. Without the cap,
+	// len(peerAnnounceHistory[peer]) would be floodFrames.
+	const floodFrames = chattyAnnounceThresholdCap + chattyAnnounceThreshold
 	step := chattyAnnounceWindow / 2 / time.Duration(floodFrames)
 	if step <= 0 {
 		step = time.Microsecond
@@ -542,19 +543,81 @@ func TestChattyRoutes_HistoryBoundedAtThreshold(t *testing.T) {
 	entry, ok := svc.peerQuarantine[peer]
 	svc.peerMu.RUnlock()
 
-	if histLen > chattyAnnounceThreshold {
-		t.Fatalf("history grew past cap: len=%d, cap=%d", histLen, chattyAnnounceThreshold)
+	if histLen > chattyAnnounceThresholdCap {
+		t.Fatalf("history grew past cap: len=%d, cap=%d", histLen, chattyAnnounceThresholdCap)
 	}
-	// Cap is "at most threshold", not "exactly threshold" — flow
-	// during arming converges on threshold but never exceeds it.
-	if histLen != chattyAnnounceThreshold {
-		t.Fatalf("history did not converge to cap: len=%d, want %d", histLen, chattyAnnounceThreshold)
+	// All floodFrames land in-window, so the slice fills to exactly the
+	// ceiling and cap-evicts the overflow.
+	if histLen != chattyAnnounceThresholdCap {
+		t.Fatalf("history did not converge to cap: len=%d, want %d", histLen, chattyAnnounceThresholdCap)
 	}
 	if !ok {
 		t.Fatal("flood did not arm quarantine")
 	}
 	if entry.Strikes != 1 {
 		t.Fatalf("flood bumped strikes despite debounce: got %d, want 1", entry.Strikes)
+	}
+}
+
+// TestChattyThreshold_ScalesWithRelayDegree pins the adaptive
+// threshold: a leaf node (no relay peers) uses the base floor, while a
+// hub's effective threshold grows by chattyAnnounceThresholdPerRelayPeer
+// per distinct relay-capable direct peer. A delta burst sized to the
+// BASE must NOT arm on a hub, but crossing the raised effective
+// threshold must.
+func TestChattyThreshold_ScalesWithRelayDegree(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
+		peerAnnounceHistory:   map[domain.PeerIdentity][]time.Time{},
+		identityRelaySessions: map[domain.PeerIdentity]int{},
+	}
+
+	// Leaf: 0 relay peers → effective == base floor.
+	svc.peerMu.Lock()
+	leaf := svc.chattyThresholdLocked()
+	svc.peerMu.Unlock()
+	if leaf != chattyAnnounceThreshold {
+		t.Fatalf("leaf threshold = %d, want base %d", leaf, chattyAnnounceThreshold)
+	}
+
+	// Hub: 4 relay peers → effective == base + 4*perPeer.
+	svc.peerMu.Lock()
+	for _, id := range []domain.PeerIdentity{"relay-0", "relay-1", "relay-2", "relay-3"} {
+		svc.identityRelaySessions[id] = 1
+	}
+	wantEff := chattyAnnounceThreshold + 4*chattyAnnounceThresholdPerRelayPeer
+	hub := svc.chattyThresholdLocked()
+	svc.peerMu.Unlock()
+	if hub != wantEff {
+		t.Fatalf("hub threshold = %d, want %d", hub, wantEff)
+	}
+
+	peer := domain.PeerIdentity("busy-neighbour")
+	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
+
+	// A burst sized to the BASE must NOT arm on the hub (below the
+	// raised effective threshold).
+	for i := 0; i < chattyAnnounceThreshold; i++ {
+		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*time.Millisecond))
+	}
+	svc.peerMu.RLock()
+	_, armedAtBase := svc.peerQuarantine[peer]
+	svc.peerMu.RUnlock()
+	if armedAtBase {
+		t.Fatal("base-sized delta burst armed chatty on a hub whose effective threshold is higher")
+	}
+
+	// Crossing the raised effective threshold DOES arm.
+	for i := chattyAnnounceThreshold; i < wantEff; i++ {
+		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*time.Millisecond))
+	}
+	svc.peerMu.RLock()
+	_, armedAtEff := svc.peerQuarantine[peer]
+	svc.peerMu.RUnlock()
+	if !armedAtEff {
+		t.Fatal("crossing the raised effective threshold must arm chatty on a hub")
 	}
 }
 

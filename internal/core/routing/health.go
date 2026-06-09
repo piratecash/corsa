@@ -63,8 +63,8 @@ func (h RouteHealth) String() string {
 }
 
 // State machine timings. The probe-driven Bad transition can fire
-// before the passive hop_ack-driven one — 3 probe failures × 15 s
-// probe cadence = 45 s, while passive hop_ack idle reaches Bad at
+// before the passive hop_ack-driven one — 3 probe failures × 30 s
+// probe cadence = 90 s, while passive hop_ack idle reaches Bad at
 // 122 s. The asymmetry is intentional: active checks (probes) should
 // detect failure faster than passive observation (hop_ack idle), so
 // that an active prober gets a fast quality signal while a node that
@@ -90,7 +90,15 @@ const (
 	// HealthProbeInterval — cadence at which Questionable pairs are
 	// probed. Used by the Phase 2 probe sender (PR 11.3); declared
 	// here so the state machine and the sender share one constant.
-	HealthProbeInterval = 15 * time.Second
+	//
+	// Raised from 15s to 30s to halve active-probe frame volume across
+	// a large mesh (a 1000-node node may hold many Questionable pairs).
+	// The probe-driven Bad timeline (3 × 30s = 90s) stays below the
+	// passive hop_ack one (122s), preserving the "active detects faster
+	// than passive" invariant above. Combined with the per-tick probe
+	// budget (maxProbesPerTick), this bounds probe load by both rate and
+	// burst size.
+	HealthProbeInterval = 30 * time.Second
 
 	// HealthProbeTimeout — per-probe send-to-ack budget. After this
 	// elapses without a probe_ack, the pair gets one
@@ -716,7 +724,7 @@ func (s *healthStore) isDeadLocked(identity, uplink PeerIdentity) bool {
 //
 // The `now` parameter exists because TickHealth's
 // applyCooldownExpiryLocked sweep runs at HealthProbeInterval
-// (15 s) cadence, so there can be up to one tick of lag between
+// (30 s) cadence, so there can be up to one tick of lag between
 // "CooldownUntil elapsed" and "CooldownUntil field cleared".
 // Reading the live `now` against the stored deadline closes that
 // gap on every Lookup / Announce projection without needing the

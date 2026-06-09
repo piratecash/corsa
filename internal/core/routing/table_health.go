@@ -442,11 +442,11 @@ func (t *Table) HealthSnapshot() []RouteHealthState {
 // Questionable pair to probe.
 //
 // Designed to be called from the probe-sender goroutine at
-// HealthProbeInterval cadence (15 s in production): every tick
+// HealthProbeInterval cadence (30 s in production): every tick
 // the sender first ages every pair through the passive timeline,
-// then iterates the Questionable subset to schedule probes. This
-// keeps the active probe path eventually-firing rather than
-// inert.
+// then iterates the Questionable subset to schedule probes (bounded
+// per tick by maxProbesPerTick). This keeps the active probe path
+// eventually-firing rather than inert.
 //
 // Active-path transitions (Bad on ProbeFailures threshold, Good
 // on ack receipt) are driven by MarkProbeAck / MarkProbeFailure

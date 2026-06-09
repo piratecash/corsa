@@ -17,6 +17,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -38,6 +42,13 @@ func Start(addr string) (shutdown func(context.Context) error, err error) {
 	if err := preflightLoopback(addr); err != nil {
 		return noop, err
 	}
+
+	// Opt-in contention profiling. The named /debug/pprof/mutex and
+	// /debug/pprof/block endpoints are already served by pprof.Index
+	// below, but they return EMPTY profiles unless the runtime sampling
+	// rates are non-zero — which is why peerMu contention under a
+	// route-update storm was invisible to pprof. Enable from env.
+	configureContentionProfiling()
 
 	// Dedicated mux — do NOT use http.DefaultServeMux, which a stray
 	// import elsewhere could pollute. Register only the pprof handlers.
@@ -79,6 +90,51 @@ func Start(addr string) (shutdown func(context.Context) error, err error) {
 	}()
 
 	return srv.Shutdown, nil
+}
+
+// configureContentionProfiling enables the mutex and block profiles
+// from env when the pprof server is on. Both default to OFF (sampling
+// rate 0) because they add per-operation runtime overhead; an operator
+// diagnosing lock contention (e.g. peerMu under a route-update storm)
+// turns them on explicitly:
+//
+//	CORSA_PPROF_MUTEX_FRACTION=5    # sample ~1/5 of mutex contention events
+//	CORSA_PPROF_BLOCK_RATE=10000    # sample a blocking event ~per 10us blocked
+//	go tool pprof http://127.0.0.1:6060/debug/pprof/mutex
+//	go tool pprof http://127.0.0.1:6060/debug/pprof/block
+//
+// Both are process-global runtime knobs (runtime.SetMutexProfileFraction
+// / runtime.SetBlockProfileRate); we only ever turn them ON here, never
+// reset to 0, so enabling pprof mid-investigation cannot silently clear
+// a rate an operator set another way.
+func configureContentionProfiling() {
+	if frac := envPositiveInt("CORSA_PPROF_MUTEX_FRACTION"); frac > 0 {
+		runtime.SetMutexProfileFraction(frac)
+		log.Warn().
+			Int("fraction", frac).
+			Msg("pprof mutex profiling enabled (CORSA_PPROF_MUTEX_FRACTION) — adds runtime overhead")
+	}
+	if rate := envPositiveInt("CORSA_PPROF_BLOCK_RATE"); rate > 0 {
+		runtime.SetBlockProfileRate(rate)
+		log.Warn().
+			Int("rate_ns", rate).
+			Msg("pprof block profiling enabled (CORSA_PPROF_BLOCK_RATE) — adds runtime overhead")
+	}
+}
+
+// envPositiveInt parses a strictly-positive integer from the named env
+// var, returning 0 (treated as "unset / disabled") on absence or any
+// parse error.
+func envPositiveInt(key string) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // preflightLoopback is the cheap pre-bind check: it rejects the obvious

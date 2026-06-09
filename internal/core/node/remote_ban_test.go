@@ -196,10 +196,12 @@ func TestRecordRemoteBanLocked_ZeroPersistedMetaSafe(t *testing.T) {
 // TestRecordRemoteBanLocked_OverwritesPreviousBan ensures a fresh notice
 // from the same peer replaces the old expiration rather than being skipped
 // or merged. Otherwise an extended ban from the responder would silently
-// preserve the shorter window already on disk. reason=peer-ban is the only
-// scope written through recordRemoteBanLocked (reason=blacklisted lands in
-// the IP-wide table via recordRemoteIPBanLocked), so both writes here use
-// the per-peer reason.
+// preserve the shorter window already on disk. Both writes here use the
+// per-peer reason=peer-ban. (reason=blacklisted ALSO writes a per-peer
+// offender row through recordRemoteBanLocked now, but additionally feeds
+// the remoteIPBanOffenders escalation set and only promotes to the IP-wide
+// table after the offender threshold — see noteRemoteIPOffenderLocked. This
+// test isolates the per-peer overwrite contract, so it uses peer-ban.)
 func TestRecordRemoteBanLocked_OverwritesPreviousBan(t *testing.T) {
 	t.Parallel()
 
@@ -462,12 +464,17 @@ func TestIsPeerRemoteBannedLocked_BoundaryAtUntilFalse(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRecordRemoteIPBanLocked_UnknownPeerStillRecords is the headline
-// difference from recordRemoteBanLocked: when the responder sends
-// reason=blacklisted, the ban must apply to every sibling peer behind
-// the same IP — including peers we haven't discovered yet. Tying the
-// record to persistedMeta the way per-peer bans do would let a sibling
-// introduced tomorrow sail past the gate and restart the retry storm
-// this notice was designed to end.
+// difference from recordRemoteBanLocked: the IP-wide helper does NOT
+// require the peer to be known. Once an IP-wide ban is recorded (which,
+// per the caller-side contract in handlePeerBannedNotice, happens only
+// after ipWideRemoteBanMinOffenders distinct live offenders behind the
+// IP have escalated — a single blacklisted notice stays per-peer), it
+// must apply to every sibling behind that IP including peers not yet
+// discovered. This test exercises the helper directly to pin that
+// unknown-peer-independence; tying the IP-wide record to persistedMeta
+// the way per-peer bans do would let a sibling introduced tomorrow sail
+// past the gate and restart the retry storm the escalation was designed
+// to end.
 func TestRecordRemoteIPBanLocked_UnknownPeerStillRecords(t *testing.T) {
 	t.Parallel()
 
@@ -761,5 +768,65 @@ func TestClearRemoteIPBanLocked_EmptyIPNoOp(t *testing.T) {
 	svc := &Service{remoteBannedIPs: make(map[string]remoteIPBanEntry)}
 	if svc.clearRemoteIPBanLocked("") {
 		t.Fatal("clear on empty IP must return false")
+	}
+}
+
+// TestNoteRemoteIPOffender_NoEscalationBelowThreshold pins that fewer
+// than ipWideRemoteBanMinOffenders live offenders yield a zero horizon
+// (no IP-wide escalation), and that expired offenders are pruned before
+// counting so two stale notices cannot combine with a much-later third.
+func TestNoteRemoteIPOffender_NoEscalationBelowThreshold(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{remoteIPBanOffenders: make(map[string]map[domain.PeerAddress]time.Time)}
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+
+	// Two offenders with short (1-minute) windows — below threshold.
+	svc.ipStateMu.Lock()
+	h1 := svc.noteRemoteIPOffenderLocked("10.0.0.1", "10.0.0.1:1", now.Add(time.Minute), now)
+	h2 := svc.noteRemoteIPOffenderLocked("10.0.0.1", "10.0.0.1:2", now.Add(time.Minute), now)
+	svc.ipStateMu.Unlock()
+	if !h1.IsZero() || !h2.IsZero() {
+		t.Fatalf("below threshold must not escalate: h1=%v h2=%v", h1, h2)
+	}
+
+	// A third offender an hour later — AFTER the first two elapsed. Only
+	// it is live, so still below threshold: zero horizon.
+	later := now.Add(time.Hour)
+	svc.ipStateMu.Lock()
+	h3 := svc.noteRemoteIPOffenderLocked("10.0.0.1", "10.0.0.1:3", later.Add(time.Minute), later)
+	svc.ipStateMu.Unlock()
+	if !h3.IsZero() {
+		t.Fatalf("expired offenders must be pruned before counting; got escalation horizon %v, want zero", h3)
+	}
+}
+
+// TestNoteRemoteIPOffender_HorizonIsKthLargestExpiry pins the P1 fix:
+// the IP-wide horizon is the ipWideRemoteBanMinOffenders-th LARGEST live
+// expiry, NOT the triggering offender's own until. With offenders
+// expiring in 1m, 1m and 10y, escalation must record a 1-minute IP-wide
+// ban (the instant only one live offender would remain), not a 10-year
+// one.
+func TestNoteRemoteIPOffender_HorizonIsKthLargestExpiry(t *testing.T) {
+	t.Parallel()
+
+	if ipWideRemoteBanMinOffenders != 3 {
+		t.Skipf("test assumes threshold 3, got %d", ipWideRemoteBanMinOffenders)
+	}
+
+	svc := &Service{remoteIPBanOffenders: make(map[string]map[domain.PeerAddress]time.Time)}
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	shortUntil := now.Add(time.Minute)
+	longUntil := now.Add(10 * 365 * 24 * time.Hour)
+
+	svc.ipStateMu.Lock()
+	svc.noteRemoteIPOffenderLocked("10.0.0.1", "10.0.0.1:1", shortUntil, now)
+	svc.noteRemoteIPOffenderLocked("10.0.0.1", "10.0.0.1:2", shortUntil, now)
+	horizon := svc.noteRemoteIPOffenderLocked("10.0.0.1", "10.0.0.1:3", longUntil, now)
+	svc.ipStateMu.Unlock()
+
+	if !horizon.Equal(shortUntil) {
+		t.Fatalf("IP-wide horizon = %v, want the 3rd-largest live expiry %v (not the 10-year notice)",
+			horizon, shortUntil)
 	}
 }
