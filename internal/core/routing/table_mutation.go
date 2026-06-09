@@ -473,6 +473,11 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 	now := t.clock()
 	t.flap.recordWithdrawalLocked(peerIdentity, now)
 	withdrawals, transitInvalidated, exposed := t.store.InvalidateAllVia(peerIdentity, now)
+	// The peer is gone as a RECEIVER too: drop its per-receiver outbound
+	// SeqNo watermarks so they cannot leak (it is never emitted to again;
+	// a reconnect gets a fresh full sync). This is the safe, lifecycle
+	// bound for the (•, peer) half of outboundPeerMax.
+	t.store.forgetReceiverLocked(peerIdentity)
 
 	// Always dirty: recordWithdrawalLocked mutated flap state
 	// (withdrawTimes at minimum, possibly hold-down arming) and
@@ -555,6 +560,17 @@ func (t *Table) TickTTL() TickTTLResult {
 	// helper is a no-op when the cache is empty, so steady-state
 	// nodes pay nothing.
 	t.pruneExpiredDigestSnapshotsLocked(now)
+	// Collapse outbound-SeqNo state back to the live working set on the
+	// same cadence: evict the outboundContent reuse cache (dead / TTL-aged
+	// / gone-identity shapes) and drop outboundPeerMax watermarks whose
+	// destination identity is fully gone. Without this they grew per
+	// distinct wire-content shape over the node's lifetime — the v1.0.47
+	// cluster-mesh memory growth. (Disconnected RECEIVERS are handled
+	// separately, on RemoveDirectPeer via forgetReceiverLocked, not here —
+	// outboundPeerMax is a high-water watermark and must not be TTL-aged.)
+	// Pure maintenance: no route state changes, so it does not affect the
+	// dirty flag.
+	t.store.pruneOutboundCachesLocked(now)
 	if totalRemoved > 0 || flapMutated {
 		t.dirty.Store(true)
 	}

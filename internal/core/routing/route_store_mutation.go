@@ -1436,7 +1436,8 @@ func (s *routeStore) nextSeqLocked(identity PeerIdentity) uint64 {
 func (s *routeStore) nextOutboundSeqLockedPerPeer(identity, peer PeerIdentity, sig outboundEmitSig, nativeSeqNo uint64, trigger PeerIdentity, now time.Time) (uint64, bool) {
 	cacheKey := outboundContentKey{Identity: identity, Sig: sig}
 	peerKey := outboundPeerKey{Identity: identity, Peer: peer}
-	if seq, ok := s.outboundContent[cacheKey]; ok && seq >= s.outboundBroadcastMax[identity] && seq >= s.outboundPeerMax[peerKey] {
+	nowNanos := now.UnixNano()
+	if ce, ok := s.outboundContent[cacheKey]; ok && ce.seq >= s.outboundBroadcastMax[identity] && ce.seq >= s.outboundPeerMax[peerKey].seq {
 		// Cache hit AND cached SeqNo is at least both watermarks:
 		// reuse so receivers see no SeqNo change and ComputeDelta
 		// stays a no-op on stable content.
@@ -1464,17 +1465,23 @@ func (s *routeStore) nextOutboundSeqLockedPerPeer(identity, peer PeerIdentity, s
 		// staleness check and emit a SeqNo below this peer's
 		// actual view, which the receiver would reject as stale.
 		// The assignment is a forward-only step (seq >= peerMax
-		// by the check) so it cannot accidentally regress.
-		s.outboundPeerMax[peerKey] = seq
-		return seq, false
+		// by the check) so it cannot accidentally regress. lastUsed is
+		// refreshed on both entries: it keeps an actively-reused
+		// outboundContent shape from being TTL-aged. (It is also written
+		// to outboundPeerMax for symmetry, but outboundPeerMax is never
+		// TTL-aged — it is a high-water watermark evicted only by
+		// lifecycle; see pruneOutboundCachesLocked.)
+		s.outboundContent[cacheKey] = outboundSeqEntry{seq: ce.seq, lastUsed: nowNanos}
+		s.outboundPeerMax[peerKey] = outboundSeqEntry{seq: ce.seq, lastUsed: nowNanos}
+		return ce.seq, false
 	}
 	next := s.outboundMax[identity] + 1
 	if nativeSeqNo > next {
 		next = nativeSeqNo
 	}
-	s.outboundContent[cacheKey] = next
+	s.outboundContent[cacheKey] = outboundSeqEntry{seq: next, lastUsed: nowNanos}
 	s.outboundMax[identity] = next
-	s.outboundPeerMax[peerKey] = next
+	s.outboundPeerMax[peerKey] = outboundSeqEntry{seq: next, lastUsed: nowNanos}
 	// Phase 1 P2: a FRESH allocation is the definition of an
 	// outbound-SeqNo advance for `identity`. Cache hits (handled
 	// above) explicitly do NOT advance — they reuse a previously-
@@ -1516,19 +1523,21 @@ func (s *routeStore) nextOutboundSeqLockedPerPeer(identity, peer PeerIdentity, s
 // Caller must hold t.mu (writer).
 func (s *routeStore) nextOutboundSeqLockedBroadcast(identity PeerIdentity, sig outboundEmitSig, nativeSeqNo uint64, trigger PeerIdentity, now time.Time) (uint64, bool) {
 	cacheKey := outboundContentKey{Identity: identity, Sig: sig}
-	if seq, ok := s.outboundContent[cacheKey]; ok && seq >= s.outboundMax[identity] {
+	if ce, ok := s.outboundContent[cacheKey]; ok && ce.seq >= s.outboundMax[identity] {
 		// Same content AND no per-peer or broadcast emit has
 		// burnt a higher SeqNo since the cache was set — safe to
 		// reuse. Bump the broadcast watermark so subsequent
 		// per-peer cache hits at lower SeqNos are invalidated.
-		s.outboundBroadcastMax[identity] = seq
-		return seq, false
+		// Refresh lastUsed so the reused shape is not aged out.
+		s.outboundContent[cacheKey] = outboundSeqEntry{seq: ce.seq, lastUsed: now.UnixNano()}
+		s.outboundBroadcastMax[identity] = ce.seq
+		return ce.seq, false
 	}
 	next := s.outboundMax[identity] + 1
 	if nativeSeqNo > next {
 		next = nativeSeqNo
 	}
-	s.outboundContent[cacheKey] = next
+	s.outboundContent[cacheKey] = outboundSeqEntry{seq: next, lastUsed: now.UnixNano()}
 	s.outboundMax[identity] = next
 	s.outboundBroadcastMax[identity] = next
 	// Phase 1 P2: a fresh allocation through the broadcast helper is

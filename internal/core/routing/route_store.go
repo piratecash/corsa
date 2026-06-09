@@ -218,10 +218,14 @@ type routeStore struct {
 	// `cached >= max(outboundPeerMax[(Identity, peer)],
 	// outboundBroadcastMax[Identity])`.
 	//
-	// Eviction: not implemented in Phase A. Entries for
-	// disconnected peers leak. Tracked alongside outboundContent
-	// eviction as a follow-up.
-	outboundPeerMax map[outboundPeerKey]uint64
+	// Eviction is lifecycle-driven only (NOT TTL/size — this is a
+	// high-water watermark, not a reuse cache; regressing it would cause
+	// stale-reject loops). forgetReceiverLocked drops a disconnected
+	// receiver's entries; pruneOutboundCachesLocked drops entries whose
+	// destination identity is fully gone. The lastUsed field is carried for
+	// symmetry with outboundContent / hit-path refresh but is not consulted
+	// for peerMax eviction.
+	outboundPeerMax map[outboundPeerKey]outboundSeqEntry
 
 	// flap is the per-peer flap detector. Mirrored from
 	// Table.flap at NewTable construction (immutable after); the
@@ -297,17 +301,20 @@ type routeStore struct {
 	// nextOutboundSeqLockedPerPeer / nextOutboundSeqLockedBroadcast
 	// for the dispatcher logic.
 	//
-	// Eviction: not implemented in Phase A. The cache grows with
-	// the number of distinct wire-content shapes seen over the
-	// node's lifetime. For a 100-node mesh with moderate
-	// topology churn this is well-bounded (~tens of thousands of
-	// entries); long-running nodes with high churn would
-	// eventually want a TTL-based eviction pass. Tracked as a
-	// follow-up.
+	// Eviction (was: "not implemented in Phase A" — the v1.0.47
+	// cluster-mesh memory growth): each entry carries a lastUsed stamp,
+	// refreshed on every reuse/allocation. pruneOutboundCachesLocked, run
+	// on the TickTTL cadence, drops entries that are either DEAD (SeqNo
+	// below the identity's broadcast watermark — never reusable for any
+	// peer) or aged past outboundCacheTTL without being re-emitted (the
+	// content shape is no longer the live projection). The cache thus
+	// collapses back to the set of content shapes actually emitted within
+	// the TTL window — the live working set — instead of accumulating
+	// every distinct wire shape over the node's lifetime.
 	//
 	// Mutated under t.mu (writer). Table.AnnounceTo runs under
 	// writer lock so AnnounceProjectionFor can update this state.
-	outboundContent map[outboundContentKey]uint64
+	outboundContent map[outboundContentKey]outboundSeqEntry
 }
 
 // outboundContentKey is the cache key for content-based outbound
@@ -367,6 +374,41 @@ type outboundEmitSig struct {
 	AttestedSig string
 }
 
+// outboundSeqEntry is the value type of the outboundContent and
+// outboundPeerMax maps: the issued wire SeqNo plus the wall-clock
+// (unix-nanos) instant it was last reused or allocated. lastUsed drives
+// TTL eviction of the outboundContent REUSE CACHE (pruneOutboundCachesLocked)
+// so it collapses to the live working set. It is also refreshed on
+// outboundPeerMax for symmetry, but is NOT consulted for outboundPeerMax
+// eviction — that map is a high-water watermark bounded by lifecycle, not
+// TTL (see outboundPeerMax / pruneOutboundCachesLocked).
+type outboundSeqEntry struct {
+	seq      uint64
+	lastUsed int64
+}
+
+const (
+	// outboundCacheTTL is the idle window after which an outboundContent
+	// entry is evicted (it applies ONLY to that reuse cache — outboundPeerMax
+	// is a high-water watermark and is bounded by lifecycle, never TTL). Sized
+	// well above the announce cadence (forced-full ≤ 30s, TickTTL sweep ≈ 10s)
+	// so a content shape that is still live — and therefore re-emitted every
+	// cycle, refreshing lastUsed — is never evicted; only shapes that stopped
+	// being emitted (winner switched, route withdrawn, signature rotated) age
+	// out.
+	outboundCacheTTL = 5 * time.Minute
+
+	// outboundContentSoftCap is a hard backstop on the outboundContent
+	// reuse cache: even if TTL/lifecycle eviction lags (clock skew, a
+	// pathological churn burst between sweeps) it cannot exceed this size.
+	// Set far above the legitimate working set of a large mesh. (There is
+	// deliberately no size cap on outboundPeerMax — arbitrary eviction of
+	// a live receiver's high-water watermark would be unsafe; it is bounded
+	// by lifecycle eviction instead — see pruneOutboundCachesLocked /
+	// forgetReceiverLocked.)
+	outboundContentSoftCap = 50000
+)
+
 // newRouteStore returns an empty store with the package defaults.
 // Options applied to the owning Table (WithMaxNextHopsPerOrigin,
 // WithDefaultTTL, WithLocalOrigin) mutate the returned store's
@@ -376,10 +418,97 @@ func newRouteStore() *routeStore {
 		buckets:              make(map[PeerIdentity][]UplinkClaim),
 		seqCounters:          make(map[PeerIdentity]uint64),
 		defaultTTL:           DefaultTTL,
-		outboundContent:      make(map[outboundContentKey]uint64),
+		outboundContent:      make(map[outboundContentKey]outboundSeqEntry),
 		outboundMax:          make(map[PeerIdentity]uint64),
 		outboundBroadcastMax: make(map[PeerIdentity]uint64),
-		outboundPeerMax:      make(map[outboundPeerKey]uint64),
+		outboundPeerMax:      make(map[outboundPeerKey]outboundSeqEntry),
+	}
+}
+
+// pruneOutboundCachesLocked collapses the outbound-SeqNo state back to the
+// live working set. Run on the TickTTL cadence (see Table.TickTTL). The two
+// maps are evicted by DIFFERENT rules because only one of them is a cache:
+//
+//   - outboundContent is a reuse cache, so evicting any entry is
+//     correctness-safe (a miss simply allocates a fresh SeqNo via the
+//     never-pruned outboundMax+1, always monotonic). It drops entries that
+//     are DEAD (SeqNo strictly below the identity's broadcast watermark —
+//     unreusable for EVERY peer), aged past outboundCacheTTL without a
+//     re-emit (no longer any peer's live projection), or whose destination
+//     identity is fully gone (no claims). A soft-cap is the last-resort
+//     backstop.
+//
+//   - outboundPeerMax is NOT a cache — each entry is the sender's copy of a
+//     receiver's high-water SeqNo. It is NEVER aged out by TTL and NEVER
+//     size-capped: dropping a STILL-LIVE (identity, receiver) watermark and
+//     reading the missing entry as zero would let a surviving outboundContent
+//     entry reuse a SeqNo below the receiver's timeline (stale-reject loop —
+//     the A→B→A hazard the watermark exists to prevent). It is bounded ONLY
+//     by lifecycle: this function drops entries whose DESTINATION identity is
+//     fully gone (safe because the content for that identity is co-evicted
+//     above, so a return cannot trigger a stale hit), and forgetReceiverLocked
+//     drops a disconnected RECEIVER's entries on RemoveDirectPeer.
+//
+// Caller must hold t.mu (writer).
+func (s *routeStore) pruneOutboundCachesLocked(now time.Time) {
+	ttlCutoff := now.Add(-outboundCacheTTL).UnixNano()
+
+	for k, e := range s.outboundContent {
+		// Evict when the destination identity is fully gone (no claims),
+		// when the SeqNo is DEAD (below the identity's broadcast watermark
+		// — never reusable for any peer), or when the shape has not been
+		// re-emitted within the TTL window. Any of these becomes a cache
+		// MISS on the next emit, which allocates a fresh monotonic SeqNo
+		// via outboundMax+1 (never pruned) — correctness-safe.
+		if len(s.buckets[k.Identity]) == 0 ||
+			e.seq < s.outboundBroadcastMax[k.Identity] ||
+			e.lastUsed < ttlCutoff {
+			delete(s.outboundContent, k)
+		}
+	}
+	if len(s.outboundContent) > outboundContentSoftCap {
+		target := outboundContentSoftCap * 3 / 4
+		for k := range s.outboundContent {
+			if len(s.outboundContent) <= target {
+				break
+			}
+			delete(s.outboundContent, k)
+		}
+	}
+
+	// outboundPeerMax is NOT a reuse cache: each entry is the sender's copy
+	// of a receiver's high-water SeqNo. Dropping it for a STILL-LIVE
+	// (identity, receiver) pair would let a surviving outboundContent entry
+	// reuse a SeqNo below the receiver's timeline — the A→B→A stale-reject
+	// hazard the watermark exists to prevent (the sender would then record
+	// the lowered value and stay stuck). So it is bounded ONLY by lifecycle,
+	// never by TTL or size:
+	//   - forgetReceiverLocked drops a disconnected receiver's entries
+	//     (it is never emitted to again, so the watermark is never read);
+	//   - here we drop entries whose DESTINATION identity is fully gone.
+	//     This is safe precisely because the content loop above co-evicts
+	//     that identity's outboundContent, so when the identity returns no
+	//     surviving content can trigger a stale hit and the fresh-allocation
+	//     path issues a SeqNo above the retained outboundMax.
+	for k := range s.outboundPeerMax {
+		if len(s.buckets[k.Identity]) == 0 {
+			delete(s.outboundPeerMax, k)
+		}
+	}
+}
+
+// forgetReceiverLocked drops every per-receiver outbound SeqNo watermark
+// for a peer that has disconnected as a RECEIVER. Once the peer is gone we
+// no longer emit per-peer projections to it, so the watermarks are never
+// consulted again; on reconnect it gets a fresh full sync. This is the
+// safe, lifecycle-driven bound for the (•, peer) half of outboundPeerMax
+// (TTL/size eviction of a live receiver's watermark would be unsafe — see
+// pruneOutboundCachesLocked). Caller must hold t.mu (writer).
+func (s *routeStore) forgetReceiverLocked(peer PeerIdentity) {
+	for k := range s.outboundPeerMax {
+		if k.Peer == peer {
+			delete(s.outboundPeerMax, k)
+		}
 	}
 }
 

@@ -50,7 +50,7 @@ import "time"
 // Caller must hold t.mu (R mode suffices).
 func (s *routeStore) announceDigestEntriesForLocked(peer PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool) []DigestEntry {
 	var entries []DigestEntry
-	for key, wireSeqNo := range s.outboundPeerMax {
+	for key, entry := range s.outboundPeerMax {
 		if key.Peer != peer {
 			continue
 		}
@@ -62,7 +62,7 @@ func (s *routeStore) announceDigestEntriesForLocked(peer PeerIdentity, now time.
 		if !s.hasAnnounceableWinnerLocked(identity, peer, now, isDead, isCooledDown) {
 			continue
 		}
-		entries = append(entries, DigestEntry{Identity: identity, MaxSeqNo: wireSeqNo})
+		entries = append(entries, DigestEntry{Identity: identity, MaxSeqNo: entry.seq})
 	}
 	return entries
 }
